@@ -1,0 +1,21 @@
+[package]
+name = "wren-iced"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "wren"
+path = "src/main.rs"
+
+[features]
+smoke-test = ["dep:png", "iced/sysinfo"]
+
+[dependencies]
+wren-core.workspace = true
+iced.workspace = true
+png = { workspace = true, optional = true }

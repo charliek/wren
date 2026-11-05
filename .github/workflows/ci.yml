@@ -1,0 +1,92 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+env:
+  UV_PYTHON: "3.12"
+
+jobs:
+  rust:
+    name: Rust build and checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # macOS covers compilation and unit tests, not native GUI integration.
+      - run: make build fmt-check clippy test
+
+  harness-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+      - run: make test-python
+
+  linux-smoke:
+    name: Linux smoke (${{ matrix.display }}, ${{ matrix.renderer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        display: [x11, wayland]
+        renderer: [wgpu, tiny-skia]
+    env:
+      DISPLAY_BACKEND: ${{ matrix.display }}
+      ICED_BACKEND: ${{ matrix.renderer }}
+      WGPU_BACKEND: vulkan
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install Linux display and software rendering dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth weston dbus-daemon dbus-x11 fonts-dejavu-core \
+            libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 libxinerama1 \
+            libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
+            libwayland-cursor0 libwayland-egl1 libegl1 libegl-mesa0 \
+            libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+      - run: make setup "smoke-${DISPLAY_BACKEND}"
+      - name: Upload display logs, screenshots, and JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wrentest-${{ matrix.display }}-${{ matrix.renderer }}
+          path: target/wrentest/
+          if-no-files-found: warn
+          retention-days: 7
+
+  ci-success:
+    needs: [rust, harness-unit, linux-smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: python3 tools/ci_gate.py
+        env:
+          NEEDS: ${{ toJSON(needs) }}

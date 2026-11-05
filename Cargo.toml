@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = ["crates/wren-core", "crates/wren-iced"]
+default-members = ["crates/wren-iced"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+wren-core = { path = "crates/wren-core" }
+iced = { version = "=0.14.0", default-features = false, features = [
+    "advanced",
+    "crisp",
+    "highlighter",
+    "linux-theme-detection",
+    "tiny-skia",
+    "tokio",
+    "wayland",
+    "web-colors",
+    "wgpu",
+    "x11",
+] }
+png = "=0.18.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

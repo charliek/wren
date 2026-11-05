@@ -65,3 +65,26 @@ Prepare GitHub Actions for Linux/macOS build/test/lint, Python harness tests, Li
 Minimum desktop delivery is a macOS `.app` and Linux executable/desktop integration with icons and bundled dependency/font notices. Developer-ID signing, notarization, remote publication, and auto-updating require separate authorization/resources.
 
 The final handoff must identify verified commands/results, remaining platform/manual checks, checkpoint commits, and any unmet acceptance criteria. An empty build scaffold is not a completed MVP.
+
+## Tooling checkpoint
+
+The Linux setup has been exercised with Rust 1.97.1, Python 3.12.3, uv 0.13.5, and the locked iced 0.14 dependency graph. `make setup`, `make build`, and `make check` pass locally. `make check` covers normal and smoke-enabled Rust tests/Clippy, formatting, and Python harness/CI-contract unit tests.
+
+Both themes render in real windows under Xvfb and headless Weston, using wgpu/Vulkan (Mesa llvmpipe) and tiny-skia. Reproduce these setup checks with:
+
+```sh
+ICED_BACKEND=wgpu WGPU_BACKEND=vulkan make smoke-x11
+ICED_BACKEND=wgpu WGPU_BACKEND=vulkan make smoke-wayland
+ICED_BACKEND=tiny-skia make smoke-x11
+ICED_BACKEND=tiny-skia make smoke-wayland
+```
+
+Each lane captures real renderer pixels and validates visible content/backgrounds, required renderer identity, opt-in rejection, invalid arguments, and refusal to overwrite existing screenshot output. Logs, PNGs, and JUnit are kept under the ignored `target/wrentest/` directory. The normal build rejects the screenshot CLI even if the test-mode environment variable is set.
+
+The display wrapper owns private displays, runtime/config directories, and a session bus without desktop-service activation. Disabling activation prevents headless tests from spawning desktop portal helpers or leaving FUSE mounts behind. Native folder selection and actual desktop theme-change delivery are not established by these forced-theme rendering tests.
+
+Registry/source preflight found compatible stable candidates for subsequent implementation: `notify =8.2.1`, `notify-debouncer-full =0.7.0`, `trash =5.3.0`, `nucleo-matcher =0.3.1`, and `rfd =0.16.1` with its Rust XDG-portal backend. The newer rfd 0.17.2 dynamically loads libdbus; prefer the checked 0.16.1 portal approach unless later implementation evidence justifies changing it. These future dependencies have not yet been added to or compiled as part of Wren. The local desktop has a FileChooser portal, but no interactive picker was opened during preflight.
+
+GitHub Actions are prepared for Linux/macOS compilation and Rust checks, Python unit tests, and the four Linux renderer/display smoke lanes. GitHub execution and macOS builds remain unverified locally. Scheduled performance testing belongs with the search implementation, not a placeholder passing job.
+
+The current application is explicitly a development scaffold: it does not open, edit, or save notes. The full editor M0 check, private functional-test IPC, autosave, storage operations, and remaining MVP capabilities are still ahead.
