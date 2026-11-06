@@ -85,6 +85,12 @@ The display wrapper owns private displays, runtime/config directories, and a ses
 
 Registry/source preflight found compatible stable candidates for subsequent implementation: `notify =8.2.1`, `notify-debouncer-full =0.7.0`, `trash =5.3.0`, `nucleo-matcher =0.3.1`, and `rfd =0.16.1` with its Rust XDG-portal backend. The newer rfd 0.17.2 dynamically loads libdbus; prefer the checked 0.16.1 portal approach unless later implementation evidence justifies changing it. These future dependencies have not yet been added to or compiled as part of Wren. The local desktop has a FileChooser portal, but no interactive picker was opened during preflight.
 
-GitHub Actions are prepared for Linux/macOS compilation and Rust checks, Python unit tests, and the four Linux renderer/display smoke lanes. GitHub execution and macOS builds remain unverified locally. Scheduled performance testing belongs with the search implementation, not a placeholder passing job.
+The initial GitHub Actions run passed Linux/macOS compilation and Rust checks, Python unit tests, and all four Linux renderer/display smoke lanes on the tooling baseline (`5b19143`). Native macOS integration remains unverified. Scheduled performance testing belongs with the search implementation, not a placeholder passing job.
 
-The current application is explicitly a development scaffold: it does not open, edit, or save notes. The full editor M0 check, private functional-test IPC, autosave, storage operations, and remaining MVP capabilities are still ahead.
+## Editor checkpoint
+
+The real in-memory editor, bounded history, literal find, semantic Markdown highlighting, bundled fonts, and private opt-in main-thread test IPC are implemented. `docs/spike-editor.md` records the Linux go decision, actual 5,000-line measurements, native X11 typing/clipboard/shortcut checks, rendering evidence, and the exact undo/redo viewport limitation. Native macOS IME acceptance remains deferred.
+
+The four local Linux lanes now include real-editor tests: 21 passing cases in each X11 lane and 17 passing cases in each Wayland lane, with the four X11-native cases explicitly deselected on Wayland. CI installs the native-input tool and uses the same targets. These editor changes have not yet run remotely.
+
+The editor checkpoint still does not open or save notes and explicitly warns about its in-memory buffer. Filesystem operations, autosave integration, and the remaining MVP capabilities are the next work, not implied by the editor go decision.

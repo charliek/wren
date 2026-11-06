@@ -13,4 +13,5 @@ test = [
 [tool.pytest.ini_options]
 testpaths = ["tools/wrentest"]
 pythonpath = ["."]
-addopts = "--timeout=120"
+addopts = "--timeout=120 --strict-markers"
+markers = ["native_x11: actual keyboard and clipboard input; required in the X11 lanes"]

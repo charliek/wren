@@ -59,7 +59,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xauth weston dbus-daemon dbus-x11 fonts-dejavu-core \
+            xvfb xauth xdotool weston dbus-daemon dbus-x11 fonts-dejavu-core \
             libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 libxinerama1 \
             libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
             libwayland-cursor0 libwayland-egl1 libegl1 libegl-mesa0 \

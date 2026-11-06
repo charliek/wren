@@ -47,34 +47,39 @@ impl Request {
     }
 
     pub fn save(&self, capture: &Screenshot) -> Result<(), Box<dyn Error>> {
-        let width = capture.size.width;
-        let height = capture.size.height;
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or("screenshot dimensions overflow")?;
-        if width == 0 || height == 0 || capture.rgba.len() != expected {
-            return Err("invalid screenshot dimensions or pixel buffer".into());
-        }
-
-        let mut png_bytes = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder.set_compression(png::Compression::Fast);
-            encoder.set_filter(png::Filter::NoFilter);
-            let mut writer = encoder.write_header()?;
-            writer.write_image_data(&capture.rgba)?;
-            writer.finish()?;
-        }
-
-        let mut output = File::create_new(&self.output)?;
-        output.write_all(&png_bytes)?;
-        output.flush()?;
+        save_capture(capture, &self.output)?;
         self.completed.store(true, Ordering::SeqCst);
         Ok(())
     }
+}
+
+pub fn save_capture(capture: &Screenshot, path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let width = capture.size.width;
+    let height = capture.size.height;
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("screenshot dimensions overflow")?;
+    if width == 0 || height == 0 || capture.rgba.len() != expected {
+        return Err("invalid screenshot dimensions or pixel buffer".into());
+    }
+
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::NoFilter);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&capture.rgba)?;
+        writer.finish()?;
+    }
+
+    let mut output = File::create_new(path)?;
+    output.write_all(&png_bytes)?;
+    output.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
