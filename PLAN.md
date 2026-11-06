@@ -112,6 +112,51 @@ cargo clippy -p wren-core --all-targets --locked -- -D warnings
 
 The test run passed **192 inline tests, 60 Session filesystem integration tests, and 6 focused recovery regressions (258 total)**. Barrier tables include pre-publication failures, failed conflict-copy persistence, and post-publication directory-sync failures. Tests inject a private quarantine, never use user OS trash, and assert real disk bytes alongside model/draft state. Independent review reproduced and led to fixes for orphaned dirty-document recovery, inactive writes bypassing a loaded baseline, and replaced-root scanning. Additional tests fixed directory names ending in `.md` and duplicate restored history entries.
 
-These core checks are not yet real-window autosave acceptance. The next checkpoint connects the editor, normal close/focus handling, browser operations, and shared test commands to this Session, and verifies actual timer saves, clean restarts, process kills, and external conflicts in the Linux display lanes.
+At this core-only checkpoint, these checks were not yet real-window autosave acceptance. The integration checkpoint below connects the editor, normal close/focus handling, browser operations, and shared test commands to this Session, and verifies actual timer saves, clean restarts, process kills, and external conflicts in the Linux display lanes.
 
 The Unix final compare/replace window cannot be made a content-conditional atomic rename against an uncooperative external writer. OS trash is a path-based API and also retains a final namespace race. These limitations are explicit; no power-loss, hostile-namespace, native macOS, or OS-trash integration guarantee is inferred from temporary-directory tests.
+
+## Live workspace integration checkpoint
+
+The application now opens an existing workspace and edits actual Markdown files. Start the normal build with:
+
+```sh
+cargo run --locked -p wren-iced -- --workspace /absolute/path/to/notes
+# Equivalent development target:
+make run ARGS="--workspace /absolute/path/to/notes"
+```
+
+The selected root must already exist. Sections are its immediate non-hidden directories; groups are directories inside sections. Use the creation dialogs for an empty workspace. Launching without `--workspace` deliberately remains the clearly marked, unsaved editor evaluation; `--editor-spike` still supplies its 5,000-line in-memory fixture.
+
+Basic Columns now exposes sections, groups, No Group, notes, counts, breadcrumbs, create/rename/move dialogs, explicit trash confirmation, Back/Forward, workspace-path switching, both semantic themes, and save/retry/error status. Native Return alone cannot confirm trash. The live Content/history/cursor survives own renames, moves, and theme changes. External reloads preserve and clamp the cursor. This is a usable integration surface, not final mockup fidelity or the complete MVP.
+
+Every edit reaches the same ordered Session used by widgets and private test requests. The application timer drives the 750 ms scheduler, and native focus loss and window close use flush barriers. A failed close leaves the window and draft available for recovery. Workspace loading transfers the serial Session owner to a task, disables edits while pending, restores the original session on failure, and defers close/focus flushing until the owner returns. Post-publication errors project committed changes instead of reverting the editor or inventing a failed filesystem operation. Writes over the 64 MiB read limit are now rejected before creating a temporary, preventing publication of a note the application cannot reopen.
+
+Independent frontend review reproduced a native creation-dialog error: the item was published, optional metadata persistence failed, and retrying the still-open dialog created a duplicate. Matching Created events now dismiss only the creation that actually committed, retain its error banner, and return focus to the editor. Unpublished creations stay retryable; unrelated flush events do not dismiss a dialog. Rust regressions cover all three creation kinds, and a native X11 regression reproduces the metadata permission failure without injected faults. The harness also now observes an already-exited owned child before attempting quit IPC, while still reaping it and rejecting nonzero exits. This fixes native-close teardown without suppressing live transport/protocol failures.
+
+Final local gates:
+
+| Command | Result |
+| --- | --- |
+| `make build check` | Passed normal build, formatting, both Clippy configurations with warnings denied, all Rust tests, and 149 Python harness/CI-contract unit tests. |
+| `ICED_BACKEND=wgpu WGPU_BACKEND=vulkan make smoke-x11` | 51 passed. |
+| `ICED_BACKEND=tiny-skia make smoke-x11` | 51 passed. |
+| `ICED_BACKEND=wgpu WGPU_BACKEND=vulkan make smoke-wayland` | 43 passed; 8 X11-native cases explicitly deselected. |
+| `ICED_BACKEND=tiny-skia make smoke-wayland` | 43 passed; 8 X11-native cases explicitly deselected. |
+
+The Rust totals per configuration are **259 core tests** (193 inline, 60 Session integration, 6 recovery), **103 editor-library tests**, and **29 normal application tests / 47 smoke-enabled application tests**. No tests were ignored in those Rust runs. GUI cases assert actual on-disk bytes and editor state, including timer saves, continuous typing across multiple persistence deadlines, clean and forced restarts, a fixed 1.1-second process kill independent of saved acknowledgment, eleven failed-save transition barriers, same-size/restored-mtime external edits, dirty conflict preservation, real permission-denied recovery, workspace switching, corrupt metadata preservation, and both-theme rendered editor glyphs.
+
+The X11-native cases additionally exercise actual typing/clipboard/shortcuts/selection, focus-loss flush, successful close flush, failed close retaining its draft, and committed-creation dialog recovery. A separate one-off native X11 probe ran the **normal, non-test-enabled executable** with tiny-skia and wgpu/Vulkan: each renderer completed two owned launches, native typing and timer saves, WM_DELETE_WINDOW flushing, reopening and editing the restored text, and exit code 0. The normal executable rejected both test IPC and screenshot flags even with the test environment variable enabled. This probe was local, not an additional CI job. Native Wayland input was not exercised.
+
+Actual saved-note measurements use a **5,000-line, 384,999-byte UTF-8 note** in the debug build, one timer save plus eight explicit editor-edit/flush saves per lane. The timer column measures request start through Python observing matching disk bytes and clean state, including scheduling, RPC, and polling; it is not the pure scheduler deadline. Core save timing covers the synchronous read/compare/write/fsync/publication path, not rendering or key-to-photon latency.
+
+| Display / renderer | Timer to observed clean | Core save median / max (9 samples) |
+| --- | ---: | ---: |
+| X11 / wgpu Vulkan | 820.82 ms | 4.76 / 7.86 ms |
+| X11 / tiny-skia | 828.91 ms | 4.94 / 7.86 ms |
+| Wayland / wgpu Vulkan | 853.94 ms | 3.78 / 6.85 ms |
+| Wayland / tiny-skia | 834.55 ms | 4.80 / 7.81 ms |
+
+Screenshots, measurements, logs, and JUnit remain under ignored `target/wrentest/`; both themes were also visually inspected on X11/tiny-skia and Wayland/wgpu. Functional trash checks use only the private injected quarantine; no user's OS trash was touched. The existing GitHub Actions matrix uses these same targets, but only the earlier tooling baseline has run remotely. CodeRabbit could not authenticate its review on this host, so no successful CodeRabbit review is claimed; independent local editor, storage, and frontend reviews supplied the actionable findings and regression checks.
+
+The requested editor plus filesystem/autosave handoff is ready for review. Remaining MVP work includes workspace registration/native picker, palette and global search, Outline, resizable panes, layout/width controls, drag/order gestures, packaging, and visual polish. Native macOS/IME, native Wayland input, OS-trash integration, release-scale search performance, and power-loss behavior remain unverified. The new checkpoint commits are local on `main`; no new push was requested.

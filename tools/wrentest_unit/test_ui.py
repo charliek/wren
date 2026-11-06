@@ -375,6 +375,14 @@ class TestBuildEnv(unittest.TestCase):
 
 class TestWrenAppReadiness(_WrenAppTestBase):
 
+    def test_returncode_observes_only_the_owned_child(self) -> None:
+        factory = self._make_popen(_good_identify())
+        with patch.object(subprocess, "Popen", side_effect=factory):
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
+                self.assertIsNone(app.returncode)
+                self._processes[-1].trigger_exit(0)
+                self.assertEqual(app.returncode, 0)
+
     def test_valid_identify_starts_and_stops(self) -> None:
         factory = self._make_popen(_good_identify())
         with patch.object(subprocess, "Popen", side_effect=factory):
@@ -495,6 +503,31 @@ class TestWrenAppReadiness(_WrenAppTestBase):
 
 
 class TestWrenAppLifecycle(_WrenAppTestBase):
+
+    def test_already_exited_child_skips_quit_and_still_validates_status(self) -> None:
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                factory = self._make_popen(_good_identify())
+                with patch.object(subprocess, "Popen", side_effect=factory):
+                    app = WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5)
+                    app.__enter__()
+                    root = app.sandbox
+                    child = self._processes[-1]
+                    child.trigger_exit(exit_code)
+                    client = app.client
+                    with patch.object(client, "call", side_effect=AssertionError("quit after exit")) as call, \
+                         patch.object(client, "close", wraps=client.close) as close:
+                        if exit_code:
+                            with self.assertRaisesRegex(RuntimeError, "code 7"):
+                                app.quit()
+                        else:
+                            app.quit()
+                        call.assert_not_called()
+                        close.assert_called_once_with()
+                    self.assertEqual(child.signals_received, [])
+                    self.assertIsNone(app._process)
+                    self.assertFalse(root.exists())
+                    self.assertFalse(app._atexit_registered)
 
     def test_nonzero_exit_fails_successful_test(self) -> None:
         """If the test passes but the app exits nonzero, RuntimeError."""

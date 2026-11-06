@@ -654,6 +654,9 @@ impl FsStore {
         bytes: &[u8],
         mode: Option<u32>,
     ) -> Result<(Temporary, DiskFile), StoreError> {
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(oversized_file(OsStr::new("draft")));
+        }
         let mut temporary = Temporary::file(directory)?;
         self.inject(Fault::Write)?;
         temporary.file.write_all(bytes)?;
@@ -1373,6 +1376,29 @@ mod tests {
         assert_eq!(saved.file.mode, 0o600);
         assert_eq!(fs::metadata(&absolute).unwrap().mode() & 0o7777, 0o600);
         assert_eq!(store.read(&path).unwrap().bytes, b"private replacement");
+    }
+
+    #[test]
+    fn writes_cannot_publish_a_document_too_large_to_read_back() {
+        let (temp, mut store, section) = workspace();
+        let note = store.create_file(&section, "Note", b"baseline").unwrap();
+        let oversized = vec![0; MAX_FILE_BYTES as usize + 1];
+        store.fail_next(Fault::Write);
+        let error = store
+            .write(&note.path, &oversized, Expected::Bytes(b"baseline"))
+            .unwrap_err();
+        assert!(error.to_string().contains("size limit"));
+        assert!(store
+            .create_file(&section, "Large", &oversized)
+            .unwrap_err()
+            .to_string()
+            .contains("size limit"));
+        assert_eq!(store.read(&note.path).unwrap().bytes, b"baseline");
+        assert!(matches!(
+            store.write(&note.path, b"small", Expected::Bytes(b"baseline")),
+            Err(StoreError::Injected(Fault::Write))
+        ));
+        assert_eq!(names(&temp.path().join("Section")), ["Note.md"]);
     }
 
     #[test]

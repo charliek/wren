@@ -1,10 +1,10 @@
 use std::ffi::{OsStr, OsString};
-#[cfg(feature = "smoke-test")]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     pub large_spike: bool,
+    pub workspace: Option<PathBuf>,
     #[cfg(feature = "smoke-test")]
     pub smoke: Option<crate::smoke::Request>,
     #[cfg(feature = "smoke-test")]
@@ -40,6 +40,15 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
     while index < args.len() {
         match args[index].to_str() {
             Some("--editor-spike") if !options.large_spike => options.large_spike = true,
+            Some("--workspace") if options.workspace.is_none() => {
+                index += 1;
+                let path =
+                    PathBuf::from(args.get(index).ok_or("--workspace requires a directory")?);
+                if !path.is_absolute() {
+                    return Err("workspace path must be absolute".into());
+                }
+                options.workspace = Some(path);
+            }
             #[cfg(feature = "smoke-test")]
             Some("--test-socket") if options.test_socket.is_none() => {
                 if _test_mode != Some(OsStr::new("1")) {
@@ -56,6 +65,9 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
             _ => return Err("unsupported or duplicate option; use --help".into()),
         }
         index += 1;
+    }
+    if options.workspace.is_some() && options.large_spike {
+        return Err("--workspace and the in-memory --editor-spike cannot be combined".into());
     }
     Ok(Command::Run(options))
 }
@@ -79,6 +91,23 @@ mod tests {
         };
         assert!(options.large_spike);
         assert!(parse(&args(&["--editor-spike", "--editor-spike"]), None).is_err());
+    }
+
+    #[test]
+    fn workspace_is_explicit_absolute_and_not_an_in_memory_spike() {
+        let Command::Run(options) = parse(&args(&["--workspace", "/tmp/notes"]), None).unwrap()
+        else {
+            panic!("expected run");
+        };
+        assert_eq!(options.workspace, Some(PathBuf::from("/tmp/notes")));
+        for values in [
+            vec!["--workspace"],
+            vec!["--workspace", "relative"],
+            vec!["--workspace", "/tmp/notes", "--workspace", "/tmp/other"],
+            vec!["--workspace", "/tmp/notes", "--editor-spike"],
+        ] {
+            assert!(parse(&args(&values), None).is_err());
+        }
     }
 
     #[test]

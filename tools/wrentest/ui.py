@@ -213,6 +213,13 @@ class WrenApp:
         return self._process.pid
 
     @property
+    def returncode(self) -> int | None:
+        """Observe only this harness-owned child's exit status."""
+        if self._process is None:
+            raise RuntimeError("WrenApp is not running")
+        return self._process.poll()
+
+    @property
     def sandbox(self) -> Path:
         if self._ownroot is None:
             raise RuntimeError("WrenApp is not running")
@@ -455,10 +462,13 @@ class WrenApp:
         teardown_error: BaseException | None = None
         reaped = self._process is None
 
-        # Phase 1: try graceful quit via IPC.
+        # Native window close may already have exited the owned child. Still
+        # reap it and validate its status below, without writing to a dead socket.
+        exited = self._process is not None and self._process.poll() is not None
         if self._client is not None:
             try:
-                self._client.call("app.quit", timeout=5.0)
+                if not exited:
+                    self._client.call("app.quit", timeout=5.0)
             except TransportError as e:
                 if not e.eof:
                     teardown_error = e

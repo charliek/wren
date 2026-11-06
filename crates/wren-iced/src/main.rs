@@ -9,6 +9,8 @@ mod smoke;
 mod test_capture;
 #[cfg(feature = "smoke-test")]
 mod test_ipc;
+#[cfg(feature = "smoke-test")]
+mod test_trash;
 
 use std::error::Error;
 use std::process::ExitCode;
@@ -30,7 +32,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref())? {
         cli::Command::Run(options) => options,
         cli::Command::Help => {
-            println!("Wren editor spike\n\n  wren                  In-memory editor evaluation\n  wren --editor-spike   Start with a 5,000-line document\n  wren --font-licenses  Show bundled font notices\n\nThis editor-spike buffer is not saved to disk.");
+            println!("Wren\n\n  wren                         In-memory editor evaluation\n  wren --editor-spike          Start with a 5,000-line in-memory document\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --font-licenses         Show bundled font notices\n\nWithout --workspace, the editor-spike buffer is not saved to disk.");
             return Ok(());
         }
         cli::Command::FontLicenses => {
@@ -50,9 +52,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "smoke-test")]
     let completion = options.smoke.as_ref().map(|request| request.completion());
 
+    let title = if options.workspace.is_some() {
+        "Wren"
+    } else {
+        "Wren — editor spike"
+    };
     let mut application =
         iced::application(move || App::new(options.clone()), App::update, App::view)
-            .title("Wren — editor spike")
+            .title(title)
             .window_size((1280.0, 800.0))
             .exit_on_close_request(false)
             .default_font(fonts::UI)

@@ -3,7 +3,7 @@
 .PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland
 
 help:
-	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Launch Wren (the editor spike is in-memory until storage lands).' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Capture both themes in a real X11 window under Xvfb.' '  make smoke-wayland  Capture both themes in a real headless Wayland window.'
+	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run            Launch the in-memory editor evaluation (not saved).' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Capture both themes in a real X11 window under Xvfb.' '  make smoke-wayland  Capture both themes in a real headless Wayland window.'
 
 setup:
 	cargo fetch --locked
@@ -13,7 +13,7 @@ build:
 	cargo build --workspace --locked
 
 run:
-	cargo run --locked -p wren-iced
+	cargo run --locked -p wren-iced -- $(ARGS)
 
 test:
 	cargo test --workspace --locked
