@@ -83,7 +83,7 @@ Each lane captures real renderer pixels and validates visible content/background
 
 The display wrapper owns private displays, runtime/config directories, and a session bus without desktop-service activation. Disabling activation prevents headless tests from spawning desktop portal helpers or leaving FUSE mounts behind. Native folder selection and actual desktop theme-change delivery are not established by these forced-theme rendering tests.
 
-Registry/source preflight found compatible stable candidates for subsequent implementation: `notify =8.2.1`, `notify-debouncer-full =0.7.0`, `trash =5.3.0`, `nucleo-matcher =0.3.1`, and `rfd =0.16.1` with its Rust XDG-portal backend. The newer rfd 0.17.2 dynamically loads libdbus; prefer the checked 0.16.1 portal approach unless later implementation evidence justifies changing it. These future dependencies have not yet been added to or compiled as part of Wren. The local desktop has a FileChooser portal, but no interactive picker was opened during preflight.
+Registry/source preflight found compatible stable candidates for subsequent implementation: `notify =8.2.1`, `notify-debouncer-full =0.7.0`, `trash =5.3.0`, `nucleo-matcher =0.3.1`, and `rfd =0.16.1` with its Rust XDG-portal backend. The newer rfd 0.17.2 dynamically loads libdbus; prefer the checked 0.16.1 portal approach unless later implementation evidence justifies changing it. The core now uses the pinned notify and trash candidates. Its watcher coalesces bounded rescan hints directly rather than adding the full-debouncer dependency. Search and folder-picker dependencies remain unadded. The local desktop has a FileChooser portal, but no interactive picker was opened during preflight.
 
 The initial GitHub Actions run passed Linux/macOS compilation and Rust checks, Python unit tests, and all four Linux renderer/display smoke lanes on the tooling baseline (`5b19143`). Native macOS integration remains unverified. Scheduled performance testing belongs with the search implementation, not a placeholder passing job.
 
@@ -93,4 +93,25 @@ The real in-memory editor, bounded history, literal find, semantic Markdown high
 
 The four local Linux lanes now include real-editor tests: 21 passing cases in each X11 lane and 17 passing cases in each Wayland lane, with the four X11-native cases explicitly deselected on Wayland. CI installs the native-input tool and uses the same targets. These editor changes have not yet run remotely.
 
-The editor checkpoint still does not open or save notes and explicitly warns about its in-memory buffer. Filesystem operations, autosave integration, and the remaining MVP capabilities are the next work, not implied by the editor go decision.
+At the editor checkpoint, the application did not open or save notes and explicitly warned about its in-memory buffer. The go decision alone was not persistence acceptance.
+
+## Filesystem and autosave core checkpoint
+
+The toolkit-neutral core now implements scanning, stable typed session IDs, every prescribed filesystem operation, workspace switching, navigation history, optional workspace metadata, draft/baseline tracking, bounded autosave, and watcher reconciliation. One ordered Session applies mutations; failed operations carry events for side effects that already committed.
+
+Storage walks validated relative paths through no-follow directory descriptors, including enumeration. A persistent advisory lock prevents cooperating duplicate writers. Creation and moves use atomic no-replace publication and collision suffixes; saves compare exact baseline bytes, preserve ordinary permissions, start sibling temporaries at 0600, fsync their data, atomically replace, and sync the parent. Failed directory syncs retain retryable descriptors rather than pretending publication did not occur. Unsupported files, special files, symlinks, incomplete scans, and malformed metadata cannot silently turn into destructive edits. Reads are bounded at 64 MiB per note; larger files are warned about and left untouched.
+
+Autosave uses injected monotonic time with both a 750 ms idle debounce and a 750 ms oldest-dirty deadline, revision/generation-aware completion, and bounded failure backoff. The synchronous Session save path protects note/ancestor moves, renames, deletions, note/workspace switches, and explicit flush. Observed external conflicts preserve a collision-safe, durably published copy before reloading; deleted or invalid originals never justify discarding the only draft. Clean deletion closes the document. Unsupported external bytes may leave the original untouched and open the saved recovery copy instead.
+
+Core verification on Linux:
+
+```sh
+cargo test -p wren-core --locked
+cargo clippy -p wren-core --all-targets --locked -- -D warnings
+```
+
+The test run passed **192 inline tests, 60 Session filesystem integration tests, and 6 focused recovery regressions (258 total)**. Barrier tables include pre-publication failures, failed conflict-copy persistence, and post-publication directory-sync failures. Tests inject a private quarantine, never use user OS trash, and assert real disk bytes alongside model/draft state. Independent review reproduced and led to fixes for orphaned dirty-document recovery, inactive writes bypassing a loaded baseline, and replaced-root scanning. Additional tests fixed directory names ending in `.md` and duplicate restored history entries.
+
+These core checks are not yet real-window autosave acceptance. The next checkpoint connects the editor, normal close/focus handling, browser operations, and shared test commands to this Session, and verifies actual timer saves, clean restarts, process kills, and external conflicts in the Linux display lanes.
+
+The Unix final compare/replace window cannot be made a content-conditional atomic rename against an uncooperative external writer. OS trash is a path-based API and also retains a final namespace race. These limitations are explicit; no power-loss, hostile-namespace, native macOS, or OS-trash integration guarantee is inferred from temporary-directory tests.
