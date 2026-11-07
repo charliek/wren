@@ -7,3 +7,9 @@
 .claude/
 .env*
 *.pem
+/third_party/sparkle/out/
+
+# DO NOT REMOVE: The "# envsecrets" marker below is used by the envsecrets CLI
+# to track which secret files it manages. See https://github.com/charliek/envsecrets
+# envsecrets
+.secrets/wren-sparkle-ed-private.key

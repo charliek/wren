@@ -9,6 +9,10 @@ RELEASE_BINARY := target/package-build/$(PACKAGE_HOST)/release/wren
 DEB_HOST_ARCH := $(shell dpkg --print-architecture 2>/dev/null)
 ARCH ?= $(DEB_HOST_ARCH)
 NFPM ?= nfpm
+# The Sparkle feed and key every Wren.app built here carries. Installed copies
+# poll this URL forever, so the appcast must never move (RELEASING.md).
+SPARKLE_FEED_URL ?= https://raw.githubusercontent.com/charliek/wren/main/packaging/macos/appcast.xml
+SPARKLE_PUBLIC_KEY ?= packaging/macos/sparkle-ed-public-key.txt
 
 .PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland perf-search package package-debug release-binary deb app dmg icons
 
@@ -70,7 +74,10 @@ app:
 	@[ "$$(uname -s)" = Darwin ] || { echo "make app builds Wren.app on macOS" >&2; exit 1; }
 	$(MAKE) release-binary
 	rm -rf target/dist/macos
-	uv run --locked --group test python tools/package.py --binary "$(RELEASE_BINARY)" --release-version "$(RELEASE_VERSION)" --output target/dist/macos/Wren.app
+	third_party/sparkle/fetch.sh
+	uv run --locked --group test python tools/package.py --binary "$(RELEASE_BINARY)" --release-version "$(RELEASE_VERSION)" --output target/dist/macos/Wren.app \
+		--sparkle-feed-url "$(SPARKLE_FEED_URL)" --sparkle-public-key-file "$(SPARKLE_PUBLIC_KEY)"
+	scripts/macos/embed-sparkle.sh target/dist/macos/Wren.app
 	scripts/macos/sign-app.sh target/dist/macos/Wren.app
 
 dmg:

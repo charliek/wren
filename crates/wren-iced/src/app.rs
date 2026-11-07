@@ -432,7 +432,13 @@ impl App {
                     self.viewport = size;
                     self.window = Some(id);
                     #[cfg(target_os = "macos")]
-                    crate::macos_menu::install(&self.preferences.keymap);
+                    {
+                        crate::macos_menu::install(&self.preferences.keymap);
+                        // A missing framework (a bare binary, a bundle built
+                        // without Sparkle) only leaves the menu item disabled.
+                        let _ = wren_sparkle::start();
+                        crate::macos_menu::sync_updates();
+                    }
                     #[cfg(feature = "smoke-test")]
                     {
                         if self.smoke.is_some() {
@@ -460,6 +466,8 @@ impl App {
                 }
                 iced::window::Event::Focused => {
                     let _ = self.reload_settings(false);
+                    #[cfg(target_os = "macos")]
+                    crate::macos_menu::sync_updates();
                 }
                 _ => {}
             },

@@ -1,0 +1,22 @@
+[package]
+name = "wren-sparkle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Wren's Sparkle updater bridge (macOS only)"
+
+# The one crate exempt from the workspace's `unsafe_code = "forbid"`: Sparkle
+# is an Objective-C framework with no safe Rust binding, so talking to it means
+# `dlopen` plus `msg_send!`. Every unsafe block must say why it is sound.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString"] }
+libc = "=0.2.191"

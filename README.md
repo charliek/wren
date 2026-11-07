@@ -44,6 +44,9 @@ Releases attach a macOS DMG and Linux `.deb` packages (amd64 and arm64) to
 sudo apt install wren
 ```
 
+On macOS, Wren updates itself through Sparkle: it checks for new releases on a
+schedule, and **Wren → Check for Updates…** checks on demand.
+
 ## Build from source
 
 Requires the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs

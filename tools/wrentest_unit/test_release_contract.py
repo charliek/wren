@@ -3,7 +3,8 @@
 These read the files as text, like test_ci_contract.py (no YAML dependency in
 the locked test environment), and pin the release-workflows invariants: the
 draft-until-complete job graph, the ci-success gate, all-or-nothing macOS
-notarization, and a .deb whose Depends cover every library the binary loads.
+notarization, the Sparkle feed and key every Wren.app carries, and a .deb
+whose Depends cover every library the binary loads.
 """
 
 import os
@@ -77,7 +78,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "create-release": {"version-check", "ci-gate"},
             "linux": {"create-release"}, "mac": {"create-release"},
             "publish-release": {"linux", "mac"},
-            "dispatch-apt-charliek": {"publish-release"},
+            "dispatch-apt-charliek": {"publish-release"}, "appcast": {"publish-release"},
         })
         # No job may run past a failed dependency: that keeps a failed build's
         # draft unpublished and the apt dispatch from firing early.
@@ -137,7 +138,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"secrets\.([A-Z0-9_]+) != ''", gate[1])), APPLE_SECRETS)
         self.assertEqual(gate[1].count("&&"), len(APPLE_SECRETS) - 1)
         self.assertNotIn("||", gate[1])
-        self.assertLessEqual(set(re.findall(r"secrets\.([A-Z0-9_]+)", mac)), APPLE_SECRETS)
+        self.assertLessEqual(set(re.findall(r"secrets\.([A-Z0-9_]+)", mac)), APPLE_SECRETS | {"SPARKLE_ED_PRIVATE_KEY"})
         # The identity reaches a step only through the gate, so any missing
         # secret falls back to an ad-hoc signature and the first-launch note.
         self.assertEqual(re.findall(r"WREN_DEVELOPER_ID_IDENTITY: (.+)", mac), [GATED_IDENTITY] * 2)
@@ -159,6 +160,40 @@ class ReleaseWorkflowTests(unittest.TestCase):
         entitlements = (ROOT / "packaging/macos/Wren.entitlements").read_text()
         self.assertNotIn("com.apple.security.automation.apple-events", entitlements)
         self.assertIn("--options runtime --timestamp", (ROOT / "scripts/macos/sign-app.sh").read_text())
+
+    def test_sparkle_feed_key_and_signature_flow(self):
+        mac, app = self.jobs["mac"], make_target(self.makefile, "app")
+        feed = re.search(r"(?m)^SPARKLE_FEED_URL \?= (\S+)$", self.makefile)[1]
+        self.assertEqual(feed, "https://raw.githubusercontent.com/charliek/wren/main/packaging/macos/appcast.xml")
+        self.assertIn(f"check SUFeedURL {feed}", mac)
+        self.assertIn("check SUPublicEDKey \"$(tr -d '[:space:]' < packaging/macos/sparkle-ed-public-key.txt)\"", mac)
+        self.assertIn("SPARKLE_PUBLIC_KEY ?= packaging/macos/sparkle-ed-public-key.txt", self.makefile)
+        self.assertNotEqual((ROOT / "packaging/macos/sparkle-ed-public-key.txt").read_text(),
+                            (ROOT / "tools/wrentest/fixtures/sparkle/TEST-ONLY-public-ed-key.txt").read_text())
+        # make app: fetch, bundle with the feed, embed the framework, then sign.
+        order = ["third_party/sparkle/fetch.sh", "--sparkle-feed-url", "scripts/macos/embed-sparkle.sh",
+                 "scripts/macos/sign-app.sh"]
+        self.assertEqual([app.index(part) for part in order], sorted(app.index(part) for part in order))
+        names = [step["name"] for step in steps(mac)]
+        order = ["Stage Sparkle", "Verify the Sparkle key pair", "Build and sign Wren.app",
+                 "Notarize + staple the DMG (skipped without credentials)", "Upload DMG to the Release",
+                 "Sign the DMG for Sparkle", "Hand the signature to the appcast job"]
+        positions = [names.index(name) for name in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("name: sparkle-signature", mac)
+
+        appcast = self.jobs["appcast"]
+        self.assertIn("name: sparkle-signature", appcast)
+        self.assertIn("ref: main", appcast)
+        self.assertIn("*-*)", appcast)  # prereleases never enter the appcast
+        for step in steps(appcast)[1:]:
+            self.assertEqual(step["if"], "steps.guard.outputs.skip == 'false'", step["name"])
+        self.assertIn("client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}", appcast)
+        self.assertIn("permission-contents: write", appcast)
+        self.assertIn("python3 tools/update_appcast.py --tag", appcast)
+        self.assertIn('[ "${staged}" = "${appcast}" ]', appcast)
+        self.assertIn("appcast=packaging/macos/appcast.xml", appcast)
+        self.assertLess(appcast.index("Verify the DMG download resolves"), appcast.index("git push"))
 
     def test_apt_dispatch_uses_a_receiver_scoped_release_bot_token(self):
         dispatch = self.jobs["dispatch-apt-charliek"]
@@ -212,7 +247,7 @@ class ReleaseFilesTests(unittest.TestCase):
     def test_changelog_has_an_unreleased_section_and_releasing_documents_the_secrets(self):
         self.assertIn("\n## [Unreleased]\n", (ROOT / "CHANGELOG.md").read_text())
         releasing = (ROOT / "RELEASING.md").read_text()
-        for secret in ("RELEASE_BOT_CLIENT_ID", "RELEASE_BOT_APP_KEY", *APPLE_SECRETS):
+        for secret in ("RELEASE_BOT_CLIENT_ID", "RELEASE_BOT_APP_KEY", "SPARKLE_ED_PRIVATE_KEY", *APPLE_SECRETS):
             self.assertIn(f"`{secret}`", releasing)
 
 

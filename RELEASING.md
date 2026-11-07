@@ -39,12 +39,17 @@ That's it. Everything else is automatic (after the [one-time setup](#one-time-gi
      and payload, validates the desktop entry, and installs the package into a
      clean `ubuntu:24.04` container where every library the binary dlopens
      must resolve. Then it uploads the `.deb`.
-   - `mac` (`macos-26`, Apple silicon): `make app` builds an arm64 release
-     `Wren.app` (bundle id `ai.stridelabs.Wren`, version from the tag) and
+   - `mac` (`macos-26`, Apple silicon): stages Sparkle
+     (`third_party/sparkle/fetch.sh`) and checks that `SPARKLE_ED_PRIVATE_KEY`
+     is the private half of the committed public key
+     (`scripts/macos/verify-sparkle-key.sh`); `make app` builds an arm64
+     release `Wren.app` (bundle id `ai.stridelabs.Wren`, version from the tag,
+     Sparkle feed and key in `Info.plist`, `Sparkle.framework` embedded) and
      signs it (`scripts/macos/sign-app.sh`); asserts the bundle's id, version,
-     arch and signature; notarizes + staples the app; `make dmg` packages
-     `Wren-X.Y.Z.dmg`; notarizes + staples the DMG; checks the app inside the
-     DMG carries its own ticket; uploads the DMG. Signing and notarization are
+     feed, key, framework, arch and signature; notarizes + staples the app;
+     `make dmg` packages `Wren-X.Y.Z.dmg`; notarizes + staples the DMG; checks
+     the app inside the DMG carries its own ticket; uploads the DMG; EdDSA-signs
+     it with Sparkle's `sign_update` and passes the signature to `appcast`. Signing and notarization are
      all-or-nothing on the six Apple secrets (see [Secrets](#secrets)); until
      they exist the DMG is ad-hoc signed, carries `FIRST-LAUNCH.txt`, and the
      release body gets the Gatekeeper-bypass note.
@@ -56,9 +61,44 @@ That's it. Everything else is automatic (after the [one-time setup](#one-time-gi
      `charliek/apt-charliek` so the `.deb`s land on `apt.stridelabs.ai`, with
      a release-bot App token scoped to that repo. Skipped for prereleases
      (the receiver tracks `include_prerelease: false`).
+   - `appcast`: checks the public DMG link resolves, adds the release to
+     `packaging/macos/appcast.xml` (`tools/update_appcast.py`), and pushes
+     that one file to `main` as the release bot. Skipped for prereleases.
 
-No auto-update feed (Sparkle) and no Homebrew cask yet: macOS users download
-each DMG from the Release page.
+No Homebrew cask yet.
+
+## Sparkle auto-update (macOS)
+
+"Wren → Check for Updates…" and Sparkle's scheduled checks read
+`https://raw.githubusercontent.com/charliek/wren/main/packaging/macos/appcast.xml`
+(`SUFeedURL`) and install only updates signed by the key in
+`packaging/macos/sparkle-ed-public-key.txt` (`SUPublicEDKey`). Both are baked
+into every `Wren.app` `make app` builds, so:
+
+- **Never move or rename `packaging/macos/appcast.xml`**, and keep the repo
+  public: every installed copy polls that URL forever.
+- **Never rotate the key casually.** Installed copies reject updates signed by
+  any other key and would never update again. If it is ever unavoidable, ship
+  a build carrying the new public key that users install by hand, and only
+  then start signing with the new private half.
+
+The private half lives in two places: the `SPARKLE_ED_PRIVATE_KEY` repo secret
+(base64 of the key file), and envsecrets as
+`.secrets/wren-sparkle-ed-private.key` (the key file itself: base64 of the
+32-byte Ed25519 seed, the format Sparkle's `generate_keys -x` writes). Restore
+it with `envsecrets pull`; reset the secret with
+`base64 < .secrets/wren-sparkle-ed-private.key | gh secret set SPARKLE_ED_PRIVATE_KEY -R charliek/wren`.
+
+The appcast lists stable releases only. A prerelease bundle records just its
+`X.Y.Z` as `CFBundleVersion`, so `v0.2.0-rc1` and `v0.2.0` compare equal and
+an rc install is not offered its final release; reinstall from the DMG.
+
+The app loads the framework at runtime (`crates/wren-sparkle`), so a bare
+`cargo run` binary just shows "Check for Updates…" disabled. To check the
+updater end to end on a Mac: `cargo build --features smoke-test`,
+`third_party/sparkle/fetch.sh`, then `python3 tools/check_updater.py`. It
+builds a throwaway bundle trusting the TEST-ONLY key in
+`tools/wrentest/fixtures/sparkle/` and polls a feed on 127.0.0.1.
 
 ## Draft-until-complete, and how to recover
 
@@ -119,6 +159,7 @@ identity beyond "last released" is ever needed, derive it at build time from
 | `APPLE_ID` | Apple ID email for notarytool | optional (`CAN_NOTARIZE`) |
 | `APPLE_TEAM_ID` | 10-character Apple team ID | optional (`CAN_NOTARIZE`) |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com (not the Apple ID password) | optional (`CAN_NOTARIZE`) |
+| `SPARKLE_ED_PRIVATE_KEY` | base64 of the Sparkle key file (see [Sparkle auto-update](#sparkle-auto-update-macos)) | required: the `mac` job fails before building without it |
 
 The six Apple secrets are all-or-nothing: with any one unset the mac job ships
 an ad-hoc signed, un-notarized DMG (with the first-launch note) and still
@@ -211,8 +252,7 @@ these once, in order, before the first release.
 actors:
 
 - `charliek-release-bot` (App ID `3902108`, type `Integration`): for
-  post-build pushes to `main`. Wren's release makes none today; it is listed
-  per the convention so a future one (an appcast) needs no ruleset change.
+  post-build pushes to `main`, which is the `appcast` job's commit.
 - Admin role (id `5`, type `RepositoryRole`): lets `/release-workflows:release`
   push the changelog + version commits and the tag before `ci-success` exists
   on them.
@@ -247,6 +287,10 @@ does), export `WREN_DEVELOPER_ID_IDENTITY`, and notarize with
 | `linux` fails at "Install nfpm": checksum mismatch | A corrupted or changed download | Re-run; if it persists, compare against nfpm's published `checksums.txt` before bumping `NFPM_VERSION` |
 | `mac` fails at notarize with `status: Invalid` | Apple refused the submission; `notarize.sh` prints Apple's per-binary reasons | Read them. "Not signed with a valid Developer ID certificate" + "no secure timestamp" means the app was ad-hoc signed: a step after `make app` rebuilt or re-signed it |
 | `mac` fails at "Assert the app carries its Developer ID signature" | Something re-signed the bundle between signing and notarizing, or the identity secret names the wrong cert | Check `WREN_DEVELOPER_ID_IDENTITY` against `security find-identity -v -p codesigning` |
+| `mac` fails at "Verify the Sparkle key pair" | `SPARKLE_ED_PRIVATE_KEY` is unset, mangled, or not the private half of `packaging/macos/sparkle-ed-public-key.txt` | Reset it from envsecrets (see [Sparkle auto-update](#sparkle-auto-update-macos)). Never "fix" this by changing the committed public key |
+| `appcast` fails at "Verify the DMG download resolves" | The DMG is not on the published release | Re-run the `mac` job's upload if needed, then re-run `appcast` |
+| `appcast` push fails or conflicts | `main` moved during the push, or the App lost its bypass | Re-run `appcast`; it rebases, and an appcast that already lists the version pushes nothing |
+| "Check for Updates…" says up to date after a release | The `appcast` job did not run or failed, or raw.githubusercontent.com is still caching the old file (up to 5 minutes) | Check the job; `curl` the feed URL |
 | `mac` fails at `hdiutil create` after 5 attempts | Persistent runner disk contention | Re-run the `mac` job |
 | `create-release` fails: "already exists and is PUBLISHED" | Re-running the whole workflow for a tag that already shipped | Deliberate. Re-run only the job you need, or delete the release first |
 | `publish-release` fails: "expected exactly one asset named …" | A build job uploaded nothing, or the same name twice | The draft is untouched: inspect with `gh release view vX.Y.Z --json assets`, fix, re-run |

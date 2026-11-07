@@ -250,6 +250,13 @@ impl App {
                 }
                 return Ok(task);
             }
+            #[cfg(target_os = "macos")]
+            "updater.status" => request.respond(Ok(updater_status())),
+            #[cfg(target_os = "macos")]
+            "updater.check" => {
+                wren_sparkle::check_for_update_information()?;
+                request.respond(Ok(updater_status()));
+            }
             _ => return Err(format!("unknown test operation: {}", request.op)),
         }
         Ok(Task::none())
@@ -823,6 +830,23 @@ fn position(params: &Value) -> Result<Position, String> {
     Ok(Position {
         line: index("line")?,
         column: index("column")?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn updater_status() -> Value {
+    let status = wren_sparkle::status();
+    json!({
+        "started": status.started,
+        "unavailable": status.unavailable,
+        "can_check": wren_sparkle::can_check(),
+        "menu_enabled": crate::macos_menu::updates_enabled(),
+        "checks": status.checks,
+        "last": status.last.map(|check| json!({
+            "outcome": check.outcome.as_str(),
+            "version": check.version,
+            "detail": check.detail,
+        })),
     })
 }
 

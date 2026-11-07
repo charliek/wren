@@ -24,7 +24,13 @@ name: Release
 # and only warns past one with no matching .deb, so it would silently
 # republish the PREVIOUS version.
 #
-# No auto-update feed (Sparkle) and no Homebrew cask yet.
+# Sparkle auto-update: every Wren.app polls packaging/macos/appcast.xml on
+# main (raw.githubusercontent.com) and trusts packaging/macos/
+# sparkle-ed-public-key.txt. The mac job checks SPARKLE_ED_PRIVATE_KEY is that
+# key's private half before building, then EdDSA-signs the final DMG and hands
+# the signature forward. After the release is public, `appcast` adds the entry
+# and pushes it to main as the release bot (the App bypasses main's ruleset).
+# Prereleases never enter the appcast. No Homebrew cask yet.
 
 on:
   push:
@@ -300,9 +306,23 @@ jobs:
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | sed 's/"//g')
           rm -f "$RUNNER_TEMP/cert.p12"
 
+      # make app fetches Sparkle as well; staging it first gives the key check
+      # below its sign_update.
+      - name: Stage Sparkle
+        run: third_party/sparkle/fetch.sh
+
+      # Before anything is built: make app stamps the committed public key
+      # into Info.plist, so the secret must be its private half, or every
+      # installed Wren.app would reject this release's update.
+      - name: Verify the Sparkle key pair
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: scripts/macos/verify-sparkle-key.sh packaging/macos/sparkle-ed-public-key.txt
+
       # Release build, tools/package.py bundle (refusing a RELEASE_VERSION that
-      # is not the Cargo version), then scripts/macos/sign-app.sh: Developer
-      # ID + hardened runtime when the identity is non-empty, else ad-hoc.
+      # is not the Cargo version) with the Sparkle feed, the embedded
+      # framework, then scripts/macos/sign-app.sh: Developer ID + hardened
+      # runtime when the identity is non-empty, else ad-hoc.
       - name: Build and sign Wren.app
         env:
           WREN_DEVELOPER_ID_IDENTITY: ${{ env.CAN_NOTARIZE == 'true' && secrets.WREN_DEVELOPER_ID_IDENTITY || '' }}
@@ -327,6 +347,10 @@ jobs:
           # Bundle versions are numeric: a prerelease records its X.Y.Z.
           check CFBundleShortVersionString "${ver%%-*}"
           check CFBundleVersion "${ver%%-*}"
+          check SUFeedURL https://raw.githubusercontent.com/charliek/wren/main/packaging/macos/appcast.xml
+          check SUPublicEDKey "$(tr -d '[:space:]' < packaging/macos/sparkle-ed-public-key.txt)"
+          test -L "${APP}/Contents/Frameworks/Sparkle.framework/Sparkle" \
+            || { echo "::error::${APP} does not embed Sparkle.framework"; exit 1; }
           test -x "${APP}/Contents/MacOS/wren" \
             || { echo "::error::${APP}/Contents/MacOS/wren is missing or not executable"; exit 1; }
           lipo "${APP}/Contents/MacOS/wren" -verify_arch arm64
@@ -425,6 +449,32 @@ jobs:
           dmg="target/dist/$(python3 tools/release_assets.py dmg-name "${GITHUB_REF_NAME}")"
           test -s "${dmg}" || { echo "::error::${dmg} was not built"; exit 1; }
           gh release upload "${GITHUB_REF_NAME}" "${dmg}#macOS — Apple silicon (.dmg)" --clobber
+
+      # Signs the exact bytes just uploaded (after any stapling). The output,
+      # edSignature plus length, is public: it goes in the appcast.
+      - name: Sign the DMG for Sparkle
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          dmg="target/dist/$(python3 tools/release_assets.py dmg-name "${GITHUB_REF_NAME}")"
+          work="$(mktemp -d)"
+          chmod 700 "${work}"
+          trap 'rm -rf "${work}"' EXIT
+          printf '%s' "${SPARKLE_ED_PRIVATE_KEY}" | base64 --decode > "${work}/key"
+          mkdir -p "${RUNNER_TEMP}/sparkle"
+          third_party/sparkle/out/bin/sign_update --ed-key-file "${work}/key" "${dmg}" \
+            > "${RUNNER_TEMP}/sparkle/sign.txt"
+          cat "${RUNNER_TEMP}/sparkle/sign.txt"
+
+      - name: Hand the signature to the appcast job
+        uses: actions/upload-artifact@v7
+        with:
+          name: sparkle-signature
+          path: ${{ runner.temp }}/sparkle/sign.txt
+          if-no-files-found: error
+          # A rerun of just this job must replace, not collide with, the first.
+          overwrite: true
 
       # While the DMG isn't notarized, append the Gatekeeper-bypass steps to the
       # release body. Gated on the stapled-ticket check, so it self-disables
@@ -569,3 +619,105 @@ jobs:
             -F "client_payload[package]=wren" \
             -F "client_payload[tag]=${tag}"
           echo "::notice::Dispatched apt-charliek publish for wren ${tag}: watch https://github.com/charliek/apt-charliek/actions"
+
+  # Add the release to the Sparkle appcast and push it to main as the release
+  # bot (main's ruleset requires ci-success; only the App bypasses it).
+  # `needs: publish-release` because the enclosure URL is a public download
+  # link, which a draft's assets do not answer. Prereleases are skipped.
+  # Rerunnable on its own: an unchanged appcast pushes nothing.
+  appcast:
+    needs: publish-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Decide whether to publish
+        id: guard
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            *-*)
+              echo "::notice::${GITHUB_REF_NAME} is a prerelease: the appcast offers stable releases only."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # main, not the tag: the appcast is served from main. Full history so
+      # the push retry can rebase.
+      - uses: actions/checkout@v6
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the Sparkle signature
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/download-artifact@v7
+        with:
+          name: sparkle-signature
+          path: ${{ runner.temp }}/sparkle
+
+      - name: Mint a release-bot token
+        if: steps.guard.outputs.skip == 'false'
+        id: bot
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_KEY }}
+          permission-contents: write
+
+      # Sparkle has no fallback for a dead enclosure, so never publish one.
+      # Range-GET a byte, retrying while the release CDN catches up.
+      - name: Verify the DMG download resolves
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(python3 tools/release_assets.py dmg-name "${GITHUB_REF_NAME}")"
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors --range 0-0 -o /dev/null "${url}" \
+            || { echo "::error::${url} does not resolve; refusing to point the appcast at it."; exit 1; }
+          echo "OK: ${url}"
+
+      - name: Add the appcast entry
+        if: steps.guard.outputs.skip == 'false'
+        run: >
+          python3 tools/update_appcast.py --tag "${GITHUB_REF_NAME}"
+          --sign-file "${RUNNER_TEMP}/sparkle/sign.txt" --repo "${GITHUB_REPOSITORY}"
+
+      - name: Push the appcast to main as the release bot
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_SLUG: ${{ steps.bot.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          appcast=packaging/macos/appcast.xml
+          if git diff --quiet "${appcast}"; then
+            echo "::notice::${appcast} already lists ${GITHUB_REF_NAME}: nothing to push."
+            exit 0
+          fi
+          # Installation tokens cannot call /user; the bot's id is public.
+          bot_id="$(gh api "/users/${BOT_SLUG}[bot]" --jq .id)"
+          git config user.name "${BOT_SLUG}[bot]"
+          git config user.email "${bot_id}+${BOT_SLUG}[bot]@users.noreply.github.com"
+          git add "${appcast}"
+          staged="$(git diff --cached --name-only)"
+          [ "${staged}" = "${appcast}" ] || { echo "::error::unexpected staged paths: ${staged}"; exit 1; }
+          git commit -m "chore(appcast): publish ${GITHUB_REF_NAME}"
+          # The token rides in the push URL: git ignores an extraheader set
+          # with -c for the push request. It stays in argv, never in
+          # .git/config.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            if git push "${remote}" HEAD:main; then
+              echo "::notice::Appcast published for ${GITHUB_REF_NAME}."
+              exit 0
+            fi
+            echo "::warning::push attempt ${attempt} failed; rebasing onto main"
+            git fetch "${remote}" main
+            git rebase FETCH_HEAD || { echo "::error::the appcast conflicts with main; rerun this job"; exit 1; }
+          done
+          echo "::error::main kept moving; rerun this job."
+          exit 1

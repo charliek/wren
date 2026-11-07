@@ -227,7 +227,8 @@ class PackageTests(unittest.TestCase):
         }
         self.assertEqual({key: info[key] for key in expected}, expected)
         self.assertRegex(info["CFBundleIdentifier"], r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
-        # Notes are trashed with NSFileManager, never by scripting Finder.
+        # Notes are trashed with NSFileManager, never by scripting Finder, and
+        # a bundle has no update feed unless one is asked for.
         for forbidden in ("NSAppleEventsUsageDescription", "SUFeedURL", "SUPublicEDKey", "NSCameraUsageDescription", "LSMinimumSystemVersion"):
             self.assertNotIn(forbidden, info)
         self.assertEqual((output / "Contents/PkgInfo").read_bytes(), b"APPL????")
@@ -244,6 +245,37 @@ class PackageTests(unittest.TestCase):
         self.assert_notices(resources)
         self.assert_permissions(output, binary)
         self.assert_source_unchanged()
+
+    def test_sparkle_feed_is_written_to_the_macos_plist_only(self):
+        key = (ROOT / "packaging/macos/sparkle-ed-public-key.txt").read_text()
+        feed = package.sparkle_feed("https://example.test/appcast.xml", key)
+        output = self.assemble("macos", sparkle=feed)
+        info = plistlib.loads((output / "Contents/Info.plist").read_bytes())
+        self.assertEqual(info["SUFeedURL"], "https://example.test/appcast.xml")
+        self.assertEqual(info["SUPublicEDKey"], key.strip())
+        with self.assertRaisesRegex(package.PackageError, "macOS-only"):
+            self.assemble(output=self.base / "linux-feed", sparkle=feed)
+        self.assertFalse((self.base / "linux-feed").exists())
+
+    def test_sparkle_feed_rejects_insecure_urls_and_malformed_keys(self):
+        key = (ROOT / "packaging/macos/sparkle-ed-public-key.txt").read_text()
+        self.assertEqual(package.sparkle_feed("http://127.0.0.1:8123/appcast.xml", key).url,
+                         "http://127.0.0.1:8123/appcast.xml")
+        for url in ("http://example.test/appcast.xml", "ftp://example.test/a.xml", "https://example.test/a b.xml"):
+            with self.subTest(url=url), self.assertRaisesRegex(package.PackageError, "Sparkle feed"):
+                package.sparkle_feed(url, key)
+        for bad in ("", "not base64!", "AAAA", key.strip() + "AAAA"):
+            with self.subTest(key=bad), self.assertRaisesRegex(package.PackageError, "public key"):
+                package.sparkle_feed("https://example.test/appcast.xml", bad)
+
+    def test_cli_sparkle_options_go_together(self):
+        stderr = io.StringIO()
+        with patch.object(package, "native_platform", return_value="macos"), redirect_stderr(stderr):
+            self.assertEqual(package.main(["--binary", str(self.binary), "--sparkle-feed-url",
+                                           "https://example.test/appcast.xml",
+                                           "--output", str(self.base / "Wren.app")]), 1)
+        self.assertIn("go together", stderr.getvalue())
+        self.assertFalse((self.base / "Wren.app").exists())
 
     def test_system_layout_keeps_installable_desktop_names_for_a_usr_install(self):
         self.set_cargo_version("0.0.1-rc.1")

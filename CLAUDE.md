@@ -26,9 +26,13 @@ was built and verified.
     current line, and caret), `panes.rs` (resize), `drag*.rs` (drag and
     drop), `ellipsis.rs`, and `keys.rs`.
   - `macos_menu.rs` is the native menu bar.
+- `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
+  Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
 - `tools/`: the Python functional harness (`wrentest/`, which drives a real
   window over a private test socket), its unit tests (`wrentest_unit/`),
-  packaging (`package.py`), and `capture_scenes.py` for visual review.
+  packaging (`package.py`), `capture_scenes.py` for visual review,
+  `check_updater.py` (the Sparkle check on a Mac), and `update_appcast.py`
+  (the release's appcast entry).
 
 ## Architecture rules
 
@@ -56,7 +60,9 @@ was built and verified.
   integration tests go in `crates/wren-core/tests/`.
 - Comments only for a non-obvious *why*. No committed `TODO`s.
 - `unsafe_code` is forbidden workspace-wide; macOS integration uses safe
-  crates (`muda`).
+  crates (`muda`). The one exception is `crates/wren-sparkle`, because
+  Sparkle has no safe binding. Keep its Objective-C surface minimal, and give
+  every `unsafe` block a `SAFETY:` comment (clippy enforces it).
 
 ## Verifying changes
 
@@ -77,6 +83,8 @@ make smoke-wayland               # same suite on headless Weston, minus X11-nati
   against a real Metal window when a user is logged in at the console.
   Synthetic keystrokes through `osascript` need an Accessibility grant
   that ssh sessions don't have.
+- Updater changes: on a Mac, `cargo build --features smoke-test`,
+  `third_party/sparkle/fetch.sh`, then `python3 tools/check_updater.py`.
 
 ## Branches and commits
 

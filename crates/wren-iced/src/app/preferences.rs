@@ -241,6 +241,14 @@ impl App {
     /// as its keyboard shortcut.
     #[cfg(target_os = "macos")]
     pub(super) fn menu_command(&mut self, key: &str) -> Task<Message> {
+        if key == crate::macos_menu::CHECK_FOR_UPDATES {
+            if let Err(error) = wren_sparkle::check_for_updates() {
+                self.banner = Some(format!("Could not check for updates: {error}"));
+                self.banner_kind = workspace::WarningKind::General;
+            }
+            crate::macos_menu::sync_updates();
+            return Task::none();
+        }
         CommandId::parse(key).map_or_else(Task::none, |id| self.run_shortcut(id))
     }
 

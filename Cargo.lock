@@ -5072,6 +5072,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "wren-core",
+ "wren-sparkle",
+]
+
+[[package]]
+name = "wren-sparkle"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

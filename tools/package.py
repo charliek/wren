@@ -21,6 +21,8 @@ built for a tag the source tree does not carry.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from contextlib import contextmanager
 import ctypes
 from dataclasses import dataclass
@@ -154,6 +156,34 @@ def bundle_version(version: str) -> str:
     version stays in the DMG name and the Release.
     """
     return version.split("-", 1)[0]
+
+
+@dataclass(frozen=True)
+class SparkleFeed:
+    """What a bundle's Sparkle updater polls, and the key it verifies with."""
+
+    url: str
+    public_key: str
+
+
+def sparkle_feed(url: str, public_key: str) -> SparkleFeed:
+    """Validate the Info.plist SUFeedURL/SUPublicEDKey pair.
+
+    The feed is https, or plain http on the loopback interface for local
+    update tests. The key is Sparkle's base64 Ed25519 public key.
+    """
+    if not (url.startswith("https://") or re.match(r"^http://(127\.0\.0\.1|localhost)(:\d+)?/", url)):
+        raise PackageError(f"the Sparkle feed must be an https URL (or loopback http): {url!r}")
+    if any(character.isspace() for character in url):
+        raise PackageError(f"the Sparkle feed URL contains whitespace: {url!r}")
+    key = public_key.strip()
+    try:
+        raw = base64.b64decode(key, validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    if len(raw) != 32:
+        raise PackageError("the Sparkle public key must be base64 of a 32-byte Ed25519 key")
+    return SparkleFeed(url, key)
 
 
 def release_version(cargo: str, requested: str | None) -> str:
@@ -464,16 +494,21 @@ def publish_bundle(stage: BundleStage, destination: Path) -> None:
 
 def assemble_bundle(binary: Path, destination: Path, platform: str, *,
                     dependency_notices: bytes, root: Path = ROOT, native: bool = False,
-                    system_layout: bool = False, version: str | None = None) -> Path:
+                    system_layout: bool = False, version: str | None = None,
+                    sparkle: SparkleFeed | None = None) -> Path:
     """Assemble supplied notices/layout without Cargo or executing the input binary.
 
     system_layout stages a Linux tree to be installed under /usr by a system
-    package; version is a release tag's version, checked against Cargo's.
+    package; version is a release tag's version, checked against Cargo's;
+    sparkle sets a macOS bundle's update feed (scripts/macos/embed-sparkle.sh
+    adds the framework that reads it).
     """
     if platform not in ("linux", "macos"):
         raise PackageError(f"unsupported platform: {platform}")
     if system_layout and platform != "linux":
         raise PackageError("the system layout is Linux-only")
+    if sparkle is not None and platform != "macos":
+        raise PackageError("the Sparkle feed is macOS-only")
     root = checked_path(root)
     binary = checked_path(binary)
     destination = checked_path(destination, missing=True)
@@ -530,6 +565,9 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
                 "NSPrincipalClass": "NSApplication",
                 "NSSupportsAutomaticGraphicsSwitching": True,
             }
+            if sparkle is not None:
+                info["SUFeedURL"] = sparkle.url
+                info["SUPublicEDKey"] = sparkle.public_key
             # Only a native build compiles the macOS 26 icon; fixtures and
             # Linux hosts ship the flat ICNS alone.
             catalog = compile_icon_catalog(root / ICON_CATALOG) if native else None
@@ -580,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-version", help="release tag version (X.Y.Z or X.Y.Z-pre); must equal the Cargo version")
     parser.add_argument("--system-layout", action="store_true",
                         help="Linux only: stage a tree a system package installs under /usr")
+    parser.add_argument("--sparkle-feed-url", help="macOS only: the appcast Sparkle polls (SUFeedURL)")
+    parser.add_argument("--sparkle-public-key-file", type=Path,
+                        help="macOS only: file holding the base64 Ed25519 key updates must verify against")
     args = parser.parse_args(argv)
     try:
         host = native_platform()
@@ -588,6 +629,11 @@ def main(argv: list[str] | None = None) -> int:
             raise PackageError(f"cannot package {platform} on a {host} host; use a native build host")
         if args.system_layout and platform != "linux":
             raise PackageError("the system layout is Linux-only")
+        if (args.sparkle_feed_url is None) != (args.sparkle_public_key_file is None):
+            raise PackageError("--sparkle-feed-url and --sparkle-public-key-file go together")
+        sparkle = None
+        if args.sparkle_feed_url is not None:
+            sparkle = sparkle_feed(args.sparkle_feed_url, args.sparkle_public_key_file.read_text(encoding="utf-8"))
         version = release_version(cargo_version(ROOT), args.release_version)
         suffix = "-system" if args.system_layout else ""
         output = args.output or ROOT / "target/package" / f"wren-{version}-{platform}{suffix}"
@@ -595,7 +641,8 @@ def main(argv: list[str] | None = None) -> int:
             output /= "Wren.app"
         report = collect_notices(ROOT)
         result = assemble_bundle(args.binary, output, platform, dependency_notices=report.render(), root=ROOT,
-                                 native=True, system_layout=args.system_layout, version=args.release_version)
+                                 native=True, system_layout=args.system_layout, version=args.release_version,
+                                 sparkle=sparkle)
     except (OSError, ValueError, KeyError, ET.ParseError) as error:
         print(f"Packaging failed: {error}", file=sys.stderr)
         return 1

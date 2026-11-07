@@ -4,6 +4,9 @@
 //! `terminate:` and would exit without Wren's autosave flush. Here Quit, like
 //! every item that maps to a command, sends that command's key back to the
 //! app, which runs it through the same path as the keyboard shortcut.
+//! "Check for Updates…" is the one item that is not a command: it drives the
+//! Sparkle updater (`wren_sparkle`), and is enabled only while that updater
+//! can check.
 
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -14,9 +17,13 @@ use muda::accelerator::Accelerator;
 use muda::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use wren_core::keybind::Keymap;
 
+/// The menu id of "Check for Updates…".
+pub const CHECK_FOR_UPDATES: &str = "app.check_for_updates";
+
 thread_local! {
     // NSApp keeps showing the menu only while muda's owner is alive.
     static MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
+    static UPDATES: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
 }
 
 /// Build and install the menu bar on the main thread. Item shortcuts come
@@ -33,11 +40,18 @@ pub fn install(keymap: &Keymap) {
         version: Some(env!("CARGO_PKG_VERSION").into()),
         ..AboutMetadata::default()
     };
+    let updates = MenuItem::with_id(
+        CHECK_FOR_UPDATES,
+        "Check for Updates…",
+        wren_sparkle::can_check(),
+        None,
+    );
     let app_menu = Submenu::with_items(
         "Wren",
         true,
         &[
             &PredefinedMenuItem::about(None, Some(about)),
+            &updates,
             &PredefinedMenuItem::separator(),
             &item("settings.open", "Settings…"),
             &item("theme.choose", "Change Theme…"),
@@ -82,6 +96,23 @@ pub fn install(keymap: &Keymap) {
     menu.init_for_nsapp();
     window_menu.set_as_windows_menu_for_nsapp();
     MENU.with(|slot| *slot.borrow_mut() = Some(menu));
+    UPDATES.with(|slot| *slot.borrow_mut() = Some(updates));
+}
+
+/// Enable "Check for Updates…" exactly when the updater can check: never in a
+/// build without Sparkle, and not while a check is already running.
+pub fn sync_updates() {
+    UPDATES.with(|slot| {
+        if let Some(item) = slot.borrow().as_ref() {
+            item.set_enabled(wren_sparkle::can_check());
+        }
+    });
+}
+
+/// Whether "Check for Updates…" is enabled, or `None` before the menu exists.
+#[cfg(feature = "smoke-test")]
+pub fn updates_enabled() -> Option<bool> {
+    UPDATES.with(|slot| slot.borrow().as_ref().map(MenuItem::is_enabled))
 }
 
 /// Command keys chosen from the menu bar.

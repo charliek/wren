@@ -42,3 +42,6 @@ for macOS (Apple silicon) and Linux (amd64, arm64).
   saves first, and a Linux desktop entry and hicolor icons.
 - **Release packaging:** a DMG for macOS and `.deb` packages for Ubuntu 24.04+
   (also published to the apt repo at `apt.stridelabs.ai`).
+- **Automatic updates on macOS** through Sparkle: "Wren → Check for Updates…"
+  plus Sparkle's scheduled checks, offering each stable release as a signed
+  update. On Linux, updates come through apt.
