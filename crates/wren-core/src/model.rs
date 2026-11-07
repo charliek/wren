@@ -157,6 +157,19 @@ impl Workspace {
         self.next_id
     }
 
+    /// The entries and ID allocator a background scan needs to preserve IDs
+    /// and carry unreadable entries forward. Warnings are not copied.
+    pub(crate) fn scan_baseline(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            sections: self.sections.clone(),
+            groups: self.groups.clone(),
+            notes: self.notes.clone(),
+            warnings: Vec::new(),
+            next_id: self.next_id,
+        }
+    }
+
     /// Update every path that has `from` as a prefix, replacing that prefix
     /// with `to`. Refreshes derived fields (section/group name, note title,
     /// note subtitle) from the updated paths. IDs are preserved.

@@ -127,6 +127,7 @@ pub enum Message {
     Resize(u64, crate::panes::ResizeEvent),
     Tick,
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
+    Reconciled(wren_core::reconcile::ReconcileResult),
     DialogName(String),
     SubmitDialog,
     ConfirmTrash,
@@ -392,9 +393,11 @@ impl App {
             }
             Message::Tick => {
                 if self.session.is_some() {
-                    return self.process_core(Op::Tick).task;
+                    let task = self.process_core(Op::Tick).task;
+                    return self.spawn_reconcile(task);
                 }
             }
+            Message::Reconciled(result) => return self.reconciled(result),
             Message::Loaded(generation, outcome) => {
                 return self.workspace_loaded(generation, outcome)
             }

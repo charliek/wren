@@ -4,6 +4,7 @@ pub mod fs_store;
 pub mod index;
 pub mod model;
 pub mod ops;
+pub mod reconcile;
 pub mod scan;
 pub mod theme;
 pub mod watch;

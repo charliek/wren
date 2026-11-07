@@ -8,6 +8,7 @@ use crate::index::Index;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
+use crate::reconcile::{self, ReconcileJob, ReconcileResult, Scanned, Tags};
 use crate::scan;
 use crate::watch::Watch;
 use crate::workspace_state::WorkspaceState;
@@ -83,6 +84,9 @@ pub enum Op {
     Flush,
     Tick,
     Reconcile,
+    /// Merges a background scan from [`Session::take_reconcile_job`]. Results
+    /// from another Session, an older job, or a since-changed tree are dropped.
+    FinishReconcile(ReconcileResult),
     Back,
     Forward,
 }
@@ -212,6 +216,16 @@ pub struct Session {
     history_index: Option<usize>,
     recent: Vec<NoteId>,
     last_save_micros: u128,
+    background_reconcile: bool,
+    reconcile_requested: bool,
+    reconcile_in_flight: Option<u64>,
+    reconcile_job: Option<ReconcileJob>,
+    // Advanced whenever IDs or paths may change; a background result taken
+    // from an older revision cannot be merged.
+    tree_revision: u64,
+    // Notes whose model metadata or index text the owner refreshed while a job
+    // was in flight. Their newer owner state wins over the job's snapshot read.
+    touched: HashSet<NoteId>,
 }
 
 impl std::fmt::Debug for Session {
@@ -245,7 +259,7 @@ impl Session {
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
         let mut index = Index::default();
-        let mut model = scan::scan_with_contents(&store, None, |note, contents| {
+        let mut model = scan::scan_with_contents(store.reader(), None, |note, contents| {
             index.ingest(note, contents);
         })
         .map_err(|error| error.to_string())?;
@@ -314,6 +328,12 @@ impl Session {
             history_index,
             recent: Vec::new(),
             last_save_micros: 0,
+            background_reconcile: false,
+            reconcile_requested: false,
+            reconcile_in_flight: None,
+            reconcile_job: None,
+            tree_revision: 0,
+            touched: HashSet::new(),
         };
         session.sort_model();
         let selected = session
@@ -418,6 +438,18 @@ impl Session {
             .is_some_and(|index| index + 1 < self.history.len())
     }
 
+    /// When enabled, watcher hints and periodic polls during `Op::Tick` prepare
+    /// a [`ReconcileJob`] instead of scanning on the owner. The frontend must run
+    /// every job from [`Self::take_reconcile_job`] off the owner and return its
+    /// result with `Op::FinishReconcile`. `Op::Reconcile` stays synchronous.
+    pub fn set_background_reconcile(&mut self, enabled: bool) {
+        self.background_reconcile = enabled;
+    }
+
+    pub fn take_reconcile_job(&mut self) -> Option<ReconcileJob> {
+        self.reconcile_job.take()
+    }
+
     pub fn apply(&mut self, op: Op) -> Result<Vec<Event>, OpError> {
         self.apply_at(op, self.started.elapsed())
     }
@@ -460,6 +492,18 @@ impl Session {
     }
 
     fn execute(&mut self, op: Op, now: Duration, events: &mut Vec<Event>) -> Result<(), String> {
+        if matches!(
+            op,
+            Op::CreateSection { .. }
+                | Op::CreateGroup { .. }
+                | Op::CreateNote { .. }
+                | Op::Rename { .. }
+                | Op::Delete { .. }
+                | Op::MoveNote { .. }
+                | Op::MoveGroup { .. }
+        ) {
+            self.tree_revision += 1;
+        }
         match op {
             Op::CreateSection { name } => {
                 let path = self
@@ -591,6 +635,7 @@ impl Session {
             }
             Op::Tick => self.tick(now, events),
             Op::Reconcile => self.reconcile(now, events),
+            Op::FinishReconcile(result) => self.finish_reconcile(&result, now, events),
             Op::Rename { target, new_name } => {
                 let from = self.item_path(target)?;
                 self.barrier(&from, now, events)?;
@@ -688,6 +733,11 @@ impl Session {
                 self.persist_metadata(events)
             }
             Op::OpenWorkspace { path } => {
+                // The frontend cannot deliver a result while the Session is
+                // away loading; a retained Session must still be able to rescan.
+                self.reconcile_in_flight = None;
+                self.reconcile_job = None;
+                self.reconcile_requested = true;
                 self.flush_active(now, true, events)?;
                 self.store
                     .retry_durability()
@@ -702,6 +752,7 @@ impl Session {
                     self.generation.wrapping_add(1),
                 )?;
                 std::mem::swap(&mut replacement.trash, &mut self.trash);
+                replacement.background_reconcile = self.background_reconcile;
                 *self = replacement;
                 events.extend([
                     Event::WorkspaceOpened,
@@ -822,13 +873,15 @@ impl Session {
                     entry.modified = document.entry.modified;
                     entry.bytes = document.entry.bytes;
                 }
+                self.touch(document.note);
                 self.sort_model();
             }
-            if let Some(outgoing) = &self.document {
+            if let Some(outgoing) = self.document.as_ref().map(|document| document.note) {
                 // A scan keeps a live draft authoritative, including after a
                 // disk read error. Once closed, only fresh disk bytes may be
                 // searched; do this before optional metadata can fail.
-                self.index.read_note(&self.store, outgoing.note);
+                self.index.read_note(&self.store, outgoing);
+                self.touch(outgoing);
             }
             self.document = document;
         }
@@ -1134,12 +1187,139 @@ impl Session {
         }
         if hint.is_some() || now.saturating_sub(self.last_poll) >= Duration::from_secs(1) {
             self.last_poll = now;
-            self.reconcile(now, events)?;
+            if self.background_reconcile {
+                self.reconcile_requested = true;
+            } else {
+                self.reconcile(now, events)?;
+            }
+        }
+        if self.background_reconcile
+            && self.reconcile_requested
+            && self.reconcile_in_flight.is_none()
+        {
+            self.start_reconcile(now, events)?;
         }
         Ok(())
     }
 
+    fn start_reconcile(&mut self, now: Duration, events: &mut Vec<Event>) -> Result<(), String> {
+        self.reconcile_requested = false;
+        let reader = match self.store.reader().try_clone() {
+            Ok(reader) => reader,
+            Err(error) => {
+                events.push(Event::Warning(format!(
+                    "Background reconciliation unavailable; rescanning on the main thread: {error}"
+                )));
+                return self.reconcile(now, events);
+            }
+        };
+        let ticket = reconcile::next_ticket();
+        self.touched.clear();
+        self.reconcile_in_flight = Some(ticket);
+        self.reconcile_job = Some(ReconcileJob::new(
+            Tags {
+                ticket,
+                generation: self.generation,
+                tree_revision: self.tree_revision,
+            },
+            reader,
+            self.model.scan_baseline(),
+            self.index.content_snapshot(),
+        ));
+        Ok(())
+    }
+
+    fn finish_reconcile(
+        &mut self,
+        result: &ReconcileResult,
+        now: Duration,
+        events: &mut Vec<Event>,
+    ) -> Result<(), String> {
+        let tags = result.tags;
+        if self.reconcile_in_flight != Some(tags.ticket) || tags.generation != self.generation {
+            return Ok(());
+        }
+        self.reconcile_job = None;
+        let Some(outcome) = result.take() else {
+            self.reconcile_in_flight = None;
+            self.reconcile_requested = true;
+            return Err(
+                "Background reconciliation stopped before returning a result; it will be retried"
+                    .into(),
+            );
+        };
+        // One fresh read keeps conflict protection for the active note exactly
+        // as in synchronous reconciliation, independent of the snapshot. It runs
+        // while still in flight so a reload marks the note as touched.
+        let document_result = self.reconcile_document(now, events);
+        self.reconcile_in_flight = None;
+        if self.tree_revision != tags.tree_revision {
+            // Own structural changes (or a conflict-copy rescan) happened after
+            // the snapshot; its IDs and paths cannot be merged safely.
+            self.reconcile_requested = true;
+            return document_result;
+        }
+        let merged = match outcome {
+            Ok(scanned) => {
+                self.merge_scanned(scanned, events);
+                Ok(())
+            }
+            Err(error) => {
+                self.index
+                    .scan_failed(self.document.as_ref().map(|document| document.note));
+                Err(error)
+            }
+        };
+        document_result.and(merged)
+    }
+
+    fn merge_scanned(&mut self, scanned: Scanned, events: &mut Vec<Event>) {
+        let Scanned {
+            mut model,
+            changed,
+            contents,
+        } = scanned;
+        if changed {
+            for note in &mut model.notes {
+                if self.touched.contains(&note.id) {
+                    if let Some(current) = self.model.note(note.id) {
+                        note.modified = current.modified;
+                        note.bytes = current.bytes;
+                    }
+                }
+            }
+            self.tree_revision += 1;
+            self.install_tree(model, events);
+        } else {
+            // Identical to the snapshot. With an unchanged tree revision, the
+            // owner's model differs from it only by touched metadata and sort
+            // order, so it already is the merged result.
+            self.model.warnings = model.warnings;
+        }
+        let active = self
+            .document
+            .as_ref()
+            .map(|document| (document.note, document.entry.path.clone()));
+        for (note, path, update) in &contents {
+            let skip = self.touched.contains(note)
+                || active
+                    .as_ref()
+                    .is_some_and(|(id, active_path)| id == note || active_path == path);
+            if !skip {
+                self.index
+                    .ingest_scanned(*note, update.as_deref().map_err(String::as_str));
+            }
+        }
+        self.push_limitation_warnings();
+    }
+
     fn reconcile(&mut self, now: Duration, events: &mut Vec<Event>) -> Result<(), String> {
+        let document_result = self.reconcile_document(now, events);
+        let refreshed = self.refresh_tree(events);
+        document_result.and(refreshed)
+    }
+
+    fn reconcile_document(&mut self, now: Duration, events: &mut Vec<Event>) -> Result<(), String> {
         let mut document_result = Ok(());
         if let Some(mut document) = self.document.take() {
             let result = (|| {
@@ -1199,8 +1379,7 @@ impl Session {
                 }
             }
         }
-        let refreshed = self.refresh_tree(events);
-        document_result.and(refreshed)
+        document_result
     }
 
     fn relocate(
@@ -1325,27 +1504,37 @@ impl Session {
     }
 
     fn refresh_tree(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
+        self.tree_revision += 1;
         let active = self.document.as_ref().map(|document| {
             self.index.set_content(document.note, &document.text, true);
             (document.note, document.entry.path.clone())
         });
-        let scanned = scan::scan_with_contents(&self.store, Some(&self.model), |note, contents| {
-            // A scan is not a document transition. In particular, a replacement
-            // at the active path must not insert a new ID or replace its draft.
-            if !active
-                .as_ref()
-                .is_some_and(|(id, path)| *id == note.id || *path == note.path)
-            {
-                self.index.ingest(note, contents);
-            }
-        });
-        let mut scanned = match scanned {
+        let scanned =
+            scan::scan_with_contents(self.store.reader(), Some(&self.model), |note, contents| {
+                // A scan is not a document transition. In particular, a replacement
+                // at the active path must not insert a new ID or replace its draft.
+                if !active
+                    .as_ref()
+                    .is_some_and(|(id, path)| *id == note.id || *path == note.path)
+                {
+                    self.index.ingest(note, contents);
+                }
+            });
+        let scanned = match scanned {
             Ok(scanned) => scanned,
             Err(error) => {
                 self.index.scan_failed(active.map(|(id, _)| id));
                 return Err(error.to_string());
             }
         };
+        self.install_tree(scanned, events);
+        self.push_limitation_warnings();
+        Ok(())
+    }
+
+    /// Replaces the model with a scan result. Index content for inactive notes
+    /// is the caller's responsibility; metadata and the live draft are synced.
+    fn install_tree(&mut self, mut scanned: Workspace, events: &mut Vec<Event>) {
         // A tree refresh is not a document transition. Keep its recovery identity
         // until document reconciliation has durably preserved or closed it.
         if let Some(document) = &self.document {
@@ -1378,45 +1567,7 @@ impl Session {
                 });
             }
         }
-        let sections: HashMap<_, _> = self
-            .model
-            .sections
-            .iter()
-            .map(|item| (item.id, (&item.path, &item.name)))
-            .collect();
-        let groups: HashMap<_, _> = self
-            .model
-            .groups
-            .iter()
-            .map(|item| (item.id, (&item.path, item.section)))
-            .collect();
-        let notes: HashMap<_, _> = self
-            .model
-            .notes
-            .iter()
-            .map(|item| {
-                (
-                    item.id,
-                    (&item.path, item.modified, item.bytes, item.parent),
-                )
-            })
-            .collect();
-        // A scan's alphabetical/default order differs from persisted manual and
-        // title order. Compare identities and metadata, not enumeration order.
-        let changed = sections.len() != scanned.sections.len()
-            || groups.len() != scanned.groups.len()
-            || notes.len() != scanned.notes.len()
-            || scanned
-                .sections
-                .iter()
-                .any(|item| sections.get(&item.id) != Some(&(&item.path, &item.name)))
-            || scanned
-                .groups
-                .iter()
-                .any(|item| groups.get(&item.id) != Some(&(&item.path, item.section)))
-            || scanned.notes.iter().any(|item| {
-                notes.get(&item.id) != Some(&(&item.path, item.modified, item.bytes, item.parent))
-            });
+        let changed = reconcile::tree_differs(&self.model, &scanned);
         self.model = scanned;
         self.sort_model();
         if let Some(document) = &mut self.document {
@@ -1429,16 +1580,18 @@ impl Session {
         if let Some(document) = &self.document {
             self.index.set_content(document.note, &document.text, true);
         }
+        if changed {
+            events.push(Event::TreeChanged);
+        }
+    }
+
+    fn push_limitation_warnings(&mut self) {
         for (path, reason) in self.index.limitations().take(64) {
             self.model.warnings.push(model::ScanWarning {
                 path: self.store.root().join(path.as_path()),
                 message: format!("{}: {reason}", path.as_path().display()),
             });
         }
-        if changed {
-            events.push(Event::TreeChanged);
-        }
-        Ok(())
     }
 
     fn sort_model(&mut self) {
@@ -1612,7 +1765,14 @@ impl Session {
             note.modified = file.modified;
             note.bytes = file.bytes.len();
         }
+        self.touch(note);
         self.sort_model();
+    }
+
+    fn touch(&mut self, note: NoteId) {
+        if self.reconcile_in_flight.is_some() {
+            self.touched.insert(note);
+        }
     }
 
     fn item_path(&self, item: ItemRef) -> Result<RelPath, String> {
@@ -1701,5 +1861,409 @@ mod tests {
             fs::read_to_string(root.path().join("S/note.md")).unwrap(),
             "baseline"
         );
+    }
+
+    fn background_session(root: &std::path::Path) -> Session {
+        let mut session = Session::open(root).unwrap();
+        // Hints would only add requests; polling makes job creation deterministic.
+        session.watcher = None;
+        session.set_background_reconcile(true);
+        session
+    }
+
+    fn secs(seconds: u64) -> Duration {
+        Duration::from_secs(seconds)
+    }
+
+    fn begin(session: &mut Session, seconds: u64) -> ReconcileJob {
+        let events = session.apply_at(Op::Tick, secs(seconds)).unwrap();
+        assert!(
+            events.is_empty(),
+            "a background request must not scan on the owner"
+        );
+        session
+            .take_reconcile_job()
+            .expect("a poll prepares one background job")
+    }
+
+    fn finish(
+        session: &mut Session,
+        result: ReconcileResult,
+        seconds: u64,
+    ) -> Result<Vec<Event>, OpError> {
+        session.apply_at(Op::FinishReconcile(result), secs(seconds))
+    }
+
+    fn id_at(session: &Session, path: &str) -> NoteId {
+        session
+            .model
+            .notes
+            .iter()
+            .find(|note| note.path.as_path() == Path::new(path))
+            .unwrap_or_else(|| panic!("{path} is in the model"))
+            .id
+    }
+
+    fn paths(session: &Session) -> Vec<String> {
+        let mut paths: Vec<_> = session
+            .model
+            .notes
+            .iter()
+            .map(|note| note.path.as_path().display().to_string())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn external_changes(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::ExternalChange { .. }))
+            .count()
+    }
+
+    fn workspace() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("S/G")).unwrap();
+        for (path, text) in [
+            ("S/G/a.md", "alpha"),
+            ("S/G/b.md", "bravo"),
+            ("S/c.md", "charlie"),
+        ] {
+            fs::write(root.path().join(path), text).unwrap();
+        }
+        root
+    }
+
+    fn search(session: &Session, text: &str) -> Vec<NoteId> {
+        session
+            .index
+            .query(
+                text,
+                crate::index::Scope::Workspace,
+                crate::index::QueryKind::Search,
+                10,
+            )
+            .into_iter()
+            .map(|hit| hit.note)
+            .collect()
+    }
+
+    struct Quarantine(tempfile::TempDir);
+
+    impl Trash for Quarantine {
+        fn trash(&mut self, path: &Path) -> Result<(), String> {
+            fs::rename(path, self.0.path().join(path.file_name().unwrap()))
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    #[test]
+    fn background_scan_merges_external_creates_deletes_and_same_size_edits() {
+        let root = workspace();
+        let mut session = background_session(root.path());
+        let b = id_at(&session, "S/G/b.md");
+        let unchanged_revision = session.index.revision();
+        let job = begin(&mut session, 1);
+        assert!(session.take_reconcile_job().is_none());
+        let events = finish(&mut session, job.run(), 1).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(session.index.revision(), unchanged_revision);
+
+        let path = root.path().join("S/G/b.md");
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, "BRAVO").unwrap();
+        File::open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::remove_file(root.path().join("S/c.md")).unwrap();
+        fs::write(root.path().join("S/d.md"), "delta").unwrap();
+        let job = begin(&mut session, 2);
+        // A poll while a job is outstanding must not start a second scan.
+        assert!(session.apply_at(Op::Tick, secs(4)).unwrap().is_empty());
+        assert!(session.take_reconcile_job().is_none());
+        let events = finish(&mut session, job.run(), 4).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::TreeChanged)));
+        assert_eq!(paths(&session), ["S/G/a.md", "S/G/b.md", "S/d.md"]);
+        assert_eq!(id_at(&session, "S/G/b.md"), b);
+        assert_eq!(session.index.content(b), Some("BRAVO"));
+        assert_eq!(search(&session, "delta"), [id_at(&session, "S/d.md")]);
+        assert!(search(&session, "charlie").is_empty());
+    }
+
+    #[test]
+    fn own_rename_create_and_delete_during_a_background_scan_are_never_reverted() {
+        for run_before_mutation in [true, false] {
+            let root = workspace();
+            let quarantine = tempfile::tempdir().unwrap();
+            let mut session =
+                Session::with_trash(root.path(), Box::new(Quarantine(quarantine))).unwrap();
+            session.watcher = None;
+            session.set_background_reconcile(true);
+            let a = id_at(&session, "S/G/a.md");
+            let c = id_at(&session, "S/c.md");
+            let section = session.model.sections[0].id;
+            let job = begin(&mut session, 1);
+            let early = run_before_mutation.then(|| job.result());
+            let late = if run_before_mutation {
+                drop(job.run());
+                None
+            } else {
+                Some(job)
+            };
+            session
+                .apply_at(
+                    Op::Rename {
+                        target: ItemRef::Note(a),
+                        new_name: "renamed".into(),
+                    },
+                    secs(1),
+                )
+                .unwrap();
+            session
+                .apply_at(
+                    Op::Delete {
+                        target: ItemRef::Note(c),
+                    },
+                    secs(1),
+                )
+                .unwrap();
+            session
+                .apply_at(
+                    Op::CreateNote {
+                        parent: Parent::Section(section),
+                        title: "created".into(),
+                    },
+                    secs(1),
+                )
+                .unwrap();
+            let expected = ["S/G/b.md", "S/G/renamed.md", "S/created.md"];
+            assert_eq!(paths(&session), expected);
+            let result = match (early, late) {
+                (Some(result), None) => result,
+                (None, Some(job)) => job.run(),
+                _ => unreachable!(),
+            };
+            let events = finish(&mut session, result, 1).unwrap();
+            assert!(
+                events.is_empty(),
+                "a stale scan must be dropped: {events:?}"
+            );
+            assert_eq!(paths(&session), expected);
+            assert_eq!(id_at(&session, "S/G/renamed.md"), a);
+            assert!(session.reconcile_requested);
+
+            // The dropped scan is retried against the current tree.
+            session.apply_at(Op::Tick, secs(1)).unwrap();
+            let job = session.take_reconcile_job().unwrap();
+            let events = finish(&mut session, job.run(), 1).unwrap();
+            assert_eq!(external_changes(&events), 0);
+            assert_eq!(paths(&session), expected);
+            assert_eq!(id_at(&session, "S/G/renamed.md"), a);
+            assert_eq!(search(&session, "alpha"), [a]);
+        }
+    }
+
+    #[test]
+    fn own_saves_during_a_background_scan_are_not_reported_or_overwritten_by_stale_reads() {
+        for case in 0..8 {
+            let (switch_away, read_after_save, external_create) =
+                (case & 1 != 0, case & 2 != 0, case & 4 != 0);
+            let root = workspace();
+            let mut session = background_session(root.path());
+            let a = id_at(&session, "S/G/a.md");
+            let b = id_at(&session, "S/G/b.md");
+            session
+                .apply_at(Op::OpenNote { note: Some(a) }, secs(0))
+                .unwrap();
+            session
+                .apply_at(
+                    Op::EditDraft {
+                        note: a,
+                        contents: "alpha draft saved mid-scan".into(),
+                    },
+                    // Recent enough that the polling Tick does not autosave it first.
+                    Duration::from_millis(900),
+                )
+                .unwrap();
+            if external_create {
+                // Forces a full tree merge rather than the unchanged fast path.
+                fs::write(root.path().join("S/d.md"), "delta").unwrap();
+            }
+            let job = begin(&mut session, 1);
+            // The worker reads either the pre-save bytes and metadata (the
+            // snapshot's view) or the owner's newly published save.
+            let early = (!read_after_save).then(|| job.result());
+            let late = if read_after_save {
+                Some(job)
+            } else {
+                drop(job.run());
+                None
+            };
+            session.apply_at(Op::Flush, secs(1)).unwrap();
+            if switch_away {
+                session
+                    .apply_at(Op::OpenNote { note: Some(b) }, secs(1))
+                    .unwrap();
+            }
+            let result = late.map_or_else(|| early.unwrap(), ReconcileJob::run);
+            let saved = session.model.note(a).unwrap().clone();
+            let events = finish(&mut session, result, 1).unwrap();
+            assert_eq!(external_changes(&events), 0, "{events:?}");
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::TreeChanged)),
+                external_create
+            );
+            let mut expected = vec!["S/G/a.md", "S/G/b.md", "S/c.md"];
+            if external_create {
+                expected.push("S/d.md");
+            }
+            assert_eq!(paths(&session), expected);
+            assert_eq!(
+                fs::read_to_string(root.path().join("S/G/a.md")).unwrap(),
+                "alpha draft saved mid-scan"
+            );
+            let current = session.model.note(a).unwrap();
+            assert_eq!(
+                (current.modified, current.bytes),
+                (saved.modified, saved.bytes)
+            );
+            assert_eq!(session.index.content(a), Some("alpha draft saved mid-scan"));
+            assert!(search(&session, "alpha draft").contains(&a));
+            let active = session.document().unwrap();
+            assert_eq!(active.note, if switch_away { b } else { a });
+            assert!(!active.dirty());
+        }
+    }
+
+    #[test]
+    fn a_dirty_draft_and_an_external_change_found_by_a_background_scan_preserve_both() {
+        let root = workspace();
+        let mut session = background_session(root.path());
+        let a = id_at(&session, "S/G/a.md");
+        session
+            .apply_at(Op::OpenNote { note: Some(a) }, secs(0))
+            .unwrap();
+        session
+            .apply_at(
+                Op::EditDraft {
+                    note: a,
+                    contents: "my draft".into(),
+                },
+                Duration::from_millis(900),
+            )
+            .unwrap();
+        fs::write(root.path().join("S/G/a.md"), "external writer").unwrap();
+        let job = begin(&mut session, 1);
+        let events = finish(&mut session, job.run(), 1).unwrap();
+        let copy = events
+            .iter()
+            .find_map(|event| match event {
+                Event::ExternalChange {
+                    note,
+                    kind: ExternalChangeKind::Conflict { copy },
+                } if *note == a => Some(copy.clone()),
+                _ => None,
+            })
+            .expect("conflict copy event");
+        assert_eq!(
+            fs::read_to_string(root.path().join(&copy)).unwrap(),
+            "my draft"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("S/G/a.md")).unwrap(),
+            "external writer"
+        );
+        let document = session.document().unwrap();
+        assert_eq!(document.note, a);
+        assert_eq!(document.text, "external writer");
+        assert!(!document.dirty());
+        assert!(session
+            .model
+            .notes
+            .iter()
+            .any(|note| note.path.as_path() == copy));
+    }
+
+    #[test]
+    fn results_from_a_replaced_or_reopened_workspace_are_dropped() {
+        let root = workspace();
+        let other = tempfile::tempdir().unwrap();
+        fs::create_dir(other.path().join("Other")).unwrap();
+        fs::write(other.path().join("Other/x.md"), "x-ray").unwrap();
+        let mut session = background_session(root.path());
+        let job = begin(&mut session, 1);
+        session
+            .apply_at(
+                Op::OpenWorkspace {
+                    path: other.path().to_path_buf(),
+                },
+                secs(1),
+            )
+            .unwrap();
+        assert!(session.background_reconcile);
+        let events = finish(&mut session, job.run(), 1).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(paths(&session), ["Other/x.md"]);
+        assert!(search(&session, "alpha").is_empty());
+
+        // A different Session for the same root starts with the same generation.
+        let result = begin(&mut session, 2).run();
+        drop(session);
+        let mut reopened = background_session(other.path());
+        let before = reopened.index.revision();
+        let events = finish(&mut reopened, result, 1).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(reopened.index.revision(), before);
+        assert!(reopened.reconcile_in_flight.is_none());
+    }
+
+    #[test]
+    fn synchronous_sessions_never_prepare_background_jobs() {
+        let root = workspace();
+        let mut session = Session::open(root.path()).unwrap();
+        session.watcher = None;
+        session
+            .apply_at(
+                Op::OpenWorkspace {
+                    path: root.path().to_path_buf(),
+                },
+                secs(0),
+            )
+            .unwrap();
+        fs::write(root.path().join("S/e.md"), "echo").unwrap();
+        let events = session.apply_at(Op::Tick, secs(1)).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::TreeChanged)));
+        assert!(session.take_reconcile_job().is_none());
+        assert!(session.reconcile_in_flight.is_none());
+    }
+
+    #[test]
+    fn an_abandoned_job_reports_an_error_and_is_retried_and_duplicate_results_are_ignored() {
+        let root = workspace();
+        let mut session = background_session(root.path());
+        let job = begin(&mut session, 1);
+        let abandoned = job.result();
+        drop(job);
+        let error = finish(&mut session, abandoned.clone(), 1).unwrap_err();
+        assert!(error.message.contains("retried"), "{}", error.message);
+        assert!(finish(&mut session, abandoned, 1).unwrap().is_empty());
+
+        fs::write(root.path().join("S/e.md"), "echo").unwrap();
+        session.apply_at(Op::Tick, secs(1)).unwrap();
+        let result = session.take_reconcile_job().unwrap().run();
+        assert!(finish(&mut session, result.clone(), 1)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, Event::TreeChanged)));
+        assert!(finish(&mut session, result, 1).unwrap().is_empty());
+        assert_eq!(search(&session, "echo"), [id_at(&session, "S/e.md")]);
     }
 }

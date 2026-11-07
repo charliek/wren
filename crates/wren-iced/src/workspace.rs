@@ -6,6 +6,7 @@ use wren_core::model::{ItemRef, NoteId, Parent, SectionId, Workspace};
 #[cfg(feature = "smoke-test")]
 use wren_core::ops::Document;
 use wren_core::ops::{Event, ExternalChangeKind, Op, Session};
+use wren_core::reconcile::ReconcileResult;
 
 use super::commands::{Disposition, Gateway};
 use super::{focus_editor, App, Message};
@@ -229,11 +230,15 @@ fn load_workspace(
         #[cfg(not(feature = "smoke-test"))]
         let result = Session::open(&path);
         match result {
-            Ok(session) => LoadOutcome {
-                session: Some(session),
-                result: Ok(Vec::new()),
-                opened: true,
-            },
+            Ok(mut session) => {
+                // Replacement Sessions created by OpenWorkspace inherit this.
+                session.set_background_reconcile(true);
+                LoadOutcome {
+                    session: Some(session),
+                    result: Ok(Vec::new()),
+                    opened: true,
+                }
+            }
             Err(error) => LoadOutcome {
                 session: None,
                 result: Err(error),
@@ -290,7 +295,7 @@ impl App {
     // All adapters use this processed gateway. The legacy Result adapter below
     // remains for existing callers, but never decides whether a picker dismisses.
     pub(super) fn process_core(&mut self, op: Op) -> Gateway {
-        let passive = matches!(op, Op::Tick | Op::EditDraft { .. });
+        let passive = matches!(op, Op::Tick | Op::EditDraft { .. } | Op::FinishReconcile(_));
         let previous_processed = self.last_processed.clone();
         if self.loading.is_some() {
             return self.blocked("A workspace is already loading; wait for it to finish");
@@ -335,7 +340,7 @@ impl App {
                     .to_owned(),
             );
         }
-        if matches!(op, Op::Flush | Op::Tick)
+        if matches!(op, Op::Flush | Op::Tick | Op::FinishReconcile(_))
             && error.is_none()
             && self.banner_kind == WarningKind::Document
             && session
@@ -481,6 +486,44 @@ impl App {
             Some(error) => Err(error),
             None => Ok(result.task),
         }
+    }
+
+    /// Runs the scan prepared by the last Tick on its own thread. The Session
+    /// stays here and merges the returned result as an ordered operation.
+    pub(super) fn spawn_reconcile(&mut self, task: Task<Message>) -> Task<Message> {
+        let Some(job) = self.session.as_mut().and_then(Session::take_reconcile_job) else {
+            return task;
+        };
+        let result = job.result();
+        let (sender, receiver) = iced::futures::channel::oneshot::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("wren-reconcile".into())
+            .spawn(move || {
+                drop(job.run());
+                let _ = sender.send(());
+            });
+        if let Err(error) = spawned {
+            // The unrun job's result releases the Session's slot and retries.
+            self.banner = Some(format!(
+                "Could not start background reconciliation: {error}"
+            ));
+        }
+        let finished = Task::perform(
+            async move {
+                // A dropped sender (a panicked worker) still returns the handle.
+                let _ = receiver.await;
+            },
+            move |()| Message::Reconciled(result),
+        );
+        Task::batch([task, finished])
+    }
+
+    pub(super) fn reconciled(&mut self, result: ReconcileResult) -> Task<Message> {
+        // A loading Session released its in-flight job when OpenWorkspace began.
+        if self.loading.is_some() || self.session.is_none() {
+            return Task::none();
+        }
+        self.process_core(Op::FinishReconcile(result)).task
     }
 
     fn begin_workspace(&mut self, path: PathBuf) -> Result<Task<Message>, String> {
@@ -1823,6 +1866,41 @@ mod tests {
             outcome.session.as_ref().unwrap().document().unwrap().text,
             "first\nsecond"
         );
+    }
+
+    #[test]
+    fn loaded_workspaces_reconcile_off_the_owner_and_drop_results_during_loads() {
+        let (directory, mut app) = fixture();
+        drop(app.session.take());
+        let slot = returning(&mut app, load(None, directory.path().into()));
+        let _ = app.workspace_loaded(app.load_generation, slot);
+        std::fs::write(directory.path().join("Inbox/External.md"), "outside").unwrap();
+        let prepare = |app: &mut App| {
+            // A watcher hint or the one-second poll prepares the job.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let _ = app.process_core(Op::Tick);
+                if let Some(job) = app.session.as_mut().unwrap().take_reconcile_job() {
+                    return job;
+                }
+                assert!(std::time::Instant::now() < deadline, "no reconcile job");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let job = prepare(&mut app);
+        assert_eq!(app.model().unwrap().notes.len(), 1, "Tick must not scan");
+
+        let session = app.session.take();
+        let slot = returning(&mut app, load(session, directory.path().into()));
+        assert!(app.reconciled(job.run()).units() == 0);
+        let _ = app.workspace_loaded(app.load_generation, slot);
+        assert_eq!(app.model().unwrap().notes.len(), 1);
+
+        // The retained Session released the dropped job and scans again.
+        let result = prepare(&mut app).run();
+        let _ = app.update(Message::Reconciled(result));
+        assert_eq!(app.model().unwrap().notes.len(), 2);
+        assert!(app.banner.is_none(), "{:?}", app.banner);
     }
 
     #[test]
