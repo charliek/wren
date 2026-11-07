@@ -37,7 +37,7 @@ from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
 
 FIXTURES = ROOT / "tools/wrentest/fixtures/sparkle"
 SIGN_UPDATE = ROOT / "third_party/sparkle/out/bin/sign_update"
-EMPTY_APPCAST = (ROOT / "packaging/macos/appcast.xml").read_text(encoding="utf-8")
+EMPTY_APPCAST = update_appcast.without_releases((ROOT / "packaging/macos/appcast.xml").read_text(encoding="utf-8"))
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):

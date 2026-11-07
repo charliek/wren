@@ -54,6 +54,21 @@ def parse_signature(text: str) -> tuple[str, str]:
     return signature.group(1), length.group(1)
 
 
+def without_releases(appcast: str) -> str:
+    """`appcast` with its channel kept and every release item removed: the
+    starting feed for the unit tests and tools/check_updater.py, since the
+    committed appcast gains an item with every release."""
+    ET.register_namespace("sparkle", SPARKLE_NS)
+    root = ET.fromstring(appcast)
+    channel = root.find("channel")
+    if channel is None:
+        raise ValueError("the appcast has no <channel>")
+    for item in channel.findall("item"):
+        channel.remove(item)
+    ET.indent(root, space="  ")
+    return "<?xml version='1.0' encoding='utf-8'?>\n" + ET.tostring(root, encoding="unicode") + "\n"
+
+
 def update(appcast: str, tag: str, signature: str, length: str, repo: str, now: datetime) -> str:
     """Return `appcast` with the release for `tag` added or replaced."""
     version = release_assets.version(tag)

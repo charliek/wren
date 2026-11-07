@@ -13,7 +13,8 @@ from tools import update_appcast
 ROOT = Path(__file__).resolve().parents[2]
 NS = {"sparkle": update_appcast.SPARKLE_NS}
 SIGN = 'sparkle:edSignature="c2lnbmF0dXJl+/A=" length="7340032"\n'
-EMPTY = (ROOT / "packaging/macos/appcast.xml").read_text()
+COMMITTED = (ROOT / "packaging/macos/appcast.xml").read_text()
+EMPTY = update_appcast.without_releases(COMMITTED)
 NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
 
 
@@ -22,8 +23,20 @@ def items(appcast: str) -> list[ET.Element]:
 
 
 class UpdateAppcastTests(unittest.TestCase):
-    def test_committed_appcast_is_an_empty_feed(self):
+    def test_committed_appcast_lists_only_stable_releases_once(self):
+        versions = []
+        for item in items(COMMITTED):
+            version = item.findtext("sparkle:version", namespaces=NS)
+            self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
+            self.assertEqual(item.find("enclosure").get("url"),
+                             f"https://github.com/charliek/wren/releases/download/v{version}/Wren-{version}.dmg")
+            versions.append(version)
+        self.assertEqual(len(versions), len(set(versions)))
+
+    def test_without_releases_keeps_the_channel(self):
         self.assertEqual(items(EMPTY), [])
+        self.assertEqual(ET.fromstring(EMPTY).findtext("channel/title"), "Wren")
+        self.assertEqual(update_appcast.without_releases(EMPTY), EMPTY)
 
     def test_adds_a_signed_item_for_the_release_dmg(self):
         signature, length = update_appcast.parse_signature(SIGN)
