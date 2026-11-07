@@ -94,6 +94,7 @@ def main() -> int:
                 ("jump", "al"),
                 ("search", "promo"),
                 ("workspaces", ""),
+                ("themes", ""),
             ]:
                 client.call("palette.open", {"mode": mode})
                 if query:

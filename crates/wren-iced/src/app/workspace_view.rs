@@ -781,7 +781,7 @@ impl App {
         }
         // Narrow editors keep the note title and actions; the parents and
         // the edited time go first.
-        let roomy = width >= 560.0;
+        let roomy = width >= 480.0;
         if let Some(section) = self
             .selected_section
             .and_then(|id| self.model()?.section(id))
