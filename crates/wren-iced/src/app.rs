@@ -112,6 +112,9 @@ pub enum Message {
     PaletteClose,
     PaletteRevealed,
     Key(crate::keys::Input),
+    /// A command key chosen from the native menu bar.
+    #[cfg(target_os = "macos")]
+    MenuCommand(String),
     FolderChosen(u64, Option<PathBuf>),
     Revealed {
         correlation: u64,
@@ -366,6 +369,8 @@ impl App {
             }
             Message::Resize(generation, event) => return self.resize_event(generation, event),
             Message::Key(input) => return self.key_input(input),
+            #[cfg(target_os = "macos")]
+            Message::MenuCommand(key) => return self.menu_command(&key),
             Message::Tick => {
                 if self.session.is_some() {
                     return self.process_core(Op::Tick).task;
@@ -423,6 +428,8 @@ impl App {
                 iced::window::Event::Opened { size, .. } => {
                     self.viewport = size;
                     self.window = Some(id);
+                    #[cfg(target_os = "macos")]
+                    crate::macos_menu::install(&self.preferences.keymap);
                     #[cfg(feature = "smoke-test")]
                     {
                         if self.smoke.is_some() {
@@ -672,6 +679,8 @@ impl App {
         if self.session.is_some() {
             subscriptions.push(iced::time::every(Duration::from_millis(25)).map(|_| Message::Tick));
         }
+        #[cfg(target_os = "macos")]
+        subscriptions.push(crate::macos_menu::events().map(Message::MenuCommand));
         #[cfg(feature = "smoke-test")]
         let subscriptions = {
             let mut subscriptions = subscriptions;

@@ -195,6 +195,13 @@ impl App {
         }
     }
 
+    /// Run a command chosen from the native menu bar, with the same rules
+    /// as its keyboard shortcut.
+    #[cfg(target_os = "macos")]
+    pub(super) fn menu_command(&mut self, key: &str) -> Task<Message> {
+        CommandId::parse(key).map_or_else(Task::none, |id| self.run_shortcut(id))
+    }
+
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
         let accel = match input {
@@ -217,6 +224,10 @@ impl App {
         else {
             return Task::none();
         };
+        self.run_shortcut(id)
+    }
+
+    fn run_shortcut(&mut self, id: CommandId) -> Task<Message> {
         // Quitting stays available everywhere. Otherwise an open dialog or
         // palette owns the keyboard: only the palette shortcut (to close it)
         // gets through.

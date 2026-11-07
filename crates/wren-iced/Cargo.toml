@@ -24,5 +24,8 @@ serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+muda.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

@@ -6,6 +6,8 @@ mod drag_view;
 mod editor_view;
 mod fonts;
 mod keys;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod palette_scroll;
 mod panes;
 mod theme;

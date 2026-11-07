@@ -36,6 +36,7 @@ toml = "=1.1.8"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 nucleo-matcher = "=0.3.1"
 directories = "=6.0.0"
+muda = { version = "=0.21.2", default-features = false }
 rfd = { version = "=0.16.1", default-features = false, features = ["xdg-portal", "tokio", "wayland"] }
 
 [patch.crates-io]
