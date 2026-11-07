@@ -45,6 +45,8 @@ expect=(
   ./usr/bin/wren
   ./usr/share/applications/wren.desktop
   ./usr/share/icons/hicolor/scalable/apps/wren.svg
+  ./usr/share/doc/wren/copyright
+  ./usr/share/doc/wren/LICENSE
   ./usr/share/doc/wren/THIRD_PARTY_NOTICES.txt
   ./usr/share/doc/wren/DEPENDENCY_NOTICES.txt
   ./usr/share/doc/wren/third_party/inter/LICENSE.txt

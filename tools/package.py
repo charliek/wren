@@ -74,8 +74,20 @@ NOTICES = (
     "\nCargo dependency declarations, local license/copyright/NOTICE texts, and\n"
     "explicit text-coverage gaps are in DEPENDENCY_NOTICES.txt. That inventory\n"
     "also includes build/dev and other-target packages, not just linked code.\n"
-    "Text collection is not a legal-completeness assurance. No Wren project\n"
-    "license is chosen or granted by these third-party notices.\n"
+    "Text collection is not a legal-completeness assurance.\n"
+    "\nWren itself is released under the MIT License; see LICENSE.\n"
+)
+PROJECT_LICENSE = Path("LICENSE")
+DEBIAN_COPYRIGHT_HEADER = (
+    "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n"
+    "Upstream-Name: wren\n"
+    "Source: https://github.com/charliek/wren\n"
+    "\n"
+    "Files: *\n"
+    "Copyright: 2026 Charlie Knudsen\n"
+    "License: MIT\n"
+    "\n"
+    "License: MIT\n"
 )
 
 
@@ -501,6 +513,9 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
             write_file(Path("share/applications/wren.desktop"), entry, dir_fd=stage.fd)
             notices = Path("share/doc/wren")
             write_file(notices / "VERSION", (release + "\n").encode("utf-8"), dir_fd=stage.fd)
+            if system_layout:
+                write_file(notices / "copyright",
+                           debian_copyright(read_source(root / PROJECT_LICENSE)), dir_fd=stage.fd)
         else:
             copy_executable(binary, Path("Contents/MacOS/wren"), platform, native, dir_fd=stage.fd)
             resources = Path("Contents/Resources")
@@ -531,12 +546,24 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
             write_file(Path("Contents/PkgInfo"), b"APPL????", dir_fd=stage.fd)
             write_file(resources / "AppIcon.icns", icns, dir_fd=stage.fd)
             notices = resources
+        write_file(notices / "LICENSE", read_source(root / PROJECT_LICENSE), dir_fd=stage.fd)
         for notice in FONT_NOTICES:
             write_file(notices / notice, read_source(root / notice), dir_fd=stage.fd)
         write_file(notices / "DEPENDENCY_NOTICES.txt", dependency_notices, dir_fd=stage.fd)
         write_file(notices / "THIRD_PARTY_NOTICES.txt", NOTICES.encode("utf-8"), dir_fd=stage.fd)
         publish_bundle(stage, destination)
         return destination
+
+
+def debian_copyright(license_text: bytes) -> bytes:
+    """The machine-readable copyright file, with the license body indented as
+    Debian requires (blank lines become " .")."""
+    body = license_text.decode("utf-8").strip("\n").splitlines()
+    # Drop the title and copyright lines, already given by the header fields.
+    while body and not body[0].startswith("Permission"):
+        body.pop(0)
+    lines = [" ." if not line.strip() else f" {line}" for line in body]
+    return (DEBIAN_COPYRIGHT_HEADER + "\n".join(lines) + "\n").encode("utf-8")
 
 
 def hicolor_icon(size: int) -> Path:

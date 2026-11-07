@@ -114,7 +114,8 @@ class PackageTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.source = self.base / "source with spaces"
         self.source.mkdir()
-        for relative in (*ICON_ASSETS, "assets/wren.desktop", *package.FONT_NOTICES):
+        for relative in (*ICON_ASSETS, "assets/wren.desktop", package.PROJECT_LICENSE,
+                         *package.FONT_NOTICES):
             target = self.source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
@@ -169,12 +170,14 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected, path)
 
     def assert_notices(self, directory: Path):
+        self.assertEqual((directory / "LICENSE").read_bytes(), (ROOT / "LICENSE").read_bytes())
         for notice in package.FONT_NOTICES:
             self.assertEqual((directory / notice).read_bytes(), (ROOT / notice).read_bytes())
         text = (directory / "THIRD_PARTY_NOTICES.txt").read_text()
         for name in ("Inter", "JetBrains Mono", "SIL Open Font License", *map(str, package.FONT_NOTICES)):
             self.assertIn(name, text)
         self.assertIn("DEPENDENCY_NOTICES.txt", text)
+        self.assertIn("MIT License", text)
         self.assertEqual((directory / "DEPENDENCY_NOTICES.txt").read_bytes(), self.dependency_text)
         self.assertIn("fixture-dependency", self.dependency_text.decode("utf-8"))
         self.assertNotIn(str(self.base), self.dependency_text.decode("utf-8"))
@@ -236,7 +239,8 @@ class PackageTests(unittest.TestCase):
         # A fixture (non-native) bundle never runs actool: the flat ICNS alone.
         self.assertNotIn("CFBundleIconName", info)
         self.assertEqual(sorted(path.name for path in resources.iterdir()),
-                         sorted(["AppIcon.icns", "DEPENDENCY_NOTICES.txt", "THIRD_PARTY_NOTICES.txt", "third_party"]))
+                         sorted(["AppIcon.icns", "DEPENDENCY_NOTICES.txt", "LICENSE",
+                                 "THIRD_PARTY_NOTICES.txt", "third_party"]))
         self.assert_notices(resources)
         self.assert_permissions(output, binary)
         self.assert_source_unchanged()
@@ -303,6 +307,7 @@ class PackageTests(unittest.TestCase):
                                            "--release-version", "0.0.1-rc1"]), 0, stderr.getvalue())
             output = self.source / "target/package/wren-0.0.1-rc1-linux-system"
             self.assertEqual((output / "share/doc/wren/VERSION").read_text(), "0.0.1-rc1\n")
+            self.assertIn("License: MIT", (output / "share/doc/wren/copyright").read_text())
             self.assertEqual(package.main(["--binary", str(self.binary), "--release-version", "9.9.9",
                                            "--output", str(self.base / "mismatch")]), 1)
         self.assertIn("system-layout linux tree", stdout.getvalue())
@@ -1015,3 +1020,15 @@ class PackageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DebianCopyrightTests(unittest.TestCase):
+    def test_copyright_is_machine_readable_with_an_indented_mit_body(self):
+        text = package.debian_copyright((ROOT / "LICENSE").read_bytes()).decode("utf-8")
+        self.assertTrue(text.startswith("Format: https://www.debian.org/doc/packaging-manuals/"))
+        self.assertIn("Copyright: 2026 Charlie Knudsen\n", text)
+        body = text.split("\nLicense: MIT\n")[-1]
+        self.assertTrue(body.startswith(" Permission is hereby granted"))
+        self.assertIn("\n .\n", body)
+        self.assertTrue(all(line.startswith(" ") for line in body.splitlines()))
+

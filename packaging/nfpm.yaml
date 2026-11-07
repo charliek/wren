@@ -20,6 +20,7 @@ priority: optional
 maintainer: Charlie Knudsen <charlie.knudsen@gmail.com>
 vendor: Stride Labs
 homepage: https://github.com/charliek/wren
+license: MIT
 description: |
   Desktop app for structured Markdown notes.
   Wren edits a directory of plain Markdown files through a fixed

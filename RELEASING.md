@@ -207,8 +207,7 @@ these once, in order, before the first release.
 
 ## Branch protection
 
-`main` is protected by ruleset `main-protection` (id `<RULESET_ID>`, fill in
-after step 4) with `required_status_checks=['ci-success']` and two bypass
+`main` is protected by ruleset `main-protection` (id `26765325`) with `required_status_checks=['ci-success']` and two bypass
 actors:
 
 - `charliek-release-bot` (App ID `3902108`, type `Integration`): for

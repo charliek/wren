@@ -9,6 +9,7 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.97"
 publish = false
+license = "MIT"
 
 [workspace.dependencies]
 wren-core = { path = "crates/wren-core" }
