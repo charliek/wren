@@ -3,6 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -14,6 +15,7 @@ use crate::model::{Note, NoteId, Parent, SectionId, Workspace};
 pub const MAX_CONTENT_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_QUERY_BYTES: usize = 4096;
 pub const MAX_QUERY_WORDS: usize = 128;
+pub(crate) const NOT_UTF8: &str = "not valid UTF-8; content search unavailable";
 
 /// Check before allocating a fuzzy pattern or lowercase copy. UI callers should
 /// display this error, rather than presenting an oversized query as no matches.
@@ -66,7 +68,8 @@ pub struct Snippet {
 
 #[derive(Debug)]
 struct Content {
-    text: Box<str>,
+    // Shared with background reconciliation snapshots, which compare exact bytes.
+    text: Arc<str>,
     folded: Box<str>,
     preview: Range<usize>,
 }
@@ -333,9 +336,30 @@ impl Index {
         match contents {
             Ok(file) => match std::str::from_utf8(&file.bytes) {
                 Ok(text) => self.set_content(note.id, text, false),
-                Err(_) => self.unavailable(note.id, "not valid UTF-8; content search unavailable"),
+                Err(_) => self.unavailable(note.id, NOT_UTF8),
             },
             Err(reason) => self.unavailable(note.id, reason),
+        }
+    }
+
+    /// Exact retained text per note, shared rather than copied, so a background
+    /// scan can send back only notes whose disk bytes differ.
+    pub(crate) fn content_snapshot(&self) -> HashMap<NoteId, Arc<str>> {
+        self.entries
+            .iter()
+            .filter_map(|(id, entry)| Some((*id, Arc::clone(&entry.content.as_ref()?.text))))
+            .collect()
+    }
+
+    /// Applies one background-scan content result to a note already present
+    /// after metadata synchronization; unknown notes are ignored.
+    pub(crate) fn ingest_scanned(&mut self, note: NoteId, contents: Result<&str, &str>) {
+        if !self.entries.contains_key(&note) {
+            return;
+        }
+        match contents {
+            Ok(text) => self.set_content(note, text, false),
+            Err(reason) => self.unavailable(note, reason),
         }
     }
 
@@ -357,7 +381,7 @@ impl Index {
         match store.read(&entry.path) {
             Ok(file) => match std::str::from_utf8(&file.bytes) {
                 Ok(text) => self.set_content(note, text, false),
-                Err(_) => self.unavailable(note, "not valid UTF-8; content search unavailable"),
+                Err(_) => self.unavailable(note, NOT_UTF8),
             },
             Err(error) => self.unavailable(note, &format!("content search unavailable: {error}")),
         }

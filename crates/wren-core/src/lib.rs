@@ -5,6 +5,7 @@ pub mod index;
 pub mod keybind;
 pub mod model;
 pub mod ops;
+pub mod reconcile;
 pub mod scan;
 pub mod settings;
 pub mod theme;

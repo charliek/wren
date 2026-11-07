@@ -193,12 +193,130 @@ struct PendingDirectory {
     inode: u64,
 }
 
-#[derive(Debug)]
-pub struct FsStore {
+/// Read-only, descriptor-relative access to a store's validated root. A
+/// duplicate shares the root directory descriptor (never the lock descriptor)
+/// so it can scan on another thread; every access still revalidates the root
+/// path and the lock name against the owning store's identities.
+pub struct StoreReader {
     root: PathBuf,
     directory: File,
+    lock: Stat,
+}
+
+impl fmt::Debug for StoreReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoreReader")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StoreReader {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Duplicates the root directory descriptor. Dropping the duplicate can
+    /// neither release nor extend the owning store's advisory lock.
+    pub fn try_clone(&self) -> Result<Self, StoreError> {
+        Ok(Self {
+            root: self.root.clone(),
+            directory: self.directory.try_clone()?,
+            lock: self.lock,
+        })
+    }
+
+    pub fn read(&self, path: &RelPath) -> Result<DiskFile, StoreError> {
+        let parent = path.parent();
+        let directory = self.open_directory(parent.as_ref())?;
+        let snapshot = snapshot(&directory, path.file_name())?;
+        self.check_directory(parent.as_ref(), &directory)?;
+        Ok(snapshot.file)
+    }
+
+    /// Lists the root (`None`) or a relative directory without following symlinks.
+    /// Names are sorted and retain their original bytes. Enumeration failures and
+    /// individual metadata failures remain in a successful, possibly partial
+    /// listing; failure to open or revalidate the directory rejects the listing.
+    pub fn list_dir(&self, path: Option<&RelPath>) -> Result<DirectoryListing, StoreError> {
+        self.list_dir_with(path, read_directory)
+    }
+
+    fn list_dir_with(
+        &self,
+        path: Option<&RelPath>,
+        enumerate: impl FnOnce(&File) -> Result<DirectoryListing, StoreError>,
+    ) -> Result<DirectoryListing, StoreError> {
+        let directory = self.open_directory(path)?;
+        self.check_directory(path, &directory)?;
+        let listing = enumerate(&directory)?;
+        self.check_directory(path, &directory)?;
+        Ok(listing)
+    }
+
+    fn validate_root(&self) -> Result<(), StoreError> {
+        let current = open_absolute_directory(&self.root)?;
+        if !same_object(&fs::fstat(&current)?, &fs::fstat(&self.directory)?) {
+            return Err(StoreError::UnsafePath(self.root.display().to_string()));
+        }
+        let named_lock = fs::statat(&self.directory, LOCK_NAME, AtFlags::SYMLINK_NOFOLLOW)?;
+        if !same_object(&named_lock, &self.lock) {
+            return Err(StoreError::UnsafePath(LOCK_NAME.into()));
+        }
+        Ok(())
+    }
+
+    fn open_directory(&self, path: Option<&RelPath>) -> Result<File, StoreError> {
+        self.validate_root()?;
+        let mut directory = self.directory.try_clone()?;
+        if let Some(path) = path {
+            for component in path.as_path().components() {
+                directory = match fs::openat(
+                    &directory,
+                    component.as_os_str(),
+                    directory_flags(),
+                    Mode::empty(),
+                ) {
+                    Ok(file) => file.into(),
+                    Err(error) => {
+                        // O_NOFOLLOW | O_DIRECTORY can report ENOTDIR for a
+                        // symlink. Keep unsafe replacement distinct from a
+                        // genuinely missing directory for scan preservation.
+                        if fs::statat(&directory, component.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+                            .is_ok_and(|stat| {
+                                FileType::from_raw_mode(stat.st_mode) == FileType::Symlink
+                            })
+                        {
+                            return Err(StoreError::UnsafePath(
+                                path.as_path().display().to_string(),
+                            ));
+                        }
+                        return Err(error.into());
+                    }
+                };
+            }
+        }
+        Ok(directory)
+    }
+
+    fn check_directory(&self, path: Option<&RelPath>, directory: &File) -> Result<(), StoreError> {
+        let current = self.open_directory(path)?;
+        if !same_object(&fs::fstat(directory)?, &fs::fstat(&current)?) {
+            return Err(StoreError::UnsafePath(path.map_or_else(
+                || self.root.display().to_string(),
+                |path| path.as_path().display().to_string(),
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct FsStore {
+    reader: StoreReader,
     // This descriptor, and the persistent name, must survive for the entire lock.
-    lock: File,
+    _lock: File,
     fault: Option<Fault>,
     pending_directories: Vec<PendingDirectory>,
     // Losing an unsynced descriptor means later retries cannot prove durability.
@@ -235,10 +353,14 @@ impl FsStore {
                 Err(error.into())
             };
         }
-        let store = Self {
+        let reader = StoreReader {
             root,
             directory,
-            lock,
+            lock: fs::fstat(&lock)?,
+        };
+        let store = Self {
+            reader,
+            _lock: lock,
             fault: None,
             pending_directories: Vec::new(),
             durability_tracking_error: None,
@@ -249,7 +371,11 @@ impl FsStore {
     }
 
     pub fn root(&self) -> &Path {
-        &self.root
+        &self.reader.root
+    }
+
+    pub fn reader(&self) -> &StoreReader {
+        &self.reader
     }
 
     pub fn fail_next(&mut self, fault: Fault) {
@@ -280,31 +406,20 @@ impl FsStore {
     }
 
     pub fn read(&self, path: &RelPath) -> Result<DiskFile, StoreError> {
-        let parent = path.parent();
-        let directory = self.open_directory(parent.as_ref())?;
-        let snapshot = snapshot(&directory, path.file_name())?;
-        self.check_directory(parent.as_ref(), &directory)?;
-        Ok(snapshot.file)
+        self.reader.read(path)
     }
 
-    /// Lists the root (`None`) or a relative directory without following symlinks.
-    /// Names are sorted and retain their original bytes. Enumeration failures and
-    /// individual metadata failures remain in a successful, possibly partial
-    /// listing; failure to open or revalidate the directory rejects the listing.
     pub fn list_dir(&self, path: Option<&RelPath>) -> Result<DirectoryListing, StoreError> {
-        self.list_dir_with(path, read_directory)
+        self.reader.list_dir(path)
     }
 
+    #[cfg(test)]
     fn list_dir_with(
         &self,
         path: Option<&RelPath>,
         enumerate: impl FnOnce(&File) -> Result<DirectoryListing, StoreError>,
     ) -> Result<DirectoryListing, StoreError> {
-        let directory = self.open_directory(path)?;
-        self.check_directory(path, &directory)?;
-        let listing = enumerate(&directory)?;
-        self.check_directory(path, &directory)?;
-        Ok(listing)
+        self.reader.list_dir_with(path, enumerate)
     }
 
     pub fn write(
@@ -578,7 +693,7 @@ impl FsStore {
         let stat = fs::statat(&directory, path.file_name(), AtFlags::SYMLINK_NOFOLLOW)?;
         let kind = FileType::from_raw_mode(stat.st_mode);
         if !matches!(kind, FileType::RegularFile | FileType::Directory)
-            || same_object(&stat, &fs::fstat(&self.directory)?)
+            || same_object(&stat, &fs::fstat(&self.reader.directory)?)
         {
             return Err(StoreError::UnsafePath(path.as_path().display().to_string()));
         }
@@ -591,63 +706,19 @@ impl FsStore {
         if !same_object(&stat, &current) {
             return Err(StoreError::UnsafePath(path.as_path().display().to_string()));
         }
-        Ok(self.root.join(path.as_path()))
+        Ok(self.reader.root.join(path.as_path()))
     }
 
     fn validate_root(&self) -> Result<(), StoreError> {
-        let current = open_absolute_directory(&self.root)?;
-        if !same_object(&fs::fstat(&current)?, &fs::fstat(&self.directory)?) {
-            return Err(StoreError::UnsafePath(self.root.display().to_string()));
-        }
-        let named_lock = fs::statat(&self.directory, LOCK_NAME, AtFlags::SYMLINK_NOFOLLOW)?;
-        if !same_object(&named_lock, &fs::fstat(&self.lock)?) {
-            return Err(StoreError::UnsafePath(LOCK_NAME.into()));
-        }
-        Ok(())
+        self.reader.validate_root()
     }
 
     fn open_directory(&self, path: Option<&RelPath>) -> Result<File, StoreError> {
-        self.validate_root()?;
-        let mut directory = self.directory.try_clone()?;
-        if let Some(path) = path {
-            for component in path.as_path().components() {
-                directory = match fs::openat(
-                    &directory,
-                    component.as_os_str(),
-                    directory_flags(),
-                    Mode::empty(),
-                ) {
-                    Ok(file) => file.into(),
-                    Err(error) => {
-                        // O_NOFOLLOW | O_DIRECTORY can report ENOTDIR for a
-                        // symlink. Keep unsafe replacement distinct from a
-                        // genuinely missing directory for scan preservation.
-                        if fs::statat(&directory, component.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
-                            .is_ok_and(|stat| {
-                                FileType::from_raw_mode(stat.st_mode) == FileType::Symlink
-                            })
-                        {
-                            return Err(StoreError::UnsafePath(
-                                path.as_path().display().to_string(),
-                            ));
-                        }
-                        return Err(error.into());
-                    }
-                };
-            }
-        }
-        Ok(directory)
+        self.reader.open_directory(path)
     }
 
     fn check_directory(&self, path: Option<&RelPath>, directory: &File) -> Result<(), StoreError> {
-        let current = self.open_directory(path)?;
-        if !same_object(&fs::fstat(directory)?, &fs::fstat(&current)?) {
-            return Err(StoreError::UnsafePath(path.map_or_else(
-                || self.root.display().to_string(),
-                |path| path.as_path().display().to_string(),
-            )));
-        }
-        Ok(())
+        self.reader.check_directory(path, directory)
     }
 
     fn prepare_file(
@@ -1895,6 +1966,35 @@ mod tests {
             fs::metadata(reopened.root().join(LOCK_NAME)).unwrap().ino(),
             inode
         );
+    }
+
+    #[test]
+    fn duplicated_readers_revalidate_the_root_and_never_hold_the_lock() {
+        let (temp, mut store, section) = workspace();
+        store.create_file(&section, "Note", b"note bytes").unwrap();
+        let reader = store.reader().try_clone().unwrap();
+        let note = rel("Section/Note.md");
+        let bytes = std::thread::spawn(move || reader.read(&note).unwrap().bytes)
+            .join()
+            .unwrap();
+        assert_eq!(bytes, b"note bytes");
+
+        let reader = store.reader().try_clone().unwrap();
+        drop(store);
+        let reopened = FsStore::open(temp.path()).unwrap();
+        assert_eq!(reader.list_dir(Some(&section)).unwrap().entries.len(), 1);
+        drop(reopened);
+
+        let parked = TempDir::new().unwrap();
+        let moved = parked.path().join("moved");
+        fs::rename(temp.path(), &moved).unwrap();
+        fs::create_dir(temp.path()).unwrap();
+        assert!(matches!(
+            reader.list_dir(None),
+            Err(StoreError::UnsafePath(_))
+        ));
+        fs::remove_dir(temp.path()).unwrap();
+        fs::rename(&moved, temp.path()).unwrap();
     }
 
     #[test]

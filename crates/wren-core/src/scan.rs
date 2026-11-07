@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::fs_store::{DirectoryListing, DiskFile, EntryKind, FsStore, RelPath, StoreError};
+use crate::fs_store::{
+    DirectoryListing, DiskFile, EntryKind, FsStore, RelPath, StoreError, StoreReader,
+};
 use crate::model::{
     compute_subtitle, natural_cmp, note_title, Group, GroupId, Note, NoteId, Parent, ScanWarning,
     Section, SectionId, Workspace,
@@ -43,7 +45,7 @@ impl std::error::Error for ScanError {
 /// have not changed, and entries under unreadable subtrees are carried
 /// forward rather than silently dropped.
 pub fn scan(store: &FsStore, previous: Option<&Workspace>) -> Result<Workspace, ScanError> {
-    scan_with_contents(store, previous, |_, _| {})
+    scan_with_contents(store.reader(), previous, |_, _| {})
 }
 
 /// Streams each accepted note's exact descriptor-relative read to `visit`.
@@ -55,7 +57,7 @@ pub fn scan(store: &FsStore, previous: Option<&Workspace>) -> Result<Workspace, 
 /// synchronizing against the returned model (which owns the accepted IDs).
 #[allow(clippy::type_complexity)]
 pub fn scan_with_contents(
-    store: &FsStore,
+    store: &StoreReader,
     previous: Option<&Workspace>,
     mut visit: impl FnMut(&Note, Result<&DiskFile, &str>),
 ) -> Result<Workspace, ScanError> {
@@ -70,11 +72,11 @@ fn scan_with_fs(
     previous: Option<&Workspace>,
     scan_fs: &impl ScanFs,
 ) -> Result<Workspace, ScanError> {
-    scan_with_fs_contents(store, previous, scan_fs, &mut |_, _| {})
+    scan_with_fs_contents(store.reader(), previous, scan_fs, &mut |_, _| {})
 }
 
 fn scan_with_fs_contents(
-    store: &FsStore,
+    store: &StoreReader,
     previous: Option<&Workspace>,
     scan_fs: &impl ScanFs,
     visit: &mut ContentsVisitor<'_>,
@@ -199,7 +201,7 @@ fn scan_with_fs_contents(
 
 #[allow(clippy::too_many_arguments)]
 fn scan_section_entries(
-    store: &FsStore,
+    store: &StoreReader,
     ws: &mut Workspace,
     section_id: SectionId,
     section_rel: &RelPath,
@@ -300,7 +302,7 @@ fn scan_section_entries(
 
 #[allow(clippy::too_many_arguments)]
 fn scan_group_entries(
-    store: &FsStore,
+    store: &StoreReader,
     ws: &mut Workspace,
     group_id: GroupId,
     group_rel: &RelPath,
@@ -411,7 +413,7 @@ fn scan_group_entries(
 
 #[allow(clippy::too_many_arguments)]
 fn add_note(
-    store: &FsStore,
+    store: &StoreReader,
     ws: &mut Workspace,
     parent: Parent,
     note_rel: RelPath,
@@ -606,7 +608,7 @@ struct DirectoryEntries {
 trait ScanFs {
     fn collect_entries(
         &self,
-        store: &FsStore,
+        store: &StoreReader,
         path: Option<&RelPath>,
     ) -> Result<DirectoryEntries, std::io::Error>;
 }
@@ -616,7 +618,7 @@ struct RealScanFs;
 impl ScanFs for RealScanFs {
     fn collect_entries(
         &self,
-        store: &FsStore,
+        store: &StoreReader,
         path: Option<&RelPath>,
     ) -> Result<DirectoryEntries, std::io::Error> {
         let listing = store.list_dir(path).map_err(scan_io_error)?;
@@ -624,7 +626,7 @@ impl ScanFs for RealScanFs {
     }
 }
 
-fn listing_path(store: &FsStore, path: Option<&RelPath>) -> PathBuf {
+fn listing_path(store: &StoreReader, path: Option<&RelPath>) -> PathBuf {
     path.map_or_else(
         || store.root().to_path_buf(),
         |path| store.root().join(path.as_path()),
@@ -785,7 +787,7 @@ mod tests {
     impl ScanFs for FaultyScanFs {
         fn collect_entries(
             &self,
-            store: &FsStore,
+            store: &StoreReader,
             path: Option<&RelPath>,
         ) -> Result<DirectoryEntries, std::io::Error> {
             let dir = listing_path(store, path);
@@ -828,7 +830,7 @@ mod tests {
     impl ScanFs for ReplacingScanFs {
         fn collect_entries(
             &self,
-            store: &FsStore,
+            store: &StoreReader,
             path: Option<&RelPath>,
         ) -> Result<DirectoryEntries, std::io::Error> {
             let replacing = path == Some(&self.before_listing) && !self.triggered.replace(true);
@@ -900,7 +902,7 @@ mod tests {
         let store = FsStore::open(directory.path()).unwrap();
         let mut index = crate::index::Index::default();
         let mut seen = HashSet::new();
-        let workspace = scan_with_contents(&store, None, |note, contents| {
+        let workspace = scan_with_contents(store.reader(), None, |note, contents| {
             let file = contents.unwrap();
             assert!(seen.insert(note.id));
             assert_eq!(note.bytes, file.bytes.len());
@@ -933,9 +935,10 @@ mod tests {
         }
         let store = FsStore::open(directory.path()).unwrap();
         let mut index = crate::index::Index::default();
-        let previous =
-            scan_with_contents(&store, None, |note, contents| index.ingest(note, contents))
-                .unwrap();
+        let previous = scan_with_contents(store.reader(), None, |note, contents| {
+            index.ingest(note, contents)
+        })
+        .unwrap();
         index.sync_metadata(&previous);
         write_file(directory.path(), "S/G/a.md", "changed bytes");
         let mut scan_fs = FaultyScanFs::default();
@@ -948,12 +951,16 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
         );
         let mut seen = HashSet::new();
-        let current =
-            scan_with_fs_contents(&store, Some(&previous), &scan_fs, &mut |note, contents| {
+        let current = scan_with_fs_contents(
+            store.reader(),
+            Some(&previous),
+            &scan_fs,
+            &mut |note, contents| {
                 assert!(seen.insert(note.id), "duplicate content callback");
                 index.ingest(note, contents);
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         index.sync_metadata(&current);
         assert_eq!(entry_ids(&current), entry_ids(&previous));
         assert_eq!(seen.len(), current.notes.len());
@@ -969,7 +976,7 @@ mod tests {
                     .contains("scan incomplete"));
             }
         }
-        let complete = scan_with_contents(&store, Some(&current), |note, contents| {
+        let complete = scan_with_contents(store.reader(), Some(&current), |note, contents| {
             index.ingest(note, contents)
         })
         .unwrap();
@@ -983,12 +990,13 @@ mod tests {
             store.root().to_path_buf(),
             std::io::ErrorKind::PermissionDenied,
         );
-        assert!(
-            scan_with_fs_contents(&store, Some(&complete), &failed, &mut |_, _| panic!(
-                "a root error must not publish callbacks"
-            ))
-            .is_err()
-        );
+        assert!(scan_with_fs_contents(
+            store.reader(),
+            Some(&complete),
+            &failed,
+            &mut |_, _| panic!("a root error must not publish callbacks")
+        )
+        .is_err());
     }
 
     // -- basic scan --

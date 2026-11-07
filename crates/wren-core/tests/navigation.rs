@@ -2592,7 +2592,158 @@ fn benchmark_filesystem_5000_notes_25mb_load_reconcile_and_edits() {
         "edit enqueued as reconcile starts to persisted clean (queue wait included)",
         queued_to_saved,
     );
-    eprintln!("Session is synchronous: edits/flushes queue behind reconciliation. These are core owner timings on warm filesystem caches, not native input, rendering, or key-to-photon latency; there is no <30 ms reconciliation target.");
+    eprintln!("Synchronous Op::Reconcile: edits/flushes queue behind reconciliation.");
+
+    // Background reconciliation, as the desktop app runs it: Tick snapshots on
+    // the owner, a worker scans, and FinishReconcile merges on the owner.
+    session.set_background_reconcile(true);
+    let mut clock = Duration::from_secs(10);
+    let begin = |session: &mut Session, clock: &mut Duration| {
+        *clock += Duration::from_secs(2);
+        let started = Instant::now();
+        let events = session.apply_at(Op::Tick, *clock).unwrap();
+        let snapshot = started.elapsed();
+        assert!(events.is_empty());
+        (session.take_reconcile_job().unwrap(), snapshot, *clock)
+    };
+    let scan_on_worker = |job: wren_core::reconcile::ReconcileJob| {
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = job.run();
+            (result, started.elapsed())
+        })
+    };
+    let finish = |session: &mut Session, result, now| {
+        let started = Instant::now();
+        let events = session
+            .apply_at(Op::FinishReconcile(result), now)
+            .unwrap_or_else(|error| panic!("{error}; committed events: {:?}", error.events));
+        (events, started.elapsed())
+    };
+
+    let (mut snapshots, mut scans, mut applies, mut owner) = (vec![], vec![], vec![], vec![]);
+    for _ in 0..20 {
+        let revision = session.index().revision();
+        let (job, snapshot, now) = begin(&mut session, &mut clock);
+        let (result, scan) = scan_on_worker(job).join().unwrap();
+        let (events, apply) = finish(&mut session, result, now);
+        assert!(events.is_empty());
+        assert_eq!(session.index().revision(), revision);
+        snapshots.push(snapshot);
+        scans.push(scan);
+        applies.push(apply);
+        owner.push(snapshot + apply);
+    }
+    report("background unchanged: owner snapshot (Tick)", snapshots);
+    report("background unchanged: worker scan", scans);
+    report("background unchanged: owner apply", applies);
+    report("background unchanged: owner total", owner);
+
+    let (mut snapshots, mut scans, mut applies, mut owner) = (vec![], vec![], vec![], vec![]);
+    for sample in 0..20 {
+        let marker = if sample % 2 == 0 {
+            "worker alpha"
+        } else {
+            "worker bravo"
+        };
+        let stale = if sample % 2 == 0 {
+            "worker bravo"
+        } else {
+            "worker alpha"
+        };
+        let mut text = body.clone();
+        text.replace_range(4200..4200 + marker.len(), marker);
+        fs::write(&path, &text).unwrap();
+        File::open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        let (job, snapshot, now) = begin(&mut session, &mut clock);
+        let (result, scan) = scan_on_worker(job).join().unwrap();
+        let (events, apply) = finish(&mut session, result, now);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::TreeChanged)));
+        assert_eq!(hits(&session, marker), [inactive]);
+        assert!(hits(&session, stale).is_empty());
+        snapshots.push(snapshot);
+        scans.push(scan);
+        applies.push(apply);
+        owner.push(snapshot + apply);
+    }
+    report(
+        "background same-size external edit: owner snapshot (Tick)",
+        snapshots,
+    );
+    report("background same-size external edit: worker scan", scans);
+    report("background same-size external edit: owner apply", applies);
+    report("background same-size external edit: owner total", owner);
+
+    let (mut scans, mut applies, mut edits, mut saved) = (vec![], vec![], vec![], vec![]);
+    let mut owner = Vec::new();
+    for sample in 0..20 {
+        let preexisting = format!("{body}\nunsaved before background scan {sample}");
+        session
+            .apply_at(
+                Op::EditDraft {
+                    note: active,
+                    contents: preexisting,
+                },
+                clock + Duration::from_secs(2),
+            )
+            .unwrap();
+        let (job, snapshot, now) = begin(&mut session, &mut clock);
+        let worker = scan_on_worker(job);
+        // The owner keeps serving input and saving while the worker scans.
+        let queued_text = format!("{body}\nedited during background scan {sample}");
+        let started = Instant::now();
+        session
+            .apply_at(
+                Op::EditDraft {
+                    note: active,
+                    contents: queued_text.clone(),
+                },
+                now,
+            )
+            .unwrap();
+        edits.push(started.elapsed());
+        session.apply_at(Op::Flush, now).unwrap();
+        saved.push(started.elapsed());
+        let (result, scan) = worker.join().unwrap();
+        let (events, apply) = finish(&mut session, result, now);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ExternalChange { .. })),
+            "own saves during a background scan are not external changes: {events:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("S/G/Meeting 0.md")).unwrap(),
+            queued_text
+        );
+        assert_eq!(session.document().unwrap().text, queued_text);
+        assert!(!session.document().unwrap().dirty());
+        assert_eq!(session.index().content(active), Some(queued_text.as_str()));
+        assert_eq!(session.model().notes.len(), 5000);
+        scans.push(scan);
+        applies.push(apply);
+        owner.push(snapshot + apply);
+    }
+    report("background with live draft: worker scan", scans);
+    report("background with live draft: owner apply", applies);
+    report(
+        "background with live draft: owner total (snapshot + apply)",
+        owner,
+    );
+    report(
+        "edit applied while the worker scans (core service time)",
+        edits,
+    );
+    report(
+        "edit applied while the worker scans to persisted clean (edit + flush)",
+        saved,
+    );
+    eprintln!("These are core owner timings on warm filesystem caches, not native input, rendering, or key-to-photon latency; there is no <30 ms reconciliation target.");
 }
 
 #[test]
