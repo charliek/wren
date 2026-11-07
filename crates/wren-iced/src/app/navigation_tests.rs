@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use crate::editor_view;
 use iced::widget::text_editor::{Action, Edit, Motion};
 use wren_core::config::Config;
 use wren_core::fs_store::Fault;
 use wren_core::model::{ItemRef, NoteId, Parent};
 use wren_core::ops::{Op, Session};
-use wren_iced::editor_view;
 
 use super::commands::{Command, CommandId, Disposition};
 use super::palette::{Mode, SearchTarget};

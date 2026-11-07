@@ -1,11 +1,12 @@
 mod app;
 mod chrome;
 mod cli;
-pub mod drag;
-pub mod drag_view;
+mod drag;
+mod drag_view;
+mod editor_view;
 mod fonts;
 mod palette_scroll;
-pub mod panes;
+mod panes;
 mod shortcuts;
 mod theme;
 

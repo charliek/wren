@@ -43,11 +43,6 @@ impl Registry {
         self.rows.insert(id.clone(), row);
         id
     }
-
-    /// Optional extra non-drag regions, e.g. an embedded non-button control or scrim.
-    pub fn exclude(&mut self, id: Id) {
-        self.excluded.insert(id);
-    }
 }
 
 pub fn row_id(row: RowKind) -> Id {
@@ -64,6 +59,7 @@ pub fn area_id() -> Id {
     Id::new("wren-file-drag-area")
 }
 
+#[cfg(any(test, feature = "smoke-test"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub pressed: bool,
@@ -72,6 +68,7 @@ pub struct Snapshot {
 }
 
 /// A real widget-operation inspection seam; it does not manufacture pointer gestures.
+#[cfg(any(test, feature = "smoke-test"))]
 pub fn inspect() -> impl Operation<Snapshot> {
     struct Inspect {
         snapshot: Option<Snapshot>,
@@ -154,6 +151,7 @@ impl Default for State {
 }
 
 impl State {
+    #[cfg(any(test, feature = "smoke-test"))]
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             pressed: self.drag.is_pressed(),

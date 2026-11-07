@@ -186,6 +186,7 @@ impl EditorView {
     }
 
     /// Return the currently selected text, or `None` if there is no selection.
+    #[cfg(any(test, feature = "smoke-test"))]
     pub fn selected_text(&self) -> Option<String> {
         self.content.selection()
     }
@@ -336,11 +337,13 @@ impl EditorView {
     }
 
     /// Whether the undo stack has any entries.
+    #[cfg(any(test, feature = "smoke-test"))]
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
 
     /// Whether the redo stack has any entries.
+    #[cfg(any(test, feature = "smoke-test"))]
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
     }

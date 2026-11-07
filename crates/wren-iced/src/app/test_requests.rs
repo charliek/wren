@@ -8,12 +8,12 @@ use serde_json::{json, Value};
 use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
+use crate::editor_view;
 use crate::panes::{Layout, Pane};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::{Op, Session};
-use wren_iced::editor_view;
 
 impl App {
     pub(super) fn handle_test(&mut self, request: Arc<Request>) -> Task<Message> {

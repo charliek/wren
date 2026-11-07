@@ -847,12 +847,12 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    use crate::editor_view;
     use iced::widget::text_editor::{Action as EditorAction, Edit, Motion};
     use wren_core::config::Config;
     use wren_core::fs_store::{Fault, RelPath};
     use wren_core::model::{GroupId, NoteId, SectionId};
     use wren_core::ops::Session;
-    use wren_iced::editor_view;
 
     use crate::app::palette::Key;
     use crate::cli::Options;

@@ -2,31 +2,24 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::editor_view::{self, EditorView};
 use iced::theme::Mode;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
 use wren_core::model::{GroupId, NoteId, SectionId};
 use wren_core::ops::{Op, Session};
 use wren_core::theme::{self as definitions, Theme};
-use wren_iced::editor_view::{self, EditorView};
 
 pub use crate::cli::Options;
 use crate::{fonts, theme};
 
-#[path = "workspace.rs"]
 mod workspace;
-#[path = "workspace_view.rs"]
 mod workspace_view;
 
-#[path = "commands.rs"]
 pub(crate) mod commands;
-#[path = "gestures.rs"]
 mod gestures;
-#[path = "navigation.rs"]
 mod navigation;
-#[path = "palette.rs"]
 mod palette;
-#[path = "workspaces.rs"]
 mod workspaces;
 
 use crate::panes::{Layout, Widths};
@@ -36,7 +29,6 @@ use palette::Palette;
 use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
-#[path = "test_requests.rs"]
 mod test_requests;
 
 pub struct App {
@@ -714,7 +706,6 @@ fn focus_editor() -> Task<Message> {
 }
 
 #[cfg(test)]
-#[path = "navigation_tests.rs"]
 mod navigation_tests;
 
 #[cfg(test)]

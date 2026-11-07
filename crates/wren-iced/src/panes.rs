@@ -148,10 +148,12 @@ impl Widths {
         width
     }
 
+    #[cfg(test)]
     pub fn reset(&mut self, layout: Layout, pane: Pane) -> f32 {
         self.set(layout, pane, pane.limits().default)
     }
 
+    #[cfg(test)]
     pub fn reset_layout(&mut self, layout: Layout) {
         for &pane in layout.panes() {
             self.reset(layout, pane);
@@ -163,6 +165,7 @@ impl Widths {
     }
 
     /// Updates metadata in memory only. Call this for Ended/Reset/Step, never Changed.
+    #[cfg(test)]
     pub fn store(
         &self,
         state: &mut WorkspaceState,

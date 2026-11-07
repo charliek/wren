@@ -915,9 +915,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use crate::editor_view;
     use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
     use wren_core::fs_store::Fault;
-    use wren_iced::editor_view;
 
     use super::*;
     use crate::cli::Options;
