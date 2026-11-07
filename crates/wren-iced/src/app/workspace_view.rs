@@ -6,7 +6,7 @@ use wren_core::model::{Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
 
-use super::commands::{Command, CommandId, PRIMARY};
+use super::commands::{Command, CommandId};
 use super::navigation::matches_name;
 use super::palette::Mode;
 use super::{workspace::DialogKind, App, Message};
@@ -201,11 +201,11 @@ impl App {
         let compact = self.viewport.width < 1120.0;
         let mut right = row![layouts].spacing(6).align_y(iced::Center);
         if !compact {
-            right = right.push(self.shortcut_button("Jump to note", "P", CommandId::Jump));
+            right = right.push(self.shortcut_button("Jump to note", CommandId::Jump));
         }
-        right = right.push(self.shortcut_button("Search", "Shift+F", CommandId::Search));
+        right = right.push(self.shortcut_button("Search", CommandId::Search));
         right = right.push(
-            self.shortcut_button("Commands", "K", CommandId::SwitchWorkspace)
+            self.shortcut_button("Commands", CommandId::CommandPalette)
                 .on_press(Message::PaletteOpen(Mode::Commands)),
         );
         right = right.push(
@@ -244,27 +244,19 @@ impl App {
         .into()
     }
 
-    fn shortcut_button<'a>(
-        &'a self,
-        label: &'a str,
-        shortcut: &'a str,
-        id: CommandId,
-    ) -> button::Button<'a, Message> {
-        button(
-            row![
-                text(label).size(12),
-                chrome::keycap_owned(format!("{PRIMARY}{shortcut}"), self.definition)
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )
-        .height(32)
-        .padding([0, 10])
-        .on_press_maybe(
-            self.command_enabled(id)
-                .then_some(Message::Command(Command::Run(id))),
-        )
-        .style(move |_, status| chrome::control(self.definition, status, false, false))
+    fn shortcut_button<'a>(&'a self, label: &'a str, id: CommandId) -> button::Button<'a, Message> {
+        let mut contents = row![text(label).size(12)].spacing(8).align_y(iced::Center);
+        if let Some(shortcut) = self.shortcut_label(id.key()) {
+            contents = contents.push(chrome::keycap_owned(shortcut, self.definition));
+        }
+        button(container(contents).center_y(Fill))
+            .height(32)
+            .padding([0, 10])
+            .on_press_maybe(
+                self.command_enabled(id)
+                    .then_some(Message::Command(Command::Run(id))),
+            )
+            .style(move |_, status| chrome::control(self.definition, status, false, false))
     }
 
     fn warning_slot(&self) -> Element<'_, Message> {
@@ -646,7 +638,12 @@ impl App {
                 row![
                     sort,
                     iced::widget::space::horizontal(),
-                    chrome::label(format!("{PRIMARY}Shift+N dated"), 11, colors.muted)
+                    chrome::label(
+                        self.shortcut_label(CommandId::NewDatedNote.key())
+                            .map_or_else(String::new, |shortcut| format!("{shortcut} dated")),
+                        11,
+                        colors.muted
+                    )
                 ]
                 .spacing(6)
                 .clip(true),

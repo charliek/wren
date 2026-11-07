@@ -226,7 +226,7 @@ def test_screenshot_draws_the_current_editor_after_layout(vault, theme, body):
     artifacts = artifact_directory(f"capture-after-layout-{theme}")
     with WrenApp(workspace=vault, artifacts_dir=artifacts) as app:
         nav.jump(app, nav.FIRST)
-        nav.command(app, f"theme.{theme}")
+        nav.choose_theme(app, theme)
         before = nav.editor_identity(app.client.call("editor.get"))
         for index, (layout, focused) in enumerate((("columns", False), ("outline", False), ("outline", True), ("columns", False))):
             nav.gateway(app, "view.layout", layout=layout)
@@ -251,7 +251,7 @@ def test_screenshot_draws_the_current_editor_after_layout(vault, theme, body):
 def test_screenshot_matches_native_hover_and_focused_input_styles(native_workspace, theme, raised, accent, widget):
     app, root, window = native_workspace
     artifacts = artifact_directory(f"capture-widget-status-{theme}")
-    nav.command(app, f"theme.{theme}")
+    nav.choose_theme(app, theme)
     assert nav.navigation(app)["viewport"] == {"width": 1280, "height": 800}
     before = gestures.files(root)
     if widget == "hover":
@@ -299,7 +299,7 @@ def test_screenshot_matches_native_hover_and_focused_input_styles(native_workspa
 def test_native_palette_preference_actions_restore_editor_typing_focus(native_workspace, query, command):
     app, root, window = native_workspace
     original = gestures.session(app)["document"]["text"]
-    gestures.keys(window, "ctrl+k")
+    gestures.keys(window, "alt+shift+p")
     wait_for(lambda: gestures.navigation(app)["modal"] is not None)
     gestures.type_text(window, query)
     wait_for(lambda: gestures.navigation(app)["modal"]["query"] == query)

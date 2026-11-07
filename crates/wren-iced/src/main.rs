@@ -5,9 +5,9 @@ mod drag;
 mod drag_view;
 mod editor_view;
 mod fonts;
+mod keys;
 mod palette_scroll;
 mod panes;
-mod shortcuts;
 mod theme;
 
 #[cfg(test)]

@@ -1555,7 +1555,7 @@ mod tests {
         config.add(&missing, Some("Missing")).unwrap();
         config.set_active(&missing).unwrap();
         drop(root);
-        let (mut app, _) = App::with_config(Options::default(), Some(config));
+        let (mut app, _) = App::with_config(Options::default(), Some(config), None);
         assert!(app.loading.is_none());
         assert!(app.workspace_mode);
         assert!(app.session.is_none());
@@ -1595,7 +1595,7 @@ mod tests {
             config,
             wren_core::config::Config::load_from(configdir.path()),
         ] {
-            let (app, _) = App::with_config(Options::default(), Some(config));
+            let (app, _) = App::with_config(Options::default(), Some(config), None);
             assert!(
                 app.loading.is_none(),
                 "a stored root must be validated before starting its loader"
@@ -1630,6 +1630,7 @@ mod tests {
                 ..Options::default()
             },
             Some(wren_core::config::Config::load_from(configdir.path())),
+            None,
         );
         assert!(app.loading.is_some());
         let slot = Arc::new(Mutex::new(Some(load(None, root.path().into()))));

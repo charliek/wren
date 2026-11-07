@@ -11,10 +11,11 @@ use wren_core::ops::Op;
 
 use super::commands::{
     item_commands, Command, CommandId, Disposition, Gateway, ItemTarget, ReorderTarget,
-    DEFINITIONS, PRIMARY,
+    DEFINITIONS, GROUPS,
 };
 use super::{focus_editor, App, Message};
 use crate::{chrome, fonts, palette_scroll, theme};
+use wren_core::theme as definitions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -26,6 +27,7 @@ pub enum Mode {
     MoveGroup(GroupId),
     ItemActions(ItemRef),
     Reorder(ItemRef),
+    Themes,
 }
 
 impl Mode {
@@ -39,6 +41,7 @@ impl Mode {
             Self::MoveGroup(_) => "move_group",
             Self::ItemActions(_) => "item_actions",
             Self::Reorder(_) => "reorder",
+            Self::Themes => "themes",
         }
     }
 
@@ -51,6 +54,7 @@ impl Mode {
             Self::MoveNote(_) | Self::MoveGroup(_) => "Choose a destination…",
             Self::ItemActions(_) => "Choose an action for this item…",
             Self::Reorder(_) => "Choose a position among all siblings…",
+            Self::Themes => "Choose a theme…",
         }
     }
 
@@ -62,6 +66,7 @@ impl Mode {
             Self::ItemActions(_) => Some("Item actions"),
             Self::Reorder(_) => Some("Reorder"),
             Self::Jump => Some("Jump"),
+            Self::Themes => Some("Theme"),
             _ => None,
         }
     }
@@ -72,9 +77,14 @@ pub enum Key {
     Command(CommandId),
     Note(NoteId),
     Destination(Parent),
-    ItemAction { target: ItemTarget, id: CommandId },
+    ItemAction {
+        target: ItemTarget,
+        id: CommandId,
+    },
     Reorder(ReorderTarget),
     Workspace(PathBuf),
+    /// `None` follows the system appearance.
+    Theme(Option<&'static str>),
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +104,7 @@ pub enum Action {
     ItemCommand { target: ItemTarget, id: CommandId },
     Reorder(ReorderTarget),
     Workspace(PathBuf),
+    Theme(Option<&'static str>),
 }
 
 #[derive(Debug, Clone)]
@@ -191,7 +202,9 @@ impl App {
         if self.dialog.is_some() || self.loading.is_some() {
             return self.blocked("Close the dialog or wait for the workspace to finish opening");
         }
-        if !matches!(mode, Mode::Commands | Mode::Workspaces) && self.session.is_none() {
+        if !matches!(mode, Mode::Commands | Mode::Workspaces | Mode::Themes)
+            && self.session.is_none()
+        {
             return self.blocked("Open a workspace first");
         }
         if matches!(mode, Mode::MoveNote(note) if self.model().and_then(|model| model.note(note)).is_none())
@@ -285,7 +298,7 @@ impl App {
         let mut rows = Vec::new();
         match mode {
             Mode::Commands => {
-                for group in ["This note", "Go", "View", "Workspace"] {
+                for group in GROUPS {
                     for definition in DEFINITIONS
                         .iter()
                         .filter(|definition| definition.group == group)
@@ -301,11 +314,7 @@ impl App {
                             highlight: None,
                             content_hit: false,
                             group,
-                            shortcut: if definition.shortcut.is_empty() {
-                                String::new()
-                            } else {
-                                format!("{PRIMARY}{}", definition.shortcut)
-                            },
+                            shortcut: self.shortcut_label(definition.key).unwrap_or_default(),
                             current: false,
                             enabled: self.command_enabled(definition.id),
                             action: Action::Command(definition.id),
@@ -380,6 +389,37 @@ impl App {
                         enabled: self.folder_request.is_none(),
                         action: Action::Command(CommandId::AddWorkspace),
                     });
+                }
+            }
+            Mode::Themes => {
+                let current = self.preferences.settings.theme.clone();
+                let system = wren_core::settings::ThemeChoice::system();
+                let mut choices = vec![(None, "System".to_string(), {
+                    let (light, dark) = (definitions::LIGHT.name, definitions::DARK.name);
+                    format!("{dark} or {light}, following the system appearance")
+                })];
+                choices.extend(definitions::BUILT_INS.iter().map(|theme| {
+                    let appearance = match theme.appearance {
+                        definitions::Appearance::Dark => "Dark",
+                        definitions::Appearance::Light => "Light",
+                    };
+                    (
+                        Some(theme.id),
+                        theme.name.to_string(),
+                        appearance.to_string(),
+                    )
+                }));
+                for (id, title, path) in choices {
+                    if fuzzy_score(&query, &title).is_none() {
+                        continue;
+                    }
+                    let selected = match id {
+                        None => current == system,
+                        Some(id) => current == wren_core::settings::ThemeChoice::Fixed(id.into()),
+                    };
+                    let mut row = action_row(Key::Theme(id), title, path, true, Action::Theme(id));
+                    row.current = selected;
+                    rows.push(row);
                 }
             }
             Mode::ItemActions(item) => {
@@ -554,6 +594,7 @@ impl App {
             Action::Note(target) => self.dispatch(Command::OpenNote(target)),
             Action::ItemCommand { target, id } => self.dispatch(Command::ItemAction { target, id }),
             Action::Reorder(target) => self.dispatch(Command::Reorder(target)),
+            Action::Theme(id) => self.choose_theme(id),
             Action::Workspace(path) => {
                 if workspace_removal {
                     self.dispatch(Command::RemoveWorkspace(path))
@@ -856,6 +897,7 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
         Key::ItemAction { target, id } => format!("item-{target:?}-{}", id.key()),
         Key::Reorder(target) => format!("reorder-{target:?}"),
         Key::Workspace(path) => format!("workspace-{}", path.display()),
+        Key::Theme(id) => format!("theme-{}", id.unwrap_or("system")),
     };
     iced::advanced::widget::Id::from(format!("palette-row-{generation}-{key}"))
 }

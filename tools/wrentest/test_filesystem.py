@@ -268,7 +268,7 @@ def test_native_committed_creation_is_not_replayed_after_metadata_error(tmp_path
         metadata = root / ".wren"
         try:
             metadata.chmod(0o500)
-            xdo("key", "--window", window, "--clearmodifiers", "ctrl+k")
+            xdo("key", "--window", window, "--clearmodifiers", "alt+shift+p")
             wait_for(lambda: app.client.call("navigation.get")["modal"] is not None,
                      description="native command palette opens")
             xdo("type", "--window", window, "--clearmodifiers", "--delay", "8", "New section")

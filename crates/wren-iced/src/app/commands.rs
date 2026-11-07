@@ -43,9 +43,11 @@ pub enum CommandId {
     ResetWidths,
     SortModified,
     SortTitle,
-    ThemeSystem,
-    ThemeLight,
-    ThemeDark,
+    ChooseTheme,
+    OpenSettings,
+    ReloadSettings,
+    CommandPalette,
+    Quit,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,166 +56,120 @@ pub struct Definition {
     pub key: &'static str,
     pub label: &'static str,
     pub group: &'static str,
-    pub shortcut: &'static str,
 }
 
 macro_rules! definitions {
-    ($(($id:ident, $key:literal, $label:literal, $group:literal, $shortcut:expr)),* $(,)?) => {
+    ($(($id:ident, $key:literal, $label:expr, $group:literal)),* $(,)?) => {
         pub const DEFINITIONS: &[Definition] = &[$(Definition {
-            id: CommandId::$id, key: $key, label: $label, group: $group, shortcut: $shortcut,
+            id: CommandId::$id, key: $key, label: $label, group: $group,
         }),*];
     };
 }
 
 #[cfg(target_os = "macos")]
-pub const PRIMARY: &str = "⌘";
+const REVEAL_NOTE: &str = "Reveal note in Finder";
+#[cfg(target_os = "macos")]
+const REVEAL_GROUP: &str = "Reveal group in Finder";
+#[cfg(target_os = "macos")]
+const REVEAL_SECTION: &str = "Reveal section in Finder";
 #[cfg(not(target_os = "macos"))]
-pub const PRIMARY: &str = "Ctrl+";
+const REVEAL_NOTE: &str = "Reveal note in Files";
+#[cfg(not(target_os = "macos"))]
+const REVEAL_GROUP: &str = "Reveal group in Files";
+#[cfg(not(target_os = "macos"))]
+const REVEAL_SECTION: &str = "Reveal section in Files";
+
+/// Palette section order; `Hidden` commands are bindable but not listed.
+pub const GROUPS: [&str; 5] = ["This note", "Go", "View", "Workspace", "App"];
 
 // These keys are the stable production/test protocol, independent of labels.
 definitions![
-    (NewNote, "note.new", "New note…", "This note", "N"),
+    (NewNote, "note.new", "New note…", "This note"),
     (
         NewDatedNote,
         "note.new_dated",
         "New dated note",
-        "This note",
-        "Shift+N"
+        "This note"
     ),
-    (RenameNote, "note.rename", "Rename note…", "This note", ""),
-    (DeleteNote, "note.delete", "Delete note…", "This note", ""),
-    (
-        RevealNote,
-        "note.reveal",
-        "Reveal note in Files",
-        "This note",
-        ""
-    ),
-    (MoveNote, "note.move", "Move note to…", "This note", ""),
+    (RenameNote, "note.rename", "Rename note…", "This note"),
+    (DeleteNote, "note.delete", "Delete note…", "This note"),
+    (RevealNote, "note.reveal", REVEAL_NOTE, "This note"),
+    (MoveNote, "note.move", "Move note to…", "This note"),
     (
         OpenConflictCopy,
         "note.open_conflict",
         "Open conflict copy",
-        "This note",
-        ""
+        "This note"
     ),
-    (NewGroup, "group.new", "New group…", "Workspace", ""),
-    (NewSection, "section.new", "New section…", "Workspace", ""),
-    (
-        RenameGroup,
-        "group.rename",
-        "Rename group…",
-        "Workspace",
-        ""
-    ),
-    (
-        DeleteGroup,
-        "group.delete",
-        "Delete group…",
-        "Workspace",
-        ""
-    ),
-    (
-        RevealGroup,
-        "group.reveal",
-        "Reveal group in Files",
-        "Workspace",
-        ""
-    ),
-    (MoveGroup, "group.move", "Move group to…", "Workspace", ""),
-    (
-        ReorderGroup,
-        "group.reorder",
-        "Reorder group…",
-        "Workspace",
-        ""
-    ),
+    (NewGroup, "group.new", "New group…", "Workspace"),
+    (NewSection, "section.new", "New section…", "Workspace"),
+    (RenameGroup, "group.rename", "Rename group…", "Workspace"),
+    (DeleteGroup, "group.delete", "Delete group…", "Workspace"),
+    (RevealGroup, "group.reveal", REVEAL_GROUP, "Workspace"),
+    (MoveGroup, "group.move", "Move group to…", "Workspace"),
+    (ReorderGroup, "group.reorder", "Reorder group…", "Workspace"),
     (
         ReorderSection,
         "section.reorder",
         "Reorder section…",
-        "Workspace",
-        ""
+        "Workspace"
     ),
     (
         RenameSection,
         "section.rename",
         "Rename section…",
-        "Workspace",
-        ""
+        "Workspace"
     ),
     (
         DeleteSection,
         "section.delete",
         "Delete section…",
-        "Workspace",
-        ""
+        "Workspace"
     ),
-    (
-        RevealSection,
-        "section.reveal",
-        "Reveal section in Files",
-        "Workspace",
-        ""
-    ),
-    (Jump, "navigation.jump", "Jump to note…", "Go", "P"),
-    (
-        Search,
-        "navigation.search",
-        "Search workspace…",
-        "Go",
-        "Shift+F"
-    ),
-    (Find, "navigation.find", "Find in note", "Go", "F"),
-    (Back, "navigation.back", "Back", "Go", "["),
-    (Forward, "navigation.forward", "Forward", "Go", "]"),
-    (Focus, "view.focus", "Toggle focus mode", "View", "\\"),
-    (Columns, "view.columns", "Layout: Columns", "View", "Alt+1"),
-    (Outline, "view.outline", "Layout: Outline", "View", "Alt+2"),
+    (RevealSection, "section.reveal", REVEAL_SECTION, "Workspace"),
+    (Jump, "navigation.jump", "Jump to note…", "Go"),
+    (Search, "navigation.search", "Search workspace…", "Go"),
+    (Find, "navigation.find", "Find in note", "Go"),
+    (Back, "navigation.back", "Back", "Go"),
+    (Forward, "navigation.forward", "Forward", "Go"),
+    (Focus, "view.focus", "Toggle focus mode", "View"),
+    (Columns, "view.columns", "Layout: Columns", "View"),
+    (Outline, "view.outline", "Layout: Outline", "View"),
     (
         ResetWidths,
         "view.reset_widths",
         "Reset column widths",
-        "View",
-        ""
+        "View"
     ),
     (
         SortModified,
         "notes.sort_modified",
         "Sort notes: modified",
-        "View",
-        ""
+        "View"
     ),
-    (
-        SortTitle,
-        "notes.sort_title",
-        "Sort notes: title",
-        "View",
-        ""
-    ),
-    (ThemeSystem, "theme.system", "Theme: System", "View", ""),
-    (ThemeLight, "theme.light", "Theme: Light", "View", ""),
-    (ThemeDark, "theme.dark", "Theme: Dark", "View", ""),
+    (SortTitle, "notes.sort_title", "Sort notes: title", "View"),
+    (ChooseTheme, "theme.choose", "Change theme…", "View"),
     (
         SwitchWorkspace,
         "workspace.switch",
         "Switch workspace…",
-        "Workspace",
-        ""
+        "Workspace"
     ),
-    (
-        AddWorkspace,
-        "workspace.add",
-        "Add workspace…",
-        "Workspace",
-        ""
-    ),
+    (AddWorkspace, "workspace.add", "Add workspace…", "Workspace"),
     (
         RemoveWorkspace,
         "workspace.remove",
         "Remove workspace from list",
-        "Workspace",
-        ""
+        "Workspace"
+    ),
+    (OpenSettings, "settings.open", "Open settings file", "App"),
+    (ReloadSettings, "settings.reload", "Reload settings", "App"),
+    (Quit, "app.quit", "Quit Wren", "App"),
+    (
+        CommandPalette,
+        "palette.commands",
+        "Show all commands",
+        "Hidden"
     ),
 ];
 
@@ -226,7 +182,6 @@ impl CommandId {
             .key
     }
 
-    #[cfg(any(test, feature = "smoke-test"))]
     pub fn parse(key: &str) -> Option<Self> {
         DEFINITIONS
             .iter()
@@ -352,7 +307,8 @@ impl App {
         }
         match id {
             AddWorkspace => self.folder_request.is_none(),
-            SwitchWorkspace | ThemeSystem | ThemeLight | ThemeDark => true,
+            SwitchWorkspace | ChooseTheme | OpenSettings | ReloadSettings | CommandPalette
+            | Quit => true,
             RemoveWorkspace => self
                 .config
                 .as_ref()
@@ -639,14 +595,28 @@ impl App {
                 ));
                 self.close_palette_after(outcome)
             }
-            ThemeSystem | ThemeLight | ThemeDark => {
+            ChooseTheme => self.open_palette(Mode::Themes),
+            CommandPalette => self.open_palette(Mode::Commands),
+            OpenSettings => self.open_settings(),
+            ReloadSettings => {
                 self.palette = None;
-                let task = self.update(Message::ChooseTheme(match id {
-                    ThemeLight => Some(wren_core::theme::LIGHT),
-                    ThemeDark => Some(wren_core::theme::DARK),
-                    _ => None,
-                }));
-                self.finish_action(Disposition::Completed, None, task.chain(focus_editor()))
+                let warning = self.reload_settings(true);
+                self.finish_action(
+                    if warning.is_some() {
+                        Disposition::CommittedWarning
+                    } else {
+                        Disposition::Completed
+                    },
+                    warning,
+                    focus_editor(),
+                )
+            }
+            Quit => {
+                self.palette = None;
+                match self.request_quit() {
+                    Ok(task) => self.finish_action(Disposition::Completed, None, task),
+                    Err(error) => self.blocked(error),
+                }
             }
         }
     }
@@ -986,9 +956,11 @@ mod tests {
             "view.reset_widths",
             "notes.sort_modified",
             "notes.sort_title",
-            "theme.system",
-            "theme.light",
-            "theme.dark",
+            "theme.choose",
+            "settings.open",
+            "settings.reload",
+            "app.quit",
+            "palette.commands",
         ] {
             assert!(CommandId::parse(key).is_some(), "{key}");
         }

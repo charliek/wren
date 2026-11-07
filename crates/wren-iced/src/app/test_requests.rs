@@ -279,6 +279,7 @@ impl App {
                     "jump" => Mode::Jump,
                     "search" => Mode::Search,
                     "workspaces" => Mode::Workspaces,
+                    "themes" => Mode::Themes,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -611,6 +612,14 @@ fn result_key(value: &Value) -> Result<Key, String> {
     if let Some(destination) = object.get("destination") {
         return Ok(Key::Destination(parent(destination)?));
     }
+    if object.contains_key("theme") {
+        let id = string(value, "theme")?;
+        return Ok(Key::Theme(if id == "system" {
+            None
+        } else {
+            Some(wren_core::theme::builtin(id).ok_or("Unknown theme")?.id)
+        }));
+    }
     if object.contains_key("workspace") {
         return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
     }
@@ -648,6 +657,7 @@ fn key_json(key: &Key) -> Value {
         Key::Note(note) => json!({"note":note.0}),
         Key::Destination(parent) => json!({"destination":parent_json(*parent)}),
         Key::Workspace(path) => json!({"workspace":path}),
+        Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }
@@ -985,7 +995,7 @@ mod tests {
             ("view.sort", json!({"mode":"title"})),
             ("view.focus", json!({"enabled":true})),
             ("palette.open", json!({"mode":"commands"})),
-            ("palette.query", json!({"query":"Theme:"})),
+            ("palette.query", json!({"query":"Layout:"})),
             ("palette.step", json!({"delta":1})),
         ] {
             assert!(
@@ -1004,7 +1014,7 @@ mod tests {
         assert_eq!(state["focus"], true);
         assert_eq!(state["filters"]["notes"], "first");
         assert_eq!(state["modal"]["active_index"], 1);
-        assert_eq!(state["modal"]["results"].as_array().unwrap().len(), 3);
+        assert_eq!(state["modal"]["results"].as_array().unwrap().len(), 2);
         assert!(state["modal"]["active_key"].is_object());
         assert!(app
             .navigation_request("command.run", &json!({"id":"save"}))

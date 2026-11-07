@@ -327,7 +327,7 @@ impl Config {
             path: directory.clone(),
             file,
         });
-        let store = FsStore::open(directory).map_err(config_store_error)?;
+        let store = open_registry_store(directory).map_err(config_store_error)?;
         if store.root() != directory {
             return Err(
                 "The config directory was replaced; reload configuration before updating it".into(),
@@ -799,6 +799,24 @@ fn same_version(left: &Stat, right: &Stat) -> bool {
         && left.st_mtime_nsec == right.st_mtime_nsec
         && left.st_ctime == right.st_ctime
         && left.st_ctime_nsec == right.st_ctime_nsec
+}
+
+/// Open the registry's store, retrying briefly while its lock is held.
+///
+/// Registry updates are short, so a competing writer releases quickly. A
+/// concurrent `fork` (Reveal, opening settings, or another thread's child
+/// process) also briefly duplicates the lock descriptor until `exec`.
+fn open_registry_store(directory: &Path) -> Result<FsStore, StoreError> {
+    let mut attempts = 0;
+    loop {
+        match FsStore::open(directory) {
+            Err(StoreError::Locked) if attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn config_store_error(error: StoreError) -> String {

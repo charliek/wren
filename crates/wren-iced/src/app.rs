@@ -20,6 +20,7 @@ pub(crate) mod commands;
 mod gestures;
 mod navigation;
 mod palette;
+mod preferences;
 mod workspaces;
 
 use crate::panes::{Layout, Widths};
@@ -35,7 +36,9 @@ pub struct App {
     definition: Theme,
     toolkit_theme: iced::Theme,
     system_mode: Mode,
-    follows_system: bool,
+    /// A theme forced by the smoke/test harness, bypassing settings.
+    theme_override: Option<Theme>,
+    preferences: preferences::Preferences,
     editor: EditorView,
     find_open: bool,
     find_query: String,
@@ -108,7 +111,7 @@ pub enum Message {
     PaletteChoose(u64, palette::Key),
     PaletteClose,
     PaletteRevealed,
-    Shortcut(crate::shortcuts::Shortcut),
+    Key(crate::keys::Input),
     FolderChosen(u64, Option<PathBuf>),
     Revealed {
         correlation: u64,
@@ -168,25 +171,25 @@ pub fn spike_text(large: bool) -> String {
 
 impl App {
     pub fn new(options: Options) -> (Self, Task<Message>) {
+        // Unit tests must never read or write the user's real configuration.
+        if cfg!(test) {
+            return Self::with_config(options, None, None);
+        }
         let config = (!options.editor).then(wren_core::config::Config::load);
-        Self::with_config(options, config)
+        Self::with_config(options, config, wren_core::settings::path())
     }
 
     fn with_config(
         options: Options,
         config: Option<wren_core::config::Config>,
+        settings_path: Option<PathBuf>,
     ) -> (Self, Task<Message>) {
         #[cfg(feature = "smoke-test")]
-        let definition = options
-            .smoke
-            .as_ref()
-            .map_or(definitions::DARK, |request| request.theme);
+        let theme_override = options.smoke.as_ref().map(|request| request.theme);
         #[cfg(not(feature = "smoke-test"))]
-        let definition = definitions::DARK;
-        #[cfg(feature = "smoke-test")]
-        let follows_system = options.smoke.is_none();
-        #[cfg(not(feature = "smoke-test"))]
-        let follows_system = true;
+        let theme_override: Option<Theme> = None;
+        let preferences = preferences::Preferences::load(settings_path);
+        let definition = preferences.theme(Mode::None).0;
         let mut registry_warning = config
             .as_ref()
             .and_then(|config| config.warning().map(str::to_owned));
@@ -214,7 +217,8 @@ impl App {
             definition,
             toolkit_theme: theme::from_definition(definition),
             system_mode: Mode::None,
-            follows_system,
+            theme_override,
+            preferences,
             editor: EditorView::new(&contents),
             find_open: false,
             find_query: String::new(),
@@ -278,6 +282,10 @@ impl App {
             #[cfg(feature = "smoke-test")]
             frames: crate::test_capture::Frames::default(),
         };
+        app.apply_preferences();
+        if let Some(warning) = app.startup_settings_warning() {
+            app.banner = Some(warning);
+        }
         let opening = workspace.map_or_else(Task::none, |path| {
             app.apply_core(Op::OpenWorkspace { path })
                 .unwrap_or_else(|error| {
@@ -311,15 +319,11 @@ impl App {
             Message::Reply(request, result) => request.respond(result),
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
-                if self.follows_system {
-                    self.set_theme(theme::definition_for_system(mode));
-                }
+                self.apply_theme();
             }
             Message::ChooseTheme(definition) => {
-                self.follows_system = definition.is_none();
-                self.set_theme(
-                    definition.unwrap_or_else(|| theme::definition_for_system(self.system_mode)),
-                );
+                self.theme_override = definition;
+                self.apply_theme();
             }
             Message::Editor(message) => return self.edit(message),
             Message::Core(op) => return self.process_core(op).task,
@@ -361,27 +365,7 @@ impl App {
                 return self.drag_event(generation, layout, event)
             }
             Message::Resize(generation, event) => return self.resize_event(generation, event),
-            Message::Shortcut(shortcut) => {
-                use crate::shortcuts::Shortcut;
-                if shortcut == Shortcut::Escape {
-                    return self.update(Message::Escape);
-                }
-                if self.palette.is_some() {
-                    return match shortcut {
-                        Shortcut::Up => self.palette_step(-1).task,
-                        Shortcut::Down => self.palette_step(1).task,
-                        Shortcut::Enter => self.activate_palette(None).task,
-                        _ => Task::none(),
-                    };
-                }
-                if self.dialog.is_none() {
-                    return match shortcut {
-                        Shortcut::Commands => self.open_palette(palette::Mode::Commands).task,
-                        Shortcut::Command(command) => self.dispatch(Command::Run(command)).task,
-                        _ => Task::none(),
-                    };
-                }
-            }
+            Message::Key(input) => return self.key_input(input),
             Message::Tick => {
                 if self.session.is_some() {
                     return self.process_core(Op::Tick).task;
@@ -463,6 +447,9 @@ impl App {
                 }
                 iced::window::Event::Unfocused => {
                     let _ = self.window_unfocused();
+                }
+                iced::window::Event::Focused => {
+                    let _ = self.reload_settings(false);
                 }
                 _ => {}
             },
@@ -550,6 +537,10 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        crate::keys::alt_filter(self.contents()).into()
+    }
+
+    fn contents(&self) -> Element<'_, Message> {
         #[cfg(feature = "smoke-test")]
         if self.smoke.is_some() {
             return self.smoke_view();
@@ -674,9 +665,7 @@ impl App {
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::window::events().map(|(id, event)| Message::Window(id, event)),
             iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Keyboard(event) => {
-                    crate::shortcuts::pressed(&event).map(Message::Shortcut)
-                }
+                iced::Event::Keyboard(event) => crate::keys::input(&event).map(Message::Key),
                 _ => None,
             }),
         ];
@@ -693,11 +682,6 @@ impl App {
             subscriptions
         };
         Subscription::batch(subscriptions)
-    }
-
-    fn set_theme(&mut self, definition: Theme) {
-        self.definition = definition;
-        self.toolkit_theme = theme::from_definition(definition);
     }
 }
 

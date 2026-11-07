@@ -90,17 +90,17 @@ fn one_modal_owns_keyboard_and_neither_typing_nor_global_creation_leaks_to_edito
     let count = app.model().unwrap().notes.len();
     let _ = app.open_palette(Mode::Commands);
     append(&mut app, "not an edit");
-    let _ = app.update(Message::Shortcut(crate::shortcuts::Shortcut::Command(
-        CommandId::NewDatedNote,
-    )));
+    let _ = app.update(super::preferences::shortcut(CommandId::NewDatedNote));
     assert_eq!(app.editor.text(), before);
     assert_eq!(app.model().unwrap().notes.len(), count);
     assert!(app.dialog.is_none());
     let _ = app.palette_query("New note".into());
-    let _ = app.update(Message::Shortcut(crate::shortcuts::Shortcut::Enter));
+    let _ = app.update(Message::Key(crate::keys::Input::Nav(
+        crate::keys::Nav::Enter,
+    )));
     assert!(app.palette.is_none());
     assert!(app.dialog.is_some());
-    let _ = app.update(Message::Shortcut(crate::shortcuts::Shortcut::Commands));
+    let _ = app.update(super::preferences::shortcut(CommandId::CommandPalette));
     assert!(app.palette.is_none());
     let _ = app.update(Message::Escape);
     assert!(app.dialog.is_none());
@@ -995,7 +995,7 @@ fn remove_command_uses_a_keyboard_picker_that_can_remove_an_unavailable_registra
 fn normal_startup_is_onboarding_or_registered_root_and_evaluation_is_explicit() {
     let configdir = crate::test_support::tempdir();
     let config = Config::load_from(configdir.path());
-    let (app, _) = App::with_config(Options::default(), Some(config));
+    let (app, _) = App::with_config(Options::default(), Some(config), None);
     assert!(app.workspace_mode);
     assert!(app.loading.is_none());
     assert!(app.editor.text().is_empty());
@@ -1003,7 +1003,7 @@ fn normal_startup_is_onboarding_or_registered_root_and_evaluation_is_explicit() 
     let mut config = Config::load_from(configdir.path());
     config.add(root.path(), None).unwrap();
     config.set_active(root.path()).unwrap();
-    let (app, _) = App::with_config(Options::default(), Some(config));
+    let (app, _) = App::with_config(Options::default(), Some(config), None);
     assert!(app.loading.is_some());
     assert_eq!(app.workspace_path, root.path().to_string_lossy());
     assert!(app.editor.text().is_empty());
@@ -1172,7 +1172,9 @@ fn destructive_command_needs_explicit_target_and_return_is_never_confirmation() 
     assert!(
         matches!(app.dialog.as_ref().unwrap().kind, DialogKind::Delete(ItemRef::Note(note)) if note == first)
     );
-    let _ = app.update(Message::Shortcut(crate::shortcuts::Shortcut::Enter));
+    let _ = app.update(Message::Key(crate::keys::Input::Nav(
+        crate::keys::Nav::Enter,
+    )));
     let _ = app.update(Message::SubmitDialog);
     assert!(app.dialog.is_some());
     assert!(directory.path().join("Alpha/First.md").exists());

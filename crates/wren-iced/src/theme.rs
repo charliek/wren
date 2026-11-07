@@ -1,16 +1,9 @@
-use iced::theme::{Mode, Palette};
+use iced::theme::Palette;
 use iced::{Color, Theme};
-use wren_core::theme::{self, Appearance, Rgb};
+use wren_core::theme::{self, Rgb};
 
 pub fn color(Rgb(red, green, blue): Rgb) -> Color {
     Color::from_rgb8(red, green, blue)
-}
-
-pub fn definition_for_system(mode: Mode) -> theme::Theme {
-    theme::for_appearance(match mode {
-        Mode::Light => Appearance::Light,
-        Mode::Dark | Mode::None => Appearance::Dark,
-    })
 }
 
 pub fn from_definition(definition: theme::Theme) -> Theme {
@@ -57,12 +50,5 @@ mod tests {
             from_definition(definition).palette().primary,
             color(definition.colors.accent)
         );
-    }
-
-    #[test]
-    fn unavailable_system_preference_has_a_deterministic_fallback() {
-        assert_eq!(definition_for_system(Mode::None), theme::DARK);
-        assert_eq!(definition_for_system(Mode::Dark), theme::DARK);
-        assert_eq!(definition_for_system(Mode::Light), theme::LIGHT);
     }
 }

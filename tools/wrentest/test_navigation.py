@@ -12,6 +12,7 @@ from datetime import date
 import os
 from pathlib import Path
 import re
+import sys
 import stat
 import tomllib
 
@@ -29,9 +30,10 @@ COMMANDS = {
     "group.reveal", "group.move", "section.rename", "section.delete", "section.reveal",
     "navigation.jump", "navigation.search", "navigation.find", "navigation.back",
     "navigation.forward", "view.focus", "view.columns", "view.outline",
-    "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.system",
-    "theme.light", "theme.dark", "workspace.switch", "workspace.add", "workspace.remove",
+    "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
+    "workspace.switch", "workspace.add", "workspace.remove",
     "section.reorder", "group.reorder", "note.open_conflict",
+    "settings.open", "settings.reload", "app.quit",
 }
 DEFAULT_WIDTHS = {
     "columns": {"sections": 200, "groups": 220, "notes": 280},
@@ -137,6 +139,12 @@ def activate(app: WrenApp, key: dict, *, disposition: str = "completed"):
     return gateway(app, "palette.activate", index=indices[0], disposition=disposition)
 
 
+def choose_theme(app: WrenApp, theme: str):
+    """Pick a built-in theme through the palette, as a user would."""
+    palette(app, "themes")
+    return activate(app, {"theme": theme if theme.startswith("wren-") else f"wren-{theme}"})
+
+
 def jump(app: WrenApp, path: str, *, disposition: str = "completed"):
     note = item(app, "notes", path)
     palette(app, "jump", note["title"])
@@ -240,7 +248,7 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         by_id = {row["key"]["command"]: row for row in rows}
         assert set(by_id) == COMMANDS
         assert len(rows) == len(COMMANDS)
-        assert {row["group"] for row in rows} == {"This note", "Go", "View", "Workspace"}
+        assert {row["group"] for row in rows} == {"This note", "Go", "View", "Workspace", "App"}
         assert all(row["title"] for row in rows)
         for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict"}:
             assert by_id[key]["enabled"] is True, key
@@ -310,8 +318,12 @@ def test_dated_creation_and_shortcut_metadata_handle_filename_collisions(vault: 
         jump(app, FIRST)
         rows = palette(app, "commands")["results"]
         shortcuts = {row["key"]["command"]: row["shortcut"] for row in rows}
-        assert shortcuts["note.new"] == "Ctrl+N"
-        assert shortcuts["note.new_dated"] == "Ctrl+Shift+N"
+        if sys.platform == "darwin":
+            assert shortcuts["note.new"] == "⌘N"
+            assert shortcuts["note.new_dated"] == "⇧⌘N"
+        else:
+            assert shortcuts["note.new"] == "Alt+N"
+            assert shortcuts["note.new_dated"] == "Alt+Shift+N"
         nonempty = [value for value in shortcuts.values() if value]
         assert len(nonempty) == len(set(nonempty))
         activate(app, {"command": "note.new_dated"})
@@ -830,8 +842,10 @@ def test_layout_focus_filter_sort_and_width_changes_retain_selection_undo_and_re
             ("view.width", {"layout": layout, "pane": "sections", "width": 333}),
             ("view.width", {"layout": layout, "pane": "notes", "width": 444}),
             ("view.focus", {"enabled": False}),
-            ("command.run", {"id": "theme.light"}),
-            ("command.run", {"id": "theme.dark"}),
+            ("palette.open", {"mode": "themes"}),
+            ("palette.activate", {"key": {"theme": "wren-light"}}),
+            ("palette.open", {"mode": "themes"}),
+            ("palette.activate", {"key": {"theme": "nord"}}),
             ("view.layout", {"layout": "outline" if layout == "columns" else "columns"}),
             ("view.layout", {"layout": layout}),
         ]
@@ -917,7 +931,10 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         assert navigation(app)["registrations"] == [] and navigation(app)["active_registration"] is None
         rows = palette(app, "commands")["results"]
         enabled = {row["key"]["command"] for row in rows if row["enabled"]}
-        assert enabled == {"workspace.add", "workspace.switch", "theme.system", "theme.light", "theme.dark"}
+        assert enabled == {
+            "workspace.add", "workspace.switch", "theme.choose",
+            "settings.open", "settings.reload", "app.quit",
+        }
         gateway(app, "palette.close")
         command(app, "note.new", disposition="blocked")
         add_workspace(app, alias, "Southern laboratory")
@@ -1113,7 +1130,7 @@ def test_palette_search_outline_and_focus_render_real_selection_and_glyphs(
     artifacts = artifact_directory(f"navigation-render-{theme}")
     with WrenApp(workspace=vault, artifacts_dir=artifacts) as app:
         note = jump(app, FIRST)
-        command(app, f"theme.{theme}")
+        choose_theme(app, theme)
         command(app, "view.outline")
         gateway(app, "filter.set", pane="outline", query="Research")
         assert navigation(app)["layout"] == "outline"

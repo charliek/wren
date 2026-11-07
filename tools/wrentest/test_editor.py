@@ -60,7 +60,7 @@ def test_theme_changes_preserve_editor_state_and_noop_edits() -> None:
             after = call("theme.set", {"id": theme})
             for field in ("text", "cursor", "selection", "selected_text", "revision"):
                 assert after[field] == before[field]
-            assert after["theme"] == theme
+            assert after["theme"] == f"wren-{theme}"
         call("editor.set", {"text": "abc"})
         before = call("editor.action", {"kind": "move", "motion": "start"})
         after = call("editor.action", {"kind": "backspace"})

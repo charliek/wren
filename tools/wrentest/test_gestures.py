@@ -319,8 +319,8 @@ def test_native_command_palette_focus_typing_arrows_and_enter(native_workspace) 
     before = editor_identity(app)
     document = session(app)["document"]
     original_files = files(root)
-    keys(window, "ctrl+k")
-    wait_for(lambda: navigation(app)["modal"] is not None, description="Ctrl+K opens commands")
+    keys(window, "alt+shift+p")
+    wait_for(lambda: navigation(app)["modal"] is not None, description="Alt+Shift+P opens commands")
     assert navigation(app)["modal"]["mode"] == "commands"
     type_text(window, "lyt")
     wait_for(lambda: navigation(app)["modal"]["query"] == "lyt", description="native command query focus")
@@ -351,8 +351,8 @@ def test_native_ctrl_p_jump_types_moves_and_opens_the_highlighted_note(native_wo
     before = editor_identity(app)
     first = item(app, "notes", PICKER_A)["id"]
     second = item(app, "notes", PICKER_B)["id"]
-    keys(window, "ctrl+p")
-    wait_for(lambda: navigation(app)["modal"] is not None, description="Ctrl+P opens Jump")
+    keys(window, "alt+p")
+    wait_for(lambda: navigation(app)["modal"] is not None, description="Alt+P opens Jump")
     assert navigation(app)["modal"]["mode"] == "jump"
     type_text(window, "Picker")
     wait_for(lambda: navigation(app)["modal"]["query"] == "Picker", description="native Jump query focus")
@@ -381,7 +381,7 @@ def test_native_escape_and_scrim_dismiss_palettes_without_typing_or_click_throug
     before_editor = editor_identity(app)
     before_session = session(app)
     original_files = files(root)
-    keys(window, "ctrl+k")
+    keys(window, "alt+shift+p")
     wait_for(lambda: navigation(app)["modal"] is not None, description="commands overlay opens")
     type_text(window, "unmatched-gesture-query")
     wait_for(lambda: navigation(app)["modal"]["query"] == "unmatched-gesture-query",
@@ -392,7 +392,7 @@ def test_native_escape_and_scrim_dismiss_palettes_without_typing_or_click_throug
     wait_for(lambda: navigation(app)["modal"] is None, description="native Escape dismisses palette")
     assert editor_identity(app) == before_editor
     assert session(app)["document"] == before_session["document"]
-    keys(window, "ctrl+p")
+    keys(window, "alt+p")
     wait_for(lambda: navigation(app)["modal"] is not None, description="Jump overlay reopens")
     type_text(window, "Picker")
     wait_for(lambda: navigation(app)["modal"]["query"] == "Picker", description="Jump input consumes typing")
