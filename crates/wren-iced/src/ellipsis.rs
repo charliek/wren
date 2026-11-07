@@ -51,9 +51,26 @@ impl Ellipsis<'_> {
 }
 
 struct State<P> {
-    key: Option<(String, u32, u32)>,
+    key: Option<Key>,
     paragraph: P,
     width: f32,
+}
+
+#[derive(PartialEq)]
+struct Key {
+    content: String,
+    width: u32,
+    size: u32,
+    font: Font,
+}
+
+impl Key {
+    fn matches(&self, content: &str, width: f32, size: f32, font: Font) -> bool {
+        self.content == content
+            && self.width == width.to_bits()
+            && self.size == size.to_bits()
+            && self.font == font
+    }
 }
 
 fn shaped<P: text::Paragraph<Font = Font>>(content: &str, size: f32, font: Font) -> P {
@@ -76,8 +93,10 @@ pub fn truncate(content: &str, mut fits: impl FnMut(&str) -> bool) -> String {
     if fits(content) {
         return content.to_string();
     }
+    // Candidate prefixes end before each char start; the full text (which
+    // did not fit) is never a candidate.
     let boundaries: Vec<usize> = content.char_indices().map(|(index, _)| index).collect();
-    let (mut low, mut high) = (0, boundaries.len());
+    let (mut low, mut high) = (0, boundaries.len().saturating_sub(1));
     while low < high {
         let middle = (low + high).div_ceil(2);
         let candidate = format!("{}…", content[..boundaries[middle]].trim_end());
@@ -121,12 +140,11 @@ where
     ) -> layout::Node {
         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
         let available = limits.max().width;
-        let key = (
-            self.content.to_string(),
-            available.to_bits(),
-            self.size.to_bits(),
-        );
-        if state.key.as_ref() != Some(&key) {
+        let fresh = state
+            .key
+            .as_ref()
+            .is_some_and(|key| key.matches(&self.content, available, self.size, self.font));
+        if !fresh {
             let (size, font) = (self.size, self.font);
             let measure = |candidate: &str| {
                 shaped::<Renderer::Paragraph>(candidate, size, font)
@@ -136,7 +154,12 @@ where
             let shown = truncate(&self.content, |candidate| measure(candidate) <= available);
             state.paragraph = shaped(&shown, size, font);
             state.width = state.paragraph.min_bounds().width.min(available);
-            state.key = Some(key);
+            state.key = Some(Key {
+                content: self.content.to_string(),
+                width: available.to_bits(),
+                size: self.size.to_bits(),
+                font: self.font,
+            });
         }
         let width = match self.width {
             Length::Shrink => state.width,
@@ -197,6 +220,15 @@ mod tests {
         // Trailing spaces before the ellipsis are dropped.
         assert_eq!(truncate("API migration", fits_chars(5)), "API…");
         assert_eq!(truncate("anything", fits_chars(0)), "…");
+    }
+
+    #[test]
+    fn a_last_character_wider_than_the_ellipsis_never_indexes_past_the_end() {
+        // Everything but the full text fits: the longest candidate is the
+        // first n-1 characters plus the ellipsis.
+        assert_eq!(truncate("ab", |candidate| candidate != "ab"), "a…");
+        assert_eq!(truncate("W", |candidate| candidate != "W"), "…");
+        assert_eq!(truncate("", |_| false), "…");
     }
 
     #[test]

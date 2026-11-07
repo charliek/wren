@@ -178,7 +178,7 @@ impl Settings {
 
     /// Load from `path`; a missing file yields defaults.
     pub fn load(path: &Path) -> Self {
-        match read(path) {
+        match read_text(path) {
             Ok(Some(text)) => Self::parse(&text),
             Ok(None) => Self::default(),
             Err(error) => Self {
@@ -189,7 +189,9 @@ impl Settings {
     }
 }
 
-fn read(path: &Path) -> io::Result<Option<String>> {
+/// Read the settings text; `None` when the file does not exist. Files over
+/// 1 MiB and invalid UTF-8 are errors.
+pub fn read_text(path: &Path) -> io::Result<Option<String>> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.len() > MAX_BYTES => Err(io::Error::other(format!(
             "larger than {} KiB",
@@ -246,30 +248,44 @@ pub fn with_value(text: &str, key: &str, value: &str) -> String {
 /// Set one setting in the file at `path`, creating it (and its directory)
 /// with the commented template when missing. Publishes atomically.
 pub fn write_value(path: &Path, key: &str, value: &str) -> io::Result<()> {
-    let current = read(path)?.unwrap_or_else(|| TEMPLATE.to_string());
+    let current = read_text(path)?.unwrap_or_else(|| TEMPLATE.to_string());
     publish(path, &with_value(&current, key, value))
 }
 
 /// Create the file with the commented template if it does not exist yet.
 pub fn ensure_exists(path: &Path) -> io::Result<()> {
-    match read(path)? {
+    match read_text(path)? {
         Some(_) => Ok(()),
         None => publish(path, TEMPLATE),
     }
 }
 
+/// Atomically replace the file. A symlinked `config.conf` (for example into
+/// a dotfiles repository) is written through, and existing permissions are
+/// kept.
 fn publish(path: &Path, text: &str) -> io::Result<()> {
+    let path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
     let directory = path
         .parent()
         .ok_or_else(|| io::Error::other("settings path has no parent directory"))?;
     fs::create_dir_all(directory)?;
-    let mut temporary = tempfile_in(directory)?;
-    temporary.1.write_all(text.as_bytes())?;
-    temporary.1.sync_all()?;
-    drop(temporary.1);
-    fs::rename(&temporary.0, path).inspect_err(|_| {
-        let _ = fs::remove_file(&temporary.0);
-    })
+    let (temporary, mut file) = tempfile_in(directory)?;
+    let written = (|| {
+        if let Ok(metadata) = fs::metadata(&path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 fn tempfile_in(directory: &Path) -> io::Result<(PathBuf, fs::File)> {
@@ -404,6 +420,43 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers, ["config.conf"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_go_through_symlinks_and_keep_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("dotfiles/wren.conf");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "editor-font-size = 15\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("config.conf");
+        symlink(&target, &link).unwrap();
+        write_value(&link, "theme", "nord").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "editor-font-size = 15\ntheme = nord\n"
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn oversized_and_non_utf8_files_are_errors_not_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.conf");
+        fs::write(&path, b"theme = \xff\n").unwrap();
+        assert!(read_text(&path).is_err());
+        assert_eq!(Settings::load(&path).warnings.len(), 1);
+        fs::write(&path, vec![b'#'; MAX_BYTES as usize + 1]).unwrap();
+        assert!(read_text(&path).is_err());
     }
 
     #[test]

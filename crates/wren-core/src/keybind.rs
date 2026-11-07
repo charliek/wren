@@ -104,6 +104,12 @@ pub fn canonical_key(token: &str) -> Option<String> {
     Some(named.into())
 }
 
+pub fn is_function_key(key: &str) -> bool {
+    key.strip_prefix('f')
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=24).contains(&number))
+}
+
 /// Parse a trigger such as `super+shift+p`. The last non-modifier token is
 /// the key; `+` itself may be written as `plus`.
 pub fn parse_trigger(trigger: &str) -> Option<Accel> {
@@ -124,6 +130,13 @@ pub fn parse_trigger(trigger: &str) -> Option<Accel> {
 }
 
 impl Accel {
+    /// Whether a key press can produce this trigger. Without Ctrl, Alt, or
+    /// Super a key types text (or moves the cursor), so only function keys
+    /// may be bound bare or with Shift alone.
+    pub fn is_bindable(&self) -> bool {
+        self.mods.ctrl || self.mods.alt || self.mods.logo || is_function_key(&self.key)
+    }
+
     /// Human-readable label in the platform's convention: `⌘⇧P` on macOS,
     /// `Alt+Shift+P` elsewhere.
     pub fn label(&self, platform: Platform) -> String {
@@ -256,6 +269,12 @@ impl Keymap {
                 warnings.push(format!("keybind: invalid trigger {trigger:?}"));
                 continue;
             };
+            if !accel.is_bindable() {
+                warnings.push(format!(
+                    "keybind: {trigger:?} needs ctrl, alt, or super (only f1–f24 may be bound alone)"
+                ));
+                continue;
+            }
             let action = action.trim();
             if action == UNBIND {
                 keymap.bindings.retain(|(bound, _)| *bound != accel);
@@ -392,5 +411,20 @@ mod tests {
         assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("no.such"));
         assert!(warnings[1].contains("invalid trigger"));
+    }
+
+    #[test]
+    fn bare_keys_other_than_function_keys_are_rejected() {
+        let user = [
+            ("f5".to_string(), "settings.reload".to_string()),
+            ("shift+f13".to_string(), "view.focus".to_string()),
+            ("shift+enter".to_string(), "view.focus".to_string()),
+            ("p".to_string(), "navigation.jump".to_string()),
+        ];
+        let (keymap, warnings) = Keymap::build(Vec::new(), &user, |_| true);
+        assert_eq!(keymap.action(&accel("f5")), Some("settings.reload"));
+        assert_eq!(keymap.action(&accel("shift+f13")), Some("view.focus"));
+        assert_eq!(keymap.action(&accel("shift+enter")), None);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 }

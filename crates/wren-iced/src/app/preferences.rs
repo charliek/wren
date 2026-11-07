@@ -1,6 +1,6 @@
 //! User settings (`config.conf`): theme, keybindings, editor options.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use iced::theme::Mode as SystemMode;
 use iced::Task;
@@ -20,22 +20,43 @@ pub struct Preferences {
     pub path: Option<PathBuf>,
     /// The bytes last loaded, so focus-triggered reloads skip unchanged files.
     loaded: Option<String>,
+    /// The warning last shown for these settings, so a clean reload can
+    /// retract it.
+    shown_warning: Option<String>,
+}
+
+/// Read and parse the settings file; read errors become warnings.
+fn read(path: Option<&Path>) -> (Option<String>, Settings) {
+    let Some(path) = path else {
+        return (None, Settings::default());
+    };
+    match settings::read_text(path) {
+        Ok(text) => {
+            let parsed = text
+                .as_deref()
+                .map_or_else(Settings::default, Settings::parse);
+            (text, parsed)
+        }
+        Err(error) => (
+            None,
+            Settings {
+                warnings: vec![format!("could not read the file: {error}")],
+                ..Settings::default()
+            },
+        ),
+    }
 }
 
 impl Preferences {
     /// Load from `path`; `None` means defaults with nowhere to persist.
     pub fn load(path: Option<PathBuf>) -> Self {
-        let loaded = path
-            .as_deref()
-            .and_then(|path| std::fs::read_to_string(path).ok());
-        let settings = loaded
-            .as_deref()
-            .map_or_else(Settings::default, Settings::parse);
+        let (loaded, settings) = read(path.as_deref());
         let mut preferences = Self {
             keymap: Keymap::default(),
             settings,
             path,
             loaded,
+            shown_warning: None,
         };
         preferences.rebuild_keymap();
         preferences
@@ -53,16 +74,14 @@ impl Preferences {
 
     /// Re-read the file. Returns `false` when nothing changed.
     fn reload(&mut self, force: bool) -> bool {
-        let Some(path) = &self.path else {
+        if self.path.is_none() {
             return false;
-        };
-        let text = std::fs::read_to_string(path).ok();
+        }
+        let (text, settings) = read(self.path.as_deref());
         if !force && text == self.loaded {
             return false;
         }
-        self.settings = text
-            .as_deref()
-            .map_or_else(Settings::default, Settings::parse);
+        self.settings = settings;
         self.loaded = text;
         self.rebuild_keymap();
         true
@@ -87,8 +106,12 @@ impl Preferences {
 
     fn warning(&self) -> Option<String> {
         let mut warnings = self.settings.warnings.clone();
-        if let Some(warning) = self.theme(SystemMode::Dark).1 {
-            warnings.push(warning);
+        for mode in [SystemMode::Dark, SystemMode::Light] {
+            if let Some(warning) = self.theme(mode).1 {
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
         }
         (!warnings.is_empty()).then(|| {
             let location = self
@@ -123,11 +146,22 @@ impl App {
             return None;
         }
         self.apply_preferences();
-        let warning = self.preferences.warning();
-        if let Some(warning) = &warning {
-            self.banner = Some(warning.clone());
-            self.banner_kind = workspace::WarningKind::General;
+        #[cfg(target_os = "macos")]
+        if self.window.is_some() {
+            crate::macos_menu::install(&self.preferences.keymap);
         }
+        let warning = self.preferences.warning();
+        match &warning {
+            Some(warning) => {
+                self.banner = Some(warning.clone());
+                self.banner_kind = workspace::WarningKind::General;
+            }
+            None if self.banner.is_some() && self.banner == self.preferences.shown_warning => {
+                self.banner = None;
+            }
+            None => {}
+        }
+        self.preferences.shown_warning = warning.clone();
         warning
     }
 
@@ -138,8 +172,10 @@ impl App {
         self.editor.set_line_numbers(settings.line_numbers);
     }
 
-    pub(super) fn startup_settings_warning(&self) -> Option<String> {
-        self.preferences.warning()
+    pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
+        let warning = self.preferences.warning();
+        self.preferences.shown_warning = warning.clone();
+        warning
     }
 
     /// Persist a theme choice from the picker; `None` follows the system.
@@ -149,18 +185,21 @@ impl App {
         self.theme_override = None;
         self.apply_theme();
         self.palette = None;
-        let warning = self.preferences.path.clone().and_then(|path| {
+        let saved = self.preferences.path.clone().map(|path| {
             settings::write_value(&path, "theme", &choice.value())
-                .map(|()| {
-                    self.preferences.loaded = std::fs::read_to_string(&path).ok();
-                })
-                .err()
-                .map(|error| format!("Could not save the theme to {}: {error}", path.display()))
+                .map_err(|error| format!("Could not save the theme to {}: {error}", path.display()))
         });
-        if let Some(warning) = &warning {
-            self.banner = Some(warning.clone());
-            self.banner_kind = workspace::WarningKind::General;
-        }
+        let warning = match saved {
+            // Re-read the merged file so edits made outside Wren since the
+            // last reload apply now rather than being marked as seen.
+            Some(Ok(())) => self.reload_settings(true),
+            Some(Err(warning)) => {
+                self.banner = Some(warning.clone());
+                self.banner_kind = workspace::WarningKind::General;
+                Some(warning)
+            }
+            None => None,
+        };
         self.finish_action(
             if warning.is_some() {
                 Disposition::CommittedWarning
@@ -304,6 +343,42 @@ mod tests {
             preferences.keymap.action(&palette),
             Some("palette.commands")
         );
+    }
+
+    #[test]
+    fn unreadable_settings_warn_and_light_theme_typos_are_reported() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, b"theme = \xff\n").unwrap();
+        let preferences = Preferences::load(Some(path.clone()));
+        assert!(preferences.warning().unwrap().contains("could not read"));
+        std::fs::write(&path, "theme = light:solarised-light,dark:nord\n").unwrap();
+        let preferences = Preferences::load(Some(path));
+        assert!(preferences.warning().unwrap().contains("solarised-light"));
+    }
+
+    #[test]
+    fn a_clean_reload_retracts_the_settings_banner_and_applies_the_theme() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "mystery = 1\n").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        assert!(app.banner.as_deref().unwrap().contains("mystery"));
+        std::fs::write(&path, "theme = nord\n").unwrap();
+        assert!(app.reload_settings(false).is_none());
+        assert!(app.banner.is_none());
+        assert_eq!(app.definition, definitions::NORD);
+        // Choosing a theme re-reads the merged file, picking up outside edits.
+        std::fs::write(&path, "theme = nord\nline-numbers = false\n").unwrap();
+        let _ = app.choose_theme(Some(definitions::ROSE_PINE.id));
+        assert_eq!(app.definition, definitions::ROSE_PINE);
+        assert!(!app.preferences.settings.line_numbers);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
     }
 
     #[test]

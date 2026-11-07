@@ -23,7 +23,8 @@ pub enum Input {
 }
 
 /// Classify a key press. Unmodified Escape/arrows/Enter are navigation;
-/// anything with Ctrl, Alt, or Super becomes a trigger for the keymap.
+/// anything with Ctrl, Alt, or Super, and any function key, becomes a
+/// trigger for the keymap.
 pub fn input(event: &keyboard::Event) -> Option<Input> {
     let keyboard::Event::KeyPressed {
         key,
@@ -35,6 +36,11 @@ pub fn input(event: &keyboard::Event) -> Option<Input> {
         return None;
     };
     if !(modifiers.control() || modifiers.alt() || modifiers.logo()) {
+        if let Some(function) = accel(key, *physical_key, *modifiers)
+            .filter(|accel| wren_core::keybind::is_function_key(&accel.key))
+        {
+            return Some(Input::Accel(function));
+        }
         return match key {
             Key::Named(Named::Escape) => Some(Input::Nav(Nav::Escape)),
             Key::Named(Named::ArrowUp) => Some(Input::Nav(Nav::Up)),
@@ -100,6 +106,18 @@ fn named_key(named: Named) -> Option<&'static str> {
         Named::F10 => "f10",
         Named::F11 => "f11",
         Named::F12 => "f12",
+        Named::F13 => "f13",
+        Named::F14 => "f14",
+        Named::F15 => "f15",
+        Named::F16 => "f16",
+        Named::F17 => "f17",
+        Named::F18 => "f18",
+        Named::F19 => "f19",
+        Named::F20 => "f20",
+        Named::F21 => "f21",
+        Named::F22 => "f22",
+        Named::F23 => "f23",
+        Named::F24 => "f24",
         _ => return None,
     })
 }
@@ -354,6 +372,11 @@ mod tests {
             Some("P"),
         );
         assert_eq!(input(&shifted), None);
+        let function = press(Key::Named(Named::F13), Code::F13, Modifiers::SHIFT, None);
+        assert_eq!(
+            input(&function),
+            Some(Input::Accel(parse_trigger("shift+f13").unwrap()))
+        );
     }
 
     #[test]
