@@ -16,6 +16,7 @@ iced = { version = "=0.14.0", default-features = false, features = [
     "crisp",
     "highlighter",
     "linux-theme-detection",
+    "svg",
     "tiny-skia",
     "tokio",
     "wayland",
@@ -32,6 +33,9 @@ notify = "=8.2.1"
 trash = "=5.3.0"
 toml = "=1.1.8"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+nucleo-matcher = "=0.3.1"
+directories = "=6.0.0"
+rfd = { version = "=0.16.1", default-features = false, features = ["xdg-portal", "tokio", "wayland"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

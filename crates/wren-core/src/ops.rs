@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::autosave::Autosave;
 use crate::fs_store::{DiskFile, Expected, Fault, FsStore, RelPath, WriteReceipt};
+use crate::index::Index;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
@@ -52,6 +53,28 @@ pub enum Op {
     },
     OpenNote {
         note: Option<NoteId>,
+    },
+    /// Select exactly this parent, including an empty ungrouped section parent.
+    SelectParent {
+        parent: Parent,
+    },
+    /// Section-row navigation: direct notes, then the first ordered group,
+    /// otherwise the empty section. `selected_parent` exposes the resolved parent.
+    SelectSection {
+        section: SectionId,
+    },
+    SetLayout {
+        layout: String,
+    },
+    SetWidth {
+        layout: String,
+        pane: String,
+        width: u16,
+    },
+    ResetWidths,
+    SetSort {
+        parent: Parent,
+        mode: String,
     },
     EditDraft {
         note: NoteId,
@@ -138,9 +161,11 @@ pub struct Document {
 }
 
 impl Document {
-    fn new(entry: Note, file: DiskFile) -> Result<Self, String> {
+    fn new(mut entry: Note, file: DiskFile) -> Result<Self, String> {
         let text = String::from_utf8(file.bytes.clone())
             .map_err(|_| "The note is not valid UTF-8; it was left untouched".to_string())?;
+        entry.modified = file.modified;
+        entry.bytes = file.bytes.len();
         Ok(Self {
             note: entry.id,
             entry,
@@ -162,10 +187,20 @@ impl Document {
     }
 }
 
+const MAX_NAVIGATION_ENTRIES: usize = 100;
+
+#[derive(Clone, Copy)]
+enum Navigation {
+    Visit,
+    History(usize),
+}
+
 pub struct Session {
     store: FsStore,
     model: Workspace,
     state: WorkspaceState,
+    index: Index,
+    selected_parent: Option<Parent>,
     watcher: Option<Watch>,
     generation: u64,
     document: Option<Document>,
@@ -175,6 +210,7 @@ pub struct Session {
     last_durability_retry: Duration,
     history: Vec<NoteId>,
     history_index: Option<usize>,
+    recent: Vec<NoteId>,
     last_save_micros: u128,
 }
 
@@ -208,7 +244,11 @@ impl Session {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
-        let mut model = scan::scan(&store, None).map_err(|error| error.to_string())?;
+        let mut index = Index::default();
+        let mut model = scan::scan_with_contents(&store, None, |note, contents| {
+            index.ingest(note, contents);
+        })
+        .map_err(|error| error.to_string())?;
         let watcher = match watch {
             Ok(watcher) => Some(watcher),
             Err(error) => {
@@ -226,70 +266,120 @@ impl Session {
                 message: warning.into(),
             });
         }
-        let history: Vec<_> = state
-            .history()
+        let notes_by_path: HashMap<_, _> = model
+            .notes
             .iter()
-            .filter_map(|path| {
-                model
-                    .notes
-                    .iter()
-                    .find(|note| note.path == *path)
-                    .map(|note| note.id)
-            })
+            .map(|note| (&note.path, note.id))
             .collect();
-        let selected = state
-            .last_open_note()
-            .or_else(|| state.selection())
-            .and_then(|path| {
-                model
-                    .notes
-                    .iter()
-                    .find(|note| note.path == path)
-                    .map(|note| note.id)
-            });
-        let document = selected.and_then(|note| {
-            let entry = model.note(note)?.clone();
-            let path = entry.path.clone();
-            match store
-                .read(&path)
-                .map_err(|error| error.to_string())
-                .and_then(|file| Document::new(entry, file))
-            {
-                Ok(document) => Some(document),
-                Err(message) => {
-                    model.warnings.push(model::ScanWarning {
-                        path: store.root().join(path.as_path()),
-                        message,
-                    });
-                    None
+        let saved_position = state.history_position();
+        let mut history = Vec::new();
+        let mut through_position = 0usize;
+        for (position, path) in state.history().iter().enumerate() {
+            if let Some(note) = notes_by_path.get(path) {
+                history.push(*note);
+                if saved_position.is_some_and(|saved| position <= saved) {
+                    through_position += 1;
                 }
             }
-        });
+        }
+        let history_index = saved_position
+            .filter(|_| !history.is_empty())
+            .map(|_| through_position.saturating_sub(1));
+        // Schema-1 files written before MRU support retain their best available
+        // visit ordering once; new files never derive MRU from a history branch.
+        let recent_paths = state.recent();
+        let restoring_recent = !recent_paths.is_empty();
+        let recent: Vec<_> = if !restoring_recent {
+            history.clone()
+        } else {
+            recent_paths
+                .iter()
+                .filter_map(|path| notes_by_path.get(path).copied())
+                .collect()
+        };
         let mut session = Self {
             store,
             model,
             state,
+            index,
+            selected_parent: None,
             watcher,
             generation,
-            document,
+            document: None,
             trash,
             started: Instant::now(),
             last_poll: Duration::ZERO,
             last_durability_retry: Duration::ZERO,
             history,
-            history_index: None,
+            history_index,
+            recent: Vec::new(),
             last_save_micros: 0,
         };
         session.sort_model();
-        if let Some(note) = session.document.as_ref().map(|document| document.note) {
-            session.history_index = session
-                .history
-                .iter()
-                .rposition(|candidate| *candidate == note);
-            if session.history_index.is_none() {
-                session.record_history(note);
+        let selected = session
+            .state
+            .selection()
+            .and_then(|path| session.resolve_selection(&path))
+            .or_else(|| {
+                session
+                    .state
+                    .last_open_note()
+                    .and_then(|path| session.resolve_selection(&path))
+            });
+        if let Some((parent, note)) = selected {
+            session.selected_parent = Some(parent);
+            if let Some(note) = note {
+                let entry = session.model.note(note).expect("resolved note").clone();
+                let path = entry.path.clone();
+                match session
+                    .store
+                    .read(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|file| Document::new(entry, file))
+                {
+                    Ok(document) => session.document = Some(document),
+                    Err(message) => session.model.warnings.push(model::ScanWarning {
+                        path: session.store.root().join(path.as_path()),
+                        message,
+                    }),
+                }
             }
         }
+        session.index.sync_metadata(&session.model);
+        if let Some(document) = &session.document {
+            session
+                .index
+                .set_content(document.note, &document.text, true);
+        }
+        for note in recent {
+            session.record_recent(note);
+        }
+        for (path, reason) in session.index.limitations().take(64) {
+            session.model.warnings.push(model::ScanWarning {
+                path: session.store.root().join(path.as_path()),
+                message: format!("{}: {reason}", path.as_path().display()),
+            });
+        }
+        drop(session.index.take_warnings());
+        if let Some(note) = session.document.as_ref().map(|document| document.note) {
+            if session
+                .history_index
+                .and_then(|position| session.history.get(position))
+                != Some(&note)
+            {
+                session.history_index = session
+                    .history
+                    .iter()
+                    .rposition(|candidate| *candidate == note);
+                if session.history_index.is_none() {
+                    session.record_history(note);
+                }
+            }
+            if !restoring_recent {
+                session.record_recent(note);
+            }
+        }
+        session.prune_history();
         Ok(session)
     }
 
@@ -301,6 +391,12 @@ impl Session {
     }
     pub fn state(&self) -> &WorkspaceState {
         &self.state
+    }
+    pub fn index(&self) -> &Index {
+        &self.index
+    }
+    pub fn selected_parent(&self) -> Option<Parent> {
+        self.selected_parent
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -328,7 +424,34 @@ impl Session {
 
     pub fn apply_at(&mut self, op: Op, now: Duration) -> Result<Vec<Event>, OpError> {
         let mut events = Vec::new();
-        let result = self.execute(op, now, &mut events);
+        let mut result = self.execute(op, now, &mut events);
+        // A conflict copy can be published before its directory sync fails.
+        // Reconcile it after the active draft has been returned to the Session.
+        if self.document.as_ref().is_some_and(|document| {
+            document
+                .recovery
+                .as_ref()
+                .is_some_and(|(copy, _)| !self.model.notes.iter().any(|note| note.path == *copy))
+        }) {
+            let refreshed = self.refresh_tree(&mut events);
+            if result.is_ok() {
+                result = refreshed;
+            }
+        }
+        let added = self.index.sync_metadata(&self.model);
+        for note in added {
+            self.index.read_note(&self.store, note);
+        }
+        if let Some(document) = &self.document {
+            self.index.set_content(document.note, &document.text, true);
+            self.selected_parent = Some(document.entry.parent);
+        } else if self
+            .selected_parent
+            .is_some_and(|parent| self.model.parent_path(parent).is_none())
+        {
+            self.selected_parent = None;
+        }
+        events.extend(self.index.take_warnings().into_iter().map(Event::Warning));
         events.extend(self.store.take_warnings().into_iter().map(Event::Warning));
         match result {
             Ok(()) => Ok(events),
@@ -421,7 +544,44 @@ impl Session {
                     Err("WriteNote requires the active document and its loaded baseline".into())
                 }
             }
-            Op::OpenNote { note } => self.select(note, now, true, events),
+            Op::OpenNote { note } => self.select(note, now, Navigation::Visit, events),
+            Op::SelectParent { parent } => self.select_parent(parent, now, events),
+            Op::SelectSection { section } => {
+                self.parent_path(Parent::Section(section))?;
+                let parent = self.section_parent(section);
+                self.select_parent(parent, now, events)
+            }
+            Op::SetLayout { layout } => {
+                self.state.set_layout(&layout)?;
+                self.persist_metadata(events)
+            }
+            Op::SetWidth {
+                layout,
+                pane,
+                width,
+            } => {
+                self.state.set_width(&layout, &pane, width)?;
+                self.persist_metadata(events)
+            }
+            Op::ResetWidths => {
+                for (layout, pane, width) in [
+                    ("columns", "sections", 200),
+                    ("columns", "groups", 220),
+                    ("columns", "notes", 280),
+                    ("outline", "sections", 260),
+                    ("outline", "notes", 280),
+                ] {
+                    self.state.set_width(layout, pane, width)?;
+                }
+                self.persist_metadata(events)
+            }
+            Op::SetSort { parent, mode } => {
+                let path = self.parent_path(parent)?;
+                self.state.set_sort(&path, &mode)?;
+                self.sort_model();
+                events.push(Event::TreeChanged);
+                self.persist_metadata(events)
+            }
             Op::Flush => {
                 self.flush_active(now, true, events)?;
                 self.store
@@ -559,9 +719,7 @@ impl Session {
                 }
                 .ok_or("No further navigation history")?;
                 let note = self.history[index];
-                self.select(Some(note), now, false, events)?;
-                self.history_index = Some(index);
-                Ok(())
+                self.select(Some(note), now, Navigation::History(index), events)
             }
         }
     }
@@ -596,38 +754,147 @@ impl Session {
         &mut self,
         note: Option<NoteId>,
         now: Duration,
-        record: bool,
+        navigation: Navigation,
         events: &mut Vec<Event>,
     ) -> Result<(), String> {
-        if self.document.as_ref().map(|document| document.note) == note {
+        if matches!(navigation, Navigation::Visit)
+            && self.document.as_ref().map(|document| document.note) == note
+            && (note.is_some() || self.selected_parent.is_none())
+        {
             return Ok(());
         }
         self.flush_active(now, true, events)?;
-        let document = note
+        let parent = note
             .map(|note| {
-                let entry = self
-                    .model
+                self.model
                     .note(note)
-                    .cloned()
-                    .ok_or("The note no longer exists")?;
-                let file = self
-                    .store
-                    .read(&entry.path)
-                    .map_err(|error| error.to_string())?;
-                Document::new(entry, file)
+                    .map(|note| note.parent)
+                    .ok_or("The note no longer exists")
             })
             .transpose()?;
-        self.document = document;
         let path = note.map(|note| self.note_path(note)).transpose()?;
-        self.state.set_selection(path.as_ref());
-        self.state.set_last_open_note(path.as_ref());
-        if record {
-            if let Some(note) = note {
-                self.record_history(note);
+        self.commit_selection(note, parent, path.as_ref(), navigation, events)
+    }
+
+    fn select_parent(
+        &mut self,
+        parent: Parent,
+        now: Duration,
+        events: &mut Vec<Event>,
+    ) -> Result<(), String> {
+        self.parent_path(parent)?;
+        self.flush_active(now, true, events)?;
+        let note = self.first_in_parent(parent);
+        let path = self.parent_path(parent)?;
+        self.commit_selection(note, Some(parent), Some(&path), Navigation::Visit, events)
+    }
+
+    fn commit_selection(
+        &mut self,
+        note: Option<NoteId>,
+        parent: Option<Parent>,
+        selection: Option<&RelPath>,
+        navigation: Navigation,
+        events: &mut Vec<Event>,
+    ) -> Result<(), String> {
+        if self.document.as_ref().map(|document| document.note) != note {
+            let document = note
+                .map(|note| {
+                    let entry = self
+                        .model
+                        .note(note)
+                        .cloned()
+                        .ok_or("The note no longer exists")?;
+                    let file = self
+                        .store
+                        .read(&entry.path)
+                        .map_err(|error| error.to_string())?;
+                    Document::new(entry, file)
+                })
+                .transpose()?;
+            if let Some(document) = &document {
+                if let Some(entry) = self
+                    .model
+                    .notes
+                    .iter_mut()
+                    .find(|entry| entry.id == document.note)
+                {
+                    entry.modified = document.entry.modified;
+                    entry.bytes = document.entry.bytes;
+                }
+                self.sort_model();
             }
+            if let Some(outgoing) = &self.document {
+                // A scan keeps a live draft authoritative, including after a
+                // disk read error. Once closed, only fresh disk bytes may be
+                // searched; do this before optional metadata can fail.
+                self.index.read_note(&self.store, outgoing.note);
+            }
+            self.document = document;
+        }
+        self.selected_parent = parent;
+        self.state.set_selection(selection);
+        let path = note.map(|note| self.note_path(note)).transpose()?;
+        self.state.set_last_open_note(path.as_ref());
+        if let Some(note) = note {
+            match navigation {
+                Navigation::Visit => self.record_history(note),
+                Navigation::History(position) => self.history_index = Some(position),
+            }
+            self.record_recent(note);
         }
         events.push(Event::Selected(note));
         self.persist_metadata(events)
+    }
+
+    fn first_in_parent(&self, parent: Parent) -> Option<NoteId> {
+        self.model
+            .notes
+            .iter()
+            .find(|note| note.parent == parent)
+            .map(|note| note.id)
+    }
+
+    fn section_parent(&self, section: SectionId) -> Parent {
+        let parent = Parent::Section(section);
+        if self.first_in_parent(parent).is_some() {
+            return parent;
+        }
+        self.model
+            .groups
+            .iter()
+            .find(|group| group.section == section)
+            .map_or(parent, |group| Parent::Group(group.id))
+    }
+
+    fn resolve_selection(&self, path: &RelPath) -> Option<(Parent, Option<NoteId>)> {
+        if let Some(note) = self.model.notes.iter().find(|note| note.path == *path) {
+            return Some((note.parent, Some(note.id)));
+        }
+        let parent = self
+            .model
+            .groups
+            .iter()
+            .find(|group| group.path == *path)
+            .map(|group| Parent::Group(group.id))
+            .or_else(|| {
+                self.model
+                    .sections
+                    .iter()
+                    .find(|section| section.path == *path)
+                    .map(|section| Parent::Section(section.id))
+            })?;
+        let last = self.state.last_open_note().and_then(|path| {
+            self.model
+                .notes
+                .iter()
+                .find(|note| note.parent == parent && note.path == path)
+                .map(|note| note.id)
+        });
+        match last {
+            Some(note) => Some((parent, Some(note))),
+            None => Some((parent, self.first_in_parent(parent))),
+        }
     }
 
     fn barrier(
@@ -817,6 +1084,8 @@ impl Session {
         self.state.set_last_open_note(Some(&receipt.path));
         self.state.set_selection(Some(&receipt.path));
         self.record_history(document.note);
+        self.record_recent(document.note);
+        self.sync_navigation_state();
         events.push(Event::Selected(Some(document.note)));
         Ok(())
     }
@@ -871,6 +1140,7 @@ impl Session {
     }
 
     fn reconcile(&mut self, now: Duration, events: &mut Vec<Event>) -> Result<(), String> {
+        let mut document_result = Ok(());
         if let Some(mut document) = self.document.take() {
             let result = (|| {
                 let path = document.entry.path.clone();
@@ -925,11 +1195,12 @@ impl Session {
                 Err(error) => {
                     document.error = Some(error.clone());
                     self.document = Some(document);
-                    return Err(error);
+                    document_result = Err(error);
                 }
             }
         }
-        self.refresh_tree(events)
+        let refreshed = self.refresh_tree(events);
+        document_result.and(refreshed)
     }
 
     fn relocate(
@@ -940,7 +1211,7 @@ impl Session {
         name: &str,
         events: &mut Vec<Event>,
     ) -> Result<(), String> {
-        let affected: Vec<_> = self
+        let affected: HashSet<_> = self
             .model
             .notes
             .iter()
@@ -952,19 +1223,66 @@ impl Session {
             .relocate(from, parent, name, matches!(target, ItemRef::Note(_)))
             .map_err(|error| error.to_string())?;
         self.model.remap_paths(from, &receipt.path);
+        match target {
+            ItemRef::Note(id) => {
+                let parent = receipt.path.parent();
+                let destination = self
+                    .model
+                    .sections
+                    .iter()
+                    .find(|section| Some(&section.path) == parent.as_ref())
+                    .map(|section| Parent::Section(section.id))
+                    .or_else(|| {
+                        self.model
+                            .groups
+                            .iter()
+                            .find(|group| Some(&group.path) == parent.as_ref())
+                            .map(|group| Parent::Group(group.id))
+                    });
+                if let Some(parent) = destination {
+                    if let Some(note) = self.model.notes.iter_mut().find(|note| note.id == id) {
+                        note.parent = parent;
+                    }
+                }
+            }
+            ItemRef::Group(id) => {
+                let parent = receipt.path.parent();
+                if let Some(section) = self
+                    .model
+                    .sections
+                    .iter()
+                    .find(|section| Some(&section.path) == parent.as_ref())
+                {
+                    if let Some(group) = self.model.groups.iter_mut().find(|group| group.id == id) {
+                        group.section = section.id;
+                    }
+                }
+            }
+            ItemRef::Section(_) => {}
+        }
         if let Some(document) = &mut self.document {
             if let Some(entry) = self.model.note(document.note) {
                 document.entry = entry.clone();
             }
         }
         self.state.remap_paths(from, &receipt.path);
-        for note in affected {
-            if let Some(note) = self.model.note(note) {
-                events.push(Event::NoteMoved {
-                    note: note.id,
-                    new_path: note.path.as_path().to_path_buf(),
-                });
+        if let Some(document) = &self.document {
+            if target == ItemRef::Note(document.note) {
+                self.selected_parent = Some(document.entry.parent);
+                self.state.set_selection(Some(&document.entry.path));
+                self.state.set_last_open_note(Some(&document.entry.path));
             }
+        }
+        for note in self
+            .model
+            .notes
+            .iter()
+            .filter(|note| affected.contains(&note.id))
+        {
+            events.push(Event::NoteMoved {
+                note: note.id,
+                new_path: note.path.as_path().to_path_buf(),
+            });
         }
         events.push(Event::TreeChanged);
         self.refresh_tree(events)?;
@@ -982,8 +1300,27 @@ impl Session {
     }
 
     fn refresh_tree(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
-        let mut scanned =
-            scan::scan(&self.store, Some(&self.model)).map_err(|error| error.to_string())?;
+        let active = self.document.as_ref().map(|document| {
+            self.index.set_content(document.note, &document.text, true);
+            (document.note, document.entry.path.clone())
+        });
+        let scanned = scan::scan_with_contents(&self.store, Some(&self.model), |note, contents| {
+            // A scan is not a document transition. In particular, a replacement
+            // at the active path must not insert a new ID or replace its draft.
+            if !active
+                .as_ref()
+                .is_some_and(|(id, path)| *id == note.id || *path == note.path)
+            {
+                self.index.ingest(note, contents);
+            }
+        });
+        let mut scanned = match scanned {
+            Ok(scanned) => scanned,
+            Err(error) => {
+                self.index.scan_failed(active.map(|(id, _)| id));
+                return Err(error.to_string());
+            }
+        };
         // A tree refresh is not a document transition. Keep its recovery identity
         // until document reconciliation has durably preserved or closed it.
         if let Some(document) = &self.document {
@@ -1016,36 +1353,63 @@ impl Session {
                 });
             }
         }
-        let changed = scanned
+        let sections: HashMap<_, _> = self
+            .model
             .sections
             .iter()
-            .map(|item| (&item.path, &item.name))
-            .ne(self
-                .model
+            .map(|item| (item.id, (&item.path, &item.name)))
+            .collect();
+        let groups: HashMap<_, _> = self
+            .model
+            .groups
+            .iter()
+            .map(|item| (item.id, (&item.path, item.section)))
+            .collect();
+        let notes: HashMap<_, _> = self
+            .model
+            .notes
+            .iter()
+            .map(|item| {
+                (
+                    item.id,
+                    (&item.path, item.modified, item.bytes, item.parent),
+                )
+            })
+            .collect();
+        // A scan's alphabetical/default order differs from persisted manual and
+        // title order. Compare identities and metadata, not enumeration order.
+        let changed = sections.len() != scanned.sections.len()
+            || groups.len() != scanned.groups.len()
+            || notes.len() != scanned.notes.len()
+            || scanned
                 .sections
                 .iter()
-                .map(|item| (&item.path, &item.name)))
+                .any(|item| sections.get(&item.id) != Some(&(&item.path, &item.name)))
             || scanned
                 .groups
                 .iter()
-                .map(|item| (&item.path, item.section))
-                .ne(self
-                    .model
-                    .groups
-                    .iter()
-                    .map(|item| (&item.path, item.section)))
-            || scanned
-                .notes
-                .iter()
-                .map(|item| (&item.path, item.modified, item.bytes, item.parent))
-                .ne(self
-                    .model
-                    .notes
-                    .iter()
-                    .map(|item| (&item.path, item.modified, item.bytes, item.parent)));
+                .any(|item| groups.get(&item.id) != Some(&(&item.path, item.section)))
+            || scanned.notes.iter().any(|item| {
+                notes.get(&item.id) != Some(&(&item.path, item.modified, item.bytes, item.parent))
+            });
         self.model = scanned;
         self.sort_model();
+        if let Some(document) = &mut self.document {
+            if let Some(entry) = self.model.note(document.note) {
+                document.entry = entry.clone();
+            }
+        }
         self.prune_history();
+        self.index.sync_metadata(&self.model);
+        if let Some(document) = &self.document {
+            self.index.set_content(document.note, &document.text, true);
+        }
+        for (path, reason) in self.index.limitations().take(64) {
+            self.model.warnings.push(model::ScanWarning {
+                path: self.store.root().join(path.as_path()),
+                message: format!("{}: {reason}", path.as_path().display()),
+            });
+        }
         if changed {
             events.push(Event::TreeChanged);
         }
@@ -1060,27 +1424,86 @@ impl Session {
             .enumerate()
             .map(|(index, path)| (path, index))
             .collect();
-        self.model
+        self.model.sections.sort_by(|left, right| {
+            order
+                .get(&left.path)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&order.get(&right.path).copied().unwrap_or(usize::MAX))
+                .then_with(|| model::natural_cmp(&left.name, &right.name))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        self.model.groups.sort_by(|left, right| {
+            left.section
+                .cmp(&right.section)
+                .then_with(|| {
+                    order
+                        .get(&left.path)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                        .cmp(&order.get(&right.path).copied().unwrap_or(usize::MAX))
+                })
+                .then_with(|| model::natural_cmp(&left.name, &right.name))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        let title_sort: HashMap<_, _> = self
+            .model
             .sections
-            .sort_by_key(|item| order.get(&item.path).copied().unwrap_or(usize::MAX));
-        self.model.groups.sort_by_key(|item| {
-            (
-                item.section,
-                order.get(&item.path).copied().unwrap_or(usize::MAX),
-            )
+            .iter()
+            .map(|section| {
+                (
+                    Parent::Section(section.id),
+                    self.state.sort(&section.path) == "title",
+                )
+            })
+            .chain(self.model.groups.iter().map(|group| {
+                (
+                    Parent::Group(group.id),
+                    self.state.sort(&group.path) == "title",
+                )
+            }))
+            .collect();
+        self.model.notes.sort_by(|left, right| {
+            left.parent.cmp(&right.parent).then_with(|| {
+                let modified = if title_sort.get(&left.parent).copied().unwrap_or(false) {
+                    std::cmp::Ordering::Equal
+                } else {
+                    right.modified.cmp(&left.modified)
+                };
+                modified
+                    .then_with(|| model::natural_cmp(&left.title, &right.title))
+                    .then_with(|| left.path.cmp(&right.path))
+            })
         });
     }
 
-    fn persist_metadata(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
-        if !self.state.writable() {
-            return Ok(());
-        }
+    fn sync_navigation_state(&mut self) {
+        let paths: HashMap<_, _> = self
+            .model
+            .notes
+            .iter()
+            .map(|note| (note.id, &note.path))
+            .collect();
         let history = self
             .history
             .iter()
-            .filter_map(|note| self.model.note(*note).map(|note| note.path.clone()))
+            .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
+            .collect::<Vec<_>>();
+        let recent = self
+            .recent
+            .iter()
+            .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
             .collect::<Vec<_>>();
         self.state.set_history(&history);
+        self.state.set_history_position(self.history_index);
+        self.state.set_recent(&recent);
+    }
+
+    fn persist_metadata(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
+        self.sync_navigation_state();
+        if !self.state.writable() {
+            return Ok(());
+        }
         self.state.save(&mut self.store).map_err(|error| {
             events.push(Event::Warning(format!(
                 "Markdown changes remain applied; workspace metadata was not saved: {error}"
@@ -1102,25 +1525,56 @@ impl Session {
             self.history.truncate(index + 1);
         }
         self.history.push(note);
-        if self.history.len() > 100 {
+        if self.history.len() > MAX_NAVIGATION_ENTRIES {
             self.history.remove(0);
         }
         self.history_index = Some(self.history.len() - 1);
     }
 
+    fn record_recent(&mut self, note: NoteId) {
+        self.recent.retain(|candidate| *candidate != note);
+        self.recent.push(note);
+        if self.recent.len() > MAX_NAVIGATION_ENTRIES {
+            let forgotten = self.recent.remove(0);
+            self.index.forget_opened(forgotten);
+        }
+        self.index.opened(note);
+    }
+
     fn prune_history(&mut self) {
-        let active = self
-            .document
-            .as_ref()
-            .map(|document| document.note)
-            .or_else(|| {
-                self.history_index
-                    .and_then(|index| self.history.get(index))
-                    .copied()
-            });
-        self.history.retain(|id| self.model.note(*id).is_some());
-        self.history_index =
-            active.and_then(|note| self.history.iter().rposition(|id| *id == note));
+        let ids: HashSet<_> = self.model.notes.iter().map(|note| note.id).collect();
+        let mut through_position = 0usize;
+        let mut position = 0usize;
+        self.history.retain(|id| {
+            let keep = ids.contains(id);
+            if keep
+                && self
+                    .history_index
+                    .is_some_and(|current| position <= current)
+            {
+                through_position += 1;
+            }
+            position += 1;
+            keep
+        });
+        self.history_index = self
+            .history_index
+            .filter(|_| !self.history.is_empty())
+            .map(|_| through_position.saturating_sub(1));
+        if self.history.len() > MAX_NAVIGATION_ENTRIES {
+            // Include the selected occurrence even when loading an overlong
+            // externally supplied history with its pointer in the early part.
+            let start = (self.history.len() - MAX_NAVIGATION_ENTRIES)
+                .min(self.history_index.unwrap_or(self.history.len()));
+            self.history = self.history[start..]
+                .iter()
+                .take(MAX_NAVIGATION_ENTRIES)
+                .copied()
+                .collect();
+            self.history_index = self.history_index.map(|position| position - start);
+        }
+        self.recent.retain(|id| ids.contains(id));
+        self.sync_navigation_state();
     }
 
     fn record_file(&mut self, note: NoteId, file: &DiskFile) {
@@ -1133,6 +1587,7 @@ impl Session {
             note.modified = file.modified;
             note.bytes = file.bytes.len();
         }
+        self.sort_model();
     }
 
     fn item_path(&self, item: ItemRef) -> Result<RelPath, String> {
@@ -1149,5 +1604,77 @@ impl Session {
             .parent_path(parent)
             .cloned()
             .ok_or_else(|| "The destination no longer exists".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File, FileTimes};
+
+    #[test]
+    fn periodic_reconciliation_without_a_watcher_refreshes_exact_closed_note_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("S")).unwrap();
+        let path = root.path().join("S/note.md");
+        fs::write(&path, "before").unwrap();
+        let mut session = Session::open(root.path()).unwrap();
+        session.watcher = None;
+        let id = session.model.notes[0].id;
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, "after!").unwrap();
+        File::open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        let events = session.apply_at(Op::Tick, Duration::from_secs(2)).unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::TreeChanged)));
+        assert_eq!(session.index.content(id), Some("after!"));
+        assert!(session
+            .index
+            .query(
+                "before",
+                crate::index::Scope::Workspace,
+                crate::index::QueryKind::Search,
+                10
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn scan_callbacks_do_not_insert_a_replacement_id_at_a_retained_active_draft_path() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("S")).unwrap();
+        fs::write(root.path().join("S/note.md"), "baseline").unwrap();
+        let mut session = Session::open(root.path()).unwrap();
+        let id = session.model.notes[0].id;
+        session
+            .apply_at(Op::OpenNote { note: Some(id) }, Duration::ZERO)
+            .unwrap();
+        session
+            .apply_at(
+                Op::EditDraft {
+                    note: id,
+                    contents: "live draft".into(),
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        // Exercise recovery retention when a scan can no longer recover the
+        // active identity from its previous model, without changing its draft.
+        session.model.notes.clear();
+        session.apply_at(Op::Reconcile, Duration::ZERO).unwrap();
+        assert_eq!(session.model.notes.len(), 1);
+        assert_eq!(session.model.notes[0].id, id);
+        assert_eq!(session.index.len(), 1);
+        assert_eq!(session.index.content(id), Some("live draft"));
+        assert_eq!(session.document().unwrap().text, "live draft");
+        assert!(session.document().unwrap().dirty());
+        assert_eq!(
+            fs::read_to_string(root.path().join("S/note.md")).unwrap(),
+            "baseline"
+        );
     }
 }

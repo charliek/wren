@@ -1,5 +1,7 @@
 pub mod autosave;
+pub mod config;
 pub mod fs_store;
+pub mod index;
 pub mod model;
 pub mod ops;
 pub mod scan;

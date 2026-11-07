@@ -18,6 +18,7 @@ smoke-test = ["dep:png", "iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rus
 [dependencies]
 wren-core.workspace = true
 iced.workspace = true
+rfd.workspace = true
 png = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

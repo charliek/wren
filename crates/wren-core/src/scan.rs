@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::fs_store::{DirectoryListing, EntryKind, FsStore, RelPath, StoreError};
+use crate::fs_store::{DirectoryListing, DiskFile, EntryKind, FsStore, RelPath, StoreError};
 use crate::model::{
     compute_subtitle, natural_cmp, note_title, Group, GroupId, Note, NoteId, Parent, ScanWarning,
     Section, SectionId, Workspace,
@@ -43,13 +43,41 @@ impl std::error::Error for ScanError {
 /// have not changed, and entries under unreadable subtrees are carried
 /// forward rather than silently dropped.
 pub fn scan(store: &FsStore, previous: Option<&Workspace>) -> Result<Workspace, ScanError> {
-    scan_with_fs(store, previous, &RealScanFs)
+    scan_with_contents(store, previous, |_, _| {})
 }
 
+/// Streams each accepted note's exact descriptor-relative read to `visit`.
+/// The borrowed file is released before the next read; no vault-sized content
+/// staging map is retained. Preserved unreadable/unseen notes yield `Err` rather
+/// than stale contents. A root error happens before any visitor calls.
+///
+/// Callers retaining an active draft must ignore its disk content and finish by
+/// synchronizing against the returned model (which owns the accepted IDs).
+#[allow(clippy::type_complexity)]
+pub fn scan_with_contents(
+    store: &FsStore,
+    previous: Option<&Workspace>,
+    mut visit: impl FnMut(&Note, Result<&DiskFile, &str>),
+) -> Result<Workspace, ScanError> {
+    scan_with_fs_contents(store, previous, &RealScanFs, &mut visit)
+}
+
+type ContentsVisitor<'a> = dyn FnMut(&Note, Result<&DiskFile, &str>) + 'a;
+
+#[cfg(test)]
 fn scan_with_fs(
     store: &FsStore,
     previous: Option<&Workspace>,
     scan_fs: &impl ScanFs,
+) -> Result<Workspace, ScanError> {
+    scan_with_fs_contents(store, previous, scan_fs, &mut |_, _| {})
+}
+
+fn scan_with_fs_contents(
+    store: &FsStore,
+    previous: Option<&Workspace>,
+    scan_fs: &impl ScanFs,
+    visit: &mut ContentsVisitor<'_>,
 ) -> Result<Workspace, ScanError> {
     let root = store.root();
     let next_id = previous.map_or(1, |p| p.next_id());
@@ -149,6 +177,7 @@ fn scan_with_fs(
                     &prev_notes,
                     &mut progress,
                     scan_fs,
+                    visit,
                 );
             }
             Err(e) => {
@@ -158,7 +187,7 @@ fn scan_with_fs(
     }
 
     if let Some(previous) = previous {
-        preserve_incomplete(previous, &mut ws, &progress);
+        preserve_incomplete(previous, &mut ws, &progress, visit);
     }
     sort_workspace(&mut ws);
     Ok(ws)
@@ -179,6 +208,7 @@ fn scan_section_entries(
     prev_notes: &HashMap<&Path, &Note>,
     progress: &mut ScanProgress,
     scan_fs: &impl ScanFs,
+    visit: &mut ContentsVisitor<'_>,
 ) {
     for entry in entries {
         progress.observed_entries.insert(entry.path());
@@ -223,6 +253,7 @@ fn scan_section_entries(
                 &entry.path(),
                 prev_notes,
                 None,
+                visit,
             );
             continue;
         }
@@ -258,7 +289,7 @@ fn scan_section_entries(
         });
 
         scan_group_entries(
-            store, ws, group_id, &group_rel, prev_notes, progress, scan_fs,
+            store, ws, group_id, &group_rel, prev_notes, progress, scan_fs, visit,
         );
     }
 }
@@ -267,6 +298,7 @@ fn scan_section_entries(
 // Group-level iterative scan (handles deeper-than-group notes)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn scan_group_entries(
     store: &FsStore,
     ws: &mut Workspace,
@@ -275,6 +307,7 @@ fn scan_group_entries(
     prev_notes: &HashMap<&Path, &Note>,
     progress: &mut ScanProgress,
     scan_fs: &impl ScanFs,
+    visit: &mut ContentsVisitor<'_>,
 ) {
     let mut pending = vec![group_rel.clone()];
     while let Some(current_rel) = pending.pop() {
@@ -347,6 +380,7 @@ fn scan_group_entries(
                     &entry.path(),
                     prev_notes,
                     subtitle,
+                    visit,
                 );
                 continue;
             }
@@ -375,6 +409,7 @@ fn scan_group_entries(
 // Note creation with store.read and prior-entry preservation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn add_note(
     store: &FsStore,
     ws: &mut Workspace,
@@ -383,6 +418,7 @@ fn add_note(
     abs_path: &Path,
     prev_notes: &HashMap<&Path, &Note>,
     subtitle: Option<String>,
+    visit: &mut ContentsVisitor<'_>,
 ) {
     match store.read(&note_rel) {
         Ok(disk_file) => {
@@ -391,7 +427,7 @@ fn add_note(
                 .map(|prev| prev.id)
                 .unwrap_or_else(|| NoteId(ws.allocate_id()));
 
-            ws.notes.push(Note {
+            let note = Note {
                 id: note_id,
                 parent,
                 title: note_title(note_rel.file_name()),
@@ -399,7 +435,9 @@ fn add_note(
                 subtitle,
                 modified: disk_file.modified,
                 bytes: disk_file.bytes.len(),
-            });
+            };
+            visit(&note, Ok(&disk_file));
+            ws.notes.push(note);
         }
         Err(e) => {
             if e.is_not_found() {
@@ -407,6 +445,7 @@ fn add_note(
                 return;
             }
             if let Some(prev) = prev_notes.get(note_rel.as_path()) {
+                visit(prev, Err(&format!("content search unavailable: {e}")));
                 ws.notes.push((*prev).clone());
                 ws.warnings.push(warn(
                     abs_path.to_path_buf(),
@@ -475,7 +514,12 @@ impl ScanProgress {
     }
 }
 
-fn preserve_incomplete(previous: &Workspace, ws: &mut Workspace, progress: &ScanProgress) {
+fn preserve_incomplete(
+    previous: &Workspace,
+    ws: &mut Workspace,
+    progress: &ScanProgress,
+    visit: &mut ContentsVisitor<'_>,
+) {
     let mut paths: HashSet<RelPath> = ws
         .sections
         .iter()
@@ -524,6 +568,10 @@ fn preserve_incomplete(previous: &Workspace, ws: &mut Workspace, progress: &Scan
             Parent::Group(id) => group_ids.contains(&id),
         };
         if parent_exists && preserve(&note.path, note.id.0) {
+            visit(
+                note,
+                Err("scan incomplete; content search unavailable until this note is readable"),
+            );
             ws.notes.push(note.clone());
         }
     }
@@ -842,6 +890,105 @@ mod tests {
         fn drop(&mut self) {
             fs::set_permissions(&self.path, self.permissions.clone()).unwrap();
         }
+    }
+
+    #[test]
+    fn content_visitor_streams_exact_read_bytes_once_per_accepted_id_without_rereading() {
+        let directory = tempfile::tempdir().unwrap();
+        write_file(directory.path(), "S/G/a.md", "initial bytes");
+        write_file(directory.path(), "S/G/deep/b.md", "deep bytes");
+        let store = FsStore::open(directory.path()).unwrap();
+        let mut index = crate::index::Index::default();
+        let mut seen = HashSet::new();
+        let workspace = scan_with_contents(&store, None, |note, contents| {
+            let file = contents.unwrap();
+            assert!(seen.insert(note.id));
+            assert_eq!(note.bytes, file.bytes.len());
+            index.ingest(note, Ok(file));
+            // The scanner has already obtained these exact bytes. Changing the
+            // pathname now must not cause an index-side second read.
+            fs::write(store.root().join(note.path.as_path()), "later bytes").unwrap();
+        })
+        .unwrap();
+        index.sync_metadata(&workspace);
+        assert_eq!(seen.len(), workspace.notes.len());
+        for note in &workspace.notes {
+            assert_eq!(
+                index.content(note.id),
+                Some(if note.title == "a" {
+                    "initial bytes"
+                } else {
+                    "deep bytes"
+                })
+            );
+            assert_eq!(store.read(&note.path).unwrap().bytes, b"later bytes");
+        }
+    }
+
+    #[test]
+    fn content_visitor_invalidates_preserved_unseen_ids_then_recovers_from_a_complete_scan() {
+        let directory = tempfile::tempdir().unwrap();
+        for path in ["S/G/a.md", "S/G/b.md", "S/Unreadable/c.md"] {
+            write_file(directory.path(), path, "old bytes");
+        }
+        let store = FsStore::open(directory.path()).unwrap();
+        let mut index = crate::index::Index::default();
+        let previous =
+            scan_with_contents(&store, None, |note, contents| index.ingest(note, contents))
+                .unwrap();
+        index.sync_metadata(&previous);
+        write_file(directory.path(), "S/G/a.md", "changed bytes");
+        let mut scan_fs = FaultyScanFs::default();
+        scan_fs.partial_listings.insert(
+            store.root().join("S/G"),
+            [OsString::from("b.md")].into_iter().collect(),
+        );
+        scan_fs.metadata_errors.insert(
+            store.root().join("S/Unreadable"),
+            std::io::ErrorKind::PermissionDenied,
+        );
+        let mut seen = HashSet::new();
+        let current =
+            scan_with_fs_contents(&store, Some(&previous), &scan_fs, &mut |note, contents| {
+                assert!(seen.insert(note.id), "duplicate content callback");
+                index.ingest(note, contents);
+            })
+            .unwrap();
+        index.sync_metadata(&current);
+        assert_eq!(entry_ids(&current), entry_ids(&previous));
+        assert_eq!(seen.len(), current.notes.len());
+        for note in &current.notes {
+            if note.title == "a" {
+                assert_eq!(index.content(note.id), Some("changed bytes"));
+                assert_eq!(index.limitation(note.id), None);
+            } else {
+                assert_eq!(index.content(note.id), None);
+                assert!(index
+                    .limitation(note.id)
+                    .unwrap()
+                    .contains("scan incomplete"));
+            }
+        }
+        let complete = scan_with_contents(&store, Some(&current), |note, contents| {
+            index.ingest(note, contents)
+        })
+        .unwrap();
+        index.sync_metadata(&complete);
+        for note in &complete.notes {
+            assert!(index.content(note.id).is_some());
+            assert_eq!(index.limitation(note.id), None);
+        }
+        let mut failed = FaultyScanFs::default();
+        failed.listing_errors.insert(
+            store.root().to_path_buf(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+        assert!(
+            scan_with_fs_contents(&store, Some(&complete), &failed, &mut |_, _| panic!(
+                "a root error must not publish callbacks"
+            ))
+            .is_err()
+        );
     }
 
     // -- basic scan --

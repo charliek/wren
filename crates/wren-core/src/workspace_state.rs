@@ -125,6 +125,47 @@ impl WorkspaceState {
         match encoded {
             Ok(value) => {
                 self.table.insert("history".to_owned(), value);
+                if self
+                    .history_position()
+                    .is_some_and(|position| position >= history.len())
+                {
+                    self.set_history_position(None);
+                }
+            }
+            Err(reason) => self.disable(reason),
+        }
+    }
+
+    /// Zero-based visit occurrence in `history`, including duplicate paths.
+    pub fn history_position(&self) -> Option<usize> {
+        self.table
+            .get("history_position")
+            .and_then(Value::as_integer)
+            .and_then(|position| usize::try_from(position).ok())
+    }
+
+    pub fn set_history_position(&mut self, position: Option<usize>) {
+        match position.and_then(|position| i64::try_from(position).ok()) {
+            Some(position) => {
+                self.table
+                    .insert("history_position".into(), Value::Integer(position));
+            }
+            None => {
+                self.table.remove("history_position");
+            }
+        }
+    }
+
+    /// Unique visited note paths, from least to most recently visited. Unlike
+    /// Back/Forward history, a new navigation branch does not discard these.
+    pub fn recent(&self) -> Vec<RelPath> {
+        paths(&self.table, "recent")
+    }
+
+    pub fn set_recent(&mut self, recent: &[RelPath]) {
+        match encode_paths(recent, Reference::Note) {
+            Ok(value) => {
+                self.table.insert("recent".into(), value);
             }
             Err(reason) => self.disable(reason),
         }
@@ -353,15 +394,38 @@ impl WorkspaceState {
             }
             for (field, kind) in [
                 ("history", Reference::Note),
+                ("recent", Reference::Note),
                 ("order", Reference::Container),
             ] {
                 if table.contains_key(field) {
+                    let position = (field == "history")
+                        .then(|| self.history_position())
+                        .flatten();
                     let mut mapped = Vec::new();
-                    for path in paths(&table, field) {
-                        if let Some(path) = transform(&path)? {
+                    let mut through_position = 0usize;
+                    for (index, path) in paths(&table, field).iter().enumerate() {
+                        if let Some(path) = transform(path)? {
+                            if field == "recent" {
+                                // Keep the more recent occurrence when remapping
+                                // onto an already referenced destination.
+                                mapped.retain(|candidate| *candidate != path);
+                            }
                             if field != "order" || !mapped.contains(&path) {
                                 mapped.push(path);
+                                if position.is_some_and(|position| index <= position) {
+                                    through_position += 1;
+                                }
                             }
+                        }
+                    }
+                    if position.is_some() {
+                        if mapped.is_empty() {
+                            table.remove("history_position");
+                        } else {
+                            table.insert(
+                                "history_position".into(),
+                                Value::Integer(through_position.saturating_sub(1) as i64),
+                            );
                         }
                     }
                     table.insert(field.into(), encode_paths(&mapped, kind)?);
@@ -537,6 +601,7 @@ fn validate(table: &Table) -> Result<(), String> {
     }
     for (field, kind) in [
         ("history", Reference::Note),
+        ("recent", Reference::Note),
         ("order", Reference::Container),
     ] {
         if let Some(value) = table.get(field) {
@@ -551,10 +616,23 @@ fn validate(table: &Table) -> Result<(), String> {
                         .ok_or_else(|| format!("{field} must contain only path strings"))?,
                     kind,
                 )?;
-                if field == "order" && !seen.insert(path) {
-                    return Err("order must not contain duplicate paths".into());
+                if field != "history" && !seen.insert(path) {
+                    return Err(format!("{field} must not contain duplicate paths"));
                 }
             }
+        }
+    }
+    if let Some(value) = table.get("history_position") {
+        let position = value
+            .as_integer()
+            .and_then(|position| usize::try_from(position).ok())
+            .ok_or("history_position must be a nonnegative integer")?;
+        let length = table
+            .get("history")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        if position >= length {
+            return Err("history_position must name an occurrence in history".into());
         }
     }
     if let Some(value) = table.get("widths") {
@@ -746,6 +824,16 @@ mod tests {
             b"selection = ['A']",
             b"history = 'A/note.md'",
             b"history = [1]",
+            b"history_position = 0",
+            b"history = ['A/note.md']\nhistory_position = -1",
+            b"history = ['A/note.md']\nhistory_position = 1",
+            b"history = ['A/note.md']\nhistory_position = '0'",
+            b"history = ['A/note.md']\nhistory_position = true",
+            b"history = ['A/note.md']\nhistory_position = 0.0",
+            b"recent = 'A/note.md'",
+            b"recent = [1]",
+            b"recent = ['A/note.md', 'A/note.md']",
+            b"recent = ['../note.md']",
             b"last_open_note = 'A'",
             b"order = ['A', 'A']",
             b"order = ['A/B/C']",
@@ -797,14 +885,21 @@ mod tests {
             "\\\\server\\share\\note.md",
         ];
         for path in unsafe_paths {
-            for field in ["selection", "last_open_note", "history", "order", "sort"] {
+            for field in [
+                "selection",
+                "last_open_note",
+                "history",
+                "recent",
+                "order",
+                "sort",
+            ] {
                 let value = Value::String(path.into());
                 let mut source = Table::new();
                 source.insert("layout".into(), Value::String("outline".into()));
                 source.insert(
                     field.into(),
                     match field {
-                        "history" | "order" => Value::Array(vec![value]),
+                        "history" | "recent" | "order" => Value::Array(vec![value]),
                         "sort" => {
                             let mut sort = Table::new();
                             sort.insert(path.into(), Value::String("title".into()));
@@ -1230,6 +1325,56 @@ mod tests {
         assert!(state.set_width("columns", "future", 200).is_err());
         assert!(state.set_layout("future").is_err());
         assert!(state.set_sort(&rel("A"), "future").is_err());
+    }
+
+    #[test]
+    fn navigation_position_and_mru_round_trip_remap_prune_and_preserve_unknown_keys() {
+        let original = b"schema_version = 1\nhistory = ['A/a.md', 'B/b.md', 'A/a.md', 'C/c.md']\nhistory_position = 2\nrecent = ['B/b.md', 'C/c.md', 'A/a.md']\n[future]\nhistory_position = 'opaque'\nrecent = ['../untouched']\n";
+        let (directory, mut store) = fixture(Some(original));
+        let mut state = WorkspaceState::load(&store);
+        assert!(state.writable());
+        assert_eq!(state.history_position(), Some(2));
+        state.remap_paths(&rel("A"), &rel("Moved"));
+        assert_eq!(state.history_position(), Some(2));
+        assert_eq!(
+            state.recent(),
+            [rel("B/b.md"), rel("C/c.md"), rel("Moved/a.md")]
+        );
+        state.remove_paths(&rel("B"));
+        assert_eq!(
+            state.history(),
+            [rel("Moved/a.md"), rel("Moved/a.md"), rel("C/c.md")]
+        );
+        assert_eq!(state.history_position(), Some(1));
+        assert_eq!(state.recent(), [rel("C/c.md"), rel("Moved/a.md")]);
+        state.save(&mut store).unwrap();
+        let loaded = WorkspaceState::load(&store);
+        assert_eq!(loaded.history_position(), Some(1));
+        assert_eq!(loaded.recent(), state.recent());
+        assert_eq!(
+            disk_table(&directory)["future"],
+            original_table(original)["future"]
+        );
+        state.remove_paths(&rel("Moved"));
+        assert_eq!(state.history_position(), Some(0));
+        state.remove_paths(&rel("C"));
+        assert_eq!(state.history_position(), None);
+        assert!(state.recent().is_empty());
+        state.save(&mut store).unwrap();
+        assert!(WorkspaceState::load(&store).writable());
+    }
+
+    fn original_table(bytes: &[u8]) -> Table {
+        std::str::from_utf8(bytes).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn mru_remapping_keeps_the_newer_unique_occurrence() {
+        let (_directory, store) = fixture(Some(b"recent = ['B/n.md', 'X/x.md', 'A/n.md']\n"));
+        let mut state = WorkspaceState::load(&store);
+        state.remap_paths(&rel("A"), &rel("B"));
+        assert_eq!(state.recent(), [rel("X/x.md"), rel("B/n.md")]);
+        assert!(state.writable());
     }
 
     #[test]
