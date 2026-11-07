@@ -5,5 +5,12 @@
     <link>https://github.com/charliek/wren</link>
     <description>Sparkle update feed for Wren on macOS.</description>
     <language>en</language>
+    <item>
+      <title>Wren 0.0.1</title>
+      <pubDate>Sat, 07 Nov 2026 20:12:11 +0000</pubDate>
+      <sparkle:version>0.0.1</sparkle:version>
+      <sparkle:shortVersionString>0.0.1</sparkle:shortVersionString>
+      <enclosure url="https://github.com/charliek/wren/releases/download/v0.0.1/Wren-0.0.1.dmg" type="application/octet-stream" sparkle:edSignature="UMPD/cps6pUBM99JoIxS0qjV4rll/23nyf9vEw4+pN+cJldRVp3Oc+fvJbqtgcwJpEFqsIflRmSBfjKruFpdDw==" length="11145173" />
+    </item>
   </channel>
 </rss>
