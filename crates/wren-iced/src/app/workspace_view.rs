@@ -140,7 +140,7 @@ impl App {
                     chrome::icon(Icon::Folder, 15.0, colors.accent),
                     chrome::label(name, 13, colors.text).font(fonts::SEMIBOLD),
                     ellipsis(
-                        root.map(display_path).unwrap_or_default(),
+                        root.map(chrome::display_path).unwrap_or_default(),
                         11.0,
                         theme::color(colors.muted)
                     )
@@ -1106,18 +1106,5 @@ fn modified_label(note: &Note) -> String {
         format!("{} h ago", seconds / 3600)
     } else {
         format!("{} d ago", seconds / 86400)
-    }
-}
-
-/// A workspace root for display, with the home directory shown as `~`.
-fn display_path(root: &std::path::Path) -> String {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    match home
-        .as_deref()
-        .and_then(|home| root.strip_prefix(home).ok())
-    {
-        Some(relative) if relative.as_os_str().is_empty() => "~".into(),
-        Some(relative) => format!("~/{}", relative.display()),
-        None => root.display().to_string(),
     }
 }

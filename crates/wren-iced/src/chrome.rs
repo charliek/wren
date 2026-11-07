@@ -224,3 +224,16 @@ pub fn top_rule<'a, Message: 'a>(
         content.into()
     ])
 }
+
+/// A workspace root for display, with the home directory shown as `~`.
+pub fn display_path(root: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home
+        .as_deref()
+        .and_then(|home| root.strip_prefix(home).ok())
+    {
+        Some(relative) if relative.as_os_str().is_empty() => "~".into(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => root.display().to_string(),
+    }
+}

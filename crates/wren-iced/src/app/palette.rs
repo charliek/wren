@@ -364,7 +364,7 @@ impl App {
                         rows.push(ResultRow {
                             key: Key::Workspace(entry.path.clone()),
                             title: entry.name.clone(),
-                            path: entry.path.to_string_lossy().into_owned(),
+                            path: chrome::display_path(&entry.path),
                             snippet: String::new(),
                             highlight: None,
                             content_hit: false,
@@ -771,11 +771,12 @@ impl App {
                 ));
             }
             if !search && !result.path.is_empty() {
-                label = label.push(ellipsis(
-                    result.path.replace('/', " › "),
-                    11.0,
-                    theme::color(colors.muted),
-                ));
+                let path = if palette.mode == Mode::Workspaces {
+                    result.path.clone()
+                } else {
+                    result.path.replace('/', " › ")
+                };
+                label = label.push(ellipsis(path, 11.0, theme::color(colors.muted)));
             }
             let mut contents = row![label.width(Fill)]
                 .spacing(12)
