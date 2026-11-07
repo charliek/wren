@@ -24,6 +24,20 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       # macOS covers compilation and unit tests, not native GUI integration.
       - run: make build fmt-check clippy test
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+      - name: Assemble normal native debug bundle with dependency notices
+        run: make package-debug
+      - name: Archive native bundle with executable modes
+        run: tar -czf target/wren-debug.tar.gz -C target/package .
+      - name: Preserve uninstalled native bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: wren-debug-${{ matrix.os }}
+          path: target/wren-debug.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
   harness-unit:
     runs-on: ubuntu-24.04

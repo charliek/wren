@@ -263,3 +263,36 @@ Final release workload measurements (20 samples per query/workload): in-memory b
 This is a substantial usable desktop milestone, **not a claim that every spec/mockup detail is finished**. Session reconciliation remains synchronous, so the measured roughly 80–119 ms large-workspace work can block input. Moving that I/O off the UI owner while preserving ordered mutations is the main remaining architecture/performance task. Toolkit visual seams still include the exact 52 px line-number gutter, current-line background, independent amber caret, and true completed-task strike-through. The wordmark uses bundled semibold rather than a distinct 700 face; ghosts are upright, and long labels clip rather than using the mockup's exact ellipsis treatment. Portable dialogs deliberately omit the broken software-renderer shadow.
 
 Native macOS integration/Japanese IME, native Wayland input, actual folder-portal interaction, OS-trash and file-manager Reveal integration, interactive desktop theme changes, manual Obsidian interoperability, signing/notarization, and power-loss behavior remain unverified. The final compare/replace and OS-trash namespace limitations from the storage checkpoint still apply. Native picker/Reveal code and private completion adapters are not substitutes for those platform checks. New GitHub Actions definitions have been prepared and unit-checked, but only the historical tooling baseline has run remotely; this implementation pass has not been pushed.
+
+### Prototype delivery and CI checkpoint
+
+`make package` and `make package-debug` build normal native executables in a dedicated `target/package-build/<host>/` tree before assembling a new, uninstalled bundle. Existing outputs are never replaced. Linux gets `bin/wren`, a generated absolute-path desktop entry, scalable icon, font notices, and dependency notices; macOS assembly produces `Wren.app` with plist, executable mode, generated multi-size ICNS, and resources. macOS layout is unit-tested with fixtures, not a locally executed macOS application. Linux desktop entry relocation requires regeneration; these bundles are not installed, signed, published, or claimed portable across Linux distributions.
+
+The packager pins input ancestors and a private output staging container using directory descriptors, exclusively publishes the bundle, and never cleans up a substituted foreign alias. Tests cover source/parent replacement, late output collisions, ownership-preserving cleanup, permissions, format checks, malformed assets, and notice failures. A successful read-only Codex Astra delivery review led to fixes for archive executable-bit loss, stale smoke binaries under Cargo output overrides, foreign-stage cleanup, source-ancestor races, and unsupported `=` in Linux desktop Exec paths. The descriptor-bearing stage is retained because the exercised namespace races make path-only staging unsafe; no additional packaging framework was introduced.
+
+The locked/offline Cargo collector inventories all non-workspace packages, including transitive/build/dev/other-target entries, and bundles actual local LICENSE/NOTICE/copyright texts rather than substituting an SPDX expression for a grant. The final local graph contains **507 packages and 804 collected texts; 66 packages still require notice review**, with two Wren workspace members deliberately excluded. Font notices are included separately. This is not redistribution clearance: source-text gaps, linked native/system components, and legal review remain open. No Wren project license has been invented or selected.
+
+The actual release command was exercised with conflicting Cargo defaults:
+
+```sh
+CARGO_TARGET_DIR=target/not-the-bundle \
+CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu \
+make package PACKAGE_OUTPUT=target/package/final-linux
+```
+
+It built a normal optimized **x86_64-unknown-linux-gnu** ELF at the explicit native target/target-dir and assembled `target/package/final-linux`. Repeating into `target/package/verified-linux` after removing unrelated resolver churn produced byte-identical executables and dependency notices (`cmp` passed). The executable's `--help` advertises ordinary workspace restoration and explicit unsaved evaluations. Archiving with `tar -czf target/package/final-linux.tar.gz -C target/package final-linux` and inspecting the result confirmed **21 members** and executable mode **0755** for `bin/wren`. The CI-facing `make package-debug PACKAGE_OUTPUT=target/package/debug-linux-acceptance` also built and assembled a normal native Linux bundle successfully, with the same notice counts.
+
+A one-off native acceptance probe ran the packaged release, not the smoke binary, under each X11 renderer:
+
+```sh
+WREN_NORMAL_BIN="$PWD/target/package/final-linux/bin/wren" ICED_BACKEND=tiny-skia \
+uv run --locked --group test python tools/run_display.py x11 -- \
+uv run --locked --group test python /tmp/craze/wren_normal_acceptance.py
+# Repeat with ICED_BACKEND=wgpu WGPU_BACKEND=vulkan.
+```
+
+Each run rejected both private test flags even with `WREN_TEST_MODE=1`, used isolated HOME/XDG directories and an owned window, typed natively, observed exact timer-saved disk bytes, flushed a final edit through WM_DELETE_WINDOW, and relaunched **without arguments** to restore the registered workspace and text. Both owned launches exited zero for each renderer. This probe is temporary local acceptance, not a committed CI test or native Wayland/macOS proof.
+
+CI now assembles normal native debug bundles in the Linux/macOS Rust matrix and uploads tar archives so executable modes survive artifact storage. The existing fail-closed aggregate still requires Rust, harness units, and all four Linux renderer/display lanes. A real nightly/manual performance workflow executes both named release workloads through `make perf-search`, preserves their exit status, and uploads measurements even on failure. Python contracts check the explicit native target-dir, shared targets, artifact archive, unconditional aggregate, and scheduled workload wiring. Workflow execution on GitHub remains unverified for this pass because no push was requested.
+
+The local checkpoints in this continuation are core/index/registrations `fef8410`, desktop navigation/layouts/gestures `1e9015d`, and the following prototype delivery/CI commit. The repository retains the original supplied spec/mockup; no release or additional git push is part of this handoff.

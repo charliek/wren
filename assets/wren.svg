@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">Wren</title>
+  <desc id="description">An amber wren with an upright tail, perched on a silver branch on a charcoal tile. Original geometric artwork for Wren.</desc>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#17191f"/>
+  <rect x="75" y="193" width="115" height="7" rx="3.5" fill="#8a919c"/>
+  <rect x="123" y="173" width="6" height="22" rx="3" fill="#f0b45a"/>
+  <rect x="151" y="173" width="6" height="22" rx="3" fill="#f0b45a"/>
+  <path d="M 91 145 L 48 77 Q 44 69 52 68 L 67 68 L 109 112 Z" fill="#ca8537"/>
+  <path d="M 82 140 C 82 114 98 99 121 96 C 130 74 151 67 170 75 C 187 82 195 96 194 112 L 202 121 L 194 131 C 185 161 162 181 135 182 C 109 183 89 169 82 150 Z" fill="#f0b45a"/>
+  <path d="M 193 110 L 220 121 L 193 128 Z" fill="#f8d59b"/>
+  <path d="M 104 123 C 122 116 143 122 158 139 C 148 157 130 162 115 149 C 108 142 104 133 104 123 Z" fill="#ca8537"/>
+  <path d="M 114 128 Q 127 140 145 142 L 139 147 Q 123 144 114 134 Z" fill="#f8d59b"/>
+  <circle cx="172" cy="98" r="5" fill="#17191f"/>
+</svg>

@@ -1,0 +1,36 @@
+name: Search performance
+
+on:
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search-performance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Measure 5,000 notes and 25 MB in release mode
+        shell: bash
+        run: |
+          mkdir -p target/performance
+          set +e
+          make perf-search > target/performance/search.log 2>&1
+          status=$?
+          cat target/performance/search.log
+          exit "$status"
+      - name: Preserve measurements and failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: search-performance
+          path: target/performance/
+          if-no-files-found: error
+          retention-days: 14

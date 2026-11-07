@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Wren
+GenericName=Structured Notes
+Comment=Edit structured Markdown notes
+Exec=wren
+Icon=wren
+Terminal=false
+Categories=Office;TextEditor;
+Keywords=Notes;Markdown;
+StartupNotify=false

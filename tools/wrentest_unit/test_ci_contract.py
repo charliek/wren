@@ -56,6 +56,30 @@ class WorkflowContractTests(unittest.TestCase):
         for suite in ("wrentest", "wrentest_unit"):
             self.assertTrue(list((ROOT / "tools" / suite).glob("test_*.py")), suite)
 
+    def test_native_bundle_rebuilds_without_smoke_features_and_is_preserved(self):
+        rust = job_blocks(WORKFLOW.read_text())["rust"]
+        self.assertIn("run: make package-debug", rust)
+        self.assertIn("uses: astral-sh/setup-uv@v7", rust)
+        self.assertLess(rust.index("uses: astral-sh/setup-uv@v7"), rust.index("run: make package-debug"))
+        self.assertIn('UV_PYTHON: "3.12"', WORKFLOW.read_text())
+        self.assertIn("name: wren-debug-${{ matrix.os }}", rust)
+        self.assertIn("run: tar -czf target/wren-debug.tar.gz -C target/package .", rust)
+        self.assertIn("path: target/wren-debug.tar.gz", rust)
+        self.assertIn("if-no-files-found: error", rust)
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertIn("PACKAGE_HOST := $(shell rustc --print host-tuple)", makefile)
+        for target, profile, build in (
+            ("package", "release", "cargo build --locked --release -p wren-iced"),
+            ("package-debug", "debug", "cargo build --locked -p wren-iced"),
+        ):
+            block = re.search(rf"(?m)^{target}:\n((?:\t[^\n]*\n)+)", makefile)[1]
+            self.assertIn(build + ' --target-dir target/package-build --target "$(PACKAGE_HOST)"\n', block)
+            self.assertIn("cargo fetch --locked\n", block)
+            self.assertIn(f'uv run --locked --group test python tools/package.py --binary "target/package-build/$(PACKAGE_HOST)/{profile}/wren"', block)
+            self.assertNotIn("--features", block)
+            self.assertNotIn("rm ", block)
+            self.assertIn("--output", block)
+
     def test_platform_matrix_and_failure_artifacts(self):
         source = WORKFLOW.read_text()
         self.assertIn("os: [ubuntu-24.04, macos-15]", source)
@@ -69,6 +93,29 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("path: target/wrentest/", smoke)
         self.assertNotIn("paths:", source)
         self.assertNotIn("paths-ignore:", source)
+
+
+class PerformanceWorkflowTests(unittest.TestCase):
+    def test_scheduled_lane_runs_the_real_release_benchmark(self):
+        source = (ROOT / ".github/workflows/performance.yml").read_text()
+        self.assertIn("  schedule:\n", source)
+        self.assertRegex(source, r'cron: "[^"\n]+"')
+        self.assertIn("  workflow_dispatch:\n", source)
+        jobs = job_blocks(source)
+        self.assertEqual(set(jobs), {"search-performance"})
+        self.assertNotRegex(jobs["search-performance"], r"(?m)^    if:")
+        self.assertNotIn("continue-on-error:", source)
+        self.assertIn("make perf-search", source)
+        self.assertIn('exit "$status"', source)
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertIn("cargo test -p wren-core --lib --release --locked", makefile)
+        self.assertIn("index::tests::benchmark_search_5000_notes_25mb_under_30ms", makefile)
+        self.assertIn("cargo test -p wren-core --test navigation --release --locked", makefile)
+        self.assertIn("benchmark_filesystem_5000_notes_25mb_load_reconcile_and_edits", makefile)
+        self.assertIn("-- --ignored --exact --nocapture", makefile)
+        self.assertIn("if: always()", source)
+        self.assertIn("path: target/performance/", source)
+        self.assertIn("if-no-files-found: error", source)
 
 
 class GateTests(unittest.TestCase):
