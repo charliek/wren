@@ -102,7 +102,9 @@ def test_five_thousand_line_note_saves_and_reopens(tmp_path: Path) -> None:
                          for n in range(5000))
     path.write_text(original, encoding="utf-8")
     artifacts = artifact_directory("autosave-5000")
-    with WrenApp(workspace=root, artifacts_dir=artifacts) as app:
+    # CI's software Vulkan (lavapipe) needs far longer than hardware to shape
+    # and draw the first frame of a 5,000-line note.
+    with WrenApp(workspace=root, artifacts_dir=artifacts, readiness_timeout=120.0) as app:
         select_a(app)
         started = time.perf_counter()
         expected = append(app, "saved by the real timer")

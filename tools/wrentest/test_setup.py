@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -46,7 +47,9 @@ def artifact_directory(case: str) -> Path:
     if not base.is_absolute():
         pytest.fail("WREN_TEST_ARTIFACT_DIR must be absolute")
     base.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=f"{case}-", dir=base))
+    # Artifact uploads reject characters such as ':' found in test ids.
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", case)
+    return Path(tempfile.mkdtemp(prefix=f"{safe}-", dir=base))
 
 
 def run_binary(args: list[str], env: dict[str, str], artifacts: Path, cwd: Path):

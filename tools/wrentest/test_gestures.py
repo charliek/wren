@@ -89,6 +89,12 @@ def keys(window: str, *names: str) -> None:
     xdo("key", "--window", window, "--clearmodifiers", *names)
 
 
+def settle_focus() -> None:
+    # iced moves Tab focus with a widget operation that runs after the current
+    # event batch; keys typed in the same batch would reach the old widget.
+    time.sleep(0.3)
+
+
 def type_text(window: str, text: str) -> None:
     xdo("type", "--window", window, "--clearmodifiers", "--delay", "5", text)
 
@@ -505,6 +511,7 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
         wait_width(app, "columns", "sections", expected)
         stored_width(root, "columns", "sections", expected)
     keys(window, "Tab")
+    settle_focus()
     type_text(window, "Visible")
     wait_for(lambda: navigation(app)["filters"]["groups"] == "Visible",
              description="Tab moves from the Sections grip to the real Groups input")
@@ -515,6 +522,7 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
     wait_width(app, "columns", "sections", 232)
     stored_width(root, "columns", "sections", 232)
     keys(window, "shift+Tab")
+    settle_focus()
     type_text(window, "Visible")
     wait_for(lambda: navigation(app)["filters"]["sections"] == "Visible",
              description="Shift+Tab moves from the grip to the real Sections input")
