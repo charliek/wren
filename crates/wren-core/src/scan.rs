@@ -1097,14 +1097,23 @@ mod tests {
 
     #[test]
     fn deeply_nested_notes_scan_on_a_small_thread_stack() {
+        use rustix::fs::{self as descriptor_fs, AtFlags, Mode, OFlags};
+
         let dir = tempfile::tempdir().unwrap();
         let mut relative = PathBuf::from("Section/Group");
         for _ in 0..512 {
             relative.push("d");
         }
+        // Build through directory descriptors: this depth exceeds Darwin's
+        // absolute PATH_MAX before the scanner is exercised.
+        let mut store = FsStore::open(dir.path()).unwrap();
+        let parent = RelPath::new(&relative).unwrap();
+        store.ensure_dir(&parent).unwrap();
+        let created = store.create_file(&parent, "note", b"deep note").unwrap();
+        assert!(created.durability_error.is_none());
+        assert!(store.take_warnings().is_empty());
+        assert!(!store.pending_durability());
         relative.push("note.md");
-        write_file(dir.path(), relative.to_str().unwrap(), "deep note");
-        let store = FsStore::open(dir.path()).unwrap();
 
         let ws = std::thread::Builder::new()
             .stack_size(128 * 1024)
@@ -1117,11 +1126,32 @@ mod tests {
         assert_eq!(ws.groups.len(), 1);
         assert_eq!(note_titles(&ws), vec!["note"]);
         assert_eq!(ws.notes[0].path.as_path(), relative);
+        assert_eq!(ws.notes[0].bytes, b"deep note".len());
         assert_eq!(ws.notes[0].parent, Parent::Group(ws.groups[0].id));
         let subtitle = relative.strip_prefix("Section/Group").unwrap();
         assert_eq!(ws.notes[0].subtitle.as_deref(), subtitle.to_str());
         assert!(has_warning_containing(&ws, "deeper than group level"));
         assert_unique_entries(&ws);
+
+        // std's recursive cleanup retains a descriptor per level. Prune this
+        // single branch bottom-up without exhausting a low descriptor limit.
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut directory = descriptor_fs::open(dir.path(), flags, Mode::empty()).unwrap();
+        for component in parent.as_path().components() {
+            directory =
+                descriptor_fs::openat(&directory, component.as_os_str(), flags, Mode::empty())
+                    .unwrap();
+        }
+        descriptor_fs::unlinkat(&directory, created.path.file_name(), AtFlags::empty()).unwrap();
+        for component in parent.as_path().components().rev() {
+            let parent_directory =
+                descriptor_fs::openat(&directory, "..", flags, Mode::empty()).unwrap();
+            descriptor_fs::unlinkat(&parent_directory, component.as_os_str(), AtFlags::REMOVEDIR)
+                .unwrap();
+            directory = parent_directory;
+        }
+        drop(directory);
+        dir.close().unwrap();
     }
 
     // -- dotfiles and dotdirs --
@@ -1367,7 +1397,9 @@ mod tests {
 
     // -- invalid UTF-8 --
 
-    #[cfg(unix)]
+    // Keep physical byte-name fixtures on Linux: APFS rejects invalid UTF-8
+    // names during fixture creation, before the scanner can inspect them.
+    #[cfg(target_os = "linux")]
     #[test]
     fn invalid_utf8_directory_warned() {
         use std::ffi::OsStr;
@@ -1389,7 +1421,7 @@ mod tests {
         assert!(has_warning_containing(&ws, "non-UTF-8"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn invalid_utf8_filename_warned() {
         use std::ffi::OsStr;

@@ -9,6 +9,9 @@ pub mod panes;
 mod shortcuts;
 mod theme;
 
+#[cfg(test)]
+mod test_support;
+
 #[cfg(feature = "smoke-test")]
 mod smoke;
 #[cfg(feature = "smoke-test")]

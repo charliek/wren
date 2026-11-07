@@ -20,7 +20,9 @@ use rustix::io::Errno;
 
 const LOCK_NAME: &str = ".wren.lock";
 const MAX_NAME_BYTES: usize = 240;
-const MAX_PENDING_DIRECTORIES: usize = 256;
+// macOS gives GUI processes a 256-descriptor soft limit; retained directory
+// descriptors must leave most of it for the watcher, fonts, and the renderer.
+const MAX_PENDING_DIRECTORIES: usize = 32;
 const MAX_WARNINGS: usize = 64;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1146,12 +1148,11 @@ mod tests {
     }
 
     #[test]
-    fn directory_listings_retain_non_utf8_names_and_do_not_follow_symlinks() {
+    fn directory_listings_do_not_follow_symlinks_and_identify_special_files() {
         let (temp, store, section) = workspace();
         let outside = TempDir::new().unwrap();
         fs::write(outside.path().join("secret.md"), b"foreign").unwrap();
-        let invalid = OsStr::from_bytes(b"\xff.md");
-        fs::write(temp.path().join("Section").join(invalid), b"non-UTF-8").unwrap();
+        fs::write(temp.path().join("Section/note.md"), b"note").unwrap();
         symlink(outside.path(), temp.path().join("Section/alias")).unwrap();
         symlink("missing", temp.path().join("Section/dangling")).unwrap();
         make_fifo(&temp.path().join("Section/pipe.md"));
@@ -1160,8 +1161,8 @@ mod tests {
             [
                 ("alias".into(), EntryKind::Symlink),
                 ("dangling".into(), EntryKind::Symlink),
+                ("note.md".into(), EntryKind::File),
                 ("pipe.md".into(), EntryKind::Other),
-                (invalid.to_os_string(), EntryKind::File),
             ]
         );
         for path in [rel("Section/alias"), rel("Section/alias/child")] {
@@ -1170,6 +1171,20 @@ mod tests {
                 Err(StoreError::UnsafePath(_))
             ));
         }
+    }
+
+    // APFS rejects invalid UTF-8 names. Keep physical byte-name fixtures on
+    // Linux, independent of the portable symlink and special-file assertions.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_listings_retain_non_utf8_names() {
+        let (temp, store, section) = workspace();
+        let invalid = OsStr::from_bytes(b"\xff.md");
+        fs::write(temp.path().join("Section").join(invalid), b"non-UTF-8").unwrap();
+        assert_eq!(
+            listed_kinds(store.list_dir(Some(&section)).unwrap()),
+            [(invalid.to_os_string(), EntryKind::File)]
+        );
     }
 
     #[test]

@@ -923,7 +923,7 @@ mod tests {
     use crate::cli::Options;
 
     fn fixture() -> (tempfile::TempDir, App) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir();
         std::fs::create_dir(directory.path().join("Inbox")).unwrap();
         std::fs::write(directory.path().join("Inbox/Note.md"), "first\nsecond").unwrap();
         let (mut app, _) = App::new(Options {
@@ -1437,7 +1437,7 @@ mod tests {
         let slot = returning(&mut app, load(previous, directory.path().join("missing")));
         let _ = app.workspace_loaded(app.load_generation, slot);
         assert_eq!(app.conflict_copy, Some(link));
-        let next = tempfile::tempdir().unwrap();
+        let next = crate::test_support::tempdir();
         std::fs::create_dir(next.path().join("Inbox")).unwrap();
         std::fs::write(next.path().join("Inbox/Other.md"), "new workspace").unwrap();
         let previous = app.session.take();
@@ -1468,7 +1468,7 @@ mod tests {
     #[test]
     fn failed_preswitch_flush_does_not_transfer_session_ownership() {
         let (_directory, mut app) = fixture();
-        let next = tempfile::tempdir().unwrap();
+        let next = crate::test_support::tempdir();
         append(&mut app, " retained");
         app.session.as_mut().unwrap().fail_next(Fault::Write);
         assert!(app
@@ -1484,7 +1484,7 @@ mod tests {
     #[test]
     fn same_root_open_registers_after_success_without_resetting_navigation_or_generation() {
         let (directory, mut app) = fixture();
-        let configdir = tempfile::tempdir().unwrap();
+        let configdir = crate::test_support::tempdir();
         app.config = Some(wren_core::config::Config::load_from(configdir.path()));
         app.filters.sections = "Inbox".into();
         app.focus = true;
@@ -1520,7 +1520,7 @@ mod tests {
     #[test]
     fn failed_open_retains_workspace_picker_query_and_does_not_advance_registry() {
         let (directory, mut app) = fixture();
-        let configdir = tempfile::tempdir().unwrap();
+        let configdir = crate::test_support::tempdir();
         let mut config = wren_core::config::Config::load_from(configdir.path());
         config.add(directory.path(), None).unwrap();
         config.set_active(directory.path()).unwrap();
@@ -1548,8 +1548,8 @@ mod tests {
 
     #[test]
     fn missing_startup_root_leaves_real_onboarding_and_switch_commands_usable() {
-        let configdir = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let configdir = crate::test_support::tempdir();
+        let root = crate::test_support::tempdir();
         let missing = root.path().to_path_buf();
         let mut config = wren_core::config::Config::load_from(configdir.path());
         config.add(&missing, Some("Missing")).unwrap();
@@ -1577,8 +1577,8 @@ mod tests {
 
     #[test]
     fn startup_revalidates_stored_symlink_ancestors_before_scheduling_any_open() {
-        let root = tempfile::tempdir().unwrap();
-        let configdir = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir();
+        let configdir = crate::test_support::tempdir();
         let ancestor = root.path().join("registered-parent");
         let stored = ancestor.join("workspace");
         let foreign = root.path().join("foreign");
@@ -1619,9 +1619,9 @@ mod tests {
 
     #[test]
     fn an_explicit_fresh_workspace_still_opens_when_global_configuration_is_invalid() {
-        let configdir = tempfile::tempdir().unwrap();
+        let configdir = crate::test_support::tempdir();
         std::fs::write(configdir.path().join("config.toml"), "invalid = [").unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir();
         std::fs::create_dir(root.path().join("Inbox")).unwrap();
         std::fs::write(root.path().join("Inbox/Fresh.md"), "fresh bytes").unwrap();
         let (mut app, _) = App::with_config(
@@ -1660,7 +1660,7 @@ mod tests {
     #[test]
     fn committed_switch_hydrates_new_preferences_and_restores_an_empty_parent_not_first_note() {
         let (_directory, mut app) = fixture();
-        let next = tempfile::tempdir().unwrap();
+        let next = crate::test_support::tempdir();
         std::fs::create_dir(next.path().join("Empty")).unwrap();
         std::fs::create_dir(next.path().join("WithNote")).unwrap();
         std::fs::write(next.path().join("WithNote/Other.md"), "other").unwrap();
@@ -1715,7 +1715,7 @@ mod tests {
         let original = app.selected_note.unwrap();
         let _ = app.show_dialog(DialogKind::Rename(ItemRef::Note(original)));
         app.dialog.as_mut().unwrap().name = "Wrong workspace".into();
-        let next = tempfile::tempdir().unwrap();
+        let next = crate::test_support::tempdir();
         std::fs::create_dir(next.path().join("Inbox")).unwrap();
         std::fs::write(next.path().join("Inbox/Other.md"), "other").unwrap();
         let previous = app.session.take();
@@ -1731,10 +1731,10 @@ mod tests {
     #[test]
     fn registry_failure_after_switch_keeps_new_session_and_warning_but_cannot_replay_picker() {
         let (_directory, mut app) = fixture();
-        let next = tempfile::tempdir().unwrap();
+        let next = crate::test_support::tempdir();
         std::fs::create_dir(next.path().join("Section")).unwrap();
         std::fs::write(next.path().join("Section/Other.md"), "other").unwrap();
-        let configdir = tempfile::tempdir().unwrap();
+        let configdir = crate::test_support::tempdir();
         std::fs::write(configdir.path().join("config.toml"), "invalid = [").unwrap();
         app.config = Some(wren_core::config::Config::load_from(configdir.path()));
         let _ = app.open_palette(super::super::palette::Mode::Workspaces);
@@ -1761,7 +1761,7 @@ mod tests {
     #[test]
     fn load_generation_guards_edits_operations_and_stale_results() {
         let (_directory, mut app) = fixture();
-        let next = tempfile::tempdir().unwrap();
+        let next = crate::test_support::tempdir();
         let _pending = app
             .apply_core(Op::OpenWorkspace {
                 path: next.path().into(),
@@ -1834,7 +1834,7 @@ mod tests {
         let slot = returning(&mut app, load(None, directory.path().into()));
         let _ = app.workspace_loaded(app.load_generation, slot);
         assert_eq!(app.selected_note, first);
-        let empty = tempfile::tempdir().unwrap();
+        let empty = crate::test_support::tempdir();
         std::fs::create_dir(empty.path().join("Empty")).unwrap();
         let previous = app.session.take();
         let slot = returning(&mut app, load(previous, empty.path().into()));
@@ -1955,7 +1955,7 @@ mod tests {
     fn deferred_blur_flush_does_not_replace_a_committed_registry_warning_load_result() {
         for flush_fails in [false, true] {
             let (_directory, mut app) = fixture();
-            let configdir = tempfile::tempdir().unwrap();
+            let configdir = crate::test_support::tempdir();
             std::fs::write(configdir.path().join("config.toml"), "invalid = [").unwrap();
             app.config = Some(wren_core::config::Config::load_from(configdir.path()));
             append(&mut app, " retained draft");
@@ -2019,9 +2019,14 @@ mod tests {
     #[cfg(feature = "smoke-test")]
     #[test]
     fn test_quarantine_survives_a_core_workspace_switch() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let sandbox = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let first = crate::test_support::tempdir();
+        let second = crate::test_support::tempdir();
+        let sandbox = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         std::fs::create_dir(second.path().join("Section")).unwrap();
         std::fs::write(second.path().join("Section/Note.md"), "quarantined").unwrap();
         let first = load_workspace(None, first.path().into(), Some(sandbox.path().into()))

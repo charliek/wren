@@ -858,7 +858,7 @@ mod tests {
     use crate::cli::Options;
 
     fn fixture() -> (tempfile::TempDir, App) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir();
         for path in [
             "Alpha",
             "Alpha/A",
@@ -1590,7 +1590,7 @@ mod tests {
     fn registered_workspace_replacement_is_blocked_before_flushing_or_canonicalizing() {
         use std::os::unix::fs::symlink;
         let (directory, mut app) = fixture();
-        let registrations = tempfile::tempdir().unwrap();
+        let registrations = crate::test_support::tempdir();
         let ancestor = registrations.path().join("ancestor");
         std::fs::create_dir(&ancestor).unwrap();
         let stored = ancestor.join("Stored");
@@ -1634,7 +1634,7 @@ mod tests {
     fn valid_stored_workspace_can_start_opening_with_read_only_optional_config() {
         use std::os::unix::fs::PermissionsExt;
         let (_directory, mut app) = fixture();
-        let registrations = tempfile::tempdir().unwrap();
+        let registrations = crate::test_support::tempdir();
         let stored = registrations.path().join("Stored");
         std::fs::create_dir(&stored).unwrap();
         let config_dir = registrations.path().join("config");

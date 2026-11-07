@@ -14,7 +14,7 @@ use super::{App, Message, Options};
 use crate::panes::{Layout, Pane};
 
 fn fixture() -> (tempfile::TempDir, App) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_support::tempdir();
     for path in ["Alpha", "Alpha/Group", "Beta", "Beta/Destination"] {
         std::fs::create_dir(directory.path().join(path)).unwrap();
     }
@@ -923,7 +923,7 @@ fn picker_cancellation_and_stale_completion_preserve_state_and_never_open() {
 #[test]
 fn chosen_folder_cannot_bypass_a_failed_save_and_keeps_the_workspace_picker_recoverable() {
     let (directory, mut app) = fixture();
-    let next = tempfile::tempdir().unwrap();
+    let next = crate::test_support::tempdir();
     append(&mut app, " retained");
     let _ = app.open_palette(Mode::Workspaces);
     let _ = app.palette_query("original query".into());
@@ -941,7 +941,7 @@ fn chosen_folder_cannot_bypass_a_failed_save_and_keeps_the_workspace_picker_reco
 #[test]
 fn remove_active_registration_does_not_close_session_flush_draft_or_delete_files() {
     let (directory, mut app) = fixture();
-    let configdir = tempfile::tempdir().unwrap();
+    let configdir = crate::test_support::tempdir();
     let mut config = Config::load_from(configdir.path());
     config.add(directory.path(), Some("Notes")).unwrap();
     config.set_active(directory.path()).unwrap();
@@ -963,8 +963,8 @@ fn remove_active_registration_does_not_close_session_flush_draft_or_delete_files
 #[test]
 fn remove_command_uses_a_keyboard_picker_that_can_remove_an_unavailable_registration() {
     let (directory, mut app) = fixture();
-    let configdir = tempfile::tempdir().unwrap();
-    let unavailable = tempfile::tempdir().unwrap();
+    let configdir = crate::test_support::tempdir();
+    let unavailable = crate::test_support::tempdir();
     let missing_path = unavailable.path().to_path_buf();
     let mut config = Config::load_from(configdir.path());
     config.add(directory.path(), Some("Active")).unwrap();
@@ -993,13 +993,13 @@ fn remove_command_uses_a_keyboard_picker_that_can_remove_an_unavailable_registra
 
 #[test]
 fn normal_startup_is_onboarding_or_registered_root_and_evaluation_is_explicit() {
-    let configdir = tempfile::tempdir().unwrap();
+    let configdir = crate::test_support::tempdir();
     let config = Config::load_from(configdir.path());
     let (app, _) = App::with_config(Options::default(), Some(config));
     assert!(app.workspace_mode);
     assert!(app.loading.is_none());
     assert!(app.editor.text().is_empty());
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let mut config = Config::load_from(configdir.path());
     config.add(root.path(), None).unwrap();
     config.set_active(root.path()).unwrap();

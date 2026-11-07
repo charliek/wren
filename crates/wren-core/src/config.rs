@@ -13,7 +13,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use directories::ProjectDirs;
-use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
+use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, RawMode, Stat};
 use rustix::io::Errno;
 use toml::{Table, Value};
 
@@ -727,7 +727,7 @@ fn has_write_bits(file: &File) -> bool {
 
 struct ConfigFile {
     bytes: Vec<u8>,
-    mode: u32,
+    mode: RawMode,
 }
 
 enum ReadError {
@@ -1039,6 +1039,28 @@ mod tests {
     }
 
     #[test]
+    fn config_reads_preserve_native_permission_bits_and_writability() {
+        let fixture = Fixture::new();
+        let bytes = b"schema_version = 1\n";
+        fixture.source(bytes);
+        let directory = open_absolute_directory(&fixture.directory).unwrap();
+        for (mode, expected) in [
+            (0o400, 0o400),
+            (0o640, 0o640),
+            (0o777, 0o777),
+            (0o4750, 0o750),
+        ] {
+            fs::set_permissions(fixture.file(), fs::Permissions::from_mode(mode)).unwrap();
+            let Ok(file) = read_config(&directory) else {
+                panic!("a readable regular config must retain its permissions");
+            };
+            assert_eq!(file.bytes, bytes);
+            assert_eq!(file.mode, expected);
+            assert_eq!(fixture.load().writable(), expected & 0o222 != 0);
+        }
+    }
+
+    #[test]
     fn duplicates_are_canonicalized_and_selected_symlinks_are_rejected() {
         let fixture = Fixture::new();
         let workspace = fixture.workspace("work");
@@ -1075,7 +1097,13 @@ mod tests {
         let file = fixture.root.join("file");
         fs::write(&file, b"unchanged").unwrap();
         let non_utf8 = fixture.root.join(OsStr::from_bytes(b"invalid-\xff"));
-        fs::create_dir(&non_utf8).unwrap();
+        assert!(path_value(&non_utf8).is_err());
+        match fs::create_dir(&non_utf8) {
+            Ok(()) => (),
+            // APFS rejects the fixture name before a workspace can exist.
+            Err(error) if error.raw_os_error() == Some(Errno::ILSEQ.raw_os_error()) => (),
+            Err(error) => panic!("could not create non-UTF-8 workspace fixture: {error}"),
+        }
         let mut config = fixture.load();
         for path in [&missing, &file, &PathBuf::from("relative"), &non_utf8] {
             assert!(config.add(path, None).is_err());

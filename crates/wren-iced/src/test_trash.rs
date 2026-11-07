@@ -66,9 +66,25 @@ mod tests {
 
     use super::*;
 
+    fn private_sandbox() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
+    #[test]
+    fn private_sandbox_has_exact_0700_permissions() {
+        let sandbox = private_sandbox();
+        assert_eq!(
+            std::fs::symlink_metadata(sandbox.path()).unwrap().mode() & 0o7777,
+            0o700
+        );
+    }
+
     #[test]
     fn quarantine_moves_files_and_directories_without_overwriting_collisions() {
-        let sandbox = tempfile::tempdir().unwrap();
+        let sandbox = private_sandbox();
         let mut trash = Quarantine::new(sandbox.path()).unwrap();
         assert_eq!(
             std::fs::metadata(&trash.path).unwrap().mode() & 0o777,
@@ -110,7 +126,7 @@ mod tests {
 
     #[test]
     fn quarantine_failure_never_removes_the_source() {
-        let sandbox = tempfile::tempdir().unwrap();
+        let sandbox = private_sandbox();
         let mut trash = Quarantine::new(sandbox.path()).unwrap();
         let note = sandbox.path().join("note.md");
         std::fs::write(&note, "draft").unwrap();

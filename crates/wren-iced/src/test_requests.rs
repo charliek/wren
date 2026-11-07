@@ -921,7 +921,7 @@ mod tests {
     }
 
     fn navigation_fixture() -> (tempfile::TempDir, App) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir();
         std::fs::create_dir(directory.path().join("Section")).unwrap();
         std::fs::write(directory.path().join("Section/First.md"), "first").unwrap();
         std::fs::write(directory.path().join("Section/Second.md"), "second").unwrap();
@@ -1163,7 +1163,7 @@ mod tests {
 
     #[test]
     fn snapshot_reports_active_draft_identity_and_dirty_state() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir();
         std::fs::create_dir(directory.path().join("Section")).unwrap();
         std::fs::write(directory.path().join("Section/Note.md"), "saved").unwrap();
         let (mut app, _) = App::new(Options {
