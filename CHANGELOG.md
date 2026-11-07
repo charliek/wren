@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.0.1 — 2026-11-07
+
 The first public build of Wren: a desktop app for structured Markdown notes,
 for macOS (Apple silicon) and Linux (amd64, arm64).
 
