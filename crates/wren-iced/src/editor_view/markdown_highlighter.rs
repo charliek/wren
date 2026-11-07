@@ -10,7 +10,7 @@
 //!   - ATX headings (`#`–`######`): faint markers, bold accent H1/primary H2–H6.
 //!   - Block-quotes (`> `): muted colour.
 //!   - Unordered/ordered list and open-task markers: accent colour.
-//!   - Completed tasks: faint text (stock iced has no strike-through format).
+//!   - Completed tasks: faint text; the editor widget draws the strike.
 //!   - Inline code spans (`` `...` ``): muted colour.
 //!   - Bold (`**...**`, `__...__`): bold font weight.
 //!   - Italic (`*...*`, `_..._`): italic font style.
@@ -294,11 +294,11 @@ fn compute_highlights(
     }
 
     // ── List item marker ─────────────────────────────────────────────────────
+    if done_task_text(line).is_some() {
+        return vec![(0..line.len(), Highlight::colored(palette.faint))];
+    }
     if let Some(mut marker_end) = list_marker_end(line) {
         let rest = &line[marker_end..];
-        if rest.starts_with("[x] ") || rest.starts_with("[X] ") {
-            return vec![(0..line.len(), Highlight::colored(palette.faint))];
-        }
         if rest.starts_with("[ ] ") {
             marker_end += 4;
         }
@@ -312,6 +312,41 @@ fn compute_highlights(
 
     // ── Normal paragraph line: scan inline elements ───────────────────────────
     scan_inline(line, palette)
+}
+
+// ---------------------------------------------------------------------------
+// Completed tasks
+// ---------------------------------------------------------------------------
+
+/// The struck text of a completed task line (after its `- [x] ` marker, with
+/// trailing blanks trimmed), or `None` if `line` is not one.
+fn done_task_text(line: &str) -> Option<Range<usize>> {
+    let marker_end = list_marker_end(line)?;
+    let rest = &line[marker_end..];
+    if !(rest.starts_with("[x] ") || rest.starts_with("[X] ")) {
+        return None;
+    }
+    let start = marker_end + 4;
+    Some(start..line.trim_end().len().max(start))
+}
+
+/// Yields, for each line in order, its completed-task text range. Lines inside
+/// fenced code blocks are code, matching [`MarkdownHighlighter`]'s fence state.
+pub(super) fn done_task_ranges<'a, I: Iterator<Item = &'a str>>(
+    lines: I,
+) -> impl Iterator<Item = Option<Range<usize>>> + use<'a, I> {
+    let mut in_code_block = false;
+    lines.map(move |line| {
+        let range = if in_code_block {
+            None
+        } else {
+            done_task_text(line)
+        };
+        if is_code_fence(line) {
+            in_code_block = !in_code_block;
+        }
+        range
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +821,25 @@ mod tests {
                 assert_eq!(spans[0].1.font, None);
             }
         }
+    }
+
+    #[test]
+    fn done_task_ranges_skip_markers_trailing_blanks_and_code_blocks() {
+        let text = "- [x] done  \n  * [X] **café**\n- [ ] open\n- [x] \n```md\n- [x] code\n```\n1. [x] last";
+        let ranges: Vec<_> = done_task_ranges(text.lines()).collect();
+        assert_eq!(
+            ranges,
+            [
+                Some(6..10),
+                Some(8..17),
+                None,
+                Some(6..6),
+                None,
+                None,
+                None,
+                Some(7..11),
+            ]
+        );
     }
 
     #[test]
