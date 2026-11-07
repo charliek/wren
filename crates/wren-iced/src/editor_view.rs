@@ -63,6 +63,7 @@ pub struct EditorView {
     /// Index into `find_matches` of the currently selected hit.
     find_current: Option<usize>,
     line_numbers: bool,
+    metrics: widget::Metrics,
 }
 
 impl EditorView {
@@ -75,7 +76,13 @@ impl EditorView {
             find_matches: Vec::new(),
             find_current: None,
             line_numbers: true,
+            metrics: widget::Metrics::default(),
         }
+    }
+
+    /// Editor text size in points; row and caret heights scale with it.
+    pub fn set_font_size(&mut self, size: f32) {
+        self.metrics = widget::Metrics::for_size(size);
     }
 
     /// Show or hide the line-number gutter (shown by default).
@@ -100,6 +107,7 @@ impl EditorView {
             HighlighterSettings { theme },
             editor_style(theme),
             self.line_numbers,
+            self.metrics,
         )
         .into()
     }

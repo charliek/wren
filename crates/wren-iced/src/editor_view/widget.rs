@@ -74,8 +74,39 @@ const CARET_HEIGHT: f32 = 18.0;
 const X_HEIGHT_EM: f32 = 0.55;
 const STRIKE_THICKNESS: f32 = 1.0;
 
+/// Text size, row height, and caret height, scaled together from the
+/// mockup's 14 px text / 24 px rows / 18 px caret.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Metrics {
+    pub text: f32,
+    pub line: f32,
+    pub caret: f32,
+}
+
+impl Metrics {
+    pub fn for_size(text: f32) -> Self {
+        let scale = text / TEXT_SIZE;
+        Self {
+            text,
+            line: (LINE_HEIGHT * scale).round(),
+            caret: (CARET_HEIGHT * scale).round(),
+        }
+    }
+
+    fn line_height(self) -> LineHeight {
+        LineHeight::Absolute(Pixels(self.line))
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::for_size(TEXT_SIZE)
+    }
+}
+
+#[cfg(test)]
 fn line_height() -> LineHeight {
-    LineHeight::Absolute(Pixels(LINE_HEIGHT))
+    Metrics::default().line_height()
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +207,7 @@ pub struct TextEditor<'a> {
     highlighter_settings: HighlighterSettings,
     style: Style,
     line_numbers: bool,
+    metrics: Metrics,
     last_status: Option<Status>,
 }
 
@@ -186,6 +218,7 @@ impl<'a> TextEditor<'a> {
         highlighter_settings: HighlighterSettings,
         style: Style,
         line_numbers: bool,
+        metrics: Metrics,
     ) -> Self {
         Self {
             id: widget::Id::from(id),
@@ -193,6 +226,7 @@ impl<'a> TextEditor<'a> {
             highlighter_settings,
             style,
             line_numbers,
+            metrics,
             last_status: None,
         }
     }
@@ -228,7 +262,7 @@ impl<'a> TextEditor<'a> {
         };
 
         InputMethod::Enabled {
-            cursor: Rectangle::new(cursor + translation, Size::new(1.0, LINE_HEIGHT)),
+            cursor: Rectangle::new(cursor + translation, Size::new(1.0, self.metrics.line)),
             purpose: input_method::Purpose::Normal,
             preedit: state.preedit.as_ref().map(input_method::Preedit::as_ref),
         }
@@ -330,8 +364,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         editor.update(
             limits.shrink(self.padding()).max(),
             FONT,
-            Pixels(TEXT_SIZE),
-            line_height(),
+            Pixels(self.metrics.text),
+            self.metrics.line_height(),
             Wrapping::WordOrGlyph,
             state.highlighter.borrow_mut().deref_mut(),
         );
@@ -423,7 +457,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                         state.preedit = Some(input_method::Preedit {
                             content,
                             selection,
-                            text_size: Some(Pixels(TEXT_SIZE)),
+                            text_size: Some(Pixels(self.metrics.text)),
                         });
                         shell.request_redraw();
                     }
@@ -530,8 +564,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                     Text {
                         content: (row.line + 1).to_string(),
                         bounds: Size::new(GUTTER_WIDTH - GUTTER_PADDING_RIGHT, row.height),
-                        size: Pixels(TEXT_SIZE),
-                        line_height: line_height(),
+                        size: Pixels(self.metrics.text),
+                        line_height: self.metrics.line_height(),
                         font: FONT,
                         align_x: text::Alignment::Right,
                         align_y: alignment::Vertical::Top,
@@ -575,7 +609,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                 let Some((start, end)) = row.strike else {
                     continue;
                 };
-                let y = (text_bounds.y + row.baseline - TEXT_SIZE * X_HEIGHT_EM / 2.0).round();
+                let y =
+                    (text_bounds.y + row.baseline - self.metrics.text * X_HEIGHT_EM / 2.0).round();
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -594,9 +629,11 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                 if focus.is_cursor_visible() {
                     let caret = Rectangle {
                         x: position.x + translation.x,
-                        y: position.y + translation.y + (LINE_HEIGHT - CARET_HEIGHT) / 2.0,
+                        y: position.y
+                            + translation.y
+                            + (self.metrics.line - self.metrics.caret) / 2.0,
                         width: CARET_WIDTH,
-                        height: CARET_HEIGHT,
+                        height: self.metrics.caret,
                     };
                     if let Some(caret) = caret.intersection(&rows_clip) {
                         renderer.fill_quad(
@@ -880,6 +917,26 @@ fn strike_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_scale_from_the_mockup_sizes() {
+        assert_eq!(
+            Metrics::default(),
+            Metrics {
+                text: 14.0,
+                line: 24.0,
+                caret: 18.0
+            }
+        );
+        assert_eq!(
+            Metrics::for_size(21.0),
+            Metrics {
+                text: 21.0,
+                line: 36.0,
+                caret: 27.0
+            }
+        );
+    }
     use iced::advanced::graphics::text::font_system;
     use wren_core::theme;
 
@@ -924,8 +981,10 @@ mod tests {
             caret: Color::WHITE,
             strike: Color::WHITE,
         };
-        let shown = TextEditor::new(&content, "e", settings, style, true).padding();
-        let hidden = TextEditor::new(&content, "e", settings, style, false).padding();
+        let shown =
+            TextEditor::new(&content, "e", settings, style, true, Metrics::default()).padding();
+        let hidden =
+            TextEditor::new(&content, "e", settings, style, false, Metrics::default()).padding();
         assert_eq!((shown.left, shown.top, shown.bottom), (60.0, 24.0, 24.0));
         assert_eq!(hidden.left, 16.0);
     }

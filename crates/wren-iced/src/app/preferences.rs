@@ -133,6 +133,9 @@ impl App {
 
     pub(super) fn apply_preferences(&mut self) {
         self.apply_theme();
+        let settings = &self.preferences.settings;
+        self.editor.set_font_size(settings.editor_font_size);
+        self.editor.set_line_numbers(settings.line_numbers);
     }
 
     pub(super) fn startup_settings_warning(&self) -> Option<String> {
