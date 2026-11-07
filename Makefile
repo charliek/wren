@@ -1,10 +1,10 @@
 .DEFAULT_GOAL := help
 PACKAGE_HOST := $(shell rustc --print host-tuple)
 
-.PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland perf-search package package-debug
+.PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland perf-search package package-debug icons
 
 help:
-	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.'
+	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.' '  make icons          Regenerate committed app icons from assets/icon/wren-icon.svg.' '  make icons ICON_COLORS="eyes=#FFAA00"  Recolor a role in the SVG, then regenerate.'
 
 setup:
 	cargo fetch --locked
@@ -36,6 +36,12 @@ package-debug:
 	cargo build --locked -p wren-iced --target-dir target/package-build --target "$(PACKAGE_HOST)"
 	cargo fetch --locked
 	uv run --locked --group test python tools/package.py --binary "target/package-build/$(PACKAGE_HOST)/debug/wren" $(if $(PACKAGE_OUTPUT),--output "$(PACKAGE_OUTPUT)")
+
+# Icon rendering needs cairosvg (and the system libcairo) plus Pillow, supplied
+# in a throwaway environment so the locked project dependencies stay untouched.
+# Outputs are committed; builds and CI never run this target.
+icons:
+	uv run --no-project --with cairosvg==2.9.1 --with pillow==13.0.0 python tools/generate_icons.py $(ICON_COLORS)
 
 fmt:
 	cargo fmt --all
