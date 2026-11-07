@@ -22,11 +22,10 @@ Derived outputs, all committed so that builds and CI never need this toolchain:
 
 The Linux scalable icon is the source SVG itself, copied by tools/package.py.
 
-Default palette ("lagoon owl"): Deep Lagoon #0E5159 tile, Parchment #FBF6EC
-owl, Wren Amber #F0B45A eyes (the dark theme's accent), white #FFFFFF glints.
-Teal and amber sit opposite each other on the color wheel, so the eyes carry
-the app's accent at full strength against a tile that is distinct from both
-Roost's violet and Wren's own near-black UI.
+Default palette ("gopher owl"): Gopher Maroon #7A0019 tile, Parchment #FBF6EC
+owl, Gopher Gold #FFCC33 eyes, white #FFFFFF glints. The University of
+Minnesota pair: deep maroon keeps the tile distinct from Roost's violet and
+from Wren's near-black UI, and the gold eyes pop against it at every size.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@
     `make icons ICON_COLORS="background=#123456 eyes=#FFAA00"`. Either way, commit
     the regenerated assets; tools/generate_icons.py lists every derived file.
   -->
-  <rect id="background" width="1024" height="1024" rx="229" fill="#0E5159"/>
+  <rect id="background" width="1024" height="1024" rx="229" fill="#7A0019"/>
   <g id="owl" transform="translate(87.04 162.06) scale(0.98713)">
     <path id="owl-body" fill="#FBF6EC"
           d="M429.5,708.0C427.9,707.6 425.8,707.6 422.0,705.5C419.5,703.8 416.8,702.3 407.0,695.5
@@ -93,7 +93,7 @@
              C624.7,625.8 599.0,630.8 583.0,632.5C575.3,632.8 549.8,630.7 537.0,634.5
              C531.8,638.0 522.0,643.8 506.0,655.5C495.2,663.7 453.4,695.8 441.0,704.5
              C439.4,705.1 434.7,707.8 431.5,708.0Z"/>
-    <g id="eyes" fill="#F0B45A">
+    <g id="eyes" fill="#FFCC33">
       <circle cx="235.75" cy="331.2" r="102.2"/>
       <circle cx="625.6" cy="330.0" r="102.3"/>
     </g>
