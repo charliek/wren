@@ -10,3 +10,4 @@ Terminal=false
 Categories=Office;TextEditor;
 Keywords=Notes;Markdown;
 StartupNotify=false
+StartupWMClass=wren

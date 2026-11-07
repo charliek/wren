@@ -39,6 +39,45 @@ fn main() -> ExitCode {
     }
 }
 
+/// The Linux window `application_id` (Wayland `app_id`, X11 `WM_CLASS`). It
+/// must equal the desktop entry's basename, `wren.desktop`, so docks and app
+/// switchers pair the window with that entry and its icon; Wayland ignores
+/// window icons entirely.
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "wren";
+
+/// The 256 px hicolor icon, derived from `assets/icon/wren-icon.svg` by `make icons`.
+const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon/hicolor/256x256/apps/wren.png");
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(1280.0, 800.0),
+        exit_on_close_request: false,
+        icon: window_icon(),
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: APP_ID.to_owned(),
+            ..Default::default()
+        },
+        ..iced::window::Settings::default()
+    }
+}
+
+/// Decodes the embedded icon for X11 (`_NET_WM_ICON`) and other platforms that
+/// honor window icons; macOS shows the bundle icon instead.
+fn window_icon() -> Option<iced::window::Icon> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut rgba).ok()?;
+    if (frame.color_type, frame.bit_depth) != (png::ColorType::Rgba, png::BitDepth::Eight) {
+        return None;
+    }
+    rgba.truncate(frame.buffer_size());
+    iced::window::icon::from_rgba(rgba, frame.width, frame.height).ok()
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref())? {
@@ -72,8 +111,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut application =
         iced::application(move || App::new(options.clone()), App::update, App::view)
             .title(title)
-            .window_size((1280.0, 800.0))
-            .exit_on_close_request(false)
+            .window(window_settings())
             .default_font(fonts::UI)
             .theme(App::theme)
             .subscription(App::subscription);
@@ -89,4 +127,27 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_window_icon_decodes_to_square_rgba() {
+        let (rgba, size) = window_icon().expect("embedded icon decodes").into_raw();
+        assert_eq!((size.width, size.height), (256, 256));
+        let alpha = |x: usize, y: usize| rgba[(y * 256 + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 0, "rounded corners stay transparent");
+        assert_eq!(alpha(128, 8), 255, "the tile is opaque");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn window_settings_carry_the_desktop_entry_application_id() {
+        let settings = window_settings();
+        assert_eq!(settings.platform_specific.application_id, APP_ID);
+        assert!(settings.icon.is_some());
+        assert!(!settings.exit_on_close_request);
+    }
 }

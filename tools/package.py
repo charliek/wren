@@ -3,7 +3,9 @@
 The CLI requires the matching host and an ELF (Linux) or Mach-O (macOS) header.
 assemble_bundle also supports cross-platform layout tests with fixture bytes;
 it does not establish that a supplied binary can run. No build, installation,
-signing, download, or application-configuration steps are performed. The CLI
+signing, download, or application-configuration steps are performed, except
+that a native macOS run compiles the committed Icon Composer icon with actool
+when full Xcode provides it. Icons are committed outputs of `make icons`. The CLI
 collects dependency texts using locked, offline Cargo metadata before assembly;
 run cargo fetch --locked separately if the locked sources are not cached.
 Existing outputs are never replaced; choose a new --output for another bundle.
@@ -15,8 +17,6 @@ import argparse
 from contextlib import contextmanager
 import ctypes
 from dataclasses import dataclass
-from functools import lru_cache
-import math
 import os
 from pathlib import Path
 import plistlib
@@ -25,10 +25,11 @@ import secrets
 import shutil
 import stat
 import struct
+import subprocess
 import sys
+import tempfile
 import tomllib
 import xml.etree.ElementTree as ET
-import zlib
 
 if __package__:
     from .dependency_notices import collect_notices, directory_fd
@@ -39,6 +40,14 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_ID = "io.github.charliek.wren"
+# Every icon file is derived from ICON_SVG by `make icons` (tools/generate_icons.py)
+# and committed, so packaging needs no rendering toolchain.
+ICON_SVG = Path("assets/icon/wren-icon.svg")
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+ICON_ICNS = Path("assets/icon/AppIcon.icns")
+ICON_CATALOG = Path("assets/icon/AppIcon.icon")
+# Rust's own default for aarch64-apple-darwin; actool needs some target.
+MACOS_ICON_DEPLOYMENT_TARGET = "11.0"
 FONT_NOTICES = (
     Path("third_party/inter/LICENSE.txt"),
     Path("third_party/jetbrains-mono/OFL.txt"),
@@ -220,142 +229,68 @@ def desktop_entry(template: bytes, destination: Path) -> bytes:
     return source.replace("\nIcon=wren\n", f"\nIcon={desktop_string(str(icon))}\n").encode("utf-8")
 
 
-def path_polygon(data: str) -> list[tuple[float, float]]:
-    tokens = re.findall(r"[MLCQZ]|-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", data)
-    if re.sub(r"[MLCQZ]|-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|[\s,]+", "", data):
-        raise PackageError("icon path uses an unsupported SVG command")
-    points = []
-    index = 0
-    while index < len(tokens):
-        command = tokens[index]
-        count = {"M": 2, "L": 2, "C": 6, "Q": 4, "Z": 0}.get(command)
-        if count is None or index + count >= len(tokens):
-            raise PackageError("invalid icon path")
-        values = [float(value) for value in tokens[index + 1:index + count + 1]]
-        index += count + 1
-        if command in ("M", "L"):
-            if command == "M" and points:
-                raise PackageError("icon paths must have a single closed subpath")
-            points.append((values[0], values[1]))
-        elif command in ("C", "Q"):
-            if not points:
-                raise PackageError("icon curve must follow M")
-            x, y = points[-1]
-            for step in range(1, 25):
-                t = step / 24
-                u = 1 - t
-                if command == "C":
-                    points.append((u**3*x + 3*u*u*t*values[0] + 3*u*t*t*values[2] + t**3*values[4],
-                                   u**3*y + 3*u*u*t*values[1] + 3*u*t*t*values[3] + t**3*values[5]))
-                else:
-                    points.append((u*u*x + 2*u*t*values[0] + t*t*values[2],
-                                   u*u*y + 2*u*t*values[1] + t*t*values[3]))
-        elif command == "Z" and index != len(tokens):
-            raise PackageError("icon path must end at its closing command")
-    if len(points) < 3 or not tokens or tokens[-1] != "Z":
-        raise PackageError("icon path must be a closed polygon")
-    return points
-
-
-def icon_shapes(svg: bytes) -> list[tuple[list[tuple[float, float]], bytes]]:
-    # This is deliberately a renderer for our flat, solid-fill icon, not a
-    # general SVG engine. Fail instead of silently dropping unsupported art.
+def check_icon_svg(svg: bytes) -> None:
     root = ET.fromstring(svg)
-    ns = "{http://www.w3.org/2000/svg}"
-    if root.tag != ns + "svg" or root.attrib.get("viewBox") != "0 0 256 256":
-        raise PackageError("icon must be a 256-unit SVG")
-    shapes = []
-    for shape in root:
-        tag = shape.tag.removeprefix(ns)
-        if tag in ("title", "desc"):
-            continue
-        allowed = {
-            "path": {"d", "fill"},
-            "circle": {"cx", "cy", "r", "fill"},
-            "rect": {"x", "y", "width", "height", "rx", "fill"},
-        }
-        if tag not in allowed or set(shape.attrib) - allowed[tag] or len(shape):
-            raise PackageError(f"unsupported icon shape or attributes: {tag}")
-        fill = shape.attrib.get("fill", "")
-        if not re.fullmatch(r"#[0-9a-fA-F]{6}", fill):
-            raise PackageError("icon shapes must use solid RGB fills")
-        rgba = bytes.fromhex(fill[1:]) + b"\xff"
-        if tag == "path":
-            points = path_polygon(shape.attrib["d"])
-        elif tag == "circle":
-            x, y, radius = (float(shape.attrib[key]) for key in ("cx", "cy", "r"))
-            points = [(x + radius*math.cos(i*math.tau/96),
-                       y + radius*math.sin(i*math.tau/96)) for i in range(96)]
-        elif tag == "rect":
-            x, y, width, height = (float(shape.attrib[key]) for key in ("x", "y", "width", "height"))
-            radius = float(shape.attrib.get("rx", "0"))
-            points = []
-            for cx, cy, start in ((x+width-radius, y+radius, -math.pi/2),
-                                  (x+width-radius, y+height-radius, 0),
-                                  (x+radius, y+height-radius, math.pi/2),
-                                  (x+radius, y+radius, math.pi)):
-                points.extend((cx + radius*math.cos(start+i*math.pi/48),
-                               cy + radius*math.sin(start+i*math.pi/48)) for i in range(25))
-        else:
-            raise PackageError(f"unsupported icon shape: {tag}")
-        shapes.append((points, rgba))
-    if not shapes:
-        raise PackageError("icon is empty")
-    return shapes
+    if root.tag != "{http://www.w3.org/2000/svg}svg" or root.attrib.get("viewBox") != "0 0 1024 1024":
+        raise PackageError("the icon source must be a 1024-unit SVG")
 
 
-def png_chunk(kind: bytes, data: bytes) -> bytes:
-    return (struct.pack(">I", len(data)) + kind + data
-            + struct.pack(">I", zlib.crc32(kind + data)))
+def check_icon_png(data: bytes, size: int) -> None:
+    if (len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR"
+            or struct.unpack_from(">II", data, 16) != (size, size)):
+        raise PackageError(f"the hicolor {size}x{size} icon is not a {size}x{size} PNG; run make icons")
 
 
-@lru_cache(maxsize=8)
-def icon_png(svg: bytes, size: int) -> bytes:
-    if size not in (128, 256, 512):
-        raise PackageError("supported icon sizes are 128, 256, and 512")
-    scale = size * 2 / 256
-    side = size * 2
-    pixels = bytearray(side * side * 4)
-    for polygon, rgba in icon_shapes(svg):
-        points = [(x*scale, y*scale) for x, y in polygon]
-        edges = list(zip(points, points[1:] + points[:1]))
-        for y in range(max(0, math.ceil(min(y for _, y in points) - 0.5)),
-                       min(side, math.ceil(max(y for _, y in points) - 0.5))):
-            scan = y + 0.5
-            xs = sorted(x1 + (scan-y1)*(x2-x1)/(y2-y1)
-                        for (x1, y1), (x2, y2) in edges
-                        if min(y1, y2) <= scan < max(y1, y2))
-            for left, right in zip(xs[::2], xs[1::2]):
-                begin = max(0, math.ceil(left - 0.5))
-                end = min(side, math.ceil(right - 0.5))
-                if begin < end:
-                    offset = (y*side + begin)*4
-                    pixels[offset:offset + (end-begin)*4] = rgba*(end-begin)
-    scanlines = bytearray()
-    for y in range(size):
-        scanlines.append(0)
-        for x in range(size):
-            offset = (y*2*side + x*2)*4
-            samples = (offset, offset+4, offset+side*4, offset+side*4+4)
-            coverage = sum(pixels[sample+3] for sample in samples)
-            # Unpremultiplied PNG colors must retain their brightness along
-            # a partially transparent edge, rather than acquire a dark halo.
-            for c in range(3):
-                scanlines.append(sum(pixels[sample+c] for sample in samples)*255 // coverage
-                                 if coverage else 0)
-            scanlines.append((coverage + 2) // 4)
-    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header)
-            + png_chunk(b"IDAT", zlib.compress(scanlines, 9)) + png_chunk(b"IEND", b""))
+def check_icns(data: bytes) -> None:
+    valid = len(data) > 8 and data[:4] == b"icns" and struct.unpack_from(">I", data, 4)[0] == len(data)
+    offset = 8
+    while valid and offset < len(data):
+        length = struct.unpack_from(">I", data, offset + 4)[0] if offset + 8 <= len(data) else 0
+        valid = 8 < length <= len(data) - offset
+        offset += length
+    if not valid:
+        raise PackageError("AppIcon.icns is not a complete ICNS file; run make icons")
 
 
-def icon_icns(svg: bytes) -> bytes:
-    chunks = []
-    for kind, size in ((b"ic07", 128), (b"ic08", 256), (b"ic09", 512)):
-        png = icon_png(svg, size)
-        chunks.append(kind + struct.pack(">I", len(png) + 8) + png)
-    data = b"".join(chunks)
-    return b"icns" + struct.pack(">I", len(data) + 8) + data
+def icon_assets(root: Path) -> tuple[bytes, dict[int, bytes], bytes]:
+    """Read and validate the committed icon assets that make icons derives from the SVG."""
+    svg = read_source(root / ICON_SVG)
+    check_icon_svg(svg)
+    pngs = {}
+    for size in ICON_SIZES:
+        pngs[size] = read_source(root / hicolor_icon(size))
+        check_icon_png(pngs[size], size)
+    icns = read_source(root / ICON_ICNS)
+    check_icns(icns)
+    return svg, pngs, icns
+
+
+def compile_icon_catalog(catalog: Path) -> bytes | None:
+    """Compile the Icon Composer source into Assets.car, or return None.
+
+    macOS 26 fills its glass Dock tile edge to edge only for a compiled .icon
+    catalog; a loose .icns is inset as a legacy icon. actool comes with full
+    Xcode 26 or later, not the Command Line Tools, so a missing or failing
+    actool falls back to the flat AppIcon.icns that every bundle carries.
+    """
+    if shutil.which("xcrun") is None or not checked_path(catalog, missing=True).is_dir():
+        return None
+    target = os.environ.get("MACOSX_DEPLOYMENT_TARGET") or MACOS_ICON_DEPLOYMENT_TARGET
+    with tempfile.TemporaryDirectory(prefix="wren-actool-") as temp:
+        car = Path(temp) / "Assets.car"
+        command = ["xcrun", "actool", str(catalog), "--compile", temp, "--platform", "macosx",
+                   "--minimum-deployment-target", target, "--app-icon", "AppIcon",
+                   "--output-partial-info-plist", str(Path(temp) / "partial.plist"),
+                   "--errors", "--warnings"]
+        try:
+            compiled = subprocess.run(command, capture_output=True, timeout=300, check=False).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            compiled = False
+        if not compiled or not car.is_file():
+            print("Warning: actool could not compile the Icon Composer icon (full Xcode 26+ is required); "
+                  "the bundle uses the flat AppIcon.icns, which macOS 26 shows inset.", file=sys.stderr)
+            return None
+        return car.read_bytes()
 
 
 @dataclass
@@ -507,11 +442,13 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
         make_directory_fd(anchor, destination.parent.relative_to(destination.anchor)) as parent,
         staging_directory(parent, destination) as stage,
     ):
-        svg = read_source(root / "assets/wren.svg")
-        icon_shapes(svg)
+        svg, pngs, icns = icon_assets(root)
         if platform == "linux":
             copy_executable(binary, Path("bin/wren"), platform, native, dir_fd=stage.fd)
-            write_file(Path("share/icons/hicolor/scalable/apps/wren.svg"), svg, dir_fd=stage.fd)
+            icons = Path("share/icons/hicolor")
+            write_file(icons / "scalable/apps/wren.svg", svg, dir_fd=stage.fd)
+            for size, png in pngs.items():
+                write_file(icons / f"{size}x{size}/apps/wren.png", png, dir_fd=stage.fd)
             template = read_source(root / "assets/wren.desktop")
             write_file(Path("share/applications/wren.desktop"), desktop_entry(template, destination), dir_fd=stage.fd)
             notices = Path("share/doc/wren")
@@ -535,10 +472,15 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
                 "NSPrincipalClass": "NSApplication",
                 "NSSupportsAutomaticGraphicsSwitching": True,
             }
+            # Only a native build compiles the macOS 26 icon; fixtures and
+            # Linux hosts ship the flat ICNS alone.
+            catalog = compile_icon_catalog(root / ICON_CATALOG) if native else None
+            if catalog is not None:
+                info["CFBundleIconName"] = "AppIcon"
+                write_file(resources / "Assets.car", catalog, dir_fd=stage.fd)
             write_file(Path("Contents/Info.plist"), plistlib.dumps(info), dir_fd=stage.fd)
             write_file(Path("Contents/PkgInfo"), b"APPL????", dir_fd=stage.fd)
-            write_file(resources / "AppIcon.icns", icon_icns(svg), dir_fd=stage.fd)
-            write_file(resources / "wren.svg", svg, dir_fd=stage.fd)
+            write_file(resources / "AppIcon.icns", icns, dir_fd=stage.fd)
             notices = resources
         for notice in FONT_NOTICES:
             write_file(notices / notice, read_source(root / notice), dir_fd=stage.fd)
@@ -546,6 +488,10 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
         write_file(notices / "THIRD_PARTY_NOTICES.txt", NOTICES.encode("utf-8"), dir_fd=stage.fd)
         publish_bundle(stage, destination)
         return destination
+
+
+def hicolor_icon(size: int) -> Path:
+    return Path(f"assets/icon/hicolor/{size}x{size}/apps/wren.png")
 
 
 def native_platform() -> str:

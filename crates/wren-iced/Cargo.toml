@@ -13,13 +13,14 @@ name = "wren"
 path = "src/main.rs"
 
 [features]
-smoke-test = ["dep:png", "iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rustix"]
+smoke-test = ["iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rustix"]
 
 [dependencies]
 wren-core.workspace = true
 iced.workspace = true
 rfd.workspace = true
-png = { workspace = true, optional = true }
+# Decodes the embedded window icon; its dependencies already ship via tiny-skia.
+png.workspace = true
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }

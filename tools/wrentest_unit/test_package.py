@@ -16,11 +16,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
+import zlib
 
 from tools import dependency_notices, package
-from tools.wrentest.png import read_png
 
 ROOT = Path(__file__).resolve().parents[2]
+ICON_ASSETS = (package.ICON_SVG, package.ICON_ICNS, *map(package.hicolor_icon, package.ICON_SIZES))
+# PNG-payload ICNS element types written by tools/generate_icons.py.
+ICNS_SIZES = {b"icp4": 16, b"icp5": 32, b"ic11": 32, b"ic12": 64, b"ic07": 128,
+              b"ic13": 256, b"ic08": 256, b"ic14": 512, b"ic09": 512, b"ic10": 1024}
 
 
 def snapshot(root: Path) -> dict[str, tuple[bytes, int, int]]:
@@ -34,6 +38,51 @@ def native_fixture(platform: str) -> bytes:
     if platform == "linux":
         return b"\x7fELF\x02\x01\x01" + bytes(9) + b"\x03\x00" + bytes(46)
     return b"\xcf\xfa\xed\xfe" + bytes(8) + b"\x02\x00\x00\x00" + bytes(16)
+
+
+def png_header(data: bytes) -> tuple[int, int, int, int]:
+    assert data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR"
+    width, height, depth, color = struct.unpack_from(">IIBB", data, 16)
+    return width, height, depth, color
+
+
+def decode_rgba(data: bytes) -> tuple[int, bytes]:
+    """Decode a non-interlaced RGBA8 PNG with any row filters (the icon outputs)."""
+    width, height, depth, color = png_header(data)
+    assert (depth, color, data[28]) == (8, 6, 0)
+    offset, compressed = 8, b""
+    while offset < len(data):
+        length, kind = struct.unpack_from(">I4s", data, offset)
+        if kind == b"IDAT":
+            compressed += data[offset + 8:offset + 8 + length]
+        offset += length + 12
+    raw, stride, rows, previous = zlib.decompress(compressed), width * 4, bytearray(), bytearray(width * 4)
+    for y in range(height):
+        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            left = line[i - 4] if i >= 4 else 0
+            up, corner = previous[i], previous[i - 4] if i >= 4 else 0
+            if kind == 4:
+                estimate = left + up - corner
+                pa, pb, pc = abs(estimate - left), abs(estimate - up), abs(estimate - corner)
+                predictor = left if pa <= pb and pa <= pc else up if pb <= pc else corner
+            else:
+                predictor = (0, left, up, (left + up) // 2)[kind]
+            line[i] = (line[i] + predictor) & 0xFF
+        rows += line
+        previous = line
+    return width, bytes(rows)
+
+
+def icns_images(data: bytes) -> dict[bytes, bytes]:
+    assert data[:4] == b"icns" and struct.unpack_from(">I", data, 4)[0] == len(data)
+    offset, images = 8, {}
+    while offset < len(data):
+        kind, length = struct.unpack_from(">4sI", data, offset)
+        assert 8 < length <= len(data) - offset
+        images[kind] = data[offset + 8:offset + length]
+        offset += length
+    return images
 
 
 def desktop_values(path: Path) -> dict[str, str]:
@@ -65,7 +114,7 @@ class PackageTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.source = self.base / "source with spaces"
         self.source.mkdir()
-        for relative in ("assets/wren.svg", "assets/wren.desktop", *package.FONT_NOTICES):
+        for relative in (*ICON_ASSETS, "assets/wren.desktop", *package.FONT_NOTICES):
             target = self.source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
@@ -146,8 +195,16 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(desktop_exec_argument(values["Exec"]), str(binary))
         icon = output / "share/icons/hicolor/scalable/apps/wren.svg"
         self.assertEqual(desktop_unescape(values["Icon"]), str(icon))
-        self.assertEqual(icon.read_bytes(), (ROOT / "assets/wren.svg").read_bytes())
-        self.assertEqual(ET.fromstring(icon.read_bytes()).attrib["viewBox"], "0 0 256 256")
+        self.assertEqual(values["StartupWMClass"], "wren")
+        self.assertEqual(icon.read_bytes(), (ROOT / package.ICON_SVG).read_bytes())
+        self.assertEqual(ET.fromstring(icon.read_bytes()).attrib["viewBox"], "0 0 1024 1024")
+        themed = sorted(path.relative_to(output / "share/icons/hicolor").as_posix()
+                        for path in (output / "share/icons/hicolor").rglob("*") if path.is_file())
+        self.assertEqual(themed, sorted(["scalable/apps/wren.svg",
+                                         *(f"{size}x{size}/apps/wren.png" for size in package.ICON_SIZES)]))
+        for size in package.ICON_SIZES:
+            png = (output / f"share/icons/hicolor/{size}x{size}/apps/wren.png").read_bytes()
+            self.assertEqual(png, (ROOT / package.hicolor_icon(size)).read_bytes())
         self.assert_notices(output / "share/doc/wren")
         self.assertEqual((output / "share/doc/wren/VERSION").read_text(), "0.0.1\n")
         self.assert_permissions(output, binary)
@@ -171,26 +228,14 @@ class PackageTests(unittest.TestCase):
             self.assertNotIn(forbidden, info)
         self.assertEqual((output / "Contents/PkgInfo").read_bytes(), b"APPL????")
         resources = output / "Contents/Resources"
-        self.assertEqual((resources / "wren.svg").read_bytes(), (ROOT / "assets/wren.svg").read_bytes())
         data = (resources / info["CFBundleIconFile"]).read_bytes()
-        self.assertEqual(data[:4], b"icns")
-        self.assertEqual(struct.unpack_from(">I", data, 4)[0], len(data))
-        offset = 8
-        images = {}
-        while offset < len(data):
-            kind = data[offset:offset + 4]
-            length = struct.unpack_from(">I", data, offset + 4)[0]
-            self.assertGreater(length, 8)
-            self.assertLessEqual(offset + length, len(data))
-            images[kind] = read_png(data[offset + 8:offset + length])
-            offset += length
-        self.assertEqual(offset, len(data))
-        self.assertEqual({kind: (image.width, image.height) for kind, image in images.items()},
-                         {b"ic07": (128, 128), b"ic08": (256, 256), b"ic09": (512, 512)})
-        self.assertEqual(images[b"ic08"].pixel(0, 0)[3], 0)
-        self.assertEqual(images[b"ic08"].pixel(20, 128), (23, 25, 31, 255))
-        self.assertEqual(images[b"ic08"].pixel(150, 100), (240, 180, 90, 255))
-        self.assertEqual(images[b"ic08"].pixel(172, 98), (23, 25, 31, 255))
+        self.assertEqual(data, (ROOT / package.ICON_ICNS).read_bytes())
+        self.assertEqual({kind: png_header(png)[:2] for kind, png in icns_images(data).items()},
+                         {kind: (size, size) for kind, size in ICNS_SIZES.items()})
+        # A fixture (non-native) bundle never runs actool: the flat ICNS alone.
+        self.assertNotIn("CFBundleIconName", info)
+        self.assertEqual(sorted(path.name for path in resources.iterdir()),
+                         sorted(["AppIcon.icns", "DEPENDENCY_NOTICES.txt", "THIRD_PARTY_NOTICES.txt", "third_party"]))
         self.assert_notices(resources)
         self.assert_permissions(output, binary)
         self.assert_source_unchanged()
@@ -217,8 +262,53 @@ class PackageTests(unittest.TestCase):
         values = desktop_values(ROOT / "assets/wren.desktop")
         self.assertEqual(values["Exec"], "wren")
         self.assertEqual(values["Icon"], "wren")
+        self.assertEqual(values["StartupWMClass"], "wren")
         self.assertNotIn("Path", values)
         self.assertNotIn("URL", values)
+
+    def test_linux_window_application_id_matches_the_desktop_entry_basename(self):
+        # Wayland pairs a window with its launcher entry and icon only by app_id.
+        main = (ROOT / "crates/wren-iced/src/main.rs").read_text(encoding="utf-8")
+        app_id = re.findall(r'^const APP_ID: &str = "([^"]+)";$', main, re.MULTILINE)
+        self.assertEqual(app_id, ["wren"])
+        self.assertIn("application_id: APP_ID.to_owned()", main)
+        self.assertEqual(desktop_values(ROOT / "assets/wren.desktop")["StartupWMClass"], app_id[0])
+        self.assertIn('Path("share/applications/wren.desktop")', (ROOT / "tools/package.py").read_text())
+
+    def test_committed_icons_are_current_renders_of_the_source_svg(self):
+        roles = ("background", "owl-body", "eyes", "eye-glints")
+        svg = ET.fromstring((ROOT / package.ICON_SVG).read_bytes())
+        fills = {element.attrib["id"]: element.attrib["fill"].lower()
+                 for element in svg.iter() if element.attrib.get("id") in roles}
+        self.assertEqual(set(fills), set(roles))
+        for fill in fills.values():
+            self.assertRegex(fill, r"^#[0-9a-f]{6}$")
+        background = tuple(bytes.fromhex(fills["background"][1:]))
+        hicolor = ROOT / "assets/icon/hicolor"
+        self.assertEqual(sorted(path.relative_to(ROOT).as_posix() for path in hicolor.rglob("*") if path.is_file()),
+                         sorted(package.hicolor_icon(size).as_posix() for size in package.ICON_SIZES))
+        for size in package.ICON_SIZES:
+            self.assertEqual(png_header((ROOT / package.hicolor_icon(size)).read_bytes()), (size, size, 8, 6))
+        width, rgba = decode_rgba((ROOT / package.hicolor_icon(256)).read_bytes())
+
+        def pixel(x, y):
+            return tuple(rgba[(y * width + x) * 4:(y * width + x) * 4 + 4])
+
+        self.assertEqual(pixel(0, 0)[3], 0)
+        # Top-center of the full-bleed tile is background; the owl sits lower.
+        self.assertEqual(pixel(128, 8), (*background, 255), "edited the SVG? run make icons")
+        width, rgba = decode_rgba(icns_images((ROOT / package.ICON_ICNS).read_bytes())[b"ic08"])
+        self.assertEqual(pixel(128, 8)[3], 0, "the macOS tile is inset on Apple's icon grid")
+        self.assertEqual(pixel(128, 40), (*background, 255), "edited the SVG? run make icons")
+        catalog = json.loads((ROOT / package.ICON_CATALOG / "icon.json").read_text())
+        channels = catalog["fill"]["solid"].removeprefix("srgb:").split(",")
+        self.assertEqual(tuple(round(float(value) * 255) for value in channels[:3]), background)
+        layers = [layer["image-name"] for group in catalog["groups"] for layer in group["layers"]]
+        self.assertEqual(layers, ["owl.png"])
+        owl = (ROOT / package.ICON_CATALOG / "Assets/owl.png").read_bytes()
+        self.assertEqual(png_header(owl), (1024, 1024, 8, 6))
+        width, rgba = decode_rgba(owl)
+        self.assertEqual(pixel(512, 40)[3], 0, "the Icon Composer owl layer has no baked tile")
 
     def test_cargo_version_is_inherited_or_taken_from_app_manifest(self):
         self.assertEqual(package.cargo_version(self.source), "0.0.1")
@@ -545,10 +635,15 @@ class PackageTests(unittest.TestCase):
                 self.assertFalse((self.base / "new-parent").exists())
 
     def test_asset_corruption_fails_closed_with_cleanup(self):
-        for asset, bad in (("wren.svg", b"not XML"),
-                           ("wren.desktop", b"[Desktop Entry]\nExec=wrong\nIcon=wren\n")):
-            with self.subTest(asset=asset):
-                path = self.source / "assets" / asset
+        wrong_size = (ROOT / package.hicolor_icon(32)).read_bytes()
+        for asset, bad in ((package.ICON_SVG, b"not XML"),
+                           (package.ICON_SVG, b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"/>'),
+                           (package.hicolor_icon(48), wrong_size),
+                           (package.hicolor_icon(64), b"not a PNG"),
+                           (package.ICON_ICNS, b"icns\x00\x00\x00\x10truncated"),
+                           (Path("assets/wren.desktop"), b"[Desktop Entry]\nExec=wrong\nIcon=wren\n")):
+            with self.subTest(asset=asset, bad=bad[:24]):
+                path = self.source / asset
                 previous = path.read_bytes()
                 path.write_bytes(bad)
                 with self.assertRaises((package.PackageError, ET.ParseError)):
@@ -556,15 +651,42 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(list((self.base / "bundle with spaces").iterdir()), [])
                 path.write_bytes(previous)
 
-    def test_icon_renderer_rejects_unsupported_art_instead_of_dropping_it(self):
-        svg = (ROOT / "assets/wren.svg").read_bytes()
-        for bad in (svg.replace(b'<circle', b'<ellipse').replace(b'cy="98"', b'cy="98" ry="5"'),
-                    svg.replace(b'fill="#f0b45a"', b'fill="url(#gradient)"'),
-                    svg.replace(b'<circle ', b'<circle stroke="#ffffff" '),
-                    svg.replace(b'M 91 145', b'm 91 145')):
-            with self.subTest(bad=bad[:80]):
-                with self.assertRaises(package.PackageError):
-                    package.icon_png(bad, 128)
+    def test_native_macos_bundle_adds_the_compiled_icon_catalog_or_falls_back(self):
+        self.binary.write_bytes(native_fixture("macos"))
+        for compiled in (b"fixture Assets.car", None):
+            with self.subTest(compiled=compiled):
+                output = self.base / f"native-{compiled is not None}" / "Wren.app"
+                with patch.object(package, "compile_icon_catalog", return_value=compiled) as compile_icon:
+                    self.assemble("macos", output=output, native=True)
+                compile_icon.assert_called_once_with(self.source / package.ICON_CATALOG)
+                info = plistlib.loads((output / "Contents/Info.plist").read_bytes())
+                resources = output / "Contents/Resources"
+                self.assertEqual(info["CFBundleIconFile"], "AppIcon.icns")
+                self.assertTrue((resources / "AppIcon.icns").is_file())
+                if compiled is None:
+                    self.assertNotIn("CFBundleIconName", info)
+                    self.assertFalse((resources / "Assets.car").exists())
+                else:
+                    self.assertEqual(info["CFBundleIconName"], "AppIcon")
+                    self.assertEqual((resources / "Assets.car").read_bytes(), compiled)
+                self.assert_permissions(output, output / "Contents/MacOS/wren")
+
+    def test_icon_catalog_compilation_is_skipped_without_xcrun(self):
+        with patch.object(package.shutil, "which", return_value=None), \
+                patch.object(package.subprocess, "run") as run:
+            self.assertIsNone(package.compile_icon_catalog(ROOT / package.ICON_CATALOG))
+        run.assert_not_called()
+
+    def test_icon_catalog_compilation_failure_falls_back_with_a_warning(self):
+        failed = subprocess.CompletedProcess([], 1, b"", b"unsupported input")
+        with patch.object(package.shutil, "which", return_value="/usr/bin/xcrun"), \
+                patch.object(package.subprocess, "run", return_value=failed) as run, \
+                redirect_stderr(io.StringIO()) as stderr:
+            self.assertIsNone(package.compile_icon_catalog(ROOT / package.ICON_CATALOG))
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["xcrun", "actool", str(ROOT / package.ICON_CATALOG)])
+        self.assertIn("--app-icon", command)
+        self.assertIn("flat AppIcon.icns", stderr.getvalue())
 
     def test_staging_container_and_bundle_remain_private_until_publication(self):
         real_publish = package.publish_bundle
