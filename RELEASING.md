@@ -255,7 +255,6 @@ does), export `WREN_DEVELOPER_ID_IDENTITY`, and notarize with
 | Release stuck as a draft | `publish-release` never ran or never passed | See [Draft-until-complete](#draft-until-complete-and-how-to-recover) |
 | `dispatch-apt-charliek` warns `RELEASE_BOT_CLIENT_ID not set`, or fails minting a token | The secret is unset, or the App is not installed on `charliek/apt-charliek` | Run `sanity-check-app.yml`; fix the secret or the install, then re-run the job. apt-charliek also re-scans every package on its next scheduled run, so a missed dispatch self-heals |
 | `apt install wren` doesn't find the new version | The apt-charliek publish run failed, or `wren` is not in its `packages.yaml` | Check <https://github.com/charliek/apt-charliek/actions>; re-dispatch by re-running `dispatch-apt-charliek` |
-| macOS: "Wren wants access to control Finder" on first delete | Expected: deleting moves notes to the Trash through Finder (`trash` crate, osascript) | Allow it once; System Settings → Privacy & Security → Automation lists it afterwards |
 
 ## Adopting the convention (for new contributors)
 
@@ -273,9 +272,10 @@ reference for anything this file leaves out.
   asks it for `Wren.app`. The `.deb`'s runtime `Depends` are hand-kept in
   `packaging/nfpm.yaml`, because winit and wgpu dlopen the whole graphics
   stack and `readelf -d` shows none of it.
-- The Developer ID signature uses `packaging/macos/Wren.entitlements`
-  (`com.apple.security.automation.apple-events`), and `Info.plist` carries
-  `NSAppleEventsUsageDescription`, both for the Finder-based trash path above.
+- The Developer ID signature uses `packaging/macos/Wren.entitlements`, which
+  grants nothing beyond the hardened runtime: deleted notes go to the Trash
+  through NSFileManager, so Wren never scripts Finder or asks for Automation
+  permission.
 - `tools/release_assets.py` names the uploaded assets and holds the
   `publish-release` rules; `tools/wrentest_unit/test_release_assets.py` and
   `test_release_contract.py` test them and the workflow's structure.

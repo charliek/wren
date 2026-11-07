@@ -5,5 +5,5 @@
 *.py[cod]
 .DS_Store
 .claude/
-.env
+.env*
 *.pem

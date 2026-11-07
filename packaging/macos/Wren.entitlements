@@ -2,16 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Hardened-runtime entitlements for the Developer ID signed Wren.app
-  (scripts/macos/sign-app.sh). Deleting a note asks Finder to move it to the
-  Trash (the trash crate's default macOS method runs osascript), and a
-  hardened-runtime app may only prompt for that Automation permission with
-  this entitlement. Info.plist carries the matching
-  NSAppleEventsUsageDescription (tools/package.py). Nothing else is needed:
-  no JIT, no unsigned memory, no library validation exceptions.
+  (scripts/macos/sign-app.sh). Wren needs no exceptions: no JIT, no unsigned
+  memory, no library validation exceptions, and no Apple Events (notes go to
+  the Trash through NSFileManager, not by scripting Finder).
 -->
 <plist version="1.0">
-<dict>
-	<key>com.apple.security.automation.apple-events</key>
-	<true/>
-</dict>
+<dict/>
 </plist>

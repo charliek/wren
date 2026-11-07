@@ -227,8 +227,8 @@ class PackageTests(unittest.TestCase):
         }
         self.assertEqual({key: info[key] for key in expected}, expected)
         self.assertRegex(info["CFBundleIdentifier"], r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
-        self.assertIn("Finder", info["NSAppleEventsUsageDescription"])
-        for forbidden in ("SUFeedURL", "SUPublicEDKey", "NSCameraUsageDescription", "LSMinimumSystemVersion"):
+        # Notes are trashed with NSFileManager, never by scripting Finder.
+        for forbidden in ("NSAppleEventsUsageDescription", "SUFeedURL", "SUPublicEDKey", "NSCameraUsageDescription", "LSMinimumSystemVersion"):
             self.assertNotIn(forbidden, info)
         self.assertEqual((output / "Contents/PkgInfo").read_bytes(), b"APPL????")
         resources = output / "Contents/Resources"

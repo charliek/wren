@@ -157,7 +157,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(package.BUNDLE_ID, "ai.stridelabs.Wren")
         self.assertIn(f"check CFBundleIdentifier {package.BUNDLE_ID}", self.jobs["mac"])
         entitlements = (ROOT / "packaging/macos/Wren.entitlements").read_text()
-        self.assertIn("<key>com.apple.security.automation.apple-events</key>", entitlements)
+        self.assertNotIn("com.apple.security.automation.apple-events", entitlements)
         self.assertIn("--options runtime --timestamp", (ROOT / "scripts/macos/sign-app.sh").read_text())
 
     def test_apt_dispatch_uses_a_receiver_scoped_release_bot_token(self):

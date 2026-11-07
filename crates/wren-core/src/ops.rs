@@ -148,7 +148,19 @@ pub struct SystemTrash;
 
 impl Trash for SystemTrash {
     fn trash(&mut self, path: &Path) -> Result<(), String> {
-        trash::delete(path).map_err(|error| format!("Could not move item to OS trash: {error}"))
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut context = trash::TrashContext::new();
+        // On macOS, move items with NSFileManager instead of asking Finder
+        // over Apple Events: no Automation permission prompt and no
+        // dependency on Finder, at the cost of Finder's "Put Back".
+        #[cfg(target_os = "macos")]
+        {
+            use trash::macos::{DeleteMethod, TrashContextExtMacos};
+            context.set_delete_method(DeleteMethod::NsFileManager);
+        }
+        context
+            .delete(path)
+            .map_err(|error| format!("Could not move item to OS trash: {error}"))
     }
 }
 
@@ -1796,6 +1808,19 @@ impl Session {
 mod tests {
     use super::*;
     use std::fs::{self, File, FileTimes};
+
+    /// Native acceptance for the real OS trash; it moves one throwaway file
+    /// into the current user's Trash, so it only runs on request:
+    /// `cargo test -p wren-core --lib system_trash -- --ignored`.
+    #[test]
+    #[ignore = "moves a file into the real OS trash"]
+    fn system_trash_moves_a_file_into_the_os_trash() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wren-system-trash-check.md");
+        fs::write(&path, b"safe to delete").unwrap();
+        SystemTrash.trash(&path).unwrap();
+        assert!(!path.exists());
+    }
 
     #[test]
     fn periodic_reconciliation_without_a_watcher_refreshes_exact_closed_note_bytes() {

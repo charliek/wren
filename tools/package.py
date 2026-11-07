@@ -49,11 +49,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # Matches the sibling app's `ai.stridelabs.Roost`. Changing it orphans every
 # macOS preference, TCC grant, and notarization record keyed on the old id.
 BUNDLE_ID = "ai.stridelabs.Wren"
-# Deleting a note moves it to the Trash through Finder (the trash crate's
-# default macOS method runs osascript), which macOS gates behind an Automation
-# prompt that shows this text. packaging/macos/Wren.entitlements grants the
-# matching hardened-runtime Apple Events entitlement for Developer ID builds.
-APPLE_EVENTS_USAGE = "Wren asks Finder to move notes you delete to the Trash."
 # Every icon file is derived from ICON_SVG by `make icons` (tools/generate_icons.py)
 # and committed, so packaging needs no rendering toolchain.
 ICON_SVG = Path("assets/icon/wren-icon.svg")
@@ -531,7 +526,6 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
                 "CFBundleShortVersionString": bundle_version(release),
                 "CFBundleVersion": bundle_version(release),
                 "LSApplicationCategoryType": "public.app-category.productivity",
-                "NSAppleEventsUsageDescription": APPLE_EVENTS_USAGE,
                 "NSHighResolutionCapable": True,
                 "NSPrincipalClass": "NSApplication",
                 "NSSupportsAutomaticGraphicsSwitching": True,
