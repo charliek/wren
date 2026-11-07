@@ -95,6 +95,7 @@ def test_timer_autosave_survives_clean_and_hard_restart(tmp_path: Path) -> None:
         capture(app, artifacts / "saved-workspace.png")
 
 
+@pytest.mark.timeout(300)
 def test_five_thousand_line_note_saves_and_reopens(tmp_path: Path) -> None:
     root = workspace(tmp_path / "notes")
     path = root / "S1/G/a.md"
@@ -103,8 +104,8 @@ def test_five_thousand_line_note_saves_and_reopens(tmp_path: Path) -> None:
     path.write_text(original, encoding="utf-8")
     artifacts = artifact_directory("autosave-5000")
     # CI's software Vulkan (lavapipe) needs far longer than hardware to shape
-    # and draw the first frame of a 5,000-line note.
-    with WrenApp(workspace=root, artifacts_dir=artifacts, readiness_timeout=120.0) as app:
+    # and draw the first frame of a 5,000-line note; the test launches twice.
+    with WrenApp(workspace=root, artifacts_dir=artifacts, readiness_timeout=60.0) as app:
         select_a(app)
         started = time.perf_counter()
         expected = append(app, "saved by the real timer")

@@ -29,7 +29,9 @@ impl Frames {
         waiters.retain(|(_, sender)| !sender.is_closed());
         waiters.push((window, sender));
         async move {
-            tokio::time::timeout(Duration::from_secs(5), receiver)
+            // Software renderers on CI can take several seconds to present
+            // the first frame of a large note; the harness bounds readiness.
+            tokio::time::timeout(Duration::from_secs(60), receiver)
                 .await
                 .map_err(|_| "timed out waiting for a rendered frame".to_string())?
                 .map_err(|_| "frame subscription ended".to_string())
