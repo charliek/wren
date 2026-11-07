@@ -22,6 +22,7 @@ from tools.wrentest.x11 import RGBImage, read_pixels
 
 
 LINE_HEIGHT = 24
+TEXT_LEFT = 8 + 52
 SCROLL_LINES = 40
 CROP_WIDTH = 416
 CROP_HEIGHT = 10 * LINE_HEIGHT
@@ -75,11 +76,12 @@ def body_rectangle(app: WrenApp) -> tuple[int, int, int, int]:
         left = root["x"] + browser_width
     assert editor_width >= 580, "Every fixture line must remain unwrapped"
     # The saved editor header is 49px plus its bottom rule. With no banner or
-    # find bar, the body starts at client y=98, followed by the editor's 16px
-    # padding. Skip 4px horizontally to exclude the initial (0,0) caret too.
-    x, y = left + 16 + 4, root["y"] + 50 + 16
-    assert x == int(x) and y == 114, (x, y)
-    assert 16 + 4 + CROP_WIDTH < editor_width - 16
+    # find bar, the body starts at client y=98, followed by the editor's 24px
+    # top padding. Text starts after the 8px row inset and 52px line-number
+    # gutter; skip 4px more to exclude the initial (0,0) 2px caret too.
+    x, y = left + TEXT_LEFT + 4, root["y"] + 50 + 24
+    assert x == int(x) and y == 122, (x, y)
+    assert TEXT_LEFT + 4 + CROP_WIDTH < editor_width - 8
     assert y + CROP_HEIGHT < root["y"] + root["height"] - 50
     return int(x), int(y), CROP_WIDTH, CROP_HEIGHT
 

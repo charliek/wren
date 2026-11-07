@@ -6,20 +6,20 @@
 
 mod editor_history;
 mod markdown_highlighter;
+mod widget;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::Instant;
 
-use iced::advanced::text::LineHeight;
-use iced::font::Font;
 use iced::widget::text_editor::{
     self, Action, Binding, Cursor, Edit, KeyPress, LineEnding, Motion, Position,
 };
-use iced::{Background, Border, Element, Fill, Padding, Pixels};
+use iced::Element;
 use wren_core::theme::Theme;
 
 use editor_history::{EditKind, History};
-use markdown_highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
+use markdown_highlighter::Settings as HighlighterSettings;
+use widget::{Content, Style, TextEditor};
 use wren_core::theme::Rgb;
 
 fn color(Rgb(r, g, b): Rgb) -> iced::Color {
@@ -47,32 +47,40 @@ pub enum Message {
 // EditorView
 // ---------------------------------------------------------------------------
 
-/// A self-contained Markdown editor backed by `iced::widget::text_editor`.
+/// A self-contained Markdown editor backed by a fork of iced's text editor
+/// that adds the mockup's line-number gutter, current-line band, and caret.
 ///
-/// Owns the [`Content`][text_editor::Content], the [`History`], and the find
-/// state.  The parent is responsible for the find bar UI and focus tasks; it
-/// shows the bar in response to [`Message::Find`] and feeds queries via
+/// Owns the [`Content`], the [`History`], and the find state.  The parent is
+/// responsible for the find bar UI and focus tasks; it shows the bar in
+/// response to [`Message::Find`] and feeds queries via
 /// [`EditorView::set_find_query`].
 pub struct EditorView {
-    content: text_editor::Content,
+    content: Content,
     history: History,
     find_query: String,
     /// Byte `(start, end)` pairs, refreshed whenever the query or text changes.
     find_matches: Vec<(usize, usize)>,
     /// Index into `find_matches` of the currently selected hit.
     find_current: Option<usize>,
+    line_numbers: bool,
 }
 
 impl EditorView {
     /// Create a new editor pre-populated with `text`.
     pub fn new(text: &str) -> Self {
         Self {
-            content: text_editor::Content::with_text(text),
+            content: Content::with_text(text),
             history: History::new(),
             find_query: String::new(),
             find_matches: Vec::new(),
             find_current: None,
+            line_numbers: true,
         }
+    }
+
+    /// Show or hide the line-number gutter (shown by default).
+    pub fn set_line_numbers(&mut self, line_numbers: bool) {
+        self.line_numbers = line_numbers;
     }
 
     // -----------------------------------------------------------------------
@@ -82,25 +90,18 @@ impl EditorView {
     /// Build the iced widget tree for the editor.
     ///
     /// Uses JetBrains Mono (bundled by the parent), 14 px / 24 px line height,
-    /// soft-wrap on by default, and Markdown highlighting mapped to `theme`
-    /// semantic colours.  Returns `Element<'_, Message>` so the parent can map
-    /// it to its own message type.
+    /// soft-wrap, a 52 px line-number gutter unless hidden, and Markdown
+    /// highlighting mapped to `theme` semantic colours.  Returns
+    /// `Element<'_, Message>` so the parent can map it to its own message type.
     pub fn view(&self, theme: Theme) -> Element<'_, Message> {
-        let hl_settings = HighlighterSettings { theme };
-
-        text_editor::TextEditor::new(&self.content)
-            .id("note-editor")
-            .font(Font::with_name("JetBrains Mono"))
-            .size(Pixels(14.0))
-            .line_height(LineHeight::Absolute(Pixels(24.0)))
-            .wrapping(iced::advanced::text::Wrapping::WordOrGlyph)
-            .padding(Padding::new(16.0))
-            .height(Fill)
-            .on_action(Message::Action)
-            .highlight_with::<MarkdownHighlighter>(hl_settings, |hl, _iced_theme| hl.to_format())
-            .key_binding(key_binding)
-            .style(move |_iced_theme, status| editor_style(status, theme))
-            .into()
+        TextEditor::new(
+            &self.content,
+            "note-editor",
+            HighlighterSettings { theme },
+            editor_style(theme),
+            self.line_numbers,
+        )
+        .into()
     }
 
     // -----------------------------------------------------------------------
@@ -258,7 +259,7 @@ impl EditorView {
         } else {
             None
         };
-        self.content = text_editor::Content::with_text(text);
+        self.content = Content::with_text(text);
         if let Some(cursor) = saved_cursor {
             let clamped = clamp_cursor(cursor, &self.content);
             self.content.move_to(clamped);
@@ -388,7 +389,7 @@ impl EditorView {
 
     /// Replace content with a history snapshot and restore cursor.
     fn load_snapshot(&mut self, text: String, cursor: Cursor) {
-        self.content = text_editor::Content::with_text(&text);
+        self.content = Content::with_text(&text);
         let clamped = clamp_cursor(cursor, &self.content);
         self.content.move_to(clamped);
         self.find_current = None;
@@ -469,14 +470,16 @@ fn key_binding(key_press: KeyPress) -> Option<Binding<Message>> {
 // Style
 // ---------------------------------------------------------------------------
 
-fn editor_style(_status: text_editor::Status, theme: Theme) -> text_editor::Style {
+fn editor_style(theme: Theme) -> Style {
     let c = theme.colors;
-    text_editor::Style {
-        background: Background::Color(color(c.editor)),
-        border: Border::default(),
-        placeholder: color(c.faint),
+    Style {
+        background: color(c.editor),
         value: color(c.body),
         selection: color(c.selected),
+        gutter: color(c.faint),
+        current_line: color(c.current_line),
+        caret: color(c.accent),
+        strike: color(c.faint),
     }
 }
 
@@ -484,7 +487,7 @@ fn editor_style(_status: text_editor::Status, theme: Theme) -> text_editor::Styl
 // Cursor clamping
 // ---------------------------------------------------------------------------
 
-fn clamp_cursor(cursor: Cursor, content: &text_editor::Content) -> Cursor {
+fn clamp_cursor(cursor: Cursor, content: &Content) -> Cursor {
     let line_count = content.line_count().max(1);
     let position = clamp_position(cursor.position, content, line_count);
     let selection = cursor
@@ -496,7 +499,7 @@ fn clamp_cursor(cursor: Cursor, content: &text_editor::Content) -> Cursor {
     }
 }
 
-fn clamp_position(pos: Position, content: &text_editor::Content, line_count: usize) -> Position {
+fn clamp_position(pos: Position, content: &Content, line_count: usize) -> Position {
     let line = pos.line.min(line_count - 1);
     let column = content.line(line).map_or(0, |line| {
         let mut column = pos.column.min(line.text.len());
@@ -581,7 +584,7 @@ impl FirstLiteral {
     }
 }
 
-fn first_content_match(content: &text_editor::Content, query: &str) -> Option<Range<usize>> {
+fn first_content_match(content: &Content, query: &str) -> Option<Range<usize>> {
     let mut matcher = FirstLiteral::new(query)?;
     let count = content.line_count();
     let mut base = 0;
@@ -646,10 +649,7 @@ fn find_all_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
     matches
 }
 
-fn exact_byte_offset_to_position(
-    content: &text_editor::Content,
-    mut offset: usize,
-) -> Option<Position> {
+fn exact_byte_offset_to_position(content: &Content, mut offset: usize) -> Option<Position> {
     let count = content.line_count();
     for (line, text) in content.lines().enumerate() {
         if offset <= text.text.len() {
@@ -677,7 +677,7 @@ fn exact_byte_offset_to_position(
 
 /// Convert an offset in `Content::text()` to a valid UTF-8 cursor position.
 /// Offsets inside a two-byte line ending snap to the next line's start.
-fn byte_offset_to_position(content: &text_editor::Content, mut offset: usize) -> Position {
+fn byte_offset_to_position(content: &Content, mut offset: usize) -> Position {
     let line_count = content.line_count().max(1);
     for (line, text) in content.lines().enumerate() {
         if offset <= text.text.len() || line + 1 == line_count {
@@ -736,7 +736,7 @@ mod tests {
             ("no match", "missing"),
             ("anything", ""),
         ] {
-            let content = text_editor::Content::with_text(text);
+            let content = Content::with_text(text);
             let expected = find_all_matches(text, query)
                 .first()
                 .map(|&(start, end)| start..end);
@@ -1611,23 +1611,32 @@ mod tests {
     }
 
     #[test]
-    fn editor_style_active_has_editor_background() {
+    fn editor_style_has_editor_background() {
         use wren_core::theme;
-        let style = editor_style(text_editor::Status::Active, theme::DARK);
-        let expected = iced::Background::Color(color(theme::DARK.colors.editor));
-        assert_eq!(style.background, expected);
+        let style = editor_style(theme::DARK);
+        assert_eq!(style.background, color(theme::DARK.colors.editor));
     }
 
     #[test]
     fn editor_style_text_color_matches_theme() {
         use wren_core::theme;
-        let dark_style = editor_style(text_editor::Status::Active, theme::DARK);
-        let light_style = editor_style(text_editor::Status::Active, theme::LIGHT);
+        let dark_style = editor_style(theme::DARK);
+        let light_style = editor_style(theme::LIGHT);
         assert_ne!(dark_style.value, light_style.value);
         assert_eq!(dark_style.value, color(theme::DARK.colors.body));
         assert_eq!(light_style.value, color(theme::LIGHT.colors.body));
-        assert_eq!(dark_style.border.width, 0.0);
-        assert_eq!(light_style.border.width, 0.0);
+    }
+
+    #[test]
+    fn editor_style_maps_mockup_gutter_line_and_caret_tokens() {
+        use wren_core::theme;
+        for theme in [theme::DARK, theme::LIGHT] {
+            let style = editor_style(theme);
+            assert_eq!(style.gutter, color(theme.colors.faint));
+            assert_eq!(style.current_line, color(theme.colors.current_line));
+            assert_eq!(style.caret, color(theme.colors.accent));
+            assert_eq!(style.strike, color(theme.colors.faint));
+        }
     }
 
     #[test]
