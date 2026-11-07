@@ -13,6 +13,21 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.0.2 — 2026-11-07
+
+### Changed
+
+- **The macOS DMG is signed with a Developer ID and notarized.** Wren now opens
+  with a normal Gatekeeper check instead of needing the
+  `xattr -dr com.apple.quarantine` bypass. Wren 0.0.1 picks this release up
+  through "Wren → Check for Updates…".
+
+### Fixed
+
+- The appcast unit tests and `tools/check_updater.py` no longer treat the
+  committed update feed as empty, which broke CI once 0.0.1 was published to
+  it.
+
 ## v0.0.1 — 2026-11-07
 
 The first public build of Wren: a desktop app for structured Markdown notes,
