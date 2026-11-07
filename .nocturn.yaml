@@ -1,0 +1,13 @@
+version: 1
+targets:
+  desktop:
+    kind: desktop
+    # release.yml builds the deb (nfpm) and the signed DMG from the root
+    # workspace on v* tags and dispatches apt-charliek. No tag yet: the
+    # workspace version is still 0.0.1.
+    released: { tag_pattern: '^v\d+\.\d+\.\d+$' }
+    ships: [Cargo.lock]
+lockfiles:
+  # pyproject.toml has no dependencies, only the test group (pytest): the
+  # tools/wrentest harness.
+  uv.lock: { role: test }
