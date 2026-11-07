@@ -217,13 +217,14 @@ class PackageTests(unittest.TestCase):
         info = plistlib.loads((output / "Contents/Info.plist").read_bytes())
         expected = {
             "CFBundleExecutable": "wren", "CFBundleName": "Wren", "CFBundleDisplayName": "Wren",
-            "CFBundleIdentifier": "io.github.charliek.wren", "CFBundlePackageType": "APPL",
+            "CFBundleIdentifier": "ai.stridelabs.Wren", "CFBundlePackageType": "APPL",
             "CFBundleVersion": "0.0.1", "CFBundleShortVersionString": "0.0.1",
             "CFBundleIconFile": "AppIcon.icns", "CFBundleInfoDictionaryVersion": "6.0",
             "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
         }
         self.assertEqual({key: info[key] for key in expected}, expected)
         self.assertRegex(info["CFBundleIdentifier"], r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+        self.assertIn("Finder", info["NSAppleEventsUsageDescription"])
         for forbidden in ("SUFeedURL", "SUPublicEDKey", "NSCameraUsageDescription", "LSMinimumSystemVersion"):
             self.assertNotIn(forbidden, info)
         self.assertEqual((output / "Contents/PkgInfo").read_bytes(), b"APPL????")
@@ -239,6 +240,74 @@ class PackageTests(unittest.TestCase):
         self.assert_notices(resources)
         self.assert_permissions(output, binary)
         self.assert_source_unchanged()
+
+    def test_system_layout_keeps_installable_desktop_names_for_a_usr_install(self):
+        self.set_cargo_version("0.0.1-rc.1")
+        output = self.assemble(output=self.base / "deb root=with equals" / "usr", system_layout=True,
+                               version="0.0.1-rc.1")
+        binary = output / "bin/wren"
+        self.assertEqual(binary.read_bytes(), self.binary.read_bytes())
+        # Installed under /usr, PATH and the icon theme resolve the asset's names.
+        self.assertEqual((output / "share/applications/wren.desktop").read_bytes(),
+                         (ROOT / "assets/wren.desktop").read_bytes())
+        themed = sorted(path.relative_to(output / "share/icons/hicolor").as_posix()
+                        for path in (output / "share/icons/hicolor").rglob("*") if path.is_file())
+        self.assertEqual(themed, sorted(["scalable/apps/wren.svg",
+                                         *(f"{size}x{size}/apps/wren.png" for size in package.ICON_SIZES)]))
+        self.assert_notices(output / "share/doc/wren")
+        self.assertEqual((output / "share/doc/wren/VERSION").read_text(), "0.0.1-rc.1\n")
+        self.assert_permissions(output, binary)
+        self.assert_source_unchanged()
+
+    def test_system_layout_is_linux_only(self):
+        with self.assertRaisesRegex(package.PackageError, "Linux-only"):
+            self.assemble("macos", system_layout=True)
+        self.assertFalse((self.base / "bundle with spaces").exists())
+        stderr = io.StringIO()
+        with patch.object(package, "native_platform", return_value="macos"), redirect_stderr(stderr):
+            self.assertEqual(package.main(["--binary", str(self.binary), "--system-layout",
+                                           "--output", str(self.base / "not-created")]), 1)
+        self.assertIn("Linux-only", stderr.getvalue())
+        self.assertFalse((self.base / "not-created").exists())
+
+    def set_cargo_version(self, version):
+        (self.source / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+        self.original = snapshot(self.source)
+
+    def test_release_version_must_be_exactly_the_cargo_version(self):
+        self.assertEqual(package.release_version("1.2.3", None), "1.2.3")
+        self.assertEqual(package.release_version("1.2.3-rc1", "1.2.3-rc1"), "1.2.3-rc1")
+        for rejected in ("v1.2.3", "1.2.4", "1.2.3-rc1", "1.2.3 ", ""):
+            with self.subTest(rejected=rejected):
+                with self.assertRaisesRegex(package.PackageError, "does not match the Cargo version"):
+                    package.release_version("1.2.3", rejected)
+        with self.assertRaisesRegex(package.PackageError, "does not match the Cargo version"):
+            self.assemble(version="0.0.2")
+        self.assertFalse((self.base / "bundle with spaces").exists())
+
+    def test_prerelease_records_its_full_version_but_a_numeric_bundle_version(self):
+        self.set_cargo_version("0.0.1-rc1")
+        output = self.assemble("macos", version="0.0.1-rc1")
+        info = plistlib.loads((output / "Contents/Info.plist").read_bytes())
+        self.assertEqual((info["CFBundleShortVersionString"], info["CFBundleVersion"]), ("0.0.1", "0.0.1"))
+        linux = self.assemble(output=self.base / "linux-rc")
+        self.assertEqual((linux / "share/doc/wren/VERSION").read_text(), "0.0.1-rc1\n")
+
+    def test_cli_system_layout_and_release_version(self):
+        self.binary.write_bytes(native_fixture("linux"))
+        self.set_cargo_version("0.0.1-rc1")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(package, "ROOT", self.source), patch.object(package, "native_platform", return_value="linux"), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(package.main(["--binary", str(self.binary), "--system-layout",
+                                           "--release-version", "0.0.1-rc1"]), 0, stderr.getvalue())
+            output = self.source / "target/package/wren-0.0.1-rc1-linux-system"
+            self.assertEqual((output / "share/doc/wren/VERSION").read_text(), "0.0.1-rc1\n")
+            self.assertEqual(package.main(["--binary", str(self.binary), "--release-version", "9.9.9",
+                                           "--output", str(self.base / "mismatch")]), 1)
+        self.assertIn("system-layout linux tree", stdout.getvalue())
+        self.assertIn("does not match the Cargo version", stderr.getvalue())
+        self.assertFalse((self.base / "mismatch").exists())
 
     def test_desktop_paths_escape_spaces_quotes_backslashes_and_field_codes(self):
         output = self.base / 'bundle "quoted" $HOME `literal` 50% \\ path' / "wren-linux"
@@ -317,12 +386,12 @@ class PackageTests(unittest.TestCase):
         output = self.assemble("macos")
         self.assertEqual(plistlib.loads((output / "Contents/Info.plist").read_bytes())["CFBundleVersion"], "2.3.4")
 
-    def test_invalid_or_prerelease_versions_are_not_silently_restamped(self):
-        for version in ("../escape", "1.2.3-beta.1", "01.2.3", "1.2", "", True):
+    def test_invalid_versions_are_rejected(self):
+        for version in ("../escape", "1.2.3-", "1.2.3-beta..1", "1.2.3+build", "01.2.3", "1.2", "", True):
             with self.subTest(version=version):
                 value = 'true' if version is True else '"' + version + '"'
                 (self.source / "crates/wren-iced/Cargo.toml").write_text(f"[package]\nversion = {value}\n")
-                with self.assertRaisesRegex(package.PackageError, "numeric release"):
+                with self.assertRaisesRegex(package.PackageError, "numeric X.Y.Z release"):
                     self.assemble()
                 self.assertFalse((self.base / "bundle with spaces").exists())
 

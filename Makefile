@@ -1,10 +1,19 @@
 .DEFAULT_GOAL := help
 PACKAGE_HOST := $(shell rustc --print host-tuple)
+# Release artifacts (make deb / app / dmg). RELEASE_VERSION defaults to the
+# [workspace.package] version; release.yml passes the tag's (X.Y.Z or
+# X.Y.Z-pre), and tools/package.py refuses one that is not the Cargo version.
+CARGO_VERSION := $(shell sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+RELEASE_VERSION ?= $(CARGO_VERSION)
+RELEASE_BINARY := target/package-build/$(PACKAGE_HOST)/release/wren
+DEB_HOST_ARCH := $(shell dpkg --print-architecture 2>/dev/null)
+ARCH ?= $(DEB_HOST_ARCH)
+NFPM ?= nfpm
 
-.PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland perf-search package package-debug icons
+.PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland perf-search package package-debug release-binary deb app dmg icons
 
 help:
-	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.' '  make icons          Regenerate committed app icons from assets/icon/wren-icon.svg.' '  make icons ICON_COLORS="eyes=#FFAA00"  Recolor a role in the SVG, then regenerate.'
+	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.' '  make deb            Linux: build target/dist/wren_<version>_<arch>.deb with nfpm (native ARCH only).' '  make app            macOS: build and sign target/dist/macos/Wren.app (Developer ID if WREN_DEVELOPER_ID_IDENTITY is set).' '  make dmg            macOS: package that Wren.app as target/dist/Wren-<version>.dmg.' '  RELEASE_VERSION=X.Y.Z[-pre] names the release; it must equal the Cargo version.' '  make icons          Regenerate committed app icons from assets/icon/wren-icon.svg.' '  make icons ICON_COLORS="eyes=#FFAA00"  Recolor a role in the SVG, then regenerate.'
 
 setup:
 	cargo fetch --locked
@@ -36,6 +45,36 @@ package-debug:
 	cargo build --locked -p wren-iced --target-dir target/package-build --target "$(PACKAGE_HOST)"
 	cargo fetch --locked
 	uv run --locked --group test python tools/package.py --binary "target/package-build/$(PACKAGE_HOST)/debug/wren" $(if $(PACKAGE_OUTPUT),--output "$(PACKAGE_OUTPUT)")
+
+# Release artifacts. Unlike `make package`, whose outputs are never replaced,
+# these rebuild fixed paths under target/: each run is one artifact for one
+# RELEASE_VERSION, and .github/workflows/release.yml calls exactly these.
+release-binary:
+	cargo build --locked --release -p wren-iced --target-dir target/package-build --target "$(PACKAGE_HOST)"
+	cargo fetch --locked
+
+# nfpm packages the /usr tree tools/package.py stages (packaging/nfpm.yaml), so
+# the bundle layout keeps one source. Built natively: ARCH must be this host's.
+deb:
+	@[ -n "$(DEB_HOST_ARCH)" ] || { echo "make deb needs dpkg (a Debian/Ubuntu build host)" >&2; exit 1; }
+	@[ "$(ARCH)" = "$(DEB_HOST_ARCH)" ] || { echo "make deb builds natively: ARCH=$(ARCH) but this host is $(DEB_HOST_ARCH)" >&2; exit 1; }
+	$(MAKE) release-binary
+	rm -rf target/deb-root
+	rm -f target/dist/wren_*.deb
+	mkdir -p target/dist
+	uv run --locked --group test python tools/package.py --binary "$(RELEASE_BINARY)" --system-layout --release-version "$(RELEASE_VERSION)" --output target/deb-root/usr
+	WREN_DEB_VERSION="$(RELEASE_VERSION)" WREN_DEB_ARCH="$(ARCH)" "$(NFPM)" pkg --packager deb --config packaging/nfpm.yaml --target target/dist/
+	@ls -l target/dist/wren_*.deb
+
+app:
+	@[ "$$(uname -s)" = Darwin ] || { echo "make app builds Wren.app on macOS" >&2; exit 1; }
+	$(MAKE) release-binary
+	rm -rf target/dist/macos
+	uv run --locked --group test python tools/package.py --binary "$(RELEASE_BINARY)" --release-version "$(RELEASE_VERSION)" --output target/dist/macos/Wren.app
+	scripts/macos/sign-app.sh target/dist/macos/Wren.app
+
+dmg:
+	scripts/macos/make-dmg.sh target/dist/macos/Wren.app "$(RELEASE_VERSION)" "target/dist/Wren-$(RELEASE_VERSION).dmg"
 
 # Icon rendering needs cairosvg (and the system libcairo) plus Pillow, supplied
 # in a throwaway environment so the locked project dependencies stay untouched.

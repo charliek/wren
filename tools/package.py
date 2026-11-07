@@ -9,6 +9,13 @@ when full Xcode provides it. Icons are committed outputs of `make icons`. The CL
 collects dependency texts using locked, offline Cargo metadata before assembly;
 run cargo fetch --locked separately if the locked sources are not cached.
 Existing outputs are never replaced; choose a new --output for another bundle.
+
+--system-layout stages the same Linux tree for a system package that installs
+it under /usr (the release .deb): the desktop entry then keeps Exec=wren and
+Icon=wren, which PATH and the hicolor icon theme resolve once installed.
+--release-version names the release tag's version (X.Y.Z or X.Y.Z-pre, no v)
+and fails unless it is exactly the Cargo version, so an artifact can never be
+built for a tag the source tree does not carry.
 """
 
 from __future__ import annotations
@@ -39,7 +46,14 @@ else:
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLE_ID = "io.github.charliek.wren"
+# Matches the sibling app's `ai.stridelabs.Roost`. Changing it orphans every
+# macOS preference, TCC grant, and notarization record keyed on the old id.
+BUNDLE_ID = "ai.stridelabs.Wren"
+# Deleting a note moves it to the Trash through Finder (the trash crate's
+# default macOS method runs osascript), which macOS gates behind an Automation
+# prompt that shows this text. packaging/macos/Wren.entitlements grants the
+# matching hardened-runtime Apple Events entitlement for Developer ID builds.
+APPLE_EVENTS_USAGE = "Wren asks Finder to move notes you delete to the Trash."
 # Every icon file is derived from ICON_SVG by `make icons` (tools/generate_icons.py)
 # and committed, so packaging needs no rendering toolchain.
 ICON_SVG = Path("assets/icon/wren-icon.svg")
@@ -108,19 +122,39 @@ def read_source(path: Path) -> bytes:
         return source.read()
 
 
+VERSION_PATTERN = (r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+                   r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?")
+
+
 def cargo_version(root: Path) -> str:
+    """The app's Cargo version: X.Y.Z, or X.Y.Z-pre for a prerelease tag."""
     app = tomllib.loads(read_source(root / "crates/wren-iced/Cargo.toml").decode("utf-8"))
     version = app["package"]["version"]
     if isinstance(version, dict) and version.get("workspace") is True:
         workspace = tomllib.loads(read_source(root / "Cargo.toml").decode("utf-8"))
         version = workspace["workspace"]["package"]["version"]
-    # Both CFBundleVersion and CFBundleShortVersionString accept this release
-    # version form. Do not silently invent a numeric version for a prerelease.
-    if not isinstance(version, str) or not re.fullmatch(
-        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version
-    ):
-        raise PackageError("the app Cargo version must be a three-component numeric release")
+    # No build metadata: release tags never carry it, and it has no Debian or
+    # bundle-version spelling.
+    if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
+        raise PackageError("the app Cargo version must be a numeric X.Y.Z release, optionally -prerelease")
     return version
+
+
+def bundle_version(version: str) -> str:
+    """CFBundleVersion/CFBundleShortVersionString form: numeric X.Y.Z only.
+
+    A prerelease records its base version, as its tag's X.Y.Z; the full
+    version stays in the DMG name and the Release.
+    """
+    return version.split("-", 1)[0]
+
+
+def release_version(cargo: str, requested: str | None) -> str:
+    """Return the version an artifact records, refusing a tag the tree does not carry."""
+    if requested is not None and requested != cargo:
+        raise PackageError(f"release version {requested!r} does not match the Cargo version {cargo}; "
+                           "run scripts/release/update-version.sh first")
+    return cargo
 
 
 @contextmanager
@@ -220,10 +254,15 @@ def desktop_exec(binary: Path) -> str:
     return desktop_string('"' + argument.replace("%", "%%") + '"')
 
 
-def desktop_entry(template: bytes, destination: Path) -> bytes:
+def installable_desktop_entry(template: bytes) -> str:
     source = template.decode("utf-8")
     if source.count("\nExec=wren\n") != 1 or source.count("\nIcon=wren\n") != 1:
         raise PackageError("desktop asset must contain exactly one Exec=wren and Icon=wren")
+    return source
+
+
+def desktop_entry(template: bytes, destination: Path) -> bytes:
+    source = installable_desktop_entry(template)
     source = source.replace("\nExec=wren\n", f"\nExec={desktop_exec(destination / 'bin/wren')}\n")
     icon = destination / "share/icons/hicolor/scalable/apps/wren.svg"
     return source.replace("\nIcon=wren\n", f"\nIcon={desktop_string(str(icon))}\n").encode("utf-8")
@@ -417,10 +456,17 @@ def publish_bundle(stage: BundleStage, destination: Path) -> None:
 
 
 def assemble_bundle(binary: Path, destination: Path, platform: str, *,
-                    dependency_notices: bytes, root: Path = ROOT, native: bool = False) -> Path:
-    """Assemble supplied notices/layout without Cargo or executing the input binary."""
+                    dependency_notices: bytes, root: Path = ROOT, native: bool = False,
+                    system_layout: bool = False, version: str | None = None) -> Path:
+    """Assemble supplied notices/layout without Cargo or executing the input binary.
+
+    system_layout stages a Linux tree to be installed under /usr by a system
+    package; version is a release tag's version, checked against Cargo's.
+    """
     if platform not in ("linux", "macos"):
         raise PackageError(f"unsupported platform: {platform}")
+    if system_layout and platform != "linux":
+        raise PackageError("the system layout is Linux-only")
     root = checked_path(root)
     binary = checked_path(binary)
     destination = checked_path(destination, missing=True)
@@ -428,7 +474,7 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
         raise PackageError(f"output already exists; choose a new --output: {destination}")
     if platform == "macos" and destination.name != "Wren.app":
         raise PackageError("the macOS output must be named Wren.app")
-    if platform == "linux" and "=" in str(destination):
+    if platform == "linux" and not system_layout and "=" in str(destination):
         raise PackageError("Linux output paths must not contain '='; desktop Exec executable paths forbid it")
     if not isinstance(dependency_notices, bytes) or not dependency_notices.strip():
         raise PackageError("nonempty Cargo dependency notices must be supplied before assembly")
@@ -436,7 +482,7 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
         dependency_notices.decode("utf-8")
     except UnicodeDecodeError:
         raise PackageError("Cargo dependency notices must be UTF-8 text") from None
-    version = cargo_version(root)
+    release = release_version(cargo_version(root), version)
     with (
         directory_fd(Path(destination.anchor)) as anchor,
         make_directory_fd(anchor, destination.parent.relative_to(destination.anchor)) as parent,
@@ -450,9 +496,11 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
             for size, png in pngs.items():
                 write_file(icons / f"{size}x{size}/apps/wren.png", png, dir_fd=stage.fd)
             template = read_source(root / "assets/wren.desktop")
-            write_file(Path("share/applications/wren.desktop"), desktop_entry(template, destination), dir_fd=stage.fd)
+            entry = (installable_desktop_entry(template).encode("utf-8") if system_layout
+                     else desktop_entry(template, destination))
+            write_file(Path("share/applications/wren.desktop"), entry, dir_fd=stage.fd)
             notices = Path("share/doc/wren")
-            write_file(notices / "VERSION", (version + "\n").encode("utf-8"), dir_fd=stage.fd)
+            write_file(notices / "VERSION", (release + "\n").encode("utf-8"), dir_fd=stage.fd)
         else:
             copy_executable(binary, Path("Contents/MacOS/wren"), platform, native, dir_fd=stage.fd)
             resources = Path("Contents/Resources")
@@ -465,9 +513,10 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
                 "CFBundleInfoDictionaryVersion": "6.0",
                 "CFBundleName": "Wren",
                 "CFBundlePackageType": "APPL",
-                "CFBundleShortVersionString": version,
-                "CFBundleVersion": version,
+                "CFBundleShortVersionString": bundle_version(release),
+                "CFBundleVersion": bundle_version(release),
                 "LSApplicationCategoryType": "public.app-category.productivity",
+                "NSAppleEventsUsageDescription": APPLE_EVENTS_USAGE,
                 "NSHighResolutionCapable": True,
                 "NSPrincipalClass": "NSApplication",
                 "NSSupportsAutomaticGraphicsSwitching": True,
@@ -507,22 +556,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--binary", type=Path, required=True, help="explicit, already built native wren executable")
     parser.add_argument("--platform", choices=("linux", "macos"), help="defaults to the native host; cross-packaging is rejected")
     parser.add_argument("--output", type=Path, help="new bundle path; existing paths are never replaced")
+    parser.add_argument("--release-version", help="release tag version (X.Y.Z or X.Y.Z-pre); must equal the Cargo version")
+    parser.add_argument("--system-layout", action="store_true",
+                        help="Linux only: stage a tree a system package installs under /usr")
     args = parser.parse_args(argv)
     try:
         host = native_platform()
         platform = args.platform or host
         if platform != host:
             raise PackageError(f"cannot package {platform} on a {host} host; use a native build host")
-        version = cargo_version(ROOT)
-        output = args.output or ROOT / "target/package" / f"wren-{version}-{platform}"
+        if args.system_layout and platform != "linux":
+            raise PackageError("the system layout is Linux-only")
+        version = release_version(cargo_version(ROOT), args.release_version)
+        suffix = "-system" if args.system_layout else ""
+        output = args.output or ROOT / "target/package" / f"wren-{version}-{platform}{suffix}"
         if platform == "macos" and args.output is None:
             output /= "Wren.app"
         report = collect_notices(ROOT)
-        result = assemble_bundle(args.binary, output, platform, dependency_notices=report.render(), root=ROOT, native=True)
+        result = assemble_bundle(args.binary, output, platform, dependency_notices=report.render(), root=ROOT,
+                                 native=True, system_layout=args.system_layout, version=args.release_version)
     except (OSError, ValueError, KeyError, ET.ParseError) as error:
         print(f"Packaging failed: {error}", file=sys.stderr)
         return 1
-    print(f"Assembled uninstalled {platform} bundle: {result}")
+    kind = "system-layout linux tree" if args.system_layout else f"uninstalled {platform} bundle"
+    print(f"Assembled {kind}: {result}")
     print(report.summary())
     if report.unresolved:
         print("Warning: dependency text coverage requires review; see bundled DEPENDENCY_NOTICES.txt before redistribution.", file=sys.stderr)

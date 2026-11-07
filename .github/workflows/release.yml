@@ -1,0 +1,571 @@
+name: Release
+
+# A tag push `v*` builds and publishes a GitHub Release carrying:
+#   * Wren-<version>.dmg                      (macOS, Apple silicon: Wren.app)
+#   * wren_<version>_amd64.deb / _arm64.deb   (Linux, built natively per arch)
+# then fires repository_dispatch at charliek/apt-charliek so the .debs land in
+# the apt repo. Cut releases with `/release-workflows:release vX.Y.Z`; see
+# RELEASING.md. Build logic lives in Makefile targets (make deb / app / dmg)
+# and scripts/, not in this file.
+#
+# Mac signing + notarization is GATED on six secrets and inert until all of
+# them exist (CAN_NOTARIZE): MACOS_CERTIFICATE_P12_BASE64,
+# MACOS_CERTIFICATE_PASSWORD, WREN_DEVELOPER_ID_IDENTITY, APPLE_ID,
+# APPLE_TEAM_ID, APPLE_APP_SPECIFIC_PASSWORD. Without them the DMG ships
+# ad-hoc signed with a FIRST-LAUNCH note (and a release-body note) explaining
+# the one-time Gatekeeper bypass.
+#
+# The Release is created as a DRAFT and stays one until `publish-release`
+# flips it, after tools/release_assets.py confirms the three assets above are
+# attached, plausibly sized and named for the tag, and nothing else is. A
+# failed build therefore leaves nothing public, and apt-charliek (whose
+# repo-scoped token cannot see drafts) never republishes against a release
+# whose .debs are missing: its collect-debs.sh walks releases newest-first
+# and only warns past one with no matching .deb, so it would silently
+# republish the PREVIOUS version.
+#
+# No auto-update feed (Sparkle) and no Homebrew cask yet.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege: default read; only the release-writing jobs get contents:write.
+permissions:
+  contents: read
+
+# Serialize runs for the same tag (a re-run from the Actions UI while the
+# original is still uploading). Better to wait than abort half-uploaded assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_PYTHON: "3.12"
+
+# Release runs restore no caches and save none (`cache: false`,
+# `save-cache: false`): an entry saved under a tag is readable by no later
+# run, and only crowds out the main-branch entries ci.yml uses.
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # Exact match, prerelease included: `/release-workflows:release
+      # v0.2.0-rc1` runs update-version.sh 0.2.0-rc1, so the tagged tree
+      # carries the full version.
+      - name: Assert tag matches [workspace.package] version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          cargo_ver="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          echo "tag=${tag}  Cargo.toml [workspace.package] version=${cargo_ver}"
+          if [ "${tag#v}" != "${cargo_ver}" ]; then
+            echo "::error::tag ${tag} does not match [workspace.package] version ${cargo_ver}. Run scripts/release/update-version.sh before tagging."
+            exit 1
+          fi
+
+  # Don't ship a tag whose code never passed CI. `ci-success` is the aggregate
+  # (fail-closed, tools/ci_gate.py) required on `main`; the tagged commit,
+  # pushed to main moments earlier by /release-workflows:release, gets its own
+  # ci.yml run. Poll that commit's `ci-success` check and refuse to release
+  # unless it's green; it may still be running when the tag fires.
+  ci-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Require ci-success green on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          deadline=$(( SECONDS + 2700 ))   # 45 min: releases aren't time-sensitive
+          while :; do
+            # Server-side check_name filter: unfiltered, the endpoint pages at
+            # 30 runs and ci-success can fall off the first page.
+            latest="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=ci-success" \
+              --jq '.check_runs | sort_by(.started_at) | last')"
+            status="$(echo "${latest}" | jq -r '.status // "missing"')"
+            conclusion="$(echo "${latest}" | jq -r '.conclusion // ""')"
+            echo "ci-success @ ${GITHUB_SHA}: status=${status} conclusion=${conclusion}"
+            if [ "${status}" = "completed" ]; then
+              [ "${conclusion}" = "success" ] && { echo "CI green: releasing."; exit 0; }
+              echo "::error::ci-success concluded '${conclusion}' for ${GITHUB_SHA}: not releasing."
+              exit 1
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for ci-success on ${GITHUB_SHA} (status=${status}). Push the commit to main and let CI finish before tagging."
+              exit 1
+            fi
+            sleep 20
+          done
+
+  create-release:
+    needs: [version-check, ci-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Create (or reuse) the draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          pre=""
+          case "${tag}" in *-*) pre="--prerelease";; esac
+          # This tag's CHANGELOG.md section: `## <tag>` up to the next `## `
+          # heading. Field match, so a trailing "— <date>" doesn't break it.
+          notes="$(awk -v tag="${tag}" '
+            $1=="##" && $2==tag {flag=1; next}
+            /^## / {if(flag) exit}
+            flag {print}
+          ' CHANGELOG.md || true)"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            # Reusing a DRAFT is the re-run case. Reusing a PUBLISHED release
+            # is not: the build jobs would --clobber new assets into something
+            # users and apt-charliek can already see. Fail closed.
+            if [ "$(gh release view "${tag}" --json isDraft -q .isDraft)" != "true" ]; then
+              echo "::error::Release ${tag} already exists and is PUBLISHED. Refusing to rebuild into a live release: delete it (gh release delete ${tag}) or cut a new tag."
+              exit 1
+            fi
+            echo "Draft release ${tag} already exists: reusing."
+            exit 0
+          fi
+          # --draft: nothing is attached yet; publish-release flips it. A draft
+          # creates no git tag of its own, and `gh release upload --clobber`
+          # works against it.
+          if [ -n "${notes}" ]; then
+            printf '%s\n' "${notes}" | gh release create "${tag}" --draft --title "${tag}" --notes-file - ${pre}
+          else
+            gh release create "${tag}" --draft --title "${tag}" --generate-notes ${pre}
+          fi
+
+  linux:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # `label` is the asset's display name on the Release page; Debian needs
+        # the file itself named `<pkg>_<version>_<arch>.deb`, and "amd64" vs
+        # "arm64" are easy to mix up at a glance.
+        include:
+          - { runner: ubuntu-24.04,     arch: amd64, label: "Linux — Intel / AMD 64-bit (.deb)" }
+          - { runner: ubuntu-24.04-arm, arch: arm64, label: "Linux — ARM 64-bit (.deb)" }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # desktop-file-validate for scripts/linux/verify-deb.sh. Building needs no
+      # system packages (iced loads the display stack at runtime).
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils
+
+      - name: Install nfpm
+        env:
+          NFPM_VERSION: "2.46.3"
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "${ARCH}" in
+            amd64) nfpm_arch="x86_64" ;;
+            arm64) nfpm_arch="arm64" ;;
+          esac
+          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          tarball="nfpm_${NFPM_VERSION}_Linux_${nfpm_arch}.tar.gz"
+          cd "${RUNNER_TEMP}"
+          curl -fsSLO "${base}/${tarball}"
+          curl -fsSLO "${base}/checksums.txt"
+          grep " ${tarball}\$" checksums.txt | sha256sum -c -
+          sudo tar -C /usr/local/bin -xzf "${tarball}" nfpm
+          nfpm --version
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+          save-cache: false
+
+      # tools/package.py stages the /usr tree (--system-layout) and refuses a
+      # RELEASE_VERSION that is not the Cargo version; nfpm packages it.
+      - name: Build .deb
+        run: make deb ARCH="${{ matrix.arch }}" RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+
+      # Control fields, payload, desktop entry, and an `apt-get install
+      # --no-install-recommends` into a clean ubuntu:24.04 container that must
+      # resolve every library the binary dlopens. This runner already has the
+      # whole graphics stack, so only the container proves the Depends list.
+      - name: Verify the .deb
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          deb="target/dist/$(python3 tools/release_assets.py deb-name "${GITHUB_REF_NAME}" "${ARCH}")"
+          scripts/linux/verify-deb.sh "${deb}" "${GITHUB_REF_NAME#v}" --clean-install
+
+      - name: Upload .deb to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_LABEL: ${{ matrix.label }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # The exact name for this job's arch, never a glob: `file#label` needs
+          # one concrete path, and a glob could hand the arm64 package to the
+          # job that labels it Intel/AMD.
+          deb="target/dist/$(python3 tools/release_assets.py deb-name "${GITHUB_REF_NAME}" "${ARCH}")"
+          test -s "${deb}" || { echo "::error::${deb} was not built"; exit 1; }
+          gh release upload "${GITHUB_REF_NAME}" "${deb}#${ASSET_LABEL}" --clobber
+
+  # The macOS release: an arm64 Wren.app (bundle id ai.stridelabs.Wren) in a
+  # DMG. Signing + notarization follow the release-workflows mac-signing
+  # convention (roost's mac job): all-or-nothing on CAN_NOTARIZE.
+  mac:
+    needs: create-release
+    runs-on: macos-26    # arm64; Xcode 26's actool compiles assets/icon/AppIcon.icon
+                         # (the macOS 26 glass icon). Without it tools/package.py
+                         # falls back to the flat AppIcon.icns.
+    timeout-minutes: 90  # two notarytool --wait round trips (app, then DMG)
+    permissions:
+      contents: write
+    env:
+      # Sign + notarize only when the FULL prerequisite set is present. Any
+      # missing secret means the ad-hoc fallback: a Developer-ID-signed but
+      # un-notarized DMG is still Gatekeeper-blocked, so signing without
+      # notarizing has no value, and a partial secret set must neither break
+      # the build nor silently drop the first-launch note. The identity reaches
+      # the app/DMG steps only when this is true.
+      CAN_NOTARIZE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.WREN_DEVELOPER_ID_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+          save-cache: false
+
+      # Inert until all six Apple secrets exist. Imports the Developer ID
+      # Application cert into a throwaway keychain so codesign can use it.
+      - name: Import Developer ID certificate
+        if: env.CAN_NOTARIZE == 'true'
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The decoded cert must never outlive this step, even on early
+          # failure. (The keychain persists: later steps sign against it.)
+          trap 'rm -f "$RUNNER_TEMP/cert.p12"' EXIT
+          kc="$RUNNER_TEMP/wren-signing.keychain-db"
+          kp="$(openssl rand -base64 24)"
+          security create-keychain -p "$kp" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kp" "$kc"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kp" "$kc"
+          # Prepend our keychain to the user search list, keeping the others;
+          # the substitution must word-split into separate paths.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | sed 's/"//g')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # Release build, tools/package.py bundle (refusing a RELEASE_VERSION that
+      # is not the Cargo version), then scripts/macos/sign-app.sh: Developer
+      # ID + hardened runtime when the identity is non-empty, else ad-hoc.
+      - name: Build and sign Wren.app
+        env:
+          WREN_DEVELOPER_ID_IDENTITY: ${{ env.CAN_NOTARIZE == 'true' && secrets.WREN_DEVELOPER_ID_IDENTITY || '' }}
+        run: make app RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+
+      # Read back from the bundle that ships, not from the inputs above.
+      - name: Assert the bundle identity
+        run: |
+          set -euo pipefail
+          APP="target/dist/macos/Wren.app"
+          INFO="${APP}/Contents/Info.plist"
+          check() {
+            got="$(/usr/libexec/PlistBuddy -c "Print :$1" "$INFO" 2>/dev/null)" \
+              || { echo "::error::$INFO has no $1"; exit 1; }
+            [ "$got" = "$2" ] || { echo "::error::$INFO $1 is '$got', want '$2'"; exit 1; }
+            echo "OK: $1 = $2"
+          }
+          ver="${GITHUB_REF_NAME#v}"
+          check CFBundleIdentifier ai.stridelabs.Wren
+          check CFBundleExecutable wren
+          check CFBundleName Wren
+          # Bundle versions are numeric: a prerelease records its X.Y.Z.
+          check CFBundleShortVersionString "${ver%%-*}"
+          check CFBundleVersion "${ver%%-*}"
+          test -x "${APP}/Contents/MacOS/wren" \
+            || { echo "::error::${APP}/Contents/MacOS/wren is missing or not executable"; exit 1; }
+          lipo "${APP}/Contents/MacOS/wren" -verify_arch arm64
+          codesign --verify --strict --verbose=2 "${APP}"
+
+      # Cheap local proof that what we submit carries the Developer ID
+      # signature, before an opaque notary rejection minutes later.
+      - name: Assert the app carries its Developer ID signature
+        if: env.CAN_NOTARIZE == 'true'
+        run: |
+          set -euo pipefail
+          authority="$(codesign -dvv target/dist/macos/Wren.app 2>&1 \
+            | awk -F'=' '/^Authority=/ { print $2; exit }')"
+          case "${authority}" in
+            "Developer ID Application:"*)
+              echo "OK: Wren.app signed by '${authority}'"
+              ;;
+            *)
+              echo "::error::Wren.app is signed by '${authority:-nothing}', not a Developer ID Application certificate. Notarization would reject it."
+              exit 1
+              ;;
+          esac
+
+      # Before the DMG, so the image carries an already-stapled app: a user who
+      # drags Wren.app out and first launches it offline still has a ticket.
+      - name: Notarize + staple the app (skipped without credentials)
+        if: env.CAN_NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: scripts/macos/notarize.sh --app target/dist/macos/Wren.app
+
+      # The identity only decides whether FIRST-LAUNCH.txt goes in the image.
+      - name: Make DMG
+        env:
+          WREN_DEVELOPER_ID_IDENTITY: ${{ env.CAN_NOTARIZE == 'true' && secrets.WREN_DEVELOPER_ID_IDENTITY || '' }}
+        run: make dmg RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: Notarize + staple the DMG (skipped without credentials)
+        if: env.CAN_NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: scripts/macos/notarize.sh "target/dist/Wren-${GITHUB_REF_NAME#v}.dmg"
+
+      # Proves the app INSIDE the DMG carries its own ticket, not just the
+      # image: mounts it read-only and validates the bundle itself.
+      - name: Verify the app inside the DMG carries a ticket
+        if: env.CAN_NOTARIZE == 'true'
+        run: |
+          set -euo pipefail
+          MNT="$RUNNER_TEMP/wren-dmg"
+          mkdir -p "$MNT"
+          trap '
+            for attempt in 1 2 3 4 5; do
+              hdiutil detach "$MNT" >/dev/null 2>&1 && break
+              [ "$attempt" = 5 ] && { hdiutil detach "$MNT" -force >/dev/null 2>&1 || true; break; }
+              sleep 2
+            done
+          ' EXIT
+          # Hosted runners fail an attach now and then with "Resource
+          # temporarily unavailable"; retry like make-dmg.sh's create.
+          for attempt in 1 2 3; do
+            hdiutil attach "target/dist/Wren-${GITHUB_REF_NAME#v}.dmg" -readonly -nobrowse -noautoopen -noverify -mountpoint "$MNT" >/dev/null && break
+            [ "$attempt" = 3 ] && { echo "::error::hdiutil attach failed $attempt times"; exit 1; }
+            sleep 5
+          done
+          xcrun stapler validate "$MNT/Wren.app"
+
+      # What governs Gatekeeper on a downloaded DMG is a stapled notarization
+      # ticket, not whether a signing cert exists. Detect the artifact's real
+      # state and gate the first-launch guidance on it.
+      - name: Detect DMG notarization status
+        id: dmg_notarized
+        run: |
+          if xcrun stapler validate "target/dist/Wren-${GITHUB_REF_NAME#v}.dmg" >/dev/null 2>&1; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Note signing status
+        if: steps.dmg_notarized.outputs.value != 'true'
+        run: |
+          echo "::notice::Wren-${GITHUB_REF_NAME#v}.dmg is NOT notarized: Gatekeeper blocks first launch. Clear it with 'xattr -dr com.apple.quarantine /Applications/Wren.app', or System Settings > Privacy & Security > Open Anyway."
+
+      # The `#...` suffix sets the Release page's display name; the file still
+      # downloads as Wren-<version>.dmg.
+      - name: Upload DMG to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dmg="target/dist/$(python3 tools/release_assets.py dmg-name "${GITHUB_REF_NAME}")"
+          test -s "${dmg}" || { echo "::error::${dmg} was not built"; exit 1; }
+          gh release upload "${GITHUB_REF_NAME}" "${dmg}#macOS — Apple silicon (.dmg)" --clobber
+
+      # While the DMG isn't notarized, append the Gatekeeper-bypass steps to the
+      # release body. Gated on the stapled-ticket check, so it self-disables
+      # once notarization lands; a marker keeps re-runs idempotent.
+      - name: Append macOS first-launch note to release body
+        if: steps.dmg_notarized.outputs.value != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          marker="<!-- wren-macos-firstlaunch -->"
+          body="$(gh release view "${tag}" --json body -q .body)"
+          case "${body}" in
+            *"${marker}"*) echo "First-launch note already present: skipping."; exit 0 ;;
+          esac
+          {
+            printf '%s\n\n' "${body}"
+            printf '%s\n' "${marker}"
+            printf '### macOS first launch\n\n'
+            printf 'The macOS DMG is not notarized yet, so Gatekeeper blocks the first launch. Clear it once after dragging Wren to Applications:\n\n'
+            # Literal Markdown code fence, not command substitution.
+            # shellcheck disable=SC2016
+            printf '```\nxattr -dr com.apple.quarantine /Applications/Wren.app\n```\n\n'
+            printf 'Or use **System Settings → Privacy & Security → Open Anyway**.\n'
+          } > "${RUNNER_TEMP}/relbody.md"
+          gh release edit "${tag}" --notes-file "${RUNNER_TEMP}/relbody.md"
+
+  # The one irreversible step: everything before it lands on a draft nobody
+  # can see; everything after it consumes a public release. `needs: [linux,
+  # mac]` with deliberately no `if: always()` is what keeps a failed build's
+  # draft unpublished.
+  publish-release:
+    needs: [linux, mac]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # For tools/release_assets.py only; the rest talks to the API.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: tools
+
+      - name: Assert the artifact set, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # `gh release` resolves the repo from a git remote; naming it keeps
+          # every call independent of the sparse checkout.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # Explicit existence check: a failing `gh release view` inside a
+          # command substitution wouldn't trip `set -e`.
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            echo "::error::no release ${tag} exists; create-release should have left a draft. Nothing to publish."
+            exit 1
+          fi
+
+          # A standalone assignment propagates a gh failure under set -e; the
+          # same substitution inside `[ ... ]` would read as "" instead.
+          is_draft="$(gh release view "${tag}" --json isDraft -q .isDraft)"
+          if [ "${is_draft}" = "false" ]; then
+            echo "::notice::Release ${tag} is already published: nothing to do."
+            exit 0
+          fi
+          if [ "${is_draft}" != "true" ]; then
+            echo "::error::could not determine whether ${tag} is a draft (got '${is_draft}'). Refusing to publish or to assume it is published."
+            exit 1
+          fi
+
+          assets="$(gh release view "${tag}" --json assets \
+            -q '.assets[] | [.name, (.size|tostring)] | @tsv')"
+          echo "assets currently on the ${tag} draft:"
+          printf '%s\n' "${assets}"
+
+          # Exactly the three assets, plausibly sized, named for this tag, and
+          # nothing else. apt-charliek globs wren_*.deb, so a stale one ships.
+          if ! printf '%s\n' "${assets}" | python3 tools/release_assets.py check "${tag}"; then
+            echo "::error::refusing to publish ${tag}. The draft is untouched: inspect it with 'gh release view ${tag}', then re-run the failed jobs or 'gh release delete ${tag}'."
+            exit 1
+          fi
+
+          gh release edit "${tag}" --draft=false
+          echo "::notice::Published ${tag}: assets are now publicly downloadable."
+
+  # Notify charliek/apt-charliek to republish its package index, with a
+  # release-bot App token scoped to the receiver (no per-pipeline PAT). The
+  # App must be installed on apt-charliek; sanity-check-app.yml verifies it.
+  #
+  # `needs: publish-release`, not `needs: linux`: apt-charliek cannot see a
+  # draft, so dispatching earlier would make it republish the previous
+  # version (see the header).
+  dispatch-apt-charliek:
+    needs: publish-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Decide whether to dispatch
+        id: guard
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "${tag}" in
+            *-*)
+              echo "::notice::${tag} is a prerelease: skipping apt-charliek dispatch (include_prerelease: false)."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [ -z "${CLIENT_ID}" ]; then
+            echo "::warning::RELEASE_BOT_CLIENT_ID not set: skipping dispatch. apt-charliek self-heals on its next publish run (collect-debs.sh re-scans every package)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint an apt-charliek token
+        if: steps.guard.outputs.skip == 'false'
+        id: apt
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_KEY }}
+          owner: charliek
+          repositories: apt-charliek
+
+      - name: Dispatch apt-charliek publish
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ steps.apt.outputs.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          gh api repos/charliek/apt-charliek/dispatches --method POST \
+            -f event_type=publish \
+            -F "client_payload[package]=wren" \
+            -F "client_payload[tag]=${tag}"
+          echo "::notice::Dispatched apt-charliek publish for wren ${tag}: watch https://github.com/charliek/apt-charliek/actions"

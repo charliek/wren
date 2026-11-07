@@ -1,0 +1,70 @@
+# nfpm config for the Wren Linux .deb.
+#
+# Run by `make deb` from the repo root, after tools/package.py --system-layout
+# has staged the /usr tree at target/deb-root/usr (bin/wren, the desktop entry,
+# hicolor icons, notices under share/doc/wren). package.py owns that layout;
+# this file only says how to package it. nfpm expands ${ENV} at package time:
+#   WREN_DEB_VERSION  release version, X.Y.Z or X.Y.Z-pre (no v prefix)
+#   WREN_DEB_ARCH     Debian architecture, amd64 or arm64 (the build host's)
+#
+# Output: target/dist/wren_<version>_<arch>.deb, the name apt-charliek globs
+# (wren_*.deb). The semver schema turns a prerelease's first `-` into `~`
+# (0.1.0-rc1 -> 0.1.0~rc1) so it sorts before the final release.
+name: wren
+arch: ${WREN_DEB_ARCH}
+version: ${WREN_DEB_VERSION}
+version_schema: semver
+platform: linux
+section: editors
+priority: optional
+maintainer: Charlie Knudsen <charlie.knudsen@gmail.com>
+vendor: Stride Labs
+homepage: https://github.com/charliek/wren
+description: |
+  Desktop app for structured Markdown notes.
+  Wren edits a directory of plain Markdown files through a fixed
+  workspace, section, group and note hierarchy, one open note at a time,
+  with a quick switcher, full-text search and always-on autosave. Built
+  with iced; renders through wgpu (Vulkan or GL) and falls back to a
+  software renderer.
+
+# NOT derived from `readelf -d`: the binary's NEEDED set is only libc, libm and
+# libgcc_s. winit, wgpu and xkbcommon-dl `dlopen` the windowing and graphics
+# stack, so a linkage-derived list would install cleanly and then fail to open
+# a window. Each entry below is a soname the release binary dlopens (from its
+# embedded strings), mapped to its Ubuntu 24.04 package; the libraries' own
+# Depends supply the rest (libxcb, Mesa's EGL vendor, glvnd). The same list,
+# reduced from roost's strace-measured one (same iced/winit/wgpu stack).
+depends:
+  # Non-weak GLIBC_2.35 imports (hypotf) set the floor; the GLIBC_2.39 symbols
+  # the binary also references are weak and do not raise it.
+  - libc6 (>= 2.35)
+  - libgcc-s1
+  # winit: keyboard mapping and the Wayland/X11 client libraries.
+  - libxkbcommon0
+  - libxkbcommon-x11-0
+  - libwayland-client0
+  - libx11-6
+  - libx11-xcb1
+  - libxcursor1
+  - libxi6
+  # wgpu's GLES path whenever no Vulkan driver is usable. These two travel
+  # together: roost measured a SIGABRT in Surface::configure on Wayland with
+  # libEGL present and libwayland-egl missing.
+  - libegl1
+  - libwayland-egl1
+# Vulkan is optional: without an ICD wgpu uses GLES, and with neither iced's
+# tiny-skia software renderer still opens the window. Recommends are installed
+# by a normal `apt install`. xdg-desktop-portal serves the "Open workspace"
+# folder picker (rfd's portal backend); desktop sessions already carry it.
+recommends:
+  - libvulkan1
+  - mesa-vulkan-drivers
+  - xdg-desktop-portal
+
+contents:
+  # The whole staged /usr tree. Directory entries (/usr, /usr/share, ...) carry
+  # the stage's 0755 modes, as any dpkg-built package's do.
+  - src: ./target/deb-root/usr
+    dst: /usr
+    type: tree
