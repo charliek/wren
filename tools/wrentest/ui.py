@@ -138,6 +138,9 @@ class WrenApp:
         Optional workspace directory passed via ``--workspace``.
     extra_args:
         Additional CLI arguments appended to the command.
+    evaluation:
+        Use the explicit unsaved editor when no workspace is supplied. Set to
+        ``False`` to exercise normal registry restoration and onboarding.
     """
 
     def __init__(
@@ -147,8 +150,11 @@ class WrenApp:
         readiness_timeout: float = READINESS_TIMEOUT,
         workspace: Path | None = None,
         extra_args: tuple[str, ...] = (),
+        evaluation: bool = True,
     ) -> None:
         _validate_positive_finite(readiness_timeout, "readiness_timeout")
+        if type(evaluation) is not bool:
+            raise ValueError("evaluation must be bool")
         self._binary = _find_binary()
         env_artifacts = os.environ.get("WREN_TEST_ARTIFACT_DIR")
         self._artifacts_base = (
@@ -160,6 +166,7 @@ class WrenApp:
         self._readiness_timeout = readiness_timeout
         self._workspace = workspace
         self._extra_args = extra_args
+        self._evaluation = evaluation
 
         self._ownroot: Path | None = None
         self._socket_path: Path | None = None
@@ -362,6 +369,10 @@ class WrenApp:
         cmd = [str(self._binary), "--test-socket", str(self._socket_path)]
         if self._workspace is not None:
             cmd.extend(["--workspace", str(self._workspace)])
+        elif self._evaluation and not any(
+            flag in self._extra_args for flag in ("--workspace", "--editor", "--editor-spike")
+        ):
+            cmd.append("--editor")
         cmd.extend(self._extra_args)
 
         with open(self._stdout_log, "wb") as stdout_fh, \

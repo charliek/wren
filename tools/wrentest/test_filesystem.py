@@ -68,8 +68,13 @@ def test_saved_workspace_renders_both_themes(tmp_path: Path, theme: str) -> None
         image = capture(app, artifacts / "workspace.png")
         background = BACKGROUNDS[theme]
         assert image.pixel(image.width - 6, image.height // 2)[:3] == background
+        navigation = app.client.call("navigation.get")
+        geometry = app.client.call("navigation.bounds")
+        scale = image.width / navigation["viewport"]["width"]
+        editor_left = geometry["root"]["x"] + sum(navigation["effective_widths"].values())
         painted = sum(any(abs(a - b) > 20 for a, b in zip(image.pixel(x, y)[:3], background))
-                      for y in range(105, 300) for x in range(660, image.width - 30))
+                      for y in range(round(115 * scale), round(300 * scale))
+                      for x in range(round((editor_left + 16) * scale), image.width - round(30 * scale)))
         assert painted > 150, "The workspace editor glyphs were not captured"
         assert state(app)["document"]["text"].startswith("# Visible workspace heading")
 
@@ -263,8 +268,15 @@ def test_native_committed_creation_is_not_replayed_after_metadata_error(tmp_path
         metadata = root / ".wren"
         try:
             metadata.chmod(0o500)
-            xdo("mousemove", "--sync", "--window", window, "80", "103")
-            xdo("click", "1")
+            xdo("key", "--window", window, "--clearmodifiers", "ctrl+k")
+            wait_for(lambda: app.client.call("navigation.get")["modal"] is not None,
+                     description="native command palette opens")
+            xdo("type", "--window", window, "--clearmodifiers", "--delay", "8", "New section")
+            wait_for(lambda: app.client.call("navigation.get")["modal"]["query"] == "New section",
+                     description="native creation command query")
+            xdo("key", "--window", window, "--clearmodifiers", "Return")
+            wait_for(lambda: app.client.call("navigation.get")["dialog"] is not None,
+                     description="native section naming dialog opens")
             xdo("type", "--window", window, "--clearmodifiers", "--delay", "8", "Created")
             xdo("key", "--window", window, "--clearmodifiers", "Return")
             wait_for(lambda: any(entry["path"] == "Created" for entry in state(app)["sections"]),

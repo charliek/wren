@@ -1,6 +1,14 @@
 use iced::Font;
 
 pub const UI: Font = Font::with_name("Inter");
+pub const MEDIUM: Font = Font {
+    weight: iced::font::Weight::Medium,
+    ..UI
+};
+pub const SEMIBOLD: Font = Font {
+    weight: iced::font::Weight::Semibold,
+    ..UI
+};
 pub const EDITOR: Font = Font::with_name("JetBrains Mono");
 
 pub const FACES: &[&[u8]] = &[

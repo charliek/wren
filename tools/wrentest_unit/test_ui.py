@@ -383,6 +383,32 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                 self._processes[-1].trigger_exit(0)
                 self.assertEqual(app.returncode, 0)
 
+    def test_launch_modes_are_explicit_without_overriding_workspace_or_spike(self) -> None:
+        for params, expected in [
+            ({}, ["--editor"]),
+            ({"evaluation": False}, []),
+            ({"workspace": Path("/tmp/notes")}, ["--workspace", "/tmp/notes"]),
+            ({"extra_args": ("--editor-spike",)}, ["--editor-spike"]),
+            ({"extra_args": ("--workspace", "/tmp/notes")}, ["--workspace", "/tmp/notes"]),
+        ]:
+            with self.subTest(params=params):
+                captured = []
+                factory = self._make_popen(_good_identify())
+
+                def launch(cmd, **kwargs):
+                    captured.append(cmd)
+                    return factory(cmd, **kwargs)
+
+                with patch.object(subprocess, "Popen", side_effect=launch):
+                    with WrenApp(artifacts_dir=self._artifacts, **params):
+                        pass
+                self.assertEqual(captured[0][3:], expected)
+
+    def test_evaluation_requires_a_boolean(self) -> None:
+        for value in (0, 1, None, "false"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "evaluation"):
+                WrenApp(evaluation=value)
+
     def test_valid_identify_starts_and_stops(self) -> None:
         factory = self._make_popen(_good_identify())
         with patch.object(subprocess, "Popen", side_effect=factory):

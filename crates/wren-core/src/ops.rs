@@ -1223,6 +1223,7 @@ impl Session {
             .relocate(from, parent, name, matches!(target, ItemRef::Note(_)))
             .map_err(|error| error.to_string())?;
         self.model.remap_paths(from, &receipt.path);
+        let mut moved_group_section = None;
         match target {
             ItemRef::Note(id) => {
                 let parent = receipt.path.parent();
@@ -1254,6 +1255,9 @@ impl Session {
                     .find(|section| Some(&section.path) == parent.as_ref())
                 {
                     if let Some(group) = self.model.groups.iter_mut().find(|group| group.id == id) {
+                        if group.section != section.id {
+                            moved_group_section = Some(section.id);
+                        }
                         group.section = section.id;
                     }
                 }
@@ -1266,6 +1270,25 @@ impl Session {
             }
         }
         self.state.remap_paths(from, &receipt.path);
+        let ordering = moved_group_section.map_or(Ok(()), |section| {
+            let siblings: Vec<_> = self
+                .model
+                .groups
+                .iter()
+                .filter(|group| group.section == section)
+                .map(|group| group.path.clone())
+                .collect();
+            let existing: HashSet<_> = self.state.order().into_iter().collect();
+            // Reorder's missing-path fallback is lexical. Materialize missing
+            // destination siblings in their current natural model order first.
+            for sibling in &siblings {
+                if sibling != &receipt.path && !existing.contains(sibling) {
+                    self.state
+                        .reorder(sibling, None, std::slice::from_ref(sibling))?;
+                }
+            }
+            self.state.reorder(&receipt.path, None, &siblings)
+        });
         if let Some(document) = &self.document {
             if target == ItemRef::Note(document.note) {
                 self.selected_parent = Some(document.entry.parent);
@@ -1285,12 +1308,14 @@ impl Session {
             });
         }
         events.push(Event::TreeChanged);
+        self.sort_model();
         self.refresh_tree(events)?;
         if let Some(error) = receipt.durability_error {
             return Err(format!(
                 "Item moved, but durability is unconfirmed: {error}"
             ));
         }
+        ordering?;
         self.persist_metadata(events)
     }
 

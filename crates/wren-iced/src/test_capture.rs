@@ -77,9 +77,6 @@ impl<Message: 'static + Send> Recipe for Pulse<Message> {
                     ..
                 } = event
                 {
-                    // iced broadcasts this after interface.draw. Returning a screenshot
-                    // action through the waiting task (not an App message) avoids the
-                    // intervening layout that invalidates iced's weak editor primitives.
                     self.frames.rendered(window);
                 }
                 future::ready(None)

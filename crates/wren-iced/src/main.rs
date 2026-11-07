@@ -1,6 +1,12 @@
 mod app;
+mod chrome;
 mod cli;
+pub mod drag;
+pub mod drag_view;
 mod fonts;
+mod palette_scroll;
+pub mod panes;
+mod shortcuts;
 mod theme;
 
 #[cfg(feature = "smoke-test")]
@@ -32,7 +38,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref())? {
         cli::Command::Run(options) => options,
         cli::Command::Help => {
-            println!("Wren\n\n  wren                         In-memory editor evaluation\n  wren --editor-spike          Start with a 5,000-line in-memory document\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --font-licenses         Show bundled font notices\n\nWithout --workspace, the editor-spike buffer is not saved to disk.");
+            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike) are never saved to disk.");
             return Ok(());
         }
         cli::Command::FontLicenses => {
@@ -52,10 +58,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "smoke-test")]
     let completion = options.smoke.as_ref().map(|request| request.completion());
 
-    let title = if options.workspace.is_some() {
-        "Wren"
+    let title = if options.editor {
+        "Wren — unsaved editor evaluation"
     } else {
-        "Wren — editor spike"
+        "Wren"
     };
     let mut application =
         iced::application(move || App::new(options.clone()), App::update, App::view)

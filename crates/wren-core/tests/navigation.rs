@@ -125,6 +125,84 @@ fn titles(session: &Session, parent: Parent) -> Vec<&str> {
         .collect()
 }
 
+fn group_names(session: &Session, section: SectionId) -> Vec<&str> {
+    session
+        .model()
+        .groups
+        .iter()
+        .filter(|group| group.section == section)
+        .map(|group| group.name.as_str())
+        .collect()
+}
+
+fn group_move_fixture() -> TempDir {
+    let root = TempDir::new().unwrap();
+    for (path, text) in [
+        ("Alpha/C/Note 2.md", "active group needle"),
+        ("Alpha/C/Note 10.md", "second group needle"),
+        ("Alpha/C/deep/ZDeep.md", "deep group needle"),
+        ("Alpha/Source 2/Stay.md", "source stay"),
+        ("Alpha/Source 10/Stay.md", "other source stay"),
+        ("Beta/Foreign 2/Note.md", "foreign two"),
+        ("Beta/Foreign 10/Note.md", "foreign ten"),
+        ("Beta/Visible A/Note.md", "visible a"),
+        ("Beta/Visible Z/Note.md", "visible z"),
+        ("Beta/Hidden A/Note.md", "hidden a"),
+        ("Beta/Hidden Z/Note.md", "hidden z"),
+        ("Gamma/Other 2/Note.md", "other two"),
+        ("Gamma/Other 10/Note.md", "other ten"),
+    ] {
+        write(root.path(), path, text);
+    }
+    write(
+        root.path(),
+        ".wren/workspace.toml",
+        r#"order = ['Alpha/C', 'Alpha/Source 10', 'Alpha/Source 2', 'Gamma', 'Beta', 'Alpha', 'Gamma/Other 10', 'Gamma/Other 2', 'Beta/Visible Z', 'Beta/Hidden Z', 'Beta/Visible A', 'Beta/Hidden A', 'Beta/Absent']
+[sort]
+'Alpha/C' = 'title'
+[future]
+selection = 'Alpha/C/Note 2.md'
+opaque = ['untouched', { value = 42 }]
+[widths.future]
+custom = 72
+"#,
+    );
+    root
+}
+
+fn assert_appended_group_order(session: &Session) {
+    assert_eq!(
+        group_names(session, section(session, "Beta")),
+        [
+            "Visible Z",
+            "Hidden Z",
+            "Visible A",
+            "Hidden A",
+            "Foreign 2",
+            "Foreign 10",
+            "C"
+        ]
+    );
+    assert_eq!(
+        group_names(session, section(session, "Alpha")),
+        ["Source 10", "Source 2"]
+    );
+    assert_eq!(
+        group_names(session, section(session, "Gamma")),
+        ["Other 10", "Other 2"]
+    );
+    assert_eq!(
+        session
+            .model()
+            .sections
+            .iter()
+            .map(|section| section.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Gamma", "Beta", "Alpha"]
+    );
+    assert!(session.state().order().contains(&rel("Beta/Absent")));
+}
+
 fn set_modified(root: &Path, path: &str, seconds: u64) {
     File::open(root.join(path))
         .unwrap()
@@ -1168,6 +1246,417 @@ fn moving_a_group_preserves_its_sort_selection_history_and_index_scope_on_reopen
     );
     assert_eq!(reopened.document().unwrap().path(), &rel("B/G/Note 2.md"));
     assert_eq!(reopened.state().sort(&rel("B/G")), "title");
+}
+
+#[test]
+fn cross_section_group_move_appends_to_complete_manual_order_and_persists_remapped_state() {
+    let root = group_move_fixture();
+    let metadata_path = root.path().join(".wren/workspace.toml");
+    let original: toml::Table = fs::read_to_string(&metadata_path).unwrap().parse().unwrap();
+    let mut current = session(root.path());
+    let moved = group(&current, "Alpha/C");
+    let active = note(&current, "Alpha/C/Note 2.md");
+    let deep = note(&current, "Alpha/C/deep/ZDeep.md");
+    let previous = note(&current, "Alpha/Source 2/Stay.md");
+    let destination = section(&current, "Beta");
+    assert_eq!(current.state().order()[0], rel("Alpha/C"));
+    assert_eq!(
+        group_names(&current, destination),
+        [
+            "Visible Z",
+            "Hidden Z",
+            "Visible A",
+            "Hidden A",
+            "Foreign 2",
+            "Foreign 10"
+        ]
+    );
+    open(&mut current, previous);
+    run(
+        &mut current,
+        Op::SelectParent {
+            parent: Parent::Group(moved),
+        },
+    );
+    edit(&mut current, active, "saved active group needle");
+    let text = current.document().unwrap().text.as_ptr();
+    let events = run(
+        &mut current,
+        Op::MoveGroup {
+            group: moved,
+            to: destination,
+        },
+    );
+    assert_appended_group_order(&current);
+    assert_eq!(group(&current, "Beta/C"), moved);
+    assert_eq!(note(&current, "Beta/C/Note 2.md"), active);
+    assert_eq!(note(&current, "Beta/C/deep/ZDeep.md"), deep);
+    assert_eq!(current.selected_parent(), Some(Parent::Group(moved)));
+    assert_eq!(current.document().unwrap().text.as_ptr(), text);
+    assert!(!current.document().unwrap().dirty());
+    assert_eq!(current.document().unwrap().path(), &rel("Beta/C/Note 2.md"));
+    assert_eq!(current.state().selection(), Some(rel("Beta/C")));
+    assert_eq!(
+        current.state().last_open_note(),
+        Some(rel("Beta/C/Note 2.md"))
+    );
+    assert_eq!(current.state().sort(&rel("Beta/C")), "title");
+    assert_eq!(
+        current.state().history(),
+        [rel("Alpha/Source 2/Stay.md"), rel("Beta/C/Note 2.md")]
+    );
+    assert_eq!(current.state().history_position(), Some(1));
+    assert_eq!(current.state().recent(), current.state().history());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::NoteSaved { note, .. } if *note == active)));
+    assert!(events.iter().any(|event| matches!(event, Event::NoteMoved { note, new_path } if *note == deep && new_path == Path::new("Beta/C/deep/ZDeep.md"))));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, Event::Selected(_))));
+    let hit = &current.index().query(
+        "saved active group needle",
+        Scope::Section(destination),
+        QueryKind::Search,
+        100,
+    )[0];
+    assert_eq!(hit.note, active);
+    assert_eq!(hit.path, rel("Beta/C/Note 2.md"));
+    assert!(current
+        .index()
+        .query(
+            "group needle",
+            Scope::Section(section(&current, "Alpha")),
+            QueryKind::Search,
+            100,
+        )
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(root.path().join("Beta/C/Note 2.md")).unwrap(),
+        "saved active group needle"
+    );
+    let saved: toml::Table = fs::read_to_string(&metadata_path).unwrap().parse().unwrap();
+    for key in ["future", "widths"] {
+        assert_eq!(saved[key], original[key]);
+    }
+    let order = current.state().order();
+    drop(current);
+    let mut reopened = session(root.path());
+    assert_appended_group_order(&reopened);
+    assert_eq!(reopened.state().order(), order);
+    assert_eq!(
+        reopened.document().unwrap().path(),
+        &rel("Beta/C/Note 2.md")
+    );
+    assert_eq!(reopened.state().selection(), Some(rel("Beta/C")));
+    assert_eq!(reopened.state().sort(&rel("Beta/C")), "title");
+    run(&mut reopened, Op::Back);
+    assert_eq!(
+        reopened.document().unwrap().path(),
+        &rel("Alpha/Source 2/Stay.md")
+    );
+    run(&mut reopened, Op::Forward);
+    assert_eq!(
+        reopened.document().unwrap().path(),
+        &rel("Beta/C/Note 2.md")
+    );
+}
+
+#[test]
+fn cross_section_group_move_preserves_natural_fallback_order_without_writable_metadata() {
+    for metadata in [None, Some("layout = [ broken")] {
+        let root = group_move_fixture();
+        let metadata_path = root.path().join(".wren/workspace.toml");
+        if let Some(source) = metadata {
+            fs::write(&metadata_path, source).unwrap();
+        } else {
+            fs::remove_file(&metadata_path).unwrap();
+        }
+        let mut current = session(root.path());
+        let moved = group(&current, "Alpha/C");
+        let destination = section(&current, "Beta");
+        assert_eq!(
+            group_names(&current, destination),
+            [
+                "Foreign 2",
+                "Foreign 10",
+                "Hidden A",
+                "Hidden Z",
+                "Visible A",
+                "Visible Z"
+            ]
+        );
+        run(
+            &mut current,
+            Op::MoveGroup {
+                group: moved,
+                to: destination,
+            },
+        );
+        let expected = [
+            "Foreign 2",
+            "Foreign 10",
+            "Hidden A",
+            "Hidden Z",
+            "Visible A",
+            "Visible Z",
+            "C",
+        ];
+        assert_eq!(group_names(&current, destination), expected);
+        run(&mut current, Op::Reconcile);
+        assert_eq!(group_names(&current, destination), expected);
+        if let Some(source) = metadata {
+            assert!(!current.state().writable());
+            assert_eq!(fs::read_to_string(&metadata_path).unwrap(), source);
+        } else {
+            drop(current);
+            let reopened = session(root.path());
+            assert_eq!(group_names(&reopened, section(&reopened, "Beta")), expected);
+        }
+    }
+}
+
+#[test]
+fn same_section_group_moves_and_renames_keep_their_manual_position() {
+    let root = group_move_fixture();
+    let mut current = session(root.path());
+    let moved = group(&current, "Beta/Hidden Z");
+    let destination = section(&current, "Beta");
+    let original = current.state().order();
+    for op in [
+        Op::MoveGroup {
+            group: moved,
+            to: destination,
+        },
+        Op::Rename {
+            target: ItemRef::Group(moved),
+            new_name: "Hidden Z".into(),
+        },
+    ] {
+        run(&mut current, op);
+        assert_eq!(current.state().order(), original);
+    }
+    run(
+        &mut current,
+        Op::Rename {
+            target: ItemRef::Group(moved),
+            new_name: "A renamed".into(),
+        },
+    );
+    let expected = [
+        "Visible Z",
+        "A renamed",
+        "Visible A",
+        "Hidden A",
+        "Foreign 2",
+        "Foreign 10",
+    ];
+    assert_eq!(group_names(&current, destination), expected);
+    assert_eq!(
+        current.state().order(),
+        original
+            .into_iter()
+            .map(|path| if path == rel("Beta/Hidden Z") {
+                rel("Beta/A renamed")
+            } else {
+                path
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(group(&current, "Beta/A renamed"), moved);
+    drop(current);
+    let reopened = session(root.path());
+    assert_eq!(group_names(&reopened, section(&reopened, "Beta")), expected);
+}
+
+#[test]
+fn cross_section_group_move_prepublish_failures_leave_order_and_paths_unchanged() {
+    for fault in [Fault::BeforePublish, Fault::Write] {
+        let root = group_move_fixture();
+        let mut current = session(root.path());
+        let moved = group(&current, "Alpha/C");
+        let active = note(&current, "Alpha/C/Note 2.md");
+        let destination = section(&current, "Beta");
+        open(&mut current, active);
+        if fault == Fault::Write {
+            edit(&mut current, active, "dirty barrier must block move");
+        }
+        let text = current.document().unwrap().text.as_ptr();
+        let order = current.state().order();
+        let groups = current.model().groups.clone();
+        let history = current.state().history();
+        let recent = current.state().recent();
+        let metadata = fs::read(root.path().join(".wren/workspace.toml")).unwrap();
+        current.fail_next(fault);
+        let error = current
+            .apply_at(
+                Op::MoveGroup {
+                    group: moved,
+                    to: destination,
+                },
+                Duration::ZERO,
+            )
+            .unwrap_err();
+        assert!(error.message.contains(&format!("{fault:?}")));
+        assert!(error.events.is_empty());
+        assert_eq!(current.state().order(), order);
+        assert_eq!(current.state().history(), history);
+        assert_eq!(current.state().recent(), recent);
+        assert_eq!(current.state().selection(), Some(rel("Alpha/C/Note 2.md")));
+        assert_eq!(current.selected_parent(), Some(Parent::Group(moved)));
+        assert_eq!(current.document().unwrap().text.as_ptr(), text);
+        assert_eq!(
+            current.document().unwrap().path(),
+            &rel("Alpha/C/Note 2.md")
+        );
+        assert_eq!(current.document().unwrap().dirty(), fault == Fault::Write);
+        assert_eq!(
+            current
+                .model()
+                .groups
+                .iter()
+                .map(|group| (group.id, group.section, &group.path))
+                .collect::<Vec<_>>(),
+            groups
+                .iter()
+                .map(|group| (group.id, group.section, &group.path))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fs::read(root.path().join(".wren/workspace.toml")).unwrap(),
+            metadata
+        );
+        assert!(root.path().join("Alpha/C").is_dir());
+        assert!(!root.path().join("Beta/C").exists());
+        assert_eq!(
+            current.index().query(
+                "group needle",
+                Scope::Section(destination),
+                QueryKind::Search,
+                100,
+            ),
+            []
+        );
+    }
+}
+
+#[test]
+fn cross_section_group_move_postpublication_faults_keep_appended_order_before_retry() {
+    for fault in [
+        Fault::DirectorySync,
+        Fault::Write,
+        Fault::Permissions,
+        Fault::FileSync,
+    ] {
+        let root = group_move_fixture();
+        let mut current = session(root.path());
+        let moved = group(&current, "Alpha/C");
+        let active = note(&current, "Alpha/C/Note 2.md");
+        let destination = section(&current, "Beta");
+        open(&mut current, active);
+        let text = current.document().unwrap().text.as_ptr();
+        current.fail_next(fault);
+        let error = current
+            .apply_at(
+                Op::MoveGroup {
+                    group: moved,
+                    to: destination,
+                },
+                Duration::ZERO,
+            )
+            .unwrap_err();
+        assert!(error.message.contains(&format!("{fault:?}")));
+        assert!(error.events.iter().any(|event| matches!(event, Event::NoteMoved { note, new_path } if *note == active && new_path == Path::new("Beta/C/Note 2.md"))));
+        assert!(error
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::TreeChanged)));
+        assert!(!error
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::Selected(_))));
+        assert_appended_group_order(&current);
+        assert_eq!(group(&current, "Beta/C"), moved);
+        assert_eq!(current.document().unwrap().text.as_ptr(), text);
+        assert_eq!(current.document().unwrap().path(), &rel("Beta/C/Note 2.md"));
+        assert_eq!(current.state().selection(), Some(rel("Beta/C/Note 2.md")));
+        assert_eq!(current.state().history(), [rel("Beta/C/Note 2.md")]);
+        assert_eq!(hits(&current, "active group needle"), [active]);
+        assert!(!root.path().join("Alpha/C").exists());
+        assert!(root.path().join("Beta/C").is_dir());
+        let order = current.state().order();
+        run(&mut current, Op::Reconcile);
+        run(&mut current, Op::Flush);
+        run(
+            &mut current,
+            Op::SetLayout {
+                layout: "outline".into(),
+            },
+        );
+        assert_appended_group_order(&current);
+        assert_eq!(current.state().order(), order);
+        assert!(!current.pending_durability());
+        assert!(!root.path().join("Beta/C 2").exists());
+        drop(current);
+        let reopened = session(root.path());
+        assert_appended_group_order(&reopened);
+        assert_eq!(
+            reopened.document().unwrap().path(),
+            &rel("Beta/C/Note 2.md")
+        );
+    }
+}
+
+#[test]
+fn cross_section_group_move_metadata_conflicts_keep_committed_order_without_overwriting_disk() {
+    let root = group_move_fixture();
+    let metadata_path = root.path().join(".wren/workspace.toml");
+    let mut current = session(root.path());
+    let moved = group(&current, "Alpha/C");
+    let active = note(&current, "Alpha/C/Note 2.md");
+    let destination = section(&current, "Beta");
+    open(&mut current, active);
+    let mut external = fs::read_to_string(&metadata_path).unwrap();
+    external.push_str("\n[external]\npreserve = true\n");
+    fs::write(&metadata_path, &external).unwrap();
+    let error = current
+        .apply_at(
+            Op::MoveGroup {
+                group: moved,
+                to: destination,
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+    assert!(error.message.contains("workspace.toml"));
+    assert!(error.events.iter().any(
+        |event| matches!(event, Event::Warning(message) if message.contains("remain applied"))
+    ));
+    assert!(error
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::NoteMoved { note, .. } if *note == active)));
+    assert_appended_group_order(&current);
+    assert_eq!(group(&current, "Beta/C"), moved);
+    assert_eq!(current.document().unwrap().path(), &rel("Beta/C/Note 2.md"));
+    assert_eq!(current.state().history(), [rel("Beta/C/Note 2.md")]);
+    assert_eq!(hits(&current, "active group needle"), [active]);
+    let order = current.state().order();
+    run(&mut current, Op::Reconcile);
+    assert!(current
+        .apply_at(
+            Op::SetLayout {
+                layout: "outline".into(),
+            },
+            Duration::ZERO,
+        )
+        .is_err());
+    assert_eq!(current.state().order(), order);
+    assert_appended_group_order(&current);
+    assert_eq!(fs::read_to_string(&metadata_path).unwrap(), external);
+    assert!(!root.path().join("Alpha/C").exists());
+    assert!(root.path().join("Beta/C").is_dir());
+    assert!(!root.path().join("Beta/C 2").exists());
 }
 
 #[test]

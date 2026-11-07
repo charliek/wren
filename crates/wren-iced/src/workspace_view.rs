@@ -1,392 +1,971 @@
-use iced::widget::{button, column, container, opaque, row, scrollable, stack, text, text_input};
+use iced::widget::{
+    button, column, container, mouse_area, opaque, row, scrollable, stack, text, text_input,
+};
 use iced::{Border, Element, Fill};
-use wren_core::model::{ItemRef, Parent};
+use wren_core::model::{Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
-use wren_core::theme::{self as definitions, Rgb, Theme};
+use wren_core::theme::Rgb;
 
+use super::commands::{Command, CommandId, PRIMARY};
+use super::navigation::matches_name;
+use super::palette::Mode;
 use super::{workspace::DialogKind, App, Message};
+use crate::chrome::{self, Icon};
+use crate::drag::RowKind;
+use crate::drag_view::Registry;
+use crate::panes::{self, Layout, Pane};
 use crate::{fonts, theme};
 
 impl App {
     pub(super) fn workspace_view(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
-        let loading = self.loading.is_some();
-        let enabled = !loading && self.session.is_some();
-        let mut path = text_input("/absolute/workspace/directory", &self.workspace_path);
-        if !loading {
-            path = path
-                .on_input(Message::WorkspacePath)
-                .on_submit(Message::OpenWorkspace);
-        }
-        let header = panel(
-            row![
-                text("Wren").size(20).color(theme::color(colors.accent)),
-                path,
-                button(if loading { "Opening…" } else { "Open" })
-                    .on_press_maybe((!loading).then_some(Message::OpenWorkspace)),
-                button("Back").on_press_maybe(
-                    (enabled
-                        && self
-                            .session
-                            .as_ref()
-                            .is_some_and(|session| session.can_back()))
-                    .then_some(Message::Core(Op::Back))
-                ),
-                button("Forward").on_press_maybe(
-                    (enabled
-                        && self
-                            .session
-                            .as_ref()
-                            .is_some_and(|session| session.can_forward()))
-                    .then_some(Message::Core(Op::Forward))
-                ),
-                button("System").on_press(Message::ChooseTheme(None)),
-                button("Dark").on_press(Message::ChooseTheme(Some(definitions::DARK))),
-                button("Light").on_press(Message::ChooseTheme(Some(definitions::LIGHT))),
-            ]
-            .spacing(8)
-            .align_y(iced::Center)
-            .into(),
-            colors.titlebar,
-            colors.divider,
-        )
-        .padding([10, 14]);
-        let mut body = column![header];
-        if let Some(banner) = &self.banner {
-            body = body.push(
-                panel(
-                    row![
-                        text(banner).size(13).color(theme::color(colors.warning)),
-                        iced::widget::space::horizontal(),
-                        button("Retry save")
-                            .on_press_maybe(enabled.then_some(Message::Core(Op::Flush))),
-                        button("Dismiss").on_press(Message::DismissBanner),
-                    ]
-                    .spacing(10)
-                    .align_y(iced::Center)
-                    .into(),
-                    colors.raised,
-                    colors.divider,
-                )
-                .padding([8, 14]),
-            );
-        }
-        let mut sections = column![
-            text(format!(
-                "Sections · {}",
-                self.model().map_or(0, |model| model.sections.len())
-            ))
-            .size(15),
-            button("New section")
-                .on_press_maybe(enabled.then_some(Message::ShowDialog(DialogKind::CreateSection)))
-                .width(Fill),
-        ]
-        .spacing(8);
-        let mut section_items = column![].spacing(3);
-        if let Some(model) = self.model() {
-            for section in &model.sections {
-                let count = model
-                    .notes
-                    .iter()
-                    .filter(|note| match note.parent {
-                        Parent::Section(id) => id == section.id,
-                        Parent::Group(id) => model
-                            .group(id)
-                            .is_some_and(|group| group.section == section.id),
-                    })
-                    .count();
-                section_items = section_items.push(item(
-                    format!("{}  ({count})", section.name),
-                    enabled.then_some(Message::SelectParent(Parent::Section(section.id))),
-                    Some(section.id) == self.selected_section,
+        let enabled = self.session.is_some()
+            && self.loading.is_none()
+            && self.palette.is_none()
+            && self.dialog.is_none();
+        let mut registry = self
+            .model()
+            .map(Registry::new)
+            .unwrap_or_else(|| Registry::new(&Workspace::empty(std::path::PathBuf::new())));
+        let effective = self.widths.effective(self.layout, self.viewport.width);
+        let mut browser = row![].height(Fill).clip(true);
+        let browser_visible = !self.focus && self.model().is_some();
+        if browser_visible {
+            for &pane in self.layout.panes() {
+                let content = match pane {
+                    Pane::Sections => self.sections_pane(&mut registry),
+                    Pane::Groups => self.groups_pane(&mut registry),
+                    Pane::Outline => self.outline_pane(&mut registry),
+                    Pane::Notes => self.notes_pane(&mut registry),
+                };
+                let generation = self.gesture_generation;
+                browser = browser.push(panes::resizable(
+                    content,
+                    self.layout,
+                    pane,
+                    effective.get(pane),
+                    self.widths.get(self.layout, pane),
                     self.definition,
+                    move |event| Message::Resize(generation, event),
                 ));
             }
         }
-        sections = sections.push(scrollable(section_items).height(Fill));
-        if let Some(section) = self.selected_section {
-            sections = sections.push(
-                row![
-                    button("Rename").on_press_maybe(enabled.then_some(Message::ShowDialog(
-                        DialogKind::Rename(ItemRef::Section(section))
-                    ))),
-                    button("Trash").on_press_maybe(enabled.then_some(Message::ShowDialog(
-                        DialogKind::Delete(ItemRef::Section(section))
-                    ))),
-                ]
-                .spacing(4),
-            );
-        }
-        let mut groups = column![
-            text(format!(
-                "Groups · {}",
-                self.model().map_or(0, |model| model
-                    .groups
-                    .iter()
-                    .filter(|group| Some(group.section) == self.selected_section)
-                    .count())
-            ))
-            .size(15),
-            button("New group")
-                .on_press_maybe(
-                    self.selected_section
-                        .filter(|_| enabled)
-                        .map(|section| Message::ShowDialog(DialogKind::CreateGroup(section)))
-                )
-                .width(Fill),
-        ]
-        .spacing(8);
-        let mut group_items = column![].spacing(3);
-        if let (Some(model), Some(section)) = (self.model(), self.selected_section) {
-            let count = model
-                .notes
-                .iter()
-                .filter(|note| note.parent == Parent::Section(section))
-                .count();
-            group_items = group_items.push(item(
-                format!("No Group  ({count})"),
-                enabled.then_some(Message::SelectParent(Parent::Section(section))),
-                self.selected_group.is_none(),
-                self.definition,
-            ));
-            for group in model.groups.iter().filter(|group| group.section == section) {
-                let count = model
-                    .notes
-                    .iter()
-                    .filter(|note| note.parent == Parent::Group(group.id))
-                    .count();
-                group_items = group_items.push(item(
-                    format!("{}  ({count})", group.name),
-                    enabled.then_some(Message::SelectParent(Parent::Group(group.id))),
-                    Some(group.id) == self.selected_group,
-                    self.definition,
-                ));
-            }
-        }
-        groups = groups.push(scrollable(group_items).height(Fill));
-        if let Some(group) = self.selected_group {
-            groups = groups.push(button("Rename group").width(Fill).on_press_maybe(
-                enabled.then_some(Message::ShowDialog(DialogKind::Rename(ItemRef::Group(
-                    group,
-                )))),
-            ));
-            groups = groups.push(
-                row![
-                    button("Move").on_press_maybe(
-                        enabled.then_some(Message::ShowDialog(DialogKind::MoveGroup(group)))
-                    ),
-                    button("Trash").on_press_maybe(enabled.then_some(Message::ShowDialog(
-                        DialogKind::Delete(ItemRef::Group(group))
-                    ))),
-                ]
-                .spacing(4),
-            );
-        }
-        let parent = self.selected_parent();
-        let count = self.model().map_or(0, |model| {
-            model
-                .notes
-                .iter()
-                .filter(|note| Some(note.parent) == parent)
-                .count()
-        });
-        let mut notes = column![
-            text(format!("Notes · {count}")).size(15),
-            button("New note")
-                .on_press_maybe(
-                    parent
-                        .filter(|_| enabled)
-                        .map(|parent| Message::ShowDialog(DialogKind::CreateNote(parent)))
-                )
-                .width(Fill),
-        ]
-        .spacing(8);
-        let mut note_items = column![].spacing(3);
-        if let Some(model) = self.model() {
-            for note in model
-                .notes
-                .iter()
-                .filter(|note| Some(note.parent) == parent)
-            {
-                let mut label = note.title.clone();
-                if let Some(subtitle) = &note.subtitle {
-                    label.push('\n');
-                    label.push_str(subtitle);
-                }
-                note_items = note_items.push(item(
-                    label,
-                    enabled.then_some(Message::Core(Op::OpenNote {
-                        note: Some(note.id),
-                    })),
-                    Some(note.id) == self.selected_note,
-                    self.definition,
-                ));
-            }
-        }
-        notes = notes.push(scrollable(note_items).height(Fill));
-        if let Some(note) = self.selected_note {
-            notes = notes.push(button("Rename note").width(Fill).on_press_maybe(
-                enabled.then_some(Message::ShowDialog(DialogKind::Rename(ItemRef::Note(note)))),
-            ));
-            notes =
-                notes.push(
-                    row![
-                        button("Move").on_press_maybe(
-                            enabled.then_some(Message::ShowDialog(DialogKind::MoveNote(note)))
-                        ),
-                        button("Trash").on_press_maybe(enabled.then_some(Message::ShowDialog(
-                            DialogKind::Delete(ItemRef::Note(note))
-                        ))),
-                    ]
-                    .spacing(4),
-                );
-        }
-        let mut editor = column![panel(
-            text(self.breadcrumb())
-                .size(13)
-                .color(theme::color(colors.muted))
-                .into(),
-            colors.editor,
-            colors.divider,
-        )
-        .padding([10, 16])];
-        if self.find_open {
-            editor = editor.push(
-                container(
-                    row![
-                        text_input("Find literal text", &self.find_query)
-                            .id("find-query")
-                            .on_input(Message::FindChanged)
-                            .on_submit(Message::FindNext),
-                        text(format!(
-                            "{} / {}",
-                            self.editor.find_current().map_or(0, |n| n + 1),
-                            self.editor.find_count()
-                        )),
-                        button("Previous").on_press(Message::FindPrevious),
-                        button("Next").on_press(Message::FindNext),
-                        button("Close").on_press(Message::FindClose),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center),
-                )
-                .padding([8, 16]),
-            );
-        }
-        if self.selected_note.is_some() {
-            editor = editor.push(self.editor.view(self.definition).map(Message::Editor));
+        let browser_width = if !browser_visible {
+            0.0
         } else {
-            editor = editor.push(
-                container(
-                    text(if loading {
-                        "Opening workspace…"
-                    } else if self.session.is_none() {
-                        "Open a workspace directory to browse saved notes."
-                    } else if self.selected_section.is_none() {
-                        "Create a section to start writing."
-                    } else {
-                        "Select a note, or create one in this location."
-                    })
-                    .color(theme::color(colors.muted)),
-                )
-                .center_x(Fill)
-                .center_y(Fill),
-            );
-        }
-        let (status, status_color) = self.save_status();
-        let cursor = self.editor.cursor();
-        editor =
-            editor.push(
-                container(
-                    row![
-                        text(format!("Markdown · {} words", self.words)),
-                        iced::widget::space::horizontal(),
-                        text(format!(
-                            "Ln {}, byte col {}",
-                            cursor.position.line + 1,
-                            cursor.position.column + 1
-                        ))
-                        .font(fonts::EDITOR)
-                        .size(12),
-                        text(status).color(theme::color(status_color)),
-                        button(
-                            if self.session.as_ref().is_some_and(|session| session
-                                .pending_durability()
-                                || session
-                                    .document()
-                                    .is_some_and(|document| document.error.is_some()))
-                            {
-                                "Retry save"
-                            } else {
-                                "Save"
-                            }
-                        )
-                        .on_press_maybe(
-                            (enabled && self.selected_note.is_some())
-                                .then_some(Message::Core(Op::Flush))
-                        ),
-                    ]
-                    .spacing(14)
-                    .align_y(iced::Center),
-                )
-                .padding([8, 14]),
-            );
-        body = body.push(
-            row![
-                panel(sections.into(), colors.pane, colors.divider)
-                    .padding(10)
-                    .width(180)
-                    .height(Fill),
-                panel(groups.into(), colors.pane, colors.divider)
-                    .padding(10)
-                    .width(190)
-                    .height(Fill),
-                panel(notes.into(), colors.notes, colors.divider)
-                    .padding(10)
-                    .width(240)
-                    .height(Fill),
-                editor.width(Fill).height(Fill),
-            ]
-            .height(Fill),
+            self.layout
+                .panes()
+                .iter()
+                .map(|pane| effective.get(*pane))
+                .sum()
+        };
+        // Reset browser-owned capture/scroll state only on a committed workspace
+        // or layout replacement. The editor remains the same sibling throughout.
+        let browser = iced::widget::keyed_column([(
+            (self.workspace_generation(), self.layout),
+            browser.into(),
+        )])
+        .height(Fill);
+        let content = row![
+            container(browser)
+                .width(browser_width)
+                .height(Fill)
+                .clip(true),
+            self.saved_editor_view()
+        ]
+        .height(Fill)
+        .clip(true);
+        let generation = self.gesture_generation;
+        let layout = self.layout;
+        let content = crate::drag_view::area(
+            content,
+            registry,
+            generation,
+            enabled,
+            self.definition,
+            move |event| Message::Drag(generation, layout, event),
         );
-        let base: Element<'_, Message> = body.width(Fill).height(Fill).into();
+        let base = column![self.titlebar(), self.warning_slot(), content]
+            .width(Fill)
+            .height(Fill);
+        let base = container(base)
+            .style(move |_| chrome::surface(self.definition, colors.editor, 0.0, false))
+            .into();
+        let base = self.palette_view(base);
         if let Some(dialog) = &self.dialog {
-            let dialog = self.dialog_view(dialog);
-            let overlay =
-                container(dialog)
+            let scrim = mouse_area(
+                container(iced::widget::space())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| container::Style {
+                        background: Some(iced::Color::from_rgba(0.025, 0.028, 0.04, 0.60).into()),
+                        ..Default::default()
+                    }),
+            )
+            .on_press(Message::CancelDialog);
+            stack![
+                base,
+                opaque(scrim),
+                container(opaque(self.dialog_view(dialog)))
                     .center_x(Fill)
                     .center_y(Fill)
-                    .style(|_| container::Style {
-                        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
-                        ..Default::default()
-                    });
-            stack![base, opaque(overlay)].into()
+                    .padding(16)
+            ]
+            .into()
         } else {
             base
         }
     }
 
-    fn breadcrumb(&self) -> String {
-        let mut parts = Vec::new();
+    fn titlebar(&self) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let root = self.model().map(|model| model.root.as_path());
+        let name = root
+            .and_then(|root| {
+                self.config
+                    .as_ref()
+                    .and_then(|config| config.workspaces().iter().find(|entry| entry.path == root))
+                    .map(|entry| entry.name.as_str())
+            })
+            .or_else(|| {
+                root.and_then(|root| root.file_name())
+                    .and_then(|name| name.to_str())
+            })
+            .unwrap_or("Choose workspace");
+        let workspace = button(
+            row![
+                chrome::icon(Icon::Folder, 15.0, colors.accent),
+                chrome::label(name, 13, colors.text).font(fonts::SEMIBOLD),
+                chrome::label(
+                    root.map(|root| root.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    11,
+                    colors.muted
+                )
+                .font(fonts::EDITOR),
+                chrome::icon(Icon::Chevron, 14.0, colors.muted)
+            ]
+            .spacing(8)
+            .align_y(iced::Center)
+            .clip(true),
+        )
+        .on_press(Message::Command(Command::Run(CommandId::SwitchWorkspace)))
+        .height(32)
+        .padding([0, 10])
+        .clip(true)
+        .style(move |_, status| chrome::control(self.definition, status, false, false));
+        let mut left = row![
+            chrome::icon(Icon::Bird, 18.0, colors.accent),
+            text("Wren").size(14).font(fonts::SEMIBOLD),
+            workspace
+        ]
+        .spacing(10)
+        .align_y(iced::Center)
+        .clip(true);
+        if self.viewport.width < 1100.0 {
+            left = left.width(Fill);
+        } else {
+            left = left.width(570);
+        }
+        let mut layouts = row![].spacing(2);
+        for (layout, icon) in [
+            (Layout::Columns, Icon::Columns),
+            (Layout::Outline, Icon::Outline),
+        ] {
+            layouts = layouts.push(
+                button(chrome::icon(
+                    icon,
+                    16.0,
+                    if layout == self.layout {
+                        colors.accent
+                    } else {
+                        colors.muted
+                    },
+                ))
+                .width(30)
+                .height(26)
+                .padding(5)
+                .on_press_maybe(
+                    self.session
+                        .as_ref()
+                        .map(|_| Message::Command(Command::Layout(layout))),
+                )
+                .style(move |_, status| {
+                    chrome::control(self.definition, status, layout == self.layout, true)
+                }),
+            );
+        }
+        let layouts = container(layouts)
+            .padding(2)
+            .style(move |_| chrome::surface(self.definition, colors.control, 7.0, true));
+        let compact = self.viewport.width < 1120.0;
+        let mut right = row![layouts].spacing(6).align_y(iced::Center);
+        if !compact {
+            right = right.push(self.shortcut_button("Jump to note", "P", CommandId::Jump));
+        }
+        right = right.push(self.shortcut_button("Search", "Shift+F", CommandId::Search));
+        right = right.push(
+            self.shortcut_button("Commands", "K", CommandId::SwitchWorkspace)
+                .on_press(Message::PaletteOpen(Mode::Commands)),
+        );
+        right = right.push(
+            button(chrome::icon(
+                Icon::Focus,
+                15.0,
+                if self.focus {
+                    colors.accent
+                } else {
+                    colors.body
+                },
+            ))
+            .on_press_maybe(
+                self.session
+                    .as_ref()
+                    .map(|_| Message::Command(Command::Focus(None))),
+            )
+            .width(32)
+            .height(32)
+            .padding(8)
+            .style(move |_, status| chrome::control(self.definition, status, self.focus, false)),
+        );
+        chrome::bottom_rule(
+            container(
+                row![left, iced::widget::space::horizontal(), right]
+                    .spacing(12)
+                    .align_y(iced::Center)
+                    .clip(true),
+            )
+            .padding([7, 12])
+            .height(47)
+            .width(Fill)
+            .style(move |_| chrome::surface(self.definition, colors.titlebar, 0.0, false)),
+            self.definition,
+        )
+        .into()
+    }
+
+    fn shortcut_button<'a>(
+        &'a self,
+        label: &'a str,
+        shortcut: &'a str,
+        id: CommandId,
+    ) -> button::Button<'a, Message> {
+        button(
+            row![
+                text(label).size(12),
+                chrome::keycap_owned(format!("{PRIMARY}{shortcut}"), self.definition)
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .height(32)
+        .padding([0, 10])
+        .on_press_maybe(
+            self.command_enabled(id)
+                .then_some(Message::Command(Command::Run(id))),
+        )
+        .style(move |_, status| chrome::control(self.definition, status, false, false))
+    }
+
+    fn warning_slot(&self) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let message = self
+            .banner
+            .as_deref()
+            .or(self.registry_warning.as_deref())
+            .unwrap_or_default();
+        let retry = self.session.as_ref().is_some_and(|session| {
+            session.pending_durability()
+                || session
+                    .document()
+                    .is_some_and(|document| document.error.is_some())
+        });
+        let mut contents = row![chrome::label(message, 12, colors.warning).width(Fill)]
+            .spacing(10)
+            .align_y(iced::Center)
+            .clip(true);
+        if retry {
+            contents = contents.push(self.small_button("Retry save", Message::Core(Op::Flush)));
+        }
+        if self.command_enabled(CommandId::OpenConflictCopy) {
+            contents = contents.push(self.small_button(
+                "Open conflict copy",
+                Message::Command(Command::Run(CommandId::OpenConflictCopy)),
+            ));
+        }
+        contents = contents.push(self.small_button("Dismiss", Message::DismissBanner));
+        container(contents)
+            .padding([6, 14])
+            .height(if message.is_empty() { 0 } else { 40 })
+            .width(Fill)
+            .clip(true)
+            .style(move |_| chrome::surface(self.definition, colors.raised, 0.0, false))
+            .into()
+    }
+
+    fn pane_header<'a>(&'a self, label: String, command: CommandId) -> Element<'a, Message> {
+        let colors = self.definition.colors;
+        container(
+            row![
+                chrome::label(label.to_uppercase(), 11, colors.muted)
+                    .font(fonts::SEMIBOLD)
+                    .width(Fill),
+                button(chrome::icon(Icon::Plus, 14.0, colors.muted))
+                    .width(26)
+                    .height(26)
+                    .padding(6)
+                    .on_press_maybe(
+                        self.command_enabled(command)
+                            .then_some(Message::Command(Command::Run(command)))
+                    )
+                    .style(move |_, status| chrome::control(self.definition, status, false, true))
+            ]
+            .spacing(4)
+            .align_y(iced::Center)
+            .clip(true),
+        )
+        .height(46)
+        .padding(iced::Padding {
+            top: 10.0,
+            right: 10.0,
+            bottom: 8.0,
+            left: 14.0,
+        })
+        .into()
+    }
+
+    fn pane_filter<'a>(
+        &'a self,
+        pane: &'static str,
+        placeholder: &'a str,
+        query: &'a str,
+    ) -> Element<'a, Message> {
+        let input = text_input(placeholder, query)
+            .size(12)
+            .padding(iced::Padding {
+                top: 7.0,
+                right: 9.0,
+                bottom: 7.0,
+                left: 28.0,
+            })
+            .on_input(move |query| {
+                Message::Command(Command::Filter {
+                    pane: pane.into(),
+                    query,
+                })
+            })
+            .style(move |_, status| chrome::input(self.definition, status, true));
+        let icon = container(chrome::icon(
+            Icon::Search,
+            13.0,
+            self.definition.colors.faint,
+        ))
+        .padding([8, 9]);
+        container(stack![input, icon])
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 10.0,
+                bottom: 8.0,
+                left: 10.0,
+            })
+            .height(38)
+            .into()
+    }
+
+    fn pane_shell<'a>(
+        &'a self,
+        content: Element<'a, Message>,
+        notes: bool,
+    ) -> Element<'a, Message> {
+        let colors = self.definition.colors;
+        row![
+            container(content)
+                .width(Fill)
+                .height(Fill)
+                .clip(true)
+                .style(move |_| chrome::surface(
+                    self.definition,
+                    if notes { colors.notes } else { colors.pane },
+                    0.0,
+                    false
+                )),
+            container(iced::widget::space())
+                .width(1)
+                .height(Fill)
+                .style(move |_| chrome::surface(self.definition, colors.divider, 0.0, false))
+        ]
+        .height(Fill)
+        .into()
+    }
+
+    fn sections_pane(&self, registry: &mut Registry) -> Element<'_, Message> {
+        let mut items = column![].spacing(2).padding([0, 8]);
+        if let Some(model) = self.model() {
+            for section in model
+                .sections
+                .iter()
+                .filter(|section| matches_name(&self.filters.sections, &section.name))
+            {
+                items = items.push(self.tree_row(
+                    registry,
+                    RowKind::Section(section.id),
+                    &section.name,
+                    self.section_count(section.id),
+                    self.selected_section == Some(section.id),
+                    (0, None),
+                ));
+            }
+        }
+        self.pane_shell(
+            column![
+                self.pane_header("Sections".into(), CommandId::NewSection),
+                self.pane_filter("sections", "Filter sections", &self.filters.sections),
+                self.pane_scroll(items, "sections-list")
+            ]
+            .height(Fill)
+            .into(),
+            false,
+        )
+    }
+
+    fn groups_pane(&self, registry: &mut Registry) -> Element<'_, Message> {
+        let mut items = column![].spacing(2).padding([0, 8]);
+        let section = self.browser_section();
+        let mut count = 0;
+        if let (Some(model), Some(section)) = (self.model(), section) {
+            let root_count = model
+                .notes
+                .iter()
+                .filter(|note| note.parent == Parent::Section(section))
+                .count();
+            if matches_name(&self.filters.groups, "(No group)") {
+                items = items.push(self.tree_row(
+                    registry,
+                    RowKind::NoGroup(section),
+                    "(No group)",
+                    root_count,
+                    self.selected_section == Some(section) && self.selected_group.is_none(),
+                    (0, None),
+                ));
+                count += 1;
+            }
+            for group in model.groups.iter().filter(|group| {
+                group.section == section && matches_name(&self.filters.groups, &group.name)
+            }) {
+                let notes = model
+                    .notes
+                    .iter()
+                    .filter(|note| note.parent == Parent::Group(group.id))
+                    .count();
+                items = items.push(self.tree_row(
+                    registry,
+                    RowKind::Group(group.id),
+                    &group.name,
+                    notes,
+                    self.selected_group == Some(group.id),
+                    (0, None),
+                ));
+                count += 1;
+            }
+        }
+        if count == 0 {
+            items = items.push(self.empty_label("No groups match."));
+        }
+        let heading = section
+            .and_then(|id| self.model()?.section(id))
+            .map_or_else(
+                || "Groups".into(),
+                |section| format!("Groups · {}", section.name),
+            );
+        self.pane_shell(
+            column![
+                self.pane_header(heading, CommandId::NewGroup),
+                self.pane_filter("groups", "Filter groups", &self.filters.groups),
+                self.pane_scroll(items, "groups-list")
+            ]
+            .height(Fill)
+            .into(),
+            false,
+        )
+    }
+
+    fn outline_pane(&self, registry: &mut Registry) -> Element<'_, Message> {
+        let mut items = column![].spacing(2).padding([0, 8]);
+        let visible = self.outline_sections();
+        if let Some(model) = self.model() {
+            for (id, expanded) in &visible {
+                let section = model.section(*id).expect("visible section");
+                items = items.push(self.tree_row(
+                    registry,
+                    RowKind::Section(*id),
+                    &section.name,
+                    self.section_count(*id),
+                    !expanded && self.selected_section == Some(*id),
+                    (0, Some(*expanded)),
+                ));
+                if !expanded {
+                    continue;
+                }
+                let section_matches = matches_name(&self.filters.outline, &section.name);
+                let root_count = model
+                    .notes
+                    .iter()
+                    .filter(|note| note.parent == Parent::Section(*id))
+                    .count();
+                if section_matches || matches_name(&self.filters.outline, "(No group)") {
+                    items = items.push(self.tree_row(
+                        registry,
+                        RowKind::NoGroup(*id),
+                        "(No group)",
+                        root_count,
+                        self.selected_section == Some(*id) && self.selected_group.is_none(),
+                        (22, None),
+                    ));
+                }
+                for group in model.groups.iter().filter(|group| {
+                    group.section == *id
+                        && (section_matches || matches_name(&self.filters.outline, &group.name))
+                }) {
+                    let count = model
+                        .notes
+                        .iter()
+                        .filter(|note| note.parent == Parent::Group(group.id))
+                        .count();
+                    items = items.push(self.tree_row(
+                        registry,
+                        RowKind::Group(group.id),
+                        &group.name,
+                        count,
+                        self.selected_group == Some(group.id),
+                        (22, None),
+                    ));
+                }
+            }
+        }
+        if visible.is_empty() {
+            items = items.push(self.empty_label("Nothing matches."));
+        }
+        self.pane_shell(
+            column![
+                self.pane_header("Sections & groups".into(), CommandId::NewSection),
+                self.pane_filter(
+                    "outline",
+                    "Filter sections and groups",
+                    &self.filters.outline
+                ),
+                self.pane_scroll(items, "outline-list")
+            ]
+            .height(Fill)
+            .into(),
+            false,
+        )
+    }
+
+    fn notes_pane(&self, registry: &mut Registry) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let mut items = column![].spacing(2).padding([0, 8]);
+        let hits = self.note_hits();
+        for hit in &hits {
+            if let Some(note) = self.model().and_then(|model| model.note(hit.note)) {
+                let preview = if self.filters.notes.trim().is_empty() {
+                    self.session
+                        .as_ref()
+                        .and_then(|session| session.index().preview(note.id))
+                        .unwrap_or(&hit.snippet.text)
+                } else {
+                    &hit.snippet.text
+                };
+                let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+                let sub = format!("{} · {}", modified_label(note), preview);
+                let mut label =
+                    column![chrome::label(&note.title, 13, colors.text).font(fonts::MEDIUM)]
+                        .spacing(3)
+                        .clip(true);
+                if self.filters.notes.trim().is_empty() {
+                    label = label.push(chrome::label(sub, 12, colors.muted));
+                } else {
+                    label = label.push(
+                        row![
+                            chrome::label(format!("{} ·", modified_label(note)), 12, colors.muted),
+                            super::palette::highlighted_text(
+                                hit.snippet.text.clone(),
+                                hit.snippet.highlight.clone(),
+                                self.definition
+                            )
+                        ]
+                        .spacing(4)
+                        .clip(true),
+                    );
+                }
+                if let Some(path) = &note.subtitle {
+                    label = label.push(chrome::label(path, 11, colors.faint).font(fonts::EDITOR));
+                }
+                let selected = Some(note.id) == self.selected_note;
+                items = items.push(
+                    container(label)
+                        .id(registry.row(RowKind::Note(note.id)))
+                        .width(Fill)
+                        .height(if note.subtitle.is_some() { 70 } else { 54 })
+                        .padding([8, 10])
+                        .clip(true)
+                        .style(move |_| self.row_style(selected)),
+                );
+            }
+        }
+        if hits.is_empty() {
+            items = items.push(self.empty_label(if self.filters.notes.is_empty() {
+                "No notes here yet. Press Ctrl+N."
+            } else {
+                "No matches."
+            }));
+        }
+        let parent = self.browser_parent();
+        let label = parent.and_then(|parent| match parent {
+            Parent::Section(id) => self
+                .model()?
+                .section(id)
+                .map(|section| section.name.as_str()),
+            Parent::Group(id) => self.model()?.group(id).map(|group| group.name.as_str()),
+        });
+        let heading = label.map_or_else(|| "Notes".into(), |name| format!("Notes · {name}"));
+        let next_sort = if self.note_sort() == "modified" {
+            "title"
+        } else {
+            "modified"
+        };
+        let sort = button(chrome::label(
+            format!("Sorted by {}", self.note_sort()),
+            11,
+            colors.muted,
+        ))
+        .padding(0)
+        .on_press_maybe(parent.map(|_| Message::Command(Command::Sort(next_sort.into()))))
+        .style(move |_, status| chrome::control(self.definition, status, false, true));
+        let footer = chrome::top_rule(
+            container(
+                row![
+                    sort,
+                    iced::widget::space::horizontal(),
+                    chrome::label(format!("{PRIMARY}Shift+N dated"), 11, colors.muted)
+                ]
+                .spacing(6)
+                .clip(true),
+            )
+            .padding([8, 14]),
+            self.definition,
+        );
+        self.pane_shell(
+            column![
+                self.pane_header(heading, CommandId::NewNote),
+                self.pane_filter("notes", "Search titles and text", &self.filters.notes),
+                self.pane_scroll(items, "notes-list"),
+                footer
+            ]
+            .height(Fill)
+            .into(),
+            true,
+        )
+    }
+
+    fn tree_row<'a>(
+        &'a self,
+        registry: &mut Registry,
+        kind: RowKind,
+        name: &'a str,
+        count: usize,
+        selected: bool,
+        outline: (u16, Option<bool>),
+    ) -> Element<'a, Message> {
+        let (indent, expanded) = outline;
+        let colors = self.definition.colors;
+        let mut content = row![].spacing(8).align_y(iced::Center).clip(true);
+        if indent > 0 {
+            content = content.push(iced::widget::space().width(u32::from(indent)));
+        }
+        if let Some(expanded) = expanded {
+            content = content.push(
+                text(if expanded { "⌄" } else { "›" })
+                    .size(14)
+                    .color(theme::color(colors.muted)),
+            );
+        }
+        content = content.push(chrome::label(name, 13, colors.text).width(Fill));
+        content = content.push(chrome::label(count.to_string(), 11, colors.muted));
+        container(content)
+            .id(registry.row(kind))
+            .height(36)
+            .width(Fill)
+            .padding([0, 10])
+            .clip(true)
+            .style(move |_| self.row_style(selected))
+            .into()
+    }
+
+    fn row_style(&self, selected: bool) -> container::Style {
+        let colors = self.definition.colors;
+        container::Style {
+            background: selected.then(|| theme::color(colors.selected).into()),
+            border: Border {
+                color: if selected {
+                    theme::color(colors.selected_border)
+                } else {
+                    iced::Color::TRANSPARENT
+                },
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn section_count(&self, section: SectionId) -> usize {
+        self.model().map_or(0, |model| {
+            model
+                .notes
+                .iter()
+                .filter(|note| match note.parent {
+                    Parent::Section(id) => id == section,
+                    Parent::Group(id) => model
+                        .group(id)
+                        .is_some_and(|group| group.section == section),
+                })
+                .count()
+        })
+    }
+
+    fn pane_scroll<'a>(
+        &'a self,
+        content: iced::widget::Column<'a, Message>,
+        id: &'static str,
+    ) -> Element<'a, Message> {
+        scrollable(content)
+            .id(id)
+            .height(Fill)
+            .style(move |_, status| chrome::scrollbar(self.definition, status))
+            .into()
+    }
+
+    fn empty_label<'a>(&'a self, label: &'a str) -> Element<'a, Message> {
+        container(chrome::label(label, 12, self.definition.colors.muted))
+            .padding([10, 6])
+            .into()
+    }
+
+    fn saved_editor_view(&self) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let mut crumbs = row![].spacing(6).align_y(iced::Center).clip(true);
+        for (id, icon) in [
+            (CommandId::Back, Icon::Back),
+            (CommandId::Forward, Icon::Forward),
+        ] {
+            crumbs = crumbs.push(
+                button(chrome::icon(icon, 13.0, colors.muted))
+                    .padding(3)
+                    .width(20)
+                    .on_press_maybe(
+                        self.command_enabled(id)
+                            .then_some(Message::Command(Command::Run(id))),
+                    )
+                    .style(move |_, status| chrome::control(self.definition, status, false, true)),
+            );
+        }
         if let Some(section) = self
             .selected_section
             .and_then(|id| self.model()?.section(id))
         {
-            parts.push(section.name.as_str());
-            parts.push(
-                self.selected_group
-                    .and_then(|id| self.model()?.group(id))
-                    .map_or("No Group", |group| group.name.as_str()),
+            crumbs = crumbs
+                .push(chrome::label(&section.name, 12, colors.muted))
+                .push(chrome::label("›", 12, colors.faint));
+        }
+        if let Some(group) = self.selected_group.and_then(|id| self.model()?.group(id)) {
+            crumbs = crumbs
+                .push(chrome::label(&group.name, 12, colors.muted))
+                .push(chrome::label("›", 12, colors.faint));
+        }
+        let note = self.selected_note.and_then(|id| self.model()?.note(id));
+        crumbs = crumbs.push(
+            chrome::label(
+                note.map_or("No note selected", |note| note.title.as_str()),
+                12,
+                colors.text,
+            )
+            .font(fonts::SEMIBOLD),
+        );
+        let actions = row![
+            chrome::label(
+                note.map(|note| format!("Edited {}", modified_label(note)))
+                    .unwrap_or_default(),
+                12,
+                colors.muted
+            ),
+            self.small_button(
+                "Move to…",
+                Message::Command(Command::Run(CommandId::MoveNote))
+            )
+            .on_press_maybe(
+                self.selected_note
+                    .map(|_| Message::Command(Command::Run(CommandId::MoveNote)))
+            ),
+            button(chrome::icon(Icon::More, 15.0, colors.muted))
+                .on_press(Message::PaletteOpen(Mode::Commands))
+                .padding(4)
+                .style(move |_, status| chrome::control(self.definition, status, false, true))
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .clip(true);
+        let header = chrome::bottom_rule(
+            container(
+                row![crumbs.width(Fill), actions]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .clip(true),
+            )
+            .height(49)
+            .padding([10, 16]),
+            self.definition,
+        );
+        let find = container(
+            row![
+                text_input("Find literal text", &self.find_query)
+                    .id("find-query")
+                    .on_input(Message::FindChanged)
+                    .on_submit(Message::FindNext)
+                    .size(12)
+                    .padding(6)
+                    .style(move |_, status| chrome::input(self.definition, status, true)),
+                text(format!(
+                    "{} / {}",
+                    self.editor.find_current().map_or(0, |n| n + 1),
+                    self.editor.find_count()
+                ))
+                .size(11),
+                self.small_button("Previous", Message::FindPrevious),
+                self.small_button("Next", Message::FindNext),
+                self.small_button("Close", Message::FindClose)
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .padding([6, 16])
+        .height(if self.find_open { 44 } else { 0 })
+        .clip(true);
+        let editor = container(self.editor.view(self.definition).map(Message::Editor))
+            .width(Fill)
+            .max_width(if self.focus { 760.0 } else { f32::MAX })
+            .height(Fill);
+        let editor: Element<'_, Message> = container(editor).center_x(Fill).height(Fill).into();
+        let mut empty = column![].spacing(14).align_x(iced::Center);
+        if self.selected_note.is_none() {
+            empty = empty.push(
+                text(if self.loading.is_some() {
+                    "Opening workspace…"
+                } else if self.session.is_none() {
+                    "Your notes. Your folders."
+                } else if self.selected_section.is_none() {
+                    "Create a section to start writing."
+                } else {
+                    "Select a note, or create one here."
+                })
+                .size(18)
+                .color(theme::color(colors.muted)),
             );
+            if self.loading.is_none() {
+                if self.session.is_none() {
+                    empty = empty.push(
+                        text("Open an existing Markdown workspace or choose an empty folder.")
+                            .size(13)
+                            .color(theme::color(colors.muted)),
+                    );
+                    empty = empty.push(
+                        row![
+                            self.small_button(
+                                "Add workspace…",
+                                Message::Command(Command::Run(CommandId::AddWorkspace))
+                            ),
+                            self.small_button(
+                                "Switch workspace…",
+                                Message::Command(Command::Run(CommandId::SwitchWorkspace))
+                            )
+                        ]
+                        .spacing(10),
+                    );
+                } else {
+                    empty = empty.push(self.small_button(
+                        if self.selected_section.is_some() {
+                            "New note…"
+                        } else {
+                            "New section…"
+                        },
+                        Message::Command(Command::Run(if self.selected_section.is_some() {
+                            CommandId::NewNote
+                        } else {
+                            CommandId::NewSection
+                        })),
+                    ));
+                }
+            }
         }
-        if let Some(note) = self.selected_note.and_then(|id| self.model()?.note(id)) {
-            parts.push(note.title.as_str());
-        }
-        if parts.is_empty() {
-            "Workspace".into()
+        let empty = container(empty)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(move |_| chrome::surface(self.definition, colors.editor, 0.0, false));
+        let document: Element<'_, Message> = if self.selected_note.is_none() {
+            stack![editor, opaque(empty)].into()
         } else {
-            parts.join("  /  ")
+            stack![editor].into()
+        };
+        let (status, status_color) = self.save_status();
+        let cursor = self.editor.cursor();
+        let mut footer = row![
+            chrome::label(
+                format!(
+                    "Markdown · {} lines · {} words",
+                    self.editor.line_count(),
+                    self.words
+                ),
+                11,
+                colors.muted
+            ),
+            iced::widget::space::horizontal(),
+            chrome::label(
+                format!(
+                    "Ln {}, Col {}",
+                    cursor.position.line + 1,
+                    cursor.position.column + 1
+                ),
+                11,
+                colors.muted
+            ),
+            chrome::label(format!("● {status}"), 11, status_color)
+        ]
+        .spacing(16)
+        .align_y(iced::Center)
+        .clip(true);
+        if self.session.as_ref().is_some_and(|session| {
+            session
+                .document()
+                .is_some_and(|document| document.error.is_some())
+                || session.pending_durability()
+        }) {
+            footer = footer.push(self.small_button("Retry save", Message::Core(Op::Flush)));
         }
+        column![
+            header,
+            find,
+            document,
+            chrome::top_rule(container(footer).padding([6, 16]), self.definition)
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    }
+
+    fn small_button<'a>(&'a self, label: &'a str, message: Message) -> button::Button<'a, Message> {
+        button(text(label).size(12))
+            .on_press(message)
+            .padding([5, 9])
+            .style(move |_, status| chrome::control(self.definition, status, false, false))
     }
 
     fn save_status(&self) -> (&str, Rgb) {
@@ -418,10 +997,10 @@ impl App {
     fn dialog_view<'a>(&'a self, dialog: &'a super::workspace::Dialog) -> Element<'a, Message> {
         let colors = self.definition.colors;
         let (heading, submit) = match dialog.kind {
-            DialogKind::CreateSection => ("Create section".to_string(), "Create"),
-            DialogKind::CreateGroup(_) => ("Create group".to_string(), "Create"),
-            DialogKind::CreateNote(_) => ("Create note".to_string(), "Create"),
-            DialogKind::Rename(_) => ("Rename item".to_string(), "Rename"),
+            DialogKind::CreateSection => ("New section".into(), "Create"),
+            DialogKind::CreateGroup(_) => ("New group".into(), "Create"),
+            DialogKind::CreateNote(_) => ("New note".into(), "Create"),
+            DialogKind::Rename(_) => ("Rename item".into(), "Rename"),
             DialogKind::Delete(target) => (
                 format!(
                     "Move “{}” to trash?",
@@ -429,131 +1008,68 @@ impl App {
                 ),
                 "Move to Trash",
             ),
-            DialogKind::MoveNote(_) => ("Move note".to_string(), "Move"),
-            DialogKind::MoveGroup(_) => ("Move group".to_string(), "Move"),
         };
-        let mut content = column![text(heading).size(22)].spacing(16);
-        match dialog.kind {
-            DialogKind::Delete(_) => {
-                content = content.push(text("This moves the item and its contents to the operating system trash. It does not permanently delete them.").color(theme::color(colors.muted)));
-            }
-            DialogKind::MoveNote(_) | DialogKind::MoveGroup(_) => {
-                content =
-                    content.push(text("Choose a destination").color(theme::color(colors.muted)));
-                let mut destinations = column![].spacing(4);
-                if let Some(model) = self.model() {
-                    for section in &model.sections {
-                        let parent = Parent::Section(section.id);
-                        let label = if matches!(dialog.kind, DialogKind::MoveNote(_)) {
-                            format!("{} / No Group", section.name)
-                        } else {
-                            section.name.clone()
-                        };
-                        destinations = destinations.push(item(
-                            label,
-                            Some(Message::DialogDestination(parent)),
-                            dialog.destination == Some(parent),
-                            self.definition,
-                        ));
-                        if matches!(dialog.kind, DialogKind::MoveNote(_)) {
-                            for group in model
-                                .groups
-                                .iter()
-                                .filter(|group| group.section == section.id)
-                            {
-                                let parent = Parent::Group(group.id);
-                                destinations = destinations.push(item(
-                                    format!("{} / {}", section.name, group.name),
-                                    Some(Message::DialogDestination(parent)),
-                                    dialog.destination == Some(parent),
-                                    self.definition,
-                                ));
-                            }
-                        }
-                    }
-                }
-                content = content.push(scrollable(destinations).height(260));
-            }
-            _ => {
-                content = content.push(
-                    text_input("Name", &dialog.name)
-                        .id("item-name")
-                        .on_input(Message::DialogName)
-                        .on_submit(Message::SubmitDialog),
-                );
-            }
+        let mut content = column![text(heading).size(20).font(fonts::SEMIBOLD)].spacing(16);
+        if let DialogKind::Delete(target) = dialog.kind {
+            let count = self.model().map_or(0, |model| {
+                model.path(target).map_or(0, |path| {
+                    model
+                        .notes
+                        .iter()
+                        .filter(|note| note.path.as_path().starts_with(path.as_path()))
+                        .count()
+                })
+            });
+            content = content.push(text(format!("This item contains {count} {}. It will move to the operating system trash, not be permanently deleted. Use the button below to confirm; Return alone never confirms.", if count == 1 { "note" } else { "notes" })).size(13).color(theme::color(colors.muted)));
+        } else {
+            content = content.push(
+                text_input("Name", &dialog.name)
+                    .id("item-name")
+                    .on_input(Message::DialogName)
+                    .on_submit(Message::SubmitDialog)
+                    .padding(9)
+                    .style(move |_, status| chrome::input(self.definition, status, true)),
+            );
         }
         if let Some(error) = &dialog.error {
-            content = content.push(text(error).color(theme::color(colors.danger)));
+            content = content.push(text(error).size(12).color(theme::color(colors.danger)));
         }
         content = content.push(
             row![
                 iced::widget::space::horizontal(),
-                button("Cancel").on_press(Message::CancelDialog),
-                button(submit).on_press(if matches!(dialog.kind, DialogKind::Delete(_)) {
-                    Message::ConfirmTrash
-                } else {
-                    Message::SubmitDialog
-                }),
+                self.small_button("Cancel", Message::CancelDialog),
+                self.small_button(
+                    submit,
+                    if matches!(dialog.kind, DialogKind::Delete(_)) {
+                        Message::ConfirmTrash
+                    } else {
+                        Message::SubmitDialog
+                    }
+                )
             ]
             .spacing(8),
         );
-        panel(content.into(), colors.raised, colors.dialog_border)
+        container(content)
             .padding(24)
             .width(520)
+            .max_width((self.viewport.width - 32.0).max(120.0))
+            .style(move |_| chrome::dialog(self.definition))
             .into()
     }
 }
 
-fn panel(
-    content: Element<'_, Message>,
-    background: Rgb,
-    border: Rgb,
-) -> container::Container<'_, Message> {
-    container(content).style(move |_| container::Style {
-        background: Some(theme::color(background).into()),
-        border: Border {
-            color: theme::color(border),
-            width: 1.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-}
-
-fn item<'a>(
-    label: String,
-    message: Option<Message>,
-    selected: bool,
-    definition: Theme,
-) -> Element<'a, Message> {
-    button(text(label).size(13))
-        .on_press_maybe(message)
-        .width(Fill)
-        .padding([9, 8])
-        .style(move |_, status| {
-            let colors = definition.colors;
-            let background = if selected {
-                colors.selected
-            } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                colors.raised
-            } else {
-                colors.pane
-            };
-            button::Style {
-                background: Some(theme::color(background).into()),
-                text_color: theme::color(colors.text),
-                border: Border {
-                    color: theme::color(if selected {
-                        colors.selected_border
-                    } else {
-                        background
-                    }),
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .into()
+fn modified_label(note: &Note) -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(note.modified)
+        .unwrap_or_default()
+        .as_secs();
+    if seconds < 60 {
+        "just now".into()
+    } else if seconds < 3600 {
+        format!("{} min ago", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{} h ago", seconds / 3600)
+    } else {
+        format!("{} d ago", seconds / 86400)
+    }
 }

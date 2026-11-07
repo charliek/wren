@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
+    pub editor: bool,
     pub large_spike: bool,
     pub workspace: Option<PathBuf>,
     #[cfg(feature = "smoke-test")]
@@ -39,7 +40,11 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
     let mut index = 0;
     while index < args.len() {
         match args[index].to_str() {
-            Some("--editor-spike") if !options.large_spike => options.large_spike = true,
+            Some("--editor") if !options.editor && !options.large_spike => options.editor = true,
+            Some("--editor-spike") if !options.editor && !options.large_spike => {
+                options.editor = true;
+                options.large_spike = true;
+            }
             Some("--workspace") if options.workspace.is_none() => {
                 index += 1;
                 let path =
@@ -66,8 +71,10 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
         }
         index += 1;
     }
-    if options.workspace.is_some() && options.large_spike {
-        return Err("--workspace and the in-memory --editor-spike cannot be combined".into());
+    if options.workspace.is_some() && options.editor {
+        return Err(
+            "--workspace and the in-memory --editor/--editor-spike cannot be combined".into(),
+        );
     }
     Ok(Command::Run(options))
 }
@@ -86,6 +93,15 @@ mod tests {
             panic!("expected run");
         };
         assert!(!options.large_spike);
+        assert!(!options.editor);
+        let Command::Run(editor) = parse(&args(&["--editor"]), None).unwrap() else {
+            panic!("expected evaluation");
+        };
+        assert!(editor.editor);
+        assert!(!editor.large_spike);
+        assert!(parse(&args(&["--editor", "--editor-spike"]), None).is_err());
+        assert!(parse(&args(&["--editor", "--editor"]), None).is_err());
+        assert!(parse(&args(&["--workspace", "/tmp/notes", "--editor"]), None).is_err());
         let Command::Run(options) = parse(&args(&["--editor-spike"]), None).unwrap() else {
             panic!("expected run");
         };

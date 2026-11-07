@@ -6,7 +6,8 @@
 
 mod editor_history;
 mod markdown_highlighter;
-
+use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::Instant;
 
 use iced::advanced::text::LineHeight;
@@ -209,6 +210,37 @@ impl EditorView {
             self.content.perform(Action::Move(Motion::Left));
         }
         self.content.move_to(clamped);
+    }
+
+    /// Select a range in the current document's original UTF-8 bytes without
+    /// replacing Content, changing find state, or recording an edit.
+    /// Invalid ranges leave the cursor and selection untouched. Cached offsets
+    /// still require the caller to validate the document's content revision.
+    pub fn select_byte_range(&mut self, range: Range<usize>) -> bool {
+        if range.start > range.end {
+            return false;
+        }
+        let Some(start) = exact_byte_offset_to_position(&self.content, range.start) else {
+            return false;
+        };
+        let Some(end) = exact_byte_offset_to_position(&self.content, range.end) else {
+            return false;
+        };
+        self.move_cursor(Cursor {
+            position: end,
+            selection: (range.start != range.end).then_some(start),
+        });
+        true
+    }
+
+    /// Reveal the first literal hit in the actual loaded text. Workspace search
+    /// must recheck here after its transition barrier rather than trust an old
+    /// index offset. The user's independent find-in-note state stays unchanged.
+    pub fn reveal_literal(&mut self, query: &str) -> bool {
+        let Some(range) = first_content_match(&self.content, query) else {
+            return false;
+        };
+        self.select_byte_range(range)
     }
 
     // -----------------------------------------------------------------------
@@ -434,22 +466,13 @@ fn key_binding(key_press: KeyPress) -> Option<Binding<Message>> {
 // Style
 // ---------------------------------------------------------------------------
 
-fn editor_style(status: text_editor::Status, theme: Theme) -> text_editor::Style {
+fn editor_style(_status: text_editor::Status, theme: Theme) -> text_editor::Style {
     let c = theme.colors;
-    let border_color = match status {
-        text_editor::Status::Focused { .. } => color(c.selected_border),
-        text_editor::Status::Hovered => color(c.control_border),
-        _ => color(c.editor), // borderless when inactive
-    };
     text_editor::Style {
         background: Background::Color(color(c.editor)),
-        border: Border {
-            radius: 0.0.into(),
-            width: 1.0,
-            color: border_color,
-        },
+        border: Border::default(),
         placeholder: color(c.faint),
-        value: color(c.text),
+        value: color(c.body),
         selection: color(c.selected),
     }
 }
@@ -501,6 +524,89 @@ fn edit_kind(action: &Action) -> EditKind {
 // Find: Unicode-safe byte-index search
 // ---------------------------------------------------------------------------
 
+struct FirstLiteral {
+    needle: Vec<char>,
+    prefixes: Vec<usize>,
+    matched: usize,
+    provenance: VecDeque<(usize, usize)>,
+}
+
+impl FirstLiteral {
+    fn new(query: &str) -> Option<Self> {
+        let needle: Vec<_> = query.chars().flat_map(char::to_lowercase).collect();
+        if needle.is_empty() {
+            return None;
+        }
+        let mut prefixes = vec![0; needle.len()];
+        let mut matched = 0;
+        for index in 1..needle.len() {
+            while matched > 0 && needle[index] != needle[matched] {
+                matched = prefixes[matched - 1];
+            }
+            if needle[index] == needle[matched] {
+                matched += 1;
+            }
+            prefixes[index] = matched;
+        }
+        let provenance = VecDeque::with_capacity(needle.len());
+        Some(Self {
+            needle,
+            prefixes,
+            matched: 0,
+            provenance,
+        })
+    }
+
+    fn push(&mut self, byte: usize, character: char) -> Option<Range<usize>> {
+        for lower in character.to_lowercase() {
+            if self.provenance.len() == self.needle.len() {
+                self.provenance.pop_front();
+            }
+            self.provenance
+                .push_back((byte, byte + character.len_utf8()));
+            while self.matched > 0 && self.needle[self.matched] != lower {
+                self.matched = self.prefixes[self.matched - 1];
+            }
+            if self.needle[self.matched] == lower {
+                self.matched += 1;
+            }
+            if self.matched == self.needle.len() {
+                return Some(self.provenance.front()?.0..self.provenance.back()?.1);
+            }
+        }
+        None
+    }
+}
+
+fn first_content_match(content: &text_editor::Content, query: &str) -> Option<Range<usize>> {
+    let mut matcher = FirstLiteral::new(query)?;
+    let count = content.line_count();
+    let mut base = 0;
+    // Content exposes owned line snapshots, not a borrowed whole buffer. Keep
+    // only the current line and query-sized provenance; stop at the first hit.
+    for (line, text) in content.lines().enumerate() {
+        for (byte, character) in text.text.char_indices() {
+            if let Some(range) = matcher.push(base + byte, character) {
+                return Some(range);
+            }
+        }
+        base += text.text.len();
+        if line + 1 < count {
+            let ending = match text.ending {
+                LineEnding::None => LineEnding::default(),
+                ending => ending,
+            };
+            for (byte, character) in ending.as_str().char_indices() {
+                if let Some(range) = matcher.push(base + byte, character) {
+                    return Some(range);
+                }
+            }
+            base += ending.as_str().len();
+        }
+    }
+    None
+}
+
 /// Return `(byte_start, byte_end)` pairs for all case-insensitive occurrences
 /// of `query` in `text`.
 ///
@@ -535,6 +641,35 @@ fn find_all_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
         }
     }
     matches
+}
+
+fn exact_byte_offset_to_position(
+    content: &text_editor::Content,
+    mut offset: usize,
+) -> Option<Position> {
+    let count = content.line_count();
+    for (line, text) in content.lines().enumerate() {
+        if offset <= text.text.len() {
+            return text.text.is_char_boundary(offset).then_some(Position {
+                line,
+                column: offset,
+            });
+        }
+        if line + 1 == count {
+            return None;
+        }
+        let ending = match text.ending {
+            LineEnding::None => LineEnding::default(),
+            ending => ending,
+        };
+        let width = text.text.len() + ending.as_str().len();
+        // A cursor cannot represent the gap between CR and LF (or LF and CR).
+        if offset < width {
+            return None;
+        }
+        offset -= width;
+    }
+    None
 }
 
 /// Convert an offset in `Content::text()` to a valid UTF-8 cursor position.
@@ -582,6 +717,159 @@ mod tests {
         for c in s.chars() {
             ev.perform(Action::Edit(Edit::Insert(c)));
         }
+    }
+
+    #[test]
+    fn first_match_stream_agrees_with_literal_find_on_small_unicode_inputs() {
+        for (text, query) in [
+            ("aaaaab", "aaab"),
+            ("abababac", "ababac"),
+            ("İx", "\u{0307}x"),
+            ("prefix 🐦 e\u{0301} CAFÉ", "café"),
+            ("ΟΣ", "σ"),
+            ("ΟΣ", "ς"),
+            ("i\u{0307}", "İ"),
+            ("first\r\nsecond\n\rthird\rlast", "second\n\rthird"),
+            ("no match", "missing"),
+            ("anything", ""),
+        ] {
+            let content = text_editor::Content::with_text(text);
+            let expected = find_all_matches(text, query)
+                .first()
+                .map(|&(start, end)| start..end);
+            assert_eq!(
+                first_content_match(&content, query),
+                expected,
+                "{text:?}, {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_match_stream_stops_immediately_and_retains_only_query_sized_provenance() {
+        let mut matcher = FirstLiteral::new("a").unwrap();
+        let mut visited = 0;
+        let range = (0..64 * 1024 * 1024).find_map(|byte| {
+            visited += 1;
+            matcher.push(byte, 'a')
+        });
+        assert_eq!(range, Some(0..1));
+        assert_eq!(visited, 1);
+        assert_eq!(matcher.provenance.len(), 1);
+
+        let mut matcher = FirstLiteral::new("aaaaab").unwrap();
+        for byte in 0..100_000 {
+            assert_eq!(matcher.push(byte, 'a'), None);
+            assert!(matcher.provenance.len() <= matcher.needle.len());
+        }
+        assert_eq!(matcher.push(100_000, 'b'), Some(99_995..100_001));
+        assert_eq!(matcher.provenance.len(), 6);
+    }
+
+    #[test]
+    fn workspace_hit_reveal_preserves_independent_find_and_edit_history() {
+        let mut ev = editor("keep CAFÉ 🐦 İ");
+        ev.perform(Action::Move(Motion::DocumentEnd));
+        type_chars(&mut ev, "!");
+        ev.set_find_query("keep");
+        assert!(ev.find_next());
+        let find = (
+            ev.find_query.clone(),
+            ev.find_matches.clone(),
+            ev.find_current,
+        );
+        assert!(ev.reveal_literal("i\u{0307}"));
+        assert_eq!(ev.selected_text().as_deref(), Some("İ"));
+        assert_eq!(
+            (
+                ev.find_query.clone(),
+                ev.find_matches.clone(),
+                ev.find_current
+            ),
+            find
+        );
+        assert!(ev.can_undo());
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "keep CAFÉ 🐦 İ");
+        assert!(ev.can_redo());
+        assert!(ev.reveal_literal("café"));
+        assert_eq!(ev.selected_text().as_deref(), Some("CAFÉ"));
+        assert!(ev.can_redo());
+        assert!(ev.redo());
+        assert_eq!(ev.text(), "keep CAFÉ 🐦 İ!");
+    }
+
+    #[test]
+    fn workspace_hit_reveal_handles_each_line_ending_without_rewriting_text() {
+        for ending in ["\n", "\r", "\r\n", "\n\r"] {
+            let original = format!("first{ending}CAFÉ 🐦 İ{ending}last");
+            let mut ev = editor(&original);
+            assert!(ev.reveal_literal(&format!("🐦 İ{ending}last")));
+            assert_eq!(ev.selected_text().as_deref(), Some("🐦 İ\nlast"));
+            assert_eq!(ev.cursor().position.line, 2);
+            assert_eq!(ev.cursor().position.column, 4);
+            assert_eq!(ev.text(), original);
+            assert!(!ev.can_undo());
+        }
+        let mut ev = editor("first\rsecond\n\rthird\r\nlast");
+        assert!(ev.reveal_literal("second\n\rthird\r\nlast"));
+        assert_eq!(ev.selected_text().as_deref(), Some("second\nthird\nlast"));
+    }
+
+    #[test]
+    fn exact_ranges_reject_endpoints_inside_paired_line_endings() {
+        for ending in ["\r\n", "\n\r"] {
+            let original = format!("a{ending}b");
+            let mut ev = editor(&original);
+            ev.move_cursor(Cursor {
+                position: Position { line: 1, column: 1 },
+                selection: None,
+            });
+            let before = ev.cursor();
+            for range in [1..2, 2..3, 2..4, 0..2, 2..2] {
+                assert!(
+                    !ev.select_byte_range(range),
+                    "accepted an unrepresentable {ending:?} endpoint"
+                );
+                assert_eq!(ev.cursor(), before);
+            }
+            assert!(!ev.reveal_literal(&format!("{}b", &ending[1..])));
+            assert_eq!(ev.cursor(), before);
+            assert!(ev.select_byte_range(1..3));
+            assert_eq!(ev.selected_text().as_deref(), Some("\n"));
+            assert!(ev.reveal_literal(&format!("{ending}b")));
+            assert_eq!(ev.selected_text().as_deref(), Some("\nb"));
+            assert_eq!(ev.text(), original);
+            assert!(!ev.can_undo());
+        }
+    }
+
+    #[test]
+    fn stale_or_invalid_workspace_ranges_do_not_change_editor_state() {
+        let mut ev = editor("🐦 e\u{0301} text");
+        ev.set_find_query("text");
+        ev.find_next();
+        let cursor = ev.cursor();
+        let selected = ev.selected_text();
+        let length = ev.text().len();
+        for range in [
+            1..4,
+            0..2,
+            6..7,
+            length..length + 1,
+            Range { start: 5, end: 2 },
+        ] {
+            assert!(!ev.select_byte_range(range));
+            assert_eq!(ev.cursor(), cursor);
+            assert_eq!(ev.selected_text(), selected);
+            assert_eq!(ev.find_query, "text");
+        }
+        assert!(!ev.reveal_literal("not present"));
+        assert!(!ev.reveal_literal(""));
+        assert_eq!(ev.cursor(), cursor);
+        assert!(ev.select_byte_range(length..length));
+        assert_eq!(ev.selected_text(), None);
+        assert!(!ev.can_undo());
     }
 
     // ── Basic content ────────────────────────────────────────────────────────
@@ -1333,6 +1621,10 @@ mod tests {
         let dark_style = editor_style(text_editor::Status::Active, theme::DARK);
         let light_style = editor_style(text_editor::Status::Active, theme::LIGHT);
         assert_ne!(dark_style.value, light_style.value);
+        assert_eq!(dark_style.value, color(theme::DARK.colors.body));
+        assert_eq!(light_style.value, color(theme::LIGHT.colors.body));
+        assert_eq!(dark_style.border.width, 0.0);
+        assert_eq!(light_style.border.width, 0.0);
     }
 
     #[test]

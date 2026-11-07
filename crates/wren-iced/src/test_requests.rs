@@ -5,7 +5,10 @@ use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 use iced::Task;
 use serde_json::{json, Value};
 
+use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
+use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
+use crate::panes::{Layout, Pane};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
@@ -31,6 +34,34 @@ impl App {
                 "theme":self.definition.id,"editor":true,
             }))),
             "session.get" => request.respond(Ok(self.session_snapshot())),
+            "navigation.get" => request.respond(Ok(self.navigation_snapshot())),
+            "palette.bounds" => {
+                if let Some((generation, key)) = self.palette.as_ref().and_then(|palette|palette.active.and_then(|index|palette.results.get(index)).map(|row|(palette.generation,&row.key))) {
+                    let request = Arc::clone(request);
+                    return Ok(iced::advanced::widget::operate(crate::palette_scroll::measure("palette-results".into(), super::palette::result_id(generation,key))).map(move |geometry| {
+                        let rectangle = |bounds: iced::Rectangle|json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
+                        Message::Reply(Arc::clone(&request),Ok(geometry.map(|geometry|json!({"viewport":rectangle(geometry.viewport),"content":rectangle(geometry.content),"row":rectangle(geometry.row),"translation_y":geometry.translation.y,"fully_visible":geometry.row.y-geometry.translation.y >= geometry.viewport.y-0.5 && geometry.row.y-geometry.translation.y+geometry.row.height <= geometry.viewport.y+geometry.viewport.height+0.5})).unwrap_or(Value::Null)))
+                    }));
+                }
+                request.respond(Ok(Value::Null));
+            }
+            "navigation.bounds" => {
+                let request = Arc::clone(request);
+                return Ok(iced::advanced::widget::operate(crate::drag_view::inspect()).map(move |snapshot| {
+                    let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
+                    Message::Reply(Arc::clone(&request), Ok(json!({"root":rectangle(snapshot.geometry.root),"pressed":snapshot.pressed,"rows":snapshot.geometry.rows.iter().map(|row| json!({"key":row_json(row.row),"bounds":rectangle(row.bounds),"visible":rectangle(row.visible)})).collect::<Vec<_>>()})))
+                }));
+            }
+            "command.run" | "palette.open" | "palette.query" | "palette.step" | "palette.activate" | "palette.close" | "filter.set" | "view.layout" | "view.focus" | "view.width" | "view.sort" | "workspace.add" | "workspace.remove" | "test.folder.begin" | "test.folder.complete" => {
+                let outcome = self.navigation_request(&request.op, params)?;
+                request.respond(Ok(json!({"correlation":outcome.processed.correlation,"disposition":outcome.processed.disposition.key(),"warning":outcome.processed.warning,"navigation":self.navigation_snapshot()})));
+                return Ok(outcome.task);
+            }
+            "dialog.name" => { let task = self.update(Message::DialogName(string(params, "name")?.into())); request.respond(Ok(self.navigation_snapshot())); return Ok(task); }
+            "dialog.submit" | "dialog.confirm_trash" | "dialog.close" => {
+                let task = self.update(match request.op.as_str() { "dialog.submit" => Message::SubmitDialog, "dialog.confirm_trash" => Message::ConfirmTrash, _ => Message::CancelDialog });
+                request.respond(Ok(self.navigation_snapshot())); return Ok(task);
+            }
             "core.apply" => {
                 let task = self.apply_core(core_op(params)?)?;
                 request.respond(Ok(self.session_snapshot()));
@@ -187,7 +218,7 @@ impl App {
                     Message::Reply(Arc::clone(&request), Ok(json!(contents)))
                 }));
             }
-            "app.screenshot" => {
+            "app.screenshot" | "test.capture.after_layout" => {
                 let path = PathBuf::from(string(params, "path")?);
                 if !path.is_absolute() {
                     return Err("screenshot path must be absolute".into());
@@ -197,21 +228,15 @@ impl App {
                 }
                 let window = self.window.ok_or("window is not open")?;
                 self.capture_pending = true;
-                let request = Arc::clone(request);
-                return Ok(Task::future(self.frames.next(window)).then(
-                    move |result| match result {
-                        Ok(()) => {
-                            let request = Arc::clone(&request);
-                            let path = path.clone();
-                            iced::window::screenshot(window).map(move |capture| {
-                                Message::RpcCaptured(Arc::clone(&request), path.clone(), capture)
-                            })
-                        }
-                        Err(error) => {
-                            Task::done(Message::CaptureFailed(Arc::clone(&request), error))
-                        }
-                    },
-                ));
+                if request.op == "test.capture.after_layout" {
+                    // Deliberately omit the frame barrier: the toolkit must draw
+                    // the rebuilt interface rather than replay expired glyphs.
+                    let request = Arc::clone(request);
+                    return Ok(iced::window::screenshot(window).map(move |capture| {
+                        Message::RpcCaptured(Arc::clone(&request), path.clone(), capture)
+                    }));
+                }
+                return Ok(self.capture_frame(Arc::clone(request), path));
             }
             "app.quit" => {
                 if self.quit_reply.is_some() {
@@ -228,6 +253,275 @@ impl App {
             _ => return Err(format!("unknown test operation: {}", request.op)),
         }
         Ok(Task::none())
+    }
+
+    fn navigation_request(&mut self, operation: &str, params: &Value) -> Result<Gateway, String> {
+        Ok(match operation {
+            "command.run" => {
+                let id = string(params, "id")?;
+                let command = match id {
+                    "item.rename" => {
+                        Command::Rename(target(params.get("target").ok_or("target is required")?)?)
+                    }
+                    "item.delete" => {
+                        Command::Delete(target(params.get("target").ok_or("target is required")?)?)
+                    }
+                    "item.reveal" => {
+                        Command::Reveal(target(params.get("target").ok_or("target is required")?)?)
+                    }
+                    _ => Command::Run(CommandId::parse(id).ok_or("Unknown command ID")?),
+                };
+                self.dispatch(command)
+            }
+            "palette.open" => {
+                let mode = match string(params, "mode")? {
+                    "commands" => Mode::Commands,
+                    "jump" => Mode::Jump,
+                    "search" => Mode::Search,
+                    "workspaces" => Mode::Workspaces,
+                    "item_actions" => Mode::ItemActions(target(
+                        params.get("target").ok_or("target is required")?,
+                    )?),
+                    "reorder" => {
+                        Mode::Reorder(target(params.get("target").ok_or("target is required")?)?)
+                    }
+                    "move_note" => Mode::MoveNote(
+                        params
+                            .get("note")
+                            .map(|_| id(params, "note").map(NoteId))
+                            .transpose()?
+                            .or(self.selected_note)
+                            .ok_or("No move note is selected")?,
+                    ),
+                    "move_group" => Mode::MoveGroup(
+                        params
+                            .get("group")
+                            .map(|_| id(params, "group").map(GroupId))
+                            .transpose()?
+                            .or(self.selected_group)
+                            .ok_or("No move group is selected")?,
+                    ),
+                    _ => return Err("Unknown palette mode".into()),
+                };
+                self.open_palette(mode)
+            }
+            "palette.query" => self.palette_query(string(params, "query")?.into()),
+            "palette.step" => self.palette_step(
+                params
+                    .get("delta")
+                    .and_then(Value::as_i64)
+                    .and_then(|delta| i32::try_from(delta).ok())
+                    .ok_or("delta must be i32")?,
+            ),
+            "palette.activate" => {
+                if let Some(key) = params.get("key") {
+                    if params.get("index").is_some() {
+                        return Err("Choose either a stable result key or an index".into());
+                    }
+                    let generation = params
+                        .get("generation")
+                        .map(|_| id(params, "generation"))
+                        .transpose()?
+                        .unwrap_or_else(|| self.workspace_generation());
+                    self.activate_palette_key(generation, result_key(key)?)
+                } else {
+                    self.activate_palette(
+                        params
+                            .get("index")
+                            .map(|_| {
+                                id(params, "index").and_then(|index| {
+                                    usize::try_from(index).map_err(|_| "index must be usize".into())
+                                })
+                            })
+                            .transpose()?,
+                    )
+                }
+            }
+            "palette.close" => self.close_palette(),
+            "filter.set" => self.dispatch(Command::Filter {
+                pane: string(params, "pane")?.into(),
+                query: string(params, "query")?.into(),
+            }),
+            "view.layout" => self.dispatch(Command::Layout(layout(params)?)),
+            "view.focus" => self.dispatch(Command::Focus(
+                params
+                    .get("enabled")
+                    .map(|enabled| enabled.as_bool().ok_or("enabled must be boolean"))
+                    .transpose()?,
+            )),
+            "view.width" => {
+                let layout = layout(params)?;
+                let pane = match (layout, string(params, "pane")?) {
+                    (Layout::Columns, "sections") => Pane::Sections,
+                    (Layout::Columns, "groups") => Pane::Groups,
+                    (Layout::Outline, "sections" | "outline") => Pane::Outline,
+                    (_, "notes") => Pane::Notes,
+                    _ => return Err("Unknown pane for this layout".into()),
+                };
+                let width = params
+                    .get("width")
+                    .and_then(Value::as_f64)
+                    .filter(|width| {
+                        width.is_finite() && *width >= 0.0 && *width <= f64::from(u16::MAX)
+                    })
+                    .ok_or("width must be finite and nonnegative")?
+                    as f32;
+                self.dispatch(Command::Width {
+                    layout,
+                    pane,
+                    width,
+                })
+            }
+            "view.sort" => self.dispatch(Command::Sort(string(params, "mode")?.into())),
+            "workspace.add" => self.dispatch(Command::OpenWorkspace {
+                path: PathBuf::from(string(params, "path")?),
+                name: params
+                    .get("name")
+                    .map(|name| {
+                        name.as_str()
+                            .map(str::to_owned)
+                            .ok_or("name must be a string")
+                    })
+                    .transpose()?,
+            }),
+            "workspace.remove" => self.dispatch(Command::RemoveWorkspace(PathBuf::from(string(
+                params, "path",
+            )?))),
+            "test.folder.begin" => {
+                if self.folder_request.is_some() {
+                    self.blocked("A folder picker is already pending")
+                } else {
+                    self.begin_folder_request();
+                    self.finish_action(
+                        super::commands::Disposition::AsyncPending,
+                        None,
+                        Task::none(),
+                    )
+                }
+            }
+            "test.folder.complete" => {
+                let path = match params.get("path").ok_or("path is required")? {
+                    Value::Null => None,
+                    value => Some(PathBuf::from(
+                        value.as_str().ok_or("path must be a string or null")?,
+                    )),
+                };
+                self.folder_chosen(id(params, "tag")?, path)
+            }
+            _ => return Err("Unknown navigation adapter".into()),
+        })
+    }
+
+    pub(super) fn navigation_snapshot(&self) -> Value {
+        let visible_sections = self
+            .model()
+            .map(|model| {
+                model
+                    .sections
+                    .iter()
+                    .filter(|section| {
+                        super::navigation::matches_name(&self.filters.sections, &section.name)
+                    })
+                    .map(|section| section.id.0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let visible_groups = self
+            .model()
+            .map(|model| {
+                model
+                    .groups
+                    .iter()
+                    .filter(|group| {
+                        Some(group.section) == self.browser_section()
+                            && super::navigation::matches_name(&self.filters.groups, &group.name)
+                    })
+                    .map(|group| group.id.0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut outline_rows = Vec::new();
+        if let Some(model) = self.model() {
+            for (section, expanded) in self.outline_sections() {
+                outline_rows.push(row_json(crate::drag::RowKind::Section(section)));
+                if !expanded {
+                    continue;
+                }
+                let section_matches = model.section(section).is_some_and(|section| {
+                    super::navigation::matches_name(&self.filters.outline, &section.name)
+                });
+                if section_matches
+                    || super::navigation::matches_name(&self.filters.outline, "(No group)")
+                {
+                    outline_rows.push(row_json(crate::drag::RowKind::NoGroup(section)));
+                }
+                outline_rows.extend(
+                    model
+                        .groups
+                        .iter()
+                        .filter(|group| {
+                            group.section == section
+                                && (section_matches
+                                    || super::navigation::matches_name(
+                                        &self.filters.outline,
+                                        &group.name,
+                                    ))
+                        })
+                        .map(|group| row_json(crate::drag::RowKind::Group(group.id))),
+                );
+            }
+        }
+        let mut visible_parents = Vec::new();
+        if let Some(section) = self.browser_section() {
+            if super::navigation::matches_name(&self.filters.groups, "(No group)") {
+                visible_parents.push(row_json(crate::drag::RowKind::NoGroup(section)));
+            }
+            visible_parents.extend(
+                visible_groups
+                    .iter()
+                    .map(|id| row_json(crate::drag::RowKind::Group(GroupId(*id)))),
+            );
+        }
+        let preferred = |layout: Layout| {
+            layout
+                .panes()
+                .iter()
+                .map(|pane| (pane.key().to_owned(), json!(self.widths.get(layout, *pane))))
+                .collect::<serde_json::Map<_, _>>()
+        };
+        let effective = self.widths.effective(self.layout, self.viewport.width);
+        let effective = self
+            .layout
+            .panes()
+            .iter()
+            .map(|pane| {
+                (
+                    pane.key().to_owned(),
+                    json!(if self.focus || self.model().is_none() {
+                        0.0
+                    } else {
+                        effective.get(*pane)
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut})).collect::<Vec<_>>()}));
+        let dialog = self.dialog.as_ref().map(|dialog| json!({"kind":format!("{:?}",dialog.kind),"name":dialog.name,"error":dialog.error}));
+        let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
+        let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
+        json!({
+            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"layout":self.layout.key(),"focus":self.focus,"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
+            "filters":{"sections":self.filters.sections,"groups":self.filters.groups,"notes":self.filters.notes,"outline":self.filters.outline},
+            "expanded_sections":self.expanded.iter().map(|section| section.0).collect::<Vec<_>>(),
+            "preferred_widths":{"columns":preferred(Layout::Columns),"outline":preferred(Layout::Outline)},"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
+            "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"outline_rows":outline_rows,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>(),"outline":self.outline_sections().iter().map(|(section,expanded)| json!({"section":section.0,"expanded":expanded})).collect::<Vec<_>>()},
+            "history":self.session.as_ref().map(|session| session.state().history().iter().map(|path| path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"history_position":self.session.as_ref().and_then(|session|session.state().history_position()),"mru":self.session.as_ref().map(|session| session.state().recent().iter().map(|path|path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"can_back":self.session.as_ref().is_some_and(Session::can_back),"can_forward":self.session.as_ref().is_some_and(Session::can_forward),
+            "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"sort":self.note_sort(),
+            "registrations":self.config.as_ref().map(|config| config.workspaces().iter().map(|entry| json!({"name":entry.name,"path":entry.path})).collect::<Vec<_>>()).unwrap_or_default(),"active_registration":self.config.as_ref().and_then(|config| config.active()),"registry_warning":self.registry_warning,"metadata_warning":self.metadata_warning,"config_writable":self.config.as_ref().is_some_and(|config| config.writable()),"config_directory":self.config.as_ref().and_then(|config|config.directory()),"folder_request":self.folder_request,
+            "generation":self.workspace_generation(),"gesture_generation":self.gesture_generation,"spring_section":self.spring_section.map(|section|section.0),"gesture_preview":gesture,
+            "conflict_copy":self.conflict_copy.as_ref().map(|(generation,path)|json!({"generation":generation,"path":path.as_path().to_string_lossy(),"enabled":self.command_enabled(CommandId::OpenConflictCopy)})),
+            "processed":processed,
+        })
     }
 
     pub(super) fn session_snapshot(&self) -> Value {
@@ -282,6 +576,7 @@ impl App {
             "pending_durability":pending,
             "last_save_micros":u64::try_from(last_save).unwrap_or(u64::MAX),
             "trash_path":self.test_sandbox.as_ref().map(|sandbox| sandbox.join("trash")),
+            "navigation":self.navigation_snapshot(),
         })
     }
 
@@ -300,6 +595,109 @@ impl App {
     }
 }
 
+fn result_key(value: &Value) -> Result<Key, String> {
+    let object = value
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .ok_or("result key must contain exactly one command, note, destination, item_action, reorder, or workspace")?;
+    if object.contains_key("command") {
+        return Ok(Key::Command(
+            CommandId::parse(string(value, "command")?).ok_or("Unknown command ID")?,
+        ));
+    }
+    if object.contains_key("note") {
+        return Ok(Key::Note(NoteId(id(value, "note")?)));
+    }
+    if let Some(destination) = object.get("destination") {
+        return Ok(Key::Destination(parent(destination)?));
+    }
+    if object.contains_key("workspace") {
+        return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
+    }
+    if let Some(action) = object.get("item_action") {
+        let object = action
+            .as_object()
+            .filter(|object| object.len() == 2)
+            .ok_or("item_action requires target and command")?;
+        return Ok(Key::ItemAction {
+            target: item_target(object.get("target").ok_or("target is required")?)?,
+            id: CommandId::parse(string(action, "command")?).ok_or("Unknown command ID")?,
+        });
+    }
+    if let Some(reorder) = object.get("reorder") {
+        let object = reorder
+            .as_object()
+            .filter(|object| object.len() == 2)
+            .ok_or("reorder requires source and before")?;
+        return Ok(Key::Reorder(ReorderTarget {
+            source: item_target(object.get("source").ok_or("source is required")?)?,
+            before: match object.get("before").ok_or("before is required")? {
+                Value::Null => None,
+                value => Some(item_target(value)?),
+            },
+        }));
+    }
+    Err("Unknown palette result key".into())
+}
+
+fn key_json(key: &Key) -> Value {
+    match key {
+        Key::Command(id) => {
+            json!({"command":super::commands::DEFINITIONS.iter().find(|definition| definition.id == *id).map(|definition| definition.key)})
+        }
+        Key::Note(note) => json!({"note":note.0}),
+        Key::Destination(parent) => json!({"destination":parent_json(*parent)}),
+        Key::Workspace(path) => json!({"workspace":path}),
+        Key::ItemAction { target, id } => {
+            json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
+        }
+        Key::Reorder(target) => {
+            json!({"reorder":{"source":item_target_json(target.source),"before":target.before.map(item_target_json)}})
+        }
+    }
+}
+
+fn item_target(value: &Value) -> Result<ItemTarget, String> {
+    let object = value
+        .as_object()
+        .filter(|object| object.len() == 3)
+        .ok_or("item target requires generation, item, and parent")?;
+    Ok(ItemTarget {
+        generation: id(value, "generation")?,
+        item: target(object.get("item").ok_or("item is required")?)?,
+        parent: match object.get("parent").ok_or("parent is required")? {
+            Value::Null => None,
+            value => Some(parent(value)?),
+        },
+    })
+}
+
+fn item_target_json(target: ItemTarget) -> Value {
+    let item = match target.item {
+        ItemRef::Section(id) => json!({"section":id.0}),
+        ItemRef::Group(id) => json!({"group":id.0}),
+        ItemRef::Note(id) => json!({"note":id.0}),
+    };
+    json!({"generation":target.generation,"item":item,"parent":target.parent.map(parent_json)})
+}
+
+fn row_json(row: crate::drag::RowKind) -> Value {
+    match row {
+        crate::drag::RowKind::Section(section) => json!({"section":section.0}),
+        crate::drag::RowKind::Group(group) => json!({"group":group.0}),
+        crate::drag::RowKind::NoGroup(section) => json!({"no_group":section.0}),
+        crate::drag::RowKind::Note(note) => json!({"note":note.0}),
+    }
+}
+
+fn layout(params: &Value) -> Result<Layout, String> {
+    match string(params, "layout")? {
+        "columns" => Ok(Layout::Columns),
+        "outline" => Ok(Layout::Outline),
+        _ => Err("Unknown layout".into()),
+    }
+}
+
 fn core_op(params: &Value) -> Result<Op, String> {
     Ok(match string(params, "op")? {
         "create_section" => Op::CreateSection {
@@ -312,6 +710,12 @@ fn core_op(params: &Value) -> Result<Op, String> {
         "create_note" => Op::CreateNote {
             parent: parent(params.get("parent").ok_or("parent is required")?)?,
             title: string(params, "title")?.into(),
+        },
+        "select_parent" => Op::SelectParent {
+            parent: parent(params.get("parent").ok_or("parent is required")?)?,
+        },
+        "select_section" => Op::SelectSection {
+            section: SectionId(id(params, "section")?),
         },
         "open_note" => Op::OpenNote {
             note: match params.get("note").ok_or("note is required")? {
@@ -449,6 +853,57 @@ mod tests {
     }
 
     #[test]
+    fn palette_result_keys_round_trip_without_accepting_ambiguous_targets() {
+        for key in [
+            Key::Command(CommandId::NewNote),
+            Key::Note(NoteId(3)),
+            Key::Destination(Parent::Group(GroupId(2))),
+            Key::Workspace("/tmp/workspace".into()),
+            Key::ItemAction {
+                target: ItemTarget {
+                    generation: 4,
+                    item: ItemRef::Group(GroupId(2)),
+                    parent: Some(Parent::Section(SectionId(1))),
+                },
+                id: CommandId::ReorderGroup,
+            },
+            Key::Reorder(ReorderTarget {
+                source: ItemTarget {
+                    generation: 4,
+                    item: ItemRef::Section(SectionId(1)),
+                    parent: None,
+                },
+                before: Some(ItemTarget {
+                    generation: 4,
+                    item: ItemRef::Section(SectionId(2)),
+                    parent: None,
+                }),
+            }),
+            Key::Reorder(ReorderTarget {
+                source: ItemTarget {
+                    generation: 4,
+                    item: ItemRef::Group(GroupId(2)),
+                    parent: Some(Parent::Section(SectionId(1))),
+                },
+                before: None,
+            }),
+        ] {
+            assert_eq!(result_key(&key_json(&key)).unwrap(), key);
+        }
+        for value in [
+            json!({"note":1,"command":"note.new"}),
+            json!({"note":-1}),
+            json!({"destination":{"note":1}}),
+            json!({"command":"save"}),
+            json!({"reorder":{"source":{"generation":1,"item":{"group":2},"parent":{"section":1}}}}),
+            json!({"item_action":{"target":{"generation":1,"item":{"note":2},"parent":{"section":1}},"command":"note.rename","extra":true}}),
+            json!({"item_action":{"target":{"generation":1,"item":{"note":2},"parent":{"section":1},"path":"external"},"command":"note.rename"}}),
+        ] {
+            assert!(result_key(&value).is_err());
+        }
+    }
+
+    #[test]
     fn requests_reject_ambiguous_ids_paths_and_draft_edit_bypasses() {
         for params in [
             json!({"op":"edit_draft","note":1,"contents":"bypass"}),
@@ -465,9 +920,236 @@ mod tests {
         }
     }
 
+    fn navigation_fixture() -> (tempfile::TempDir, App) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("Section")).unwrap();
+        std::fs::write(directory.path().join("Section/First.md"), "first").unwrap();
+        std::fs::write(directory.path().join("Section/Second.md"), "second").unwrap();
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        app.workspace_mode = true;
+        app.session = Some(Session::open(directory.path()).unwrap());
+        let first = app
+            .model()
+            .unwrap()
+            .notes
+            .iter()
+            .find(|note| note.title == "First")
+            .unwrap()
+            .id;
+        let _ = app.process_core(Op::OpenNote { note: Some(first) });
+        (directory, app)
+    }
+
+    #[test]
+    fn navigation_adapters_share_the_failed_flush_barrier_and_return_correlated_disposition() {
+        let (directory, mut app) = navigation_fixture();
+        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+            Arc::new("dirty ".into()),
+        ))));
+        let _ = app
+            .navigation_request("palette.open", &json!({"mode":"jump"}))
+            .unwrap();
+        let _ = app
+            .navigation_request("palette.query", &json!({"query":"Second"}))
+            .unwrap();
+        app.session.as_mut().unwrap().fail_next(Fault::Write);
+        let outcome = app
+            .navigation_request("palette.activate", &json!({}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "blocked");
+        assert_eq!(
+            app.navigation_snapshot()["processed"]["correlation"],
+            outcome.processed.correlation
+        );
+        assert_eq!(app.navigation_snapshot()["modal"]["query"], "Second");
+        assert_eq!(app.editor.text(), "dirty first");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("Section/First.md")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn navigation_adapters_project_layout_filters_width_sort_and_modal_selection() {
+        let (_directory, mut app) = navigation_fixture();
+        for (operation, params) in [
+            ("filter.set", json!({"pane":"notes","query":"first"})),
+            ("view.layout", json!({"layout":"outline"})),
+            (
+                "view.width",
+                json!({"layout":"outline","pane":"sections","width":999}),
+            ),
+            ("view.sort", json!({"mode":"title"})),
+            ("view.focus", json!({"enabled":true})),
+            ("palette.open", json!({"mode":"commands"})),
+            ("palette.query", json!({"query":"Theme:"})),
+            ("palette.step", json!({"delta":1})),
+        ] {
+            assert!(
+                app.navigation_request(operation, &params)
+                    .unwrap()
+                    .processed
+                    .disposition
+                    .committed(),
+                "{operation}"
+            );
+        }
+        let state = app.navigation_snapshot();
+        assert_eq!(state["layout"], "outline");
+        assert_eq!(state["preferred_widths"]["outline"]["sections"], 420.0);
+        assert_eq!(state["sort"], "title");
+        assert_eq!(state["focus"], true);
+        assert_eq!(state["filters"]["notes"], "first");
+        assert_eq!(state["modal"]["active_index"], 1);
+        assert_eq!(state["modal"]["results"].as_array().unwrap().len(), 3);
+        assert!(state["modal"]["active_key"].is_object());
+        assert!(app
+            .navigation_request("command.run", &json!({"id":"save"}))
+            .is_err());
+        assert!(app
+            .navigation_request(
+                "view.width",
+                &json!({"layout":"outline","pane":"groups","width":200})
+            )
+            .is_err());
+        assert!(
+            app.navigation_request("filter.set", &json!({"pane":"editor","query":"no"}))
+                .unwrap()
+                .processed
+                .disposition
+                == super::super::commands::Disposition::Blocked
+        );
+    }
+
+    #[test]
+    fn fake_picker_adapter_uses_tagged_production_completion_and_cancel_keeps_draft() {
+        let (_directory, mut app) = navigation_fixture();
+        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+            Arc::new("draft ".into()),
+        ))));
+        let pending = app
+            .navigation_request("test.folder.begin", &json!({}))
+            .unwrap()
+            .processed
+            .correlation;
+        let tag = app.navigation_snapshot()["folder_request"]
+            .as_u64()
+            .unwrap();
+        let stale = app
+            .navigation_request("test.folder.complete", &json!({"tag":tag+1,"path":null}))
+            .unwrap();
+        assert_eq!(stale.processed.disposition.key(), "blocked");
+        let cancelled = app
+            .navigation_request("test.folder.complete", &json!({"tag":tag,"path":null}))
+            .unwrap();
+        assert_eq!(cancelled.processed.disposition.key(), "completed");
+        assert_eq!(cancelled.processed.correlation, pending);
+        assert!(app.loading.is_none());
+        assert_eq!(app.editor.text(), "draft first");
+        assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
+    }
+
+    #[test]
+    fn private_rpc_exposes_context_reorder_sources_and_stable_typed_keys() {
+        let (_directory, mut app) = navigation_fixture();
+        let selected = app.selected_note;
+        let section = app.selected_section.unwrap();
+        assert!(app
+            .navigation_request(
+                "palette.open",
+                &json!({"mode":"item_actions","target":{"section":section.0}})
+            )
+            .unwrap()
+            .processed
+            .disposition
+            .committed());
+        let snapshot = app.navigation_snapshot();
+        assert_eq!(snapshot["modal"]["mode"], "item_actions");
+        assert_eq!(
+            snapshot["modal"]["source"]["item"],
+            json!({"section":section.0})
+        );
+        let key = snapshot["modal"]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"]["item_action"]["command"] == "section.reorder")
+            .unwrap()["key"]
+            .clone();
+        assert!(app
+            .navigation_request("palette.activate", &json!({"key":key}))
+            .unwrap()
+            .processed
+            .disposition
+            .committed());
+        let snapshot = app.navigation_snapshot();
+        assert_eq!(snapshot["modal"]["mode"], "reorder");
+        assert_eq!(
+            snapshot["modal"]["results"][0]["key"]["reorder"]["before"],
+            Value::Null
+        );
+        assert_eq!(
+            snapshot["modal"]["source"]["generation"],
+            app.workspace_generation()
+        );
+        assert_eq!(app.selected_note, selected);
+        app.conflict_copy = Some((
+            app.workspace_generation(),
+            app.model().unwrap().notes[1].path.clone(),
+        ));
+        assert_eq!(app.navigation_snapshot()["conflict_copy"]["enabled"], true);
+        assert!(app
+            .navigation_request(
+                "palette.open",
+                &json!({"mode":"item_actions","target":{"no_group":section.0}})
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn private_rpc_query_guards_keep_the_previous_valid_query_and_editor() {
+        let (_directory, mut app) = navigation_fixture();
+        let before = app.editor.text();
+        app.navigation_request("palette.open", &json!({"mode":"commands"}))
+            .unwrap();
+        app.navigation_request("palette.query", &json!({"query":"theme"}))
+            .unwrap();
+        let outcome = app
+            .navigation_request("palette.query", &json!({"query":"x".repeat(4097)}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "blocked");
+        assert_eq!(app.navigation_snapshot()["modal"]["query"], "theme");
+        assert!(app.navigation_snapshot()["modal"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("4,096"));
+        app.navigation_request("palette.close", &json!({})).unwrap();
+        app.navigation_request("filter.set", &json!({"pane":"notes","query":"First"}))
+            .unwrap();
+        assert_eq!(
+            app.navigation_request(
+                "filter.set",
+                &json!({"pane":"notes","query":"a ".repeat(129)})
+            )
+            .unwrap()
+            .processed
+            .disposition
+            .key(),
+            "blocked"
+        );
+        assert_eq!(app.navigation_snapshot()["filters"]["notes"], "First");
+        assert_eq!(app.editor.text(), before);
+    }
+
     #[test]
     fn no_workspace_snapshot_has_the_documented_nulls_and_empty_arrays() {
-        let (app, _) = App::new(Options::default());
+        let (app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
         let snapshot = app.session_snapshot();
         assert!(snapshot["root"].is_null());
         assert!(snapshot["document"].is_null());
@@ -484,7 +1166,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("Section")).unwrap();
         std::fs::write(directory.path().join("Section/Note.md"), "saved").unwrap();
-        let (mut app, _) = App::new(Options::default());
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
         app.workspace_mode = true;
         app.session = Some(Session::open(directory.path()).unwrap());
         let note = app.session.as_ref().unwrap().model().notes[0].id;

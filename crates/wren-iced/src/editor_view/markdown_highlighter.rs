@@ -7,10 +7,10 @@
 //!
 //! Supported constructs:
 //!   - Fenced code blocks (`` ``` ``): entire block content is code-coloured.
-//!   - ATX headings (`#`–`######`): accent colour + bold.
+//!   - ATX headings (`#`–`######`): faint markers, bold accent H1/primary H2–H6.
 //!   - Block-quotes (`> `): muted colour.
-//!   - Unordered list markers (`-`, `*`, `+`): muted colour for the marker only.
-//!   - Ordered list markers (`1.`): muted colour for the marker only.
+//!   - Unordered/ordered list and open-task markers: accent colour.
+//!   - Completed tasks: faint text (stock iced has no strike-through format).
 //!   - Inline code spans (`` `...` ``): muted colour.
 //!   - Bold (`**...**`, `__...__`): bold font weight.
 //!   - Italic (`*...*`, `_..._`): italic font style.
@@ -265,8 +265,17 @@ fn compute_highlights(
 
     // ── ATX heading ──────────────────────────────────────────────────────────
     if let Some(level) = heading_level(line) {
-        let _ = level;
-        return vec![(0..line.len(), Highlight::bold(palette.accent))];
+        let marker_end = level + usize::from(line.as_bytes().get(level) == Some(&b' '));
+        let mut result = vec![(0..marker_end, Highlight::colored(palette.faint))];
+        if marker_end < line.len() {
+            let color = if level == 1 {
+                palette.accent
+            } else {
+                palette.text
+            };
+            result.push((marker_end..line.len(), Highlight::bold(color)));
+        }
+        return result;
     }
 
     // ── Blockquote ───────────────────────────────────────────────────────────
@@ -285,8 +294,15 @@ fn compute_highlights(
     }
 
     // ── List item marker ─────────────────────────────────────────────────────
-    if let Some(marker_end) = list_marker_end(line) {
-        let mut result = vec![(0..marker_end, Highlight::colored(palette.muted))];
+    if let Some(mut marker_end) = list_marker_end(line) {
+        let rest = &line[marker_end..];
+        if rest.starts_with("[x] ") || rest.starts_with("[X] ") {
+            return vec![(0..line.len(), Highlight::colored(palette.faint))];
+        }
+        if rest.starts_with("[ ] ") {
+            marker_end += 4;
+        }
+        let mut result = vec![(0..marker_end, Highlight::colored(palette.accent))];
         let rest = &line[marker_end..];
         for (r, h) in scan_inline(rest, palette) {
             result.push((r.start + marker_end..r.end + marker_end, h));
@@ -393,55 +409,55 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     );
 
     // ── 3. Bold-italic (*** or ___) ────────────────────────────────────────────
-    extract_between(
+    extract_emphasis(
         line,
         "***",
-        "***",
         Highlight::bold_italic(palette.text),
+        palette.faint,
         &mut spans,
         &mut occupied,
     );
-    extract_between(
+    extract_emphasis(
         line,
         "___",
-        "___",
         Highlight::bold_italic(palette.text),
+        palette.faint,
         &mut spans,
         &mut occupied,
     );
 
     // ── 4. Bold (** or __) ───────────────────────────────────────────────────
-    extract_between(
+    extract_emphasis(
         line,
         "**",
-        "**",
         Highlight::bold(palette.text),
+        palette.faint,
         &mut spans,
         &mut occupied,
     );
-    extract_between(
+    extract_emphasis(
         line,
         "__",
-        "__",
         Highlight::bold(palette.text),
+        palette.faint,
         &mut spans,
         &mut occupied,
     );
 
     // ── 5. Italic (* or _) ───────────────────────────────────────────────────
-    extract_between(
+    extract_emphasis(
         line,
         "*",
-        "*",
         Highlight::italic(palette.text),
+        palette.faint,
         &mut spans,
         &mut occupied,
     );
-    extract_between(
+    extract_emphasis(
         line,
         "_",
-        "_",
         Highlight::italic(palette.text),
+        palette.faint,
         &mut spans,
         &mut occupied,
     );
@@ -520,6 +536,51 @@ fn extract_backtick_spans(
     }
 }
 
+fn extract_emphasis(
+    line: &str,
+    marker: &str,
+    highlight: Highlight,
+    faint: Color,
+    spans: &mut Vec<(Range<usize>, Highlight)>,
+    occupied: &mut [bool],
+) {
+    let mut search = 0;
+    while let Some(relative) = line[search..].find(marker) {
+        let opening = search + relative;
+        let content = opening + marker.len();
+        if any_occupied(occupied, opening..content) {
+            search = opening + 1;
+            continue;
+        }
+        let Some(closing) = line[content..]
+            .match_indices(marker)
+            .map(|(relative, _)| content + relative)
+            .find(|&closing| !any_occupied(occupied, closing..closing + marker.len()))
+        else {
+            break;
+        };
+        let end = closing + marker.len();
+        spans.push((opening..content, Highlight::colored(faint)));
+        let mut run = None;
+        for (relative, character) in line[content..closing].char_indices() {
+            let byte = content + relative;
+            if any_occupied(occupied, byte..byte + character.len_utf8()) {
+                if let Some(start) = run.take() {
+                    spans.push((start..byte, highlight));
+                }
+            } else {
+                run.get_or_insert(byte);
+            }
+        }
+        if let Some(start) = run {
+            spans.push((start..closing, highlight));
+        }
+        spans.push((closing..end, Highlight::colored(faint)));
+        mark_occupied(occupied, opening..end);
+        search = end;
+    }
+}
+
 /// Extract spans delimited by a fixed `open` and `close` marker string,
 /// skipping regions already occupied by higher-priority spans.
 fn extract_between(
@@ -550,7 +611,7 @@ fn extract_between(
         };
         let abs_close_start = content_start + rel_close;
         let abs_close_end = abs_close_start + close_len;
-        if any_occupied(occupied, abs_close_start..abs_close_end) {
+        if any_occupied(occupied, abs_open..abs_close_end) {
             search_from = abs_open + 1;
             continue;
         }
@@ -667,13 +728,29 @@ mod tests {
     // ── Headings ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn heading_colours_the_whole_line_with_accent() {
-        let p = dark_palette();
-        for prefix in ["# ", "## ", "### ", "#### ", "##### ", "###### "] {
-            let line = format!("{}Hello", prefix);
-            let spans = compute_highlights(&line, LineState::NORMAL, &LineState::NORMAL, &p);
-            assert!(!spans.is_empty(), "no spans for heading '{line}'");
-            assert_eq!(spans[0].0, 0..line.len(), "span should cover full line");
+    fn heading_markers_are_faint_and_only_h1_text_is_accent_in_both_themes() {
+        for theme in [theme::DARK, theme::LIGHT] {
+            let p = Palette::from_theme(theme);
+            for (level, prefix) in ["# ", "## ", "### ", "#### ", "##### ", "###### "]
+                .into_iter()
+                .enumerate()
+            {
+                let line = format!("{prefix}Heading");
+                let spans = compute_highlights(&line, LineState::NORMAL, &LineState::NORMAL, &p);
+                assert_eq!(spans.len(), 2);
+                assert_eq!(spans[0].0, 0..prefix.len());
+                assert_eq!(spans[0].1.color, Some(p.faint));
+                assert_eq!(spans[0].1.font, None);
+                assert_eq!(spans[1].0, prefix.len()..line.len());
+                assert_eq!(
+                    spans[1].1.color,
+                    Some(if level == 0 { p.accent } else { p.text })
+                );
+                assert!(spans[1]
+                    .1
+                    .font
+                    .is_some_and(|font| font.weight == font::Weight::Bold));
+            }
         }
     }
 
@@ -684,6 +761,71 @@ mod tests {
         for (r, _) in &spans {
             assert_ne!(r.start, 0, "unexpected span starting at 0");
         }
+    }
+
+    #[test]
+    fn list_and_open_task_markers_use_accent_but_done_tasks_are_faint() {
+        for theme in [theme::DARK, theme::LIGHT] {
+            let p = Palette::from_theme(theme);
+            for (line, end) in [
+                ("- words", 2),
+                ("* words", 2),
+                ("+ words", 2),
+                ("12. words", 4),
+                ("- [ ] words", 6),
+            ] {
+                let spans = compute_highlights(line, LineState::NORMAL, &LineState::NORMAL, &p);
+                assert_eq!(spans[0].0, 0..end);
+                assert_eq!(spans[0].1.color, Some(p.accent));
+            }
+            for line in ["- [x] completed", "  - [X] **completed**"] {
+                let spans = compute_highlights(line, LineState::NORMAL, &LineState::NORMAL, &p);
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].0, 0..line.len());
+                assert_eq!(spans[0].1.color, Some(p.faint));
+                assert_eq!(spans[0].1.font, None);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_markup_never_overlaps_code_or_splits_utf8() {
+        for line in [
+            "**bold `code` text**",
+            "***both***",
+            "__粗体__ and *café*",
+            "- [ ] **café**",
+            "<!-- **ignored** -->",
+            "**bold** and `code` and ~~deleted~~",
+            "# 🐦 heading",
+        ] {
+            let spans = highlights_for(line);
+            let mut previous = 0;
+            for (range, _) in &spans {
+                assert!(range.start < range.end, "empty span in {line:?}");
+                assert!(
+                    range.start >= previous,
+                    "overlapping spans in {line:?}: {spans:?}"
+                );
+                assert!(line.is_char_boundary(range.start) && line.is_char_boundary(range.end));
+                previous = range.end;
+            }
+        }
+        let spans = highlights_for("**bold `code` text**");
+        assert!(spans.iter().any(|(range, highlight)| *range == (7..13)
+            && highlight.color == Some(dark_palette().success)));
+        let bold: Vec<_> = spans
+            .iter()
+            .filter(|(_, highlight)| {
+                highlight
+                    .font
+                    .is_some_and(|font| font.weight == font::Weight::Bold)
+            })
+            .map(|(range, _)| range.clone())
+            .collect();
+        assert_eq!(bold, [2..7, 13..18]);
+        assert_eq!(span_color_at(&spans, 0), Some(dark_palette().faint));
+        assert_eq!(span_color_at(&spans, 18), Some(dark_palette().faint));
     }
 
     // ── Code block ───────────────────────────────────────────────────────────
@@ -750,21 +892,40 @@ mod tests {
     // ── Bold and italic ───────────────────────────────────────────────────────
 
     #[test]
-    fn bold_markers_produce_bold_highlight() {
-        let spans = highlights_for("This is **bold** text.");
-        let bold_span = spans.iter().find(|(r, _)| r.start == 8);
-        assert!(bold_span.is_some(), "no bold span: {spans:?}");
-        let (_, h) = bold_span.unwrap();
-        assert!(h.font.is_some_and(|f| f.weight == font::Weight::Bold));
+    fn bold_text_is_strong_while_its_markers_are_faint() {
+        for theme in [theme::DARK, theme::LIGHT] {
+            let p = Palette::from_theme(theme);
+            let spans = compute_highlights(
+                "This is **bold** text.",
+                LineState::NORMAL,
+                &LineState::NORMAL,
+                &p,
+            );
+            let marker = spans.iter().find(|(range, _)| *range == (8..10)).unwrap();
+            assert_eq!(marker.1.color, Some(p.faint));
+            assert_eq!(marker.1.font, None);
+            let inner = spans.iter().find(|(range, _)| *range == (10..14)).unwrap();
+            assert_eq!(inner.1.color, Some(p.text));
+            assert!(inner
+                .1
+                .font
+                .is_some_and(|font| font.weight == font::Weight::Bold));
+            assert_eq!(span_color_at(&spans, 14), Some(p.faint));
+        }
     }
 
     #[test]
-    fn italic_markers_produce_italic_highlight() {
+    fn italic_text_preserves_style_without_emphasizing_its_markers() {
         let spans = highlights_for("This is *italic* text.");
-        let span = spans.iter().find(|(r, _)| r.start == 8);
-        assert!(span.is_some(), "no italic span: {spans:?}");
-        let (_, h) = span.unwrap();
-        assert!(h.font.is_some_and(|f| f.style == font::Style::Italic));
+        let marker = spans.iter().find(|(range, _)| *range == (8..9)).unwrap();
+        assert_eq!(marker.1.font, None);
+        assert_eq!(marker.1.color, Some(dark_palette().faint));
+        let inner = spans.iter().find(|(range, _)| *range == (9..15)).unwrap();
+        assert!(inner
+            .1
+            .font
+            .is_some_and(|font| font.style == font::Style::Italic));
+        assert_eq!(span_color_at(&spans, 15), Some(dark_palette().faint));
     }
 
     #[test]
@@ -950,8 +1111,7 @@ mod tests {
 
         let spans: Vec<_> = h.highlight_line("# Heading").collect();
         assert!(!spans.is_empty());
-        // Colour should now match the light theme's accent
-        let expected = rgb(theme::LIGHT.colors.accent);
-        assert_eq!(spans[0].1.color, Some(expected));
+        assert_eq!(spans[0].1.color, Some(rgb(theme::LIGHT.colors.faint)));
+        assert_eq!(spans[1].1.color, Some(rgb(theme::LIGHT.colors.accent)));
     }
 }

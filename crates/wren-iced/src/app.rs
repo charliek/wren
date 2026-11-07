@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use iced::theme::Mode;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
-use wren_core::model::{GroupId, NoteId, Parent, SectionId};
+use wren_core::model::{GroupId, NoteId, SectionId};
 use wren_core::ops::{Op, Session};
 use wren_core::theme::{self as definitions, Theme};
 use wren_iced::editor_view::{self, EditorView};
@@ -18,7 +18,22 @@ mod workspace;
 #[path = "workspace_view.rs"]
 mod workspace_view;
 
-use workspace::{Dialog, DialogKind, LoadOutcome, Loading};
+#[path = "commands.rs"]
+pub(crate) mod commands;
+#[path = "gestures.rs"]
+mod gestures;
+#[path = "navigation.rs"]
+mod navigation;
+#[path = "palette.rs"]
+mod palette;
+#[path = "workspaces.rs"]
+mod workspaces;
+
+use crate::panes::{Layout, Widths};
+use commands::{Command, Processed};
+use navigation::Filters;
+use palette::Palette;
+use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
 #[path = "test_requests.rs"]
@@ -46,9 +61,31 @@ pub struct App {
     selected_note: Option<NoteId>,
     editor_note: Option<NoteId>,
     banner: Option<String>,
+    conflict_copy: Option<(u64, wren_core::fs_store::RelPath)>,
     dialog: Option<Dialog>,
     quit_pending: bool,
     flush_on_load: bool,
+    config: Option<wren_core::config::Config>,
+    registry_warning: Option<String>,
+    metadata_warning: Option<String>,
+    banner_kind: workspace::WarningKind,
+    registration_name: Option<String>,
+    folder_serial: u64,
+    folder_request: Option<u64>,
+    folder_correlation: Option<u64>,
+    action_serial: u64,
+    last_processed: Option<Processed>,
+    palette: Option<Palette>,
+    layout: Layout,
+    widths: Widths,
+    focus: bool,
+    filters: Filters,
+    expanded: std::collections::BTreeSet<SectionId>,
+    viewport: iced::Size,
+    spring_section: Option<SectionId>,
+    gesture_generation: u64,
+    drag_preview: Option<crate::drag::Preview>,
+    resizing: Option<(Layout, crate::panes::Pane, f32)>,
     #[cfg(feature = "smoke-test")]
     test_sandbox: Option<PathBuf>,
     #[cfg(feature = "smoke-test")]
@@ -73,14 +110,24 @@ pub enum Message {
     ChooseTheme(Option<Theme>),
     Editor(editor_view::Message),
     Core(Op),
+    Command(Command),
+    PaletteOpen(palette::Mode),
+    PaletteQuery(String),
+    PaletteChoose(u64, palette::Key),
+    PaletteClose,
+    PaletteRevealed,
+    Shortcut(crate::shortcuts::Shortcut),
+    FolderChosen(u64, Option<PathBuf>),
+    Revealed {
+        correlation: u64,
+        generation: u64,
+        result: Result<(), String>,
+    },
+    Drag(u64, Layout, crate::drag::DragEvent),
+    Resize(u64, crate::panes::ResizeEvent),
     Tick,
-    WorkspacePath(String),
-    OpenWorkspace,
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
-    SelectParent(Parent),
-    ShowDialog(DialogKind),
     DialogName(String),
-    DialogDestination(Parent),
     SubmitDialog,
     ConfirmTrash,
     CancelDialog,
@@ -129,6 +176,14 @@ pub fn spike_text(large: bool) -> String {
 
 impl App {
     pub fn new(options: Options) -> (Self, Task<Message>) {
+        let config = (!options.editor).then(wren_core::config::Config::load);
+        Self::with_config(options, config)
+    }
+
+    fn with_config(
+        options: Options,
+        config: Option<wren_core::config::Config>,
+    ) -> (Self, Task<Message>) {
         #[cfg(feature = "smoke-test")]
         let definition = options
             .smoke
@@ -140,11 +195,27 @@ impl App {
         let follows_system = options.smoke.is_none();
         #[cfg(not(feature = "smoke-test"))]
         let follows_system = true;
-        let workspace = options.workspace.clone();
-        let contents = if workspace.is_some() {
-            String::new()
-        } else {
+        let mut registry_warning = config
+            .as_ref()
+            .and_then(|config| config.warning().map(str::to_owned));
+        let workspace = options.workspace.clone().or_else(|| {
+            let config = config.as_ref()?;
+            let active = config.active()?;
+            match config.validate_registration(active) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    registry_warning = Some(match registry_warning.take() {
+                        Some(warning) => format!("{warning} {error}"),
+                        None => error,
+                    });
+                    None
+                }
+            }
+        });
+        let contents = if options.editor {
             spike_text(options.large_spike)
+        } else {
+            String::new()
         };
         let words = contents.split_whitespace().count();
         let mut app = Self {
@@ -160,7 +231,7 @@ impl App {
             edit_micros: Vec::new(),
             window: None,
             session: None,
-            workspace_mode: workspace.is_some(),
+            workspace_mode: !options.editor,
             workspace_path: String::new(),
             loading: None,
             load_generation: 0,
@@ -169,9 +240,31 @@ impl App {
             selected_note: None,
             editor_note: None,
             banner: None,
+            conflict_copy: None,
             dialog: None,
             quit_pending: false,
             flush_on_load: false,
+            config,
+            registry_warning,
+            metadata_warning: None,
+            banner_kind: workspace::WarningKind::General,
+            registration_name: None,
+            folder_serial: 0,
+            folder_request: None,
+            folder_correlation: None,
+            action_serial: 0,
+            last_processed: None,
+            palette: None,
+            layout: Layout::Columns,
+            widths: Widths::default(),
+            focus: false,
+            filters: Filters::default(),
+            expanded: std::collections::BTreeSet::new(),
+            viewport: iced::Size::new(1280.0, 800.0),
+            spring_section: None,
+            gesture_generation: 1,
+            drag_preview: None,
+            resizing: None,
             #[cfg(feature = "smoke-test")]
             test_sandbox: options
                 .test_socket
@@ -237,35 +330,77 @@ impl App {
                 );
             }
             Message::Editor(message) => return self.edit(message),
-            Message::Core(op) => return self.apply_core(op).unwrap_or_else(|_| Task::none()),
-            Message::Tick => {
-                if self.session.is_some() {
-                    let _ = self.apply_core(Op::Tick);
+            Message::Core(op) => return self.process_core(op).task,
+            Message::Command(command) => return self.dispatch(command).task,
+            Message::PaletteOpen(mode) => return self.open_palette(mode).task,
+            Message::PaletteQuery(query) => return self.palette_query(query).task,
+            Message::PaletteChoose(generation, key) => {
+                return self.activate_palette_key(generation, key).task
+            }
+            Message::PaletteClose => return self.close_palette().task,
+            Message::PaletteRevealed => {}
+            Message::FolderChosen(tag, path) => return self.folder_chosen(tag, path).task,
+            Message::Revealed {
+                correlation,
+                generation,
+                result,
+            } => {
+                if generation != self.workspace_generation() {
+                    return Task::none();
+                }
+                let warning = result
+                    .err()
+                    .map(|error| format!("Could not reveal item: {error}"));
+                if let Some(warning) = &warning {
+                    self.banner = Some(warning.clone());
+                    self.banner_kind = workspace::WarningKind::General;
+                }
+                self.last_processed = Some(Processed {
+                    correlation,
+                    disposition: if warning.is_some() {
+                        commands::Disposition::Blocked
+                    } else {
+                        commands::Disposition::Completed
+                    },
+                    warning,
+                });
+            }
+            Message::Drag(generation, layout, event) => {
+                return self.drag_event(generation, layout, event)
+            }
+            Message::Resize(generation, event) => return self.resize_event(generation, event),
+            Message::Shortcut(shortcut) => {
+                use crate::shortcuts::Shortcut;
+                if shortcut == Shortcut::Escape {
+                    return self.update(Message::Escape);
+                }
+                if self.palette.is_some() {
+                    return match shortcut {
+                        Shortcut::Up => self.palette_step(-1).task,
+                        Shortcut::Down => self.palette_step(1).task,
+                        Shortcut::Enter => self.activate_palette(None).task,
+                        _ => Task::none(),
+                    };
+                }
+                if self.dialog.is_none() {
+                    return match shortcut {
+                        Shortcut::Commands => self.open_palette(palette::Mode::Commands).task,
+                        Shortcut::Command(command) => self.dispatch(Command::Run(command)).task,
+                        _ => Task::none(),
+                    };
                 }
             }
-            Message::WorkspacePath(path) => self.workspace_path = path,
-            Message::OpenWorkspace => {
-                return self
-                    .apply_core(Op::OpenWorkspace {
-                        path: PathBuf::from(&self.workspace_path),
-                    })
-                    .unwrap_or_else(|_| Task::none());
+            Message::Tick => {
+                if self.session.is_some() {
+                    return self.process_core(Op::Tick).task;
+                }
             }
             Message::Loaded(generation, outcome) => {
                 return self.workspace_loaded(generation, outcome)
             }
-            Message::SelectParent(parent) => {
-                let _ = self.select_parent(parent);
-            }
-            Message::ShowDialog(kind) => return self.show_dialog(kind),
             Message::DialogName(name) => {
                 if let Some(dialog) = &mut self.dialog {
                     dialog.name = name;
-                }
-            }
-            Message::DialogDestination(parent) => {
-                if let Some(dialog) = &mut self.dialog {
-                    dialog.destination = Some(parent);
                 }
             }
             Message::SubmitDialog => return self.submit_dialog(false),
@@ -274,7 +409,18 @@ impl App {
                 self.dialog = None;
                 return focus_editor();
             }
-            Message::DismissBanner => self.banner = None,
+            Message::DismissBanner => {
+                self.conflict_copy = None;
+                if self.banner.is_some() {
+                    if self.banner == self.metadata_warning {
+                        self.metadata_warning = None;
+                    }
+                    self.banner = self.metadata_warning.clone();
+                    self.banner_kind = workspace::WarningKind::Metadata;
+                } else {
+                    self.registry_warning = None;
+                }
+            }
             Message::FindChanged(query) => {
                 self.find_query = query;
                 self.editor.set_find_query(&self.find_query);
@@ -291,13 +437,15 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
-                if self.dialog.take().is_none() {
+                self.cancel_gestures();
+                if self.palette.take().is_none() && self.dialog.take().is_none() {
                     self.find_open = false;
                 }
                 return focus_editor();
             }
             Message::Window(id, event) => match event {
-                iced::window::Event::Opened { .. } => {
+                iced::window::Event::Opened { size, .. } => {
+                    self.viewport = size;
                     self.window = Some(id);
                     #[cfg(feature = "smoke-test")]
                     {
@@ -314,6 +462,9 @@ impl App {
                     }
                     #[cfg(not(feature = "smoke-test"))]
                     return focus_editor();
+                }
+                iced::window::Event::Resized(size) => {
+                    self.viewport = size;
                 }
                 iced::window::Event::CloseRequested => {
                     return self.request_quit().unwrap_or_else(|_| Task::none());
@@ -353,7 +504,7 @@ impl App {
     }
 
     fn edit(&mut self, message: editor_view::Message) -> Task<Message> {
-        if self.ensure_editor_ready().is_err() || self.dialog.is_some() {
+        if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
         }
         let started = Instant::now();
@@ -383,6 +534,27 @@ impl App {
                 .push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
         }
         Task::none()
+    }
+
+    #[cfg(feature = "smoke-test")]
+    fn capture_frame(
+        &self,
+        request: Arc<crate::test_ipc::Request>,
+        path: PathBuf,
+    ) -> Task<Message> {
+        let Some(window) = self.window else {
+            return Task::done(Message::CaptureFailed(request, "window is not open".into()));
+        };
+        Task::future(self.frames.next(window)).then(move |result| match result {
+            Ok(()) => {
+                let request = Arc::clone(&request);
+                let path = path.clone();
+                iced::window::screenshot(window).map(move |capture| {
+                    Message::RpcCaptured(Arc::clone(&request), path.clone(), capture)
+                })
+            }
+            Err(error) => Task::done(Message::CaptureFailed(Arc::clone(&request), error)),
+        })
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -472,7 +644,7 @@ impl App {
             .padding([8, 16])
             .width(Fill),
         );
-        body.width(Fill).height(Fill).into()
+        self.palette_view(body.width(Fill).height(Fill).into())
     }
 
     #[cfg(feature = "smoke-test")]
@@ -510,10 +682,9 @@ impl App {
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::window::events().map(|(id, event)| Message::Window(id, event)),
             iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                    ..
-                }) => Some(Message::Escape),
+                iced::Event::Keyboard(event) => {
+                    crate::shortcuts::pressed(&event).map(Message::Shortcut)
+                }
                 _ => None,
             }),
         ];
@@ -543,12 +714,19 @@ fn focus_editor() -> Task<Message> {
 }
 
 #[cfg(test)]
+#[path = "navigation_tests.rs"]
+mod navigation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn explicit_theme_stays_selected_until_system_mode_is_restored() {
-        let (mut app, _) = App::new(Options::default());
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
         let _ = app.update(Message::SystemTheme(Mode::Light));
         assert_eq!(app.definition, definitions::LIGHT);
         let _ = app.update(Message::ChooseTheme(Some(definitions::DARK)));
