@@ -14,6 +14,7 @@ use super::commands::{
     DEFINITIONS, GROUPS,
 };
 use super::{focus_editor, App, Message};
+use crate::ellipsis::ellipsis;
 use crate::{chrome, fonts, palette_scroll, theme};
 use wren_core::theme as definitions;
 
@@ -744,21 +745,21 @@ impl App {
             }
             let mut label = column![].spacing(3);
             if search {
-                label = label.push(chrome::label(
+                label = label.push(ellipsis(
                     result.path.replace('/', " › "),
-                    11,
-                    colors.muted,
+                    11.0,
+                    theme::color(colors.muted),
                 ));
             }
             label = label.push(
-                chrome::label(
+                ellipsis(
                     &result.title,
-                    13,
-                    if result.enabled {
+                    13.0,
+                    theme::color(if result.enabled {
                         colors.text
                     } else {
                         colors.faint
-                    },
+                    }),
                 )
                 .font(fonts::MEDIUM),
             );
@@ -770,10 +771,10 @@ impl App {
                 ));
             }
             if !search && !result.path.is_empty() {
-                label = label.push(chrome::label(
+                label = label.push(ellipsis(
                     result.path.replace('/', " › "),
-                    11,
-                    colors.muted,
+                    11.0,
+                    theme::color(colors.muted),
                 ));
             }
             let mut contents = row![label.width(Fill)]
@@ -795,7 +796,7 @@ impl App {
                 contents = contents.push(chrome::keycap(&result.shortcut, self.definition));
             }
             let active = palette.active == Some(index);
-            let row = button(contents)
+            let row = button(container(contents).center_y(Fill))
                 .height(if search {
                     76
                 } else if result.path.is_empty() {
@@ -840,19 +841,37 @@ impl App {
                 container(text(error).size(12).color(theme::color(colors.danger))).padding([6, 14]),
             );
         }
-        panel = panel.push(chrome::top_rule(
-            container(
-                text(if palette.workspace_removal {
-                    "Enter removes the registration only. Folders and notes stay untouched."
-                } else if search {
-                    "Titles and text, whole workspace     Enter open at match     Esc close"
-                } else {
-                    "↑↓ move     Enter run     Esc close"
-                })
+        let hint = |key: &'static str, action: &'static str| {
+            row![
+                chrome::keycap(key, self.definition),
+                text(action).size(11).color(theme::color(colors.muted))
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+        };
+        let footer: Element<'_, Message> = if palette.workspace_removal {
+            text("↵ removes the registration only. Folders and notes stay untouched.")
                 .size(11)
-                .color(theme::color(colors.muted)),
-            )
-            .padding([9, 14]),
+                .color(theme::color(colors.muted))
+                .into()
+        } else {
+            let mut hints = row![].spacing(14).align_y(iced::Center);
+            if search {
+                hints = hints.push(
+                    text("Titles and text, whole workspace")
+                        .size(11)
+                        .color(theme::color(colors.muted)),
+                );
+            } else {
+                hints = hints.push(hint("↑↓", "move"));
+            }
+            hints
+                .push(hint("↵", if search { "open at match" } else { "run" }))
+                .push(hint("esc", "close"))
+                .into()
+        };
+        panel = panel.push(chrome::top_rule(
+            container(footer).padding([9, 14]),
             self.definition,
         ));
         let dialog = container(panel)
@@ -941,6 +960,15 @@ pub(super) fn highlighted_text<'a>(
 ) -> Element<'a, Message> {
     use iced::widget::span;
     use iced::widget::text::Wrapping;
+    // Snippets span line breaks; show them on one line. Each replacement is
+    // one ASCII byte for another, so highlight offsets stay valid.
+    let snippet: String = snippet
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => ' ',
+            other => other,
+        })
+        .collect();
     if let Some(range) = &highlight {
         if let (Some(before), Some(hit), Some(after)) = (
             snippet.get(..range.start),

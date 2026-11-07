@@ -560,9 +560,44 @@ fn body_line(text: &str) -> Range<usize> {
         {
             continue;
         }
-        return range;
+        let skipped = line.len() - strip_block_markers(line).len();
+        return range.start + skipped..range.end;
     }
     0..0
+}
+
+/// Drop leading Markdown block markers (`>`, `-`/`*`/`+`, `1.`, `[ ]`/`[x]`)
+/// so previews show the line's words.
+fn strip_block_markers(mut line: &str) -> &str {
+    loop {
+        let trimmed = line.trim_start();
+        let rest = if let Some(rest) = trimmed.strip_prefix('>') {
+            rest
+        } else if let Some(rest) = ["- ", "* ", "+ "]
+            .iter()
+            .find_map(|marker| trimmed.strip_prefix(marker))
+        {
+            rest
+        } else if let Some(rest) = ["[ ] ", "[x] ", "[X] "]
+            .iter()
+            .find_map(|marker| trimmed.strip_prefix(marker))
+        {
+            rest
+        } else {
+            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            match trimmed[digits..]
+                .strip_prefix(". ")
+                .or_else(|| trimmed[digits..].strip_prefix(") "))
+            {
+                Some(rest) if digits > 0 => rest,
+                _ => return trimmed,
+            }
+        };
+        if rest.trim().is_empty() {
+            return trimmed;
+        }
+        line = rest;
+    }
 }
 
 fn clipped_preview(text: &str) -> Range<usize> {
@@ -1015,6 +1050,26 @@ mod tests {
                 assert!(hits.is_empty(), "{text:?}, {query:?}");
             }
         }
+    }
+
+    #[test]
+    fn previews_drop_list_task_and_quote_markers() {
+        for (line, expected) in [
+            ("- API migration", "API migration"),
+            ("  - [ ] Review promo", "Review promo"),
+            ("- [x] Shipped", "Shipped"),
+            ("> - quoted item", "quoted item"),
+            ("12. Numbered", "Numbered"),
+            ("3) Paren", "Paren"),
+            ("-", "-"),
+            ("- [ ]", "[ ]"),
+            ("Plain *emphasis*", "Plain *emphasis*"),
+            ("2026-11-04 notes", "2026-11-04 notes"),
+        ] {
+            assert_eq!(strip_block_markers(line), expected, "{line:?}");
+        }
+        let text = "# Title\n\n- First item\n";
+        assert_eq!(&text[body_line(text)], "First item");
     }
 
     #[test]

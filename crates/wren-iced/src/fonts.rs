@@ -9,12 +9,17 @@ pub const SEMIBOLD: Font = Font {
     weight: iced::font::Weight::Semibold,
     ..UI
 };
+pub const BOLD: Font = Font {
+    weight: iced::font::Weight::Bold,
+    ..UI
+};
 pub const EDITOR: Font = Font::with_name("JetBrains Mono");
 
 pub const FACES: &[&[u8]] = &[
     include_bytes!("../../../third_party/inter/Inter-Regular.ttf"),
     include_bytes!("../../../third_party/inter/Inter-Medium.ttf"),
     include_bytes!("../../../third_party/inter/Inter-SemiBold.ttf"),
+    include_bytes!("../../../third_party/inter/Inter-Bold.ttf"),
     include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Regular.ttf"),
     include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Bold.ttf"),
     include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Italic.ttf"),
@@ -34,7 +39,7 @@ mod tests {
 
     #[test]
     fn bundled_faces_and_redistribution_notices_are_present() {
-        assert_eq!(FACES.len(), 7);
+        assert_eq!(FACES.len(), 8);
         for face in FACES {
             assert!(face.len() > 1000);
             assert_eq!(&face[..4], &[0, 1, 0, 0]);

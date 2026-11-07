@@ -1,7 +1,8 @@
 use iced::widget::{
-    button, column, container, mouse_area, opaque, row, scrollable, stack, text, text_input,
+    button, column, container, mouse_area, opaque, responsive, row, scrollable, stack, text,
+    text_input,
 };
-use iced::{Border, Element, Fill};
+use iced::{Border, Element, Fill, Shrink};
 use wren_core::model::{Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
@@ -13,6 +14,7 @@ use super::{workspace::DialogKind, App, Message};
 use crate::chrome::{self, Icon};
 use crate::drag::RowKind;
 use crate::drag_view::Registry;
+use crate::ellipsis::ellipsis;
 use crate::panes::{self, Layout, Pane};
 use crate::{fonts, theme};
 
@@ -133,21 +135,24 @@ impl App {
             })
             .unwrap_or("Choose workspace");
         let workspace = button(
-            row![
-                chrome::icon(Icon::Folder, 15.0, colors.accent),
-                chrome::label(name, 13, colors.text).font(fonts::SEMIBOLD),
-                chrome::label(
-                    root.map(|root| root.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    11,
-                    colors.muted
-                )
-                .font(fonts::EDITOR),
-                chrome::icon(Icon::Chevron, 14.0, colors.muted)
-            ]
-            .spacing(8)
-            .align_y(iced::Center)
-            .clip(true),
+            container(
+                row![
+                    chrome::icon(Icon::Folder, 15.0, colors.accent),
+                    chrome::label(name, 13, colors.text).font(fonts::SEMIBOLD),
+                    ellipsis(
+                        root.map(display_path).unwrap_or_default(),
+                        11.0,
+                        theme::color(colors.muted)
+                    )
+                    .font(fonts::EDITOR)
+                    .width(Shrink),
+                    chrome::icon(Icon::Chevron, 14.0, colors.muted)
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+                .clip(true),
+            )
+            .center_y(Fill),
         )
         .on_press(Message::Command(Command::Run(CommandId::SwitchWorkspace)))
         .height(32)
@@ -156,7 +161,7 @@ impl App {
         .style(move |_, status| chrome::control(self.definition, status, false, false));
         let mut left = row![
             chrome::icon(Icon::Bird, 18.0, colors.accent),
-            text("Wren").size(14).font(fonts::SEMIBOLD),
+            text("Wren").size(14).font(fonts::BOLD),
             workspace
         ]
         .spacing(10)
@@ -569,12 +574,13 @@ impl App {
                 };
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
                 let sub = format!("{} · {}", modified_label(note), preview);
-                let mut label =
-                    column![chrome::label(&note.title, 13, colors.text).font(fonts::MEDIUM)]
-                        .spacing(3)
-                        .clip(true);
+                let mut label = column![
+                    ellipsis(&note.title, 13.0, theme::color(colors.text)).font(fonts::MEDIUM)
+                ]
+                .spacing(3)
+                .clip(true);
                 if self.filters.notes.trim().is_empty() {
-                    label = label.push(chrome::label(sub, 12, colors.muted));
+                    label = label.push(ellipsis(sub, 12.0, theme::color(colors.muted)));
                 } else {
                     label = label.push(
                         row![
@@ -606,9 +612,12 @@ impl App {
         }
         if hits.is_empty() {
             items = items.push(self.empty_label(if self.filters.notes.is_empty() {
-                "No notes here yet. Press Ctrl+N."
+                self.shortcut_label(CommandId::NewNote.key()).map_or_else(
+                    || "No notes here yet.".to_string(),
+                    |shortcut| format!("No notes here yet. Press {shortcut}."),
+                )
             } else {
-                "No matches."
+                "No matches.".to_string()
             }));
         }
         let parent = self.browser_parent();
@@ -686,12 +695,13 @@ impl App {
                     .color(theme::color(colors.muted)),
             );
         }
-        content = content.push(chrome::label(name, 13, colors.text).width(Fill));
+        content = content.push(ellipsis(name, 13.0, theme::color(colors.text)));
         content = content.push(chrome::label(count.to_string(), 11, colors.muted));
         container(content)
             .id(registry.row(kind))
             .height(36)
             .width(Fill)
+            .align_y(iced::Center)
             .padding([0, 10])
             .clip(true)
             .style(move |_| self.row_style(selected))
@@ -742,13 +752,16 @@ impl App {
             .into()
     }
 
-    fn empty_label<'a>(&'a self, label: &'a str) -> Element<'a, Message> {
+    fn empty_label<'a>(
+        &'a self,
+        label: impl iced::widget::text::IntoFragment<'a>,
+    ) -> Element<'a, Message> {
         container(chrome::label(label, 12, self.definition.colors.muted))
             .padding([10, 6])
             .into()
     }
 
-    fn saved_editor_view(&self) -> Element<'_, Message> {
+    fn editor_header(&self, width: f32) -> Element<'_, Message> {
         let colors = self.definition.colors;
         let mut crumbs = row![].spacing(6).align_y(iced::Center).clip(true);
         for (id, icon) in [
@@ -766,31 +779,41 @@ impl App {
                     .style(move |_, status| chrome::control(self.definition, status, false, true)),
             );
         }
+        // Narrow editors keep the note title and actions; the parents and
+        // the edited time go first.
+        let roomy = width >= 560.0;
         if let Some(section) = self
             .selected_section
             .and_then(|id| self.model()?.section(id))
+            .filter(|_| width >= 420.0)
         {
             crumbs = crumbs
-                .push(chrome::label(&section.name, 12, colors.muted))
+                .push(ellipsis(&section.name, 12.0, theme::color(colors.muted)).width(Shrink))
                 .push(chrome::label("›", 12, colors.faint));
         }
-        if let Some(group) = self.selected_group.and_then(|id| self.model()?.group(id)) {
+        if let Some(group) = self
+            .selected_group
+            .and_then(|id| self.model()?.group(id))
+            .filter(|_| width >= 420.0)
+        {
             crumbs = crumbs
-                .push(chrome::label(&group.name, 12, colors.muted))
+                .push(ellipsis(&group.name, 12.0, theme::color(colors.muted)).width(Shrink))
                 .push(chrome::label("›", 12, colors.faint));
         }
         let note = self.selected_note.and_then(|id| self.model()?.note(id));
         crumbs = crumbs.push(
-            chrome::label(
+            ellipsis(
                 note.map_or("No note selected", |note| note.title.as_str()),
-                12,
-                colors.text,
+                12.0,
+                theme::color(colors.text),
             )
-            .font(fonts::SEMIBOLD),
+            .font(fonts::SEMIBOLD)
+            .width(Shrink),
         );
         let actions = row![
             chrome::label(
-                note.map(|note| format!("Edited {}", modified_label(note)))
+                note.filter(|_| roomy)
+                    .map(|note| format!("Edited {}", modified_label(note)))
                     .unwrap_or_default(),
                 12,
                 colors.muted
@@ -811,15 +834,19 @@ impl App {
         .spacing(8)
         .align_y(iced::Center)
         .clip(true);
+        row![crumbs.width(Fill), actions]
+            .spacing(8)
+            .align_y(iced::Center)
+            .clip(true)
+            .into()
+    }
+
+    fn saved_editor_view(&self) -> Element<'_, Message> {
+        let colors = self.definition.colors;
         let header = chrome::bottom_rule(
-            container(
-                row![crumbs.width(Fill), actions]
-                    .spacing(8)
-                    .align_y(iced::Center)
-                    .clip(true),
-            )
-            .height(49)
-            .padding([10, 16]),
+            container(responsive(move |size| self.editor_header(size.width)))
+                .height(49)
+                .padding([10, 16]),
             self.definition,
         );
         let find = container(
@@ -912,18 +939,37 @@ impl App {
         } else {
             stack![editor].into()
         };
+        column![
+            header,
+            find,
+            document,
+            chrome::top_rule(
+                container(responsive(move |size| self.editor_footer(size.width)))
+                    .height(29)
+                    .padding([6, 16]),
+                self.definition
+            )
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    }
+
+    fn editor_footer(&self, width: f32) -> Element<'_, Message> {
+        let colors = self.definition.colors;
         let (status, status_color) = self.save_status();
         let cursor = self.editor.cursor();
+        let stats = if width >= 440.0 {
+            format!(
+                "Markdown · {} lines · {} words",
+                self.editor.line_count(),
+                self.words
+            )
+        } else {
+            String::new()
+        };
         let mut footer = row![
-            chrome::label(
-                format!(
-                    "Markdown · {} lines · {} words",
-                    self.editor.line_count(),
-                    self.words
-                ),
-                11,
-                colors.muted
-            ),
+            chrome::label(stats, 11, colors.muted),
             iced::widget::space::horizontal(),
             chrome::label(
                 format!(
@@ -947,15 +993,7 @@ impl App {
         }) {
             footer = footer.push(self.small_button("Retry save", Message::Core(Op::Flush)));
         }
-        column![
-            header,
-            find,
-            document,
-            chrome::top_rule(container(footer).padding([6, 16]), self.definition)
-        ]
-        .width(Fill)
-        .height(Fill)
-        .into()
+        footer.into()
     }
 
     fn small_button<'a>(&'a self, label: &'a str, message: Message) -> button::Button<'a, Message> {
@@ -1068,5 +1106,18 @@ fn modified_label(note: &Note) -> String {
         format!("{} h ago", seconds / 3600)
     } else {
         format!("{} d ago", seconds / 86400)
+    }
+}
+
+/// A workspace root for display, with the home directory shown as `~`.
+fn display_path(root: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home
+        .as_deref()
+        .and_then(|home| root.strip_prefix(home).ok())
+    {
+        Some(relative) if relative.as_os_str().is_empty() => "~".into(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => root.display().to_string(),
     }
 }

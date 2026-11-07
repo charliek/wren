@@ -4,6 +4,7 @@ mod cli;
 mod drag;
 mod drag_view;
 mod editor_view;
+mod ellipsis;
 mod fonts;
 mod keys;
 #[cfg(target_os = "macos")]

@@ -829,7 +829,8 @@ fn draw_preview<R: text::Renderer<Font = Font>>(
         width,
         height,
     };
-    quad(renderer, ghost, color(colors.raised), Some(accent));
+    // The mockup's ghost card uses the selected-row fill with an accent border.
+    quad(renderer, ghost, color(colors.selected), Some(accent));
     label(
         renderer,
         catalog.label(preview.source).to_owned(),
