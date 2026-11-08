@@ -29,7 +29,10 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Me
         Icon::Forward => "<path d='m10 6 6 6-6 6'/>",
         Icon::More => "<circle cx='5' cy='12' r='1'/><circle cx='12' cy='12' r='1'/><circle cx='19' cy='12' r='1'/>",
     };
-    let source = format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#{:02x}{:02x}{:02x}' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>{paths}</svg>", tint.0, tint.1, tint.2);
+    // Keep strokes about 1.4 px on screen: at 14 px a 1.8-unit stroke
+    // rasterizes to one faint pixel on dark themes.
+    let stroke = (24.0 * 1.4 / size).max(1.8);
+    let source = format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#{:02x}{:02x}{:02x}' stroke-width='{stroke:.2}' stroke-linecap='round' stroke-linejoin='round'>{paths}</svg>", tint.0, tint.1, tint.2);
     svg(svg::Handle::from_memory(source.into_bytes()))
         .width(size)
         .height(size)
