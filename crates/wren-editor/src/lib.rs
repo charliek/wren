@@ -236,7 +236,7 @@ impl EditorView {
         for replace in order.iter().rev() {
             let ending = self
                 .content
-                .with_lines(|lines| edit::split_ending(lines, replace.start, replace.end));
+                .with_lines(|lines| edit::split_ending(lines, replace.end));
             let text = edit::with_breaks(&replace.text, ending);
             self.content
                 .replace_range(replace.start, replace.end, &text);
@@ -557,14 +557,9 @@ impl EditorView {
         let ending = || {
             let cursor = self.content.cursor();
             let anchor = cursor.selection.unwrap_or(cursor.position);
-            let (start, end) =
-                if (anchor.line, anchor.column) < (cursor.position.line, cursor.position.column) {
-                    (anchor, cursor.position)
-                } else {
-                    (cursor.position, anchor)
-                };
+            let end = std::cmp::max_by_key(anchor, cursor.position, |at| (at.line, at.column));
             self.content
-                .with_lines(|lines| edit::split_ending(lines, start, end))
+                .with_lines(|lines| edit::split_ending(lines, end))
         };
         match action {
             Action::Edit(Edit::Enter | Edit::Insert('\n')) => match ending() {
@@ -2068,6 +2063,33 @@ mod tests {
             let mut ev = editor("");
             assert!(ev.perform(Action::Edit(Edit::Enter)));
             assert_eq!(ev.text(), "\n");
+        }
+
+        #[test]
+        fn edits_over_the_whole_note_keep_its_ending() {
+            for e in ENDINGS {
+                let original = format!("one{e}two{e}three");
+                let mut ev = editor(&original);
+                ev.perform(Action::SelectAll);
+                assert!(ev.perform(Action::Edit(Edit::Paste(Arc::new("x\r\ny\nz".into())))));
+                assert_eq!(ev.text(), format!("x{e}y{e}z"), "{e:?}");
+
+                let mut ev = editor(&original);
+                ev.perform(Action::SelectAll);
+                assert!(ev.perform(Action::Edit(Edit::Enter)));
+                assert_eq!(ev.text(), e, "{e:?}");
+
+                let mut ev = editor(&original);
+                let whole = Replace {
+                    start: pos(0, 1),
+                    end: pos(2, 1),
+                    text: "X\nY".into(),
+                };
+                assert!(ev.apply(&[whole], super::at(1, 1)));
+                assert_eq!(ev.text(), format!("oX{e}Yhree"), "{e:?}");
+                assert!(ev.undo());
+                assert_eq!(ev.text(), original);
+            }
         }
 
         #[test]

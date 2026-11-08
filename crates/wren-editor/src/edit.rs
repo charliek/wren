@@ -57,10 +57,11 @@ fn addressable(lines: Lines<'_>, position: Position) -> bool {
     })
 }
 
-/// The ending for a line break inserted in place of `start..end`: that of
-/// the line being split, which after the deletion carries `end`'s ending.
-/// The last line has none, so it borrows the line above's, else LF.
-pub(crate) fn split_ending(lines: Lines<'_>, start: Position, end: Position) -> LineEnding {
+/// The ending for a line break inserted in place of a range ending at `end`:
+/// that of the line being split, which after the deletion carries `end`'s
+/// ending. The last line has none, so it borrows the line above `end`'s,
+/// even when that line is deleted too (Select All), else LF.
+pub(crate) fn split_ending(lines: Lines<'_>, end: Position) -> LineEnding {
     let own = |line: usize| {
         lines
             .get(line)
@@ -68,7 +69,7 @@ pub(crate) fn split_ending(lines: Lines<'_>, start: Position, end: Position) -> 
             .filter(|ending| *ending != LineEnding::None)
     };
     own(end.line)
-        .or_else(|| start.line.checked_sub(1).and_then(own))
+        .or_else(|| end.line.checked_sub(1).and_then(own))
         .unwrap_or(LineEnding::Lf)
 }
 
@@ -120,17 +121,20 @@ mod tests {
         for kind in BackendKind::ALL {
             let content = Content::new(kind, "a\r\nb\nc\rlast");
             content.with_lines(|lines| {
-                assert_eq!(split_ending(lines, at(0, 1), at(0, 1)), LineEnding::CrLf);
-                assert_eq!(split_ending(lines, at(0, 1), at(1, 0)), LineEnding::Lf);
-                assert_eq!(split_ending(lines, at(2, 0), at(2, 1)), LineEnding::Cr);
-                // The last line has no ending of its own.
-                assert_eq!(split_ending(lines, at(3, 2), at(3, 4)), LineEnding::Cr);
-                assert_eq!(split_ending(lines, at(1, 0), at(3, 4)), LineEnding::CrLf);
-                assert_eq!(split_ending(lines, at(0, 0), at(3, 0)), LineEnding::Lf);
+                assert_eq!(split_ending(lines, at(0, 1)), LineEnding::CrLf);
+                assert_eq!(split_ending(lines, at(1, 0)), LineEnding::Lf);
+                assert_eq!(split_ending(lines, at(2, 1)), LineEnding::Cr);
+                // The last line has no ending of its own, so it borrows the
+                // one above, whatever the edit starts on.
+                assert_eq!(split_ending(lines, at(3, 4)), LineEnding::Cr);
+                assert_eq!(split_ending(lines, at(3, 0)), LineEnding::Cr);
+            });
+            Content::new(kind, "one\r\ntwo").with_lines(|lines| {
+                assert_eq!(split_ending(lines, at(1, 3)), LineEnding::CrLf);
             });
             for text in ["", "one line"] {
                 Content::new(kind, text).with_lines(|lines| {
-                    assert_eq!(split_ending(lines, at(0, 0), at(0, 0)), LineEnding::Lf);
+                    assert_eq!(split_ending(lines, at(0, 0)), LineEnding::Lf);
                 });
             }
         }
