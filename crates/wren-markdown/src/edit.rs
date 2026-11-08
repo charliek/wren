@@ -2075,6 +2075,192 @@ mod tests {
         assert_eq!(docs, 2000);
     }
 
+    /// A small deterministic generator (xorshift64*), so failures replay.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len())]
+        }
+    }
+
+    /// Check a plan's contract: edits in bounds, on character boundaries,
+    /// in order and apart, with `'\n'` as the only line break, and a
+    /// selection that is valid in the edited text.
+    fn assert_valid(doc: &Document, plan: &EditPlan, what: &str) {
+        let mut previous: Option<&Replace> = None;
+        for edit in &plan.edits {
+            assert!(edit.start <= edit.end, "{what}: {edit:?} is backwards");
+            for p in [edit.start, edit.end] {
+                assert!(
+                    p.line < doc.line_count(),
+                    "{what}: {edit:?} is past the end"
+                );
+                let line = doc.line(p.line);
+                assert!(
+                    p.col <= line.len() && line.is_char_boundary(p.col),
+                    "{what}: {edit:?} splits {line:?}"
+                );
+            }
+            assert!(!edit.text.contains('\r'), "{what}: {edit:?} writes a CR");
+            if let Some(prev) = previous {
+                assert!(
+                    prev.end <= edit.start,
+                    "{what}: {prev:?} and {edit:?} overlap"
+                );
+            }
+            previous = Some(edit);
+        }
+        // Applied to lines, as an editor's buffer holds them: re-reading a
+        // mixed-ending string could merge an LF and a CR around an emptied
+        // line into one LF-CR ending.
+        let mut lines: Vec<String> = (0..doc.line_count())
+            .map(|i| doc.line(i).to_owned())
+            .collect();
+        for edit in plan.edits.iter().rev() {
+            let joined = format!(
+                "{}{}{}",
+                &lines[edit.start.line][..edit.start.col],
+                edit.text,
+                &lines[edit.end.line][edit.end.col..]
+            );
+            lines.splice(
+                edit.start.line..=edit.end.line,
+                joined.split('\n').map(str::to_owned),
+            );
+        }
+        for p in [plan.selection.anchor, plan.selection.head] {
+            assert!(
+                p.line < lines.len(),
+                "{what}: selection {p:?} is past the end of {lines:?}"
+            );
+            let line = &lines[p.line];
+            assert!(
+                p.col <= line.len() && line.is_char_boundary(p.col),
+                "{what}: selection {p:?} splits {line:?} in {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn random_documents_and_intents_plan_valid_edits() {
+        const LINES: [&str; 40] = [
+            "",
+            " ",
+            "  ",
+            "\t",
+            "- a",
+            "- ",
+            "-",
+            "  - b",
+            "    - c",
+            "\t- t",
+            "* s",
+            "+ p",
+            "1. x",
+            "2. y",
+            "10. z",
+            "09. pad",
+            "1) paren",
+            "- [ ] t",
+            "- [x] d",
+            "1. [X] o",
+            "> q",
+            ">",
+            "> - w",
+            "> > n",
+            ">   c",
+            "```",
+            "~~~",
+            "    code",
+            "Para",
+            "lazy text",
+            "---",
+            "===",
+            "# h",
+            "## T ##",
+            "<div>",
+            "<!-- c -->",
+            "title: x",
+            "é ü 日本",
+            "e\u{301}👨\u{200d}👩\u{200d}👧",
+            "**b** *i* `c`",
+        ];
+        const ENDINGS: [&str; 4] = ["\n", "\r\n", "\r", "\n\r"];
+        let intents = [
+            Intent::Enter,
+            Intent::ShiftEnter,
+            Intent::Tab,
+            Intent::ShiftTab,
+            Intent::Backspace,
+            Intent::Delete,
+            Intent::DeleteWordBackward,
+            Intent::DeleteWordForward,
+            Intent::DeleteToTextStart,
+            Intent::Home { extend: false },
+            Intent::Home { extend: true },
+            Intent::DocumentStart { extend: true },
+            Intent::DocumentEnd { extend: false },
+            Intent::ToggleTask,
+            Intent::Bold,
+            Intent::Italic,
+            Intent::Code,
+            Intent::MoveLineUp,
+            Intent::MoveLineDown,
+        ];
+        let mut rng = Rng(0x5eed_0f3a_3d1e_5700);
+        for case in 0..30_000 {
+            let mut text = String::new();
+            if rng.below(8) == 0 {
+                text.push('\u{feff}');
+            }
+            let count = 1 + rng.below(7);
+            for i in 0..count {
+                if i > 0 {
+                    text.push_str(rng.pick(&ENDINGS));
+                }
+                text.push_str(rng.pick(&LINES));
+            }
+            if rng.below(3) == 0 {
+                text.push_str(rng.pick(&ENDINGS));
+            }
+            let doc = Document::new(&text);
+            // Positions may be off the document or inside a character; the
+            // planner clamps them.
+            let pos = |rng: &mut Rng| {
+                let line = rng.below(doc.line_count() + 1);
+                let len = doc.line(line.min(doc.line_count() - 1)).len();
+                Pos::new(line, rng.below(len + 2))
+            };
+            let head = pos(&mut rng);
+            let anchor = if rng.below(2) == 0 {
+                head
+            } else {
+                pos(&mut rng)
+            };
+            let sel = Selection::new(anchor, head);
+            let intent = *rng.pick(&intents);
+            let opts = Options {
+                indent_width: *rng.pick(&[2, 4]),
+                renumber: rng.below(5) != 0,
+            };
+            let what = format!("case {case}: {intent:?} at {sel:?} in {text:?}");
+            let plan = plan(&doc, sel, intent, &opts);
+            assert_valid(&doc, &plan, &what);
+        }
+    }
+
     #[test]
     #[ignore = "micro benchmark; run with --release --ignored --nocapture"]
     fn benchmark_enter_in_5000_lines() {

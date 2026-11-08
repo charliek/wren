@@ -438,6 +438,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
   - HTML;
   - tab indent units;
   - multi-cursor cases (dropped).
+- A seeded random test plans every intent at random selections (some off the document or inside a character) in 30,000 small generated documents with mixed endings and a BOM. It checks that edits are in bounds, on character boundaries, in order, and apart, that they write only `\n`, and that the selection is valid in the edited lines.
 
 **`wren-editor`:**
 - The existing `editor_view` and widget tests run against `Backend::ALL`.
