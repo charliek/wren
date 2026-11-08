@@ -443,6 +443,12 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - **wren-26's second editor commit also comes across.** Milestone 5 absorbs `e17c877` along with `df7a6c1`: H2 uses `heading2`, done and struck text use `completed`, and the selection uses `text_selection`. Theme side `516231c` changes the Wren Light accent to `#a14808`; when merging `test_editor.py`, keep our engine parametrization and their light tuple `(0xA1, 0x48, 0x08)`. Default pane widths now live in `workspace_state.rs` (`PANE_WIDTHS`, used by `Op::ResetWidths`).
 - **Notify wren-26** whenever `editor_colors`, `Palette`, `Style`, or the highlight test in `test_editor.py` changes.
 
+**Design review round 2** (P1, widget and highlighter):
+- **Selected newlines.** Each selected newline and each selected empty line gets a selection cell about one character wide, so a selection across blank lines reads as one block.
+- **Link destinations.** In `[text](url)` the URL uses `completed`; brackets and parens stay `faint`.
+- **Links in done tasks.** Link text on a done-task line keeps the `link` color, and the strike is still drawn.
+- **Inline code chip** (optional). A `code_block` background behind inline code spans, with about 2 px padding.
+
 **Design-review defaults** for the P1 visual items:
 
 | Item | Default |
