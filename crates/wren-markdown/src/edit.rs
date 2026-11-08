@@ -325,7 +325,18 @@ fn empty_item(
             return done;
         }
     }
-    let caret = exit(d, an, ctx, ctx.outer(slot));
+    let outer = ctx.outer(slot);
+    let caret = exit(d, an, ctx, outer.clone());
+    // Text right below would otherwise run into what is typed here: a
+    // following `2.` cannot interrupt a paragraph, so it would become
+    // paragraph text too.
+    let text_below = an
+        .recs
+        .get(ctx.l + 1)
+        .is_some_and(|rec| rec.info.kind != Kind::Blank);
+    if text_below {
+        d.insert(caret.line + 1, trim_ws_end(&outer).to_owned());
+    }
     let mut requests = Vec::new();
     if let Marker::Ordered {
         number, delimiter, ..
@@ -1713,8 +1724,28 @@ mod tests {
                 ("# T\n- |", "# T\n|"),
                 ("> a\n>\n> |", "> a\n>\n|"),
                 ("- a\n  > |", "- a\n\n  |"),
+                ("- a\n- |\n- c", "- a\n\n|\n\n- c"),
+                ("- |\n- c", "|\n\n- c"),
+                ("> - a\n> - |\n> - c", "> - a\n>\n> |\n>\n> - c"),
+                ("- a\n- |\ntext", "- a\n\n|\n\ntext"),
+                ("- a\n- |\n\n- c", "- a\n\n|\n\n- c"),
             ],
         );
+    }
+
+    #[test]
+    fn text_typed_after_an_exit_leaves_the_rest_of_the_list_a_list() {
+        for before in ["1. a\n2. |\n3. c", "- a\n- |\n- c", "1. a\n2. |\n3) c"] {
+            let (text, sel) = parse(before);
+            let doc = Document::new(&text);
+            let exited = plan(&doc, sel, Intent::Enter, &Options::default());
+            let mut after = apply(&doc, &exited);
+            let caret = Document::new(&after).offset(exited.selection.head);
+            after.insert_str(caret, "foo");
+            let infos = block::scan(&Document::new(&after));
+            let last = infos.last().expect("a document has a line");
+            assert!(last.item.is_some(), "{before:?} became {after:?}");
+        }
     }
 
     #[test]
@@ -1864,8 +1895,8 @@ mod tests {
                 ("3. a|\n1. b", "3. a\n4. |\n1. b"),
                 ("1. a|\n2. b\n7. c", "1. a\n2. |\n3. b\n7. c"),
                 ("1. a\n   1. x|\n   5. y", "1. a\n   1. x\n   2. |\n   5. y"),
-                ("1. a\n2. |\n3. b", "1. a\n\n|\n2. b"),
-                ("1. |\n2. b", "|\n1. b"),
+                ("1. a\n2. |\n3. b", "1. a\n\n|\n\n2. b"),
+                ("1. |\n2. b", "|\n\n1. b"),
                 ("1. a\n   1. b\n   2. |\n2. c", "1. a\n   1. b\n2. |\n3. c"),
                 (
                     "1. a\n   1. b\n   2. |\n   3. c",
@@ -1887,7 +1918,7 @@ mod tests {
                 ("1. a|\n1. b", "1. a\n1. |\n1. b"),
                 ("1. a\n1. b|", "1. a\n1. b\n1. |"),
                 ("1. a\n1. |", "1. a\n\n|"),
-                ("1. a\n1. |\n1. b", "1. a\n\n|\n1. b"),
+                ("1. a\n1. |\n1. b", "1. a\n\n|\n\n1. b"),
                 ("1. a\n1. |x", "1. a\n1.\n1. |x"),
                 ("1. a\n   - |\n1. b", "1. a\n1. |\n1. b"),
             ],
@@ -1906,7 +1937,7 @@ mod tests {
                     "98. a|\n99. b\n    c\n\n    d",
                     "98. a\n99. |\n100. b\n     c\n\n     d",
                 ),
-                ("8. a\n9. |\n10. b\n    - c", "8. a\n\n|\n9. b\n   - c"),
+                ("8. a\n9. |\n10. b\n    - c", "8. a\n\n|\n\n9. b\n   - c"),
                 (
                     "> 8. a|\n> 9. b\n>    c",
                     "> 8. a\n> 9. |\n> 10. b\n>     c",
@@ -1928,7 +1959,7 @@ mod tests {
             &opts,
             &[
                 ("1. a|\n2. b", "1. a\n2. |\n2. b"),
-                ("1. a\n2. |\n3. b", "1. a\n\n|\n3. b"),
+                ("1. a\n2. |\n3. b", "1. a\n\n|\n\n3. b"),
             ],
         );
     }

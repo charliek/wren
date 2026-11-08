@@ -273,6 +273,15 @@ At the outermost level the marker is removed. **After a paragraph line a blank l
 | `> > a⏎> > \|` | `> > a⏎>⏎> \|` |
 | `> - \|` | `> \|` |
 
+**When text follows on the next line, a blank line is left below the cursor as well**, so the item that follows does not run into what is typed. An ordered item other than 1 cannot interrupt a paragraph, so without the gap `1. a⏎⏎foo⏎2. c` would read `2. c` as paragraph text. The rest of the list is still renumbered (§5.6):
+
+| Before | After |
+|---|---|
+| `1. a⏎2. \|⏎3. c` | `1. a⏎⏎\|⏎⏎2. c` |
+| `- a⏎- \|⏎- c` | `- a⏎⏎\|⏎⏎- c` |
+| `> - a⏎> - \|⏎> - c` | `> - a⏎>⏎> \|⏎>⏎> - c` |
+| `1. \|⏎2. b` (first line) | `\|⏎⏎1. b` |
+
 ### 5.3 Shift+Enter
 
 Shift+Enter breaks the line inside the item: the container prefix, then indent to the content column, with no marker and no task box. It never exits.
