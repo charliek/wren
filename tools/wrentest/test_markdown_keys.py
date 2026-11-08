@@ -135,6 +135,25 @@ def test_backspace_removes_markup_then_whole_characters(keys_app) -> None:
         assert editor.press("delete_to_line_start")["text"] == ""
 
 
+def test_word_deletes_take_one_group_and_undo_restores_it(keys_app) -> None:
+    cases = [
+        ("delete_word_back", "foo!!", 5, "foo", 3),
+        ("delete_word_back", "**bold**", 8, "**bold", 6),
+        ("delete_word_back", "- [ ] ", 6, "- [ ", 4),
+        ("delete_word_back", "ok👍👍", len("ok👍👍".encode()), "ok", 2),
+        ("delete_word_back", "日本語のテキスト", len("日本語のテキスト".encode()), "", 0),
+        ("delete_word_forward", "!!foo", 0, "foo", 0),
+    ]
+    with keys_app("keys-word-delete") as app:
+        editor = Editor(app)
+        for intent, before, column, after, at in cases:
+            editor.load(before, 0, column)
+            state = editor.press(intent)
+            assert (state["text"], cursor(state)) == (after, (0, at)), (intent, before)
+            state = editor.call("editor.undo")
+            assert (state["text"], cursor(state)) == (before, (0, column)), (intent, before)
+
+
 def test_home_toggles_between_the_text_and_column_0(keys_app) -> None:
     with keys_app("keys-home") as app:
         editor = Editor(app)
@@ -275,6 +294,14 @@ def test_native_smart_keys(keys_app) -> None:
         native_text(app, "- a\n- ", "BackSpace deletes a selection")
         key("BackSpace")
         native_text(app, "- a\n  ", "BackSpace turns the marker into indentation")
+
+        call("editor.set", {"text": "foo **bold**!!"})
+        key("ctrl+End", "ctrl+BackSpace")
+        native_text(app, "foo **bold", "ctrl+BackSpace takes one run of punctuation")
+        key("alt+BackSpace")
+        native_text(app, "foo **", "alt+BackSpace takes one word")
+        key("ctrl+z")
+        native_text(app, "foo **bold", "ctrl+z restores the word")
 
 
 @pytest.mark.native_x11
