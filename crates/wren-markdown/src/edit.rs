@@ -699,18 +699,19 @@ fn renumber_runs(d: &mut Draft, runs: &[Run], was: &[Option<u32>], marks: &mut S
     }
     for (first, slot) in found {
         let start = was.get(first).copied().flatten();
-        renumber_from(d, first, slot, start, marks);
+        renumber_from(d, first, slot, start, true, marks);
     }
 }
 
 /// Number the run whose first item line `first` opens at `slot`
-/// consecutively from `start` (or that item's own number), unless the list
-/// numbers every item the same.
+/// consecutively from `start` (or that item's own number), unless
+/// `keep_same` is set and the list numbers every item the same.
 fn renumber_from(
     d: &mut Draft,
     first: usize,
     slot: usize,
     start: Option<u32>,
+    keep_same: bool,
     marks: &mut Selection,
 ) {
     let an = Analysis::new(&*d, None);
@@ -720,7 +721,7 @@ fn renumber_from(
     let Marker::Ordered { number, .. } = head.marker else {
         return;
     };
-    if all_same(&an, first, slot, &head) {
+    if keep_same && all_same(&an, first, slot, &head) {
         return;
     }
     let mut next = start.unwrap_or(number);

@@ -69,9 +69,39 @@ pub(super) fn move_lines<L: Lines + ?Sized>(
                 _ => None,
             })
             .collect();
-        let runs: Vec<Run> = (lo.saturating_sub(1)..=(hi + 1).min(count - 1))
-            .map(|line| Run { line, slot: None })
-            .collect();
+        let near = lo.saturating_sub(1)..=(hi + 1).min(count - 1);
+        // A run whose first line moved counts from that line's number,
+        // which goes to the item of the same run that took its place. It
+        // goes in before the rescan, because under a paragraph line an item
+        // that is not 1 reads as paragraph text, and the run is then
+        // renumbered even though its first two numbers now match.
+        let mut heads: Vec<(usize, usize, u32)> = Vec::new();
+        for line in near.clone() {
+            let Some(slot) = an.item_slot(line) else {
+                continue;
+            };
+            let Some(first) = an.run_start(line, slot) else {
+                continue;
+            };
+            let from = first.checked_sub(lo).and_then(|k| order.get(k));
+            let Some((&from, n)) = from.zip(was[first]) else {
+                continue;
+            };
+            let same_run =
+                an.item_slot(from) == Some(slot) && an.run_start(from, slot) == Some(first);
+            let numbered_alike = an
+                .item_here(first, slot)
+                .is_some_and(|item| all_same(&an, first, slot, &item));
+            if same_run && !numbered_alike && !heads.iter().any(|h| h.0 == first) {
+                heads.push((first, slot, n));
+            }
+        }
+        for (j, slot, n) in heads {
+            let ws = Analysis::new(&d, None).line_at(j, d.line(j)).ws;
+            set_number(&mut d, j, ws, n, &mut marks);
+            renumber_from(&mut d, j, slot, Some(n), false, &mut marks);
+        }
+        let runs: Vec<Run> = near.map(|line| Run { line, slot: None }).collect();
         renumber_runs(&mut d, &runs, &was, &mut marks);
     }
     finish(base, &d, marks)
@@ -137,6 +167,10 @@ mod tests {
                 ("1. a\n2. b\n# h|", "1. a\n# h|\n2. b"),
                 ("1. a\n1. b|", "1. b|\n1. a"),
                 ("1. a\n   - x|\n2. b", "   - x|\n1. a\n2. b"),
+                ("x\n1. a\n2. b|", "x\n1. b|\n2. a"),
+                ("> x\n> 1. a\n> 2. b|", "> x\n> 1. b|\n> 2. a"),
+                ("x\n1. a\n2. b\n3. c|", "x\n1. a\n2. c|\n3. b"),
+                ("1. a\n   5. x|", "   1. x|\n2. a"),
             ],
         );
         check(
@@ -144,6 +178,7 @@ mod tests {
             &[
                 ("1. a|\n2. b\n3. c", "1. b\n2. a|\n3. c"),
                 ("x|\n1. a\n2. b", "1. a\nx|\n2. b"),
+                ("x\n1. a|\n2. b", "x\n1. b\n2. a|"),
             ],
         );
     }
