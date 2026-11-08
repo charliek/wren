@@ -1285,6 +1285,31 @@ mod tests {
             );
             lay_out(&content, &mut highlighter);
             assert_eq!(content.scroll(), away, "{kind:?}");
+
+            // One long wrapped line, scrolled down with the caret at its start.
+            let content = Content::new(kind, &"word ".repeat(400));
+            lay_out(&content, &mut highlighter);
+            scroll_by(&content, &mut highlighter, 10);
+            assert!(content.scroll().vertical > 0.0, "{kind:?}");
+            let mut state = State::new(HighlighterSettings {
+                palette: fixtures::DARK,
+                font: fixtures::FONT,
+                front_matter_end: None,
+            });
+            assert!(
+                take_preedit(&mut state, &content, preedit("に")),
+                "{kind:?}"
+            );
+            lay_out(&content, &mut highlighter);
+            assert_eq!(content.scroll().vertical, 0.0, "{kind:?}");
+            assert_eq!(content.cursor().position.column, 0, "{kind:?}");
+            assert!(
+                matches!(
+                    content.0.borrow().selection(),
+                    Some(Selection::Caret(caret)) if caret == Point::ORIGIN
+                ),
+                "{kind:?}"
+            );
         }
     }
 

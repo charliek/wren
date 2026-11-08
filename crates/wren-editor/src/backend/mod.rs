@@ -470,6 +470,25 @@ mod tests {
             assert_eq!(backend.ime_position(), Some(shown), "{kind:?}");
             assert_eq!(backend.cursor().position.line, 59, "{kind:?}");
         }
+
+        // A caret on the scroll line, in a wrapped row scrolled off above.
+        let text = format!("{}\nend", "word ".repeat(400));
+        for kind in BackendKind::ALL {
+            let (mut backend, mut highlighter) = laid_out(kind, &text, size);
+            backend.perform(Action::Scroll { lines: 10 });
+            update(&mut backend, &mut highlighter, size, fixtures::FONT);
+            let scroll = backend.scroll();
+            assert!(
+                scroll.line == 0 && scroll.vertical > 0.0,
+                "{kind:?}: {scroll:?}"
+            );
+            assert_eq!(backend.cursor().position, Position { line: 0, column: 0 });
+            assert_eq!(
+                backend.ime_position(),
+                Some(Point::ORIGIN),
+                "{kind:?}: above the view"
+            );
+        }
     }
 
     #[test]

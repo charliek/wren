@@ -487,12 +487,17 @@ impl Engine {
         anchor.or_else(|| {
             let cursor = self.editor.cursor();
             let buffer = self.buffer();
-            let x = buffer.lines[cursor.line]
+            let row = buffer.lines[cursor.line]
                 .layout_opt()
-                .and_then(|layout| caret_row(layout, cursor))
-                .map_or(0.0, |(_, x)| x);
+                .and_then(|layout| caret_row(layout, cursor));
+            let x = row.map_or(0.0, |(_, x)| x);
             let line_height = buffer.metrics().line_height;
-            let below = cursor.line >= buffer.scroll().line;
+            let scroll = buffer.scroll();
+            // On the scroll line itself, a wrapped row may be scrolled off
+            // above the view.
+            let below = cursor.line > scroll.line
+                || (cursor.line == scroll.line
+                    && row.is_none_or(|(row, _)| row as f32 * line_height >= scroll.vertical));
             Some(Point::new(
                 x,
                 if below {
