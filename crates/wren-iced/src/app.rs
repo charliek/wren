@@ -2,13 +2,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::editor_view::{self, EditorView};
 use iced::theme::Mode;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
 use wren_core::model::{GroupId, NoteId, SectionId};
 use wren_core::ops::{Op, Session};
 use wren_core::theme::{self as definitions, Theme};
+use wren_editor::EditorView;
 
 pub use crate::cli::Options;
 use crate::{fonts, theme};
@@ -107,7 +107,7 @@ pub struct App {
 pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
-    Editor(editor_view::Message),
+    Editor(wren_editor::Message),
     Core(Op),
     Command(Command),
     PaletteOpen(palette::Mode),
@@ -514,13 +514,13 @@ impl App {
         Task::none()
     }
 
-    fn edit(&mut self, message: editor_view::Message) -> Task<Message> {
+    fn edit(&mut self, message: wren_editor::Message) -> Task<Message> {
         if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
         }
         let started = Instant::now();
         let changed = match message {
-            editor_view::Message::Action(action) => {
+            wren_editor::Message::Action(action) => {
                 // Scrolling reaches an unfocused editor; anything else means
                 // the editor has the keyboard.
                 if !matches!(action, iced::widget::text_editor::Action::Scroll { .. }) {
@@ -528,9 +528,9 @@ impl App {
                 }
                 self.editor.perform(action)
             }
-            editor_view::Message::Undo => self.editor.undo(),
-            editor_view::Message::Redo => self.editor.redo(),
-            editor_view::Message::Find => {
+            wren_editor::Message::Undo => self.editor.undo(),
+            wren_editor::Message::Redo => self.editor.redo(),
+            wren_editor::Message::Find => {
                 self.editor.break_group();
                 self.find_open = true;
                 return iced::widget::operation::focus("find-query");
@@ -642,7 +642,8 @@ impl App {
                 .padding([8, 16]),
             );
         }
-        body = body.push(self.editor.view(self.definition).map(Message::Editor));
+        let (style, palette) = theme::editor_colors(self.definition);
+        body = body.push(self.editor.view(style, palette).map(Message::Editor));
         let cursor = self.editor.cursor();
         body = body.push(
             container(

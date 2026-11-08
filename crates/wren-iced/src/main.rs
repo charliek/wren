@@ -3,7 +3,6 @@ mod chrome;
 mod cli;
 mod drag;
 mod drag_view;
-mod editor_view;
 mod ellipsis;
 mod fonts;
 mod keys;

@@ -51,12 +51,12 @@ use iced::widget::text_editor::{
     Action, Binding, Cursor, Edit, KeyPress, Line, LineEnding, Position, Selection, Status,
 };
 use iced::{
-    alignment, window, Color, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer,
-    Size, Theme, Vector,
+    alignment, window, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size,
+    Theme, Vector,
 };
 
-use super::markdown_highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
-use super::Message;
+use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 24.0;
@@ -111,22 +111,6 @@ impl Default for Metrics {
 #[cfg(test)]
 fn line_height() -> LineHeight {
     Metrics::default().line_height()
-}
-
-// ---------------------------------------------------------------------------
-// Style
-// ---------------------------------------------------------------------------
-
-/// Colours of the editor surface.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Style {
-    pub background: Color,
-    pub value: Color,
-    pub selection: Color,
-    pub gutter: Color,
-    pub current_line: Color,
-    pub caret: Color,
-    pub strike: Color,
 }
 
 // ---------------------------------------------------------------------------
@@ -855,7 +839,7 @@ impl Update {
                 } else {
                     Status::Active
                 };
-                super::key_binding(KeyPress {
+                crate::keys::key_binding(KeyPress {
                     key: key.clone(),
                     modified_key: modified_key.clone(),
                     physical_key: *physical_key,
@@ -895,10 +879,9 @@ fn visual_rows(buffer: &cosmic_text::Buffer) -> Vec<VisualRow> {
         return Vec::new();
     };
     // Fence state crosses lines, so scan from the top through the last visible line.
-    let struck: Vec<_> = markdown_highlighter::done_task_ranges(
-        buffer.lines[..=last_line].iter().map(|line| line.text()),
-    )
-    .collect();
+    let struck: Vec<_> =
+        highlighter::done_task_ranges(buffer.lines[..=last_line].iter().map(|line| line.text()))
+            .collect();
 
     runs.iter()
         .map(|run| VisualRow {
@@ -967,8 +950,7 @@ mod tests {
             }
         );
     }
-    use iced::advanced::graphics::text::font_system;
-    use wren_core::theme;
+    use crate::fixtures;
 
     #[test]
     fn continuation_rows_do_not_start_a_line() {
@@ -1002,18 +984,10 @@ mod tests {
     fn padding_reserves_the_gutter_only_when_shown() {
         let content = Content::with_text("");
         let settings = HighlighterSettings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         };
-        let style = Style {
-            background: Color::BLACK,
-            value: Color::WHITE,
-            selection: Color::WHITE,
-            gutter: Color::WHITE,
-            current_line: Color::WHITE,
-            caret: Color::WHITE,
-            strike: Color::WHITE,
-        };
+        let style = fixtures::STYLE;
         let shown =
             TextEditor::new(&content, "e", settings, style, true, Metrics::default()).padding();
         let hidden =
@@ -1023,20 +997,15 @@ mod tests {
     }
 
     fn laid_out(text: &str, width: f32) -> RawEditor {
-        font_system()
-            .write()
-            .expect("font system")
-            .load_font(Cow::Borrowed(include_bytes!(
-                "../../../../third_party/jetbrains-mono/JetBrainsMono-Regular.ttf"
-            )));
+        fixtures::load_font();
         let mut editor = RawEditor::with_text(text);
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         });
         editor.update(
             Size::new(width, 1000.0),
-            crate::fonts::EDITOR,
+            fixtures::FONT,
             Pixels(TEXT_SIZE),
             line_height(),
             Wrapping::WordOrGlyph,

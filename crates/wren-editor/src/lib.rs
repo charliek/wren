@@ -3,27 +3,67 @@
 //! Cursor columns and find ranges use UTF-8 byte offsets. Ordinary interactions
 //! retain the iced Content; snapshot restoration replaces it. Stock iced does
 //! not expose an absolute viewport offset, so undo/redo cannot restore scroll.
+//!
+//! The crate knows nothing about its host: colours arrive as a [`Style`] and a
+//! [`Palette`], and the font through [`EditorView::set_font`].
 
-mod editor_history;
-mod markdown_highlighter;
+mod find;
+mod highlighter;
+mod history;
+mod keys;
 mod widget;
-use std::collections::VecDeque;
+
+#[cfg(test)]
+mod fixtures;
+
 use std::ops::Range;
 use std::time::Instant;
 
-use iced::widget::text_editor::{
-    self, Action, Binding, Cursor, Edit, KeyPress, LineEnding, Motion, Position,
+use iced::widget::text_editor::{self, Action, Cursor, Edit, Motion, Position};
+use iced::{Color, Element, Font};
+
+use find::{
+    byte_offset_to_position, exact_byte_offset_to_position, find_all_matches, first_content_match,
 };
-use iced::Element;
-use wren_core::theme::Theme;
+use highlighter::Settings as HighlighterSettings;
+use history::{EditKind, History};
+use widget::{Content, TextEditor};
 
-use editor_history::{EditKind, History};
-use markdown_highlighter::Settings as HighlighterSettings;
-use widget::{Content, Style, TextEditor};
-use wren_core::theme::Rgb;
+// ---------------------------------------------------------------------------
+// Colours
+// ---------------------------------------------------------------------------
 
-fn color(Rgb(r, g, b): Rgb) -> iced::Color {
-    iced::Color::from_rgb8(r, g, b)
+/// Colours of the editor surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Style {
+    pub background: Color,
+    /// Unhighlighted text.
+    pub value: Color,
+    pub selection: Color,
+    /// Line numbers.
+    pub gutter: Color,
+    /// The band behind the cursor's line.
+    pub current_line: Color,
+    pub caret: Color,
+    /// The line through a completed task.
+    pub strike: Color,
+}
+
+/// Colours of the Markdown syntax highlighting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Palette {
+    /// Heading and emphasis text.
+    pub text: Color,
+    /// Code and blockquotes.
+    pub muted: Color,
+    /// Markup characters, fences, comments, and completed tasks.
+    pub faint: Color,
+    /// The first-level heading, list markers, and links.
+    pub accent: Color,
+    /// Strikethrough.
+    pub danger: Color,
+    /// Inline code.
+    pub success: Color,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +104,7 @@ pub struct EditorView {
     find_current: Option<usize>,
     line_numbers: bool,
     metrics: widget::Metrics,
-    font: iced::Font,
+    font: Font,
 }
 
 impl EditorView {
@@ -78,7 +118,7 @@ impl EditorView {
             find_current: None,
             line_numbers: true,
             metrics: widget::Metrics::default(),
-            font: crate::fonts::EDITOR,
+            font: Font::MONOSPACE,
         }
     }
 
@@ -87,16 +127,18 @@ impl EditorView {
         self.metrics = widget::Metrics::for_size(size);
     }
 
-    pub fn set_font(&mut self, font: iced::Font) {
+    /// The editor font; bold and italic spans use its variants. Defaults to
+    /// [`Font::MONOSPACE`].
+    pub fn set_font(&mut self, font: Font) {
         self.font = font;
     }
 
-    #[cfg(feature = "smoke-test")]
-    pub fn font(&self) -> iced::Font {
+    #[cfg(feature = "test-support")]
+    pub fn font(&self) -> Font {
         self.font
     }
 
-    #[cfg(feature = "smoke-test")]
+    #[cfg(feature = "test-support")]
     pub fn font_size(&self) -> f32 {
         self.metrics.text
     }
@@ -112,20 +154,19 @@ impl EditorView {
 
     /// Build the iced widget tree for the editor.
     ///
-    /// Uses the editor font (bundled JetBrains Mono unless the user picked
-    /// another), 14 px / 24 px line height scaled with the text size,
-    /// soft-wrap, a 52 px line-number gutter unless hidden, and Markdown
-    /// highlighting mapped to `theme` semantic colours.  Returns
+    /// Uses the editor font, 14 px / 24 px line height scaled with the text
+    /// size, soft-wrap, a 52 px line-number gutter unless hidden, `style` for
+    /// the surface, and Markdown highlighting in `palette` colours.  Returns
     /// `Element<'_, Message>` so the parent can map it to its own message type.
-    pub fn view(&self, theme: Theme) -> Element<'_, Message> {
+    pub fn view(&self, style: Style, palette: Palette) -> Element<'_, Message> {
         TextEditor::new(
             &self.content,
             "note-editor",
             HighlighterSettings {
-                theme,
+                palette,
                 font: self.font,
             },
-            editor_style(theme),
+            style,
             self.line_numbers,
             self.metrics,
         )
@@ -215,7 +256,7 @@ impl EditorView {
     }
 
     /// Return the currently selected text, or `None` if there is no selection.
-    #[cfg(any(test, feature = "smoke-test"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn selected_text(&self) -> Option<String> {
         self.content.selection()
     }
@@ -366,13 +407,13 @@ impl EditorView {
     }
 
     /// Whether the undo stack has any entries.
-    #[cfg(any(test, feature = "smoke-test"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
 
     /// Whether the redo stack has any entries.
-    #[cfg(any(test, feature = "smoke-test"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
     }
@@ -450,68 +491,6 @@ impl EditorView {
 }
 
 // ---------------------------------------------------------------------------
-// Key binding
-// ---------------------------------------------------------------------------
-
-/// Custom key-binding handler.  Intercepts Undo, Redo, and Find shortcuts
-/// before delegating to `Binding::from_key_press`.
-///
-/// Shortcuts handled:
-/// - `Ctrl/Cmd+Z` → [`Message::Undo`]
-/// - `Ctrl/Cmd+Shift+Z` → [`Message::Redo`]
-/// - `Ctrl+Y` (non-macOS only) → [`Message::Redo`]
-/// - `Ctrl/Cmd+F` → [`Message::Find`]
-fn key_binding(key_press: KeyPress) -> Option<Binding<Message>> {
-    if !matches!(key_press.status, text_editor::Status::Focused { .. }) {
-        return None;
-    }
-    let m = key_press.modifiers;
-    let key = &key_press.key;
-    let physical = key_press.physical_key;
-
-    // Undo: Ctrl/Cmd + Z (without Shift)
-    if m.command() && !m.shift() && key.to_latin(physical) == Some('z') {
-        return Some(Binding::Custom(Message::Undo));
-    }
-
-    // Redo: Ctrl/Cmd + Shift + Z
-    if m.command() && m.shift() && key.to_latin(physical) == Some('z') {
-        return Some(Binding::Custom(Message::Redo));
-    }
-
-    // Redo: Ctrl + Y (Linux/Windows only — on macOS this key is unused for redo)
-    #[cfg(not(target_os = "macos"))]
-    if m.control() && !m.shift() && !m.alt() && !m.logo() && key.to_latin(physical) == Some('y') {
-        return Some(Binding::Custom(Message::Redo));
-    }
-
-    // Find: Ctrl/Cmd + F
-    if m.command() && !m.shift() && key.to_latin(physical) == Some('f') {
-        return Some(Binding::Custom(Message::Find));
-    }
-
-    // Delegate everything else (insert, copy/paste, motion, etc.) to stock iced.
-    Binding::from_key_press(key_press)
-}
-
-// ---------------------------------------------------------------------------
-// Style
-// ---------------------------------------------------------------------------
-
-fn editor_style(theme: Theme) -> Style {
-    let c = theme.colors;
-    Style {
-        background: color(c.editor),
-        value: color(c.body),
-        selection: color(c.selected),
-        gutter: color(c.faint),
-        current_line: color(c.current_line),
-        caret: color(c.accent),
-        strike: color(c.faint),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Cursor clamping
 // ---------------------------------------------------------------------------
 
@@ -527,7 +506,7 @@ fn clamp_cursor(cursor: Cursor, content: &Content) -> Cursor {
     }
 }
 
-fn clamp_position(pos: Position, content: &Content, line_count: usize) -> Position {
+pub(crate) fn clamp_position(pos: Position, content: &Content, line_count: usize) -> Position {
     let line = pos.line.min(line_count - 1);
     let column = content.line(line).map_or(0, |line| {
         let mut column = pos.column.min(line.text.len());
@@ -555,187 +534,13 @@ fn edit_kind(action: &Action) -> EditKind {
 }
 
 // ---------------------------------------------------------------------------
-// Find: Unicode-safe byte-index search
-// ---------------------------------------------------------------------------
-
-struct FirstLiteral {
-    needle: Vec<char>,
-    prefixes: Vec<usize>,
-    matched: usize,
-    provenance: VecDeque<(usize, usize)>,
-}
-
-impl FirstLiteral {
-    fn new(query: &str) -> Option<Self> {
-        let needle: Vec<_> = query.chars().flat_map(char::to_lowercase).collect();
-        if needle.is_empty() {
-            return None;
-        }
-        let mut prefixes = vec![0; needle.len()];
-        let mut matched = 0;
-        for index in 1..needle.len() {
-            while matched > 0 && needle[index] != needle[matched] {
-                matched = prefixes[matched - 1];
-            }
-            if needle[index] == needle[matched] {
-                matched += 1;
-            }
-            prefixes[index] = matched;
-        }
-        let provenance = VecDeque::with_capacity(needle.len());
-        Some(Self {
-            needle,
-            prefixes,
-            matched: 0,
-            provenance,
-        })
-    }
-
-    fn push(&mut self, byte: usize, character: char) -> Option<Range<usize>> {
-        for lower in character.to_lowercase() {
-            if self.provenance.len() == self.needle.len() {
-                self.provenance.pop_front();
-            }
-            self.provenance
-                .push_back((byte, byte + character.len_utf8()));
-            while self.matched > 0 && self.needle[self.matched] != lower {
-                self.matched = self.prefixes[self.matched - 1];
-            }
-            if self.needle[self.matched] == lower {
-                self.matched += 1;
-            }
-            if self.matched == self.needle.len() {
-                return Some(self.provenance.front()?.0..self.provenance.back()?.1);
-            }
-        }
-        None
-    }
-}
-
-fn first_content_match(content: &Content, query: &str) -> Option<Range<usize>> {
-    let mut matcher = FirstLiteral::new(query)?;
-    let count = content.line_count();
-    let mut base = 0;
-    // Content exposes owned line snapshots, not a borrowed whole buffer. Keep
-    // only the current line and query-sized provenance; stop at the first hit.
-    for (line, text) in content.lines().enumerate() {
-        for (byte, character) in text.text.char_indices() {
-            if let Some(range) = matcher.push(base + byte, character) {
-                return Some(range);
-            }
-        }
-        base += text.text.len();
-        if line + 1 < count {
-            let ending = match text.ending {
-                LineEnding::None => LineEnding::default(),
-                ending => ending,
-            };
-            for (byte, character) in ending.as_str().char_indices() {
-                if let Some(range) = matcher.push(base + byte, character) {
-                    return Some(range);
-                }
-            }
-            base += ending.as_str().len();
-        }
-    }
-    None
-}
-
-/// Return `(byte_start, byte_end)` pairs for all case-insensitive occurrences
-/// of `query` in `text`.
-///
-/// Uses full `char::to_lowercase` expansions, not Unicode case folding or
-/// normalization. Each expanded character maps back to its original UTF-8
-/// character range, so even a partial expansion match selects valid text.
-/// Overlapping matches are included, with duplicate source ranges removed.
-fn find_all_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-
-    let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
-    let text_chars: Vec<(char, usize, usize)> = text
-        .char_indices()
-        .flat_map(|(start, ch)| {
-            ch.to_lowercase()
-                .map(move |lower| (lower, start, start + ch.len_utf8()))
-        })
-        .collect();
-    let mut matches = Vec::new();
-    for window in text_chars.windows(query_chars.len()) {
-        if window
-            .iter()
-            .zip(&query_chars)
-            .all(|((ch, _, _), query)| ch == query)
-        {
-            let range = (window[0].1, window[window.len() - 1].2);
-            if matches.last() != Some(&range) {
-                matches.push(range);
-            }
-        }
-    }
-    matches
-}
-
-fn exact_byte_offset_to_position(content: &Content, mut offset: usize) -> Option<Position> {
-    let count = content.line_count();
-    for (line, text) in content.lines().enumerate() {
-        if offset <= text.text.len() {
-            return text.text.is_char_boundary(offset).then_some(Position {
-                line,
-                column: offset,
-            });
-        }
-        if line + 1 == count {
-            return None;
-        }
-        let ending = match text.ending {
-            LineEnding::None => LineEnding::default(),
-            ending => ending,
-        };
-        let width = text.text.len() + ending.as_str().len();
-        // A cursor cannot represent the gap between CR and LF (or LF and CR).
-        if offset < width {
-            return None;
-        }
-        offset -= width;
-    }
-    None
-}
-
-/// Convert an offset in `Content::text()` to a valid UTF-8 cursor position.
-/// Offsets inside a two-byte line ending snap to the next line's start.
-fn byte_offset_to_position(content: &Content, mut offset: usize) -> Position {
-    let line_count = content.line_count().max(1);
-    for (line, text) in content.lines().enumerate() {
-        if offset <= text.text.len() || line + 1 == line_count {
-            return clamp_position(
-                Position {
-                    line,
-                    column: offset,
-                },
-                content,
-                line_count,
-            );
-        }
-        // Match Content::text's fallback for an unterminated interior line.
-        let ending = match text.ending {
-            LineEnding::None => LineEnding::default(),
-            ending => ending,
-        };
-        offset = offset.saturating_sub(text.text.len() + ending.as_str().len());
-    }
-    Position { line: 0, column: 0 }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wren_core::theme;
+    use crate::fixtures;
 
     // Helper: create an EditorView with pre-loaded text.
     fn editor(text: &str) -> EditorView {
@@ -748,53 +553,6 @@ mod tests {
         for c in s.chars() {
             ev.perform(Action::Edit(Edit::Insert(c)));
         }
-    }
-
-    #[test]
-    fn first_match_stream_agrees_with_literal_find_on_small_unicode_inputs() {
-        for (text, query) in [
-            ("aaaaab", "aaab"),
-            ("abababac", "ababac"),
-            ("İx", "\u{0307}x"),
-            ("prefix 🐦 e\u{0301} CAFÉ", "café"),
-            ("ΟΣ", "σ"),
-            ("ΟΣ", "ς"),
-            ("i\u{0307}", "İ"),
-            ("first\r\nsecond\n\rthird\rlast", "second\n\rthird"),
-            ("no match", "missing"),
-            ("anything", ""),
-        ] {
-            let content = Content::with_text(text);
-            let expected = find_all_matches(text, query)
-                .first()
-                .map(|&(start, end)| start..end);
-            assert_eq!(
-                first_content_match(&content, query),
-                expected,
-                "{text:?}, {query:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn first_match_stream_stops_immediately_and_retains_only_query_sized_provenance() {
-        let mut matcher = FirstLiteral::new("a").unwrap();
-        let mut visited = 0;
-        let range = (0..64 * 1024 * 1024).find_map(|byte| {
-            visited += 1;
-            matcher.push(byte, 'a')
-        });
-        assert_eq!(range, Some(0..1));
-        assert_eq!(visited, 1);
-        assert_eq!(matcher.provenance.len(), 1);
-
-        let mut matcher = FirstLiteral::new("aaaaab").unwrap();
-        for byte in 0..100_000 {
-            assert_eq!(matcher.push(byte, 'a'), None);
-            assert!(matcher.provenance.len() <= matcher.needle.len());
-        }
-        assert_eq!(matcher.push(100_000, 'b'), Some(99_995..100_001));
-        assert_eq!(matcher.provenance.len(), 6);
     }
 
     #[test]
@@ -1593,78 +1351,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn find_all_matches_empty_query() {
-        assert!(find_all_matches("hello", "").is_empty());
-    }
-
-    #[test]
-    fn find_all_matches_no_overlap() {
-        let matches = find_all_matches("aaa", "aa");
-        // "aaa" with query "aa": matches at [0,2) only (no overlapping)
-        // Our implementation advances by 1 so there would be two: [0,2) and [1,3)
-        // This is deliberate — overlapping matches are reported.
-        assert!(!matches.is_empty());
-        // All byte boundaries must be valid UTF-8
-        let text = "aaa";
-        for (s, e) in &matches {
-            assert!(text.is_char_boundary(*s));
-            assert!(text.is_char_boundary(*e));
-        }
-    }
-
-    #[test]
-    fn find_all_matches_emoji() {
-        let text = "👋 hello 👋";
-        let matches = find_all_matches(text, "👋");
-        assert_eq!(matches.len(), 2);
-        // First match: byte 0 to byte 4 ("👋" = 4 bytes)
-        assert_eq!(matches[0], (0, 4));
-        // "👋 hello 👋": 👋(4) + ' '(1) + "hello"(5) + ' '(1) + 👋(4)
-        // Second 👋 starts at byte 11 (4+1+5+1 = 11), ends at 15.
-        assert_eq!(matches[1].0, 11);
-        assert_eq!(matches[1].1, 15);
-    }
-
-    // ── view + theme ──────────────────────────────────────────────────────────
+    // ── view ──────────────────────────────────────────────────────────────────
 
     #[test]
     fn view_does_not_clone_content() {
         // This is a structural test: view() takes &self, so it cannot clone
         // content by moving it. We verify the text is unchanged after view().
         let ev = editor("test content");
-        let _element = ev.view(theme::DARK);
+        let _element = ev.view(fixtures::STYLE, fixtures::DARK);
         // If this compiles and runs without panicking, content was borrowed not moved.
         assert_eq!(ev.text(), "test content");
-    }
-
-    #[test]
-    fn editor_style_has_editor_background() {
-        use wren_core::theme;
-        let style = editor_style(theme::DARK);
-        assert_eq!(style.background, color(theme::DARK.colors.editor));
-    }
-
-    #[test]
-    fn editor_style_text_color_matches_theme() {
-        use wren_core::theme;
-        let dark_style = editor_style(theme::DARK);
-        let light_style = editor_style(theme::LIGHT);
-        assert_ne!(dark_style.value, light_style.value);
-        assert_eq!(dark_style.value, color(theme::DARK.colors.body));
-        assert_eq!(light_style.value, color(theme::LIGHT.colors.body));
-    }
-
-    #[test]
-    fn editor_style_maps_mockup_gutter_line_and_caret_tokens() {
-        use wren_core::theme;
-        for theme in [theme::DARK, theme::LIGHT] {
-            let style = editor_style(theme);
-            assert_eq!(style.gutter, color(theme.colors.faint));
-            assert_eq!(style.current_line, color(theme.colors.current_line));
-            assert_eq!(style.caret, color(theme.colors.accent));
-            assert_eq!(style.strike, color(theme.colors.faint));
-        }
     }
 
     #[test]
@@ -1833,58 +1529,6 @@ mod tests {
         assert_eq!(ev.find_count(), 2);
         ev.find_next();
         assert_eq!(ev.selected_text().as_deref(), Some("İ"));
-    }
-
-    #[test]
-    fn shortcuts_require_editor_focus() {
-        use iced::keyboard::{key, Key, Modifiers};
-        let command = if cfg!(target_os = "macos") {
-            Modifiers::LOGO
-        } else {
-            Modifiers::CTRL
-        };
-        for (letter, physical, shift) in [
-            ("z", key::Code::KeyZ, false),
-            ("z", key::Code::KeyZ, true),
-            ("f", key::Code::KeyF, false),
-            #[cfg(not(target_os = "macos"))]
-            ("y", key::Code::KeyY, false),
-        ] {
-            for status in [
-                text_editor::Status::Active,
-                text_editor::Status::Hovered,
-                text_editor::Status::Disabled,
-            ] {
-                assert!(key_binding(KeyPress {
-                    key: Key::Character(letter.into()),
-                    modified_key: Key::Character(letter.into()),
-                    physical_key: key::Physical::Code(physical),
-                    modifiers: command
-                        | if shift {
-                            Modifiers::SHIFT
-                        } else {
-                            Modifiers::empty()
-                        },
-                    text: None,
-                    status,
-                })
-                .is_none());
-            }
-            let binding = key_binding(KeyPress {
-                key: Key::Character(letter.into()),
-                modified_key: Key::Character(letter.into()),
-                physical_key: key::Physical::Code(physical),
-                modifiers: command
-                    | if shift {
-                        Modifiers::SHIFT
-                    } else {
-                        Modifiers::empty()
-                    },
-                text: None,
-                status: text_editor::Status::Focused { is_hovered: false },
-            });
-            assert!(matches!(binding, Some(Binding::Custom(_))));
-        }
     }
 
     // ── Paste action type ────────────────────────────────────────────────────

@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
-use crate::editor_view;
 use crate::panes::{Pane, PANES};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
@@ -144,11 +143,11 @@ impl App {
             "editor.insert" | "editor.undo" | "editor.redo" => {
                 self.ensure_editor_ready()?;
                 let message = match request.op.as_str() {
-                    "editor.insert" => editor_view::Message::Action(Action::Edit(Edit::Paste(
+                    "editor.insert" => wren_editor::Message::Action(Action::Edit(Edit::Paste(
                         Arc::new(string(params, "text")?.into()),
                     ))),
-                    "editor.undo" => editor_view::Message::Undo,
-                    _ => editor_view::Message::Redo,
+                    "editor.undo" => wren_editor::Message::Undo,
+                    _ => wren_editor::Message::Redo,
                 };
                 let task = self.edit(message);
                 request.respond(Ok(self.editor_snapshot()));
@@ -188,7 +187,7 @@ impl App {
                     }
                     _ => return Err("unknown editor action".into()),
                 };
-                let task = self.edit(editor_view::Message::Action(action));
+                let task = self.edit(wren_editor::Message::Action(action));
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
             }
@@ -1084,7 +1083,7 @@ mod tests {
     #[test]
     fn navigation_adapters_share_the_failed_flush_barrier_and_return_correlated_disposition() {
         let (directory, mut app) = navigation_fixture();
-        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
             Arc::new("dirty ".into()),
         ))));
         let _ = app
@@ -1157,7 +1156,7 @@ mod tests {
     #[test]
     fn fake_picker_adapter_uses_tagged_production_completion_and_cancel_keeps_draft() {
         let (_directory, mut app) = navigation_fixture();
-        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
             Arc::new("draft ".into()),
         ))));
         let pending = app
@@ -1304,7 +1303,7 @@ mod tests {
         app.session = Some(Session::open(directory.path()).unwrap());
         let note = app.session.as_ref().unwrap().model().notes[0].id;
         let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
-        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
             Arc::new("draft ".into()),
         ))));
         let snapshot = app.session_snapshot();
