@@ -44,6 +44,10 @@ palette), it rewrites only that one line.
 | `solarized-light` | Solarized Light | light |
 | `rose-pine` | Rosé Pine | dark |
 | `everforest-dark` | Everforest Dark | dark |
+| `tokyo-night` | Tokyo Night | dark |
+| `dracula` | Dracula | dark |
+| `catppuccin-mocha` | Catppuccin Mocha | dark |
+| `catppuccin-macchiato` | Catppuccin Macchiato | dark |
 
 **Change theme…** in the command palette picks one and saves it as
 `theme = <id>`. To follow the OS appearance with your own pair:

@@ -13,6 +13,18 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **Four more dark themes:** Tokyo Night (`tokyo-night`), Dracula
+  (`dracula`), Catppuccin Mocha (`catppuccin-mocha`) and Catppuccin Macchiato
+  (`catppuccin-macchiato`), each meeting the same 4.5:1 text contrast as the
+  other built-ins.
+
+### Changed
+
+- **Focus mode toggles with ⌘Y on macOS and Alt+Y on Linux**, replacing ⌘\ /
+  Alt+\. A `keybind` line in `config.conf` can still bind it elsewhere.
+
 ## v0.0.2 — 2026-11-07
 
 ### Changed

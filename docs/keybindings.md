@@ -13,7 +13,7 @@ and Ctrl+A keep working in the editor and in every text field.
 | New note | ⌘N | Alt+N | `note.new` |
 | New dated note | ⇧⌘N | Alt+Shift+N | `note.new_dated` |
 | Back / Forward | ⌘[ / ⌘] | Alt+[ / Alt+] | `navigation.back` / `navigation.forward` |
-| Toggle focus mode | ⌘\ | Alt+\ | `view.focus` |
+| Toggle focus mode | ⌘Y | Alt+Y | `view.focus` |
 | Layout: Columns | ⌥⌘1 | Ctrl+Alt+1 | `view.columns` |
 | Layout: Outline | ⌥⌘2 | Ctrl+Alt+2 | `view.outline` |
 | Open settings file | ⌘, | — | `settings.open` |

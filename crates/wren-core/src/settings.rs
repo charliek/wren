@@ -312,7 +312,8 @@ pub const TEMPLATE: &str = "\
 
 # Theme: system, a theme id, or light:<id>,dark:<id>.
 # Built-in themes: wren-dark, wren-light, nord, gruvbox-dark, solarized-light,
-# rose-pine, everforest-dark.
+# rose-pine, everforest-dark, tokyo-night, dracula, catppuccin-mocha,
+# catppuccin-macchiato.
 # theme = system
 
 # Editor text size in points (9–32).

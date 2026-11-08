@@ -29,8 +29,9 @@ only a `.wren/` directory).
   workspace-wide **search** with snippets, and per-pane filters.
 - Move notes and groups by drag and drop or from the palette.
 - Several workspaces, switched from the palette.
-- Seven built-in themes (Wren Dark/Light, Nord, Gruvbox Dark, Solarized
-  Light, Rosé Pine, Everforest Dark), with light/dark following the system.
+- Eleven built-in themes (Wren Dark/Light, Nord, Gruvbox Dark, Solarized
+  Light, Rosé Pine, Everforest Dark, Tokyo Night, Dracula, Catppuccin Mocha
+  and Macchiato), with light/dark following the system.
 - Configurable keybindings and settings in `~/.config/wren/config.conf`.
 
 ## Install

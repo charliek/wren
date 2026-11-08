@@ -155,7 +155,7 @@ Shared rules for both layouts:
   end. The order is stored in `.wren/workspace.toml`, and items missing from
   it fall back to alphabetical order.
 - **Counts** show how many notes are under each section and group.
-- **Focus mode** (`⌘\`): hides every browser pane so only the editor shows
+- **Focus mode** (`⌘Y`): hides every browser pane so only the editor shows
   (text centered, max ~760 px wide). Toggling again restores the previous
   layout and widths.
 - A **dirty / saving / saved** indicator sits at the bottom of the editor.
@@ -289,7 +289,7 @@ New section                  New group                 New note        New dated
 Rename…                      Delete… (to OS trash)     Reveal in Finder/Files
 Move note to…                Move group to…
 Jump to note… (⌘P)           Search workspace… (⌘⇧F)   Find in note (⌘F)
-Back (⌘[)   Forward (⌘])     Toggle focus mode (⌘\)
+Back (⌘[)   Forward (⌘])     Toggle focus mode (⌘Y)
 Layout: Columns (⌘⌥1)        Layout: Outline (⌘⌥2)     Reset column widths
 Sort notes: modified / title
 ```

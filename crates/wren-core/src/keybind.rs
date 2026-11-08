@@ -222,7 +222,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{p}+shift+n"), "note.new_dated"),
         (format!("{p}+bracketleft"), "navigation.back"),
         (format!("{p}+bracketright"), "navigation.forward"),
-        (format!("{p}+backslash"), "view.focus"),
+        (format!("{p}+y"), "view.focus"),
     ];
     match platform {
         Platform::Mac => bindings.extend([
