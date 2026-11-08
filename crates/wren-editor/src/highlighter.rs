@@ -17,12 +17,13 @@
 //!   - List markers and open task boxes: accent colour.
 //!   - Completed tasks: faint markers and `completed` text, struck through.
 //!   - Thematic breaks, setext underlines, and HTML blocks: faint.
-//!   - Inline code spans (`` `...` ``): `code` colour.
+//!   - Inline code spans (`` `...` ``): `code` colour on a code chip.
 //!   - Bold (`**...**`, `__...__`) and italic (`*...*`, `_..._`): the font's
 //!     bold and italic faces, markers included in faint.
 //!   - Strikethrough (`~~...~~`): faint tildes, `completed` text, struck.
 //!   - Links (`[text](url)`, `[text][ref]`, bare `http(s)://` URLs): `link`
-//!     text, faint brackets and destination.
+//!     text, a `completed` destination, and faint brackets; on a done task
+//!     the link keeps its colour under the strike.
 //!   - Inline HTML comments (`<!--...-->`): faint colour.
 //!
 //! The syntax colours, the emphasis-marker fonts, links, and the code band
@@ -31,7 +32,7 @@
 //! The scanner state is checkpointed every [`CHECKPOINT_INTERVAL`] lines so
 //! that `change_line` can resync cheaply without replaying the document.
 //! Alongside the spans, each highlighted line leaves a [`LineDecor`] for the
-//! widget to draw: strike-throughs and the code band.
+//! widget to draw: strike-throughs, the code band, and inline code chips.
 //!
 //! All byte ranges returned are valid UTF-8 boundaries.
 
@@ -126,6 +127,8 @@ pub struct LineDecor {
     pub code: bool,
     /// Byte ranges to strike through.
     pub strikes: Vec<Range<usize>>,
+    /// Inline code spans, backticks included, to set on a chip.
+    pub code_spans: Vec<Range<usize>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -363,20 +366,26 @@ fn line_highlights(
         }
         Kind::IndentedCode => spans.push(body, Highlight::colored(ink.muted)),
         Kind::Prose if done => {
+            // Done text recedes, but its links keep their colour.
             let text = info.text_start..info.text_start + line[info.text_start..].trim_end().len();
-            spans.push(text.clone(), Highlight::colored(ink.completed));
+            let completed = Highlight::colored(ink.completed);
+            let mut covered = text.start;
+            for (range, highlight) in scan_links(&line[text.clone()], ink) {
+                let range = range.start + text.start..range.end + text.start;
+                spans.push(covered..range.start, completed);
+                covered = range.end;
+                spans.push(range, highlight);
+            }
+            spans.push(covered..text.end, completed);
             spans.push(text.end..line.len(), Highlight::colored(ink.faint));
             decor.strikes.push(text);
         }
         Kind::Prose => {
             let start = info.text_start;
             let inline = scan_inline(&line[start..], ink);
-            decor.strikes.extend(
-                inline
-                    .strikes
-                    .iter()
-                    .map(|r| r.start + start..r.end + start),
-            );
+            let shift = |r: &Range<usize>| r.start + start..r.end + start;
+            decor.strikes.extend(inline.strikes.iter().map(shift));
+            decor.code_spans.extend(inline.code.iter().map(shift));
             if info.quote_depth == 0 {
                 spans.extend_at(start, inline.spans);
             } else {
@@ -405,6 +414,8 @@ fn line_highlights(
 struct Inline {
     spans: Vec<(Range<usize>, Highlight)>,
     strikes: Vec<Range<usize>>,
+    /// Inline code spans, backticks included.
+    code: Vec<Range<usize>>,
 }
 
 /// Scans inline Markdown: inline code (highest priority), HTML comments,
@@ -420,6 +431,7 @@ fn scan_inline(line: &str, palette: &Ink) -> Inline {
 
     // ── 1. Inline code spans ──────────────────────────────────────────────────
     extract_backtick_spans(line, &chars, palette, &mut spans, &mut occupied);
+    let code = spans.iter().map(|(range, _)| range.clone()).collect();
 
     // ── 2. HTML comments ─────────────────────────────────────────────────────
     extract_between(
@@ -494,7 +506,21 @@ fn scan_inline(line: &str, palette: &Ink) -> Inline {
 
     // Sort by start position for deterministic output.
     spans.sort_by_key(|(r, _)| r.start);
-    Inline { spans, strikes }
+    Inline {
+        spans,
+        strikes,
+        code,
+    }
+}
+
+/// Only the links of a line, for text that is otherwise one colour.
+fn scan_links(line: &str, palette: &Ink) -> Vec<(Range<usize>, Highlight)> {
+    let mut spans = Vec::new();
+    let mut occupied = vec![false; line.len().max(1)];
+    extract_links(line, palette, &mut spans, &mut occupied);
+    extract_bare_urls(line, palette, &mut spans, &mut occupied);
+    spans.sort_by_key(|(range, _)| range.start);
+    spans
 }
 
 /// Extract all backtick-delimited code spans, respecting multi-backtick fences.
@@ -722,7 +748,14 @@ fn extract_links(
                         Highlight::colored(palette.link),
                     ));
                 }
-                spans.push((close_bracket..end, faint));
+                if next == Some(b'(') && after_bracket + 2 < end {
+                    let destination = after_bracket + 1..end - 1;
+                    spans.push((close_bracket..destination.start, faint));
+                    spans.push((destination.clone(), Highlight::colored(palette.completed)));
+                    spans.push((destination.end..end, faint));
+                } else {
+                    spans.push((close_bracket..end, faint));
+                }
             }
             search_from = end;
         } else {
@@ -1294,9 +1327,44 @@ mod tests {
             [
                 ("[", Some(p.faint)),
                 ("the docs", Some(p.link)),
-                ("](https://example.com)", Some(p.faint)),
+                ("](", Some(p.faint)),
+                ("https://example.com", Some(p.completed)),
+                (")", Some(p.faint)),
             ]
         );
+    }
+
+    #[test]
+    fn links_on_a_done_task_keep_their_colour_under_the_strike() {
+        let p = dark_palette();
+        let line = "- [x] read [the docs](u) and https://x.io/a now";
+        let (spans, decor) = highlight_text(fixtures::DARK, line).remove(0);
+        assert_eq!(
+            colored(line, &spans),
+            [
+                ("- [x] ", Some(p.faint)),
+                ("read ", Some(p.completed)),
+                ("[", Some(p.faint)),
+                ("the docs", Some(p.link)),
+                ("](", Some(p.faint)),
+                ("u", Some(p.completed)),
+                (")", Some(p.faint)),
+                (" and ", Some(p.completed)),
+                ("https://x.io/a", Some(p.link)),
+                (" now", Some(p.completed)),
+            ]
+        );
+        assert_eq!(decor.strikes, vec![(6..line.len())]);
+    }
+
+    #[test]
+    fn inline_code_spans_are_set_on_chips() {
+        let line = "> run `cargo test` or **``a ` b``**";
+        let (_, decor) = highlight_text(fixtures::DARK, line).remove(0);
+        let chips: Vec<_> = decor.code_spans.iter().map(|r| &line[r.clone()]).collect();
+        assert_eq!(chips, ["`cargo test`", "``a ` b``"]);
+        let (_, decor) = highlight_text(fixtures::DARK, "- [x] `done`").remove(0);
+        assert!(decor.code_spans.is_empty());
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
         value: color(c.body),
         text_selection: color(c.selected),
         gutter: color(c.faint),
+        gutter_current: color(c.body),
         current_line: color(c.current_line),
         code_block: color(c.current_line),
         caret: color(c.accent),
@@ -89,6 +90,7 @@ mod tests {
             let (style, palette) = editor_colors(*theme);
             assert_eq!(style.text_selection, color(c.selected));
             assert_eq!(style.code_block, color(c.current_line));
+            assert_eq!(style.gutter_current, color(c.body));
             for heading in [palette.heading, palette.heading2, palette.link] {
                 assert_eq!(heading, color(c.accent));
             }

@@ -55,9 +55,11 @@ pub struct Style {
     pub text_selection: Color,
     /// Line numbers.
     pub gutter: Color,
+    /// The cursor line's number.
+    pub gutter_current: Color,
     /// The band behind the cursor's line.
     pub current_line: Color,
-    /// The band behind fenced code blocks.
+    /// The band behind fenced code blocks and the chip behind inline code.
     pub code_block: Color,
     pub caret: Color,
     /// The line through completed tasks and struck text.

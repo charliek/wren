@@ -49,8 +49,8 @@ use iced::widget::text_editor::{
     Action, Binding, Cursor, Edit, KeyPress, LineEnding, Position, Selection, Status,
 };
 use iced::{
-    alignment, window, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size,
-    Theme, Vector,
+    alignment, window, Border, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer,
+    Size, Theme, Vector,
 };
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
@@ -73,6 +73,14 @@ const CARET_HEIGHT: f32 = 18.0;
 /// JetBrains Mono OS/2 `sxHeight` (550) over its 1000 units per em; other
 /// monospace fonts sit close enough for the strike-through.
 const X_HEIGHT_EM: f32 = 0.55;
+/// JetBrains Mono's advance (600 units per 1000-unit em): the width of the
+/// cell that shows a selected line break.
+const ADVANCE_EM: f32 = 0.6;
+/// An inline code chip's height, in ems: the glyph box plus about 2 px a
+/// side at the default size.
+const CHIP_HEIGHT_EM: f32 = 1.3;
+const CHIP_PADDING_X: f32 = 2.0;
+const CHIP_RADIUS: f32 = 3.0;
 const STRIKE_THICKNESS: f32 = 1.0;
 
 /// Text size, row height, caret height, and gutter width, scaled together
@@ -581,7 +589,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             height: text_bounds.height,
         };
         let rows = visual_rows(editor.buffer(), &state.highlighter.borrow());
-        let cursor_line = editor.cursor().position.line;
+        let cursor = editor.cursor();
+        let cursor_line = cursor.position.line;
 
         // Code bands start just left of the text so the gutter stays clear.
         let code_left = text_bounds.x - CODE_BAND_OUTSET;
@@ -621,10 +630,37 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             }
         }
 
+        let chip_height = self.metrics.text * CHIP_HEIGHT_EM;
+        for row in &rows {
+            for &(start, end) in &row.code_spans {
+                let chip = Rectangle {
+                    x: text_bounds.x + start - CHIP_PADDING_X,
+                    y: text_bounds.y + row.top + (row.height - chip_height) / 2.0,
+                    width: end - start + 2.0 * CHIP_PADDING_X,
+                    height: chip_height,
+                };
+                if let Some(chip) = chip.intersection(&rows_clip) {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: chip,
+                            border: Border::default().rounded(CHIP_RADIUS),
+                            ..renderer::Quad::default()
+                        },
+                        style.code_block,
+                    );
+                }
+            }
+        }
+
         if self.line_numbers {
             let right = bounds.x + ROW_INSET + self.metrics.gutter - GUTTER_PADDING_RIGHT;
             clip(renderer, rows_clip, |renderer| {
                 for row in rows.iter().filter(|row| row.starts_line) {
+                    let color = if row.line == cursor_line {
+                        style.gutter_current
+                    } else {
+                        style.gutter
+                    };
                     renderer.fill_text(
                         Text {
                             content: (row.line + 1).to_string(),
@@ -641,7 +677,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                             wrapping: Wrapping::None,
                         },
                         Point::new(right, text_bounds.y + row.top),
-                        style.gutter,
+                        color,
                         rows_clip,
                     );
                 }
@@ -655,9 +691,12 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             .and_then(|focus| Some((focus, editor.selection()?)));
 
         if let Some((_, Selection::Range(ranges))) = &selection {
+            let breaks = selected_breaks(&rows, cursor, self.metrics.text * ADVANCE_EM);
             for range in ranges
                 .iter()
-                .filter_map(|range| text_bounds.intersection(&(*range + translation)))
+                .copied()
+                .chain(breaks)
+                .filter_map(|range| text_bounds.intersection(&(range + translation)))
             {
                 renderer.fill_quad(
                     renderer::Quad {
@@ -942,8 +981,12 @@ struct VisualRow {
     baseline: f32,
     /// Whether this is the first visual row of its logical line.
     starts_line: bool,
+    /// Where the row's glyphs end.
+    width: f32,
     /// Horizontal `(start, end)` of each strike-through on the row.
     strikes: Vec<(f32, f32)>,
+    /// Horizontal `(start, end)` of each inline code span on the row.
+    code_spans: Vec<(f32, f32)>,
     /// Whether the row belongs to a fenced code block.
     code: bool,
 }
@@ -955,18 +998,11 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
         .layout_runs()
         .map(|run| {
             let decor = highlighter.decor(run.line_i);
-            VisualRow {
-                line: run.line_i,
-                top: run.line_top,
-                height: run.line_height,
-                baseline: run.line_y,
-                starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
-                code: decor.is_some_and(|decor| decor.code),
-                strikes: decor
-                    .into_iter()
-                    .flat_map(|decor| &decor.strikes)
+            let spans = |ranges: &[Range<usize>]| -> Vec<(f32, f32)> {
+                ranges
+                    .iter()
                     .filter_map(|range| {
-                        strike_span(
+                        glyph_span(
                             run.text,
                             run.glyphs
                                 .iter()
@@ -974,8 +1010,46 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
                             range.clone(),
                         )
                     })
-                    .collect(),
+                    .collect()
+            };
+            VisualRow {
+                line: run.line_i,
+                top: run.line_top,
+                height: run.line_height,
+                baseline: run.line_y,
+                width: run.line_w,
+                starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
+                code: decor.is_some_and(|decor| decor.code),
+                strikes: decor.map(|decor| spans(&decor.strikes)).unwrap_or_default(),
+                code_spans: decor
+                    .map(|decor| spans(&decor.code_spans))
+                    .unwrap_or_default(),
             }
+        })
+        .collect()
+}
+
+/// A cell `advance` wide after each selected line break, at the end of its
+/// line's last row, so a selection reads as one block across empty lines.
+/// The breaks are those of the lines from the selection's first through
+/// the one before its last.
+fn selected_breaks(rows: &[VisualRow], cursor: Cursor, advance: f32) -> Vec<Rectangle> {
+    let Some(anchor) = cursor.selection else {
+        return Vec::new();
+    };
+    let first = anchor.line.min(cursor.position.line);
+    let last = anchor.line.max(cursor.position.line);
+    rows.iter()
+        .enumerate()
+        .filter(|(i, row)| {
+            (first..last).contains(&row.line)
+                && rows.get(i + 1).is_none_or(|next| next.line != row.line)
+        })
+        .map(|(_, row)| Rectangle {
+            x: row.width,
+            y: row.top,
+            width: advance,
+            height: row.height,
         })
         .collect()
 }
@@ -985,9 +1059,9 @@ fn starts_line(glyph_starts: impl Iterator<Item = usize>) -> bool {
     glyph_starts.min().is_none_or(|start| start == 0)
 }
 
-/// Horizontal extent of the non-blank glyphs of one row that fall inside the
-/// struck byte `range` of `line`. Glyphs are `(bytes, x, width)`.
-fn strike_span(
+/// Horizontal extent of the non-blank glyphs of one row that fall inside
+/// byte `range` of `line`. Glyphs are `(bytes, x, width)`.
+fn glyph_span(
     line: &str,
     glyphs: impl Iterator<Item = (Range<usize>, f32, f32)>,
     range: Range<usize>,
@@ -1044,7 +1118,7 @@ mod tests {
             .char_indices()
             .map(|(i, c)| (i..i + c.len_utf8(), i as f32 * 8.0, 8.0));
         // Bytes 6..11 are "ab cd"; the marker and trailing blank stay clear.
-        assert_eq!(strike_span(line, glyphs, 6..12), Some((48.0, 88.0)));
+        assert_eq!(glyph_span(line, glyphs, 6..12), Some((48.0, 88.0)));
     }
 
     #[test]
@@ -1052,9 +1126,9 @@ mod tests {
         let line = "- [x] alpha beta";
         // The second visual row holds "beta" starting again at x = 0.
         let row = [(12..13, 0.0, 8.0), (13..14, 8.0, 8.0), (14..15, 16.0, 8.0)];
-        assert_eq!(strike_span(line, row.into_iter(), 6..16), Some((0.0, 24.0)));
+        assert_eq!(glyph_span(line, row.into_iter(), 6..16), Some((0.0, 24.0)));
         let blank_row = [(11..12, 0.0, 8.0)];
-        assert_eq!(strike_span(line, blank_row.into_iter(), 6..16), None);
+        assert_eq!(glyph_span(line, blank_row.into_iter(), 6..16), None);
     }
 
     #[test]
@@ -1112,6 +1186,58 @@ mod tests {
             for pair in rows.windows(2) {
                 assert_eq!(pair[1].top, pair[0].top + LINE_HEIGHT);
             }
+        }
+    }
+
+    #[test]
+    fn selected_line_breaks_get_a_cell_at_the_end_of_their_last_row() {
+        for kind in BackendKind::ALL {
+            let rows = laid_out(kind, "ab\n\nwrapped words wrapped words\nlast", 120.0);
+            let select = |from: (usize, usize), to: (usize, usize)| Cursor {
+                position: Position {
+                    line: to.0,
+                    column: to.1,
+                },
+                selection: Some(Position {
+                    line: from.0,
+                    column: from.1,
+                }),
+            };
+            let cells = selected_breaks(&rows, select((3, 2), (0, 1)), 8.0);
+            let wrapped: Vec<_> = rows.iter().filter(|row| row.line == 2).collect();
+            assert!(wrapped.len() > 1, "{kind:?}");
+            let expected = [
+                (rows[0].width, rows[0].top),
+                (0.0, rows[1].top),
+                (wrapped.last().unwrap().width, wrapped.last().unwrap().top),
+            ];
+            let found: Vec<_> = cells.iter().map(|cell| (cell.x, cell.y)).collect();
+            assert_eq!(found, expected, "{kind:?}");
+            assert!(rows[0].width > 0.0);
+            assert!(cells
+                .iter()
+                .all(|cell| cell.width == 8.0 && cell.height == LINE_HEIGHT));
+            // A selection within one line, or none, selects no break.
+            assert!(selected_breaks(&rows, select((2, 0), (2, 5)), 8.0).is_empty());
+            let caret = Cursor {
+                position: Position { line: 1, column: 0 },
+                selection: None,
+            };
+            assert!(selected_breaks(&rows, caret, 8.0).is_empty());
+        }
+    }
+
+    #[test]
+    fn inline_code_spans_measure_their_chips_from_the_glyphs() {
+        for kind in BackendKind::ALL {
+            let rows = laid_out(kind, "run `x y` now\n- [x] `done`", 600.0);
+            assert_eq!(rows[0].code_spans.len(), 1, "{kind:?}");
+            let (start, end) = rows[0].code_spans[0];
+            // "run " is four cells, and "`x y`" five more.
+            let cell = start / 4.0;
+            assert!(cell > 7.0 && cell < 10.0, "{start}");
+            assert!((end - start - 5.0 * cell).abs() < 0.5, "{start}..{end}");
+            assert!(rows[1].code_spans.is_empty());
         }
     }
 
