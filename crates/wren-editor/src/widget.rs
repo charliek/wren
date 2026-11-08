@@ -30,17 +30,14 @@
 //! `Content` hides its renderer editor, and the line geometry lives in that
 //! editor's cosmic-text buffer, so this module owns its own `Content`.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ops::{DerefMut, Range};
 use std::sync::Arc;
 
 use iced::advanced::graphics::text::cosmic_text;
-use iced::advanced::graphics::text::Editor as RawEditor;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
 use iced::advanced::renderer::{self, Renderer as _};
-use iced::advanced::text::editor::Editor as _;
 use iced::advanced::text::highlighter::Highlighter as _;
 use iced::advanced::text::{self, LineHeight, Renderer as _, Text, Wrapping};
 use iced::advanced::widget::{self, operation, tree, Widget};
@@ -48,13 +45,14 @@ use iced::advanced::{clipboard, input_method, Clipboard, InputMethod, Shell};
 use iced::keyboard;
 use iced::time::{Duration, Instant};
 use iced::widget::text_editor::{
-    Action, Binding, Cursor, Edit, KeyPress, Line, LineEnding, Position, Selection, Status,
+    Action, Binding, Cursor, Edit, KeyPress, LineEnding, Selection, Status,
 };
 use iced::{
     alignment, window, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size,
     Theme, Vector,
 };
 
+use crate::backend::{Backend, Lines};
 use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::{Message, Style};
 
@@ -118,12 +116,12 @@ fn line_height() -> LineHeight {
 // ---------------------------------------------------------------------------
 
 /// The text and cursor of a [`TextEditor`].
-pub struct Content(RefCell<RawEditor>);
+pub struct Content(RefCell<Backend>);
 
 impl Content {
     /// Creates a [`Content`] with the given text.
     pub fn with_text(text: &str) -> Self {
-        Self(RefCell::new(RawEditor::with_text(text)))
+        Self(RefCell::new(Backend::with_text(text)))
     }
 
     /// Performs an [`Action`] on the [`Content`].
@@ -146,36 +144,28 @@ impl Content {
         self.0.borrow().line_count()
     }
 
-    /// Returns the text of the line at the given index, if it exists.
-    pub fn line(&self, index: usize) -> Option<Line<'_>> {
-        let editor = self.0.borrow();
-        let line = editor.line(index)?;
-        Some(Line {
-            text: Cow::Owned(line.text.into_owned()),
-            ending: line.ending,
-        })
-    }
-
-    /// Returns an iterator of the text of the lines in the [`Content`].
-    pub fn lines(&self) -> impl Iterator<Item = Line<'_>> {
-        (0..).map_while(|i| self.line(i))
+    /// Runs `f` over the borrowed lines, without copying any text.
+    pub fn with_lines<R>(&self, f: impl FnOnce(Lines<'_>) -> R) -> R {
+        f(self.0.borrow().lines())
     }
 
     /// Returns the text of the [`Content`].
     pub fn text(&self) -> String {
-        let mut contents = String::new();
-        let mut lines = self.lines().peekable();
-        while let Some(line) = lines.next() {
-            contents.push_str(&line.text);
-            if lines.peek().is_some() {
-                contents.push_str(if line.ending == LineEnding::None {
-                    LineEnding::default().as_str()
-                } else {
-                    line.ending.as_str()
-                });
+        self.with_lines(|lines| {
+            let mut contents = String::new();
+            let mut lines = lines.iter().peekable();
+            while let Some(line) = lines.next() {
+                contents.push_str(&line.text);
+                if lines.peek().is_some() {
+                    contents.push_str(if line.ending == LineEnding::None {
+                        LineEnding::default().as_str()
+                    } else {
+                        line.ending.as_str()
+                    });
+                }
             }
-        }
-        contents
+            contents
+        })
     }
 
     /// Returns the selected text of the [`Content`].
@@ -244,9 +234,8 @@ impl<'a> TextEditor<'a> {
 
         let text_bounds = layout.bounds().shrink(self.padding());
         let translation = text_bounds.position() - Point::ORIGIN;
-        let cursor = match self.content.0.borrow().selection() {
-            Selection::Caret(position) => position,
-            Selection::Range(ranges) => ranges.first().cloned().unwrap_or_default().position(),
+        let Some(cursor) = self.content.0.borrow().ime_position() else {
+            return InputMethod::Disabled;
         };
 
         InputMethod::Enabled {
@@ -254,27 +243,6 @@ impl<'a> TextEditor<'a> {
             purpose: input_method::Purpose::Normal,
             preedit: state.preedit.as_ref().map(input_method::Preedit::as_ref),
         }
-    }
-}
-
-/// After a font change iced reshapes only the scrolled-to lines, and the
-/// caret and IME queries panic on an unshaped cursor line (an off-screen
-/// cursor, after scrolling or a text size change). A cursor move makes the
-/// next update shape up to the cursor and scroll to it; cosmic-text ignores a
-/// move to the same place, so step away first.
-fn reshape_to_cursor(editor: &mut RawEditor) {
-    let cursor = editor.cursor();
-    let elsewhere = if cursor.position.line == 0 && cursor.position.column == 0 {
-        (editor.line_count() > 1).then_some(Position { line: 1, column: 0 })
-    } else {
-        Some(Position { line: 0, column: 0 })
-    };
-    if let Some(position) = elsewhere {
-        editor.move_to(Cursor {
-            position,
-            selection: None,
-        });
-        editor.move_to(cursor);
     }
 }
 
@@ -362,7 +330,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         let state = tree.state.downcast_mut::<State>();
 
         if state.highlighter_settings.font != self.highlighter_settings.font {
-            reshape_to_cursor(&mut editor);
+            editor.font_changing();
         }
         if state.highlighter_settings != self.highlighter_settings {
             state
@@ -529,7 +497,6 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         editor.highlight(
             self.highlighter_settings.font,
             state.highlighter.borrow_mut().deref_mut(),
-            |highlight| highlight.to_format(),
         );
 
         renderer.fill_quad(
@@ -591,13 +558,13 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             }
         }
 
-        renderer.fill_editor(&editor, text_bounds.position(), style.value, text_bounds);
+        editor.draw(renderer, text_bounds.position(), style.value, text_bounds);
 
         let translation = text_bounds.position() - Point::ORIGIN;
         let selection = state
             .focus
             .as_ref()
-            .map(|focus| (focus, editor.selection()));
+            .and_then(|focus| Some((focus, editor.selection()?)));
 
         if let Some((_, Selection::Range(ranges))) = &selection {
             for range in ranges
@@ -996,9 +963,9 @@ mod tests {
         assert_eq!(hidden.left, 16.0);
     }
 
-    fn laid_out(text: &str, width: f32) -> RawEditor {
+    fn laid_out(text: &str, width: f32) -> Backend {
         fixtures::load_font();
-        let mut editor = RawEditor::with_text(text);
+        let mut editor = Backend::with_text(text);
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
             palette: fixtures::DARK,
             font: fixtures::FONT,

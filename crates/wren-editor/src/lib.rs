@@ -7,6 +7,7 @@
 //! The crate knows nothing about its host: colours arrive as a [`Style`] and a
 //! [`Palette`], and the font through [`EditorView::set_font`].
 
+mod backend;
 mod find;
 mod highlighter;
 mod history;
@@ -22,6 +23,7 @@ use std::time::Instant;
 use iced::widget::text_editor::{self, Action, Cursor, Edit, Motion, Position};
 use iced::{Color, Element, Font};
 
+use backend::Lines;
 use find::{
     byte_offset_to_position, exact_byte_offset_to_position, find_all_matches, first_content_match,
 };
@@ -275,7 +277,7 @@ impl EditorView {
     /// Ends the current typing group without discarding history.
     pub fn move_cursor(&mut self, cursor: Cursor) {
         self.history.break_group();
-        let clamped = clamp_cursor(cursor, &self.content);
+        let clamped = self.clamped(cursor);
         if clamped.selection.is_none() && self.content.cursor().selection.is_some() {
             // iced's move_to leaves the old selection intact when passed None.
             self.content.perform(Action::Move(Motion::Left));
@@ -291,10 +293,12 @@ impl EditorView {
         if range.start > range.end {
             return false;
         }
-        let Some(start) = exact_byte_offset_to_position(&self.content, range.start) else {
-            return false;
-        };
-        let Some(end) = exact_byte_offset_to_position(&self.content, range.end) else {
+        let Some((start, end)) = self.content.with_lines(|lines| {
+            Some((
+                exact_byte_offset_to_position(lines, range.start)?,
+                exact_byte_offset_to_position(lines, range.end)?,
+            ))
+        }) else {
             return false;
         };
         self.move_cursor(Cursor {
@@ -308,7 +312,10 @@ impl EditorView {
     /// must recheck here after its transition barrier rather than trust an old
     /// index offset. The user's independent find-in-note state stays unchanged.
     pub fn reveal_literal(&mut self, query: &str) -> bool {
-        let Some(range) = first_content_match(&self.content, query) else {
+        let Some(range) = self
+            .content
+            .with_lines(|lines| first_content_match(lines, query))
+        else {
             return false;
         };
         self.select_byte_range(range)
@@ -330,7 +337,7 @@ impl EditorView {
         };
         self.content = Content::with_text(text);
         if let Some(cursor) = saved_cursor {
-            let clamped = clamp_cursor(cursor, &self.content);
+            let clamped = self.clamped(cursor);
             self.content.move_to(clamped);
         }
         self.history.clear();
@@ -445,13 +452,10 @@ impl EditorView {
                 end.column = text.len();
             }
         }
-        let cursor = clamp_cursor(
-            Cursor {
-                position: if backward { start } else { end },
-                selection: Some(if backward { end } else { start }),
-            },
-            &self.content,
-        );
+        let cursor = self.clamped(Cursor {
+            position: if backward { start } else { end },
+            selection: Some(if backward { end } else { start }),
+        });
         self.content.move_to(cursor);
         cursor
     }
@@ -459,10 +463,14 @@ impl EditorView {
     /// Replace content with a history snapshot and restore cursor.
     fn load_snapshot(&mut self, text: String, cursor: Cursor) {
         self.content = Content::with_text(&text);
-        let clamped = clamp_cursor(cursor, &self.content);
+        let clamped = self.clamped(cursor);
         self.content.move_to(clamped);
         self.find_current = None;
         self.recompute_find();
+    }
+
+    fn clamped(&self, cursor: Cursor) -> Cursor {
+        self.content.with_lines(|lines| clamp_cursor(cursor, lines))
     }
 
     fn recompute_find(&mut self) {
@@ -480,8 +488,12 @@ impl EditorView {
         let Some(&(byte_start, byte_end)) = self.find_matches.get(index) else {
             return;
         };
-        let start = byte_offset_to_position(&self.content, byte_start);
-        let end = byte_offset_to_position(&self.content, byte_end);
+        let (start, end) = self.content.with_lines(|lines| {
+            (
+                byte_offset_to_position(lines, byte_start),
+                byte_offset_to_position(lines, byte_end),
+            )
+        });
         // Cursor at end, selection anchor at start → visually selects the match.
         self.content.move_to(Cursor {
             position: end,
@@ -494,21 +506,16 @@ impl EditorView {
 // Cursor clamping
 // ---------------------------------------------------------------------------
 
-fn clamp_cursor(cursor: Cursor, content: &Content) -> Cursor {
-    let line_count = content.line_count().max(1);
-    let position = clamp_position(cursor.position, content, line_count);
-    let selection = cursor
-        .selection
-        .map(|s| clamp_position(s, content, line_count));
+fn clamp_cursor(cursor: Cursor, lines: Lines<'_>) -> Cursor {
     Cursor {
-        position,
-        selection,
+        position: clamp_position(cursor.position, lines),
+        selection: cursor.selection.map(|s| clamp_position(s, lines)),
     }
 }
 
-pub(crate) fn clamp_position(pos: Position, content: &Content, line_count: usize) -> Position {
-    let line = pos.line.min(line_count - 1);
-    let column = content.line(line).map_or(0, |line| {
+pub(crate) fn clamp_position(pos: Position, lines: Lines<'_>) -> Position {
+    let line = pos.line.min(lines.len().max(1) - 1);
+    let column = lines.get(line).map_or(0, |line| {
         let mut column = pos.column.min(line.text.len());
         while !line.text.is_char_boundary(column) {
             column -= 1;
@@ -1309,11 +1316,13 @@ mod tests {
         let ev = editor("line0\nline1\nline2");
         // "line1" starts at byte 6; its 'i' is at byte 7.
         assert_eq!(
-            byte_offset_to_position(&ev.content, 6),
+            ev.content
+                .with_lines(|lines| byte_offset_to_position(lines, 6)),
             Position { line: 1, column: 0 }
         );
         assert_eq!(
-            byte_offset_to_position(&ev.content, 7),
+            ev.content
+                .with_lines(|lines| byte_offset_to_position(lines, 7)),
             Position { line: 1, column: 1 }
         );
     }
@@ -1323,11 +1332,13 @@ mod tests {
         // "αβ" = 4 bytes (each Greek letter = 2 bytes)
         let ev = editor("αβ\nγδ");
         assert_eq!(
-            byte_offset_to_position(&ev.content, 2), // 'β' start
+            ev.content
+                .with_lines(|lines| byte_offset_to_position(lines, 2)), // 'β' start
             Position { line: 0, column: 2 }
         );
         assert_eq!(
-            byte_offset_to_position(&ev.content, 5), // 'γ' start, after \n at byte 4
+            ev.content
+                .with_lines(|lines| byte_offset_to_position(lines, 5)), // 'γ' start, after \n at byte 4
             Position { line: 1, column: 0 }
         );
     }
@@ -1338,10 +1349,15 @@ mod tests {
             let text = format!("é{ending}👋{ending}");
             let mut ev = editor(&text);
             for offset in 0..=text.len() + 2 {
-                let position = byte_offset_to_position(&ev.content, offset);
-                let line = ev.content.line(position.line).unwrap();
-                assert!(position.column <= line.text.len());
-                assert!(line.text.is_char_boundary(position.column));
+                ev.content.with_lines(|lines| {
+                    let position = byte_offset_to_position(lines, offset);
+                    let line = lines.get(position.line).unwrap();
+                    assert!(position.column <= line.text.len());
+                    assert!(line.text.is_char_boundary(position.column));
+                });
+                let position = ev
+                    .content
+                    .with_lines(|lines| byte_offset_to_position(lines, offset));
                 ev.content.move_to(Cursor {
                     position,
                     selection: Some(Position { line: 0, column: 0 }),

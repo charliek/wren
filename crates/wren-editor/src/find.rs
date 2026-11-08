@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use iced::widget::text_editor::{LineEnding, Position};
 
+use crate::backend::Lines;
 use crate::clamp_position;
-use crate::widget::Content;
 
 struct FirstLiteral {
     needle: Vec<char>,
@@ -62,13 +62,13 @@ impl FirstLiteral {
     }
 }
 
-pub(crate) fn first_content_match(content: &Content, query: &str) -> Option<Range<usize>> {
+pub(crate) fn first_content_match(lines: Lines<'_>, query: &str) -> Option<Range<usize>> {
     let mut matcher = FirstLiteral::new(query)?;
-    let count = content.line_count();
+    let count = lines.len();
     let mut base = 0;
-    // Content exposes owned line snapshots, not a borrowed whole buffer. Keep
-    // only the current line and query-sized provenance; stop at the first hit.
-    for (line, text) in content.lines().enumerate() {
+    // Stream the borrowed lines rather than join the whole text; keep only
+    // query-sized provenance and stop at the first hit.
+    for (line, text) in lines.iter().enumerate() {
         for (byte, character) in text.text.char_indices() {
             if let Some(range) = matcher.push(base + byte, character) {
                 return Some(range);
@@ -128,11 +128,11 @@ pub(crate) fn find_all_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
 }
 
 pub(crate) fn exact_byte_offset_to_position(
-    content: &Content,
+    lines: Lines<'_>,
     mut offset: usize,
 ) -> Option<Position> {
-    let count = content.line_count();
-    for (line, text) in content.lines().enumerate() {
+    let count = lines.len();
+    for (line, text) in lines.iter().enumerate() {
         if offset <= text.text.len() {
             return text.text.is_char_boundary(offset).then_some(Position {
                 line,
@@ -158,17 +158,16 @@ pub(crate) fn exact_byte_offset_to_position(
 
 /// Convert an offset in `Content::text()` to a valid UTF-8 cursor position.
 /// Offsets inside a two-byte line ending snap to the next line's start.
-pub(crate) fn byte_offset_to_position(content: &Content, mut offset: usize) -> Position {
-    let line_count = content.line_count().max(1);
-    for (line, text) in content.lines().enumerate() {
+pub(crate) fn byte_offset_to_position(lines: Lines<'_>, mut offset: usize) -> Position {
+    let line_count = lines.len().max(1);
+    for (line, text) in lines.iter().enumerate() {
         if offset <= text.text.len() || line + 1 == line_count {
             return clamp_position(
                 Position {
                     line,
                     column: offset,
                 },
-                content,
-                line_count,
+                lines,
             );
         }
         // Match Content::text's fallback for an unterminated interior line.
@@ -184,6 +183,7 @@ pub(crate) fn byte_offset_to_position(content: &Content, mut offset: usize) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::Content;
 
     #[test]
     fn first_match_stream_agrees_with_literal_find_on_small_unicode_inputs() {
@@ -204,7 +204,7 @@ mod tests {
                 .first()
                 .map(|&(start, end)| start..end);
             assert_eq!(
-                first_content_match(&content, query),
+                content.with_lines(|lines| first_content_match(lines, query)),
                 expected,
                 "{text:?}, {query:?}"
             );
