@@ -29,14 +29,8 @@ REMOTE = f"{SECTIONS[1]}/Remote"
 ORIGIN = f"{SOURCE}/Origin.md"
 PICKER_A = f"{SOURCE}/Picker A.md"
 PICKER_B = f"{SOURCE}/Picker B.md"
-DEFAULT_WIDTHS = {
-    "columns": {"sections": 200, "groups": 220, "notes": 280},
-    "outline": {"sections": 260, "notes": 280},
-}
-WIDTH_LIMITS = {
-    "columns": {"sections": (140, 360), "groups": (150, 400), "notes": (200, 480)},
-    "outline": {"sections": (180, 420), "notes": (200, 480)},
-}
+DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
+WIDTH_LIMITS = {"sections": (140, 360), "groups": (150, 400), "notes": (200, 480)}
 
 
 def session(app: WrenApp):
@@ -179,7 +173,7 @@ def idle(app: WrenApp) -> None:
 def seam(app: WrenApp, pane: str) -> tuple[int, int]:
     current = navigation(app)
     assert current["focus"] is False
-    panes = list(DEFAULT_WIDTHS[current["layout"]])
+    panes = list(DEFAULT_WIDTHS)
     assert pane in panes
     assert set(current["effective_widths"]) == set(panes)
     root = bounds(app)["root"]
@@ -190,35 +184,35 @@ def seam(app: WrenApp, pane: str) -> tuple[int, int]:
     return point
 
 
-def wait_width(app: WrenApp, layout: str, pane: str, width: float):
+def wait_width(app: WrenApp, pane: str, width: float):
     def observed():
         current = navigation(app)
-        return current if current["preferred_widths"][layout][pane] == pytest.approx(width) else None
+        return current if current["preferred_widths"][pane] == pytest.approx(width) else None
     return wait_for(observed, timeout=3, interval=0.025,
-                    description=f"native {layout}/{pane} width {width}")
+                    description=f"native {pane} width {width}")
 
 
-def stored_width(root: Path, layout: str, pane: str, width: float) -> None:
-    wait_for(lambda: metadata(root).get("widths", {}).get(layout, {}).get(pane) == width,
-             timeout=3, interval=0.025, description=f"persisted {layout}/{pane} width {width}")
+def stored_width(root: Path, pane: str, width: float) -> None:
+    # Widths persist under [widths.columns], the table name from when Wren had two layouts.
+    wait_for(lambda: metadata(root).get("widths", {}).get("columns", {}).get(pane) == width,
+             timeout=3, interval=0.025, description=f"persisted {pane} width {width}")
 
 
 def resize(app: WrenApp, root: Path, window: str, pane: str, delta: int):
     before = navigation(app)
-    layout = before["layout"]
-    expected = {key: widths.copy() for key, widths in before["preferred_widths"].items()}
-    minimum, maximum = WIDTH_LIMITS[layout][pane]
-    expected[layout][pane] = min(maximum, max(minimum, expected[layout][pane] + delta))
+    expected = dict(before["preferred_widths"])
+    minimum, maximum = WIDTH_LIMITS[pane]
+    expected[pane] = min(maximum, max(minimum, expected[pane] + delta))
     old_disk = (root / ".wren/workspace.toml").read_bytes()
     start = seam(app, pane)
     with held_button(window, start):
         move(window, (start[0] + delta, start[1]))
-        during = wait_width(app, layout, pane, expected[layout][pane])
+        during = wait_width(app, pane, expected[pane])
         assert during["preferred_widths"] == expected
         assert during["processed"] == before["processed"], "Live resize must not dispatch persistence"
         assert (root / ".wren/workspace.toml").read_bytes() == old_disk
         assert_browser_geometry(app, during)
-    stored_width(root, layout, pane, expected[layout][pane])
+    stored_width(root, pane, expected[pane])
     after = navigation(app)
     assert after["preferred_widths"] == expected
     assert after["processed"]["disposition"] == "completed", after["processed"]
@@ -243,9 +237,8 @@ def assert_browser_geometry(app: WrenApp, current: dict) -> None:
         measured = bounds(app)
         root = measured["root"]
         left = root["x"]
-        kinds = (({"section"}, {"group"}, {"note"})
-                 if current["layout"] == "columns" else ({"section", "group"}, {"note"}))
-        for pane, row_kinds in zip(DEFAULT_WIDTHS[current["layout"]], kinds):
+        kinds = ({"section"}, {"group"}, {"note"})
+        for pane, row_kinds in zip(DEFAULT_WIDTHS, kinds):
             right = left + current["effective_widths"][pane]
             rows = [row for row in measured["rows"] if set(row["key"]) <= row_kinds]
             if not rows:
@@ -327,23 +320,23 @@ def test_native_command_palette_focus_typing_arrows_and_enter(native_workspace) 
     keys(window, "alt+shift+p")
     wait_for(lambda: navigation(app)["modal"] is not None, description="Alt+Shift+P opens commands")
     assert navigation(app)["modal"]["mode"] == "commands"
-    type_text(window, "lyt")
-    wait_for(lambda: navigation(app)["modal"]["query"] == "lyt", description="native command query focus")
+    type_text(window, "sort notes")
+    wait_for(lambda: navigation(app)["modal"]["query"] == "sort notes", description="native command query focus")
     modal = navigation(app)["modal"]
     assert [row["key"] for row in modal["results"]] == [
-        {"command": "view.columns"}, {"command": "view.outline"},
+        {"command": "notes.sort_modified"}, {"command": "notes.sort_title"},
     ]
     assert modal["active_index"] == 0
     keys(window, "Down")
-    wait_for(lambda: navigation(app)["modal"]["active_key"] == {"command": "view.outline"},
-             description="native Down selects Outline")
+    wait_for(lambda: navigation(app)["modal"]["active_key"] == {"command": "notes.sort_title"},
+             description="native Down selects Sort by title")
     keys(window, "Up")
-    wait_for(lambda: navigation(app)["modal"]["active_key"] == {"command": "view.columns"},
-             description="native Up returns to Columns")
+    wait_for(lambda: navigation(app)["modal"]["active_key"] == {"command": "notes.sort_modified"},
+             description="native Up returns to Sort by modified")
     keys(window, "Down", "Return")
-    wait_for(lambda: navigation(app)["layout"] == "outline" and navigation(app)["modal"] is None,
-             description="native Enter runs the highlighted layout command")
-    assert metadata(root)["layout"] == "outline"
+    wait_for(lambda: navigation(app)["sort"] == "title" and navigation(app)["modal"] is None,
+             description="native Enter runs the highlighted sort command")
+    assert metadata(root)["sort"][SOURCE] == "title"
     assert editor_identity(app) == before
     assert session(app)["document"] == document
     assert files(root) == original_files
@@ -421,24 +414,19 @@ def test_native_dividers_update_live_clamp_and_persist_independently_on_restart(
     before_editor = editor_identity(app)
     before_document = session(app)["document"]
     maximum = resize(app, root, window, "sections", 500)
-    assert maximum["preferred_widths"]["columns"]["sections"] == 360
-    columns = resize(app, root, window, "sections", -240)
-    assert columns["preferred_widths"]["columns"]["sections"] == 140
-    assert columns["preferred_widths"]["outline"] == DEFAULT_WIDTHS["outline"]
-    keys(window, "ctrl+alt+2")
-    wait_for(lambda: navigation(app)["layout"] == "outline", description="native Outline shortcut")
-    outline = resize(app, root, window, "notes", 64)
-    assert outline["preferred_widths"]["outline"]["notes"] == 344
-    assert outline["preferred_widths"]["columns"] == columns["preferred_widths"]["columns"]
+    assert maximum["preferred_widths"]["sections"] == 360
+    narrowed = resize(app, root, window, "sections", -240)
+    assert narrowed["preferred_widths"]["sections"] == 140
+    widened = resize(app, root, window, "notes", 64)
+    assert widened["preferred_widths"] == {"sections": 140, "groups": 220, "notes": 344}
     assert editor_identity(app) == before_editor
     assert session(app)["document"] == before_document
-    expected = outline["preferred_widths"]
+    expected = widened["preferred_widths"]
     app.restart(hard=False)
-    assert navigation(app)["layout"] == "outline"
     assert navigation(app)["preferred_widths"] == expected
     table = metadata(root)["widths"]
     assert table["columns"]["sections"] == 140
-    assert table["outline"]["notes"] == 344
+    assert table["columns"]["notes"] == 344
     assert session(app)["document"]["path"] == ORIGIN
     assert session(app)["document"]["text"] == before_document["text"]
 
@@ -462,9 +450,9 @@ def test_native_divider_escape_restores_width_without_touching_dirty_text_or_sel
         start = seam(app, "notes")
         with held_button(window, start):
             move(window, (start[0] + 80, start[1]))
-            wait_width(app, "columns", "notes", 360)
+            wait_width(app, "notes", 360)
             keys(window, "Escape")
-            wait_width(app, "columns", "notes", 280)
+            wait_width(app, "notes", 280)
             assert editor_identity(app) == before_editor
         idle(app)
         assert navigation(app)["preferred_widths"] == before["preferred_widths"]
@@ -484,13 +472,13 @@ def test_native_double_click_resets_only_the_target_divider(native_workspace) ->
     before_editor = editor_identity(app)
     resize(app, root, window, "sections", 32)
     resized = resize(app, root, window, "groups", 64)
-    assert resized["preferred_widths"]["columns"]["groups"] == 284
-    expected = {layout: widths.copy() for layout, widths in resized["preferred_widths"].items()}
-    expected["columns"]["groups"] = 220
+    assert resized["preferred_widths"]["groups"] == 284
+    expected = dict(resized["preferred_widths"])
+    expected["groups"] = 220
     move(window, seam(app, "groups"))
     xdo("click", "--repeat", "2", "--delay", "80", "1")
-    wait_width(app, "columns", "groups", 220)
-    stored_width(root, "columns", "groups", 220)
+    wait_width(app, "groups", 220)
+    stored_width(root, "groups", 220)
     idle(app)
     assert navigation(app)["preferred_widths"] == expected
     assert metadata(root)["widths"]["columns"]["sections"] == 232
@@ -504,22 +492,22 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
     before_editor = editor_identity(app)
     move(window, seam(app, "sections"))
     xdo("click", "1")
-    stored_width(root, "columns", "sections", 200)
+    stored_width(root, "sections", 200)
     for key, expected in (("Right", 216), ("Right", 232), ("Left", 216)):
         keys(window, key)
-        wait_width(app, "columns", "sections", expected)
-        stored_width(root, "columns", "sections", expected)
+        wait_width(app, "sections", expected)
+        stored_width(root, "sections", expected)
     keys(window, "Tab")
     settle_focus()
     type_text(window, "Visible")
     wait_for(lambda: navigation(app)["filters"]["groups"] == "Visible",
              description="Tab moves from the Sections grip to the real Groups input")
-    assert navigation(app)["preferred_widths"]["columns"]["sections"] == 216
+    assert navigation(app)["preferred_widths"]["sections"] == 216
     move(window, seam(app, "sections"))
     xdo("click", "1")
     keys(window, "Right")
-    wait_width(app, "columns", "sections", 232)
-    stored_width(root, "columns", "sections", 232)
+    wait_width(app, "sections", 232)
+    stored_width(root, "sections", 232)
     keys(window, "shift+Tab")
     settle_focus()
     type_text(window, "Visible")
@@ -527,8 +515,7 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
              description="Shift+Tab moves from the grip to the real Sections input")
     after = navigation(app)
     assert after["filters"]["groups"] == after["filters"]["sections"] == "Visible"
-    assert after["preferred_widths"]["columns"] == {"sections": 232, "groups": 220, "notes": 280}
-    assert after["preferred_widths"]["outline"] == DEFAULT_WIDTHS["outline"]
+    assert after["preferred_widths"] == {"sections": 232, "groups": 220, "notes": 280}
     assert editor_identity(app) == before_editor
     assert session(app)["document"]["dirty"] is False
 
@@ -540,25 +527,25 @@ def test_native_narrow_window_compresses_actual_panes_and_wide_restores_preferre
     for pane, delta in (("sections", 80), ("groups", 80), ("notes", 60)):
         resize(app, root, window, pane, delta)
     preferred = navigation(app)["preferred_widths"]
-    assert preferred["columns"] == {"sections": 280, "groups": 300, "notes": 340}
+    assert preferred == {"sections": 280, "groups": 300, "notes": 340}
     old_disk = (root / ".wren/workspace.toml").read_bytes()
     narrow = window_size(app, window, 760, 700)
     assert narrow["preferred_widths"] == preferred
-    factor = (760 - 320) / sum(preferred["columns"].values())
+    factor = (760 - 320) / sum(preferred.values())
     for pane, width in narrow["effective_widths"].items():
-        assert 120 <= width < preferred["columns"][pane]
-        assert width == pytest.approx(preferred["columns"][pane] * factor, abs=0.1)
+        assert 120 <= width < preferred[pane]
+        assert width == pytest.approx(preferred[pane] * factor, abs=0.1)
     assert_browser_geometry(app, narrow)
     assert (root / ".wren/workspace.toml").read_bytes() == old_disk
     compressed = resize(app, root, window, "sections", 32)
-    assert compressed["preferred_widths"]["columns"]["sections"] == 312, (
+    assert compressed["preferred_widths"]["sections"] == 312, (
         "A compressed seam must anchor its drag to the preferred, not effective, width"
     )
     assert_browser_geometry(app, compressed)
     old_disk = (root / ".wren/workspace.toml").read_bytes()
     wide = window_size(app, window, 1280, 800)
     assert wide["preferred_widths"] == compressed["preferred_widths"]
-    assert wide["effective_widths"] == wide["preferred_widths"]["columns"]
+    assert wide["effective_widths"] == wide["preferred_widths"]
     assert_browser_geometry(app, wide)
     assert (root / ".wren/workspace.toml").read_bytes() == old_disk
     assert editor_identity(app) == before_editor
@@ -763,15 +750,10 @@ def test_native_clicks_leave_exactly_one_text_widget_focused(native_workspace) -
 
     # Right to left: a press captured by an earlier pane's input used to stop
     # at that pane, leaving every input to its right focused as well.
-    for layout, names in (
-        ("columns", ("note-editor", "filter-notes", "filter-groups", "filter-sections")),
-        ("outline", ("note-editor", "filter-notes", "filter-outline")),
-    ):
-        fixture_gateway(app, "view.layout", layout=layout)
-        for name in names:
-            click(name)
+    for name in ("note-editor", "filter-notes", "filter-groups", "filter-sections"):
+        click(name)
     type_text(window, "zz")
-    wait_for(lambda: navigation(app)["filters"]["outline"] == "zz", timeout=3,
+    wait_for(lambda: navigation(app)["filters"]["sections"] == "zz", timeout=3,
              description="typing reaches the focused filter")
     assert navigation(app)["filters"]["notes"] == ""
     assert session(app)["document"] == before_document

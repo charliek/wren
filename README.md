@@ -19,7 +19,7 @@ only a `.wren/` directory).
 
 ## Features
 
-- Two layouts, **Columns** and **Outline**, with resizable, persistent panes,
+- Sections, Groups, and Notes columns with resizable, persistent widths,
   plus a **focus mode** that shows only the editor.
 - A Markdown editor with highlighting, a line-number gutter, soft wrap,
   undo/redo, and find-in-note.

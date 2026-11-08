@@ -876,7 +876,7 @@ fn selecting_the_current_parent_does_not_replace_the_live_document() {
 }
 
 #[test]
-fn layout_width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values() {
+fn width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values() {
     let root = fixture();
     write(
         root.path(),
@@ -890,16 +890,11 @@ fn layout_width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values
     edit(&mut session, id, "view preferences must not flush");
     let ptr = session.document().unwrap().text.as_ptr();
     for op in [
-        Op::SetLayout {
-            layout: "outline".into(),
-        },
         Op::SetWidth {
-            layout: "columns".into(),
             pane: "groups".into(),
             width: 333,
         },
         Op::SetWidth {
-            layout: "outline".into(),
             pane: "sections".into(),
             width: 999,
         },
@@ -920,30 +915,22 @@ fn layout_width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values
         fs::read_to_string(root.path().join("A/G/Note 2.md")).unwrap(),
         "first body"
     );
-    assert_eq!(session.state().layout(), "outline");
-    assert_eq!(session.state().width("columns", "groups"), Some(333));
-    assert_eq!(session.state().width("outline", "sections"), Some(420));
+    assert_eq!(session.state().width("groups"), Some(333));
+    assert_eq!(session.state().width("sections"), Some(360));
     assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
     run(&mut session, Op::Flush);
     drop(session);
     let mut reopened = self::session(root.path());
-    assert_eq!(reopened.state().layout(), "outline");
-    assert_eq!(reopened.state().width("columns", "groups"), Some(333));
-    assert_eq!(reopened.state().width("outline", "sections"), Some(420));
+    assert_eq!(reopened.state().width("groups"), Some(333));
+    assert_eq!(reopened.state().width("sections"), Some(360));
     assert_eq!(reopened.state().sort(&rel("A/G")), "title");
     assert_eq!(
         reopened.document().unwrap().text,
         "view preferences must not flush"
     );
     run(&mut reopened, Op::ResetWidths);
-    for (layout, pane, width) in [
-        ("columns", "sections", 200),
-        ("columns", "groups", 220),
-        ("columns", "notes", 280),
-        ("outline", "sections", 260),
-        ("outline", "notes", 280),
-    ] {
-        assert_eq!(reopened.state().width(layout, pane), Some(width));
+    for (pane, width) in [("sections", 200), ("groups", 220), ("notes", 280)] {
+        assert_eq!(reopened.state().width(pane), Some(width));
     }
     let metadata: toml::Table = fs::read_to_string(root.path().join(".wren/workspace.toml"))
         .unwrap()
@@ -972,15 +959,11 @@ fn corrupt_optional_metadata_allows_in_memory_view_changes_but_is_never_overwrit
     edit(&mut session, id, "live draft");
     let ptr = session.document().unwrap().text.as_ptr();
     for op in [
-        Op::SetLayout {
-            layout: "outline".into(),
-        },
+        Op::ResetWidths,
         Op::SetWidth {
-            layout: "columns".into(),
             pane: "notes".into(),
             width: 470,
         },
-        Op::ResetWidths,
         Op::SetSort {
             group: g,
             mode: "title".into(),
@@ -995,7 +978,7 @@ fn corrupt_optional_metadata_allows_in_memory_view_changes_but_is_never_overwrit
             original
         );
     }
-    assert_eq!(session.state().layout(), "outline");
+    assert_eq!(session.state().width("notes"), Some(470));
     assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
 }
 
@@ -1010,8 +993,9 @@ fn preference_persistence_errors_preserve_the_applied_view_change_and_live_dirty
     session.fail_next(Fault::Write);
     let error = session
         .apply_at(
-            Op::SetLayout {
-                layout: "outline".into(),
+            Op::SetWidth {
+                pane: "notes".into(),
+                width: 300,
             },
             Duration::ZERO,
         )
@@ -1020,7 +1004,7 @@ fn preference_persistence_errors_preserve_the_applied_view_change_and_live_dirty
         .events
         .iter()
         .any(|event| matches!(event, Event::Warning(_))));
-    assert_eq!(session.state().layout(), "outline");
+    assert_eq!(session.state().width("notes"), Some(300));
     assert_eq!(session.document().unwrap().text.as_ptr(), ptr);
     assert!(session.document().unwrap().dirty());
     assert_eq!(
@@ -1029,8 +1013,9 @@ fn preference_persistence_errors_preserve_the_applied_view_change_and_live_dirty
     );
     run(
         &mut session,
-        Op::SetLayout {
-            layout: "outline".into(),
+        Op::SetWidth {
+            pane: "notes".into(),
+            width: 300,
         },
     );
     assert_eq!(session.index().content(id), Some("still dirty"));
@@ -1047,12 +1032,8 @@ fn invalid_preference_and_selection_requests_leave_views_selection_and_drafts_un
     edit(&mut session, id, "dirty truth");
     let selection = session.state().selection();
     for op in [
-        Op::SetLayout {
-            layout: "future".into(),
-        },
         Op::SetWidth {
-            layout: "outline".into(),
-            pane: "groups".into(),
+            pane: "future".into(),
             width: 200,
         },
         Op::SetSort {
@@ -1068,7 +1049,7 @@ fn invalid_preference_and_selection_requests_leave_views_selection_and_drafts_un
         },
     ] {
         assert!(session.apply_at(op, Duration::ZERO).is_err());
-        assert_eq!(session.state().layout(), "columns");
+        assert_eq!(session.state().width("notes"), Some(280));
         assert_eq!(session.state().selection(), selection);
         assert_eq!(session.selected_parent(), Some(parent));
         assert_eq!(session.document().unwrap().text, "dirty truth");
@@ -1585,8 +1566,9 @@ fn cross_section_group_move_postpublication_faults_keep_appended_order_before_re
         run(&mut current, Op::Flush);
         run(
             &mut current,
-            Op::SetLayout {
-                layout: "outline".into(),
+            Op::SetWidth {
+                pane: "notes".into(),
+                width: 300,
             },
         );
         assert_appended_group_order(&current);
@@ -1641,8 +1623,9 @@ fn cross_section_group_move_metadata_conflicts_keep_committed_order_without_over
     run(&mut current, Op::Reconcile);
     assert!(current
         .apply_at(
-            Op::SetLayout {
-                layout: "outline".into(),
+            Op::SetWidth {
+                pane: "notes".into(),
+                width: 300,
             },
             Duration::ZERO,
         )
@@ -2766,7 +2749,7 @@ fn successful_workspace_switch_replaces_the_entire_index_and_parent_selection() 
     write(
         other_root.path(),
         ".wren/workspace.toml",
-        "selection = 'Different/G/Unique.md'\nlayout = 'outline'\n",
+        "selection = 'Different/G/Unique.md'\n[widths.columns]\nnotes = 300\n",
     );
     let mut session = session(root.path());
     let old_note = note(&session, "A/G/Note 2.md");
@@ -2781,7 +2764,7 @@ fn successful_workspace_switch_replaces_the_entire_index_and_parent_selection() 
     );
     assert_ne!(session.generation(), generation);
     assert_eq!(session.index().len(), 1);
-    assert_eq!(session.state().layout(), "outline");
+    assert_eq!(session.state().width("notes"), Some(300));
     assert!(hits(&session, "old workspace draft").is_empty());
     assert_eq!(hits(&session, "new workspace only").len(), 1);
     assert_eq!(

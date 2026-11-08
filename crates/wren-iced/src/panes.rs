@@ -18,42 +18,14 @@ pub const COMPRESSED_MIN: f32 = 120.0;
 pub const GRIP_WIDTH: f32 = 7.0;
 pub const KEYBOARD_STEP: f32 = 16.0;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Layout {
-    #[default]
-    Columns,
-    Outline,
-}
-
-impl Layout {
-    pub fn from_state(state: &WorkspaceState) -> Self {
-        match state.layout() {
-            "outline" => Self::Outline,
-            _ => Self::Columns,
-        }
-    }
-
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::Columns => "columns",
-            Self::Outline => "outline",
-        }
-    }
-
-    pub const fn panes(self) -> &'static [Pane] {
-        match self {
-            Self::Columns => &[Pane::Sections, Pane::Groups, Pane::Notes],
-            Self::Outline => &[Pane::Outline, Pane::Notes],
-        }
-    }
-}
+/// The browser panes, left to right.
+pub const PANES: [Pane; 3] = [Pane::Sections, Pane::Groups, Pane::Notes];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
     Sections,
     Groups,
     Notes,
-    Outline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,14 +41,13 @@ impl Pane {
             Self::Sections => (200.0, 140.0, 360.0),
             Self::Groups => (220.0, 150.0, 400.0),
             Self::Notes => (280.0, 200.0, 480.0),
-            Self::Outline => (260.0, 180.0, 420.0),
         };
         Limits { default, min, max }
     }
 
     pub const fn key(self) -> &'static str {
         match self {
-            Self::Sections | Self::Outline => "sections",
+            Self::Sections => "sections",
             Self::Groups => "groups",
             Self::Notes => "notes",
         }
@@ -87,7 +58,6 @@ impl Pane {
             Self::Sections => "Sections",
             Self::Groups => "Groups",
             Self::Notes => "Notes",
-            Self::Outline => "Sections & groups",
         }
     }
 
@@ -103,61 +73,49 @@ impl Pane {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Widths {
-    preferred: [f32; 5],
+    preferred: [f32; 3],
 }
 
 impl Default for Widths {
     fn default() -> Self {
         Self {
-            preferred: [200.0, 220.0, 280.0, 260.0, 280.0],
+            preferred: PANES.map(|pane| pane.limits().default),
         }
     }
 }
 
-fn index(layout: Layout, pane: Pane) -> usize {
-    match (layout, pane) {
-        (Layout::Columns, Pane::Sections) => 0,
-        (Layout::Columns, Pane::Groups) => 1,
-        (Layout::Columns, Pane::Notes) => 2,
-        (Layout::Outline, Pane::Outline) => 3,
-        (Layout::Outline, Pane::Notes) => 4,
-        _ => panic!("pane does not belong to this layout"),
+const fn index(pane: Pane) -> usize {
+    match pane {
+        Pane::Sections => 0,
+        Pane::Groups => 1,
+        Pane::Notes => 2,
     }
 }
 
 impl Widths {
     pub fn from_state(state: &WorkspaceState) -> Self {
         let mut widths = Self::default();
-        for layout in [Layout::Columns, Layout::Outline] {
-            for &pane in layout.panes() {
-                if let Some(width) = state.width(layout.key(), pane.key()) {
-                    widths.set(layout, pane, f32::from(width));
-                }
+        for pane in PANES {
+            if let Some(width) = state.width(pane.key()) {
+                widths.set(pane, f32::from(width));
             }
         }
         widths
     }
 
-    pub fn get(&self, layout: Layout, pane: Pane) -> f32 {
-        self.preferred[index(layout, pane)]
+    pub fn get(&self, pane: Pane) -> f32 {
+        self.preferred[index(pane)]
     }
 
-    pub fn set(&mut self, layout: Layout, pane: Pane, width: f32) -> f32 {
+    pub fn set(&mut self, pane: Pane, width: f32) -> f32 {
         let width = pane.clamp(width);
-        self.preferred[index(layout, pane)] = width;
+        self.preferred[index(pane)] = width;
         width
     }
 
     #[cfg(test)]
-    pub fn reset(&mut self, layout: Layout, pane: Pane) -> f32 {
-        self.set(layout, pane, pane.limits().default)
-    }
-
-    #[cfg(test)]
-    pub fn reset_layout(&mut self, layout: Layout) {
-        for &pane in layout.panes() {
-            self.reset(layout, pane);
-        }
+    pub fn reset(&mut self, pane: Pane) -> f32 {
+        self.set(pane, pane.limits().default)
     }
 
     pub fn reset_all(&mut self) {
@@ -166,24 +124,15 @@ impl Widths {
 
     /// Updates metadata in memory only. Call this for Ended/Reset/Step, never Changed.
     #[cfg(test)]
-    pub fn store(
-        &self,
-        state: &mut WorkspaceState,
-        layout: Layout,
-        pane: Pane,
-    ) -> Result<(), String> {
-        state.set_width(
-            layout.key(),
-            pane.key(),
-            self.get(layout, pane).round() as u16,
-        )
+    pub fn store(&self, state: &mut WorkspaceState, pane: Pane) -> Result<(), String> {
+        state.set_width(pane.key(), self.get(pane).round() as u16)
     }
 
     /// `available` is the actual horizontal browser+editor extent, excluding any outer chrome.
     /// Below the sum of the 120px floors, the row overflows rather than wrapping.
-    pub fn effective(&self, layout: Layout, available: f32) -> EffectiveWidths {
-        let panes = layout.panes();
-        let mut widths: Vec<_> = panes.iter().map(|&pane| self.get(layout, pane)).collect();
+    pub fn effective(&self, available: f32) -> EffectiveWidths {
+        let panes = &PANES;
+        let mut widths: Vec<_> = panes.iter().map(|&pane| self.get(pane)).collect();
         let available = if available.is_nan() {
             0.0
         } else {
@@ -205,7 +154,7 @@ impl Widths {
                 .iter()
                 .zip(&fixed)
                 .filter(|(_, fixed)| !**fixed)
-                .map(|(&pane, _)| self.get(layout, pane))
+                .map(|(&pane, _)| self.get(pane))
                 .sum();
             if free_sum == 0.0 {
                 break;
@@ -214,7 +163,7 @@ impl Widths {
             let mut hit_floor = false;
             for (i, &pane) in panes.iter().enumerate() {
                 if !fixed[i] {
-                    widths[i] = self.get(layout, pane) * factor;
+                    widths[i] = self.get(pane) * factor;
                     if widths[i] < COMPRESSED_MIN {
                         widths[i] = COMPRESSED_MIN;
                         fixed[i] = true;
@@ -227,62 +176,45 @@ impl Widths {
             }
         }
         let editor = (available - widths.iter().sum::<f32>()).max(0.0);
-        EffectiveWidths {
-            layout,
-            widths,
-            editor,
-        }
+        EffectiveWidths { widths, editor }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveWidths {
-    pub layout: Layout,
     widths: Vec<f32>,
     pub editor: f32,
 }
 
 impl EffectiveWidths {
     pub fn get(&self, pane: Pane) -> f32 {
-        let position = self
-            .layout
-            .panes()
-            .iter()
-            .position(|&candidate| candidate == pane)
-            .expect("pane belongs to layout");
-        self.widths[position]
+        self.widths[index(pane)]
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ResizeEvent {
     Started {
-        layout: Layout,
         pane: Pane,
     },
     Changed {
-        layout: Layout,
         pane: Pane,
         width: f32,
     },
     Ended {
-        layout: Layout,
         pane: Pane,
         width: f32,
     },
     Reset {
-        layout: Layout,
         pane: Pane,
         width: f32,
     },
     Step {
-        layout: Layout,
         pane: Pane,
         width: f32,
     },
     /// Escape restores the preferred width at press time and does not persist a new width.
     Cancelled {
-        layout: Layout,
         pane: Pane,
         width: f32,
     },
@@ -292,13 +224,12 @@ pub enum ResizeEvent {
     },
 }
 
-pub fn grip_id(layout: Layout, pane: Pane) -> Id {
-    Id::from(format!("wren-grip-{}-{}", layout.key(), pane.key()))
+pub fn grip_id(pane: Pane) -> Id {
+    Id::from(format!("wren-grip-{}", pane.key()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Resize {
-    pub layout: Layout,
     pub pane: Pane,
     pub origin: Point,
     pub original: f32,
@@ -306,10 +237,9 @@ pub struct Resize {
 }
 
 impl Resize {
-    pub fn new(layout: Layout, pane: Pane, origin: Point, preferred: f32) -> Self {
+    pub fn new(pane: Pane, origin: Point, preferred: f32) -> Self {
         let width = pane.clamp(preferred);
         Self {
-            layout,
             pane,
             origin,
             original: width,
@@ -324,7 +254,6 @@ impl Resize {
         }
         self.width = width;
         Some(ResizeEvent::Changed {
-            layout: self.layout,
             pane: self.pane,
             width,
         })
@@ -332,7 +261,6 @@ impl Resize {
 
     pub fn ended(self) -> ResizeEvent {
         ResizeEvent::Ended {
-            layout: self.layout,
             pane: self.pane,
             width: self.width,
         }
@@ -340,7 +268,6 @@ impl Resize {
 
     pub fn cancelled(self) -> ResizeEvent {
         ResizeEvent::Cancelled {
-            layout: self.layout,
             pane: self.pane,
             width: self.original,
         }
@@ -351,7 +278,7 @@ impl Resize {
 struct State {
     drag: Option<Resize>,
     last_cursor: Option<Point>,
-    previous_press: Option<(Instant, Point, Layout, Pane)>,
+    previous_press: Option<(Instant, Point, Pane)>,
     swallow_release: bool,
     focused: bool,
     external_width: Option<f32>,
@@ -388,7 +315,6 @@ enum Ownership {
 
 struct Seam {
     bounds: Rectangle,
-    layout: Layout,
     pane: Pane,
     preferred: f32,
 }
@@ -402,7 +328,6 @@ fn owns_event(
 ) -> Ownership {
     let Seam {
         bounds,
-        layout,
         pane,
         preferred,
     } = seam;
@@ -417,10 +342,7 @@ fn owns_event(
             state.live_width = pane.clamp(preferred);
         }
     }
-    if state
-        .drag
-        .is_some_and(|drag| drag.layout != layout || drag.pane != pane)
-    {
+    if state.drag.is_some_and(|drag| drag.pane != pane) {
         let drag = state.drag.take().expect("checked live resize");
         state.swallow_release = true;
         return Ownership::Broadcast(vec![drag.cancelled()]);
@@ -438,29 +360,26 @@ fn owns_event(
                 return Ownership::Delegate;
             };
             state.focused = true;
-            let double =
-                state
-                    .previous_press
-                    .is_some_and(|(then, position, old_layout, old_pane)| {
-                        old_layout == layout
-                            && old_pane == pane
-                            && now.saturating_duration_since(then) <= Duration::from_millis(300)
-                            && position.distance(at) < 6.0
-                    });
+            let double = state
+                .previous_press
+                .is_some_and(|(then, position, old_pane)| {
+                    old_pane == pane
+                        && now.saturating_duration_since(then) <= Duration::from_millis(300)
+                        && position.distance(at) < 6.0
+                });
             if double {
                 state.previous_press = None;
                 state.swallow_release = true;
                 state.live_width = pane.limits().default;
                 return Ownership::Own(vec![ResizeEvent::Reset {
-                    layout,
                     pane,
                     width: state.live_width,
                 }]);
             }
             state.swallow_release = false;
-            state.previous_press = Some((now, at, layout, pane));
-            state.drag = Some(Resize::new(layout, pane, at, state.live_width));
-            Ownership::Own(vec![ResizeEvent::Started { layout, pane }])
+            state.previous_press = Some((now, at, pane));
+            state.drag = Some(Resize::new(pane, at, state.live_width));
+            Ownership::Own(vec![ResizeEvent::Started { pane }])
         }
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
             let Some(drag) = &mut state.drag else {
@@ -516,7 +435,6 @@ fn owns_event(
                     };
                     state.live_width = pane.clamp(state.live_width + delta);
                     Ownership::Own(vec![ResizeEvent::Step {
-                        layout,
                         pane,
                         width: state.live_width,
                     }])
@@ -532,11 +450,10 @@ fn owns_event(
 }
 
 /// Wrap the pane, not the scrollable inside it. No space is added for the overlapping grip.
-/// On Started/Reset, focus `grip_id(layout, pane)` to unfocus other application widgets.
+/// On Started/Reset, focus `grip_id(pane)` to unfocus other application widgets.
 /// `drag_view::area` also routes these grips before delegating to any sibling editor.
 pub fn resizable<'a, Message: Send + 'static, R>(
     content: impl Into<Element<'a, Message, iced::Theme, R>>,
-    layout: Layout,
     pane: Pane,
     effective_width: f32,
     preferred_width: f32,
@@ -546,10 +463,8 @@ pub fn resizable<'a, Message: Send + 'static, R>(
 where
     R: text::Renderer<Font = Font> + 'a,
 {
-    let _ = index(layout, pane);
     Element::new(Resizable {
         content: content.into(),
-        layout,
         pane,
         effective_width,
         preferred_width,
@@ -560,7 +475,6 @@ where
 
 struct Resizable<'a, Message, R> {
     content: Element<'a, Message, iced::Theme, R>,
-    layout: Layout,
     pane: Pane,
     effective_width: f32,
     preferred_width: f32,
@@ -570,7 +484,6 @@ struct Resizable<'a, Message, R> {
 
 struct GripState<Message> {
     gesture: State,
-    layout: Layout,
     pane: Pane,
     preferred: f32,
     root_enabled: bool,
@@ -642,7 +555,6 @@ where
                 self.cursor,
                 Seam {
                     bounds,
-                    layout: grip.layout,
                     pane: grip.pane,
                     preferred: grip.preferred,
                 },
@@ -692,7 +604,6 @@ impl<Message: Send + 'static, R: text::Renderer<Font = Font>> Widget<Message, ic
     fn state(&self) -> tree::State {
         tree::State::new(GripState {
             gesture: State::default(),
-            layout: self.layout,
             pane: self.pane,
             preferred: self.preferred_width,
             root_enabled: true,
@@ -735,20 +646,15 @@ impl<Message: Send + 'static, R: text::Renderer<Font = Font>> Widget<Message, ic
         operation: &mut dyn Operation,
     ) {
         let grip = tree.state.downcast_mut::<GripState<Message>>();
-        grip.layout = self.layout;
         grip.pane = self.pane;
         grip.preferred = self.preferred_width;
         grip.on_event = self.on_event.clone();
-        operation.custom(
-            Some(&grip_id(self.layout, self.pane)),
-            layout.bounds(),
-            grip,
-        );
+        operation.custom(Some(&grip_id(self.pane)), layout.bounds(), grip);
         self.content
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
         operation.focusable(
-            Some(&grip_id(self.layout, self.pane)),
+            Some(&grip_id(self.pane)),
             grip_bounds(layout.bounds()),
             &mut tree.state.downcast_mut::<GripState<Message>>().gesture,
         );
@@ -776,7 +682,6 @@ impl<Message: Send + 'static, R: text::Renderer<Font = Font>> Widget<Message, ic
                 cursor,
                 Seam {
                     bounds: layout.bounds(),
-                    layout: self.layout,
                     pane: self.pane,
                     preferred: self.preferred_width,
                 },
@@ -1005,7 +910,6 @@ mod tests {
             }),
             Seam {
                 bounds: bounds(),
-                layout: Layout::Columns,
                 pane: Pane::Groups,
                 preferred: 220.0,
             },
@@ -1014,17 +918,17 @@ mod tests {
     }
 
     #[test]
-    fn defaults_clamps_and_separate_layout_preferences() {
+    fn defaults_and_clamps() {
         let mut widths = Widths::default();
-        assert_eq!(widths.get(Layout::Columns, Pane::Sections), 200.0);
-        assert_eq!(widths.get(Layout::Outline, Pane::Outline), 260.0);
-        assert_eq!(widths.set(Layout::Columns, Pane::Notes, -5.0), 200.0);
-        assert_eq!(widths.get(Layout::Outline, Pane::Notes), 280.0);
-        assert_eq!(widths.set(Layout::Columns, Pane::Groups, 900.0), 400.0);
-        assert_eq!(widths.set(Layout::Outline, Pane::Outline, f32::NAN), 260.0);
-        widths.reset_layout(Layout::Columns);
+        assert_eq!(widths.get(Pane::Sections), 200.0);
+        assert_eq!(widths.set(Pane::Notes, -5.0), 200.0);
+        assert_eq!(widths.set(Pane::Groups, 900.0), 400.0);
+        assert_eq!(widths.set(Pane::Sections, f32::NAN), 200.0);
+        for pane in PANES {
+            widths.reset(pane);
+        }
         assert_eq!(widths, Widths::default());
-        widths.set(Layout::Outline, Pane::Notes, 400.0);
+        widths.set(Pane::Notes, 400.0);
         widths.reset_all();
         assert_eq!(widths, Widths::default());
     }
@@ -1032,18 +936,18 @@ mod tests {
     #[test]
     fn compression_is_proportional_until_floors_then_editor_shrinks() {
         let widths = Widths::default();
-        let normal = widths.effective(Layout::Columns, 1200.0);
+        let normal = widths.effective(1200.0);
         assert_eq!(normal.editor, 500.0);
-        let squeezed = widths.effective(Layout::Columns, 880.0);
+        let squeezed = widths.effective(880.0);
         assert!((squeezed.get(Pane::Sections) - 160.0).abs() < 0.01);
         assert!((squeezed.get(Pane::Groups) - 176.0).abs() < 0.01);
         assert!((squeezed.get(Pane::Notes) - 224.0).abs() < 0.01);
         assert!((squeezed.editor - 320.0).abs() < 0.01);
-        let near_floor = widths.effective(Layout::Columns, 700.0);
+        let near_floor = widths.effective(700.0);
         assert!((near_floor.get(Pane::Sections) - 120.0).abs() < 0.01);
         assert!((near_floor.get(Pane::Groups) - 120.0).abs() < 0.01);
         assert!((near_floor.get(Pane::Notes) - 140.0).abs() < 0.01);
-        let narrow = widths.effective(Layout::Columns, 600.0);
+        let narrow = widths.effective(600.0);
         assert_eq!(narrow.widths, [120.0, 120.0, 120.0]);
         assert_eq!(narrow.editor, 240.0);
         assert_eq!(
@@ -1051,40 +955,32 @@ mod tests {
             Widths::default(),
             "layout never overwrites preferences"
         );
-        assert_eq!(
-            widths.effective(Layout::Outline, 0.0).widths,
-            [120.0, 120.0]
-        );
     }
 
     #[test]
     fn all_compression_extents_are_bounded_and_monotonic() {
-        for layout in [Layout::Columns, Layout::Outline] {
-            let widths = Widths::default();
-            let mut previous = vec![120.0; layout.panes().len()];
-            for available in 0..2000 {
-                let effective = widths.effective(layout, available as f32);
-                for (i, &pane) in layout.panes().iter().enumerate() {
-                    let width = effective.get(pane);
-                    assert!(width >= 120.0 - 0.001 && width <= widths.get(layout, pane) + 0.001);
-                    assert!(width >= previous[i] - 0.001);
-                    previous[i] = width;
-                }
+        let widths = Widths::default();
+        let mut previous = [120.0; 3];
+        for available in 0..2000 {
+            let effective = widths.effective(available as f32);
+            for (i, pane) in PANES.into_iter().enumerate() {
+                let width = effective.get(pane);
+                assert!(width >= 120.0 - 0.001 && width <= widths.get(pane) + 0.001);
+                assert!(width >= previous[i] - 0.001);
+                previous[i] = width;
             }
         }
     }
 
     #[test]
-    fn outline_persistence_uses_sections_key_and_round_trips() {
+    fn persistence_round_trips() {
         let directory = tempfile::tempdir().unwrap();
         let store = wren_core::fs_store::FsStore::open(directory.path()).unwrap();
         let mut state = WorkspaceState::load(&store);
         let mut widths = Widths::from_state(&state);
-        widths.set(Layout::Outline, Pane::Outline, 310.0);
-        widths
-            .store(&mut state, Layout::Outline, Pane::Outline)
-            .unwrap();
-        assert_eq!(state.width("outline", "sections"), Some(310));
+        widths.set(Pane::Sections, 310.0);
+        widths.store(&mut state, Pane::Sections).unwrap();
+        assert_eq!(state.width("sections"), Some(310));
         assert_eq!(Widths::from_state(&state), widths);
     }
 
@@ -1108,7 +1004,6 @@ mod tests {
         let content = row![body, Space::new().width(1.0).height(Length::Fill)].height(Length::Fill);
         let mut widget: Element<'_, (), iced::Theme, ()> = resizable(
             content,
-            Layout::Columns,
             Pane::Groups,
             220.0,
             220.0,
@@ -1197,7 +1092,6 @@ mod tests {
     fn root_preflight_cursor_overrides_a_grips_stale_local_cache() {
         let mut widget: Element<'_, ResizeEvent, iced::Theme, ()> = resizable(
             iced::widget::Space::new().width(Length::Fill).height(100.0),
-            Layout::Columns,
             Pane::Groups,
             220.0,
             220.0,
@@ -1229,13 +1123,7 @@ mod tests {
             &mut shell,
         ));
         assert!(shell.is_event_captured());
-        assert_eq!(
-            messages,
-            vec![ResizeEvent::Started {
-                layout: Layout::Columns,
-                pane: Pane::Groups
-            }]
-        );
+        assert_eq!(messages, vec![ResizeEvent::Started { pane: Pane::Groups }]);
     }
 
     #[test]
@@ -1246,7 +1134,6 @@ mod tests {
         assert_eq!(
             route(&mut state, &moved(281.0), None, now),
             Ownership::Own(vec![ResizeEvent::Changed {
-                layout: Layout::Columns,
                 pane: Pane::Groups,
                 width: 260.0
             }])
@@ -1254,7 +1141,6 @@ mod tests {
         assert_eq!(
             route(&mut state, &release(), None, now),
             Ownership::Own(vec![ResizeEvent::Ended {
-                layout: Layout::Columns,
                 pane: Pane::Groups,
                 width: 260.0
             }])
@@ -1263,7 +1149,7 @@ mod tests {
             route(&mut state, &release(), None, now),
             Ownership::Delegate
         );
-        let mut resize = Resize::new(Layout::Columns, Pane::Groups, Point::new(120.0, 0.0), 300.0);
+        let mut resize = Resize::new(Pane::Groups, Point::new(120.0, 0.0), 300.0);
         resize.moved(Point::new(136.0, 0.0));
         assert_eq!(
             resize.width, 316.0,
@@ -1291,7 +1177,6 @@ mod tests {
                 now + Duration::from_millis(100)
             ),
             Ownership::Own(vec![ResizeEvent::Reset {
-                layout: Layout::Columns,
                 pane: Pane::Groups,
                 width: 220.0
             }])
@@ -1329,7 +1214,6 @@ mod tests {
                 now
             ),
             Ownership::Own(vec![ResizeEvent::Cancelled {
-                layout: Layout::Columns,
                 pane: Pane::Groups,
                 width: 220.0
             }])
@@ -1364,7 +1248,6 @@ mod tests {
                     now
                 ),
                 Ownership::Own(vec![ResizeEvent::Step {
-                    layout: Layout::Columns,
                     pane: Pane::Groups,
                     width
                 }])
@@ -1381,7 +1264,6 @@ mod tests {
                 now
             ),
             Ownership::Own(vec![ResizeEvent::Step {
-                layout: Layout::Columns,
                 pane: Pane::Groups,
                 width: 236.0
             }])
@@ -1401,7 +1283,6 @@ mod tests {
     fn compressed_widget_floors_overflow_instead_of_disappearing_or_wrapping() {
         let mut widget: Element<'_, ResizeEvent, iced::Theme, ()> = resizable(
             iced::widget::Space::new().width(Length::Fill).height(100.0),
-            Layout::Columns,
             Pane::Groups,
             120.0,
             220.0,
@@ -1423,7 +1304,6 @@ mod tests {
         let child = iced::widget::Space::new().width(Length::Fill).height(100.0);
         let mut widget: Element<'_, ResizeEvent, iced::Theme, ()> = resizable(
             child,
-            Layout::Columns,
             Pane::Groups,
             220.0,
             220.0,
@@ -1436,7 +1316,7 @@ mod tests {
             &(),
             &layout::Limits::new(Size::ZERO, Size::new(1000.0, 500.0)),
         );
-        let mut focus = operation::focusable::focus::<()>(grip_id(Layout::Columns, Pane::Groups));
+        let mut focus = operation::focusable::focus::<()>(grip_id(Pane::Groups));
         widget
             .as_widget_mut()
             .operate(&mut tree, WidgetLayout::new(&node), &(), &mut focus);

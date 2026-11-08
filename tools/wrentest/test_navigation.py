@@ -29,17 +29,14 @@ COMMANDS = {
     "note.move", "group.new", "section.new", "group.rename", "group.delete",
     "group.reveal", "group.move", "section.rename", "section.delete", "section.reveal",
     "navigation.jump", "navigation.search", "navigation.find", "navigation.back",
-    "navigation.forward", "view.focus", "view.columns", "view.outline",
+    "navigation.forward", "view.focus",
     "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
     "font.choose", "font.increase", "font.decrease", "font.reset",
     "workspace.switch", "workspace.add", "workspace.remove",
     "section.reorder", "group.reorder", "note.open_conflict",
     "settings.open", "settings.reload", "app.quit",
 }
-DEFAULT_WIDTHS = {
-    "columns": {"sections": 200, "groups": 220, "notes": 280},
-    "outline": {"sections": 260, "notes": 280},
-}
+DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
 TENTH = "Atlas/Research/Note 10.md"
@@ -285,11 +282,9 @@ def test_fuzzy_commands_create_real_items_through_dialogs(
 ) -> None:
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory(f"palette-{command_id}")) as app:
         jump(app, FIRST)
-        assert [row["key"] for row in palette(app, "commands", "lyt otlne")["results"]] == [
-            {"command": "view.outline"},
-        ]
-        activate(app, {"command": "view.outline"})
-        assert navigation(app)["layout"] == "outline"
+        assert palette(app, "commands", "srt ttl")["results"][0]["key"] == {"command": "notes.sort_title"}
+        activate(app, {"command": "notes.sort_title"})
+        assert navigation(app)["sort"] == "title"
         rows = palette(app, "commands", query)["results"]
         assert {"command": command_id} in [row["key"] for row in rows]
         count = len(session(app)[collection])
@@ -388,7 +383,7 @@ def test_trash_requires_explicit_confirmation_and_only_uses_private_quarantine(
         assert navigation(app)["modal"]["results"] == []
 
 
-def test_independent_name_filters_and_outline_projection_keep_hidden_document_open(vault: Path) -> None:
+def test_independent_name_filters_render_only_matching_rows_and_keep_hidden_document_open(vault: Path) -> None:
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory("filter-scope")) as app:
         note = jump(app, FIRST)
         before = app.client.call("editor.get")
@@ -407,25 +402,13 @@ def test_independent_name_filters_and_outline_projection_keep_hidden_document_op
         assert note not in snapshot["visible"]["notes"]
         assert session(app)["selected_note"] == note
         assert editor_identity(app.client.call("editor.get")) == editor_identity(before)
-        expanded = snapshot["expanded_sections"]
-        gateway(app, "view.layout", layout="outline")
-        gateway(app, "filter.set", pane="outline", query="rvw")
-        snapshot = navigation(app)
-        assert snapshot["visible"]["outline"] == [{"section": atlas, "expanded": True}]
-        assert snapshot["visible"]["outline_rows"] == [{"section": atlas}, {"group": review}]
-        assert snapshot["expanded_sections"] == expanded
-        assert snapshot["filters"] == {
-            "sections": "brl", "groups": "rvw", "notes": "needle amber", "outline": "rvw",
-        }
+        assert snapshot["filters"] == {"sections": "brl", "groups": "rvw", "notes": "needle amber"}
         bounds = wait_for(lambda: app.client.call("navigation.bounds")["rows"], timeout=5)
         keys = [row["key"] for row in bounds]
-        assert {"section": atlas} in keys and {"group": review} in keys
-        assert {"section": boreal} not in keys
-        gateway(app, "filter.set", pane="outline", query="Boreal")
-        assert navigation(app)["visible"]["outline"] == [{"section": boreal, "expanded": True}]
-        assert navigation(app)["expanded_sections"] == expanded
-        gateway(app, "filter.set", pane="outline", query="")
-        assert {row["section"] for row in navigation(app)["visible"]["outline"]} == {
+        assert {"section": boreal} in keys and {"group": review} in keys
+        assert {"section": atlas} not in keys
+        gateway(app, "filter.set", pane="sections", query="")
+        assert set(navigation(app)["visible"]["sections"]) == {
             entry["id"] for entry in session(app)["sections"]
         }
         assert session(app)["document"]["note"] == note
@@ -824,9 +807,8 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
         assert navigation(app)["modal"] is None
 
 
-@pytest.mark.parametrize("layout", ["columns", "outline"])
-def test_layout_focus_filter_sort_and_width_changes_retain_selection_undo_and_redo(vault: Path, layout: str) -> None:
-    with WrenApp(workspace=vault, artifacts_dir=artifact_directory(f"editor-layout-{layout}")) as app:
+def test_focus_filter_sort_and_width_changes_retain_selection_undo_and_redo(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("editor-view-changes")) as app:
         note = jump(app, FIRST)
         original = app.client.call("editor.get")["text"]
         one = append(app, "edit one\n")
@@ -836,68 +818,54 @@ def test_layout_focus_filter_sort_and_width_changes_retain_selection_undo_and_re
         before = app.client.call("editor.get")
         assert before["can_undo"] is True and before["can_redo"] is True
         requests = [
-            ("view.layout", {"layout": layout}),
             ("view.focus", {"enabled": True}),
             ("filter.set", {"pane": "sections", "query": "Boreal"}),
             ("filter.set", {"pane": "groups", "query": "Review"}),
-            ("filter.set", {"pane": "outline", "query": "Empty section"}),
             ("filter.set", {"pane": "notes", "query": "no-such-galaxy"}),
             ("view.sort", {"mode": "title"}),
-            ("view.width", {"layout": layout, "pane": "sections", "width": 333}),
-            ("view.width", {"layout": layout, "pane": "notes", "width": 444}),
+            ("view.width", {"pane": "sections", "width": 333}),
+            ("view.width", {"pane": "notes", "width": 444}),
             ("view.focus", {"enabled": False}),
             ("palette.open", {"mode": "themes"}),
             ("palette.activate", {"key": {"theme": "wren-light"}}),
             ("palette.open", {"mode": "themes"}),
             ("palette.activate", {"key": {"theme": "nord"}}),
-            ("view.layout", {"layout": "outline" if layout == "columns" else "columns"}),
-            ("view.layout", {"layout": layout}),
         ]
         for operation, params in requests:
             gateway(app, operation, **params)
             assert editor_identity(app.client.call("editor.get")) == editor_identity(before), (operation, params)
             assert session(app)["document"]["note"] == note
         current = navigation(app)
-        assert current["layout"] == layout and current["focus"] is False
+        assert current["focus"] is False
         assert current["visible"]["notes"] == [] and current["sort"] == "title"
-        assert current["preferred_widths"][layout]["notes"] == 444
+        assert current["preferred_widths"]["notes"] == 444
         assert app.client.call("editor.undo")["text"] == original
         assert app.client.call("editor.redo")["text"] == one
         assert app.client.call("editor.redo")["text"] == two
         saved(app, vault / FIRST, two)
 
 
-def test_width_preferences_are_independent_clamped_reset_and_persisted(vault: Path) -> None:
+def test_width_preferences_are_clamped_reset_and_persisted(vault: Path) -> None:
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory("width-preferences")) as app:
         jump(app, FIRST)
-        expected = {
-            "columns": {"sections": 140, "groups": 400, "notes": 399},
-            "outline": {"sections": 420, "notes": 200},
-        }
-        for layout, pane, width in (
-            ("columns", "sections", 0), ("columns", "groups", 999), ("columns", "notes", 399),
-            ("outline", "sections", 999), ("outline", "notes", 0),
-        ):
-            gateway(app, "view.width", layout=layout, pane=pane, width=width)
-        assert navigation(app)["preferred_widths"] == expected
-        for layout in ("columns", "outline"):
-            gateway(app, "view.layout", layout=layout)
-            current = navigation(app)
-            for pane, width in current["effective_widths"].items():
-                assert 120 <= width <= expected[layout][pane]
-            budget = min(sum(expected[layout].values()), max(current["viewport"]["width"] - 320, 120 * len(expected[layout])))
-            assert sum(current["effective_widths"].values()) == pytest.approx(budget, abs=0.1)
-            assert current["preferred_widths"] == expected
+        expected = {"sections": 140, "groups": 400, "notes": 399}
+        for pane, width in (("sections", 0), ("groups", 999), ("notes", 399)):
+            gateway(app, "view.width", pane=pane, width=width)
+        current = navigation(app)
+        assert current["preferred_widths"] == expected
+        for pane, width in current["effective_widths"].items():
+            assert 120 <= width <= expected[pane]
+        budget = min(sum(expected.values()), max(current["viewport"]["width"] - 320, 120 * len(expected)))
+        assert sum(current["effective_widths"].values()) == pytest.approx(budget, abs=0.1)
         metadata = vault / ".wren/workspace.toml"
-        assert tomllib.loads(metadata.read_text(encoding="utf-8"))["widths"] == expected
+        assert tomllib.loads(metadata.read_text(encoding="utf-8"))["widths"] == {"columns": expected}
         app.restart(hard=False)
         assert navigation(app)["preferred_widths"] == expected
-        assert navigation(app)["layout"] == "outline"
         command(app, "view.reset_widths")
         assert navigation(app)["preferred_widths"] == DEFAULT_WIDTHS
         app.restart(hard=False)
         assert navigation(app)["preferred_widths"] == DEFAULT_WIDTHS
-        assert tomllib.loads(metadata.read_text(encoding="utf-8"))["widths"] == DEFAULT_WIDTHS
+        assert tomllib.loads(metadata.read_text(encoding="utf-8"))["widths"] == {"columns": DEFAULT_WIDTHS}
 
 
 def test_natural_title_sort_is_per_parent_and_persists(vault: Path) -> None:
@@ -944,16 +912,14 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         command(app, "note.new", disposition="blocked")
         add_workspace(app, alias, "Southern laboratory")
         jump(app, SECOND)
-        command(app, "view.outline")
-        gateway(app, "view.width", layout="outline", pane="sections", width=311)
+        gateway(app, "view.width", pane="sections", width=311)
         command(app, "notes.sort_title")
         first_state = navigation(app)
         add_workspace(app, second, "Northern laboratory")
-        assert navigation(app)["layout"] == "columns"
         assert navigation(app)["preferred_widths"] == DEFAULT_WIDTHS
         assert navigation(app)["sort"] == "modified"
         jump(app, "Boreal/Workbench/Loose 5.md")
-        gateway(app, "view.width", layout="columns", pane="groups", width=355)
+        gateway(app, "view.width", pane="groups", width=355)
         assert navigation(app)["registrations"] == [
             {"name": "Southern laboratory", "path": str(first.resolve())},
             {"name": "Northern laboratory", "path": str(second.resolve())},
@@ -961,7 +927,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         switch_workspace(app, first)
         assert session(app)["document"]["path"] == SECOND
         restored = navigation(app)
-        for field in ("layout", "preferred_widths", "sort", "history", "history_position", "mru"):
+        for field in ("preferred_widths", "sort", "history", "history_position", "mru"):
             assert restored[field] == first_state[field]
         add_workspace(app, alias, "Duplicate name must not replace the original")
         assert len(navigation(app)["registrations"]) == 2
@@ -972,7 +938,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         gateway(app, "palette.close")
         switch_workspace(app, second)
         assert session(app)["document"]["path"] == "Boreal/Workbench/Loose 5.md"
-        assert navigation(app)["preferred_widths"]["columns"]["groups"] == 355
+        assert navigation(app)["preferred_widths"]["groups"] == 355
         assert navigation(app)["active_registration"] == str(second.resolve())
         assert palette(app, "search", "vault-token-southern-vault")["results"] == []
         rows = gateway(app, "palette.query", query="vault-token-northern-vault")["navigation"]["modal"]["results"]
@@ -981,7 +947,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         app.restart(hard=False)
         assert Path(session(app)["root"]) == second.resolve()
         assert session(app)["document"]["path"] == "Boreal/Workbench/Loose 5.md"
-        assert navigation(app)["preferred_widths"]["columns"]["groups"] == 355
+        assert navigation(app)["preferred_widths"]["groups"] == 355
         assert len(navigation(app)["registrations"]) == 2
         app.restart(hard=True)
         assert Path(session(app)["root"]) == second.resolve()
@@ -1040,7 +1006,7 @@ def test_folder_completions_are_tagged_cancel_safe_and_failed_or_current_open_pr
             gateway(app, "test.folder.complete", tag=tag, path=str(other), disposition="blocked")
         core(app, "flush")
         saved(app, vault / FIRST, expected)
-        gateway(app, "view.layout", layout="outline")
+        gateway(app, "view.width", pane="notes", width=301)
         gateway(app, "filter.set", pane="notes", query="baseline")
         before = session(app)
         editor_before = app.client.call("editor.get")
@@ -1049,7 +1015,7 @@ def test_folder_completions_are_tagged_cancel_safe_and_failed_or_current_open_pr
         assert session(app)["generation"] == before["generation"]
         assert selection_identity(session(app)) == selection_identity(before)
         assert editor_identity(app.client.call("editor.get")) == editor_identity(editor_before)
-        assert navigation(app)["layout"] == "outline" and navigation(app)["filters"]["notes"] == "baseline"
+        assert navigation(app)["preferred_widths"]["notes"] == 301 and navigation(app)["filters"]["notes"] == "baseline"
         response = gateway(app, "workspace.add", path=str(tmp_path / "does-not-exist"), disposition="async-pending")
         failed = settle_workspace(app, response, vault, disposition="blocked")
         assert failed["navigation"]["processed"]["warning"]
@@ -1091,8 +1057,8 @@ def test_corrupt_optional_configuration_is_preserved_while_notes_open_and_save(v
         if optional_file == "global_config":
             gateway(app, "workspace.remove", path=str(vault), disposition="blocked")
         else:
-            command(app, "view.outline", disposition="committed-warning")
-            assert navigation(app)["layout"] == "outline"
+            command(app, "notes.sort_title", disposition="committed-warning")
+            assert navigation(app)["sort"] == "title"
         assert path.read_bytes() == corrupt
         app.restart(hard=True)
         assert path.read_bytes() == corrupt and (vault / destination).read_bytes() == expected.encode()
@@ -1104,8 +1070,8 @@ def test_malformed_parameters_are_remote_errors_but_context_rejections_are_proce
         for operation, params, message in (
             ("command.run", {"id": "save"}, "Unknown command ID"),
             ("palette.step", {"delta": "down"}, "delta must be i32"),
-            ("view.width", {"layout": "outline", "pane": "groups", "width": 200}, "Unknown pane"),
-            ("view.width", {"layout": "columns", "pane": "notes", "width": -1}, "width must be finite"),
+            ("view.width", {"pane": "outline", "width": 200}, "Unknown pane"),
+            ("view.width", {"pane": "notes", "width": -1}, "width must be finite"),
             ("view.focus", {"enabled": "yes"}, "enabled must be boolean"),
         ):
             with pytest.raises(RemoteError, match=message):
@@ -1129,16 +1095,13 @@ def color_count(image, viewport: dict, rectangle: tuple[float, float, float, flo
     ("dark", (0x2A, 0x31, 0x40), (0xE6, 0xE8, 0xEC), (0xD5, 0xD9, 0xE0), (0x1C, 0x1F, 0x26), (0xF0, 0xB4, 0x5A)),
     ("light", (0xE1, 0xE7, 0xF0), (0x20, 0x24, 0x2D), (0x31, 0x38, 0x44), (0xFF, 0xFF, 0xFF), (0x9A, 0x58, 0x00)),
 ])
-def test_palette_search_outline_and_focus_render_real_selection_and_glyphs(
+def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
     vault: Path, theme: str, selected: tuple, text: tuple, body: tuple, raised: tuple, accent: tuple,
 ) -> None:
     artifacts = artifact_directory(f"navigation-render-{theme}")
     with WrenApp(workspace=vault, artifacts_dir=artifacts) as app:
         note = jump(app, FIRST)
         choose_theme(app, theme)
-        command(app, "view.outline")
-        gateway(app, "filter.set", pane="outline", query="Research")
-        assert navigation(app)["layout"] == "outline"
         assert session(app)["document"]["note"] == note
 
         def selected_row():
@@ -1147,7 +1110,7 @@ def test_palette_search_outline_and_focus_render_real_selection_and_glyphs(
                          and row["visible"]["height"] >= 40), None)
 
         bounds = wait_for(selected_row, timeout=5, description="actual selected note row geometry")
-        image = capture(app, artifacts / "outline.png")
+        image = capture(app, artifacts / "columns.png")
         viewport = navigation(app)["viewport"]
         rect = (bounds["x"] + 4, bounds["y"] + 4,
                 bounds["x"] + bounds["width"] - 4, bounds["y"] + bounds["height"] - 4)

@@ -7,7 +7,7 @@ use wren_core::ops::Op;
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
 use super::{focus_editor, App, Message};
-use crate::panes::{Layout, Pane};
+use crate::panes::Pane;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandId {
@@ -38,8 +38,6 @@ pub enum CommandId {
     Back,
     Forward,
     Focus,
-    Columns,
-    Outline,
     ResetWidths,
     SortModified,
     SortTitle,
@@ -137,8 +135,6 @@ definitions![
     (Back, "navigation.back", "Back", "Go"),
     (Forward, "navigation.forward", "Forward", "Go"),
     (Focus, "view.focus", "Toggle focus mode", "View"),
-    (Columns, "view.columns", "Layout: Columns", "View"),
-    (Outline, "view.outline", "Layout: Outline", "View"),
     (
         ResetWidths,
         "view.reset_widths",
@@ -215,10 +211,7 @@ pub struct ReorderTarget {
 pub enum Command {
     Run(CommandId),
     ItemActions(ItemTarget),
-    ItemAction {
-        target: ItemTarget,
-        id: CommandId,
-    },
+    ItemAction { target: ItemTarget, id: CommandId },
     Reorder(ReorderTarget),
     Rename(ItemRef),
     Delete(ItemRef),
@@ -226,23 +219,11 @@ pub enum Command {
     OpenNote(SearchTarget),
     SelectParent(Parent),
     SelectSection(wren_core::model::SectionId),
-    ToggleSection(wren_core::model::SectionId),
-    Layout(Layout),
     Focus(Option<bool>),
-    Width {
-        layout: Layout,
-        pane: Pane,
-        width: f32,
-    },
+    Width { pane: Pane, width: f32 },
     Sort(String),
-    Filter {
-        pane: String,
-        query: String,
-    },
-    OpenWorkspace {
-        path: PathBuf,
-        name: Option<String>,
-    },
+    Filter { pane: String, query: String },
+    OpenWorkspace { path: PathBuf, name: Option<String> },
     RemoveWorkspace(PathBuf),
 }
 
@@ -321,9 +302,7 @@ impl App {
                 .config
                 .as_ref()
                 .is_some_and(|config| config.writable() && !config.workspaces().is_empty()),
-            NewSection | Focus | Columns | Outline | ResetWidths | Jump | Search => {
-                self.session.is_some()
-            }
+            NewSection | Focus | ResetWidths | Jump | Search => self.session.is_some(),
             NewGroup | RenameSection | DeleteSection | RevealSection | ReorderSection => {
                 self.selected_section.is_some() && self.session.is_some()
             }
@@ -392,36 +371,6 @@ impl App {
                 }
                 outcome
             }
-            Command::ToggleSection(section) => {
-                if self
-                    .model()
-                    .and_then(|model| model.section(section))
-                    .is_none()
-                {
-                    return self.blocked("The section no longer exists");
-                }
-                if self.selected_section == Some(section) {
-                    if !self.expanded.remove(&section) {
-                        self.expanded.insert(section);
-                    }
-                    return self.finish_action(Disposition::Completed, None, Task::none());
-                }
-                let outcome = self.process_core(Op::SelectSection { section });
-                if outcome.processed.disposition.committed() {
-                    self.expanded.insert(section);
-                }
-                outcome
-            }
-            Command::Layout(layout) => {
-                if self.session.is_none() {
-                    return self.blocked("No workspace is open");
-                }
-                self.cancel_gestures();
-                self.layout = layout;
-                self.process_core(Op::SetLayout {
-                    layout: layout.key().into(),
-                })
-            }
             Command::Focus(enabled) => {
                 if self.session.is_none() {
                     return self.blocked("No workspace is open");
@@ -430,20 +379,12 @@ impl App {
                 self.focus = enabled.unwrap_or(!self.focus);
                 self.finish_action(Disposition::Completed, None, focus_editor())
             }
-            Command::Width {
-                layout,
-                pane,
-                width,
-            } => {
+            Command::Width { pane, width } => {
                 if self.session.is_none() {
                     return self.blocked("No workspace is open");
                 }
-                if !layout.panes().contains(&pane) {
-                    return self.blocked("The pane does not belong to this layout");
-                }
-                let width = self.widths.set(layout, pane, width);
+                let width = self.widths.set(pane, width);
                 self.process_core(Op::SetWidth {
-                    layout: layout.key().into(),
                     pane: pane.key().into(),
                     width: width.round() as u16,
                 })
@@ -581,14 +522,6 @@ impl App {
             Focus => {
                 self.palette = None;
                 self.dispatch(Command::Focus(None))
-            }
-            Columns | Outline => {
-                let outcome = self.dispatch(Command::Layout(if id == Columns {
-                    Layout::Columns
-                } else {
-                    Layout::Outline
-                }));
-                self.close_palette_after(outcome)
             }
             ResetWidths => {
                 self.cancel_gestures();
@@ -967,8 +900,6 @@ mod tests {
             "navigation.back",
             "navigation.forward",
             "view.focus",
-            "view.columns",
-            "view.outline",
             "view.reset_widths",
             "notes.sort_modified",
             "notes.sort_title",
@@ -1044,7 +975,7 @@ mod tests {
         append(&mut app, " retained draft");
         let text = app.editor.text();
         let cursor = app.editor.cursor();
-        for pane in ["sections", "groups", "notes", "outline"] {
+        for pane in ["sections", "groups", "notes"] {
             let valid = app.dispatch(Command::Filter {
                 pane: pane.into(),
                 query: "First".into(),
@@ -1064,7 +995,6 @@ mod tests {
         assert_eq!(app.filters.sections, "First");
         assert_eq!(app.filters.groups, "First");
         assert_eq!(app.filters.notes, "First");
-        assert_eq!(app.filters.outline, "First");
         assert_eq!(
             std::fs::read_to_string(directory.path().join("Alpha/A/First.md")).unwrap(),
             "first body"
@@ -1127,7 +1057,6 @@ mod tests {
         let generation = app.gesture_generation;
         let _ = app.drag_event(
             generation,
-            app.layout,
             DragEvent::Context {
                 generation,
                 row: RowKind::Note(peer),
@@ -1142,7 +1071,6 @@ mod tests {
         let _ = app.close_palette();
         let _ = app.drag_event(
             generation,
-            app.layout,
             DragEvent::Rename {
                 generation,
                 row: RowKind::Note(peer),
@@ -1155,7 +1083,6 @@ mod tests {
         let generation = app.gesture_generation;
         let _ = app.drag_event(
             generation,
-            app.layout,
             DragEvent::Rename {
                 generation: generation + 1,
                 row: RowKind::Note(peer),
@@ -1167,7 +1094,6 @@ mod tests {
         );
         let _ = app.drag_event(
             generation,
-            app.layout,
             DragEvent::Rename {
                 generation,
                 row: RowKind::Note(peer),
@@ -1512,12 +1438,10 @@ mod tests {
     }
 
     #[test]
-    fn sort_layout_and_reset_palette_actions_schedule_editor_focus_after_closing() {
+    fn sort_and_reset_palette_actions_schedule_editor_focus_after_closing() {
         for id in [
             CommandId::SortTitle,
             CommandId::SortModified,
-            CommandId::Columns,
-            CommandId::Outline,
             CommandId::ResetWidths,
         ] {
             let (_directory, mut app) = fixture();

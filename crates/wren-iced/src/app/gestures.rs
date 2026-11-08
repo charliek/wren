@@ -6,7 +6,7 @@ use super::commands::Command;
 use super::palette::SearchTarget;
 use super::{App, Message};
 use crate::drag::{DragEvent, RowKind};
-use crate::panes::{self, Layout, ResizeEvent};
+use crate::panes::{self, ResizeEvent};
 
 impl App {
     pub(super) fn cancel_file_drag(&mut self) {
@@ -17,30 +17,23 @@ impl App {
 
     pub(super) fn cancel_gestures(&mut self) {
         self.cancel_file_drag();
-        if let Some((layout, pane, original)) = self.resizing.take() {
-            self.widths.set(layout, pane, original);
+        if let Some((pane, original)) = self.resizing.take() {
+            self.widths.set(pane, original);
         }
     }
 
     pub(super) fn settle_resize(&mut self) {
-        if let Some((layout, pane, _)) = self.resizing.take() {
-            let width = self.widths.get(layout, pane).round() as u16;
+        if let Some((pane, _)) = self.resizing.take() {
+            let width = self.widths.get(pane).round() as u16;
             let _ = self.process_core(Op::SetWidth {
-                layout: layout.key().into(),
                 pane: pane.key().into(),
                 width,
             });
         }
     }
 
-    pub(super) fn drag_event(
-        &mut self,
-        generation: u64,
-        layout: Layout,
-        event: DragEvent,
-    ) -> Task<Message> {
-        if generation != self.gesture_generation || layout != self.layout || self.loading.is_some()
-        {
+    pub(super) fn drag_event(&mut self, generation: u64, event: DragEvent) -> Task<Message> {
+        if generation != self.gesture_generation || self.loading.is_some() {
             return Task::none();
         }
         match event {
@@ -76,9 +69,6 @@ impl App {
                 row,
             } if tag == generation => {
                 let command = match row {
-                    RowKind::Section(section) if self.layout == Layout::Outline => {
-                        Command::ToggleSection(section)
-                    }
                     RowKind::Section(section) => Command::SelectSection(section),
                     RowKind::Group(group) => Command::SelectParent(Parent::Group(group)),
                     RowKind::Note(note) => {
@@ -133,51 +123,25 @@ impl App {
             return Task::none();
         }
         match event {
-            ResizeEvent::Started { layout, pane } if layout == self.layout => {
+            ResizeEvent::Started { pane } => {
                 self.drag_preview = None;
                 self.spring_section = None;
                 self.editor.break_group();
-                self.resizing = Some((layout, pane, self.widths.get(layout, pane)));
-                return iced::widget::operation::focus(panes::grip_id(layout, pane));
+                self.resizing = Some((pane, self.widths.get(pane)));
+                return iced::widget::operation::focus(panes::grip_id(pane));
             }
-            ResizeEvent::Changed {
-                layout,
-                pane,
-                width,
-            } if layout == self.layout => {
-                self.widths.set(layout, pane, width);
+            ResizeEvent::Changed { pane, width } => {
+                self.widths.set(pane, width);
             }
-            ResizeEvent::Ended {
-                layout,
-                pane,
-                width,
-            }
-            | ResizeEvent::Reset {
-                layout,
-                pane,
-                width,
-            }
-            | ResizeEvent::Step {
-                layout,
-                pane,
-                width,
-            } if layout == self.layout => {
+            ResizeEvent::Ended { pane, width }
+            | ResizeEvent::Reset { pane, width }
+            | ResizeEvent::Step { pane, width } => {
                 self.resizing = None;
-                let task = self
-                    .dispatch(Command::Width {
-                        layout,
-                        pane,
-                        width,
-                    })
-                    .task;
-                return task.chain(iced::widget::operation::focus(panes::grip_id(layout, pane)));
+                let task = self.dispatch(Command::Width { pane, width }).task;
+                return task.chain(iced::widget::operation::focus(panes::grip_id(pane)));
             }
-            ResizeEvent::Cancelled {
-                layout,
-                pane,
-                width,
-            } if layout == self.layout => {
-                self.widths.set(layout, pane, width);
+            ResizeEvent::Cancelled { pane, width } => {
+                self.widths.set(pane, width);
                 self.resizing = None;
             }
             ResizeEvent::Tab { reverse } => {
@@ -187,7 +151,6 @@ impl App {
                     iced::widget::operation::focus_next()
                 }
             }
-            _ => {}
         }
         Task::none()
     }

@@ -23,7 +23,7 @@ mod palette;
 mod preferences;
 mod workspaces;
 
-use crate::panes::{Layout, Widths};
+use crate::panes::Widths;
 use commands::{Command, Processed};
 use navigation::Filters;
 use palette::Palette;
@@ -73,16 +73,14 @@ pub struct App {
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
-    layout: Layout,
     widths: Widths,
     focus: bool,
     filters: Filters,
-    expanded: std::collections::BTreeSet<SectionId>,
     viewport: iced::Size,
     spring_section: Option<SectionId>,
     gesture_generation: u64,
     drag_preview: Option<crate::drag::Preview>,
-    resizing: Option<(Layout, crate::panes::Pane, f32)>,
+    resizing: Option<(crate::panes::Pane, f32)>,
     #[cfg(feature = "smoke-test")]
     test_sandbox: Option<PathBuf>,
     #[cfg(feature = "smoke-test")]
@@ -123,7 +121,7 @@ pub enum Message {
         generation: u64,
         result: Result<(), String>,
     },
-    Drag(u64, Layout, crate::drag::DragEvent),
+    Drag(u64, crate::drag::DragEvent),
     Resize(u64, crate::panes::ResizeEvent),
     Tick,
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
@@ -258,11 +256,9 @@ impl App {
             action_serial: 0,
             last_processed: None,
             palette: None,
-            layout: Layout::Columns,
             widths: Widths::default(),
             focus: false,
             filters: Filters::default(),
-            expanded: std::collections::BTreeSet::new(),
             viewport: iced::Size::new(1280.0, 800.0),
             spring_section: None,
             gesture_generation: 1,
@@ -376,9 +372,7 @@ impl App {
                     warning,
                 });
             }
-            Message::Drag(generation, layout, event) => {
-                return self.drag_event(generation, layout, event)
-            }
+            Message::Drag(generation, event) => return self.drag_event(generation, event),
             Message::Resize(generation, event) => return self.resize_event(generation, event),
             Message::Key(input) => return self.key_input(input),
             #[cfg(target_os = "macos")]

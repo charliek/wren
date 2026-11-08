@@ -9,7 +9,7 @@ use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
 use crate::editor_view;
-use crate::panes::{Layout, Pane};
+use crate::panes::{Pane, PANES};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
@@ -52,7 +52,7 @@ impl App {
                     Message::Reply(Arc::clone(&request), Ok(json!({"root":rectangle(snapshot.geometry.root),"pressed":snapshot.pressed,"rows":snapshot.geometry.rows.iter().map(|row| json!({"key":row_json(row.row),"bounds":rectangle(row.bounds),"visible":rectangle(row.visible)})).collect::<Vec<_>>()})))
                 }));
             }
-            "command.run" | "palette.open" | "palette.query" | "palette.step" | "palette.activate" | "palette.close" | "filter.set" | "view.layout" | "view.focus" | "view.width" | "view.sort" | "workspace.add" | "workspace.remove" | "test.folder.begin" | "test.folder.complete" => {
+            "command.run" | "palette.open" | "palette.query" | "palette.step" | "palette.activate" | "palette.close" | "filter.set" | "view.focus" | "view.width" | "view.sort" | "workspace.add" | "workspace.remove" | "test.folder.begin" | "test.folder.complete" => {
                 let outcome = self.navigation_request(&request.op, params)?;
                 request.respond(Ok(json!({"correlation":outcome.processed.correlation,"disposition":outcome.processed.disposition.key(),"warning":outcome.processed.warning,"navigation":self.navigation_snapshot()})));
                 return Ok(outcome.task);
@@ -358,7 +358,6 @@ impl App {
                 pane: string(params, "pane")?.into(),
                 query: string(params, "query")?.into(),
             }),
-            "view.layout" => self.dispatch(Command::Layout(layout(params)?)),
             "view.focus" => self.dispatch(Command::Focus(
                 params
                     .get("enabled")
@@ -366,13 +365,11 @@ impl App {
                     .transpose()?,
             )),
             "view.width" => {
-                let layout = layout(params)?;
-                let pane = match (layout, string(params, "pane")?) {
-                    (Layout::Columns, "sections") => Pane::Sections,
-                    (Layout::Columns, "groups") => Pane::Groups,
-                    (Layout::Outline, "sections" | "outline") => Pane::Outline,
-                    (_, "notes") => Pane::Notes,
-                    _ => return Err("Unknown pane for this layout".into()),
+                let pane = match string(params, "pane")? {
+                    "sections" => Pane::Sections,
+                    "groups" => Pane::Groups,
+                    "notes" => Pane::Notes,
+                    _ => return Err("Unknown pane".into()),
                 };
                 let width = params
                     .get("width")
@@ -382,11 +379,7 @@ impl App {
                     })
                     .ok_or("width must be finite and nonnegative")?
                     as f32;
-                self.dispatch(Command::Width {
-                    layout,
-                    pane,
-                    width,
-                })
+                self.dispatch(Command::Width { pane, width })
             }
             "view.sort" => self.dispatch(Command::Sort(string(params, "mode")?.into())),
             "workspace.add" => self.dispatch(Command::OpenWorkspace {
@@ -456,32 +449,6 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut outline_rows = Vec::new();
-        if let Some(model) = self.model() {
-            for (section, expanded) in self.outline_sections() {
-                outline_rows.push(row_json(crate::drag::RowKind::Section(section)));
-                if !expanded {
-                    continue;
-                }
-                let section_matches = model.section(section).is_some_and(|section| {
-                    super::navigation::matches_name(&self.filters.outline, &section.name)
-                });
-                outline_rows.extend(
-                    model
-                        .groups
-                        .iter()
-                        .filter(|group| {
-                            group.section == section
-                                && (section_matches
-                                    || super::navigation::matches_name(
-                                        &self.filters.outline,
-                                        &group.name,
-                                    ))
-                        })
-                        .map(|group| row_json(crate::drag::RowKind::Group(group.id))),
-                );
-            }
-        }
         let mut visible_parents = Vec::new();
         if self.browser_section().is_some() {
             visible_parents.extend(
@@ -490,25 +457,20 @@ impl App {
                     .map(|id| row_json(crate::drag::RowKind::Group(GroupId(*id)))),
             );
         }
-        let preferred = |layout: Layout| {
-            layout
-                .panes()
-                .iter()
-                .map(|pane| (pane.key().to_owned(), json!(self.widths.get(layout, *pane))))
-                .collect::<serde_json::Map<_, _>>()
-        };
-        let effective = self.widths.effective(self.layout, self.viewport.width);
-        let effective = self
-            .layout
-            .panes()
+        let preferred = PANES
             .iter()
-            .map(|pane| {
+            .map(|&pane| (pane.key().to_owned(), json!(self.widths.get(pane))))
+            .collect::<serde_json::Map<_, _>>();
+        let effective = self.widths.effective(self.viewport.width);
+        let effective = PANES
+            .iter()
+            .map(|&pane| {
                 (
                     pane.key().to_owned(),
                     json!(if self.focus || self.model().is_none() {
                         0.0
                     } else {
-                        effective.get(*pane)
+                        effective.get(pane)
                     }),
                 )
             })
@@ -518,11 +480,10 @@ impl App {
         let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
         let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
         json!({
-            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"layout":self.layout.key(),"focus":self.focus,"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
-            "filters":{"sections":self.filters.sections,"groups":self.filters.groups,"notes":self.filters.notes,"outline":self.filters.outline},
-            "expanded_sections":self.expanded.iter().map(|section| section.0).collect::<Vec<_>>(),
-            "preferred_widths":{"columns":preferred(Layout::Columns),"outline":preferred(Layout::Outline)},"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
-            "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"outline_rows":outline_rows,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>(),"outline":self.outline_sections().iter().map(|(section,expanded)| json!({"section":section.0,"expanded":expanded})).collect::<Vec<_>>()},
+            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"focus":self.focus,"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
+            "filters":{"sections":self.filters.sections,"groups":self.filters.groups,"notes":self.filters.notes},
+            "preferred_widths":preferred,"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
+            "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>()},
             "history":self.session.as_ref().map(|session| session.state().history().iter().map(|path| path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"history_position":self.session.as_ref().and_then(|session|session.state().history_position()),"mru":self.session.as_ref().map(|session| session.state().recent().iter().map(|path|path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"can_back":self.session.as_ref().is_some_and(Session::can_back),"can_forward":self.session.as_ref().is_some_and(Session::can_forward),
             "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"sort":self.note_sort(),
             "registrations":self.config.as_ref().map(|config| config.workspaces().iter().map(|entry| json!({"name":entry.name,"path":entry.path})).collect::<Vec<_>>()).unwrap_or_default(),"active_registration":self.config.as_ref().and_then(|config| config.active()),"registry_warning":self.registry_warning,"metadata_warning":self.metadata_warning,"config_writable":self.config.as_ref().is_some_and(|config| config.writable()),"config_directory":self.config.as_ref().and_then(|config|config.directory()),"folder_request":self.folder_request,
@@ -719,14 +680,6 @@ fn row_json(row: crate::drag::RowKind) -> Value {
     }
 }
 
-fn layout(params: &Value) -> Result<Layout, String> {
-    match string(params, "layout")? {
-        "columns" => Ok(Layout::Columns),
-        "outline" => Ok(Layout::Outline),
-        _ => Err("Unknown layout".into()),
-    }
-}
-
 fn core_op(params: &Value) -> Result<Op, String> {
     Ok(match string(params, "op")? {
         "create_section" => Op::CreateSection {
@@ -857,7 +810,6 @@ const FOCUS_NAMES: &[&str] = &[
     "filter-sections",
     "filter-groups",
     "filter-notes",
-    "filter-outline",
     "note-editor",
     "find-query",
     "palette-query",
@@ -1092,19 +1044,15 @@ mod tests {
     }
 
     #[test]
-    fn navigation_adapters_project_layout_filters_width_sort_and_modal_selection() {
+    fn navigation_adapters_project_filters_width_sort_and_modal_selection() {
         let (_directory, mut app) = navigation_fixture();
         for (operation, params) in [
             ("filter.set", json!({"pane":"notes","query":"first"})),
-            ("view.layout", json!({"layout":"outline"})),
-            (
-                "view.width",
-                json!({"layout":"outline","pane":"sections","width":999}),
-            ),
+            ("view.width", json!({"pane":"sections","width":999})),
             ("view.sort", json!({"mode":"title"})),
             ("view.focus", json!({"enabled":true})),
             ("palette.open", json!({"mode":"commands"})),
-            ("palette.query", json!({"query":"Layout:"})),
+            ("palette.query", json!({"query":"Sort notes:"})),
             ("palette.step", json!({"delta":1})),
         ] {
             assert!(
@@ -1117,8 +1065,7 @@ mod tests {
             );
         }
         let state = app.navigation_snapshot();
-        assert_eq!(state["layout"], "outline");
-        assert_eq!(state["preferred_widths"]["outline"]["sections"], 420.0);
+        assert_eq!(state["preferred_widths"]["sections"], 360.0);
         assert_eq!(state["sort"], "title");
         assert_eq!(state["focus"], true);
         assert_eq!(state["filters"]["notes"], "first");
@@ -1129,10 +1076,7 @@ mod tests {
             .navigation_request("command.run", &json!({"id":"save"}))
             .is_err());
         assert!(app
-            .navigation_request(
-                "view.width",
-                &json!({"layout":"outline","pane":"groups","width":200})
-            )
+            .navigation_request("view.width", &json!({"pane":"outline","width":200}))
             .is_err());
         assert!(
             app.navigation_request("filter.set", &json!({"pane":"editor","query":"no"}))

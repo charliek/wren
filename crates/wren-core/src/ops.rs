@@ -64,11 +64,7 @@ pub enum Op {
     SelectSection {
         section: SectionId,
     },
-    SetLayout {
-        layout: String,
-    },
     SetWidth {
-        layout: String,
         pane: String,
         width: u16,
     },
@@ -607,27 +603,13 @@ impl Session {
                 let parent = self.section_parent(section);
                 self.select_parent(parent, now, events)
             }
-            Op::SetLayout { layout } => {
-                self.state.set_layout(&layout)?;
-                self.persist_metadata(events)
-            }
-            Op::SetWidth {
-                layout,
-                pane,
-                width,
-            } => {
-                self.state.set_width(&layout, &pane, width)?;
+            Op::SetWidth { pane, width } => {
+                self.state.set_width(&pane, width)?;
                 self.persist_metadata(events)
             }
             Op::ResetWidths => {
-                for (layout, pane, width) in [
-                    ("columns", "sections", 200),
-                    ("columns", "groups", 220),
-                    ("columns", "notes", 280),
-                    ("outline", "sections", 260),
-                    ("outline", "notes", 280),
-                ] {
-                    self.state.set_width(layout, pane, width)?;
+                for (pane, width) in [("sections", 200), ("groups", 220), ("notes", 280)] {
+                    self.state.set_width(pane, width)?;
                 }
                 self.persist_metadata(events)
             }

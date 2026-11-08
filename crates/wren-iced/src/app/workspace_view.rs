@@ -15,7 +15,7 @@ use crate::chrome::{self, Icon};
 use crate::drag::RowKind;
 use crate::drag_view::Registry;
 use crate::ellipsis::ellipsis;
-use crate::panes::{self, Layout, Pane};
+use crate::panes::{self, Pane};
 use crate::{fonts, theme};
 
 impl App {
@@ -29,24 +29,22 @@ impl App {
             .model()
             .map(Registry::new)
             .unwrap_or_else(|| Registry::new(&Workspace::empty(std::path::PathBuf::new())));
-        let effective = self.widths.effective(self.layout, self.viewport.width);
+        let effective = self.widths.effective(self.viewport.width);
         let mut browser = row![].height(Fill).clip(true);
         let browser_visible = !self.focus && self.model().is_some();
         if browser_visible {
-            for &pane in self.layout.panes() {
+            for pane in panes::PANES {
                 let content = match pane {
                     Pane::Sections => self.sections_pane(&mut registry),
                     Pane::Groups => self.groups_pane(&mut registry),
-                    Pane::Outline => self.outline_pane(&mut registry),
                     Pane::Notes => self.notes_pane(&mut registry),
                 };
                 let generation = self.gesture_generation;
                 browser = browser.push(panes::resizable(
                     content,
-                    self.layout,
                     pane,
                     effective.get(pane),
-                    self.widths.get(self.layout, pane),
+                    self.widths.get(pane),
                     self.definition,
                     move |event| Message::Resize(generation, event),
                 ));
@@ -55,19 +53,12 @@ impl App {
         let browser_width = if !browser_visible {
             0.0
         } else {
-            self.layout
-                .panes()
-                .iter()
-                .map(|pane| effective.get(*pane))
-                .sum()
+            panes::PANES.iter().map(|&pane| effective.get(pane)).sum()
         };
         // Reset browser-owned capture/scroll state only on a committed workspace
-        // or layout replacement. The editor remains the same sibling throughout.
-        let browser = iced::widget::keyed_column([(
-            (self.workspace_generation(), self.layout),
-            browser.into(),
-        )])
-        .height(Fill);
+        // replacement. The editor remains the same sibling throughout.
+        let browser = iced::widget::keyed_column([(self.workspace_generation(), browser.into())])
+            .height(Fill);
         let content = row![
             container(browser)
                 .width(browser_width)
@@ -78,14 +69,13 @@ impl App {
         .height(Fill)
         .clip(true);
         let generation = self.gesture_generation;
-        let layout = self.layout;
         let content = crate::drag_view::area(
             content,
             registry,
             generation,
             enabled,
             self.definition,
-            move |event| Message::Drag(generation, layout, event),
+            move |event| Message::Drag(generation, event),
         );
         let base = column![self.titlebar(), self.warning_slot(), content]
             .width(Fill)
@@ -172,39 +162,8 @@ impl App {
         } else {
             left = left.width(570);
         }
-        let mut layouts = row![].spacing(2);
-        for (layout, icon) in [
-            (Layout::Columns, Icon::Columns),
-            (Layout::Outline, Icon::Outline),
-        ] {
-            layouts = layouts.push(
-                button(chrome::icon(
-                    icon,
-                    16.0,
-                    if layout == self.layout {
-                        colors.accent
-                    } else {
-                        colors.muted
-                    },
-                ))
-                .width(30)
-                .height(26)
-                .padding(5)
-                .on_press_maybe(
-                    self.session
-                        .as_ref()
-                        .map(|_| Message::Command(Command::Layout(layout))),
-                )
-                .style(move |_, status| {
-                    chrome::control(self.definition, status, layout == self.layout, true)
-                }),
-            );
-        }
-        let layouts = container(layouts)
-            .padding(2)
-            .style(move |_| chrome::surface(self.definition, colors.control, 7.0, true));
         let compact = self.viewport.width < 1120.0;
-        let mut right = row![layouts].spacing(6).align_y(iced::Center);
+        let mut right = row![].spacing(6).align_y(iced::Center);
         if !compact {
             right = right.push(self.shortcut_button("Jump to note", CommandId::Jump));
         }
@@ -427,7 +386,6 @@ impl App {
                     &section.name,
                     self.section_count(section.id),
                     self.selected_section == Some(section.id),
-                    (0, None),
                 ));
             }
         }
@@ -457,7 +415,6 @@ impl App {
                     &group.name,
                     group_count(model, group.id),
                     self.selected_group == Some(group.id),
-                    (0, None),
                 ));
                 count += 1;
             }
@@ -482,58 +439,6 @@ impl App {
                 self.pane_header(heading, CommandId::NewGroup),
                 self.pane_filter("groups", "Filter groups", &self.filters.groups),
                 self.pane_scroll(items, "groups-list")
-            ]
-            .height(Fill)
-            .into(),
-            false,
-        )
-    }
-
-    fn outline_pane(&self, registry: &mut Registry) -> Element<'_, Message> {
-        let mut items = column![].spacing(2).padding([0, 8]);
-        let visible = self.outline_sections();
-        if let Some(model) = self.model() {
-            for (id, expanded) in &visible {
-                let section = model.section(*id).expect("visible section");
-                items = items.push(self.tree_row(
-                    registry,
-                    RowKind::Section(*id),
-                    &section.name,
-                    self.section_count(*id),
-                    !expanded && self.selected_section == Some(*id),
-                    (0, Some(*expanded)),
-                ));
-                if !expanded {
-                    continue;
-                }
-                let section_matches = matches_name(&self.filters.outline, &section.name);
-                for group in model.groups.iter().filter(|group| {
-                    group.section == *id
-                        && (section_matches || matches_name(&self.filters.outline, &group.name))
-                }) {
-                    items = items.push(self.tree_row(
-                        registry,
-                        RowKind::Group(group.id),
-                        &group.name,
-                        group_count(model, group.id),
-                        self.selected_group == Some(group.id),
-                        (22, None),
-                    ));
-                }
-            }
-        }
-        if visible.is_empty() {
-            items = items.push(self.empty_label("Nothing matches."));
-        }
-        self.pane_shell(
-            column![
-                self.pane_header("Sections & groups".into(), CommandId::NewSection),
-                self.pane_filter(
-                    "outline",
-                    "Filter sections and groups",
-                    &self.filters.outline
-                ),
-                self.pane_scroll(items, "outline-list")
             ]
             .height(Fill)
             .into(),
@@ -673,23 +578,15 @@ impl App {
         name: &'a str,
         count: usize,
         selected: bool,
-        outline: (u16, Option<bool>),
     ) -> Element<'a, Message> {
-        let (indent, expanded) = outline;
         let colors = self.definition.colors;
-        let mut content = row![].spacing(8).align_y(iced::Center).clip(true);
-        if indent > 0 {
-            content = content.push(iced::widget::space().width(u32::from(indent)));
-        }
-        if let Some(expanded) = expanded {
-            content = content.push(
-                text(if expanded { "⌄" } else { "›" })
-                    .size(14)
-                    .color(theme::color(colors.muted)),
-            );
-        }
-        content = content.push(ellipsis(name, 13.0, theme::color(colors.text)));
-        content = content.push(chrome::label(count.to_string(), 11, colors.muted));
+        let content = row![
+            ellipsis(name, 13.0, theme::color(colors.text)),
+            chrome::label(count.to_string(), 11, colors.muted)
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .clip(true);
         container(content)
             .id(registry.row(kind))
             .height(36)

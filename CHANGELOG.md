@@ -36,6 +36,15 @@ version's section as its notes, and publishes to the apt repo. See
 - **Focus mode toggles with ⌘Y on macOS and Alt+Y on Linux**, replacing ⌘\ /
   Alt+\. A `keybind` line in `config.conf` can still bind it elsewhere.
 
+### Removed
+
+- **The Outline layout**, with its title-bar toggle and the
+  `view.columns` / `view.outline` commands (⌥⌘1 / ⌥⌘2). The Columns
+  layout is the only one, and keyboard drill-down navigation is replacing
+  Outline's space savings. Saved column widths carry over; an old
+  `layout = 'outline'` line in `.wren/workspace.toml` is left alone and
+  ignored, and a `keybind` line naming a removed command now warns.
+
 ### Fixed
 
 - **Fonts with malformed tables no longer crash Wren.** Wren now builds with a

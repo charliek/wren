@@ -45,7 +45,7 @@ Wren's saves, but comments and formatting are not kept.
 | `history`, `history_position` | Back/Forward history. |
 | `recent` | Most recently opened notes, for Jump to note ranking. |
 | `order` | Manual order of sections and groups. Items missing from it sort alphabetically after it. |
-| `layout`, `widths` | Browser layout and column widths. |
+| `widths` | Column widths, under `[widths.columns]`. |
 | `sort` | Per-group note order: `modified` (default) or `title`. |
 
 ## App configuration

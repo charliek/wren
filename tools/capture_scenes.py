@@ -101,9 +101,6 @@ def main() -> int:
             client.call("core.apply", {"op": "open_note", "note": note["id"]})
             time.sleep(0.3)
             shot_here("columns")
-            client.call("view.layout", {"layout": "outline"})
-            shot_here("outline")
-            client.call("view.layout", {"layout": "columns"})
             for mode, query in [
                 ("commands", ""),
                 ("jump", "al"),

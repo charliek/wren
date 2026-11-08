@@ -2,14 +2,13 @@ use wren_core::index::{fuzzy_score, Hit, QueryKind, Scope};
 use wren_core::model::{Parent, SectionId};
 
 use super::App;
-use crate::panes::{Layout, Widths};
+use crate::panes::Widths;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Filters {
     pub sections: String,
     pub groups: String,
     pub notes: String,
-    pub outline: String,
 }
 
 impl Filters {
@@ -18,7 +17,6 @@ impl Filters {
             "sections" => &mut self.sections,
             "groups" => &mut self.groups,
             "notes" => &mut self.notes,
-            "outline" => &mut self.outline,
             _ => return false,
         };
         *slot = query;
@@ -32,19 +30,14 @@ impl App {
         let Some(session) = &self.session else {
             return;
         };
-        self.layout = Layout::from_state(session.state());
         self.widths = Widths::from_state(session.state());
         self.focus = false;
         self.filters = Filters::default();
-        self.expanded.clear();
         self.spring_section = None;
         self.palette = None;
         self.find_open = false;
         self.find_query.clear();
         self.editor.set_find_query("");
-        if let Some(section) = self.selected_section {
-            self.expanded.insert(section);
-        }
     }
 
     pub(super) fn reveal_selection(&mut self) {
@@ -57,9 +50,6 @@ impl App {
             section.is_some_and(|section| !matches_name(&self.filters.sections, &section.name));
         let groups_conflict =
             group.is_some_and(|group| !matches_name(&self.filters.groups, &group.name));
-        let outline_conflict = section
-            .is_some_and(|section| !matches_name(&self.filters.outline, &section.name))
-            && group.is_none_or(|group| !matches_name(&self.filters.outline, &group.name));
         let notes_conflict = self
             .selected_note
             .is_some_and(|note| !self.note_hits().iter().any(|hit| hit.note == note));
@@ -69,14 +59,8 @@ impl App {
         if groups_conflict {
             self.filters.groups.clear();
         }
-        if outline_conflict {
-            self.filters.outline.clear();
-        }
         if notes_conflict {
             self.filters.notes.clear();
-        }
-        if let Some(section) = self.selected_section {
-            self.expanded.insert(section);
         }
     }
 
@@ -106,33 +90,6 @@ impl App {
         } else {
             self.selected_parent()
         }
-    }
-
-    pub(super) fn outline_sections(&self) -> Vec<(SectionId, bool)> {
-        let Some(model) = self.model() else {
-            return Vec::new();
-        };
-        let query = self.filters.outline.trim();
-        model
-            .sections
-            .iter()
-            .filter_map(|section| {
-                let matches_section = matches_name(query, &section.name);
-                let matches_group = model
-                    .groups
-                    .iter()
-                    .any(|group| group.section == section.id && matches_name(query, &group.name));
-                if !matches_section && !matches_group {
-                    return None;
-                }
-                Some((
-                    section.id,
-                    self.expanded.contains(&section.id)
-                        || (!query.is_empty() && (matches_section || matches_group))
-                        || self.spring_section == Some(section.id),
-                ))
-            })
-            .collect()
     }
 
     pub(super) fn note_sort(&self) -> &str {

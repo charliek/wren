@@ -1144,11 +1144,10 @@ mod tests {
 
     #[test]
     fn disabling_the_area_settles_an_active_resize_and_blocks_new_seam_presses() {
-        use crate::panes::{resizable, Layout as PaneLayout, Pane, ResizeEvent};
+        use crate::panes::{resizable, Pane, ResizeEvent};
         let build = |enabled| -> Element<'static, Message, iced::Theme, ()> {
             let pane = resizable(
                 Space::new().width(Length::Fill).height(300.0),
-                PaneLayout::Columns,
                 Pane::Notes,
                 280.0,
                 280.0,
@@ -1208,11 +1207,10 @@ mod tests {
 
     #[test]
     fn root_resize_preflight_keeps_a_seam_press_out_of_the_real_sibling_editor() {
-        use crate::panes::{resizable, Layout as PaneLayout, Pane, ResizeEvent};
+        use crate::panes::{resizable, Pane, ResizeEvent};
         let content = iced::widget::text_editor::Content::<()>::with_text("A preserved editor");
         let pane = resizable(
             Space::new().width(Length::Fill).height(300.0),
-            PaneLayout::Columns,
             Pane::Notes,
             280.0,
             280.0,
@@ -1280,13 +1278,12 @@ mod tests {
     fn resizable_area<'a>(
         content: &'a iced::widget::text_editor::Content<()>,
     ) -> Element<'a, Message, iced::Theme, ()> {
-        use crate::panes::{resizable, Layout as PaneLayout, Pane};
+        use crate::panes::{resizable, Pane};
         let mut registry = Registry::new(&workspace());
         let source = container(Space::new().width(180.0).height(36.0))
             .id(registry.row(RowKind::Note(NoteId(100))));
         let pane = resizable(
             column![Space::new().height(40.0), source].height(300.0),
-            PaneLayout::Columns,
             Pane::Notes,
             280.0,
             280.0,

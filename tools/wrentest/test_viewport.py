@@ -205,7 +205,6 @@ def test_actual_client_pixels_retain_scrolled_viewport_across_chrome(viewport_wo
     app, path, original, window, artifacts = viewport_workspace
     call = app.client.call
     call("theme.set", {"id": theme})
-    gateway(app, "view.layout", layout="columns")
     gateway(app, "view.focus", enabled=False)
     # Both history directions are populated; their concrete contents are replayed
     # after the viewport assertions, rather than trusting only can_undo/can_redo.
@@ -250,7 +249,7 @@ def test_actual_client_pixels_retain_scrolled_viewport_across_chrome(viewport_wo
         assert path.read_text(encoding="utf-8") == one, stage
 
     for stage, operation, params in (
-        ("outline", "view.layout", {"layout": "outline"}),
+        ("narrower-sections", "view.width", {"pane": "sections", "width": 140}),
         ("focus", "view.focus", {"enabled": True}),
         ("unfocus", "view.focus", {"enabled": False}),
     ):
@@ -260,7 +259,7 @@ def test_actual_client_pixels_retain_scrolled_viewport_across_chrome(viewport_wo
         assert image.data == reference.data, stage
         reports.append(report)
         unchanged(stage)
-    assert reports[2]["rectangle"][0] != reports[1]["rectangle"][0], "Outline did not translate the editor"
+    assert reports[2]["rectangle"][0] != reports[1]["rectangle"][0], "Narrowing a pane did not translate the editor"
     assert reports[3]["rectangle"][0] != reports[2]["rectangle"][0], "Focus did not center the editor"
 
     gateway(app, "palette.open", mode="commands")

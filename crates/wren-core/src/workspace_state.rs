@@ -11,6 +11,9 @@ use crate::fs_store::{Expected, FsStore, RelPath};
 
 const STATE_PATH: &str = ".wren/workspace.toml";
 const SCHEMA_VERSION: i64 = 1;
+/// Pane widths live under `[widths.columns]`, the name from when Wren had a
+/// second layout, so widths saved by earlier versions still apply.
+const WIDTHS_TABLE: &str = "columns";
 
 #[derive(Debug)]
 pub struct WorkspaceState {
@@ -236,29 +239,15 @@ impl WorkspaceState {
         Ok(())
     }
 
-    pub fn layout(&self) -> &str {
-        self.table
-            .get("layout")
-            .and_then(Value::as_str)
-            .unwrap_or("columns")
-    }
-
-    pub fn set_layout(&mut self, layout: &str) -> Result<(), String> {
-        check_layout(layout)?;
-        self.table
-            .insert("layout".into(), Value::String(layout.into()));
-        Ok(())
-    }
-
-    /// Returns the stored width, or the specification's default. Unknown panes
-    /// return `None`; their TOML values are nevertheless preserved.
-    pub fn width(&self, layout: &str, pane: &str) -> Option<u16> {
-        let (default, _, _) = width_limits(layout, pane)?;
+    /// Returns the stored width, or the default. Unknown panes return `None`;
+    /// their TOML values are nevertheless preserved.
+    pub fn width(&self, pane: &str) -> Option<u16> {
+        let (default, _, _) = width_limits(pane)?;
         Some(
             self.table
                 .get("widths")
                 .and_then(Value::as_table)
-                .and_then(|widths| widths.get(layout))
+                .and_then(|widths| widths.get(WIDTHS_TABLE))
                 .and_then(Value::as_table)
                 .and_then(|panes| panes.get(pane))
                 .and_then(Value::as_integer)
@@ -267,9 +256,9 @@ impl WorkspaceState {
         )
     }
 
-    pub fn set_width(&mut self, layout: &str, pane: &str, width: u16) -> Result<(), String> {
-        let (_directory, min, max) = width_limits(layout, pane)
-            .ok_or_else(|| "Unknown layout or pane for a persisted width".to_owned())?;
+    pub fn set_width(&mut self, pane: &str, width: u16) -> Result<(), String> {
+        let (_default, min, max) =
+            width_limits(pane).ok_or_else(|| "Unknown pane for a persisted width".to_owned())?;
         let widths = self
             .table
             .entry("widths")
@@ -277,10 +266,10 @@ impl WorkspaceState {
             .as_table_mut()
             .ok_or_else(|| "widths must be a table".to_owned())?;
         let panes = widths
-            .entry(layout)
+            .entry(WIDTHS_TABLE)
             .or_insert_with(|| Value::Table(Table::new()))
             .as_table_mut()
-            .ok_or_else(|| "The layout widths must be a table".to_owned())?;
+            .ok_or_else(|| "The column widths must be a table".to_owned())?;
         panes.insert(
             pane.into(),
             Value::Integer(i64::from(width.clamp(min, max))),
@@ -474,7 +463,6 @@ fn metadata_path() -> RelPath {
 fn defaults() -> Table {
     let mut table = Table::new();
     table.insert("schema_version".into(), Value::Integer(SCHEMA_VERSION));
-    table.insert("layout".into(), Value::String("columns".into()));
     table
 }
 
@@ -549,13 +537,6 @@ fn parse_path(path: &str, kind: Reference) -> Result<RelPath, String> {
         .map_err(|_| "Metadata contains an invalid workspace-relative reference".into())
 }
 
-fn check_layout(layout: &str) -> Result<(), String> {
-    match layout {
-        "columns" | "outline" => Ok(()),
-        _ => Err("The workspace layout must be columns or outline".into()),
-    }
-}
-
 fn check_sort(mode: &str) -> Result<(), String> {
     match mode {
         "modified" | "title" => Ok(()),
@@ -563,12 +544,12 @@ fn check_sort(mode: &str) -> Result<(), String> {
     }
 }
 
-fn width_limits(layout: &str, pane: &str) -> Option<(u16, u16, u16)> {
-    match (layout, pane) {
-        ("columns", "sections") => Some((200, 140, 360)),
-        ("columns", "groups") => Some((220, 150, 400)),
-        ("columns" | "outline", "notes") => Some((280, 200, 480)),
-        ("outline", "sections") => Some((260, 180, 420)),
+/// Default, minimum, and maximum width of each browser pane.
+fn width_limits(pane: &str) -> Option<(u16, u16, u16)> {
+    match pane {
+        "sections" => Some((200, 140, 360)),
+        "groups" => Some((220, 150, 400)),
+        "notes" => Some((280, 200, 480)),
         _ => None,
     }
 }
@@ -578,13 +559,6 @@ fn validate(table: &Table) -> Result<(), String> {
         if version.as_integer() != Some(SCHEMA_VERSION) {
             return Err("Unsupported workspace metadata schema_version (expected 1)".into());
         }
-    }
-    if let Some(layout) = table.get("layout") {
-        check_layout(
-            layout
-                .as_str()
-                .ok_or_else(|| "layout must be a string".to_owned())?,
-        )?;
     }
     for (field, kind) in [
         ("selection", Reference::Any),
@@ -639,21 +613,17 @@ fn validate(table: &Table) -> Result<(), String> {
         let widths = value
             .as_table()
             .ok_or_else(|| "widths must be a table".to_owned())?;
-        for layout in ["columns", "outline"] {
-            if let Some(value) = widths.get(layout) {
-                let panes = value
-                    .as_table()
-                    .ok_or_else(|| "The layout widths must be tables".to_owned())?;
-                for (pane, value) in panes {
-                    if let Some((_, min, max)) = width_limits(layout, pane) {
-                        let width = value
-                            .as_integer()
-                            .ok_or_else(|| "Pane widths must be integers".to_owned())?;
-                        if !(i64::from(min)..=i64::from(max)).contains(&width) {
-                            return Err(
-                                "A persisted pane width is outside its supported range".into()
-                            );
-                        }
+        if let Some(value) = widths.get(WIDTHS_TABLE) {
+            let panes = value
+                .as_table()
+                .ok_or_else(|| "The column widths must be a table".to_owned())?;
+            for (pane, value) in panes {
+                if let Some((_, min, max)) = width_limits(pane) {
+                    let width = value
+                        .as_integer()
+                        .ok_or_else(|| "Pane widths must be integers".to_owned())?;
+                    if !(i64::from(min)..=i64::from(max)).contains(&width) {
+                        return Err("A persisted pane width is outside its supported range".into());
                     }
                 }
             }
@@ -709,34 +679,32 @@ mod tests {
         let mut state = WorkspaceState::load(&store);
         assert!(state.writable());
         assert_eq!(state.warning(), None);
-        assert_eq!(state.layout(), "columns");
+        assert_eq!(state.width("notes"), Some(280));
         assert_eq!(state.selection(), None);
         assert!(state.history().is_empty());
         assert!(state.order().is_empty());
         assert!(!directory.path().join(".wren").exists());
 
         let note = rel("Projects/Group/note.md");
-        state.set_layout("outline").unwrap();
+        state.set_width("notes", 300).unwrap();
         state.set_selection(Some(&note));
         state.set_last_open_note(Some(&note));
         state.set_history(&[note.clone(), rel("Inbox/other.md"), note.clone()]);
-        state.set_width("columns", "groups", 268).unwrap();
-        state.set_width("outline", "sections", 310).unwrap();
+        state.set_width("groups", 268).unwrap();
         state.set_sort(&rel("Projects/Group"), "title").unwrap();
         state.save(&mut store).unwrap();
 
         let loaded = WorkspaceState::load(&store);
         assert!(loaded.writable());
         assert_eq!(loaded.warning(), None);
-        assert_eq!(loaded.layout(), "outline");
+        assert_eq!(loaded.width("notes"), Some(300));
         assert_eq!(loaded.selection(), Some(note.clone()));
         assert_eq!(loaded.last_open_note(), Some(note.clone()));
         assert_eq!(
             loaded.history(),
             [note.clone(), rel("Inbox/other.md"), note]
         );
-        assert_eq!(loaded.width("columns", "groups"), Some(268));
-        assert_eq!(loaded.width("outline", "sections"), Some(310));
+        assert_eq!(loaded.width("groups"), Some(268));
         assert_eq!(loaded.sort(&rel("Projects/Group")), "title");
         assert_eq!(loaded.sort(&rel("Inbox")), "modified");
         assert_eq!(
@@ -750,7 +718,7 @@ mod tests {
         let (_directory, mut store) = fixture(Some(b""));
         let mut state = WorkspaceState::load(&store);
         assert!(state.writable());
-        assert_eq!(state.layout(), "columns");
+        assert_eq!(state.width("notes"), Some(280));
         state.save(&mut store).unwrap();
         assert!(WorkspaceState::load(&store).writable());
     }
@@ -759,7 +727,7 @@ mod tests {
     fn unknown_valid_toml_values_survive_known_field_updates() {
         let source = br#"
             schema_version = 1
-            layout = 'columns'
+            layout = 'outline'
             future_flag = true
             future_array = [1, 'two', { three = 3 }]
             future_date = 2026-11-04T12:30:00Z
@@ -785,12 +753,12 @@ mod tests {
         let (directory, mut store) = fixture(Some(source));
         let mut state = WorkspaceState::load(&store);
         assert!(state.writable(), "{:?}", state.warning());
-        state.set_layout("outline").unwrap();
-        state.set_width("columns", "sections", 300).unwrap();
+        state.set_width("sections", 300).unwrap();
         state.remap_paths(&rel("A"), &rel("B"));
         state.save(&mut store).unwrap();
         let saved = disk_table(&directory);
         for key in [
+            "layout",
             "future_flag",
             "future_array",
             "future_date",
@@ -808,7 +776,10 @@ mod tests {
             saved["widths"]["future_layout"],
             original["widths"]["future_layout"]
         );
-        assert_eq!(saved["layout"].as_str(), Some("outline"));
+        assert_eq!(
+            saved["widths"]["columns"]["sections"].as_integer(),
+            Some(300)
+        );
     }
 
     #[test]
@@ -819,8 +790,6 @@ mod tests {
             b"schema_version = 2\nlayout = 'outline'",
             b"schema_version = '1'",
             b"schema_version = true",
-            b"layout = 'future'",
-            b"layout = 1",
             b"selection = ['A']",
             b"history = 'A/note.md'",
             b"history = [1]",
@@ -842,8 +811,6 @@ mod tests {
             b"[widths.columns]\nsections = -1",
             b"[widths.columns]\nsections = 361",
             b"[widths.columns]\ngroups = 149",
-            b"[widths.outline]\nnotes = 481",
-            b"[widths.outline]\nsections = 179",
             b"[widths.columns]\nnotes = 280.0",
             b"[widths.columns]\nnotes = true",
             b"sort = 'title'",
@@ -854,13 +821,13 @@ mod tests {
             let mut state = WorkspaceState::load(&store);
             assert!(!state.writable(), "{}", String::from_utf8_lossy(bytes));
             assert!(state.warning().is_some());
-            assert_eq!(state.layout(), "columns");
+            assert_eq!(state.width("notes"), Some(280));
             assert_eq!(state.selection(), None);
             assert_eq!(state.last_open_note(), None);
             assert!(state.history().is_empty());
             assert!(state.order().is_empty());
-            assert_eq!(state.width("columns", "sections"), Some(200));
-            state.set_layout("outline").unwrap();
+            assert_eq!(state.width("sections"), Some(200));
+            state.set_width("notes", 300).unwrap();
             assert!(state.save(&mut store).is_err());
             assert_eq!(fs::read(directory.path().join(STATE_PATH)).unwrap(), *bytes);
         }
@@ -913,7 +880,7 @@ mod tests {
                 let mut state = WorkspaceState::load(&store);
                 assert!(!state.writable(), "{field}: {path:?}");
                 assert!(state.warning().is_some());
-                assert_eq!(state.layout(), "columns");
+                assert_eq!(state.width("notes"), Some(280));
                 assert!(state.save(&mut store).is_err());
                 assert_eq!(fs::read(directory.path().join(STATE_PATH)).unwrap(), bytes);
             }
@@ -951,7 +918,7 @@ mod tests {
         assert!(!read.unwrap_err().is_not_found());
         assert!(!state.writable());
         assert!(state.warning().is_some());
-        assert_eq!(state.layout(), "columns");
+        assert_eq!(state.width("notes"), Some(280));
         assert!(save.is_err());
         assert_eq!(fs::read(path).unwrap(), original);
     }
@@ -1026,12 +993,12 @@ mod tests {
         let (_directory, mut store) = fixture(None);
         let mut state = WorkspaceState::load(&store);
         state.save(&mut store).unwrap();
-        state.set_layout("outline").unwrap();
+        state.set_width("notes", 300).unwrap();
         state.save(&mut store).unwrap();
         state.set_selection(Some(&rel("Inbox/note.md")));
         state.save(&mut store).unwrap();
         let loaded = WorkspaceState::load(&store);
-        assert_eq!(loaded.layout(), "outline");
+        assert_eq!(loaded.width("notes"), Some(300));
         assert_eq!(loaded.selection(), Some(rel("Inbox/note.md")));
     }
 
@@ -1048,7 +1015,7 @@ mod tests {
             let original = b"layout = 'columns'\n";
             let (directory, mut store) = fixture(Some(original));
             let mut state = WorkspaceState::load(&store);
-            state.set_layout("outline").unwrap();
+            state.set_width("notes", 300).unwrap();
             store.fail_next(fault);
             assert!(state.save(&mut store).is_err(), "{fault:?}");
             assert_eq!(
@@ -1057,7 +1024,7 @@ mod tests {
             );
             assert_eq!(state.baseline.as_deref(), Some(original.as_slice()));
             state.save(&mut store).unwrap();
-            assert_eq!(WorkspaceState::load(&store).layout(), "outline");
+            assert_eq!(WorkspaceState::load(&store).width("notes"), Some(300));
         }
     }
 
@@ -1086,7 +1053,7 @@ mod tests {
     fn post_publication_durability_error_still_advances_the_baseline() {
         let (directory, mut store) = fixture(Some(b"layout = 'columns'\n"));
         let mut state = WorkspaceState::load(&store);
-        state.set_layout("outline").unwrap();
+        state.set_width("notes", 300).unwrap();
         store.fail_next(crate::fs_store::Fault::DirectorySync);
         assert!(state
             .save(&mut store)
@@ -1094,7 +1061,7 @@ mod tests {
             .contains("was published"));
         let published = fs::read(directory.path().join(STATE_PATH)).unwrap();
         assert_eq!(state.baseline.as_deref(), Some(published.as_slice()));
-        assert_eq!(WorkspaceState::load(&store).layout(), "outline");
+        assert_eq!(WorkspaceState::load(&store).width("notes"), Some(300));
         assert!(state.writable());
         assert!(state.warning().unwrap().contains("durability"));
         state.set_selection(Some(&rel("A/note.md")));
@@ -1308,22 +1275,19 @@ mod tests {
     fn pane_widths_use_defaults_and_setters_clamp_to_supported_ranges() {
         let (_directory, store) = fixture(None);
         let mut state = WorkspaceState::load(&store);
-        for (layout, pane, default, min, max) in [
-            ("columns", "sections", 200, 140, 360),
-            ("columns", "groups", 220, 150, 400),
-            ("columns", "notes", 280, 200, 480),
-            ("outline", "sections", 260, 180, 420),
-            ("outline", "notes", 280, 200, 480),
+        for (pane, default, min, max) in [
+            ("sections", 200, 140, 360),
+            ("groups", 220, 150, 400),
+            ("notes", 280, 200, 480),
         ] {
-            assert_eq!(state.width(layout, pane), Some(default));
-            state.set_width(layout, pane, 0).unwrap();
-            assert_eq!(state.width(layout, pane), Some(min));
-            state.set_width(layout, pane, u16::MAX).unwrap();
-            assert_eq!(state.width(layout, pane), Some(max));
+            assert_eq!(state.width(pane), Some(default));
+            state.set_width(pane, 0).unwrap();
+            assert_eq!(state.width(pane), Some(min));
+            state.set_width(pane, u16::MAX).unwrap();
+            assert_eq!(state.width(pane), Some(max));
         }
-        assert_eq!(state.width("future", "notes"), None);
-        assert!(state.set_width("columns", "future", 200).is_err());
-        assert!(state.set_layout("future").is_err());
+        assert_eq!(state.width("future"), None);
+        assert!(state.set_width("future", 200).is_err());
         assert!(state.set_sort(&rel("A"), "future").is_err());
     }
 

@@ -234,14 +234,10 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
     ];
     match platform {
         Platform::Mac => bindings.extend([
-            ("super+alt+1".to_string(), "view.columns"),
-            ("super+alt+2".to_string(), "view.outline"),
             ("super+comma".to_string(), "settings.open"),
             ("super+q".to_string(), "app.quit"),
         ]),
         Platform::Linux => bindings.extend([
-            ("ctrl+alt+1".to_string(), "view.columns"),
-            ("ctrl+alt+2".to_string(), "view.outline"),
             // Find is an editor gesture; keep the universal Ctrl+F too.
             ("ctrl+f".to_string(), "navigation.find"),
             ("ctrl+q".to_string(), "app.quit"),
@@ -360,9 +356,9 @@ mod tests {
     fn labels_follow_each_platform_convention_and_display_round_trips() {
         let palette = accel("super+shift+p");
         assert_eq!(palette.label(Platform::Mac), "⇧⌘P");
-        let layout = accel("ctrl+alt+1");
-        assert_eq!(layout.label(Platform::Linux), "Ctrl+Alt+1");
-        assert_eq!(layout.label(Platform::Mac), "⌃⌥1");
+        let chord = accel("ctrl+alt+1");
+        assert_eq!(chord.label(Platform::Linux), "Ctrl+Alt+1");
+        assert_eq!(chord.label(Platform::Mac), "⌃⌥1");
         for trigger in ["super+shift+p", "ctrl+alt+1", "alt+plus", "shift+enter"] {
             assert_eq!(
                 parse_trigger(&accel(trigger).to_string()),

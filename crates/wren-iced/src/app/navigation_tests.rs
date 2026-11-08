@@ -11,7 +11,7 @@ use super::commands::{Command, CommandId, Disposition};
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
 use super::{App, Message, Options};
-use crate::panes::{Layout, Pane};
+use crate::panes::Pane;
 
 fn fixture() -> (tempfile::TempDir, App) {
     let directory = crate::test_support::tempdir();
@@ -88,13 +88,12 @@ fn command_context_is_explicit_and_palette_groups_filter_without_empty_headers()
     assert!(app.command_enabled(CommandId::RenameGroup));
     assert!(app.command_enabled(CommandId::RenameSection));
     let _ = app.open_palette(Mode::Commands);
-    let _ = app.palette_query("Layout: Outline".into());
+    let _ = app.palette_query("Reset column widths".into());
     let palette = app.palette.as_ref().unwrap();
     assert_eq!(palette.results.len(), 1);
     assert_eq!(palette.results[0].group, "View");
-    assert_eq!(palette.results[0].title, "Layout: Outline");
+    assert_eq!(palette.results[0].title, "Reset column widths");
     let _ = app.activate_palette(None);
-    assert_eq!(app.layout, Layout::Outline);
     assert!(app.palette.is_none());
 }
 
@@ -122,7 +121,7 @@ fn one_modal_owns_keyboard_and_neither_typing_nor_global_creation_leaks_to_edito
 }
 
 #[test]
-fn filters_are_pure_and_layout_focus_theme_retain_editor_history_cursor_and_selection() {
+fn filters_are_pure_and_focus_theme_retain_editor_history_cursor_and_selection() {
     let (_directory, mut app) = fixture();
     append(&mut app, " retained");
     let cursor = app.editor.cursor();
@@ -134,7 +133,6 @@ fn filters_are_pure_and_layout_focus_theme_retain_editor_history_cursor_and_sele
     assert!(app.note_hits().is_empty());
     assert_eq!(app.selected_note, selected);
     assert_eq!(app.editor.cursor(), cursor);
-    let _ = app.dispatch(Command::Layout(Layout::Outline));
     let _ = app.dispatch(Command::Focus(Some(true)));
     let _ = app.update(Message::ChooseTheme(Some(wren_core::theme::LIGHT)));
     let _ = app.dispatch(Command::Focus(Some(false)));
@@ -143,46 +141,6 @@ fn filters_are_pure_and_layout_focus_theme_retain_editor_history_cursor_and_sele
     assert_eq!(app.filters.notes, "nothing matches");
     assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
     assert_eq!(app.selected_note, selected);
-}
-
-#[test]
-fn outline_current_section_only_toggles_and_matching_group_expansion_is_temporary() {
-    let (_directory, mut app) = fixture();
-    append(&mut app, " unsaved");
-    let section = app.selected_section.unwrap();
-    assert!(app.expanded.contains(&section));
-    let _ = app.dispatch(Command::ToggleSection(section));
-    assert!(!app.expanded.contains(&section));
-    assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
-    let _ = app.dispatch(Command::Filter {
-        pane: "outline".into(),
-        query: "Group".into(),
-    });
-    assert_eq!(app.outline_sections(), vec![(section, true)]);
-    assert!(!app.expanded.contains(&section));
-    let _ = app.dispatch(Command::Filter {
-        pane: "outline".into(),
-        query: String::new(),
-    });
-    assert!(
-        !app.outline_sections()
-            .iter()
-            .find(|(id, _)| *id == section)
-            .unwrap()
-            .1
-    );
-    let beta = app
-        .model()
-        .unwrap()
-        .sections
-        .iter()
-        .find(|section| section.name == "Beta")
-        .unwrap()
-        .id;
-    let _ = app.dispatch(Command::ToggleSection(beta));
-    assert_eq!(app.selected_note, Some(note(&app, "Third")));
-    assert_eq!(app.selected_section, Some(beta));
-    assert!(app.expanded.contains(&beta));
 }
 
 #[test]
@@ -224,7 +182,6 @@ fn jumping_back_to_another_group_clears_only_a_conflicting_groups_filter() {
         app.filters.sections = "Alpha".into();
         app.filters.groups = query.into();
         app.filters.notes = "body".into();
-        app.filters.outline = "Alpha".into();
         let expected = if query == "Inbox" { query } else { "" };
         let result = app.dispatch(Command::Run(CommandId::Back));
         assert_eq!(result.processed.disposition, Disposition::Completed);
@@ -233,7 +190,6 @@ fn jumping_back_to_another_group_clears_only_a_conflicting_groups_filter() {
         assert_eq!(app.filters.groups, expected);
         assert_eq!(app.filters.sections, "Alpha");
         assert_eq!(app.filters.notes, "body");
-        assert_eq!(app.filters.outline, "Alpha");
 
         let _ = app.dispatch(Command::OpenNote(target(&app, second, "")));
         app.filters.groups = query.into();
@@ -242,7 +198,6 @@ fn jumping_back_to_another_group_clears_only_a_conflicting_groups_filter() {
         assert_eq!(app.filters.groups, expected);
         assert_eq!(app.filters.sections, "Alpha");
         assert_eq!(app.filters.notes, "body");
-        assert_eq!(app.filters.outline, "Alpha");
     }
 }
 
@@ -255,7 +210,6 @@ fn moving_into_a_filtered_out_group_reveals_it_without_clearing_other_filters() 
     app.filters.sections = "Alpha".into();
     app.filters.groups = "Group".into();
     app.filters.notes = "Second".into();
-    app.filters.outline = "Alpha".into();
     let _ = app.open_palette(Mode::MoveNote(second));
     let destination = super::palette::Key::Destination(Parent::Group(inbox));
     let result = app.activate_palette_key(app.workspace_generation(), destination);
@@ -264,7 +218,6 @@ fn moving_into_a_filtered_out_group_reveals_it_without_clearing_other_filters() 
     assert_eq!(app.filters.groups, "");
     assert_eq!(app.filters.sections, "Alpha");
     assert_eq!(app.filters.notes, "Second");
-    assert_eq!(app.filters.outline, "Alpha");
 }
 
 #[test]
@@ -890,9 +843,7 @@ fn read_only_workspace_metadata_warns_for_committed_selection_and_preferences_bu
         app.editor.text()
     );
     for command in [
-        Command::Layout(Layout::Outline),
         Command::Width {
-            layout: Layout::Columns,
             pane: Pane::Groups,
             width: 340.0,
         },
@@ -911,7 +862,7 @@ fn read_only_workspace_metadata_warns_for_committed_selection_and_preferences_bu
         Disposition::Blocked
     );
     assert_eq!(app.banner_kind, super::workspace::WarningKind::Document);
-    let result = app.dispatch(Command::Layout(Layout::Columns));
+    let result = app.dispatch(Command::Sort("modified".into()));
     assert_eq!(result.processed.disposition, Disposition::CommittedWarning);
     assert_eq!(result.processed.warning.as_ref(), Some(&reason));
     assert_eq!(app.banner_kind, super::workspace::WarningKind::Metadata);
@@ -977,21 +928,18 @@ fn document_flush_does_not_clear_registry_warning_or_metadata_warning() {
 }
 
 #[test]
-fn preference_ops_use_the_session_and_narrow_layout_does_not_change_preferences() {
+fn preference_ops_use_the_session_and_a_narrow_window_does_not_change_preferences() {
     let (directory, mut app) = fixture();
     let _ = app.dispatch(Command::Width {
-        layout: Layout::Columns,
         pane: Pane::Groups,
         width: 350.0,
     });
-    let _ = app.dispatch(Command::Layout(Layout::Outline));
     let _ = app.dispatch(Command::Sort("title".into()));
-    let _ = app.widths.effective(Layout::Columns, 710.0);
-    assert_eq!(app.widths.get(Layout::Columns, Pane::Groups), 350.0);
+    let _ = app.widths.effective(710.0);
+    assert_eq!(app.widths.get(Pane::Groups), 350.0);
     drop(app);
     let session = Session::open(directory.path()).unwrap();
-    assert_eq!(session.state().layout(), "outline");
-    assert_eq!(session.state().width("columns", "groups"), Some(350));
+    assert_eq!(session.state().width("groups"), Some(350));
     let parent = session.selected_parent().unwrap();
     assert_eq!(
         session
@@ -1116,7 +1064,7 @@ fn normal_startup_is_onboarding_or_registered_root_and_evaluation_is_explicit() 
 #[test]
 fn passive_autosave_does_not_replace_the_correlated_requested_action_result() {
     let (_directory, mut app) = fixture();
-    let requested = app.dispatch(Command::Layout(Layout::Outline)).processed;
+    let requested = app.dispatch(Command::Sort("title".into())).processed;
     append(&mut app, " edit");
     let _ = app.process_core(Op::Tick);
     let processed = app.last_processed.as_ref().unwrap();
@@ -1164,7 +1112,6 @@ fn spring_browsing_is_transient_and_a_failed_blur_clears_preview_before_the_barr
         .id;
     let _ = app.drag_event(
         generation,
-        app.layout,
         crate::drag::DragEvent::Spring {
             generation,
             section: beta,
@@ -1188,7 +1135,6 @@ fn spring_browsing_is_transient_and_a_failed_blur_clears_preview_before_the_barr
     assert_ne!(app.gesture_generation, generation);
     let _ = app.drag_event(
         generation,
-        app.layout,
         crate::drag::DragEvent::Commit {
             generation,
             op: Op::MoveNote {
@@ -1207,42 +1153,29 @@ fn resize_updates_live_preference_but_persists_only_at_end() {
     let generation = app.gesture_generation;
     let _ = app.resize_event(
         generation,
-        crate::panes::ResizeEvent::Started {
-            layout: Layout::Columns,
-            pane: Pane::Groups,
-        },
+        crate::panes::ResizeEvent::Started { pane: Pane::Groups },
     );
     let _ = app.resize_event(
         generation,
         crate::panes::ResizeEvent::Changed {
-            layout: Layout::Columns,
             pane: Pane::Groups,
             width: 320.0,
         },
     );
-    assert_eq!(app.widths.get(Layout::Columns, Pane::Groups), 320.0);
+    assert_eq!(app.widths.get(Pane::Groups), 320.0);
     assert_eq!(
-        app.session
-            .as_ref()
-            .unwrap()
-            .state()
-            .width("columns", "groups"),
+        app.session.as_ref().unwrap().state().width("groups"),
         Some(220)
     );
     let _ = app.resize_event(
         generation,
         crate::panes::ResizeEvent::Ended {
-            layout: Layout::Columns,
             pane: Pane::Groups,
             width: 320.0,
         },
     );
     assert_eq!(
-        app.session
-            .as_ref()
-            .unwrap()
-            .state()
-            .width("columns", "groups"),
+        app.session.as_ref().unwrap().state().width("groups"),
         Some(320)
     );
     assert!(app.resizing.is_none());

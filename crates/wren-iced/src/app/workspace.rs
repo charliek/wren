@@ -127,8 +127,7 @@ impl EffectBefore {
                         )
                         .collect::<Vec<_>>()
             }
-            Op::SetLayout { layout } => session.state().layout() == layout,
-            Op::SetWidth { layout, pane, .. } => session.state().width(layout, pane).is_some(),
+            Op::SetWidth { pane, .. } => session.state().width(pane).is_some(),
             Op::ResetWidths => true,
             Op::SetSort { group, mode } => session
                 .model()
@@ -1547,12 +1546,7 @@ mod tests {
         app.config = Some(wren_core::config::Config::load_from(configdir.path()));
         app.filters.sections = "Inbox".into();
         app.focus = true;
-        app.layout = crate::panes::Layout::Outline;
-        app.widths.set(
-            crate::panes::Layout::Outline,
-            crate::panes::Pane::Outline,
-            330.0,
-        );
+        app.widths.set(crate::panes::Pane::Sections, 330.0);
         let generation = app.workspace_generation();
         let previous = app.session.take();
         let outcome = load(previous, directory.path().into());
@@ -1563,12 +1557,7 @@ mod tests {
         assert_eq!(app.workspace_generation(), generation);
         assert_eq!(app.filters.sections, "Inbox");
         assert!(app.focus);
-        assert_eq!(app.layout, crate::panes::Layout::Outline);
-        assert_eq!(
-            app.widths
-                .get(crate::panes::Layout::Outline, crate::panes::Pane::Outline),
-            330.0
-        );
+        assert_eq!(app.widths.get(crate::panes::Pane::Sections), 330.0);
         assert_eq!(
             app.config.as_ref().unwrap().active(),
             Some(directory.path())
@@ -1742,13 +1731,7 @@ mod tests {
             })
             .unwrap();
         preferences
-            .apply(Op::SetLayout {
-                layout: "outline".into(),
-            })
-            .unwrap();
-        preferences
             .apply(Op::SetWidth {
-                layout: "outline".into(),
                 pane: "sections".into(),
                 width: 310,
             })
@@ -1759,18 +1742,12 @@ mod tests {
         let previous = app.session.take();
         let slot = returning(&mut app, load(previous, next.path().into()));
         let _ = app.workspace_loaded(app.load_generation, slot);
-        assert_eq!(app.layout, crate::panes::Layout::Outline);
-        assert_eq!(
-            app.widths
-                .get(crate::panes::Layout::Outline, crate::panes::Pane::Outline),
-            310.0
-        );
+        assert_eq!(app.widths.get(crate::panes::Pane::Sections), 310.0);
         assert_eq!(app.filters, super::super::navigation::Filters::default());
         assert!(!app.focus);
         assert!(app.selected_note.is_none());
         assert_eq!(app.selected_section, Some(empty));
         assert!(app.editor.text().is_empty());
-        assert!(app.expanded.contains(&empty));
     }
 
     #[test]
@@ -1986,8 +1963,9 @@ mod tests {
             for flush_fails in [false, true] {
                 let (directory, mut app) = fixture();
                 app.session.as_mut().unwrap().fail_next(Fault::FileSync);
-                let result = app.process_core(Op::SetLayout {
-                    layout: "outline".into(),
+                let result = app.process_core(Op::SetWidth {
+                    pane: "notes".into(),
+                    width: 300,
                 });
                 assert_eq!(result.processed.disposition, Disposition::CommittedWarning);
                 let metadata_warning = app.metadata_warning.clone().unwrap();

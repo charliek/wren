@@ -32,7 +32,7 @@ def test_oversized_palette_queries_are_visible_rejections_without_state_loss(vau
         assert current["navigation"]["modal"]["error"] is None
 
 
-@pytest.mark.parametrize("pane", ["sections", "groups", "notes", "outline"])
+@pytest.mark.parametrize("pane", ["sections", "groups", "notes"])
 def test_oversized_pane_filters_leave_previous_projection_and_document_intact(vault, pane):
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory("filter-budget")) as app:
         nav.jump(app, nav.FIRST)
@@ -150,7 +150,7 @@ def test_palette_reordering_uses_full_siblings_and_persists_after_optional_warni
             with nav.unwritable(vault / ".wren"):
                 nav.gateway(app, "palette.activate", index=index, disposition="committed-warning")
                 assert nav.navigation(app)["modal"] is None
-            nav.gateway(app, "view.width", layout="columns", pane="sections", width=200)
+            nav.gateway(app, "view.width", pane="sections", width=200)
         else:
             nav.gateway(app, "palette.activate", index=index)
         assert nav.navigation(app)["modal"] is None
@@ -228,8 +228,8 @@ def test_screenshot_draws_the_current_editor_after_layout(vault, theme, body):
         nav.jump(app, nav.FIRST)
         nav.choose_theme(app, theme)
         before = nav.editor_identity(app.client.call("editor.get"))
-        for index, (layout, focused) in enumerate((("columns", False), ("outline", False), ("outline", True), ("columns", False))):
-            nav.gateway(app, "view.layout", layout=layout)
+        for index, (sections, focused) in enumerate(((200, False), (320, False), (320, True), (200, False))):
+            nav.gateway(app, "view.width", pane="sections", width=sections)
             nav.gateway(app, "view.focus", enabled=focused)
             path = artifacts / f"current-frame-{index}.png"
             result = app.client.call("test.capture.after_layout", {"path": str(path)})
@@ -294,7 +294,6 @@ def test_screenshot_matches_native_hover_and_focused_input_styles(native_workspa
 @pytest.mark.parametrize("query,command", [
     ("Sort notes: title", "notes.sort_title"),
     ("Reset column widths", "view.reset_widths"),
-    ("Layout: Outline", "view.outline"),
 ])
 def test_native_palette_preference_actions_restore_editor_typing_focus(native_workspace, query, command):
     app, root, window = native_workspace

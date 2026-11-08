@@ -1190,7 +1190,7 @@ fn switching_workspace_flushes_old_and_replaces_generation_history_selection_and
     new.write("New/G/Only.md", b"new workspace");
     new.write(
         ".wren/workspace.toml",
-        b"last_open_note = 'New/G/Only.md'\nhistory = ['New/G/Only.md']\nlayout = 'outline'\n",
+        b"last_open_note = 'New/G/Only.md'\nhistory = ['New/G/Only.md']\n[widths.columns]\nnotes = 300\n",
     );
     let mut session = old.session();
     let old_note = note(&session, "A/G/Note.md");
@@ -1214,7 +1214,7 @@ fn switching_workspace_flushes_old_and_replaces_generation_history_selection_and
     assert_eq!(session.model().notes.len(), 1);
     let new_note = note(&session, "New/G/Only.md");
     assert_document(&session, new_note, "new workspace", false);
-    assert_eq!(session.state().layout(), "outline");
+    assert_eq!(session.state().width("notes"), Some(300));
     assert_eq!(session.state().history(), [rel("New/G/Only.md")]);
     assert!(!session.can_back());
     assert!(!session.can_forward());
