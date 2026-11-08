@@ -87,6 +87,76 @@ pub fn container_prefix<'a>(line: &'a str, info: &LineInfo) -> &'a str {
     &line[..info.prefix_end]
 }
 
+/// One container's share of a line's container prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Segment {
+    /// Byte offset where the share starts, including the whitespace before
+    /// a marker.
+    pub start: usize,
+    /// Byte offset where it ends: at the container's content column, or at
+    /// the end of a line too short to reach it.
+    pub end: usize,
+    /// Byte offset of the container's marker (`>` or a list marker) when
+    /// the line carries one. A list item carries its marker only on its
+    /// first line.
+    pub marker: Option<usize>,
+}
+
+/// Split a line's container prefix by container.
+///
+/// `containers` are the line's own containers, outermost first: on a lazy
+/// line, only the ones it continued. The first `continued` of them were
+/// open before the line (see [`Scanner::continued`]); the rest opened on
+/// it. `index` is the line's index, so a byte order mark on line 0 is
+/// skipped. One segment comes back per container.
+pub fn segments(
+    line: &str,
+    index: usize,
+    containers: &[Container],
+    continued: usize,
+) -> Vec<Segment> {
+    let b = line.as_bytes();
+    let mut pos = if index == 0 && line.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let mut col = 0;
+    containers
+        .iter()
+        .enumerate()
+        .map(|(slot, container)| {
+            let start = pos;
+            let marker = match container {
+                Container::Quote { .. } => {
+                    let (p, c) = skip_ws(b, pos, col);
+                    if b.get(p) == Some(&b'>') {
+                        (pos, col) = advance_to(b, p + 1, c + 1, quote_content(b, p, c));
+                        Some(p)
+                    } else {
+                        None
+                    }
+                }
+                Container::Item(item) if slot < continued => {
+                    (pos, col) = advance_to(b, pos, col, item.content_column);
+                    None
+                }
+                Container::Item(item) => {
+                    let width = item.marker_end - item.marker_start;
+                    (pos, col) =
+                        advance_to(b, item.marker_end, item.indent + width, item.content_column);
+                    Some(item.marker_start)
+                }
+            };
+            Segment {
+                start,
+                end: pos,
+                marker,
+            }
+        })
+        .collect()
+}
+
 /// What a line is, once its container prefix is set aside.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -308,6 +378,7 @@ pub struct Scanner {
     /// The stack index of an item that opened empty on the previous line;
     /// a blank line right after it ends it.
     empty_item: Option<usize>,
+    continued: usize,
 }
 
 impl Default for Scanner {
@@ -331,6 +402,7 @@ impl Scanner {
             stack: Vec::new(),
             leaf: Leaf::None,
             empty_item: None,
+            continued: 0,
         }
     }
 
@@ -344,6 +416,14 @@ impl Scanner {
         &self.stack
     }
 
+    /// How many of the containers open before the last scanned line that
+    /// line continued. Containers at this index and above opened on the
+    /// line, except on a lazy line, which continues fewer containers than
+    /// it leaves open and opens none.
+    pub fn continued(&self) -> usize {
+        self.continued
+    }
+
     /// Classify the next line. `text` is the line without its ending.
     pub fn next_line(&mut self, text: &str) -> LineInfo {
         let index = self.line;
@@ -355,6 +435,7 @@ impl Scanner {
             0
         };
         let empty_item = self.empty_item.take();
+        self.continued = 0;
 
         if self.front_matter_end.is_some_and(|end| index <= end) {
             return LineInfo {
@@ -404,6 +485,7 @@ impl Scanner {
             }
             matched += 1;
         }
+        self.continued = matched;
         let all_matched = matched == self.stack.len();
 
         if all_matched {
@@ -1512,6 +1594,47 @@ mod tests {
         assert!(matches!(stack[1], Container::Item(item) if item.content_column == 4));
         scanner.next_line("");
         assert!(scanner.containers().is_empty());
+    }
+
+    #[test]
+    fn continued_counts_the_containers_a_line_kept() {
+        let mut scanner = Scanner::new();
+        let continued: Vec<(usize, usize)> = ["> - a", ">   b", "> - c", "> d", "# e"]
+            .iter()
+            .map(|line| {
+                scanner.next_line(line);
+                (scanner.continued(), scanner.containers().len())
+            })
+            .collect();
+        // `> d` is lazy: it keeps the item open without continuing it.
+        assert_eq!(continued, [(0, 2), (2, 2), (1, 2), (1, 2), (0, 0)]);
+    }
+
+    #[test]
+    fn segments_split_the_prefix_by_container() {
+        let seg = |start, end, marker| Segment { start, end, marker };
+        let segs_of = |text: &str| {
+            let doc = Document::new(text);
+            let mut scanner = Scanner::new();
+            let mut last = Vec::new();
+            for i in 0..doc.line_count() {
+                scanner.next_line(doc.line(i));
+                let stack = scanner.containers().to_vec();
+                last = segments(doc.line(i), i, &stack, scanner.continued());
+            }
+            last
+        };
+        assert_eq!(segs_of("> - a"), [seg(0, 2, Some(0)), seg(2, 4, Some(2))]);
+        assert_eq!(
+            segs_of("> - a\n>   b"),
+            [seg(0, 2, Some(0)), seg(2, 4, None)]
+        );
+        assert_eq!(segs_of("  1.  a"), [seg(0, 6, Some(2))]);
+        assert_eq!(segs_of(">>a"), [seg(0, 1, Some(0)), seg(1, 2, Some(1))]);
+        assert_eq!(segs_of("- a\n\tb"), [seg(0, 1, None)]);
+        assert_eq!(segs_of("- a\n"), [seg(0, 0, None)]);
+        assert_eq!(segs_of("-"), [seg(0, 1, Some(0))]);
+        assert_eq!(segs_of("\u{feff}> a"), [seg(3, 5, Some(3))]);
     }
 
     #[test]
