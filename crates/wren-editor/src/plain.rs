@@ -9,12 +9,10 @@
 //! the planner handles them either way.
 
 use unicode_segmentation::UnicodeSegmentation;
+use wren_markdown::block::{self, TAB_STOP};
 use wren_markdown::{EditPlan, Intent, Lines as _, Pos, Replace, Selection};
 
 use crate::backend::Lines;
-
-/// Columns between tab stops.
-const TAB_STOP: usize = 4;
 
 const BOM: char = '\u{feff}';
 
@@ -24,8 +22,7 @@ pub(crate) fn plan(lines: Lines<'_>, sel: Selection, intent: Intent) -> Option<E
     Some(match intent {
         Intent::Tab if sel.start().line == sel.end().line => {
             let start = sel.start();
-            let before = &lines.line(start.line)[..start.col];
-            let spaces = TAB_STOP - column(before) % TAB_STOP;
+            let spaces = TAB_STOP - block::column(lines.line(start.line), start.col) % TAB_STOP;
             replace(sel, " ".repeat(spaces))
         }
         Intent::Tab => shift_lines(lines, sel, true),
@@ -53,18 +50,6 @@ pub(crate) fn plan(lines: Lines<'_>, sel: Selection, intent: Intent) -> Option<E
         | Intent::Code
         | Intent::MoveLineUp
         | Intent::MoveLineDown => unchanged(sel),
-    })
-}
-
-/// The display column at the end of `text`, with tabs at every
-/// [`TAB_STOP`].
-fn column(text: &str) -> usize {
-    text.chars().fold(0, |column, c| {
-        if c == '\t' {
-            (column / TAB_STOP + 1) * TAB_STOP
-        } else {
-            column + 1
-        }
     })
 }
 
@@ -215,6 +200,9 @@ mod tests {
             ("abcd", 4, 4),
             ("\tx", 2, 3),
             ("é", 2, 3),
+            // A byte-order mark takes no column, as with assist on.
+            ("\u{feff}x", 3, 4),
+            ("\u{feff}", 3, 4),
         ] {
             let plan = planned(text, caret(0, col), Intent::Tab).unwrap();
             assert_eq!(plan.edits, [edit((0, col), (0, col), &" ".repeat(spaces))]);
