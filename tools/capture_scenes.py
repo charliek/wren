@@ -101,6 +101,18 @@ def main() -> int:
             client.call("core.apply", {"op": "open_note", "note": note["id"]})
             time.sleep(0.3)
             shot_here("columns")
+            # Keyboard drill-down: walk left to Sections, then fold rightward.
+            for _ in range(3):
+                client.call("command.run", {"id": "navigation.column_left"})
+            shot_here("column-sections")
+            for name in ("column-groups-folded", "column-notes-folded", "column-editor-folded"):
+                client.call("command.run", {"id": "navigation.column_right"})
+                shot_here(name)
+            # Unfold, then return to the editor through Jump, which keeps the fold.
+            client.call("column.open", {"column": "sections"})
+            client.call("palette.open", {"mode": "jump"})
+            client.call("palette.query", {"query": "2026-11-04"})
+            client.call("palette.activate", {})
             for mode, query in [
                 ("commands", ""),
                 ("jump", "al"),

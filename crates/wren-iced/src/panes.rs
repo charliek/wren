@@ -130,8 +130,8 @@ impl Widths {
 
     /// `available` is the actual horizontal browser+editor extent, excluding any outer chrome.
     /// Below the sum of the 120px floors, the row overflows rather than wrapping.
-    pub fn effective(&self, available: f32) -> EffectiveWidths {
-        let panes = &PANES;
+    /// Only `panes` share the space; a folded pane is absent and gets none.
+    pub fn effective(&self, panes: &[Pane], available: f32) -> EffectiveWidths {
         let mut widths: Vec<_> = panes.iter().map(|&pane| self.get(pane)).collect();
         let available = if available.is_nan() {
             0.0
@@ -176,19 +176,32 @@ impl Widths {
             }
         }
         let editor = (available - widths.iter().sum::<f32>()).max(0.0);
-        EffectiveWidths { widths, editor }
+        EffectiveWidths {
+            panes: panes.to_vec(),
+            widths,
+            editor,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveWidths {
+    panes: Vec<Pane>,
     widths: Vec<f32>,
     pub editor: f32,
 }
 
 impl EffectiveWidths {
+    /// The pane's width, or zero for a pane that is not shown.
     pub fn get(&self, pane: Pane) -> f32 {
-        self.widths[index(pane)]
+        self.panes
+            .iter()
+            .position(|&shown| shown == pane)
+            .map_or(0.0, |position| self.widths[position])
+    }
+
+    pub fn browser(&self) -> f32 {
+        self.widths.iter().sum()
     }
 }
 
@@ -936,18 +949,18 @@ mod tests {
     #[test]
     fn compression_is_proportional_until_floors_then_editor_shrinks() {
         let widths = Widths::default();
-        let normal = widths.effective(1200.0);
+        let normal = widths.effective(&PANES, 1200.0);
         assert_eq!(normal.editor, 500.0);
-        let squeezed = widths.effective(880.0);
+        let squeezed = widths.effective(&PANES, 880.0);
         assert!((squeezed.get(Pane::Sections) - 160.0).abs() < 0.01);
         assert!((squeezed.get(Pane::Groups) - 176.0).abs() < 0.01);
         assert!((squeezed.get(Pane::Notes) - 224.0).abs() < 0.01);
         assert!((squeezed.editor - 320.0).abs() < 0.01);
-        let near_floor = widths.effective(700.0);
+        let near_floor = widths.effective(&PANES, 700.0);
         assert!((near_floor.get(Pane::Sections) - 120.0).abs() < 0.01);
         assert!((near_floor.get(Pane::Groups) - 120.0).abs() < 0.01);
         assert!((near_floor.get(Pane::Notes) - 140.0).abs() < 0.01);
-        let narrow = widths.effective(600.0);
+        let narrow = widths.effective(&PANES, 600.0);
         assert_eq!(narrow.widths, [120.0, 120.0, 120.0]);
         assert_eq!(narrow.editor, 240.0);
         assert_eq!(
@@ -958,11 +971,32 @@ mod tests {
     }
 
     #[test]
+    fn folded_panes_get_no_width_and_the_editor_gains_it() {
+        let widths = Widths::default();
+        let notes_only = widths.effective(&[Pane::Notes], 1200.0);
+        assert_eq!(notes_only.get(Pane::Sections), 0.0);
+        assert_eq!(notes_only.get(Pane::Groups), 0.0);
+        assert_eq!(notes_only.get(Pane::Notes), 280.0);
+        assert_eq!(notes_only.browser(), 280.0);
+        assert_eq!(notes_only.editor, 920.0);
+        let groups_and_notes = widths.effective(&[Pane::Groups, Pane::Notes], 1200.0);
+        assert_eq!(groups_and_notes.browser(), 500.0);
+        assert_eq!(groups_and_notes.get(Pane::Sections), 0.0);
+        let narrow = widths.effective(&[Pane::Notes], 400.0);
+        assert_eq!(narrow.get(Pane::Notes), 120.0);
+        assert_eq!(
+            widths,
+            Widths::default(),
+            "folding never changes preferences"
+        );
+    }
+
+    #[test]
     fn all_compression_extents_are_bounded_and_monotonic() {
         let widths = Widths::default();
         let mut previous = [120.0; 3];
         for available in 0..2000 {
-            let effective = widths.effective(available as f32);
+            let effective = widths.effective(&PANES, available as f32);
             for (i, pane) in PANES.into_iter().enumerate() {
                 let width = effective.get(pane);
                 assert!(width >= 120.0 - 0.001 && width <= widths.get(pane) + 0.001);

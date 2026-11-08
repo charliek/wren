@@ -46,6 +46,14 @@ the arrow keys and ↵ keep their usual editing jobs. A single click on a row
 selects it, the same as the arrow keys; a double-click selects it and moves
 one column right.
 
+Moving right (↵, →, ⇧⌘], or a double-click) folds the columns to the left
+of the active one, so the editor gets their width. Groups folds Sections;
+Notes and the editor fold Sections and Groups. Notes never folds; focus
+mode (⌘Y) hides it. Folded columns show as a path at the top of the
+leftmost open column, `‹ Section › Group`: click a name, or `‹`, to open
+that column again. Moving left only ever unfolds, and a single click never
+changes what is folded. Every column is open again after a restart.
+
 ## Custom keybindings
 
 Add `keybind` lines to [`config.conf`](../reference/configuration.md):

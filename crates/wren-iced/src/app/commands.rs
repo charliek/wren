@@ -215,7 +215,10 @@ pub struct ReorderTarget {
 pub enum Command {
     Run(CommandId),
     ItemActions(ItemTarget),
-    ItemAction { target: ItemTarget, id: CommandId },
+    ItemAction {
+        target: ItemTarget,
+        id: CommandId,
+    },
     Reorder(ReorderTarget),
     Rename(ItemRef),
     Delete(ItemRef),
@@ -223,11 +226,22 @@ pub enum Command {
     OpenNote(SearchTarget),
     SelectParent(Parent),
     SelectSection(wren_core::model::SectionId),
+    /// Unfold and activate a column, as a breadcrumb click does.
+    OpenColumn(super::columns::Column),
     Focus(Option<bool>),
-    Width { pane: Pane, width: f32 },
+    Width {
+        pane: Pane,
+        width: f32,
+    },
     Sort(String),
-    Filter { pane: String, query: String },
-    OpenWorkspace { path: PathBuf, name: Option<String> },
+    Filter {
+        pane: String,
+        query: String,
+    },
+    OpenWorkspace {
+        path: PathBuf,
+        name: Option<String>,
+    },
     RemoveWorkspace(PathBuf),
 }
 
@@ -377,6 +391,7 @@ impl App {
                 }
                 outcome
             }
+            Command::OpenColumn(column) => self.open_column(column),
             Command::Focus(enabled) => {
                 if self.session.is_none() {
                     return self.blocked("No workspace is open");

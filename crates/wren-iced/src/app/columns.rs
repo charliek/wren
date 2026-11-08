@@ -8,6 +8,7 @@ use super::commands::{Command, Disposition, Gateway};
 use super::navigation::matches_name;
 use super::palette::SearchTarget;
 use super::{App, Message};
+use crate::panes::{Pane, PANES};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Column {
@@ -31,6 +32,34 @@ impl Column {
 
     pub const fn is_browser(self) -> bool {
         !matches!(self, Self::Editor)
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Sections => 0,
+            Self::Groups => 1,
+            Self::Notes => 2,
+            Self::Editor => 3,
+        }
+    }
+
+    /// How many browser panes, from the left, are folded while this column
+    /// has been reached from the keyboard. Notes never folds.
+    const fn fold(self) -> usize {
+        let index = self.index();
+        if index < 2 {
+            index
+        } else {
+            2
+        }
+    }
+
+    const fn of_pane(pane: Pane) -> Self {
+        match pane {
+            Pane::Sections => Self::Sections,
+            Pane::Groups => Self::Groups,
+            Pane::Notes => Self::Notes,
+        }
     }
 }
 
@@ -97,6 +126,31 @@ impl App {
         self.column_focus()
     }
 
+    /// The browser panes shown: folded ones (left of the active column after
+    /// a keyboard move) drop out and the breadcrumb stands in for them.
+    pub(super) fn visible_panes(&self) -> &'static [Pane] {
+        &PANES[self.fold.min(2)..]
+    }
+
+    /// The folded columns, left to right, as the breadcrumb shows them.
+    pub(super) fn folded_columns(&self) -> Vec<Column> {
+        PANES[..self.fold.min(2)]
+            .iter()
+            .map(|&pane| Column::of_pane(pane))
+            .collect()
+    }
+
+    /// Open `column` from the breadcrumb: it unfolds, with everything to its
+    /// right, and takes the keyboard.
+    pub(super) fn open_column(&mut self, column: Column) -> Gateway {
+        if self.session.is_none() {
+            return self.blocked("No workspace is open");
+        }
+        self.fold = self.fold.min(column.fold());
+        let task = self.activate_column(column);
+        self.finish_action(Disposition::Completed, None, task)
+    }
+
     /// ↑ / ↓ in a browser column: select the neighbouring row. Selection is
     /// live, exactly like a click, so the next column and the editor follow.
     pub(super) fn step_column(&mut self, delta: isize) -> Gateway {
@@ -142,6 +196,7 @@ impl App {
             Column::Editor => return self.blocked("The editor is the rightmost column"),
         };
         self.column = next;
+        self.fold = next.fold();
         let task = self.column_focus();
         self.finish_action(Disposition::Completed, None, task)
     }
@@ -158,12 +213,18 @@ impl App {
             Column::Notes => Column::Groups,
             Column::Editor => Column::Notes,
         };
+        // Moving left only ever unfolds; it never hides a column you could see.
+        self.fold = self.fold.min(previous.fold());
         let task = self.activate_column(previous);
         self.finish_action(Disposition::Completed, None, task)
     }
 
-    /// Esc in a browser column: back to writing, keeping the selection.
+    /// Esc: back to writing, keeping the selection. Leaving a browser column
+    /// this way folds like moving right; Esc in the editor changes nothing.
     pub(super) fn return_to_editor(&mut self) -> Task<Message> {
+        if self.column.is_browser() {
+            self.fold = Column::Editor.fold();
+        }
         self.column = Column::Editor;
         self.column_focus()
     }

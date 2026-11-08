@@ -52,7 +52,7 @@ impl App {
                     Message::Reply(Arc::clone(&request), Ok(json!({"root":rectangle(snapshot.geometry.root),"pressed":snapshot.pressed,"rows":snapshot.geometry.rows.iter().map(|row| json!({"key":row_json(row.row),"bounds":rectangle(row.bounds),"visible":rectangle(row.visible)})).collect::<Vec<_>>()})))
                 }));
             }
-            "command.run" | "palette.open" | "palette.query" | "palette.step" | "palette.activate" | "palette.close" | "filter.set" | "view.focus" | "view.width" | "view.sort" | "workspace.add" | "workspace.remove" | "test.folder.begin" | "test.folder.complete" => {
+            "command.run" | "palette.open" | "palette.query" | "palette.step" | "palette.activate" | "palette.close" | "filter.set" | "view.focus" | "view.width" | "view.sort" | "column.open" | "workspace.add" | "workspace.remove" | "test.folder.begin" | "test.folder.complete" => {
                 let outcome = self.navigation_request(&request.op, params)?;
                 request.respond(Ok(json!({"correlation":outcome.processed.correlation,"disposition":outcome.processed.disposition.key(),"warning":outcome.processed.warning,"navigation":self.navigation_snapshot()})));
                 return Ok(outcome.task);
@@ -409,6 +409,13 @@ impl App {
                 self.dispatch(Command::Width { pane, width })
             }
             "view.sort" => self.dispatch(Command::Sort(string(params, "mode")?.into())),
+            "column.open" => self.dispatch(Command::OpenColumn(match string(params, "column")? {
+                "sections" => super::columns::Column::Sections,
+                "groups" => super::columns::Column::Groups,
+                "notes" => super::columns::Column::Notes,
+                "editor" => super::columns::Column::Editor,
+                _ => return Err("column must be sections, groups, notes, or editor".into()),
+            })),
             "workspace.add" => self.dispatch(Command::OpenWorkspace {
                 path: PathBuf::from(string(params, "path")?),
                 name: params
@@ -488,7 +495,9 @@ impl App {
             .iter()
             .map(|&pane| (pane.key().to_owned(), json!(self.widths.get(pane))))
             .collect::<serde_json::Map<_, _>>();
-        let effective = self.widths.effective(self.viewport.width);
+        let effective = self
+            .widths
+            .effective(self.visible_panes(), self.viewport.width);
         let effective = PANES
             .iter()
             .map(|&pane| {
@@ -507,7 +516,7 @@ impl App {
         let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
         let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
         json!({
-            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"focus":self.focus,"column":self.column.key(),"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
+            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"focus":self.focus,"column":self.column.key(),"fold":self.fold,"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
             "filters":{"sections":self.filters.sections,"groups":self.filters.groups,"notes":self.filters.notes},
             "preferred_widths":preferred,"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
             "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>()},

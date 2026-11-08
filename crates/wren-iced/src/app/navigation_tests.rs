@@ -935,7 +935,7 @@ fn preference_ops_use_the_session_and_a_narrow_window_does_not_change_preference
         width: 350.0,
     });
     let _ = app.dispatch(Command::Sort("title".into()));
-    let _ = app.widths.effective(710.0);
+    let _ = app.widths.effective(&crate::panes::PANES, 710.0);
     assert_eq!(app.widths.get(Pane::Groups), 350.0);
     drop(app);
     let session = Session::open(directory.path()).unwrap();
@@ -1438,5 +1438,138 @@ mod columns {
             app.dialog.as_ref().unwrap().kind,
             DialogKind::Rename(ItemRef::Note(_))
         ));
+    }
+
+    fn state(app: &App) -> (Column, usize) {
+        (app.column, app.fold)
+    }
+
+    #[test]
+    fn moving_right_folds_and_moving_left_only_unfolds() {
+        let (_directory, mut app) = fixture();
+        assert_eq!(state(&app), (Column::Editor, 0));
+        // Leaving the editor leftward never hides a column you could see.
+        for expected in [
+            (Column::Notes, 0),
+            (Column::Groups, 0),
+            (Column::Sections, 0),
+        ] {
+            let _ = run(&mut app, CommandId::ColumnLeft);
+            assert_eq!(state(&app), expected);
+        }
+        for expected in [(Column::Groups, 1), (Column::Notes, 2), (Column::Editor, 2)] {
+            if expected.0 == Column::Editor {
+                let _ = run(&mut app, CommandId::ColumnRight);
+            } else {
+                key(&mut app, Nav::Enter);
+            }
+            assert_eq!(state(&app), expected);
+            if expected.0 == Column::Notes {
+                assert_eq!(app.visible_panes(), &[Pane::Notes]);
+                assert_eq!(app.folded_columns(), [Column::Sections, Column::Groups]);
+            }
+        }
+        for expected in [
+            (Column::Notes, 2),
+            (Column::Groups, 1),
+            (Column::Sections, 0),
+        ] {
+            let _ = run(&mut app, CommandId::ColumnLeft);
+            assert_eq!(state(&app), expected);
+        }
+        assert_eq!(
+            app.visible_panes(),
+            &[Pane::Sections, Pane::Groups, Pane::Notes]
+        );
+    }
+
+    #[test]
+    fn clicks_keep_the_fold_and_double_clicks_fold_like_enter() {
+        let (_directory, mut app) = fixture();
+        let generation = app.gesture_generation;
+        let second = note(&app, "Second");
+        let _ = app.dispatch(Command::SelectParent(Parent::Group(group(&app, "Group"))));
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Activate {
+                generation,
+                row: RowKind::Note(second),
+            },
+        );
+        assert_eq!(
+            state(&app),
+            (Column::Notes, 0),
+            "a click never moves the layout"
+        );
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Open {
+                generation,
+                row: RowKind::Section(section(&app, "Beta")),
+            },
+        );
+        assert_eq!(state(&app), (Column::Groups, 1));
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Activate {
+                generation,
+                row: RowKind::Group(group(&app, "Destination")),
+            },
+        );
+        assert_eq!(state(&app), (Column::Groups, 1));
+    }
+
+    #[test]
+    fn breadcrumbs_unfold_and_escape_folds_only_from_a_browser_column() {
+        let (_directory, mut app) = fixture();
+        key(&mut app, Nav::Escape);
+        assert_eq!(
+            state(&app),
+            (Column::Editor, 0),
+            "Esc in the editor never folds"
+        );
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        key(&mut app, Nav::Escape);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        let _ = app.dispatch(Command::OpenColumn(Column::Groups));
+        assert_eq!(state(&app), (Column::Groups, 1));
+        let _ = run(&mut app, CommandId::ColumnRight);
+        let _ = app.dispatch(Command::OpenColumn(Column::Sections));
+        assert_eq!(state(&app), (Column::Sections, 0));
+        let _ = app.dispatch(Command::OpenColumn(Column::Notes));
+        assert_eq!(state(&app), (Column::Notes, 0), "opening never folds");
+    }
+
+    #[test]
+    fn focus_mode_and_a_new_workspace_reset_cleanly() {
+        let (directory, mut app) = fixture();
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        key(&mut app, Nav::Escape);
+        assert_eq!(app.fold, 2);
+        let _ = app.dispatch(Command::Focus(Some(true)));
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        assert!(!app.focus, "leaving the editor leftward leaves focus mode");
+        assert_eq!(state(&app), (Column::Notes, 2));
+        let previous = app.session.take();
+        drop(previous);
+        app.session = Some(Session::open(directory.path()).unwrap());
+        app.hydrate_navigation();
+        assert_eq!(state(&app), (Column::Editor, 0));
+    }
+
+    #[test]
+    fn folded_panes_hand_their_width_to_the_editor() {
+        let (_directory, mut app) = fixture();
+        let open = app.widths.effective(app.visible_panes(), 1280.0);
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        key(&mut app, Nav::Escape);
+        let folded = app.widths.effective(app.visible_panes(), 1280.0);
+        assert_eq!(folded.get(Pane::Sections) + folded.get(Pane::Groups), 0.0);
+        assert_eq!(folded.editor, open.editor + 420.0);
+        assert_eq!(
+            app.widths.get(Pane::Sections),
+            200.0,
+            "preferences are untouched"
+        );
     }
 }

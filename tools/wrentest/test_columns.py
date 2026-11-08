@@ -177,10 +177,15 @@ def test_active_column_header_is_accented_in_each_state(vault: Path, theme: str)
             image = capture(app, artifacts / f"active-{active}.png")
             viewport = current["viewport"]
             left = 0.0
+            shown = [pane for pane in panes if current["effective_widths"][pane] > 0]
+            assert shown == list(panes[current["fold"]:])
             for pane in panes:
                 width = current["effective_widths"][pane]
-                # The header band: below the 48 px title bar, above the filter.
-                accent = color_count(image, viewport, (left + 4, 52, left + width - 40, 92), ACCENT[theme])
+                # The header band: below the 48 px title bar (and the 41 px
+                # breadcrumb, on the leftmost pane while any are folded).
+                top = 52 + (41 if current["fold"] and pane == shown[0] else 0)
+                accent = color_count(image, viewport, (left + 4, top, left + width - 40, top + 40),
+                                     ACCENT[theme])
                 if pane == active:
                     assert accent > 20, (active, pane, accent)
                 else:
@@ -188,6 +193,53 @@ def test_active_column_header_is_accented_in_each_state(vault: Path, theme: str)
                 left += width
             if active != "editor":
                 command(app, "navigation.column_right")
+
+
+def rendered_kinds(app: WrenApp) -> set[str]:
+    rows = app.client.call("navigation.bounds")["rows"]
+    return {kind for row in rows for kind in row["key"]}
+
+
+def test_folding_follows_keyboard_moves_and_breadcrumbs_unfold(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("columns-fold")) as app:
+        jump(app, FIRST)
+        for _ in range(3):
+            command(app, "navigation.column_left")
+        state = navigation(app)
+        assert (state["column"], state["fold"]) == ("sections", 0), "moving left never folds"
+        widths = state["preferred_widths"]
+
+        state = nav(app, "enter")
+        assert (state["column"], state["fold"]) == ("groups", 1)
+        assert state["effective_widths"]["sections"] == 0
+        wait_for(lambda: rendered_kinds(app) == {"group", "note"}, timeout=5,
+                 description="Sections folds out of the rendered browser")
+        state = nav(app, "enter")
+        assert (state["column"], state["fold"]) == ("notes", 2)
+        assert state["effective_widths"] == {"sections": 0, "groups": 0, "notes": widths["notes"]}
+        wait_for(lambda: rendered_kinds(app) == {"note"}, timeout=5, description="only Notes remains")
+        assert nav(app, "enter")["fold"] == 2, "Notes never folds"
+        assert navigation(app)["preferred_widths"] == widths, "folding never changes widths"
+
+        # Esc from a browser column folds; Esc in the editor never does.
+        state = app.client.call("column.open", {"column": "groups"})
+        assert (state["navigation"]["column"], state["navigation"]["fold"]) == ("groups", 1)
+        assert nav(app, "escape")["fold"] == 2
+        state = app.client.call("column.open", {"column": "sections"})["navigation"]
+        assert (state["column"], state["fold"]) == ("sections", 0)
+        wait_for(lambda: rendered_kinds(app) == {"section", "group", "note"}, timeout=5,
+                 description="every column is back")
+        command(app, "navigation.column_right")
+        command(app, "navigation.column_left")
+        assert navigation(app)["fold"] == 0
+        nav(app, "escape")
+        assert nav(app, "escape")["fold"] == 2
+
+        # Clicks never move the layout; a restart starts unfolded.
+        note = item(app, "notes", "Atlas/Research/Note 2.md")["id"]
+        assert click(app, {"note": note})["fold"] == 2
+        app.restart(hard=False)
+        assert (navigation(app)["column"], navigation(app)["fold"]) == ("editor", 0)
 
 
 @pytest.mark.native_x11
@@ -237,3 +289,19 @@ def test_native_double_click_moves_right_and_alt_r_renames(native_workspace) -> 
     native.keys(window, "alt+r")
     wait_for(lambda: navigation(app)["dialog"] is not None, description="Alt+R opens rename")
     assert navigation(app)["dialog"]["kind"].startswith("Rename")
+
+
+@pytest.mark.native_x11
+def test_native_breadcrumb_back_button_unfolds_one_column_at_a_time(native_workspace) -> None:
+    app, root, window = native_workspace
+    native.keys(window, "alt+shift+bracketleft", "Escape")
+    wait_for(lambda: (navigation(app)["column"], navigation(app)["fold"]) == ("editor", 2),
+             description="Esc from Notes folds Sections and Groups")
+    area = native.bounds(app)["root"]
+    back = (round(area["x"] + 8 + 13), round(area["y"] + 20))
+    for expected in (("groups", 1), ("sections", 0)):
+        native.move(window, back)
+        native.xdo("click", "1")
+        wait_for(lambda: (navigation(app)["column"], navigation(app)["fold"]) == expected,
+                 description=f"breadcrumb back opens {expected[0]}")
+    assert navigation(app)["dialog"] is None and navigation(app)["modal"] is None

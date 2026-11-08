@@ -30,11 +30,13 @@ impl App {
             .model()
             .map(Registry::new)
             .unwrap_or_else(|| Registry::new(&Workspace::empty(std::path::PathBuf::new())));
-        let effective = self.widths.effective(self.viewport.width);
+        let effective = self
+            .widths
+            .effective(self.visible_panes(), self.viewport.width);
         let mut browser = row![].height(Fill).clip(true);
         let browser_visible = !self.focus && self.model().is_some();
         if browser_visible {
-            for pane in panes::PANES {
+            for &pane in self.visible_panes() {
                 let content = match pane {
                     Pane::Sections => self.sections_pane(&mut registry),
                     Pane::Groups => self.groups_pane(&mut registry),
@@ -54,7 +56,7 @@ impl App {
         let browser_width = if !browser_visible {
             0.0
         } else {
-            panes::PANES.iter().map(|&pane| effective.get(pane)).sum()
+            effective.browser()
         };
         // Reset browser-owned capture/scroll state only on a committed workspace
         // replacement. The editor remains the same sibling throughout.
@@ -372,12 +374,74 @@ impl App {
             .into()
     }
 
-    fn pane_shell<'a>(
-        &'a self,
-        content: Element<'a, Message>,
-        notes: bool,
-    ) -> Element<'a, Message> {
+    /// `‹ Section › Group` for the folded columns; each crumb, and `‹`, opens
+    /// its column again.
+    fn breadcrumb(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
+        let folded = self.folded_columns();
+        let mut crumbs = row![].spacing(2).align_y(iced::Center).clip(true);
+        if let Some(&last) = folded.last() {
+            crumbs = crumbs.push(
+                button(chrome::icon(Icon::Back, 14.0, colors.muted))
+                    .width(26)
+                    .height(26)
+                    .padding(6)
+                    .on_press(Message::Command(Command::OpenColumn(last)))
+                    .style(move |_, status| chrome::control(self.definition, status, false, true)),
+            );
+        }
+        for (index, &column) in folded.iter().enumerate() {
+            if index > 0 {
+                crumbs = crumbs.push(chrome::label("›", 13, colors.muted));
+            }
+            let name = match column {
+                Column::Sections => self
+                    .selected_section
+                    .and_then(|id| self.model()?.section(id))
+                    .map_or("Sections", |section| section.name.as_str()),
+                _ => self
+                    .selected_group
+                    .and_then(|id| self.model()?.group(id))
+                    .map_or("Groups", |group| group.name.as_str()),
+            };
+            crumbs = crumbs.push(
+                button(
+                    container(
+                        ellipsis(name, 13.0, theme::color(colors.text))
+                            .font(fonts::MEDIUM)
+                            .width(iced::Length::Shrink),
+                    )
+                    .max_width(150),
+                )
+                .height(26)
+                .padding([4, 8])
+                .on_press(Message::Command(Command::OpenColumn(column)))
+                .style(move |_, status| chrome::control(self.definition, status, false, true)),
+            );
+        }
+        column![
+            container(crumbs)
+                .height(40)
+                .width(Fill)
+                .align_y(iced::Center)
+                .padding([0, 8]),
+            container(iced::widget::space())
+                .width(Fill)
+                .height(1)
+                .style(move |_| chrome::surface(self.definition, colors.divider, 0.0, false))
+        ]
+        .into()
+    }
+
+    fn pane_shell<'a>(&'a self, content: Element<'a, Message>, pane: Pane) -> Element<'a, Message> {
+        let colors = self.definition.colors;
+        let notes = pane == Pane::Notes;
+        // The leftmost shown pane carries the breadcrumb for folded ones.
+        let content = if self.fold > 0 && self.visible_panes().first() == Some(&pane) {
+            column![self.breadcrumb(), content].height(Fill).into()
+        } else {
+            content
+        };
         row![
             container(content)
                 .width(Fill)
@@ -423,7 +487,7 @@ impl App {
             ]
             .height(Fill)
             .into(),
-            false,
+            Pane::Sections,
         )
     }
 
@@ -468,7 +532,7 @@ impl App {
             ]
             .height(Fill)
             .into(),
-            false,
+            Pane::Groups,
         )
     }
 
@@ -593,7 +657,7 @@ impl App {
             ]
             .height(Fill)
             .into(),
-            true,
+            Pane::Notes,
         )
     }
 

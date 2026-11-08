@@ -22,6 +22,10 @@ version's section as its notes, and publishes to the apt repo. See
   Alt+Shift+] on Linux) move a column left or right from anywhere, including
   the editor. Arrow keys typed in the editor or a filter box keep their usual
   jobs.
+- **Folding columns.** Moving right by keyboard or double-click folds
+  Sections (and then Groups) into a `‹ Section › Group` path at the top of
+  the leftmost open column, giving the editor their width. Click a name or
+  `‹` to unfold; moving left only unfolds. Notes never folds.
 - **⌘R (Alt+R on Linux) renames the open note.**
 
 - **Four more dark themes:** Tokyo Night (`tokyo-night`), Dracula

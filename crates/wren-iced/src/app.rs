@@ -76,6 +76,8 @@ pub struct App {
     palette: Option<Palette>,
     widths: Widths,
     column: columns::Column,
+    /// Browser panes folded from the left (0–2) by keyboard moves.
+    fold: usize,
     focus: bool,
     filters: Filters,
     viewport: iced::Size,
@@ -260,6 +262,7 @@ impl App {
             palette: None,
             widths: Widths::default(),
             column: columns::Column::Editor,
+            fold: 0,
             focus: false,
             filters: Filters::default(),
             viewport: iced::Size::new(1280.0, 800.0),
