@@ -477,7 +477,19 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 | doesn't take effect in fenced code | `- ```foo\|`, `> - ```foo\|` | declines | `- ```foo⏎··\|`, `> - ```foo⏎>···\|`: code keeps its container prefix. |
 | can continue markup for multiple cursors | | | Dropped: Wren has one cursor. |
 
-`- |x` at the start of the text agrees with CodeMirror (`1. |x⏎2. y` → `1.⏎2. |x⏎3. y`). §5.2 only differs right after a paragraph line, which the corpus does not cover. The `deleteMarkupBackward` cases port with the Backspace planner.
+`- |x` at the start of the text agrees with CodeMirror (`1. |x⏎2. y` → `1.⏎2. |x⏎3. y`). §5.2 only differs right after a paragraph line, which the corpus does not cover.
+
+`crates/wren-markdown/src/edit/delete.rs` ports 16 of the 17 Backspace cases of the `deleteMarkupBackward` suite at the same commit. Where CodeMirror's command declines, its host deletes a character; Wren's Backspace always plans (§5.5), so the case asserts that plan. Backspace on the first item agrees with CodeMirror (` - |` → `|`), as do the quote, extra-space, marker, and indentation cases.
+
+| CodeMirror case | Before | CodeMirror | Wren |
+|---|---|---|---|
+| does nothing in regular text | `one\|` | declines | `on\|`, one grapheme. |
+| does nothing at the top level | `one⏎\|` | declines | `one\|`, the line break. |
+| does nothing in a continued list item | `- Foo⏎-⏎··\|Welcome` | declines | `- Foo⏎-⏎·\|Welcome`: a continuation line has no marker, and text follows the cursor. |
+| doesn't delete normal text in continued list items | `- ⏎a \|b` | declines | `- ⏎a\|b` |
+| normalizes whitespace on deleting (tab indent unit) | `··- one⏎··- \|` | `··- one⏎\t\|` | `··- one⏎····\|`: tab indent units; the line's indentation has no tab, so it stays spaces. |
+| doesn't kick in in a continued paragraph under a quote | `> q⏎rs\|t` | declines | `> q⏎r\|t` |
+| can delete for multiple cursors | | | Dropped: Wren has one cursor. |
 
 ## 8. Milestones and commit order
 

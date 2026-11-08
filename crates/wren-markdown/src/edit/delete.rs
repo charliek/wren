@@ -520,4 +520,136 @@ mod tests {
             }
         }
     }
+
+    mod codemirror {
+        // The cases of CodeMirror's Markdown Backspace command tests, ported
+        // to Rust. Where Wren's spec decides differently, the case asserts
+        // Wren's behavior and is listed in `discovery/markdown-editor.md`
+        // §7.1.
+        //
+        // Ported from `test/test-commands.ts` (the `deleteMarkupBackward`
+        // suite) of `@codemirror/lang-markdown`,
+        // <https://github.com/codemirror/lang-markdown>, at commit
+        // f90daf6e56a72f1cf8bbe10b07867f535d0ad2e4, under the MIT license.
+        // Modified by Wren: converted to Rust table tests, with expectations
+        // changed where noted. The multiple-cursor case is dropped, because
+        // Wren's editor has one cursor.
+        //
+        // MIT License
+        //
+        // Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin>
+        // and others
+        //
+        // Permission is hereby granted, free of charge, to any person obtaining
+        // a copy of this software and associated documentation files (the
+        // "Software"), to deal in the Software without restriction, including
+        // without limitation the rights to use, copy, modify, merge, publish,
+        // distribute, sublicense, and/or sell copies of the Software, and to
+        // permit persons to whom the Software is furnished to do so, subject to
+        // the following conditions:
+        //
+        // The above copyright notice and this permission notice shall be
+        // included in all copies or substantial portions of the Software.
+        //
+        // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+        // EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+        // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+        // NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+        // LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+        // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+        // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+        use super::*;
+
+        fn backspace(cases: &[(&str, &str)]) {
+            check(Intent::Backspace, cases);
+        }
+
+        #[test]
+        fn does_nothing_in_regular_text() {
+            // Divergence: CodeMirror declines; Wren deletes a grapheme.
+            backspace(&[("one|", "on|")]);
+        }
+
+        #[test]
+        fn does_nothing_at_the_top_level() {
+            // Divergence: CodeMirror declines; Wren joins the lines.
+            backspace(&[("one\n|", "one|")]);
+        }
+
+        #[test]
+        fn can_delete_blockquote_markers() {
+            backspace(&[("> |", "|")]);
+        }
+
+        #[test]
+        fn only_deletes_one_marker_at_a_time() {
+            backspace(&[("> > |", "> |")]);
+        }
+
+        #[test]
+        fn deletes_trailing_whitespace() {
+            backspace(&[(">   |", "> |")]);
+        }
+
+        #[test]
+        fn clears_list_markers() {
+            backspace(&[(" - one\n - |", " - one\n   |")]);
+        }
+
+        #[test]
+        fn removes_extra_indentation() {
+            backspace(&[("> - one\n> -    |", "> - one\n> - |")]);
+        }
+
+        #[test]
+        fn clears_triple_space_indentation() {
+            backspace(&[(" - one\n   |", " - one\n|")]);
+        }
+
+        #[test]
+        fn clears_one_level_of_indentation() {
+            backspace(&[("- one\n    - two\n      |", "- one\n    - two\n  |")]);
+        }
+
+        #[test]
+        fn deletes_the_first_list_marker_immediately() {
+            backspace(&[(" - |", "|")]);
+        }
+
+        #[test]
+        fn clears_number_markers_in_one_go() {
+            backspace(&[("1. one\n2. |", "1. one\n   |")]);
+        }
+
+        #[test]
+        fn deletes_nested_list_markers() {
+            backspace(&[(" > - |", " > |")]);
+        }
+
+        #[test]
+        fn does_nothing_in_a_continued_list_item() {
+            // Divergence: CodeMirror declines; Wren deletes a grapheme.
+            backspace(&[("- Foo\n-\n  |Welcome", "- Foo\n-\n |Welcome")]);
+        }
+
+        #[test]
+        fn doesnt_delete_normal_text_in_continued_list_items() {
+            // Divergence: CodeMirror declines; Wren deletes a grapheme.
+            backspace(&[("- \na |b", "- \na|b")]);
+        }
+
+        #[test]
+        fn normalizes_whitespace_on_deleting() {
+            // Divergence: CodeMirror indents with its tab indent unit; Wren
+            // keeps spaces, since the line's indentation has no tab.
+            backspace(&[("  - one\n  - |", "  - one\n    |")]);
+        }
+
+        #[test]
+        fn doesnt_kick_in_in_a_continued_paragraph_under_a_quote() {
+            // Divergence: CodeMirror declines; Wren deletes a grapheme.
+            backspace(&[("> q\nrs|t", "> q\nr|t")]);
+        }
+    }
 }
