@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/wren-core", "crates/wren-editor", "crates/wren-iced", "crates/wren-markdown", "crates/wren-sparkle"]
-exclude = ["vendor/iced_winit", "vendor/swash"]
+exclude = ["vendor/cosmic-text", "vendor/iced_winit", "vendor/swash"]
 default-members = ["crates/wren-iced"]
 
 [workspace.package]
@@ -47,6 +47,8 @@ rfd = { version = "=0.16.1", default-features = false, features = ["xdg-portal",
 swash = { version = "=0.2.10", default-features = false, features = ["std"] }
 
 [patch.crates-io]
+# A hanging indent for wrapped rows; see vendor/cosmic-text/WREN.md.
+cosmic-text = { path = "vendor/cosmic-text" }
 iced_winit = { path = "vendor/iced_winit" }
 # Safety fixes for fonts with malformed tables; see vendor/swash/WREN.md.
 swash = { path = "vendor/swash" }
