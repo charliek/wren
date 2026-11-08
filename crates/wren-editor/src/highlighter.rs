@@ -19,11 +19,14 @@
 //!   - Thematic breaks, setext underlines, and HTML blocks: faint.
 //!   - Inline code spans (`` `...` ``): `code` colour on a code chip.
 //!   - Bold (`**...**`, `__...__`) and italic (`*...*`, `_..._`): the font's
-//!     bold and italic faces, markers included in faint.
-//!   - Strikethrough (`~~...~~`): faint tildes, `completed` text, struck.
+//!     bold and italic faces, markers included in faint. Emphasis can wrap
+//!     links and style link text, but never pairs markers inside a URL.
+//!   - Strikethrough (`~~...~~`): faint tildes, `completed` text, struck,
+//!     around any emphasis, links, or code inside.
 //!   - Links (`[text](url)`, `[text][ref]`, bare `http(s)://` URLs): `link`
 //!     text, a `completed` destination, and faint brackets; on a done task
-//!     the link keeps its colour under the strike.
+//!     the link keeps its colour under the strike. Destinations and bare
+//!     URLs keep the parentheses they balance.
 //!   - Inline HTML comments (`<!--...-->`): faint colour.
 //!
 //! The syntax colours, the emphasis-marker fonts, links, and the code band
@@ -88,17 +91,6 @@ impl Highlight {
         Self {
             color: Some(color),
             font: Some(Font {
-                style: font::Style::Italic,
-                ..base
-            }),
-        }
-    }
-
-    fn bold_italic(color: Color, base: Font) -> Self {
-        Self {
-            color: Some(color),
-            font: Some(Font {
-                weight: font::Weight::Bold,
                 style: font::Style::Italic,
                 ..base
             }),
@@ -418,394 +410,383 @@ struct Inline {
     code: Vec<Range<usize>>,
 }
 
-/// Scans inline Markdown: inline code (highest priority), HTML comments,
-/// bold+italic, bold, italic, strikethrough, then links.
-fn scan_inline(line: &str, palette: &Ink) -> Inline {
-    // We build a priority-ordered list of non-overlapping spans.
-    // First collect code spans (they cannot contain other markup).
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
-    let len = line.len();
-
-    let mut spans: Vec<(Range<usize>, Highlight)> = Vec::new();
-    let mut occupied = vec![false; len.max(1)];
-
-    // ── 1. Inline code spans ──────────────────────────────────────────────────
-    extract_backtick_spans(line, &chars, palette, &mut spans, &mut occupied);
-    let code = spans.iter().map(|(range, _)| range.clone()).collect();
-
-    // ── 2. HTML comments ─────────────────────────────────────────────────────
-    extract_between(
-        line,
-        "<!--",
-        "-->",
-        Highlight::colored(palette.faint),
-        &mut spans,
-        &mut occupied,
-    );
-
-    // ── 3. Bold-italic (*** or ___) ────────────────────────────────────────────
-    extract_emphasis(
-        line,
-        "***",
-        Highlight::bold_italic(palette.text, palette.font),
-        palette.faint,
-        &mut spans,
-        &mut occupied,
-    );
-    extract_emphasis(
-        line,
-        "___",
-        Highlight::bold_italic(palette.text, palette.font),
-        palette.faint,
-        &mut spans,
-        &mut occupied,
-    );
-
-    // ── 4. Bold (** or __) ───────────────────────────────────────────────────
-    extract_emphasis(
-        line,
-        "**",
-        Highlight::bold(palette.text, palette.font),
-        palette.faint,
-        &mut spans,
-        &mut occupied,
-    );
-    extract_emphasis(
-        line,
-        "__",
-        Highlight::bold(palette.text, palette.font),
-        palette.faint,
-        &mut spans,
-        &mut occupied,
-    );
-
-    // ── 5. Italic (* or _) ───────────────────────────────────────────────────
-    extract_emphasis(
-        line,
-        "*",
-        Highlight::italic(palette.text, palette.font),
-        palette.faint,
-        &mut spans,
-        &mut occupied,
-    );
-    extract_emphasis(
-        line,
-        "_",
-        Highlight::italic(palette.text, palette.font),
-        palette.faint,
-        &mut spans,
-        &mut occupied,
-    );
-
-    // ── 6. Strikethrough (~~) ────────────────────────────────────────────────
-    let strikes = extract_strikethrough(line, palette, &mut spans, &mut occupied);
-
-    // ── 7. Links: [text](url), [text][ref], and bare URLs ──────────────────────
-    extract_links(line, palette, &mut spans, &mut occupied);
-    extract_bare_urls(line, palette, &mut spans, &mut occupied);
-
-    // Sort by start position for deterministic output.
-    spans.sort_by_key(|(r, _)| r.start);
+/// Scans inline Markdown. Code spans and HTML comments come first and hold
+/// nothing else. Links and bare URLs come next, so emphasis never pairs the
+/// `_` or `*` of a URL. Strikethrough and emphasis are matched inside each
+/// link's text, and then across the line, where they can wrap whole links.
+fn scan_inline(line: &str, ink: &Ink) -> Inline {
+    let mut cells = Cells::new(line);
+    let code = cells.code_spans(ink);
+    cells.comments(ink);
+    let texts = cells.links(ink);
+    cells.bare_urls(ink);
+    let mut strikes = Vec::new();
+    for text in &texts {
+        strikes.extend(cells.delimited(text.clone(), ink));
+    }
+    for text in texts {
+        cells.set(text, |cell| cell.locked = true);
+    }
+    strikes.extend(cells.delimited(0..line.len(), ink));
+    strikes.sort_by_key(|range| range.start);
     Inline {
-        spans,
+        spans: cells.spans(ink.font),
         strikes,
         code,
     }
 }
 
 /// Only the links of a line, for text that is otherwise one colour.
-fn scan_links(line: &str, palette: &Ink) -> Vec<(Range<usize>, Highlight)> {
-    let mut spans = Vec::new();
-    let mut occupied = vec![false; line.len().max(1)];
-    extract_links(line, palette, &mut spans, &mut occupied);
-    extract_bare_urls(line, palette, &mut spans, &mut occupied);
-    spans.sort_by_key(|(range, _)| range.start);
-    spans
+fn scan_links(line: &str, ink: &Ink) -> Vec<(Range<usize>, Highlight)> {
+    let mut cells = Cells::new(line);
+    cells.links(ink);
+    cells.bare_urls(ink);
+    cells.spans(ink.font)
 }
 
-/// Extract all backtick-delimited code spans, respecting multi-backtick fences.
-fn extract_backtick_spans(
-    _line: &str,
-    chars: &[(usize, char)],
-    palette: &Ink,
-    spans: &mut Vec<(Range<usize>, Highlight)>,
-    occupied: &mut [bool],
-) {
-    let n = chars.len();
-    let mut i = 0;
-    while i < n {
-        let (byte_i, ch) = chars[i];
-        if ch != '`' || occupied.get(byte_i).copied().unwrap_or(true) {
-            i += 1;
-            continue;
+/// The style of one byte of scanned text.
+#[derive(Clone, Copy, Default)]
+struct Cell {
+    color: Option<Color>,
+    bold: bool,
+    italic: bool,
+    /// Code and comments keep their face inside emphasis.
+    fixed_face: bool,
+    /// No later delimiter may match here.
+    locked: bool,
+}
+
+/// A line's bytes as each kind of construct layers its style onto them. A
+/// construct found later can wrap one found earlier but never pair its
+/// delimiters inside it.
+struct Cells<'a> {
+    line: &'a str,
+    cells: Vec<Cell>,
+}
+
+impl<'a> Cells<'a> {
+    fn new(line: &'a str) -> Self {
+        Self {
+            line,
+            cells: vec![Cell::default(); line.len()],
         }
-        // Count run of opening backticks.
-        let open_start = i;
-        let mut j = i + 1;
-        while j < n && chars[j].1 == '`' {
-            j += 1;
+    }
+
+    fn set(&mut self, range: Range<usize>, style: impl Fn(&mut Cell)) {
+        self.cells[range].iter_mut().for_each(style);
+    }
+
+    /// Faint, locked syntax: brackets, tildes, and the like.
+    fn mark(&mut self, range: Range<usize>, ink: &Ink) {
+        self.set(range, |cell| {
+            cell.color = Some(ink.faint);
+            cell.locked = true;
+        });
+    }
+
+    fn is_free(&self, range: Range<usize>) -> bool {
+        self.cells[range].iter().all(|cell| !cell.locked)
+    }
+
+    /// The first `marker` in `from..end` that lies on free bytes.
+    fn next_free(&self, marker: &str, from: usize, end: usize) -> Option<usize> {
+        let mut search = from;
+        while let Some(at) = self.line[search..end].find(marker).map(|at| search + at) {
+            if self.is_free(at..at + marker.len()) {
+                return Some(at);
+            }
+            search = at + 1;
         }
-        let tick_count = j - i;
-        // Search for a closing run of exactly tick_count backticks.
-        let mut k = j;
-        while k < n {
-            if chars[k].1 == '`' {
-                let close_start = k;
-                let mut m = k + 1;
-                while m < n && chars[m].1 == '`' && (m - close_start) < tick_count {
-                    m += 1;
-                }
-                if m - close_start == tick_count && (m >= n || chars[m].1 != '`') {
-                    // Found a valid closing fence.
-                    let byte_start = chars[open_start].0;
-                    let last = chars[m - 1];
-                    let byte_end = last.0 + last.1.len_utf8();
-                    if !any_occupied(occupied, byte_start..byte_end) {
-                        mark_occupied(occupied, byte_start..byte_end);
-                        spans.push((byte_start..byte_end, Highlight::colored(palette.code)));
+        None
+    }
+
+    /// Backtick code spans, closed by a run of as many backticks as opened
+    /// them. Returns their ranges, backticks included.
+    fn code_spans(&mut self, ink: &Ink) -> Vec<Range<usize>> {
+        let bytes = self.line.as_bytes();
+        let run = |from: usize| bytes[from..].iter().take_while(|&&b| b == b'`').count();
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'`' {
+                i += 1;
+                continue;
+            }
+            let ticks = run(i);
+            let mut k = i + ticks;
+            let mut end = None;
+            while k < bytes.len() {
+                if bytes[k] == b'`' {
+                    let length = run(k);
+                    if length == ticks {
+                        end = Some(k + length);
+                        break;
                     }
-                    i = m;
-                    break;
+                    k += length;
                 } else {
-                    k = m;
+                    k += 1;
                 }
-            } else {
-                k += 1;
+            }
+            match end {
+                Some(end) => {
+                    self.set(i..end, |cell| {
+                        cell.color = Some(ink.code);
+                        cell.fixed_face = true;
+                        cell.locked = true;
+                    });
+                    found.push(i..end);
+                    i = end;
+                }
+                None => i += ticks,
             }
         }
-        if k >= n {
-            i = j; // No matching close — skip the opening ticks.
-        }
+        found
     }
-}
 
-fn extract_emphasis(
-    line: &str,
-    marker: &str,
-    highlight: Highlight,
-    faint: Color,
-    spans: &mut Vec<(Range<usize>, Highlight)>,
-    occupied: &mut [bool],
-) {
-    let mut search = 0;
-    while let Some(relative) = line[search..].find(marker) {
-        let opening = search + relative;
-        let content = opening + marker.len();
-        if any_occupied(occupied, opening..content) {
-            search = opening + 1;
-            continue;
-        }
-        let Some(closing) = line[content..]
-            .match_indices(marker)
-            .map(|(relative, _)| content + relative)
-            .find(|&closing| !any_occupied(occupied, closing..closing + marker.len()))
-        else {
-            break;
-        };
-        let end = closing + marker.len();
-        // cosmic-text shapes a word in the font of its first character, so a
-        // regular-weight `**` would leave `**Alice` regular. The markers
-        // carry the span's font and differ only in colour.
-        let marker_highlight = Highlight {
-            color: Some(faint),
-            font: highlight.font,
-        };
-        spans.push((opening..content, marker_highlight));
-        let mut run = None;
-        for (relative, character) in line[content..closing].char_indices() {
-            let byte = content + relative;
-            if any_occupied(occupied, byte..byte + character.len_utf8()) {
-                if let Some(start) = run.take() {
-                    spans.push((start..byte, highlight));
-                }
+    /// `<!-- ... -->`, faint.
+    fn comments(&mut self, ink: &Ink) {
+        let mut search = 0;
+        while let Some(open) = self.line[search..].find("<!--").map(|at| search + at) {
+            let Some(end) = self.line[open + 4..]
+                .find("-->")
+                .map(|at| open + 4 + at + 3)
+            else {
+                break;
+            };
+            if self.is_free(open..end) {
+                self.set(open..end, |cell| {
+                    cell.color = Some(ink.faint);
+                    cell.fixed_face = true;
+                    cell.locked = true;
+                });
+                search = end;
             } else {
-                run.get_or_insert(byte);
+                search = open + 1;
             }
         }
-        if let Some(start) = run {
-            spans.push((start..closing, highlight));
-        }
-        spans.push((closing..end, marker_highlight));
-        mark_occupied(occupied, opening..end);
-        search = end;
     }
-}
 
-/// `~~struck~~`: faint tildes around `completed` text. Returns the struck
-/// text ranges.
-fn extract_strikethrough(
-    line: &str,
-    palette: &Ink,
-    spans: &mut Vec<(Range<usize>, Highlight)>,
-    occupied: &mut [bool],
-) -> Vec<Range<usize>> {
-    let mut found = Vec::new();
-    let faint = Highlight::colored(palette.faint);
-    extract_between(line, "~~", "~~", faint, &mut found, occupied);
-    let mut strikes = Vec::new();
-    for (range, _) in found {
-        let inner = range.start + 2..range.end - 2;
-        spans.push((range.start..inner.start, faint));
-        if !inner.is_empty() {
-            spans.push((inner.clone(), Highlight::colored(palette.completed)));
-            strikes.push(inner.clone());
+    /// `[text](destination)` and `[text][ref]`: `link` text between faint
+    /// brackets, and a `completed` destination. Brackets pair by depth, and
+    /// a destination ends at the `)` that balances its parentheses, as in
+    /// CommonMark. Returns the text ranges.
+    fn links(&mut self, ink: &Ink) -> Vec<Range<usize>> {
+        let bytes = self.line.as_bytes();
+        let mut open = Vec::new();
+        let mut pairs = Vec::new();
+        for (i, &byte) in bytes.iter().enumerate() {
+            match byte {
+                _ if self.cells[i].locked => {}
+                b'[' => open.push(i),
+                b']' => pairs.extend(open.pop().map(|start| (start, i))),
+                _ => {}
+            }
         }
-        spans.push((inner.end..range.end, faint));
+        pairs.sort_unstable();
+        let mut texts = Vec::new();
+        let mut covered = 0;
+        for (start, close) in pairs {
+            if start < covered {
+                continue;
+            }
+            let Some(end) = self.link_tail(close + 1) else {
+                continue;
+            };
+            covered = end;
+            self.mark(start..start + 1, ink);
+            let text = start + 1..close;
+            self.set(text.clone(), |cell| {
+                cell.color.get_or_insert(ink.link);
+            });
+            let destination = close + 2..end - 1;
+            if bytes[close + 1] == b'(' && !destination.is_empty() {
+                self.mark(close..destination.start, ink);
+                self.set(destination.clone(), |cell| {
+                    cell.color = Some(ink.completed);
+                    cell.locked = true;
+                });
+                self.mark(destination.end..end, ink);
+            } else {
+                self.mark(close..end, ink);
+            }
+            texts.push(text);
+        }
+        texts
     }
-    strikes
-}
 
-/// Extract spans delimited by a fixed `open` and `close` marker string,
-/// skipping regions already occupied by higher-priority spans.
-fn extract_between(
-    line: &str,
-    open: &str,
-    close: &str,
-    highlight: Highlight,
-    spans: &mut Vec<(Range<usize>, Highlight)>,
-    occupied: &mut [bool],
-) {
-    let open_len = open.len();
-    let close_len = close.len();
-
-    let mut search_from = 0;
-    while search_from + open_len <= line.len() {
-        let Some(rel_open) = line[search_from..].find(open) else {
-            break;
+    /// The end of the `(destination)` or `[ref]` that starts at `start`.
+    fn link_tail(&self, start: usize) -> Option<usize> {
+        let bytes = self.line.as_bytes();
+        let inline = match bytes.get(start)? {
+            b'(' => true,
+            b'[' => false,
+            _ => return None,
         };
-        let abs_open = search_from + rel_open;
-        if any_occupied(occupied, abs_open..abs_open + open_len) {
-            search_from = abs_open + 1;
-            continue;
-        }
-        let content_start = abs_open + open_len;
-        // Avoid zero-length content (e.g. `**`) matching itself.
-        let Some(rel_close) = line[content_start..].find(close) else {
-            break;
-        };
-        let abs_close_start = content_start + rel_close;
-        let abs_close_end = abs_close_start + close_len;
-        if any_occupied(occupied, abs_open..abs_close_end) {
-            search_from = abs_open + 1;
-            continue;
-        }
-        // Ensure we're on valid UTF-8 boundaries.
-        if !line.is_char_boundary(abs_open) || !line.is_char_boundary(abs_close_end) {
-            search_from = abs_open + 1;
-            continue;
-        }
-        mark_occupied(occupied, abs_open..abs_close_end);
-        spans.push((abs_open..abs_close_end, highlight));
-        search_from = abs_close_end;
-    }
-}
-
-/// Extract inline links in `[text](url)` or `[text][ref]` form.
-fn extract_links(
-    line: &str,
-    palette: &Ink,
-    spans: &mut Vec<(Range<usize>, Highlight)>,
-    occupied: &mut [bool],
-) {
-    let mut search_from = 0;
-    while search_from < line.len() {
-        let Some(rel_bracket) = line[search_from..].find('[') else {
-            break;
-        };
-        let open_bracket = search_from + rel_bracket;
-        if any_occupied(occupied, open_bracket..open_bracket + 1) {
-            search_from = open_bracket + 1;
-            continue;
-        }
-        let Some(rel_close) = line[open_bracket + 1..].find(']') else {
-            break;
-        };
-        let close_bracket = open_bracket + 1 + rel_close;
-        // Look for `(url)` or `[ref]` immediately after.
-        let after_bracket = close_bracket + 1;
-        if after_bracket >= line.len() {
-            search_from = close_bracket + 1;
-            continue;
-        }
-        let next = line.as_bytes().get(after_bracket).copied();
-        let span_end = match next {
-            Some(b'(') => line[after_bracket + 1..]
-                .find(')')
-                .map(|r| after_bracket + 1 + r + 1),
-            Some(b'[') => line[after_bracket + 1..]
-                .find(']')
-                .map(|r| after_bracket + 1 + r + 1),
-            _ => None,
-        };
-        if let Some(end) = span_end {
-            if !any_occupied(occupied, open_bracket..end) && line.is_char_boundary(end) {
-                mark_occupied(occupied, open_bracket..end);
-                let faint = Highlight::colored(palette.faint);
-                spans.push((open_bracket..open_bracket + 1, faint));
-                if open_bracket + 1 < close_bracket {
-                    spans.push((
-                        open_bracket + 1..close_bracket,
-                        Highlight::colored(palette.link),
-                    ));
+        let mut depth = 0_usize;
+        for (i, &byte) in bytes.iter().enumerate().skip(start) {
+            if self.cells[i].locked {
+                return None;
+            }
+            match byte {
+                b'(' if inline => depth += 1,
+                b')' if inline => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
                 }
-                if next == Some(b'(') && after_bracket + 2 < end {
-                    let destination = after_bracket + 1..end - 1;
-                    spans.push((close_bracket..destination.start, faint));
-                    spans.push((destination.clone(), Highlight::colored(palette.completed)));
-                    spans.push((destination.end..end, faint));
+                b']' if !inline => return Some(i + 1),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Bare `http://` and `https://` URLs in the link colour. A URL ends at
+    /// whitespace or other markup, and keeps [`trim_url`]'s punctuation out.
+    fn bare_urls(&mut self, ink: &Ink) {
+        let line = self.line;
+        let mut search = 0;
+        while let Some((start, scheme)) = ["https://", "http://"]
+            .iter()
+            .filter_map(|scheme| Some((search + line[search..].find(scheme)?, scheme.len())))
+            .min()
+        {
+            let rest = &line[start..];
+            let length = rest
+                .char_indices()
+                .find(|&(i, ch)| ch.is_whitespace() || self.cells[start + i].locked)
+                .map_or(rest.len(), |(i, _)| i);
+            let url = trim_url(&rest[..length]);
+            if url.len() > scheme {
+                self.set(start..start + url.len(), |cell| {
+                    cell.color = Some(ink.link);
+                    cell.locked = true;
+                });
+            }
+            search = start + length.max(1);
+        }
+    }
+
+    /// Strikethrough, then emphasis from the strongest marker down, inside
+    /// `range`. Returns the struck ranges.
+    fn delimited(&mut self, range: Range<usize>, ink: &Ink) -> Vec<Range<usize>> {
+        let strikes = self.strikethrough(range.clone(), ink);
+        for (marker, bold, italic) in [
+            ("***", true, true),
+            ("___", true, true),
+            ("**", true, false),
+            ("__", true, false),
+            ("*", false, true),
+            ("_", false, true),
+        ] {
+            self.emphasis(range.clone(), marker, bold, italic, ink);
+        }
+        strikes
+    }
+
+    /// `~~struck~~`: faint tildes around `completed` text, keeping the
+    /// colour of links and code inside. Returns the struck text ranges.
+    fn strikethrough(&mut self, range: Range<usize>, ink: &Ink) -> Vec<Range<usize>> {
+        let mut strikes = Vec::new();
+        let mut search = range.start;
+        while let Some(open) = self.next_free("~~", search, range.end) {
+            let Some(close) = self.next_free("~~", open + 2, range.end) else {
+                break;
+            };
+            let inner = open + 2..close;
+            self.set(inner.clone(), |cell| {
+                cell.color.get_or_insert(ink.completed);
+            });
+            self.mark(open..inner.start, ink);
+            self.mark(close..close + 2, ink);
+            if !inner.is_empty() {
+                strikes.push(inner);
+            }
+            search = close + 2;
+        }
+        strikes
+    }
+
+    /// Emphasis delimited by `marker`, which then holds no other emphasis.
+    fn emphasis(&mut self, range: Range<usize>, marker: &str, bold: bool, italic: bool, ink: &Ink) {
+        let mut search = range.start;
+        while let Some(open) = self.next_free(marker, search, range.end) {
+            let content = open + marker.len();
+            let Some(close) = self.next_free(marker, content, range.end) else {
+                break;
+            };
+            let end = close + marker.len();
+            let face = |cell: &mut Cell| {
+                cell.bold |= bold;
+                cell.italic |= italic;
+            };
+            self.set(content..close, |cell| {
+                if !cell.fixed_face {
+                    face(cell);
+                }
+                cell.color.get_or_insert(ink.text);
+            });
+            // cosmic-text shapes a word in the font of its first character,
+            // so a regular-weight `**` would leave `**Alice` regular. The
+            // markers carry the span's font and differ only in colour.
+            for markers in [open..content, close..end] {
+                self.set(markers, |cell| {
+                    cell.color = Some(ink.faint);
+                    face(cell);
+                });
+            }
+            self.set(open..end, |cell| cell.locked = true);
+            search = end;
+        }
+    }
+
+    /// The styled bytes as sorted spans, touching ones that look the same
+    /// merged.
+    fn spans(&self, base: Font) -> Vec<(Range<usize>, Highlight)> {
+        let mut spans = Spans::default();
+        for (start, character) in self.line.char_indices() {
+            let cell = self.cells[start];
+            let font = (cell.bold || cell.italic).then_some(Font {
+                weight: if cell.bold {
+                    font::Weight::Bold
                 } else {
-                    spans.push((close_bracket..end, faint));
-                }
+                    base.weight
+                },
+                style: if cell.italic {
+                    font::Style::Italic
+                } else {
+                    base.style
+                },
+                ..base
+            });
+            if cell.color.is_some() || font.is_some() {
+                let highlight = Highlight {
+                    color: cell.color,
+                    font,
+                };
+                spans.push(start..start + character.len_utf8(), highlight);
             }
-            search_from = end;
-        } else {
-            search_from = close_bracket + 1;
         }
+        spans.0
     }
 }
 
-/// Color bare `http://` and `https://` URLs as links. A URL ends at
-/// whitespace, and trailing sentence punctuation stays outside it.
-fn extract_bare_urls(
-    line: &str,
-    palette: &Ink,
-    spans: &mut Vec<(Range<usize>, Highlight)>,
-    occupied: &mut [bool],
-) {
-    let mut search = 0;
-    while let Some(start) = ["https://", "http://"]
-        .iter()
-        .filter_map(|scheme| line[search..].find(scheme))
-        .min()
-        .map(|relative| search + relative)
-    {
-        let rest = &line[start..];
-        let length = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        let url =
-            rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', '"', '\'']);
-        let end = start + url.len();
-        if !any_occupied(occupied, start..end) && url.len() > "https://".len() {
-            mark_occupied(occupied, start..end);
-            spans.push((start..end, Highlight::colored(palette.link)));
+/// A bare URL without its trailing sentence punctuation, as in GFM's
+/// autolinks: a final `)` stays only when it closes a `(` in the URL.
+fn trim_url(mut url: &str) -> &str {
+    while let Some(last) = url.chars().next_back() {
+        let trailing = match last {
+            ')' => url.matches(')').count() > url.matches('(').count(),
+            '.' | ',' | ';' | ':' | '!' | '?' | '*' | '_' | '~' | '>' | '"' | '\'' => true,
+            _ => false,
+        };
+        if !trailing {
+            break;
         }
-        search = start + length.max(1);
+        url = &url[..url.len() - 1];
     }
-}
-
-// ---------------------------------------------------------------------------
-// Occupied-range helpers
-// ---------------------------------------------------------------------------
-
-fn any_occupied(occupied: &[bool], range: Range<usize>) -> bool {
-    occupied
-        .get(range.clone())
-        .is_some_and(|slice| slice.iter().any(|&b| b))
-}
-
-fn mark_occupied(occupied: &mut [bool], range: Range<usize>) {
-    for cell in occupied.get_mut(range).into_iter().flatten() {
-        *cell = true;
-    }
+    url
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,6 +1382,150 @@ mod tests {
             assert_eq!(link, [url], "{line}");
         }
         assert!(highlights_for("https:// alone").is_empty());
+    }
+
+    /// `(text, color, bold, italic)` for each span of `line`.
+    fn styled<'a>(
+        line: &'a str,
+        spans: &[(Range<usize>, Highlight)],
+    ) -> Vec<(&'a str, Option<Color>, bool, bool)> {
+        spans
+            .iter()
+            .map(|(range, highlight)| {
+                let font = highlight.font.unwrap_or(fixtures::FONT);
+                (
+                    &line[range.clone()],
+                    highlight.color,
+                    font.weight == font::Weight::Bold,
+                    font.style == font::Style::Italic,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn emphasis_never_pairs_markers_inside_a_url() {
+        let p = dark_palette();
+        for (line, url) in [
+            (
+                "see https://example.com/a_b_c/d ok",
+                "https://example.com/a_b_c/d",
+            ),
+            (
+                "go to https://example.com/x*y*z now",
+                "https://example.com/x*y*z",
+            ),
+        ] {
+            assert_eq!(
+                styled(line, &highlights_for(line)),
+                [(url, Some(p.link), false, false)],
+                "{line}"
+            );
+        }
+        let line = "[x](https://example.com/a_b_c)";
+        assert_eq!(
+            styled(line, &highlights_for(line)),
+            [
+                ("[", Some(p.faint), false, false),
+                ("x", Some(p.link), false, false),
+                ("](", Some(p.faint), false, false),
+                ("https://example.com/a_b_c", Some(p.completed), false, false),
+                (")", Some(p.faint), false, false),
+            ]
+        );
+        // Emphasis around a URL still pairs, and the URL leaves its marker.
+        let line = "_see https://x.io/a_b_";
+        assert_eq!(
+            styled(line, &highlights_for(line)),
+            [
+                ("_", Some(p.faint), false, true),
+                ("see ", Some(p.text), false, true),
+                ("https://x.io/a_b", Some(p.link), false, true),
+                ("_", Some(p.faint), false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn urls_keep_the_parentheses_they_balance() {
+        let p = dark_palette();
+        let line = "[wiki](https://en.wikipedia.org/wiki/Foo_(bar)) after";
+        assert_eq!(
+            colored(line, &highlights_for(line)),
+            [
+                ("[", Some(p.faint)),
+                ("wiki", Some(p.link)),
+                ("](", Some(p.faint)),
+                ("https://en.wikipedia.org/wiki/Foo_(bar)", Some(p.completed)),
+                (")", Some(p.faint)),
+            ]
+        );
+        for (line, url) in [
+            (
+                "see https://en.wikipedia.org/wiki/Foo_(bar) ok",
+                "https://en.wikipedia.org/wiki/Foo_(bar)",
+            ),
+            ("(see https://x.io/a_(b))", "https://x.io/a_(b)"),
+            ("(https://x.io/a).", "https://x.io/a"),
+        ] {
+            assert_eq!(
+                colored(line, &highlights_for(line)),
+                [(url, Some(p.link))],
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn emphasis_wraps_links_and_styles_link_text_and_strikes_wrap_emphasis() {
+        let p = dark_palette();
+        let line = "**[bold link](https://x.io)**";
+        assert_eq!(
+            styled(line, &highlights_for(line)),
+            [
+                ("**[", Some(p.faint), true, false),
+                ("bold link", Some(p.link), true, false),
+                ("](", Some(p.faint), true, false),
+                ("https://x.io", Some(p.completed), true, false),
+                (")**", Some(p.faint), true, false),
+            ]
+        );
+        let line = "[**bold**](https://x.io) and *[a](u)*";
+        assert_eq!(
+            styled(line, &highlights_for(line)),
+            [
+                ("[", Some(p.faint), false, false),
+                ("**", Some(p.faint), true, false),
+                ("bold", Some(p.link), true, false),
+                ("**", Some(p.faint), true, false),
+                ("](", Some(p.faint), false, false),
+                ("https://x.io", Some(p.completed), false, false),
+                (")", Some(p.faint), false, false),
+                ("*[", Some(p.faint), false, true),
+                ("a", Some(p.link), false, true),
+                ("](", Some(p.faint), false, true),
+                ("u", Some(p.completed), false, true),
+                (")*", Some(p.faint), false, true),
+            ]
+        );
+        let line = "~~**x**~~ and ~~[gone](u)~~";
+        let (spans, decor) = highlight_text(fixtures::DARK, line).remove(0);
+        assert_eq!(
+            styled(line, &spans),
+            [
+                ("~~", Some(p.faint), false, false),
+                ("**", Some(p.faint), true, false),
+                ("x", Some(p.completed), true, false),
+                ("**", Some(p.faint), true, false),
+                ("~~", Some(p.faint), false, false),
+                ("~~[", Some(p.faint), false, false),
+                ("gone", Some(p.link), false, false),
+                ("](", Some(p.faint), false, false),
+                ("u", Some(p.completed), false, false),
+                (")~~", Some(p.faint), false, false),
+            ]
+        );
+        assert_eq!(decor.strikes, [2..7, 16..25]);
     }
 
     // ── Unicode safety ────────────────────────────────────────────────────────

@@ -469,6 +469,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - **Selected newlines.** Each selected newline and each selected empty line gets a selection cell about one character wide, so a selection across blank lines reads as one block.
 - **Link destinations.** In `[text](url)` the URL uses `completed`; brackets and parens stay `faint`.
 - **Links in done tasks.** Link text on a done-task line keeps the `link` color, and the strike is still drawn.
+- **Inline precedence.** Code spans and HTML comments are found first. Links and bare URLs come next, so emphasis never pairs a `_` or `*` inside a URL. Strikethrough and emphasis are matched inside link text, and then across the line, where they can wrap whole links and other emphasis. Link destinations end at the `)` that balances their parentheses (CommonMark). Bare URLs drop trailing punctuation, and they drop a final `)` only when it is unbalanced (GFM autolinks).
 - **Inline code chip** (optional). A `code_block` background behind inline code spans, with about 2 px padding.
 
 **Design-review defaults** for the P1 visual items:
