@@ -119,11 +119,15 @@ JetBrains Mono. Both are already bundled in roost (`third_party/inter`,
 - **Resize handle:** a 7 px hit area over the 1 px divider. It turns accent
   (about 45 %) on hover and about 60 % while dragging. During a drag an accent
   chip shows "<Pane> · <width> px" at the top of the divider.
-- **Empty states:** "No groups match.", "No notes here yet. Press ⌘N.",
-  "No matches.", "Nothing matches “…”."
+- **Empty states:** "Create a section first.", "No groups yet.", "No groups
+  match.", "Create a group first.", "No notes here yet. Press ⌘N.", "No matches.", "Nothing matches
+  “…”." The editor area prompts for the next missing level: "Create a section
+  to start writing." with New section…, then "Create a group to start
+  writing." with New group…, then "Select a note, or create one here." with
+  New note…
 - **The palette** filters with fuzzy subsequence matching and hides headers
-  that have no matching rows. The move picker lists every Section (root) and
-  Section › Group except the note's current location.
+  that have no matching rows. The note move picker lists every Section › Group
+  except the note's current group.
 
 ## Sample content
 

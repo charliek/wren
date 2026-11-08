@@ -49,7 +49,6 @@ pub fn row_id(row: RowKind) -> Id {
     let name = match row {
         RowKind::Section(id) => format!("section-{}", id.0),
         RowKind::Group(id) => format!("group-{}", id.0),
-        RowKind::NoGroup(id) => format!("no-group-{}", id.0),
         RowKind::Note(id) => format!("note-{}", id.0),
     };
     Id::from(format!("wren-drag-row-{name}"))
@@ -492,7 +491,7 @@ impl<Message: Send + 'static, R: text::Renderer<Font = Font>> Widget<Message, ic
                             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
                         ) {
                             state.drag.forget_click();
-                            if !state.drag.is_pressed() && row.item().is_some() {
+                            if !state.drag.is_pressed() {
                                 state.context_pressed = true;
                                 self.publish(
                                     [DragEvent::Context {
@@ -895,7 +894,7 @@ mod tests {
     use iced::advanced::Clipboard;
     use iced::widget::{button, column, container, row, scrollable, Space};
     use wren_core::fs_store::RelPath;
-    use wren_core::model::{Group, GroupId, Note, NoteId, Parent, Section, SectionId};
+    use wren_core::model::{Group, GroupId, Note, NoteId, Section, SectionId};
 
     #[derive(Debug, Clone)]
     enum Message {
@@ -919,17 +918,25 @@ mod tests {
                 path: RelPath::new("Two").unwrap(),
             },
         ];
-        workspace.groups = vec![Group {
-            id: GroupId(20),
-            section: SectionId(2),
-            name: "Destination".into(),
-            path: RelPath::new("Two/Destination").unwrap(),
-        }];
+        workspace.groups = vec![
+            Group {
+                id: GroupId(10),
+                section: SectionId(1),
+                name: "Origin".into(),
+                path: RelPath::new("One/Origin").unwrap(),
+            },
+            Group {
+                id: GroupId(20),
+                section: SectionId(2),
+                name: "Destination".into(),
+                path: RelPath::new("Two/Destination").unwrap(),
+            },
+        ];
         workspace.notes = vec![Note {
             id: NoteId(100),
-            parent: Parent::Section(SectionId(1)),
+            group: GroupId(10),
             title: "Source".into(),
-            path: RelPath::new("One/Source.md").unwrap(),
+            path: RelPath::new("One/Origin/Source.md").unwrap(),
             subtitle: None,
             modified: std::time::SystemTime::UNIX_EPOCH,
             bytes: 0,
@@ -1570,7 +1577,7 @@ mod tests {
                 [Message::Drag(DragEvent::Commit {
                     op: wren_core::ops::Op::MoveNote {
                         note: NoteId(100),
-                        to: Parent::Group(GroupId(20))
+                        to: GroupId(20)
                     },
                     ..
                 })]

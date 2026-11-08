@@ -6,8 +6,8 @@ use crate::fs_store::{
     DirectoryListing, DiskFile, EntryKind, FsStore, RelPath, StoreError, StoreReader,
 };
 use crate::model::{
-    compute_subtitle, natural_cmp, note_title, Group, GroupId, Note, NoteId, Parent, ScanWarning,
-    Section, SectionId, Workspace,
+    compute_subtitle, natural_cmp, note_title, Group, GroupId, Note, NoteId, ScanWarning, Section,
+    SectionId, Workspace,
 };
 
 // ---------------------------------------------------------------------------
@@ -233,30 +233,12 @@ fn scan_section_entries(
         }
 
         if kind == EntryKind::File {
-            if !is_markdown_name(&name) {
-                continue;
+            if is_markdown_name(&name) {
+                ws.warnings.push(warn(
+                    entry.path(),
+                    "note outside a group ignored; move it into a group to see it",
+                ));
             }
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    ws.warnings.push(warn(entry.path(), "non-UTF-8 filename"));
-                    continue;
-                }
-            };
-            let note_rel = match section_rel.join(name_str) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            add_note(
-                store,
-                ws,
-                Parent::Section(section_id),
-                note_rel,
-                &entry.path(),
-                prev_notes,
-                None,
-                visit,
-            );
             continue;
         }
 
@@ -377,7 +359,7 @@ fn scan_group_entries(
                 add_note(
                     store,
                     ws,
-                    Parent::Group(group_id),
+                    group_id,
                     note_rel,
                     &entry.path(),
                     prev_notes,
@@ -400,6 +382,7 @@ fn scan_group_entries(
                 }
             };
             if let Ok(sub_rel) = current_rel.join(name_str) {
+                progress.group_subdirectories.insert(entry.path());
                 subdirectories.push(sub_rel);
             }
         }
@@ -415,7 +398,7 @@ fn scan_group_entries(
 fn add_note(
     store: &StoreReader,
     ws: &mut Workspace,
-    parent: Parent,
+    group: GroupId,
     note_rel: RelPath,
     abs_path: &Path,
     prev_notes: &HashMap<&Path, &Note>,
@@ -431,7 +414,7 @@ fn add_note(
 
             let note = Note {
                 id: note_id,
-                parent,
+                group,
                 title: note_title(note_rel.file_name()),
                 path: note_rel,
                 subtitle,
@@ -471,6 +454,9 @@ fn add_note(
 struct ScanProgress {
     incomplete_prefixes: HashSet<PathBuf>,
     observed_entries: HashSet<PathBuf>,
+    /// Directories inside groups. A former note at one of these paths was
+    /// replaced, so an unreadable listing there must not restore it.
+    group_subdirectories: HashSet<PathBuf>,
 }
 
 impl ScanProgress {
@@ -565,11 +551,12 @@ fn preserve_incomplete(
         }
     }
     for note in &previous.notes {
-        let parent_exists = match note.parent {
-            Parent::Section(id) => section_ids.contains(&id),
-            Parent::Group(id) => group_ids.contains(&id),
-        };
-        if parent_exists && preserve(&note.path, note.id.0) {
+        if group_ids.contains(&note.group)
+            && !progress
+                .group_subdirectories
+                .contains(&root.join(note.path.as_path()))
+            && preserve(&note.path, note.id.0)
+        {
             visit(
                 note,
                 Err("scan incomplete; content search unavailable until this note is readable"),
@@ -770,10 +757,7 @@ mod tests {
             assert!(ws.section(group.section).is_some());
         }
         for note in &ws.notes {
-            match note.parent {
-                Parent::Section(id) => assert!(ws.section(id).is_some()),
-                Parent::Group(id) => assert!(ws.group(id).is_some()),
-            }
+            assert!(ws.group(note.group).is_some());
         }
     }
 
@@ -1007,16 +991,17 @@ mod tests {
         let root = dir.path();
         write_file(root, "Projects/WebApp/design.md", "# Design");
         write_file(root, "Projects/WebApp/notes.md", "# Notes");
-        write_file(root, "Projects/plan.md", "# Plan");
-        write_file(root, "Inbox/scratch.md", "# Scratch");
+        write_file(root, "Projects/Planning/plan.md", "# Plan");
+        write_file(root, "Inbox/Today/scratch.md", "# Scratch");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
 
         assert_eq!(ws.sections.len(), 2);
         assert_eq!(section_names(&ws), vec!["Inbox", "Projects"]);
-        assert_eq!(ws.groups.len(), 1);
-        assert_eq!(group_names(&ws), vec!["WebApp"]);
+        let mut groups = group_names(&ws);
+        groups.sort_unstable();
+        assert_eq!(groups, vec!["Planning", "Today", "WebApp"]);
         assert_eq!(ws.notes.len(), 4);
     }
 
@@ -1056,21 +1041,25 @@ mod tests {
     }
 
     #[test]
-    fn scan_ungrouped_notes_in_section() {
+    fn notes_directly_in_a_section_are_ignored_with_a_warning() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "Inbox/scratch.md", "hello");
         write_file(root, "Inbox/todo.md", "world");
+        write_file(root, "Inbox/readme.txt", "not markdown");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
 
         assert_eq!(ws.sections.len(), 1);
         assert_eq!(ws.groups.len(), 0);
-        assert_eq!(ws.notes.len(), 2);
-        for note in &ws.notes {
-            assert!(matches!(note.parent, Parent::Section(_)));
-        }
+        assert!(ws.notes.is_empty());
+        let warned: Vec<_> = ws
+            .warnings
+            .iter()
+            .filter(|warning| warning.message.contains("outside a group"))
+            .collect();
+        assert_eq!(warned.len(), 2, "{:?}", ws.warnings);
     }
 
     // -- depth rules --
@@ -1094,11 +1083,11 @@ mod tests {
 
         let deep = ws.notes.iter().find(|n| n.title == "arch").unwrap();
         assert_eq!(deep.subtitle.as_deref(), Some("src/arch.md"));
-        assert_eq!(deep.parent, direct.parent);
+        assert_eq!(deep.group, direct.group);
 
         let deeper = ws.notes.iter().find(|n| n.title == "detail").unwrap();
         assert_eq!(deeper.subtitle.as_deref(), Some("src/impl/detail.md"));
-        assert_eq!(deeper.parent, direct.parent);
+        assert_eq!(deeper.group, direct.group);
 
         assert!(has_warning_containing(&ws, "deeper than group level"));
     }
@@ -1135,7 +1124,7 @@ mod tests {
         assert_eq!(note_titles(&ws), vec!["note"]);
         assert_eq!(ws.notes[0].path.as_path(), relative);
         assert_eq!(ws.notes[0].bytes, b"deep note".len());
-        assert_eq!(ws.notes[0].parent, Parent::Group(ws.groups[0].id));
+        assert_eq!(ws.notes[0].group, ws.groups[0].id);
         let subtitle = relative.strip_prefix("Section/Group").unwrap();
         assert_eq!(ws.notes[0].subtitle.as_deref(), subtitle.to_str());
         assert!(has_warning_containing(&ws, "deeper than group level"));
@@ -1210,7 +1199,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "README.md", "root markdown");
-        write_file(root, "Inbox/note.md", "ok");
+        write_file(root, "Inbox/Today/note.md", "ok");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
@@ -1226,7 +1215,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "日記/旅行/東京.md", "Tokyo notes");
-        write_file(root, "Ñotas/café.md", "coffee");
+        write_file(root, "Ñotas/Bebidas/café.md", "coffee");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
@@ -1235,8 +1224,9 @@ mod tests {
         assert!(ws.sections.iter().any(|s| s.name == "日記"));
         assert!(ws.sections.iter().any(|s| s.name == "Ñotas"));
 
-        assert_eq!(ws.groups.len(), 1);
-        assert_eq!(ws.groups[0].name, "旅行");
+        assert_eq!(ws.groups.len(), 2);
+        assert!(ws.groups.iter().any(|g| g.name == "旅行"));
+        assert!(ws.groups.iter().any(|g| g.name == "Bebidas"));
 
         assert_eq!(ws.notes.len(), 2);
         assert!(ws.notes.iter().any(|n| n.title == "東京"));
@@ -1249,11 +1239,11 @@ mod tests {
     fn case_insensitive_md_extension() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Sec/lower.md", "a");
-        write_file(root, "Sec/upper.MD", "b");
-        write_file(root, "Sec/mixed.Md", "c");
-        write_file(root, "Sec/mixed2.mD", "d");
-        write_file(root, "Sec/not.txt", "e");
+        write_file(root, "Sec/G/lower.md", "a");
+        write_file(root, "Sec/G/upper.MD", "b");
+        write_file(root, "Sec/G/mixed.Md", "c");
+        write_file(root, "Sec/G/mixed2.mD", "d");
+        write_file(root, "Sec/G/not.txt", "e");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
@@ -1273,12 +1263,13 @@ mod tests {
     fn symlinks_warned_not_followed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Sec/real.md", "content");
+        write_file(root, "Sec/G/real.md", "content");
 
         // Symlink at root level
         std::os::unix::fs::symlink("/tmp", root.join("linked_section")).unwrap();
-        // Symlink file in section
-        std::os::unix::fs::symlink(root.join("Sec/real.md"), root.join("Sec/linked.md")).unwrap();
+        // Symlink file in group
+        std::os::unix::fs::symlink(root.join("Sec/G/real.md"), root.join("Sec/G/linked.md"))
+            .unwrap();
         // Symlink dir in section
         std::os::unix::fs::symlink("/tmp", root.join("Sec/linked_group")).unwrap();
 
@@ -1287,7 +1278,7 @@ mod tests {
 
         assert_eq!(ws.notes.len(), 1);
         assert_eq!(ws.notes[0].title, "real");
-        assert_eq!(ws.groups.len(), 0);
+        assert_eq!(group_names(&ws), vec!["G"]);
 
         let symlink_warnings = ws
             .warnings
@@ -1344,10 +1335,10 @@ mod tests {
             ("Section/Group/deep", "Section/Group"),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            write_file(dir.path(), "Section/direct.md", "trusted direct");
+            write_file(dir.path(), "Section/Sibling/direct.md", "trusted sibling");
             write_file(dir.path(), "Section/Group/note.md", "trusted group");
             write_file(dir.path(), "Section/Group/deep/note.md", "trusted deep");
-            write_file(dir.path(), "Other/note.md", "unaffected");
+            write_file(dir.path(), "Other/Group/note.md", "unaffected");
             let store = FsStore::open(dir.path()).unwrap();
             let previous = scan(&store, None).unwrap();
             let outside = tempfile::tempdir().unwrap();
@@ -1437,11 +1428,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Sec/good.md", "ok");
+        write_file(root, "Sec/G/good.md", "ok");
 
         // Create a file with invalid UTF-8 name ending in .md
         let bad_name = OsStr::from_bytes(&[0xff, 0xfe, b'.', b'm', b'd']);
-        fs::write(root.join("Sec").join(bad_name), b"bad").unwrap();
+        fs::write(root.join("Sec/G").join(bad_name), b"bad").unwrap();
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
@@ -1458,7 +1449,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "Projects/WebApp/design.md", "v1");
-        write_file(root, "Inbox/scratch.md", "v1");
+        write_file(root, "Inbox/Today/scratch.md", "v1");
 
         let store = FsStore::open(root).unwrap();
         let ws1 = scan(&store, None).unwrap();
@@ -1489,7 +1480,7 @@ mod tests {
         let max_id_1 = ws1.next_id();
 
         write_file(root, "Projects/WebApp/notes.md", "new");
-        write_file(root, "Archive/old.md", "archived");
+        write_file(root, "Archive/2025/old.md", "archived");
 
         let ws2 = scan(&store, Some(&ws1)).unwrap();
 
@@ -1510,7 +1501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "Projects/WebApp/design.md", "v1");
-        write_file(root, "Projects/plan.md", "v1");
+        write_file(root, "Projects/Planning/plan.md", "v1");
 
         let store = FsStore::open(root).unwrap();
         let mut ws1 = scan(&store, None).unwrap();
@@ -1522,6 +1513,7 @@ mod tests {
             .id;
         let grp_id = ws1.groups.iter().find(|g| g.name == "WebApp").unwrap().id;
         let note_id = ws1.notes.iter().find(|n| n.title == "design").unwrap().id;
+        let plan_id = ws1.notes.iter().find(|n| n.title == "plan").unwrap().id;
 
         // Remap paths in the model before renaming on disk
         ws1.remap_paths(
@@ -1546,6 +1538,9 @@ mod tests {
             ws2.notes.iter().find(|n| n.title == "design").unwrap().id,
             note_id,
         );
+        let plan = ws2.notes.iter().find(|n| n.title == "plan").unwrap();
+        assert_eq!(plan.id, plan_id);
+        assert_eq!(plan.path.as_path(), Path::new("Work/Planning/plan.md"));
     }
 
     // -- deletions --
@@ -1554,14 +1549,14 @@ mod tests {
     fn deleted_file_removed_from_model() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Sec/a.md", "a");
-        write_file(root, "Sec/b.md", "b");
+        write_file(root, "Sec/G/a.md", "a");
+        write_file(root, "Sec/G/b.md", "b");
 
         let store = FsStore::open(root).unwrap();
         let ws1 = scan(&store, None).unwrap();
         assert_eq!(ws1.notes.len(), 2);
 
-        fs::remove_file(root.join("Sec/b.md")).unwrap();
+        fs::remove_file(root.join("Sec/G/b.md")).unwrap();
         let ws2 = scan(&store, Some(&ws1)).unwrap();
 
         assert_eq!(ws2.notes.len(), 1);
@@ -1573,17 +1568,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "Sec/Grp/note.md", "content");
-        write_file(root, "Sec/other.md", "other");
+        write_file(root, "Sec/Other/other.md", "other");
 
         let store = FsStore::open(root).unwrap();
         let ws1 = scan(&store, None).unwrap();
-        assert_eq!(ws1.groups.len(), 1);
+        assert_eq!(ws1.groups.len(), 2);
         assert_eq!(ws1.notes.len(), 2);
 
         fs::remove_dir_all(root.join("Sec/Grp")).unwrap();
         let ws2 = scan(&store, Some(&ws1)).unwrap();
 
-        assert_eq!(ws2.groups.len(), 0);
+        assert_eq!(group_names(&ws2), vec!["Other"]);
         assert_eq!(ws2.notes.len(), 1);
         assert_eq!(ws2.notes[0].title, "other");
     }
@@ -1592,8 +1587,8 @@ mod tests {
     fn deleted_section_removed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Alpha/note.md", "a");
-        write_file(root, "Beta/note.md", "b");
+        write_file(root, "Alpha/G/note.md", "a");
+        write_file(root, "Beta/G/note.md", "b");
 
         let store = FsStore::open(root).unwrap();
         let ws1 = scan(&store, None).unwrap();
@@ -1612,19 +1607,20 @@ mod tests {
     fn metadata_read_errors_preserve_entries_at_every_level() {
         for unreadable in [
             "Section",
-            "Section/direct.md",
+            "Section/Sibling",
+            "Section/Sibling/direct.md",
             "Section/Group",
             "Section/Group/note.md",
             "Section/Group/deep",
             "Section/Group/deep/note.md",
         ] {
             let dir = tempfile::tempdir().unwrap();
-            write_file(dir.path(), "Section/direct.md", "direct");
+            write_file(dir.path(), "Section/Sibling/direct.md", "direct");
             write_file(dir.path(), "Section/Group/note.md", "grouped");
             write_file(dir.path(), "Section/Group/deep/note.md", "deep");
             let store = FsStore::open(dir.path()).unwrap();
             let previous = scan(&store, None).unwrap();
-            write_file(dir.path(), "New/new.md", "new");
+            write_file(dir.path(), "New/Group/new.md", "new");
             let unreadable_path = store.root().join(unreadable);
             let mut scan_fs = FaultyScanFs::default();
             scan_fs.metadata_errors.insert(
@@ -1650,14 +1646,15 @@ mod tests {
     fn metadata_missing_errors_do_not_preserve_entries() {
         for missing in [
             "Section",
-            "Section/direct.md",
+            "Section/Sibling",
+            "Section/Sibling/direct.md",
             "Section/Group",
             "Section/Group/deep",
         ] {
             let dir = tempfile::tempdir().unwrap();
-            write_file(dir.path(), "Section/direct.md", "direct");
+            write_file(dir.path(), "Section/Sibling/direct.md", "direct");
             write_file(dir.path(), "Section/Group/deep/note.md", "deep");
-            write_file(dir.path(), "Other/note.md", "other");
+            write_file(dir.path(), "Other/Group/note.md", "other");
             let store = FsStore::open(dir.path()).unwrap();
             let previous = scan(&store, None).unwrap();
             let mut scan_fs = FaultyScanFs::default();
@@ -1683,15 +1680,20 @@ mod tests {
 
     #[test]
     fn directory_read_errors_preserve_only_the_unreadable_subtree() {
-        for unreadable in ["Section", "Section/Group", "Section/Group/deep"] {
+        for unreadable in [
+            "Section",
+            "Section/Sibling",
+            "Section/Group",
+            "Section/Group/deep",
+        ] {
             let dir = tempfile::tempdir().unwrap();
-            write_file(dir.path(), "Section/direct.md", "direct");
+            write_file(dir.path(), "Section/Sibling/direct.md", "direct");
             write_file(dir.path(), "Section/Group/note.md", "grouped");
             write_file(dir.path(), "Section/Group/deep/note.md", "deep");
-            write_file(dir.path(), "Other/gone.md", "gone");
+            write_file(dir.path(), "Other/Group/gone.md", "gone");
             let store = FsStore::open(dir.path()).unwrap();
             let previous = scan(&store, None).unwrap();
-            fs::remove_file(dir.path().join("Other/gone.md")).unwrap();
+            fs::remove_file(dir.path().join("Other/Group/gone.md")).unwrap();
             let mut scan_fs = FaultyScanFs::default();
             scan_fs.listing_errors.insert(
                 store.root().join(unreadable),
@@ -1731,8 +1733,8 @@ mod tests {
                 "Unseen/nested/note.md",
                 "Missing/nested/note.md",
                 "Unreadable/nested/note.md",
-                "Seen/changed.md",
-                "Seen/gone.md",
+                "Seen/inner/changed.md",
+                "Seen/inner/gone.md",
                 "Ignored/nested/note.md",
                 "Linked/nested/note.md",
             ] {
@@ -1741,9 +1743,13 @@ mod tests {
             let store = FsStore::open(dir.path()).unwrap();
             let previous = scan(&store, None).unwrap();
             fs::remove_dir_all(dir.path().join(relative("Missing"))).unwrap();
-            fs::remove_file(dir.path().join(relative("Seen/gone.md"))).unwrap();
-            write_file(dir.path(), &relative("Seen/changed.md"), "changed on disk");
-            write_file(dir.path(), &relative("Seen/new.md"), "new");
+            fs::remove_file(dir.path().join(relative("Seen/inner/gone.md"))).unwrap();
+            write_file(
+                dir.path(),
+                &relative("Seen/inner/changed.md"),
+                "changed on disk",
+            );
+            write_file(dir.path(), &relative("Seen/inner/new.md"), "new");
             fs::remove_dir_all(dir.path().join(relative("Ignored"))).unwrap();
             write_file(dir.path(), &relative("Ignored"), "not a directory");
             fs::remove_dir_all(dir.path().join(relative("Linked"))).unwrap();
@@ -1806,26 +1812,22 @@ mod tests {
     #[test]
     fn unreadable_replacement_directory_does_not_restore_a_former_note() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "Section/note.md", "previous");
+        write_file(dir.path(), "Section/Group/note.md", "previous");
         let store = FsStore::open(dir.path()).unwrap();
         let previous = scan(&store, None).unwrap();
         let former_note_id = previous.notes[0].id;
-        fs::remove_file(dir.path().join("Section/note.md")).unwrap();
-        fs::create_dir(dir.path().join("Section/note.md")).unwrap();
+        fs::remove_file(dir.path().join("Section/Group/note.md")).unwrap();
+        fs::create_dir(dir.path().join("Section/Group/note.md")).unwrap();
         let mut scan_fs = FaultyScanFs::default();
         scan_fs.listing_errors.insert(
-            store.root().join("Section/note.md"),
+            store.root().join("Section/Group/note.md"),
             std::io::ErrorKind::PermissionDenied,
         );
 
         let current = scan_with_fs(&store, Some(&previous), &scan_fs).unwrap();
-        assert!(current.notes.is_empty());
-        assert_eq!(current.groups.len(), 1);
-        assert_eq!(
-            current.groups[0].path.as_path(),
-            Path::new("Section/note.md")
-        );
-        assert_ne!(current.groups[0].id.0, former_note_id.0);
+        assert!(current.notes.is_empty(), "{:?}", current.notes);
+        assert!(current.note(former_note_id).is_none());
+        assert_eq!(group_names(&current), vec!["Group"]);
         assert_unique_entries(&current);
     }
 
@@ -1835,8 +1837,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "Projects/WebApp/design.md", "content");
-        write_file(root, "Projects/plan.md", "plan");
-        write_file(root, "Inbox/scratch.md", "scratch");
+        write_file(root, "Projects/Planning/plan.md", "plan");
+        write_file(root, "Inbox/Today/scratch.md", "scratch");
 
         let store = FsStore::open(root).unwrap();
         let ws1 = scan(&store, None).unwrap();
@@ -1851,6 +1853,7 @@ mod tests {
         assert!(ws2.sections.iter().any(|s| s.name == "Projects"));
         // Previous groups and notes under Projects should be preserved
         assert!(ws2.groups.iter().any(|g| g.name == "WebApp"));
+        assert!(ws2.groups.iter().any(|g| g.name == "Planning"));
         let preserved_notes: Vec<&str> = ws2
             .notes
             .iter()
@@ -1868,7 +1871,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_file(root, "Sec/Grp/note.md", "content");
-        write_file(root, "Sec/other.md", "other");
+        write_file(root, "Sec/Other/other.md", "other");
 
         let store = FsStore::open(root).unwrap();
         let ws1 = scan(&store, None).unwrap();
@@ -1888,11 +1891,12 @@ mod tests {
     #[test]
     fn unreadable_note_preserves_previous_metadata_from_real_store() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "Section/note.md", "previous bytes");
+        write_file(dir.path(), "Section/Group/note.md", "previous bytes");
         let store = FsStore::open(dir.path()).unwrap();
         let previous = scan(&store, None).unwrap();
-        write_file(dir.path(), "Section/note.md", "changed");
-        let permissions = RestorePermissions::restrict(&dir.path().join("Section/note.md"), 0);
+        write_file(dir.path(), "Section/Group/note.md", "changed");
+        let permissions =
+            RestorePermissions::restrict(&dir.path().join("Section/Group/note.md"), 0);
         let read_error = store.read(&previous.notes[0].path).unwrap_err();
         let result = scan(&store, Some(&previous));
         drop(permissions);
@@ -1944,7 +1948,7 @@ mod tests {
     #[test]
     fn unreadable_root_returns_permission_denied_after_opening_store() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "Section/note.md", "previous");
+        write_file(dir.path(), "Section/Group/note.md", "previous");
         let store = FsStore::open(dir.path()).unwrap();
         let previous = scan(&store, None).unwrap();
         let permissions = RestorePermissions::restrict(dir.path(), 0);
@@ -2013,15 +2017,15 @@ mod tests {
     fn notes_sorted_modified_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Sec/old.md", "old");
+        write_file(root, "Sec/G/old.md", "old");
 
         let old_time = SystemTime::now() - Duration::from_secs(10);
-        fs::File::open(root.join("Sec/old.md"))
+        fs::File::open(root.join("Sec/G/old.md"))
             .unwrap()
             .set_modified(old_time)
             .unwrap();
 
-        write_file(root, "Sec/new.md", "new");
+        write_file(root, "Sec/G/new.md", "new");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
@@ -2038,7 +2042,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let content = "hello world";
-        write_file(root, "Sec/note.md", content);
+        write_file(root, "Sec/G/note.md", content);
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
@@ -2053,23 +2057,19 @@ mod tests {
     // -- note parent assignment --
 
     #[test]
-    fn notes_assigned_correct_parents() {
+    fn notes_assigned_their_enclosing_group() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_file(root, "Sec/ungrouped.md", "a");
         write_file(root, "Sec/Grp/grouped.md", "b");
+        write_file(root, "Sec/Other/second.md", "c");
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();
 
-        let sec_id = ws.sections[0].id;
-        let grp_id = ws.groups[0].id;
-
-        let ungrouped = ws.notes.iter().find(|n| n.title == "ungrouped").unwrap();
-        assert_eq!(ungrouped.parent, Parent::Section(sec_id));
-
-        let grouped = ws.notes.iter().find(|n| n.title == "grouped").unwrap();
-        assert_eq!(grouped.parent, Parent::Group(grp_id));
+        for (title, group) in [("grouped", "Grp"), ("second", "Other")] {
+            let note = ws.notes.iter().find(|n| n.title == title).unwrap();
+            assert_eq!(ws.group(note.group).unwrap().name, group);
+        }
     }
 
     // -- groups sorted within their section --
@@ -2118,10 +2118,10 @@ mod tests {
     fn special_files_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        make_dir(root, "Sec");
-        write_file(root, "Sec/note.md", "ok");
+        make_dir(root, "Sec/G");
+        write_file(root, "Sec/G/note.md", "ok");
 
-        make_fifo(&root.join("Sec/pipe.md"));
+        make_fifo(&root.join("Sec/G/pipe.md"));
 
         let store = FsStore::open(root).unwrap();
         let ws = scan(&store, None).unwrap();

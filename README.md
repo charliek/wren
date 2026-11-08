@@ -11,8 +11,9 @@ only a `.wren/` directory).
 ~/notes/work/            ← workspace
 ├── 1-1s/                ← section
 │   ├── Alice Chen/      ← group
-│   │   └── 2026-11-04.md
-│   └── Team sync.md     ← a note directly in a section
+│   │   └── 2026-11-04.md ← note
+│   └── Team/
+│       └── Team sync.md
 └── Projects/
 ```
 

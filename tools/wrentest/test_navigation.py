@@ -50,8 +50,8 @@ def vault_factory(tmp_path: Path):
     def make(name: str = "field-notes") -> Path:
         root = tmp_path / name
         for relative in (
-            "Atlas/Research", "Atlas/Review", "Atlas/Empty group",
-            "Boreal/Research", "Empty section",
+            "Atlas/Research", "Atlas/Review", "Atlas/Empty group", "Atlas/Workbench",
+            "Boreal/Research", "Boreal/Workbench", "Empty section",
         ):
             (root / relative).mkdir(parents=True, exist_ok=True)
         contents = {
@@ -63,9 +63,9 @@ def vault_factory(tmp_path: Path):
             TENTH: "amber-before\n",
             "Atlas/Research/Needle amber.md": "# Titled checklist\n\nA title-only match lives here.\n",
             "Atlas/Review/Peer check.md": "needle amber from the review desk\n",
-            "Atlas/Loose 3.md": "needle amber from the ungrouped desk\n",
+            "Atlas/Workbench/Loose 3.md": "needle amber from the workbench desk\n",
             "Boreal/Research/Remote 4.md": "needle amber from the northern desk\n",
-            "Boreal/Loose 5.md": "northern baseline\n",
+            "Boreal/Workbench/Loose 5.md": "northern baseline\n",
         }
         for index, (relative, text) in enumerate(contents.items()):
             path = root / relative
@@ -265,9 +265,10 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
         for key in ("note.rename", "note.delete", "note.reveal", "note.move", "navigation.find",
-                    "group.rename", "group.delete", "group.reveal", "group.move"):
+                    "group.rename", "group.delete", "group.reveal", "group.move",
+                    "note.new", "note.new_dated", "notes.sort_title"):
             assert by_id[key]["enabled"] is False, key
-        for key in ("note.new", "note.new_dated", "group.new", "section.rename", "notes.sort_title"):
+        for key in ("group.new", "section.rename"):
             assert by_id[key]["enabled"] is True, key
         activate(app, {"command": "note.rename"}, disposition="blocked")
         assert navigation(app)["dialog"] is None
@@ -305,6 +306,9 @@ def test_fuzzy_commands_create_real_items_through_dialogs(
         assert len(session(app)[collection]) == count + 1
         created = item(app, collection, path)
         assert (vault / path).exists()
+        if collection == "groups":
+            assert session(app)["selected_group"] == created["id"]
+            assert session(app)["document"] is None
         if collection == "notes":
             assert session(app)["selected_note"] == created["id"]
             assert (vault / path).read_bytes() == b""
@@ -379,7 +383,7 @@ def test_trash_requires_explicit_confirmation_and_only_uses_private_quarantine(
         moved = list(quarantine.iterdir())
         assert len(moved) == 1
         assert tree_bytes(moved[0]) == original
-        assert (vault / "Boreal/Loose 5.md").read_bytes() == b"northern baseline\n"
+        assert (vault / "Boreal/Workbench/Loose 5.md").read_bytes() == b"northern baseline\n"
         palette(app, "search", "vault-token-")
         assert navigation(app)["modal"]["results"] == []
 
@@ -416,7 +420,6 @@ def test_independent_name_filters_and_outline_projection_keep_hidden_document_op
         bounds = wait_for(lambda: app.client.call("navigation.bounds")["rows"], timeout=5)
         keys = [row["key"] for row in bounds]
         assert {"section": atlas} in keys and {"group": review} in keys
-        assert not any("no_group" in key for key in keys)
         assert {"section": boreal} not in keys
         gateway(app, "filter.set", pane="outline", query="Boreal")
         assert navigation(app)["visible"]["outline"] == [{"section": boreal, "expanded": True}]
@@ -430,7 +433,7 @@ def test_independent_name_filters_and_outline_projection_keep_hidden_document_op
 
 @pytest.mark.parametrize("collection,parent,expected_paths", [
     ("groups", "Atlas/Research", {SECOND, "Atlas/Research/Needle amber.md"}),
-    ("sections", "Atlas", {"Atlas/Loose 3.md"}),
+    ("groups", "Atlas/Workbench", {"Atlas/Workbench/Loose 3.md"}),
     ("groups", "Atlas/Empty group", set()),
     ("groups", "Boreal/Research", {"Boreal/Research/Remote 4.md"}),
 ])
@@ -508,7 +511,7 @@ def test_jump_is_fuzzy_title_only_and_branching_history_preserves_mru_on_restart
         command(app, "navigation.back")
         assert session(app)["document"]["note"] == first
         assert navigation(app)["can_forward"] is True
-        third_path = "Atlas/Loose 3.md"
+        third_path = "Atlas/Workbench/Loose 3.md"
         jump(app, third_path)
         branched = navigation(app)
         assert branched["history"][-2:] == [FIRST, third_path]
@@ -949,7 +952,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         assert navigation(app)["layout"] == "columns"
         assert navigation(app)["preferred_widths"] == DEFAULT_WIDTHS
         assert navigation(app)["sort"] == "modified"
-        jump(app, "Boreal/Loose 5.md")
+        jump(app, "Boreal/Workbench/Loose 5.md")
         gateway(app, "view.width", layout="columns", pane="groups", width=355)
         assert navigation(app)["registrations"] == [
             {"name": "Southern laboratory", "path": str(first.resolve())},
@@ -968,7 +971,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         assert gateway(app, "palette.query", query="vault-token-northern-vault")["navigation"]["modal"]["results"] == []
         gateway(app, "palette.close")
         switch_workspace(app, second)
-        assert session(app)["document"]["path"] == "Boreal/Loose 5.md"
+        assert session(app)["document"]["path"] == "Boreal/Workbench/Loose 5.md"
         assert navigation(app)["preferred_widths"]["columns"]["groups"] == 355
         assert navigation(app)["active_registration"] == str(second.resolve())
         assert palette(app, "search", "vault-token-southern-vault")["results"] == []
@@ -977,7 +980,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         gateway(app, "palette.close")
         app.restart(hard=False)
         assert Path(session(app)["root"]) == second.resolve()
-        assert session(app)["document"]["path"] == "Boreal/Loose 5.md"
+        assert session(app)["document"]["path"] == "Boreal/Workbench/Loose 5.md"
         assert navigation(app)["preferred_widths"]["columns"]["groups"] == 355
         assert len(navigation(app)["registrations"]) == 2
         app.restart(hard=True)
@@ -1155,7 +1158,7 @@ def test_palette_search_outline_and_focus_render_real_selection_and_glyphs(
             assert modal["results"] and modal["active_index"] == 0
             if mode == "search":
                 index = next(index for index, row in enumerate(modal["results"])
-                             if row["path"] == "Atlas/Loose 3.md")
+                             if row["path"] == "Atlas/Workbench/Loose 3.md")
                 modal = gateway(app, "palette.step", delta=index)["navigation"]["modal"]
                 assert modal["results"][modal["active_index"]]["hit"] == "content"
 

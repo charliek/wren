@@ -320,3 +320,13 @@ This pass made macOS a first-class build target alongside Linux, added user conf
 
 Verification at the end of this pass: `make check` passed (normal and smoke-test Clippy with warnings denied, every Rust suite, and the Python harness units), and `ICED_BACKEND=tiny-skia make smoke-x11` passed **142/142** on Linux. On the macOS host (Apple M4, macOS 26.5), the workspace builds, normal Clippy is clean, and every Rust suite passes. `tools/capture_scenes.py` captured real Metal windows there for visual review in several themes. Native macOS keyboard input (Cmd+Q through the new menu, typing, IME) has not been driven automatically: synthetic keystrokes need an Accessibility grant that ssh sessions lack. It is listed for manual acceptance.
 
+
+## Notes live only in groups
+
+A section now holds only groups, the way a workspace holds only sections, and the "(No group)" row is gone. `Note.parent: Parent` became `Note.group: GroupId`. `Op::CreateNote`, `Op::MoveNote`, and `Op::SetSort` take a `GroupId`, and `index::Scope::Group` replaced `Scope::Parent`. `Parent` remains only for selection, where a section that has no groups yet is selected with no group. The scanner ignores a `.md` file found directly in a section folder and warns about it ("note outside a group ignored"). A note dropped on a section row is now an invalid target; section rows still spring open, so a note can still reach another section's group. The note move picker lists only groups. Section selection, including a persisted `selection = '<section>'`, resolves to the section's first ordered group.
+
+The editor area prompts for the next missing level: New section…, then New group…, then New note…. Creating a group selects it. New note and New dated note are disabled until a group is selected, and running them from a section reports "Create a group first; notes live in groups".
+
+While fixing fixtures, a scanner gap became reachable. When an unreadable directory replaced a former note's path inside a group, the old note was restored from the previous scan. `preserve_incomplete` now skips notes whose path is a directory seen inside a group.
+
+`tools/capture_scenes.py` gained `empty-workspace`, `empty-section`, and `empty-group` scenes for these prompts. Verification: `make check` passed, and `ICED_BACKEND=tiny-skia make smoke-x11` passed **147/147**.

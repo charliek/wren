@@ -80,7 +80,6 @@ impl App {
                         Command::ToggleSection(section)
                     }
                     RowKind::Section(section) => Command::SelectSection(section),
-                    RowKind::NoGroup(section) => Command::SelectParent(Parent::Section(section)),
                     RowKind::Group(group) => Command::SelectParent(Parent::Group(group)),
                     RowKind::Note(note) => {
                         let hit = self.note_hits().into_iter().find(|hit| hit.note == note);
@@ -102,15 +101,13 @@ impl App {
                 generation: tag,
                 row,
             } if tag == generation => {
-                if let Some(item) = row.item() {
-                    return self.dispatch(Command::Rename(item)).task;
-                }
+                return self.dispatch(Command::Rename(row.item())).task;
             }
             DragEvent::Context {
                 generation: tag,
                 row,
             } if tag == generation => {
-                if let Some(target) = row.item().and_then(|item| self.item_target(item)) {
+                if let Some(target) = self.item_target(row.item()) {
                     return self.dispatch(Command::ItemActions(target)).task;
                 }
             }

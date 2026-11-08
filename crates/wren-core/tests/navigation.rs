@@ -44,7 +44,7 @@ fn fixture() -> TempDir {
     for (path, text) in [
         ("A/G/Note 2.md", "first body"),
         ("A/G/Note 10.md", "second body"),
-        ("A/Loose.md", "ungrouped body"),
+        ("A/L/Loose.md", "loose body"),
         ("B/H/Other.md", "another body"),
     ] {
         write(root.path(), path, text);
@@ -115,12 +115,12 @@ fn hits(session: &Session, query: &str) -> Vec<NoteId> {
         .collect()
 }
 
-fn titles(session: &Session, parent: Parent) -> Vec<&str> {
+fn titles(session: &Session, group: GroupId) -> Vec<&str> {
     session
         .model()
         .notes
         .iter()
-        .filter(|note| note.parent == parent)
+        .filter(|note| note.group == group)
         .map(|note| note.title.as_str())
         .collect()
 }
@@ -220,11 +220,11 @@ fn moving_a_parent_selected_active_note_restores_its_destination_on_restart() {
         write(root.path(), "A/G/b.md", "remaining body");
         fs::create_dir_all(root.path().join("B/H")).unwrap();
         let mut current = session(root.path());
-        let parent = Parent::Group(group(&current, "A/G"));
+        let g = group(&current, "A/G");
         run(
             &mut current,
             Op::SetSort {
-                parent,
+                group: g,
                 mode: "title".into(),
             },
         );
@@ -233,14 +233,16 @@ fn moving_a_parent_selected_active_note_restores_its_destination_on_restart() {
                 section: section(&current, "A"),
             }
         } else {
-            Op::SelectParent { parent }
+            Op::SelectParent {
+                parent: Parent::Group(g),
+            }
         };
         run(&mut current, selection);
         let active = note(&current, "A/G/a.md");
         assert_eq!(current.document().unwrap().note, active);
-        let to = Parent::Group(group(&current, "B/H"));
+        let to = group(&current, "B/H");
         run(&mut current, Op::MoveNote { note: active, to });
-        assert_eq!(current.selected_parent(), Some(to));
+        assert_eq!(current.selected_parent(), Some(Parent::Group(to)));
         drop(current);
         let reopened = session(root.path());
         assert_eq!(reopened.document().unwrap().path(), &rel("B/H/a.md"));
@@ -304,15 +306,15 @@ fn leaving_an_unreadable_active_note_revalidates_its_closed_index_even_on_metada
 }
 
 #[test]
-fn load_builds_descriptor_read_content_with_exact_parent_and_section_scopes() {
+fn load_builds_descriptor_read_content_with_exact_group_and_section_scopes() {
     let root = fixture();
     write(root.path(), "A/G/deep/Deep.md", "deep body");
     let session = session(root.path());
     assert_eq!(session.index().len(), 5);
     assert!(!session.index().is_empty());
-    let loose = note(&session, "A/Loose.md");
+    let loose = note(&session, "A/L/Loose.md");
     let deep = note(&session, "A/G/deep/Deep.md");
-    assert_eq!(session.index().preview(loose), Some("ungrouped body"));
+    assert_eq!(session.index().preview(loose), Some("loose body"));
     assert_eq!(session.index().content(deep), Some("deep body"));
     assert_eq!(
         session
@@ -331,7 +333,7 @@ fn load_builds_descriptor_read_content_with_exact_parent_and_section_scopes() {
             .index()
             .query(
                 "body",
-                Scope::Parent(Parent::Section(section(&session, "A"))),
+                Scope::Group(group(&session, "A/L")),
                 QueryKind::Filter,
                 100
             )
@@ -401,7 +403,7 @@ fn own_write_rename_move_ancestor_rename_and_delete_keep_index_ids_paths_and_sco
     let root = fixture();
     let mut session = session(root.path());
     let id = note(&session, "A/G/Note 2.md");
-    let destination = Parent::Group(group(&session, "B/H"));
+    let destination = group(&session, "B/H");
     open(&mut session, id);
     run(
         &mut session,
@@ -429,7 +431,7 @@ fn own_write_rename_move_ancestor_rename_and_delete_keep_index_ids_paths_and_sco
         },
     );
     let section_b = section(&session, "B");
-    assert_eq!(session.selected_parent(), Some(destination));
+    assert_eq!(session.selected_parent(), Some(Parent::Group(destination)));
     assert_eq!(
         session.index().query(
             "distinctive",
@@ -465,10 +467,7 @@ fn own_write_rename_move_ancestor_rename_and_delete_keep_index_ids_paths_and_sco
     run(
         &mut session,
         Op::Delete {
-            target: ItemRef::Group(match destination {
-                Parent::Group(group) => group,
-                _ => unreachable!(),
-            }),
+            target: ItemRef::Group(destination),
         },
     );
     assert!(session.index().content(id).is_none());
@@ -481,12 +480,12 @@ fn own_write_rename_move_ancestor_rename_and_delete_keep_index_ids_paths_and_sco
 fn partial_note_creation_and_relocation_publications_are_indexed_on_error() {
     let root = fixture();
     let mut session = session(root.path());
-    let parent = Parent::Group(group(&session, "A/G"));
+    let g = group(&session, "A/G");
     session.fail_next(Fault::DirectorySync);
     let error = session
         .apply_at(
             Op::CreateNote {
-                parent,
+                group: g,
                 title: "Published".into(),
             },
             Duration::ZERO,
@@ -507,7 +506,7 @@ fn partial_note_creation_and_relocation_publications_are_indexed_on_error() {
     );
     run(&mut session, Op::Flush);
     session.fail_next(Fault::DirectorySync);
-    let to = Parent::Section(section(&session, "B"));
+    let to = group(&session, "B/H");
     let error = session
         .apply_at(Op::MoveNote { note: id, to }, Duration::ZERO)
         .unwrap_err();
@@ -518,9 +517,9 @@ fn partial_note_creation_and_relocation_publications_are_indexed_on_error() {
     assert_eq!(
         session
             .index()
-            .query("Published", Scope::Parent(to), QueryKind::Jump, 100)[0]
+            .query("Published", Scope::Group(to), QueryKind::Jump, 100)[0]
             .path,
-        rel("B/Published.md")
+        rel("B/H/Published.md")
     );
 }
 
@@ -591,12 +590,12 @@ fn inactive_same_size_restored_mtime_edit_refreshes_index_without_requiring_tree
 fn external_create_move_rename_and_delete_remove_old_index_paths() {
     let root = fixture();
     let mut session = session(root.path());
-    write(root.path(), "A/New.md", "new external needle");
+    write(root.path(), "A/G/New.md", "new external needle");
     run(&mut session, Op::Reconcile);
-    let created = note(&session, "A/New.md");
+    let created = note(&session, "A/G/New.md");
     assert_eq!(hits(&session, "external needle"), [created]);
     fs::rename(
-        root.path().join("A/New.md"),
+        root.path().join("A/G/New.md"),
         root.path().join("B/H/Relocated.md"),
     )
     .unwrap();
@@ -812,23 +811,23 @@ fn empty_group_and_section_selections_round_trip_without_reopening_an_old_note()
 }
 
 #[test]
-fn section_selection_prefers_ungrouped_notes_otherwise_the_first_manually_ordered_group_even_if_empty(
-) {
+fn section_selection_picks_the_first_manually_ordered_group_even_if_empty() {
     let root = fixture();
     fs::create_dir_all(root.path().join("B/Empty")).unwrap();
     let mut session = session(root.path());
-    let section_a = Parent::Section(section(&session, "A"));
-    let loose = note(&session, "A/Loose.md");
+    let loose = note(&session, "A/L/Loose.md");
+    let l = group(&session, "A/L");
+    let g = group(&session, "A/G");
+    let section_a = section(&session, "A");
     run(
         &mut session,
-        Op::SelectSection {
-            section: match section_a {
-                Parent::Section(section) => section,
-                _ => unreachable!(),
-            },
+        Op::Reorder {
+            target: ItemRef::Group(l),
+            before: Some(ItemRef::Group(g)),
         },
     );
-    assert_eq!(session.selected_parent(), Some(section_a));
+    run(&mut session, Op::SelectSection { section: section_a });
+    assert_eq!(session.selected_parent(), Some(Parent::Group(l)));
     assert_eq!(session.document().unwrap().note, loose);
     let empty = group(&session, "B/Empty");
     let h = group(&session, "B/H");
@@ -858,11 +857,12 @@ fn section_selection_prefers_ungrouped_notes_otherwise_the_first_manually_ordere
 fn selecting_the_current_parent_does_not_replace_the_live_document() {
     let root = fixture();
     let mut session = session(root.path());
-    let parent = Parent::Group(group(&session, "A/G"));
+    let g = group(&session, "A/G");
+    let parent = Parent::Group(g);
     run(
         &mut session,
         Op::SetSort {
-            parent,
+            group: g,
             mode: "title".into(),
         },
     );
@@ -885,7 +885,7 @@ fn layout_width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values
     );
     let mut session = session(root.path());
     let id = note(&session, "A/G/Note 2.md");
-    let parent = Parent::Group(group(&session, "A/G"));
+    let g = group(&session, "A/G");
     open(&mut session, id);
     edit(&mut session, id, "view preferences must not flush");
     let ptr = session.document().unwrap().text.as_ptr();
@@ -904,7 +904,7 @@ fn layout_width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values
             width: 999,
         },
         Op::SetSort {
-            parent,
+            group: g,
             mode: "title".into(),
         },
     ] {
@@ -923,7 +923,7 @@ fn layout_width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values
     assert_eq!(session.state().layout(), "outline");
     assert_eq!(session.state().width("columns", "groups"), Some(333));
     assert_eq!(session.state().width("outline", "sections"), Some(420));
-    assert_eq!(titles(&session, parent), ["Note 2", "Note 10"]);
+    assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
     run(&mut session, Op::Flush);
     drop(session);
     let mut reopened = self::session(root.path());
@@ -967,7 +967,7 @@ fn corrupt_optional_metadata_allows_in_memory_view_changes_but_is_never_overwrit
     let mut session = session(root.path());
     assert!(!session.state().writable());
     let id = note(&session, "A/G/Note 2.md");
-    let parent = Parent::Group(group(&session, "A/G"));
+    let g = group(&session, "A/G");
     open(&mut session, id);
     edit(&mut session, id, "live draft");
     let ptr = session.document().unwrap().text.as_ptr();
@@ -982,7 +982,7 @@ fn corrupt_optional_metadata_allows_in_memory_view_changes_but_is_never_overwrit
         },
         Op::ResetWidths,
         Op::SetSort {
-            parent,
+            group: g,
             mode: "title".into(),
         },
     ] {
@@ -996,7 +996,7 @@ fn corrupt_optional_metadata_allows_in_memory_view_changes_but_is_never_overwrit
         );
     }
     assert_eq!(session.state().layout(), "outline");
-    assert_eq!(titles(&session, parent), ["Note 2", "Note 10"]);
+    assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
 }
 
 #[test]
@@ -1041,7 +1041,8 @@ fn invalid_preference_and_selection_requests_leave_views_selection_and_drafts_un
     let root = fixture();
     let mut session = session(root.path());
     let id = note(&session, "A/G/Note 2.md");
-    let parent = Parent::Group(group(&session, "A/G"));
+    let g = group(&session, "A/G");
+    let parent = Parent::Group(g);
     open(&mut session, id);
     edit(&mut session, id, "dirty truth");
     let selection = session.state().selection();
@@ -1055,11 +1056,11 @@ fn invalid_preference_and_selection_requests_leave_views_selection_and_drafts_un
             width: 200,
         },
         Op::SetSort {
-            parent,
+            group: g,
             mode: "future".into(),
         },
         Op::SetSort {
-            parent: Parent::Group(GroupId(u64::MAX)),
+            group: GroupId(u64::MAX),
             mode: "title".into(),
         },
         Op::SelectParent {
@@ -1080,7 +1081,7 @@ fn invalid_preference_and_selection_requests_leave_views_selection_and_drafts_un
 }
 
 #[test]
-fn sorting_is_per_parent_natural_or_modified_and_keeps_ids_history_and_manual_container_order() {
+fn sorting_is_per_group_natural_or_modified_and_keeps_ids_history_and_manual_container_order() {
     let root = fixture();
     write(root.path(), "B/H/Other 2.md", "two");
     write(root.path(), "B/H/Other 10.md", "ten");
@@ -1094,13 +1095,11 @@ fn sorting_is_per_parent_natural_or_modified_and_keeps_ids_history_and_manual_co
         set_modified(root.path(), path, seconds);
     }
     let mut session = session(root.path());
-    let parent = Parent::Group(group(&session, "A/G"));
-    let other_parent = Parent::Group(group(&session, "B/H"));
-    assert_eq!(titles(&session, parent), ["Note 10", "Note 2"]);
-    assert_eq!(
-        titles(&session, other_parent),
-        ["Other 2", "Other 10", "Other"]
-    );
+    let g = group(&session, "A/G");
+    let parent = Parent::Group(g);
+    let h = group(&session, "B/H");
+    assert_eq!(titles(&session, g), ["Note 10", "Note 2"]);
+    assert_eq!(titles(&session, h), ["Other 2", "Other 10", "Other"]);
     let id2 = note(&session, "A/G/Note 2.md");
     let id10 = note(&session, "A/G/Note 10.md");
     open(&mut session, id2);
@@ -1117,15 +1116,12 @@ fn sorting_is_per_parent_natural_or_modified_and_keeps_ids_history_and_manual_co
     run(
         &mut session,
         Op::SetSort {
-            parent,
+            group: g,
             mode: "title".into(),
         },
     );
-    assert_eq!(titles(&session, parent), ["Note 2", "Note 10"]);
-    assert_eq!(
-        titles(&session, other_parent),
-        ["Other 2", "Other 10", "Other"]
-    );
+    assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
+    assert_eq!(titles(&session, h), ["Other 2", "Other 10", "Other"]);
     assert_eq!(
         session
             .model()
@@ -1145,8 +1141,8 @@ fn sorting_is_per_parent_natural_or_modified_and_keeps_ids_history_and_manual_co
     assert_eq!(session.document().unwrap().note, id2);
     drop(session);
     let mut reopened = self::session(root.path());
-    let parent = Parent::Group(group(&reopened, "A/G"));
-    assert_eq!(titles(&reopened, parent), ["Note 2", "Note 10"]);
+    let g = group(&reopened, "A/G");
+    assert_eq!(titles(&reopened, g), ["Note 2", "Note 10"]);
     assert_eq!(
         reopened
             .model()
@@ -1159,11 +1155,11 @@ fn sorting_is_per_parent_natural_or_modified_and_keeps_ids_history_and_manual_co
     run(
         &mut reopened,
         Op::SetSort {
-            parent,
+            group: g,
             mode: "modified".into(),
         },
     );
-    assert_eq!(titles(&reopened, parent), ["Note 10", "Note 2"]);
+    assert_eq!(titles(&reopened, g), ["Note 10", "Note 2"]);
 }
 
 #[test]
@@ -1172,8 +1168,8 @@ fn modified_sort_reorders_on_own_save_and_external_reconciliation_with_natural_t
     set_modified(root.path(), "A/G/Note 2.md", 100);
     set_modified(root.path(), "A/G/Note 10.md", 100);
     let mut session = session(root.path());
-    let parent = Parent::Group(group(&session, "A/G"));
-    assert_eq!(titles(&session, parent), ["Note 2", "Note 10"]);
+    let g = group(&session, "A/G");
+    assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
     let id10 = note(&session, "A/G/Note 10.md");
     open(&mut session, id10);
     run(
@@ -1183,14 +1179,14 @@ fn modified_sort_reorders_on_own_save_and_external_reconciliation_with_natural_t
             contents: "newest own save".into(),
         },
     );
-    assert_eq!(titles(&session, parent), ["Note 10", "Note 2"]);
+    assert_eq!(titles(&session, g), ["Note 10", "Note 2"]);
     set_modified(root.path(), "A/G/Note 2.md", 4_000_000_000);
     run(&mut session, Op::Reconcile);
-    assert_eq!(titles(&session, parent), ["Note 2", "Note 10"]);
+    assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
     assert_eq!(
         session
             .index()
-            .query("", Scope::Parent(parent), QueryKind::Filter, 100)
+            .query("", Scope::Group(g), QueryKind::Filter, 100)
             .iter()
             .map(|hit| hit.title.as_str())
             .collect::<Vec<_>>(),
@@ -1208,7 +1204,7 @@ fn moving_a_group_preserves_its_sort_selection_history_and_index_scope_on_reopen
     run(
         &mut session,
         Op::SetSort {
-            parent,
+            group: g,
             mode: "title".into(),
         },
     );
@@ -1223,7 +1219,7 @@ fn moving_a_group_preserves_its_sort_selection_history_and_index_scope_on_reopen
     );
     assert_eq!(session.selected_parent(), Some(parent));
     assert_eq!(session.document().unwrap().note, id);
-    assert_eq!(titles(&session, parent), ["Note 2", "Note 10"]);
+    assert_eq!(titles(&session, g), ["Note 2", "Note 10"]);
     assert_eq!(session.state().selection(), Some(rel("B/G")));
     assert_eq!(session.state().sort(&rel("B/G")), "title");
     assert_eq!(
@@ -1702,37 +1698,46 @@ fn jump_recency_updates_for_back_forward_and_restores_from_history() {
 }
 
 #[test]
-fn section_selection_restores_its_last_note_rather_than_the_new_first_sorted_note() {
+fn group_selection_restores_its_last_note_rather_than_the_new_first_sorted_note() {
     let root = fixture();
-    write(root.path(), "A/Loose 2.md", "another ungrouped note");
+    write(root.path(), "A/L/Loose 2.md", "another loose note");
     write(
         root.path(),
         ".wren/workspace.toml",
-        "selection = 'A'\nlast_open_note = 'A/Loose.md'\n",
+        "selection = 'A/L'\nlast_open_note = 'A/L/Loose.md'\n",
     );
-    set_modified(root.path(), "A/Loose.md", 100);
-    set_modified(root.path(), "A/Loose 2.md", 200);
+    set_modified(root.path(), "A/L/Loose.md", 100);
+    set_modified(root.path(), "A/L/Loose 2.md", 200);
     let session = session(root.path());
-    assert_eq!(
-        titles(&session, Parent::Section(section(&session, "A"))),
-        ["Loose 2", "Loose"]
+    let l = group(&session, "A/L");
+    assert_eq!(titles(&session, l), ["Loose 2", "Loose"]);
+    assert_eq!(session.document().unwrap().path(), &rel("A/L/Loose.md"));
+    assert_eq!(session.selected_parent(), Some(Parent::Group(l)));
+}
+
+#[test]
+fn a_persisted_section_selection_restores_to_its_first_group() {
+    let root = fixture();
+    write(
+        root.path(),
+        ".wren/workspace.toml",
+        "selection = 'A'\nlast_open_note = 'A/G/Note 10.md'\n",
     );
-    assert_eq!(session.document().unwrap().path(), &rel("A/Loose.md"));
-    assert_eq!(
-        session.selected_parent(),
-        Some(Parent::Section(section(&session, "A")))
-    );
+    let session = session(root.path());
+    let g = group(&session, "A/G");
+    assert_eq!(session.selected_parent(), Some(Parent::Group(g)));
+    assert_eq!(session.document().unwrap().path(), &rel("A/G/Note 10.md"));
 }
 
 #[test]
 fn unchanged_reconciliation_after_manual_and_title_sort_is_quiet() {
     let root = fixture();
     let mut session = session(root.path());
-    let parent = Parent::Group(group(&session, "A/G"));
+    let g = group(&session, "A/G");
     run(
         &mut session,
         Op::SetSort {
-            parent,
+            group: g,
             mode: "title".into(),
         },
     );
@@ -1838,14 +1843,14 @@ fn history_branching_retains_independent_mru_order_on_restart_and_same_note_open
     let mut session = session(root.path());
     let a = note(&session, "A/G/Note 2.md");
     let b = note(&session, "A/G/Note 10.md");
-    let c = note(&session, "A/Loose.md");
+    let c = note(&session, "A/L/Loose.md");
     open(&mut session, a);
     open(&mut session, b);
     run(&mut session, Op::Back);
     open(&mut session, c);
     assert_eq!(
         session.state().history(),
-        [rel("A/G/Note 2.md"), rel("A/Loose.md")]
+        [rel("A/G/Note 2.md"), rel("A/L/Loose.md")]
     );
     assert_eq!(session.state().history_position(), Some(1));
     assert_eq!(
@@ -1853,11 +1858,11 @@ fn history_branching_retains_independent_mru_order_on_restart_and_same_note_open
         [
             rel("A/G/Note 10.md"),
             rel("A/G/Note 2.md"),
-            rel("A/Loose.md")
+            rel("A/L/Loose.md")
         ]
     );
     let expected = vec![
-        rel("A/Loose.md"),
+        rel("A/L/Loose.md"),
         rel("A/G/Note 2.md"),
         rel("A/G/Note 10.md"),
     ];
@@ -2015,7 +2020,7 @@ fn duplicate_visit_occurrence_and_forward_position_survive_restart_and_unchanged
     let mut session = session(root.path());
     let a = note(&session, "A/G/Note 2.md");
     let b = note(&session, "A/G/Note 10.md");
-    let c = note(&session, "A/Loose.md");
+    let c = note(&session, "A/L/Loose.md");
     for id in [a, b, a, c] {
         open(&mut session, id);
     }
@@ -2037,7 +2042,7 @@ fn duplicate_visit_occurrence_and_forward_position_survive_restart_and_unchanged
     for (position, path) in [
         (1, "A/G/Note 10.md"),
         (2, "A/G/Note 2.md"),
-        (3, "A/Loose.md"),
+        (3, "A/L/Loose.md"),
     ] {
         run(&mut reopened, Op::Forward);
         assert_eq!(reopened.state().history_position(), Some(position));
@@ -2049,15 +2054,15 @@ fn duplicate_visit_occurrence_and_forward_position_survive_restart_and_unchanged
 #[test]
 fn pruned_entries_remap_the_selected_occurrence_instead_of_finding_the_last_duplicate() {
     let root = fixture();
-    for path in ["A/Missing 1.md", "A/Missing 2.md"] {
+    for path in ["A/L/Missing 1.md", "A/L/Missing 2.md"] {
         write(root.path(), path, "will be deleted");
     }
     let mut session = session(root.path());
     let a = note(&session, "A/G/Note 2.md");
     let b = note(&session, "A/G/Note 10.md");
-    let c = note(&session, "A/Loose.md");
-    let missing1 = note(&session, "A/Missing 1.md");
-    let missing2 = note(&session, "A/Missing 2.md");
+    let c = note(&session, "A/L/Loose.md");
+    let missing1 = note(&session, "A/L/Missing 1.md");
+    let missing2 = note(&session, "A/L/Missing 2.md");
     for id in [missing1, a, missing2, b, a, c] {
         open(&mut session, id);
     }
@@ -2066,8 +2071,8 @@ fn pruned_entries_remap_the_selected_occurrence_instead_of_finding_the_last_dupl
     }
     assert_eq!(session.state().history_position(), Some(1));
     drop(session);
-    fs::remove_file(root.path().join("A/Missing 1.md")).unwrap();
-    fs::remove_file(root.path().join("A/Missing 2.md")).unwrap();
+    fs::remove_file(root.path().join("A/L/Missing 1.md")).unwrap();
+    fs::remove_file(root.path().join("A/L/Missing 2.md")).unwrap();
     let mut reopened = self::session(root.path());
     assert_eq!(reopened.state().history_position(), Some(0));
     assert!(!reopened.can_back());
@@ -2077,7 +2082,7 @@ fn pruned_entries_remap_the_selected_occurrence_instead_of_finding_the_last_dupl
             rel("A/G/Note 2.md"),
             rel("A/G/Note 10.md"),
             rel("A/G/Note 2.md"),
-            rel("A/Loose.md")
+            rel("A/L/Loose.md")
         ]
     );
     assert!(!reopened
@@ -2115,7 +2120,7 @@ fn deleting_the_selected_history_entry_prunes_visits_and_mru_without_losing_forw
     let mut session = session(root.path());
     let a = note(&session, "A/G/Note 2.md");
     let b = note(&session, "A/G/Note 10.md");
-    let c = note(&session, "A/Loose.md");
+    let c = note(&session, "A/L/Loose.md");
     for id in [a, b, a, c] {
         open(&mut session, id);
     }
@@ -2126,12 +2131,12 @@ fn deleting_the_selected_history_entry_prunes_visits_and_mru_without_losing_forw
     assert!(session.document().is_none());
     assert_eq!(
         session.state().history(),
-        [rel("A/G/Note 10.md"), rel("A/Loose.md")]
+        [rel("A/G/Note 10.md"), rel("A/L/Loose.md")]
     );
     assert_eq!(session.state().history_position(), Some(0));
     assert_eq!(
         session.state().recent(),
-        [rel("A/G/Note 10.md"), rel("A/Loose.md")]
+        [rel("A/G/Note 10.md"), rel("A/L/Loose.md")]
     );
     assert!(!session.can_back());
     assert!(session.can_forward());
@@ -2141,7 +2146,7 @@ fn deleting_the_selected_history_entry_prunes_visits_and_mru_without_losing_forw
     assert_eq!(reopened.state().history_position(), Some(0));
     assert!(reopened.can_forward());
     run(&mut reopened, Op::Forward);
-    assert_eq!(reopened.document().unwrap().path(), &rel("A/Loose.md"));
+    assert_eq!(reopened.document().unwrap().path(), &rel("A/L/Loose.md"));
 }
 
 #[test]
@@ -2150,7 +2155,7 @@ fn mru_and_the_current_duplicate_occurrence_follow_note_group_and_section_moves(
     let mut session = session(root.path());
     let a = note(&session, "A/G/Note 2.md");
     let b = note(&session, "A/G/Note 10.md");
-    let c = note(&session, "A/Loose.md");
+    let c = note(&session, "A/L/Loose.md");
     for id in [a, b, a, c] {
         open(&mut session, id);
     }
@@ -2171,14 +2176,14 @@ fn mru_and_the_current_duplicate_occurrence_follow_note_group_and_section_moves(
             new_name: "Archive".into(),
         },
     );
-    let to = Parent::Section(section(&session, "A"));
+    let to = group(&session, "A/L");
     run(&mut session, Op::MoveNote { note: b, to });
     assert_eq!(session.state().history_position(), Some(2));
     assert_eq!(
         session.state().recent(),
         [
-            rel("A/Note 10.md"),
-            rel("A/Loose.md"),
+            rel("A/L/Note 10.md"),
+            rel("A/L/Loose.md"),
             rel("Archive/G/Note 2.md")
         ]
     );
@@ -2189,28 +2194,28 @@ fn mru_and_the_current_duplicate_occurrence_follow_note_group_and_section_moves(
         recent_paths(&reopened, 3),
         [
             rel("Archive/G/Note 2.md"),
-            rel("A/Loose.md"),
-            rel("A/Note 10.md")
+            rel("A/L/Loose.md"),
+            rel("A/L/Note 10.md")
         ]
     );
     run(&mut reopened, Op::Back);
-    assert_eq!(reopened.document().unwrap().path(), &rel("A/Note 10.md"));
+    assert_eq!(reopened.document().unwrap().path(), &rel("A/L/Note 10.md"));
 }
 
 #[test]
 fn navigation_retention_is_capped_for_visits_mru_and_loaded_overlong_metadata() {
     let root = TempDir::new().unwrap();
     for number in 0..120 {
-        write(root.path(), &format!("S/{number}.md"), "body");
+        write(root.path(), &format!("S/G/{number}.md"), "body");
     }
     let mut session = session(root.path());
     for number in 0..120 {
-        let id = note(&session, &format!("S/{number}.md"));
+        let id = note(&session, &format!("S/G/{number}.md"));
         open(&mut session, id);
     }
     assert_eq!(session.state().history().len(), 100);
     assert_eq!(session.state().recent().len(), 100);
-    assert_eq!(session.state().history()[0], rel("S/20.md"));
+    assert_eq!(session.state().history()[0], rel("S/G/20.md"));
     assert_eq!(session.state().history_position(), Some(99));
     let ranking = recent_paths(&session, 120);
     drop(session);
@@ -2218,34 +2223,34 @@ fn navigation_retention_is_capped_for_visits_mru_and_loaded_overlong_metadata() 
     assert_eq!(recent_paths(&reopened, 120), ranking);
     drop(reopened);
     let paths = (0..120)
-        .map(|number| format!("'S/{number}.md'"))
+        .map(|number| format!("'S/G/{number}.md'"))
         .collect::<Vec<_>>()
         .join(",");
-    write(root.path(), ".wren/workspace.toml", format!("history = [{paths}]\nhistory_position = 10\nrecent = [{paths}]\nselection = 'S/10.md'\n"));
+    write(root.path(), ".wren/workspace.toml", format!("history = [{paths}]\nhistory_position = 10\nrecent = [{paths}]\nselection = 'S/G/10.md'\n"));
     let reopened = self::session(root.path());
     assert_eq!(reopened.state().history().len(), 100);
     assert_eq!(reopened.state().history_position(), Some(0));
-    assert_eq!(reopened.document().unwrap().path(), &rel("S/10.md"));
+    assert_eq!(reopened.document().unwrap().path(), &rel("S/G/10.md"));
     assert_eq!(reopened.state().recent().len(), 100);
-    assert_eq!(reopened.state().recent().last(), Some(&rel("S/119.md")));
+    assert_eq!(reopened.state().recent().last(), Some(&rel("S/G/119.md")));
 }
 
 #[test]
 fn corrupt_new_navigation_fields_leave_metadata_read_only_and_never_damage_markdown() {
     for source in [
         "history_position = 0",
-        "history = ['A/Loose.md']\nhistory_position = -1",
-        "history = ['A/Loose.md']\nhistory_position = 1",
-        "history = ['A/Loose.md']\nhistory_position = '0'",
-        "recent = 'A/Loose.md'",
-        "recent = ['A/Loose.md', 'A/Loose.md']",
+        "history = ['A/L/Loose.md']\nhistory_position = -1",
+        "history = ['A/L/Loose.md']\nhistory_position = 1",
+        "history = ['A/L/Loose.md']\nhistory_position = '0'",
+        "recent = 'A/L/Loose.md'",
+        "recent = ['A/L/Loose.md', 'A/L/Loose.md']",
         "recent = ['../escape.md']",
     ] {
         let root = fixture();
         write(root.path(), ".wren/workspace.toml", source);
         let mut session = session(root.path());
         assert!(!session.state().writable(), "{source}");
-        let id = note(&session, "A/Loose.md");
+        let id = note(&session, "A/L/Loose.md");
         open(&mut session, id);
         run(
             &mut session,
@@ -2255,7 +2260,7 @@ fn corrupt_new_navigation_fields_leave_metadata_read_only_and_never_damage_markd
             },
         );
         assert_eq!(
-            fs::read_to_string(root.path().join("A/Loose.md")).unwrap(),
+            fs::read_to_string(root.path().join("A/L/Loose.md")).unwrap(),
             "safe changed Markdown"
         );
         assert_eq!(
@@ -2266,23 +2271,25 @@ fn corrupt_new_navigation_fields_leave_metadata_read_only_and_never_damage_markd
 }
 
 #[test]
-fn exact_empty_no_group_selection_stays_selected_through_sort_preferences_and_reopen() {
+fn exact_empty_section_selection_stays_selected_through_sort_preferences_and_reopen() {
     let root = fixture();
+    fs::create_dir(root.path().join("Empty")).unwrap();
     let mut session = session(root.path());
-    let section_b = section(&session, "B");
-    run(&mut session, Op::SelectSection { section: section_b });
-    assert_eq!(session.document().unwrap().path(), &rel("B/H/Other.md"));
-    let parent = Parent::Section(section_b);
+    let g = group(&session, "A/G");
+    let empty = section(&session, "Empty");
+    let other = note(&session, "B/H/Other.md");
+    open(&mut session, other);
+    let parent = Parent::Section(empty);
     run(&mut session, Op::SelectParent { parent });
     assert!(session.document().is_none());
     assert_eq!(session.selected_parent(), Some(parent));
-    assert_eq!(session.state().selection(), Some(rel("B")));
+    assert_eq!(session.state().selection(), Some(rel("Empty")));
     assert_eq!(session.state().last_open_note(), None);
     for mode in ["title", "modified"] {
         run(
             &mut session,
             Op::SetSort {
-                parent,
+                group: g,
                 mode: mode.into(),
             },
         );
@@ -2291,13 +2298,14 @@ fn exact_empty_no_group_selection_stays_selected_through_sort_preferences_and_re
     }
     drop(session);
     let mut reopened = self::session(root.path());
-    let restored = Parent::Section(section(&reopened, "B"));
+    let restored = Parent::Section(section(&reopened, "Empty"));
     assert!(reopened.document().is_none());
     assert_eq!(reopened.selected_parent(), Some(restored));
+    let g = group(&reopened, "A/G");
     run(
         &mut reopened,
         Op::SetSort {
-            parent: restored,
+            group: g,
             mode: "title".into(),
         },
     );
@@ -2313,7 +2321,7 @@ fn section_row_selects_an_empty_section_and_obeys_the_existing_flush_barrier() {
     let root = fixture();
     fs::create_dir(root.path().join("Empty")).unwrap();
     let mut session = session(root.path());
-    let active = note(&session, "A/Loose.md");
+    let active = note(&session, "A/L/Loose.md");
     open(&mut session, active);
     edit(&mut session, active, "retained at section barrier");
     let empty = section(&session, "Empty");
@@ -2752,13 +2760,13 @@ fn successful_workspace_switch_replaces_the_entire_index_and_parent_selection() 
     let other_root = TempDir::new().unwrap();
     write(
         other_root.path(),
-        "Different/Unique.md",
+        "Different/G/Unique.md",
         "new workspace only",
     );
     write(
         other_root.path(),
         ".wren/workspace.toml",
-        "selection = 'Different/Unique.md'\nlayout = 'outline'\n",
+        "selection = 'Different/G/Unique.md'\nlayout = 'outline'\n",
     );
     let mut session = session(root.path());
     let old_note = note(&session, "A/G/Note 2.md");
@@ -2780,7 +2788,7 @@ fn successful_workspace_switch_replaces_the_entire_index_and_parent_selection() 
         session
             .model()
             .parent_path(session.selected_parent().unwrap()),
-        Some(&rel("Different"))
+        Some(&rel("Different/G"))
     );
     assert_eq!(
         fs::read_to_string(root.path().join("A/G/Note 2.md")).unwrap(),

@@ -55,10 +55,8 @@ impl App {
         let group = self.selected_group.and_then(|id| model.group(id));
         let sections_conflict =
             section.is_some_and(|section| !matches_name(&self.filters.sections, &section.name));
-        let groups_conflict = group
-            .map(|group| group.name.as_str())
-            .or_else(|| section.map(|_| "(No group)"))
-            .is_some_and(|name| !matches_name(&self.filters.groups, name));
+        let groups_conflict =
+            group.is_some_and(|group| !matches_name(&self.filters.groups, &group.name));
         let outline_conflict = section
             .is_some_and(|section| !matches_name(&self.filters.outline, &section.name))
             && group.is_none_or(|group| !matches_name(&self.filters.outline, &group.name));
@@ -86,12 +84,13 @@ impl App {
         if let Some(loading) = &self.loading {
             return loading.note_hits.clone();
         }
-        let (Some(session), Some(parent)) = (&self.session, self.browser_parent()) else {
+        let (Some(session), Some(Parent::Group(group))) = (&self.session, self.browser_parent())
+        else {
             return Vec::new();
         };
         session.index().query(
             &self.filters.notes,
-            Scope::Parent(parent),
+            Scope::Group(group),
             QueryKind::Filter,
             usize::MAX,
         )
@@ -143,9 +142,9 @@ impl App {
         self.session
             .as_ref()
             .and_then(|session| {
-                self.selected_parent()
-                    .and_then(|parent| session.model().parent_path(parent))
-                    .map(|path| session.state().sort(path))
+                self.selected_group
+                    .and_then(|group| session.model().group(group))
+                    .map(|group| session.state().sort(&group.path))
             })
             .unwrap_or("modified")
     }

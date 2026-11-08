@@ -161,12 +161,7 @@ pub(crate) fn tree_differs(old: &Workspace, new: &Workspace) -> bool {
     let notes: HashMap<_, _> = old
         .notes
         .iter()
-        .map(|item| {
-            (
-                item.id,
-                (&item.path, item.modified, item.bytes, item.parent),
-            )
-        })
+        .map(|item| (item.id, (&item.path, item.modified, item.bytes, item.group)))
         .collect();
     sections.len() != new.sections.len()
         || groups.len() != new.groups.len()
@@ -180,6 +175,6 @@ pub(crate) fn tree_differs(old: &Workspace, new: &Workspace) -> bool {
             .iter()
             .any(|item| groups.get(&item.id) != Some(&(&item.path, item.section)))
         || new.notes.iter().any(|item| {
-            notes.get(&item.id) != Some(&(&item.path, item.modified, item.bytes, item.parent))
+            notes.get(&item.id) != Some(&(&item.path, item.modified, item.bytes, item.group))
         })
 }

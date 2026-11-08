@@ -545,7 +545,9 @@ impl App {
             Mode::MoveNote(_) | Mode::MoveGroup(_) => {
                 if let Some(model) = self.model() {
                     let current = match mode {
-                        Mode::MoveNote(note) => model.note(note).map(|note| note.parent),
+                        Mode::MoveNote(note) => {
+                            model.note(note).map(|note| Parent::Group(note.group))
+                        }
                         Mode::MoveGroup(group) => model
                             .group(group)
                             .map(|group| Parent::Section(group.section)),
@@ -553,15 +555,13 @@ impl App {
                     };
                     for section in &model.sections {
                         let parent = Parent::Section(section.id);
-                        let title = if matches!(mode, Mode::MoveNote(_)) {
-                            format!("{} › (No group)", section.name)
-                        } else {
-                            section.name.clone()
-                        };
-                        if current != Some(parent) && fuzzy_score(&query, &title).is_some() {
+                        if matches!(mode, Mode::MoveGroup(_))
+                            && current != Some(parent)
+                            && fuzzy_score(&query, &section.name).is_some()
+                        {
                             rows.push(destination_row(
                                 parent,
-                                title,
+                                section.name.clone(),
                                 section.path.as_path().to_string_lossy().into_owned(),
                             ));
                         }
@@ -659,7 +659,10 @@ impl App {
                     self.blocked("The move source no longer exists in its original parent")
                 } else {
                     match mode {
-                        Mode::MoveNote(note) => self.process_core(Op::MoveNote { note, to }),
+                        Mode::MoveNote(note) => match to {
+                            Parent::Group(to) => self.process_core(Op::MoveNote { note, to }),
+                            Parent::Section(_) => self.blocked("A note can only move to a group"),
+                        },
                         Mode::MoveGroup(group) => match to {
                             Parent::Section(to) => self.process_core(Op::MoveGroup { group, to }),
                             _ => self.blocked("A group can only move to a section"),

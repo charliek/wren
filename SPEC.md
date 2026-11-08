@@ -51,7 +51,7 @@ at a time**.
 | Workspace  | A root directory registered in config     | `~/notes/work/`                |
 | Section    | Top-level directory in the workspace      | `1-1s/`, `Projects/`, `Inbox/` |
 | Group      | Directory inside a section                | `1-1s/Alice Chen/`             |
-| Note       | `.md` file in a group **or** in a section | `1-1s/Alice Chen/2026-11-04.md`|
+| Note       | `.md` file in a group                     | `1-1s/Alice Chen/2026-11-04.md`|
 
 ```
 ~/notes/work/                     ← workspace root
@@ -66,17 +66,23 @@ at a time**.
 ├── Projects/
 │   ├── Hub Migration/
 │   │   └── Design notes.md
-│   └── Quarterly planning.md     ← note directly in a section ("ungrouped")
+│   └── Planning/
+│       └── Quarterly planning.md
 └── Inbox/
-    └── scratch.md
+    └── Triage/
+        └── scratch.md
 ```
 
 Rules:
 
-- **Notes may live directly in a section** ("ungrouped") as well as in groups,
-  so you never have to invent a group just to write something down. The UI
-  shows ungrouped notes under a synthetic "(No group)" row at the top of the
-  section's group list.
+- **Every note lives in a group.** A section holds only groups, just as a
+  workspace holds only sections, and the app never creates or moves a note
+  directly into a section. A `.md` file found directly in a section folder is
+  ignored, like a non-`.md` file, and the app shows a warning naming it. A new
+  workspace guides you through creating one of each: with no section the
+  editor area offers "New section…", and with a section that has no groups it
+  offers "New group…". Creating a group selects it, so the next note goes
+  there.
 - **Depth is capped at two directories.** A directory found deeper than
   `section/group/` is not shown as structure. Its `.md` files appear as notes of
   the enclosing group, with their relative path shown as a subtitle, and the
@@ -109,10 +115,10 @@ search box, like Apple Notes, Bear or Finder's column view:
 ├────────────┬┬─────────────┬┬────────────────┬┬───────────────────────────────────┤
 │ SECTIONS + ││ GROUPS·1:1s+││ NOTES·Alice  + ││ 1:1s › Alice Chen › 2026-11-04  Move… │
 │ [🔍 filter]││ [🔍 filter ]││ [🔍 titles+text]│├───────────────────────────────────────┤
-│ ▌1:1s   11 ││ (No group) 1││ ▌2026-11-04     ││  1  # 1:1 — Alice Chen · Nov 4        │
-│  Projects 6││ ▌Alice Chen5││  2 min · API…   ││  2                                    │
-│  Inbox   3 ││  Bob Ruiz  3││  2026-10-28     ││  3  ## Agenda                         │
-│  Reference5││  Priya Nair2││  Oct 28 · …     ││  4  - API migration: cutover plan…    │
+│ ▌1:1s   11 ││ ▌Alice Chen5││ ▌2026-11-04     ││  1  # 1:1 — Alice Chen · Nov 4        │
+│  Projects 6││  Bob Ruiz  3││  2 min · API…   ││  2                                    │
+│  Inbox   3 ││  Priya Nair2││  2026-10-28     ││  3  ## Agenda                         │
+│  Reference5││  Templates 1││  Oct 28 · …     ││  4  - API migration: cutover plan…    │
 │            ││             ││ Sorted by mod.  ││ Markdown · 16 lines      Ln 16 ● Saved │
 └────────────┴┴─────────────┴┴────────────────┴┴───────────────────────────────────┘
                 ↑ drag handles between every pane (││)
@@ -128,9 +134,9 @@ them), then the Notes column, then the editor. It gives the editor roughly
 │ SECTIONS & GROUPS││ NOTES·Alice    ││ 1:1s › Alice Chen › 2026-11-04        │
 │ [🔍 filter      ]││ [🔍 titles+text]││                                       │
 │ ▾ 1:1s        11 ││ ▌2026-11-04     ││  1  # 1:1 — Alice Chen · Nov 4        │
-│     (No group) 1 ││  2026-10-28     ││  …                                    │
-│   ▌ Alice Chen 5 ││  2026-10-21     ││                                       │
-│     Bob Ruiz   3 ││                 ││                                       │
+│   ▌ Alice Chen 5 ││  2026-10-28     ││  …                                    │
+│     Bob Ruiz   3 ││  2026-10-21     ││                                       │
+│     Priya Nair 2 ││                 ││                                       │
 │ ▸ Projects     6 ││                 ││                                       │
 │ ▸ Inbox        3 ││                 ││                                       │
 └──────────────────┴┴────────────────┴┴──────────────────────────────────────┘
@@ -195,7 +201,7 @@ shows with its parent section expanded):
 |----------|-----------------------------|-------------------------------------------------------------------------|
 | Sections | workspace                   | section names (fuzzy)                                                   |
 | Groups   | selected section            | group names (fuzzy)                                                     |
-| Notes    | selected group, or section if "(No group)"/none selected | note titles (fuzzy) **and** note content (substring, case-insensitive) |
+| Notes    | selected group              | note titles (fuzzy) **and** note content (substring, case-insensitive) |
 
 Notes-column search shows a match snippet under each result. Opening a
 content match puts the cursor on the first hit.
@@ -221,8 +227,6 @@ Allowed moves, and only these:
 | Drag      | Drop onto                         | Result                                           |
 |-----------|-----------------------------------|--------------------------------------------------|
 | Note      | a group row (any section)         | file moved into that group directory             |
-| Note      | a section row                     | file moved to the section root (ungrouped)       |
-| Note      | "(No group)" row                  | same as onto the section row                     |
 | Group     | a section row                     | directory moved into that section                |
 | Group     | between groups (same column)      | reorder                                          |
 | Section   | between sections                  | reorder                                          |
@@ -450,8 +454,8 @@ and `cargo fmt --check` passing on macOS and Linux.
   original intact.
 
 **M2 — Columns + editor + autosave**
-- Layout A (1.4) wired to the model: selection, counts, "(No group)"
-  row, notes sorted by mtime, breadcrumb, `+` buttons, rename via
+- Layout A (1.4) wired to the model: selection, counts, notes sorted by
+  mtime, breadcrumb, `+` buttons, rename via
   double-click or Enter.
 - `autosave.rs` as a pure state machine (`on_edit(now)`, `on_tick(now)`,
   `on_flush_trigger()` → `Option<WriteNote>`), unit-tested with fake time.

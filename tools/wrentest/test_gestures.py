@@ -243,8 +243,8 @@ def assert_browser_geometry(app: WrenApp, current: dict) -> None:
         measured = bounds(app)
         root = measured["root"]
         left = root["x"]
-        kinds = (({"section"}, {"group", "no_group"}, {"note"})
-                 if current["layout"] == "columns" else ({"section", "group", "no_group"}, {"note"}))
+        kinds = (({"section"}, {"group"}, {"note"})
+                 if current["layout"] == "columns" else ({"section", "group"}, {"note"}))
         for pane, row_kinds in zip(DEFAULT_WIDTHS[current["layout"]], kinds):
             right = left + current["effective_widths"][pane]
             rows = [row for row in measured["rows"] if set(row["key"]) <= row_kinds]
@@ -291,7 +291,6 @@ def native_workspace(tmp_path: Path, request):
         PICKER_B: "second picker document\n",
         f"{DESTINATION}/A resident.md": "destination resident must not open on drop\n",
         f"{REMOTE}/Northern.md": "remote group document\n",
-        f"{SECTIONS[1]}/Loose.md": "remote ungrouped document\n",
     }
     for relative, text in contents.items():
         path = root / relative
@@ -655,7 +654,7 @@ def test_native_spring_hover_is_transient_and_note_drop_survives_hidden_source(n
         hover_point = point_in(visible_row(app, {"section": other_section})["visible"])
         hover_started = time.monotonic()
         move(window, hover_point)
-        preview(app, source, {"section": other_section})
+        preview(app, source, None)
 
         def sprung_without_navigation():
             current = session(app)

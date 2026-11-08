@@ -30,7 +30,7 @@ CAPTURE_TIMEOUT = 8
 MAX_CAPTURES = 40
 STABLE_CAPTURES = 3
 BODY_COLORS = {"dark": (0xd5, 0xd9, 0xe0), "light": (0x31, 0x38, 0x44)}
-NOTE = "Viewport/Proof.md"
+NOTE = "Viewport/Proofs/Proof.md"
 IDENTITY_FIELDS = (
     "text", "cursor", "selection", "selected_text", "revision", "line_count", "words",
     "can_undo", "can_redo", "find_open", "find_query", "find_count", "find_current",

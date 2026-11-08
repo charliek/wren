@@ -10,7 +10,7 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 
 use crate::fs_store::{DiskFile, FsStore, RelPath};
-use crate::model::{Note, NoteId, Parent, SectionId, Workspace};
+use crate::model::{GroupId, Note, NoteId, SectionId, Workspace};
 
 pub const MAX_CONTENT_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_QUERY_BYTES: usize = 4096;
@@ -35,10 +35,9 @@ const MAX_QUEUED_WARNINGS: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Workspace,
-    /// Includes both ungrouped notes and every group in the section.
+    /// Every group in the section.
     Section(SectionId),
-    /// Exactly this parent; a section parent includes only ungrouped notes.
-    Parent(Parent),
+    Group(GroupId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +83,7 @@ impl Content {
 struct Entry {
     title: String,
     path: RelPath,
-    parent: Parent,
+    group: GroupId,
     section: Option<SectionId>,
     modified: SystemTime,
     opened: u64,
@@ -166,7 +165,7 @@ impl Index {
         let in_scope = |entry: &Entry| match scope {
             Scope::Workspace => true,
             Scope::Section(section) => entry.section == Some(section),
-            Scope::Parent(parent) => entry.parent == parent,
+            Scope::Group(group) => entry.group == group,
         };
         if (query.is_empty() && kind == QueryKind::Search) || !self.entries.values().any(in_scope) {
             return Vec::new();
@@ -265,20 +264,17 @@ impl Index {
         }
         let mut added = Vec::new();
         for note in &workspace.notes {
-            let section = match note.parent {
-                Parent::Section(section) => Some(section),
-                Parent::Group(group) => sections.get(&group).copied(),
-            };
+            let section = sections.get(&note.group).copied();
             if let Some(entry) = self.entries.get_mut(&note.id) {
                 if entry.title != note.title
                     || entry.path != note.path
-                    || entry.parent != note.parent
+                    || entry.group != note.group
                     || entry.section != section
                     || entry.modified != note.modified
                 {
                     entry.title.clone_from(&note.title);
                     entry.path.clone_from(&note.path);
-                    entry.parent = note.parent;
+                    entry.group = note.group;
                     entry.section = section;
                     entry.modified = note.modified;
                     self.changed();
@@ -289,7 +285,7 @@ impl Index {
                     Entry {
                         title: note.title.clone(),
                         path: note.path.clone(),
-                        parent: note.parent,
+                        group: note.group,
                         section,
                         modified: note.modified,
                         opened: 0,
@@ -321,11 +317,8 @@ impl Index {
             entry.insert(Entry {
                 title: note.title.clone(),
                 path: note.path.clone(),
-                parent: note.parent,
-                section: match note.parent {
-                    Parent::Section(section) => Some(section),
-                    Parent::Group(_) => None,
-                },
+                group: note.group,
+                section: None,
                 modified: note.modified,
                 opened: 0,
                 content: None,
@@ -699,7 +692,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
-    use crate::model::{self, Group, GroupId, Note, Section};
+    use crate::model::{self, Group, Note, Section};
 
     use super::*;
 
@@ -712,20 +705,26 @@ mod tests {
                 path: RelPath::new(path).unwrap(),
             });
         }
-        workspace.groups.push(Group {
-            id: GroupId(3),
-            section: SectionId(1),
-            name: "G".into(),
-            path: RelPath::new("A/G").unwrap(),
-        });
-        for (id, parent, path) in [
-            (NoteId(4), Parent::Section(SectionId(1)), "A/Note 2.md"),
-            (NoteId(5), Parent::Group(GroupId(3)), "A/G/Note 10.md"),
-            (NoteId(6), Parent::Section(SectionId(2)), "B/Other.md"),
+        for (id, section, path) in [
+            (GroupId(3), SectionId(1), "A/G"),
+            (GroupId(7), SectionId(1), "A/H"),
+            (GroupId(8), SectionId(2), "B/C"),
+        ] {
+            workspace.groups.push(Group {
+                id,
+                section,
+                name: model::dir_name(&RelPath::new(path).unwrap()),
+                path: RelPath::new(path).unwrap(),
+            });
+        }
+        for (id, group, path) in [
+            (NoteId(4), GroupId(7), "A/H/Note 2.md"),
+            (NoteId(5), GroupId(3), "A/G/Note 10.md"),
+            (NoteId(6), GroupId(8), "B/C/Other.md"),
         ] {
             workspace.notes.push(Note {
                 id,
-                parent,
+                group,
                 title: model::note_title(RelPath::new(path).unwrap().file_name()),
                 path: RelPath::new(path).unwrap(),
                 subtitle: None,
@@ -754,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn scopes_distinguish_section_descendants_from_ungrouped_parent() {
+    fn scopes_distinguish_section_descendants_from_one_group() {
         let index = index();
         assert_eq!(
             ids(&index, "shared", Scope::Workspace, QueryKind::Search, 20),
@@ -774,7 +773,7 @@ mod tests {
             ids(
                 &index,
                 "shared",
-                Scope::Parent(Parent::Section(SectionId(1))),
+                Scope::Group(GroupId(7)),
                 QueryKind::Filter,
                 20
             ),
@@ -784,7 +783,7 @@ mod tests {
             ids(
                 &index,
                 "shared",
-                Scope::Parent(Parent::Group(GroupId(3))),
+                Scope::Group(GroupId(3)),
                 QueryKind::Filter,
                 20
             ),
@@ -931,12 +930,7 @@ mod tests {
             ("οσ", "ΟΣ"),
             ("ος", ""),
         ] {
-            let hits = index.query(
-                query,
-                Scope::Parent(Parent::Section(SectionId(2))),
-                QueryKind::Search,
-                10,
-            );
+            let hits = index.query(query, Scope::Group(GroupId(8)), QueryKind::Search, 10);
             if expected.is_empty() {
                 assert!(hits.is_empty());
                 continue;
@@ -1027,7 +1021,7 @@ mod tests {
     #[test]
     fn charwise_casing_agrees_for_sigma_expansions_combining_emoji_and_original_line_endings() {
         let mut index = index();
-        let scope = Scope::Parent(Parent::Section(SectionId(2)));
+        let scope = Scope::Group(GroupId(8));
         for (text, query, matched) in [
             ("ΟΣ", "οσ", Some("ΟΣ")),
             ("ΟΣ", "ΟΣ", Some("ΟΣ")),
@@ -1153,7 +1147,7 @@ mod tests {
             let title = format!("Meeting {number}");
             workspace.notes.push(Note {
                 id: NoteId(number + 10),
-                parent: Parent::Group(GroupId(3)),
+                group: GroupId(3),
                 title: title.clone(),
                 path: RelPath::new(format!("A/G/{title}.md")).unwrap(),
                 subtitle: None,

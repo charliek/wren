@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use wren_core::fs_store::{Fault, RelPath};
-use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
+use wren_core::model::{GroupId, ItemRef, NoteId, SectionId};
 use wren_core::ops::{Event, ExternalChangeKind, Op, Session, Trash};
 
 const ORIGINAL: &str = "original\n";
@@ -98,7 +98,7 @@ impl Fixture {
         for (path, bytes) in [
             ("A/G/Note.md", ORIGINAL),
             ("A/G/deep/Deep.md", "deep\n"),
-            ("A/Loose.md", "loose\n"),
+            ("A/L/Loose.md", "loose\n"),
             ("B/H/Other.md", "other\n"),
         ] {
             fixture.write(path, bytes.as_bytes());
@@ -328,10 +328,11 @@ fn empty_workspace_holds_a_persistent_lock_until_drop_and_ignores_it() {
 }
 
 #[test]
-fn scanning_exposes_ungrouped_and_deep_notes_but_ignores_hidden_and_non_markdown() {
+fn scanning_exposes_grouped_and_deep_notes_but_ignores_section_level_hidden_and_non_markdown() {
     let fixture = Fixture::standard();
     for path in [
         "root.md",
+        "A/Stray.md",
         ".hidden/note.md",
         "A/.private.md",
         "A/.cache/note.md",
@@ -341,18 +342,18 @@ fn scanning_exposes_ungrouped_and_deep_notes_but_ignores_hidden_and_non_markdown
         fixture.write(path, b"ignored");
     }
     let mut session = fixture.session();
-    let loose = note(&session, "A/Loose.md");
+    let loose = note(&session, "A/L/Loose.md");
     let deep = note(&session, "A/G/deep/Deep.md");
     assert_eq!(session.model().notes.len(), 4);
     assert_eq!(session.model().sections.len(), 2);
-    assert_eq!(session.model().groups.len(), 2);
+    assert_eq!(session.model().groups.len(), 3);
     assert_eq!(
-        session.model().note(loose).unwrap().parent,
-        Parent::Section(section(&session, "A"))
+        session.model().note(loose).unwrap().group,
+        group(&session, "A/L")
     );
     assert_eq!(
-        session.model().note(deep).unwrap().parent,
-        Parent::Group(group(&session, "A/G"))
+        session.model().note(deep).unwrap().group,
+        group(&session, "A/G")
     );
     assert_eq!(
         session.model().note(deep).unwrap().subtitle.as_deref(),
@@ -363,6 +364,9 @@ fn scanning_exposes_ungrouped_and_deep_notes_but_ignores_hidden_and_non_markdown
         .warnings
         .iter()
         .any(|warning| warning.message.contains("deeper")));
+    assert!(session.model().warnings.iter().any(|warning| {
+        warning.path.ends_with("A/Stray.md") && warning.message.contains("outside a group")
+    }));
     let before = model_paths(&session);
     let disk = disk_tree(fixture.path());
     for time in [0, 1000, 2000] {
@@ -396,13 +400,13 @@ fn create_operations_sanitize_names_and_suffix_collisions_without_overwriting() 
             },
         );
     }
-    let parent = Parent::Group(group(&session, "A-B/G-Q-"));
+    let parent = group(&session, "A-B/G-Q-");
     fixture.write("A-B/G-Q-/N-X.md", b"do not overwrite");
     for _ in 0..2 {
         let events = run(
             &mut session,
             Op::CreateNote {
-                parent,
+                group: parent,
                 title: " N/X.MD.md. ".into(),
             },
         );
@@ -414,7 +418,7 @@ fn create_operations_sanitize_names_and_suffix_collisions_without_overwriting() 
     for path in ["A-B/G-Q-/N-X 2.md", "A-B/G-Q-/N-X 3.md"] {
         assert_eq!(fixture.read(path), b"");
         assert_eq!(
-            session.model().note(note(&session, path)).unwrap().parent,
+            session.model().note(note(&session, path)).unwrap().group,
             parent
         );
     }
@@ -426,14 +430,14 @@ fn create_operations_sanitize_names_and_suffix_collisions_without_overwriting() 
 fn long_unicode_titles_remain_valid_and_bounded_after_collision_suffixes() {
     let fixture = Fixture::standard();
     let mut session = fixture.session();
-    let parent = Parent::Section(section(&session, "A"));
+    let g = group(&session, "A/G");
     let title = "界é".repeat(150);
     let mut paths = Vec::new();
     for _ in 0..2 {
         let events = run(
             &mut session,
             Op::CreateNote {
-                parent,
+                group: g,
                 title: title.clone(),
             },
         );
@@ -468,8 +472,16 @@ fn section_names_ending_in_md_are_legal_directories_and_survive_reopen() {
     let id = section(&session, "Archive.md");
     run(
         &mut session,
+        Op::CreateGroup {
+            section: id,
+            name: "G".into(),
+        },
+    );
+    let g = group(&session, "Archive.md/G");
+    run(
+        &mut session,
         Op::CreateNote {
-            parent: Parent::Section(id),
+            group: g,
             title: "Note".into(),
         },
     );
@@ -477,7 +489,7 @@ fn section_names_ending_in_md_are_legal_directories_and_survive_reopen() {
     assert!(session.state().writable());
     drop(session);
     let reopened = fixture.session();
-    note(&reopened, "Archive.md/Note.md");
+    note(&reopened, "Archive.md/G/Note.md");
     assert!(reopened.state().writable());
 }
 
@@ -522,7 +534,7 @@ fn group_names_ending_in_md_are_legal_for_creation_reorder_and_rename() {
             .filter(|item| item.section == section(&reopened, "A"))
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
-        ["Renamed.md", "G"]
+        ["Renamed.md", "G", "L"]
     );
 }
 
@@ -635,7 +647,7 @@ fn moving_open_note_flushes_preserves_id_and_history_and_never_overwrites() {
     fixture.write("B/H/Note.md", b"occupied");
     let mut session = fixture.session();
     let id = note(&session, "A/G/Note.md");
-    let destination = Parent::Group(group(&session, "B/H"));
+    let destination = group(&session, "B/H");
     open(&mut session, id);
     edit(&mut session, id, DRAFT, 10);
     let events = at(
@@ -647,7 +659,7 @@ fn moving_open_note_flushes_preserves_id_and_history_and_never_overwrites() {
         11,
     );
     assert!(saved(&events, id));
-    assert_eq!(session.model().note(id).unwrap().parent, destination);
+    assert_eq!(session.model().note(id).unwrap().group, destination);
     assert_eq!(session.model().note(id).unwrap().path, rel("B/H/Note 2.md"));
     assert_eq!(fixture.read("B/H/Note 2.md"), DRAFT.as_bytes());
     assert_eq!(fixture.read("B/H/Note.md"), b"occupied");
@@ -664,14 +676,14 @@ fn moving_open_note_flushes_preserves_id_and_history_and_never_overwrites() {
 }
 
 #[test]
-fn moving_a_deep_note_to_ungrouped_preserves_inode_and_removes_its_subtitle() {
+fn moving_a_deep_note_to_another_group_preserves_inode_and_removes_its_subtitle() {
     let fixture = Fixture::standard();
     let mut session = fixture.session();
     let id = note(&session, "A/G/deep/Deep.md");
     let inode = fs::metadata(fixture.path().join("A/G/deep/Deep.md"))
         .unwrap()
         .ino();
-    let destination = Parent::Section(section(&session, "B"));
+    let destination = group(&session, "B/H");
     run(
         &mut session,
         Op::MoveNote {
@@ -680,12 +692,12 @@ fn moving_a_deep_note_to_ungrouped_preserves_inode_and_removes_its_subtitle() {
         },
     );
     let moved = session.model().note(id).unwrap();
-    assert_eq!(moved.parent, destination);
+    assert_eq!(moved.group, destination);
     assert_eq!(moved.subtitle, None);
-    assert_eq!(moved.path, rel("B/Deep.md"));
-    assert_eq!(fixture.read("B/Deep.md"), b"deep\n");
+    assert_eq!(moved.path, rel("B/H/Deep.md"));
+    assert_eq!(fixture.read("B/H/Deep.md"), b"deep\n");
     assert_eq!(
-        fs::metadata(fixture.path().join("B/Deep.md"))
+        fs::metadata(fixture.path().join("B/H/Deep.md"))
             .unwrap()
             .ino(),
         inode
@@ -763,7 +775,7 @@ fn moving_group_remaps_parent_deep_notes_history_sort_and_order_with_stable_ids(
     assert_eq!(session.model().group(g).unwrap().path, rel("B/G 2"));
     assert_eq!(note(&session, "B/G 2/Note.md"), direct);
     assert_eq!(note(&session, "B/G 2/deep/Deep.md"), deep);
-    assert_eq!(session.model().note(deep).unwrap().parent, Parent::Group(g));
+    assert_eq!(session.model().note(deep).unwrap().group, g);
     assert_eq!(fixture.read("B/G 2/deep/Deep.md"), DRAFT.as_bytes());
     assert_eq!(fixture.read("B/G/Occupied.md"), b"keep");
     assert!(!fixture.path().join("A/G").exists());
@@ -793,7 +805,7 @@ fn renaming_section_flushes_and_remaps_descendants_without_matching_similar_pref
     let g = group(&session, "A/G");
     let id = note(&session, "A/G/Note.md");
     let deep = note(&session, "A/G/deep/Deep.md");
-    let loose = note(&session, "A/Loose.md");
+    let loose = note(&session, "A/L/Loose.md");
     let unrelated = note(&session, "AB/G/Keep.md");
     open(&mut session, loose);
     open(&mut session, id);
@@ -811,7 +823,7 @@ fn renaming_section_flushes_and_remaps_descendants_without_matching_similar_pref
     assert_eq!(group(&session, "Work/G"), g);
     assert_eq!(note(&session, "Work/G/Note.md"), id);
     assert_eq!(note(&session, "Work/G/deep/Deep.md"), deep);
-    assert_eq!(note(&session, "Work/Loose.md"), loose);
+    assert_eq!(note(&session, "Work/L/Loose.md"), loose);
     assert_eq!(note(&session, "AB/G/Keep.md"), unrelated);
     assert_eq!(fixture.read("Work/G/Note.md"), DRAFT.as_bytes());
     assert_eq!(fixture.read("AB/G/Keep.md"), b"unrelated");
@@ -822,7 +834,7 @@ fn renaming_section_flushes_and_remaps_descendants_without_matching_similar_pref
     );
     assert_eq!(
         session.state().history(),
-        [rel("Work/Loose.md"), rel("Work/G/Note.md")]
+        [rel("Work/L/Loose.md"), rel("Work/G/Note.md")]
     );
     save_after_relocation(&mut session, &fixture, id, "Work/G/Note.md");
     assert!(!fixture.path().join("A").exists());
@@ -870,7 +882,7 @@ fn section_and_group_reordering_changes_only_metadata_and_survives_reopen() {
             .filter(|item| item.section == a)
             .map(|item| item.id)
             .collect::<Vec<_>>(),
-        [z, g]
+        [z, g, group(&session, "A/L")]
     );
     assert_eq!(model_paths(&session), ids);
     assert_eq!(disk_tree(fixture.path()), before);
@@ -894,7 +906,7 @@ fn section_and_group_reordering_changes_only_metadata_and_survives_reopen() {
             .filter(|item| item.section == section(&reopened, "A"))
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
-        ["Z", "G"]
+        ["Z", "G", "L"]
     );
     assert_eq!(disk_tree(fixture.path()), before);
 }
@@ -918,7 +930,7 @@ fn invalid_ids_destinations_and_reorders_do_not_damage_disk_or_model() {
             name: "No".into(),
         },
         Op::CreateNote {
-            parent: Parent::Group(bad_group),
+            group: bad_group,
             title: "No".into(),
         },
         Op::Rename {
@@ -930,11 +942,11 @@ fn invalid_ids_destinations_and_reorders_do_not_damage_disk_or_model() {
         },
         Op::MoveNote {
             note: id,
-            to: Parent::Group(bad_group),
+            to: bad_group,
         },
         Op::MoveNote {
             note: bad_note,
-            to: Parent::Section(a),
+            to: h,
         },
         Op::MoveGroup {
             group: g,
@@ -996,7 +1008,7 @@ fn invalid_names_do_not_create_or_rename_any_item() {
                 name: name.into(),
             },
             Op::CreateNote {
-                parent: Parent::Group(g),
+                group: g,
                 title: name.into(),
             },
             Op::Rename {
@@ -1108,7 +1120,7 @@ fn deleting_containers_quarantines_all_ignored_contents_and_removes_only_descend
             assert!(session.model().sections.iter().all(|item| item.name != "A"));
         } else {
             assert_eq!(fixture.read("A/.private"), b"section private");
-            note(&session, "A/Loose.md");
+            note(&session, "A/L/Loose.md");
         }
     }
 }
@@ -1150,10 +1162,7 @@ fn same_parent_moves_and_same_name_renames_are_safe_noops_on_disk_and_ids() {
     let before = disk_tree(fixture.path());
     let model = model_paths(&session);
     for op in [
-        Op::MoveNote {
-            note: id,
-            to: Parent::Group(g),
-        },
+        Op::MoveNote { note: id, to: g },
         Op::MoveGroup { group: g, to: a },
         Op::Rename {
             target: ItemRef::Note(id),
@@ -1178,10 +1187,10 @@ fn same_parent_moves_and_same_name_renames_are_safe_noops_on_disk_and_ids() {
 fn switching_workspace_flushes_old_and_replaces_generation_history_selection_and_lock() {
     let old = Fixture::standard();
     let new = Fixture::empty();
-    new.write("New/Only.md", b"new workspace");
+    new.write("New/G/Only.md", b"new workspace");
     new.write(
         ".wren/workspace.toml",
-        b"last_open_note = 'New/Only.md'\nhistory = ['New/Only.md']\nlayout = 'outline'\n",
+        b"last_open_note = 'New/G/Only.md'\nhistory = ['New/G/Only.md']\nlayout = 'outline'\n",
     );
     let mut session = old.session();
     let old_note = note(&session, "A/G/Note.md");
@@ -1203,10 +1212,10 @@ fn switching_workspace_flushes_old_and_replaces_generation_history_selection_and
     assert_eq!(session.generation(), generation + 1);
     assert_eq!(session.model().root, new.path().canonicalize().unwrap());
     assert_eq!(session.model().notes.len(), 1);
-    let new_note = note(&session, "New/Only.md");
+    let new_note = note(&session, "New/G/Only.md");
     assert_document(&session, new_note, "new workspace", false);
     assert_eq!(session.state().layout(), "outline");
-    assert_eq!(session.state().history(), [rel("New/Only.md")]);
+    assert_eq!(session.state().history(), [rel("New/G/Only.md")]);
     assert!(!session.can_back());
     assert!(!session.can_forward());
     assert!(Session::with_trash(new.path(), new.quarantine.fake(false)).is_err());
@@ -1266,7 +1275,7 @@ fn failed_workspace_replacement_keeps_old_state_document_history_and_writer_lock
     invalid.write("not-a-directory", b"file");
     let mut session = fixture.session();
     let id = note(&session, "A/G/Note.md");
-    let loose = note(&session, "A/Loose.md");
+    let loose = note(&session, "A/L/Loose.md");
     open(&mut session, loose);
     open(&mut session, id);
     let generation = session.generation();
@@ -1292,7 +1301,7 @@ fn failed_workspace_replacement_keeps_old_state_document_history_and_writer_lock
         assert_eq!(session.state().selection(), Some(rel("A/G/Note.md")));
         assert_eq!(
             session.state().history(),
-            [rel("A/Loose.md"), rel("A/G/Note.md")]
+            [rel("A/L/Loose.md"), rel("A/G/Note.md")]
         );
         assert!(session.can_back());
         assert!(Session::with_trash(fixture.path(), fixture.quarantine.fake(false)).is_err());
@@ -1441,7 +1450,7 @@ fn back_forward_and_new_history_branch_flush_drafts_and_persist_navigation() {
     let fixture = Fixture::standard();
     let mut session = fixture.session();
     let first = note(&session, "A/G/Note.md");
-    let second = note(&session, "A/Loose.md");
+    let second = note(&session, "A/L/Loose.md");
     let third = note(&session, "B/H/Other.md");
     open(&mut session, first);
     edit(&mut session, first, DRAFT, 10);
@@ -1465,7 +1474,7 @@ fn back_forward_and_new_history_branch_flush_drafts_and_persist_navigation() {
         [rel("A/G/Note.md"), rel("B/H/Other.md")]
     );
     assert_eq!(fixture.read("A/G/Note.md"), DRAFT.as_bytes());
-    assert_eq!(fixture.read("A/Loose.md"), b"second draft");
+    assert_eq!(fixture.read("A/L/Loose.md"), b"second draft");
     drop(session);
     let mut reopened = fixture.session();
     assert_eq!(reopened.document().unwrap().text, "other\n");
@@ -1530,7 +1539,7 @@ fn barrier_op(kind: Barrier, session: &Session, other: &Fixture) -> Op {
         },
         Barrier::MoveNote => Op::MoveNote {
             note: id,
-            to: Parent::Section(b),
+            to: group(session, "B/H"),
         },
         Barrier::MoveGroup => Op::MoveGroup { group: g, to: b },
         Barrier::DeleteNote => Op::Delete {
@@ -1651,14 +1660,14 @@ fn prepublication_faults_on_note_creation_leave_no_partial_files_or_created_even
     for fault in PREPUBLICATION {
         let fixture = Fixture::standard();
         let mut session = fixture.session();
-        let parent = Parent::Group(group(&session, "A/G"));
+        let g = group(&session, "A/G");
         let before = disk_tree(fixture.path());
         let model = model_paths(&session);
         session.fail_next(fault);
         let error = session
             .apply_at(
                 Op::CreateNote {
-                    parent,
+                    group: g,
                     title: "Failed".into(),
                 },
                 ms(0),
@@ -1769,18 +1778,18 @@ fn new_edits_after_uncertain_publication_are_not_cleared_or_saved_as_a_false_con
 fn note_creation_durability_error_returns_created_events_and_committed_model() {
     let fixture = Fixture::standard();
     let mut session = fixture.session();
-    let parent = Parent::Section(section(&session, "A"));
+    let g = group(&session, "A/G");
     session.fail_next(Fault::DirectorySync);
     let error = session
         .apply_at(
             Op::CreateNote {
-                parent,
+                group: g,
                 title: "Published".into(),
             },
             ms(0),
         )
         .unwrap_err();
-    let id = note(&session, "A/Published.md");
+    let id = note(&session, "A/G/Published.md");
     assert!(error.message.contains("durability"));
     assert!(error
         .events
@@ -1790,11 +1799,11 @@ fn note_creation_durability_error_returns_created_events_and_committed_model() {
         .events
         .iter()
         .any(|event| matches!(event, Event::TreeChanged)));
-    assert_eq!(fixture.read("A/Published.md"), b"");
+    assert_eq!(fixture.read("A/G/Published.md"), b"");
     assert!(session.pending_durability());
     at(&mut session, Op::Tick, 1000);
     assert!(!session.pending_durability());
-    assert_eq!(note(&session, "A/Published.md"), id);
+    assert_eq!(note(&session, "A/G/Published.md"), id);
 }
 
 #[test]
@@ -2267,7 +2276,7 @@ fn symlink_replacement_of_note_or_ancestor_cannot_redirect_any_mutation() {
         let mut session = fixture.session();
         let id = note(&session, "A/G/Note.md");
         let g = group(&session, "A/G");
-        let b = section(&session, "B");
+        let h = group(&session, "B/H");
         let source = fixture.path().join(if replace_ancestor {
             "A/G"
         } else {
@@ -2294,10 +2303,7 @@ fn symlink_replacement_of_note_or_ancestor_cannot_redirect_any_mutation() {
                 target: ItemRef::Note(id),
                 new_name: "Damage".into(),
             },
-            Op::MoveNote {
-                note: id,
-                to: Parent::Section(b),
-            },
+            Op::MoveNote { note: id, to: h },
             Op::Delete {
                 target: ItemRef::Note(id),
             },
@@ -2312,7 +2318,7 @@ fn symlink_replacement_of_note_or_ancestor_cannot_redirect_any_mutation() {
         if replace_ancestor {
             for op in [
                 Op::CreateNote {
-                    parent: Parent::Group(g),
+                    group: g,
                     title: "Damage".into(),
                 },
                 Op::Delete {
@@ -2323,7 +2329,7 @@ fn symlink_replacement_of_note_or_ancestor_cannot_redirect_any_mutation() {
             }
         }
         assert!(!outside.path().join("Damage.md").exists());
-        assert!(!fixture.path().join("B/Note.md").exists());
+        assert!(!fixture.path().join("B/H/Note.md").exists());
         assert!(fixture.quarantine.destinations().is_empty());
         assert_eq!(
             fs::read(if replace_ancestor {
@@ -2375,7 +2381,7 @@ fn malformed_or_unsupported_metadata_is_preserved_through_actual_note_and_struct
             .iter()
             .any(|warning| warning.message.contains("metadata is read-only")));
         let id = note(&session, "A/G/Note.md");
-        let a = section(&session, "A");
+        let g = group(&session, "A/G");
         open(&mut session, id);
         run(
             &mut session,
@@ -2394,7 +2400,7 @@ fn malformed_or_unsupported_metadata_is_preserved_through_actual_note_and_struct
         run(
             &mut session,
             Op::CreateNote {
-                parent: Parent::Section(a),
+                group: g,
                 title: "New".into(),
             },
         );
@@ -2405,7 +2411,7 @@ fn malformed_or_unsupported_metadata_is_preserved_through_actual_note_and_struct
             },
         );
         assert_eq!(fixture.read(".wren/workspace.toml"), *source);
-        assert_eq!(fixture.read("A/New.md"), b"");
+        assert_eq!(fixture.read("A/G/New.md"), b"");
         assert!(!fixture.path().join("A/G/Renamed.md").exists());
         assert_eq!(
             fs::read(&fixture.quarantine.destinations()[0]).unwrap(),
@@ -2533,7 +2539,7 @@ fn structural_before_publish_failures_leave_existing_items_and_ids_untouched() {
         },
         Op::MoveNote {
             note: id,
-            to: Parent::Section(b),
+            to: group(&session, "B/H"),
         },
         Op::MoveGroup { group: g, to: b },
     ] {
@@ -2552,7 +2558,7 @@ fn unrelated_external_additions_and_deletions_preserve_existing_ids_and_never_re
     let fixture = Fixture::standard();
     let mut session = fixture.session();
     let keep = note(&session, "A/G/Note.md");
-    let removed = note(&session, "A/Loose.md");
+    let removed = note(&session, "A/L/Loose.md");
     let old_max = model_paths(&session)
         .keys()
         .map(|item| match item {
@@ -2562,20 +2568,20 @@ fn unrelated_external_additions_and_deletions_preserve_existing_ids_and_never_re
         })
         .max()
         .unwrap();
-    fs::remove_file(fixture.path().join("A/Loose.md")).unwrap();
+    fs::remove_file(fixture.path().join("A/L/Loose.md")).unwrap();
     fixture.write("A/G/Added.md", b"added");
     at(&mut session, Op::Reconcile, 1000);
     assert_eq!(note(&session, "A/G/Note.md"), keep);
     assert!(session.model().note(removed).is_none());
     let added = note(&session, "A/G/Added.md");
     assert!(added.0 > old_max);
-    fixture.write("A/Loose.md", b"new incarnation");
+    fixture.write("A/L/Loose.md", b"new incarnation");
     at(&mut session, Op::Reconcile, 2000);
-    let replacement = note(&session, "A/Loose.md");
+    let replacement = note(&session, "A/L/Loose.md");
     assert_ne!(replacement, removed);
     assert!(replacement.0 > added.0);
     assert_eq!(note(&session, "A/G/Note.md"), keep);
-    assert_eq!(fixture.read("A/Loose.md"), b"new incarnation");
+    assert_eq!(fixture.read("A/L/Loose.md"), b"new incarnation");
 }
 
 #[test]

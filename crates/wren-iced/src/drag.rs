@@ -15,22 +15,16 @@ pub const DOUBLE_CLICK_DELAY: Duration = Duration::from_millis(500);
 pub enum RowKind {
     Section(SectionId),
     Group(GroupId),
-    NoGroup(SectionId),
     Note(NoteId),
 }
 
 impl RowKind {
-    pub fn item(self) -> Option<ItemRef> {
+    pub fn item(self) -> ItemRef {
         match self {
-            Self::Section(id) => Some(ItemRef::Section(id)),
-            Self::Group(id) => Some(ItemRef::Group(id)),
-            Self::Note(id) => Some(ItemRef::Note(id)),
-            Self::NoGroup(_) => None,
+            Self::Section(id) => ItemRef::Section(id),
+            Self::Group(id) => ItemRef::Group(id),
+            Self::Note(id) => ItemRef::Note(id),
         }
-    }
-
-    pub fn draggable(self) -> bool {
-        !matches!(self, Self::NoGroup(_))
     }
 }
 
@@ -39,7 +33,7 @@ impl RowKind {
 pub struct Catalog {
     sections: Vec<SectionId>,
     groups: Vec<(GroupId, SectionId)>,
-    notes: Vec<(NoteId, Parent)>,
+    notes: Vec<(NoteId, GroupId)>,
     labels: Vec<(RowKind, String)>,
 }
 
@@ -62,12 +56,6 @@ impl Catalog {
                 .iter()
                 .map(|note| (RowKind::Note(note.id), note.title.clone())),
         );
-        labels.extend(
-            workspace
-                .sections
-                .iter()
-                .map(|section| (RowKind::NoGroup(section.id), "(No group)".to_owned())),
-        );
         Self {
             sections: workspace
                 .sections
@@ -82,7 +70,7 @@ impl Catalog {
             notes: workspace
                 .notes
                 .iter()
-                .map(|note| (note.id, note.parent))
+                .map(|note| (note.id, note.group))
                 .collect(),
             labels,
         }
@@ -90,7 +78,7 @@ impl Catalog {
 
     pub fn contains(&self, row: RowKind) -> bool {
         match row {
-            RowKind::Section(id) | RowKind::NoGroup(id) => self.sections.contains(&id),
+            RowKind::Section(id) => self.sections.contains(&id),
             RowKind::Group(id) => self.groups.iter().any(|&(group, _)| group == id),
             RowKind::Note(id) => self.notes.iter().any(|&(note, _)| note == id),
         }
@@ -105,7 +93,7 @@ impl Catalog {
             RowKind::Note(id) => self
                 .notes
                 .iter()
-                .find_map(|&(note, parent)| (note == id).then_some(parent)),
+                .find_map(|&(note, group)| (note == id).then_some(Parent::Group(group))),
             _ => None,
         }
     }
@@ -127,9 +115,6 @@ impl Catalog {
                 ),
                 _ => self.label(row).to_owned(),
             },
-            RowKind::NoGroup(section) => {
-                format!("{} › (No group)", self.label(RowKind::Section(section)))
-            }
             _ => self.label(row).to_owned(),
         }
     }
@@ -206,7 +191,7 @@ pub enum Edge {
 pub enum DropAction {
     MoveNote {
         note: NoteId,
-        to: Parent,
+        to: GroupId,
     },
     MoveGroup {
         group: GroupId,
@@ -254,16 +239,7 @@ pub fn target(
     }
     let mut insertion = None;
     let action = match (source, hit.row) {
-        (RowKind::Note(note), RowKind::Group(group)) => DropAction::MoveNote {
-            note,
-            to: Parent::Group(group),
-        },
-        (RowKind::Note(note), RowKind::Section(section) | RowKind::NoGroup(section)) => {
-            DropAction::MoveNote {
-                note,
-                to: Parent::Section(section),
-            }
-        }
+        (RowKind::Note(note), RowKind::Group(group)) => DropAction::MoveNote { note, to: group },
         (RowKind::Group(group), RowKind::Section(to))
             if catalog.parent(source) != Some(Parent::Section(to)) =>
         {
@@ -272,8 +248,8 @@ pub fn target(
         (RowKind::Section(_), RowKind::Section(_)) | (RowKind::Group(_), RowKind::Group(_))
             if catalog.parent(source) == catalog.parent(hit.row) =>
         {
-            let target = source.item()?;
-            let over = hit.row.item()?;
+            let target = source.item();
+            let over = hit.row.item();
             let edge = if position.y < hit.bounds.center_y() {
                 Edge::Before
             } else {
@@ -313,7 +289,8 @@ pub fn target(
         }
         _ => return None,
     };
-    if matches!(action, DropAction::MoveNote { to, .. } if Some(to) == catalog.parent(source)) {
+    if matches!(action, DropAction::MoveNote { to, .. } if Some(Parent::Group(to)) == catalog.parent(source))
+    {
         return None;
     }
     Some(DropTarget {
@@ -349,7 +326,6 @@ pub enum CancelReason {
     SourceChanged,
     TargetRemoved,
     TargetChanged,
-    NotDraggable,
     InvalidTarget,
     ReleasedElsewhere,
 }
@@ -573,12 +549,6 @@ impl Drag {
             if gesture.origin.distance(position) < THRESHOLD {
                 return vec![];
             }
-            if !gesture.source.draggable() {
-                return self
-                    .cancel(CancelReason::NotDraggable)
-                    .into_iter()
-                    .collect();
-            }
             gesture.dragging = true;
             self.last_click = None;
         }
@@ -698,16 +668,14 @@ impl Drag {
             .is_some_and(|hit| hit.row == gesture.source)
         {
             let position = position.expect("row hit has a position");
-            if gesture.source.item().is_some()
-                && previous_click.is_some_and(|click| {
-                    click.generation == gesture.generation
-                        && click.row == gesture.source
-                        && click.parent == gesture.parent
-                        && now.saturating_sub(click.at) <= DOUBLE_CLICK_DELAY
-                        && click.position.distance(gesture.origin) < THRESHOLD
-                        && click.position.distance(position) < THRESHOLD
-                })
-            {
+            if previous_click.is_some_and(|click| {
+                click.generation == gesture.generation
+                    && click.row == gesture.source
+                    && click.parent == gesture.parent
+                    && now.saturating_sub(click.at) <= DOUBLE_CLICK_DELAY
+                    && click.position.distance(gesture.origin) < THRESHOLD
+                    && click.position.distance(position) < THRESHOLD
+            }) {
                 DragEvent::Rename {
                     generation: gesture.generation,
                     row: gesture.source,
@@ -750,10 +718,7 @@ mod tests {
                 (GroupId(12), SectionId(1)),
                 (GroupId(20), SectionId(2)),
             ],
-            notes: vec![
-                (NoteId(100), Parent::Group(GroupId(10))),
-                (NoteId(101), Parent::Section(SectionId(1))),
-            ],
+            notes: vec![(NoteId(100), GroupId(10)), (NoteId(101), GroupId(11))],
             labels: vec![],
         }
     }
@@ -829,38 +794,16 @@ mod tests {
     #[test]
     fn every_allowed_move_pairing_has_the_exact_op() {
         let source = RowKind::Note(NoteId(100));
-        let cases = [
-            (
-                RowKind::Group(GroupId(20)),
-                DropAction::MoveNote {
-                    note: NoteId(100),
-                    to: Parent::Group(GroupId(20)),
-                },
-            ),
-            (
-                RowKind::Section(SectionId(2)),
-                DropAction::MoveNote {
-                    note: NoteId(100),
-                    to: Parent::Section(SectionId(2)),
-                },
-            ),
-            (
-                RowKind::NoGroup(SectionId(2)),
-                DropAction::MoveNote {
-                    note: NoteId(100),
-                    to: Parent::Section(SectionId(2)),
-                },
-            ),
-        ];
-        for (kind, expected) in cases {
-            let hit = row(kind, 0.0);
-            assert_eq!(
-                target(source, &hit, hit.bounds.center(), &catalog())
-                    .unwrap()
-                    .action,
-                expected
-            );
-        }
+        let hit = row(RowKind::Group(GroupId(20)), 0.0);
+        assert_eq!(
+            target(source, &hit, hit.bounds.center(), &catalog())
+                .unwrap()
+                .action,
+            DropAction::MoveNote {
+                note: NoteId(100),
+                to: GroupId(20),
+            }
+        );
         let hit = row(RowKind::Section(SectionId(2)), 0.0);
         assert_eq!(
             target(
@@ -883,20 +826,18 @@ mod tests {
         let sources = [
             RowKind::Section(SectionId(1)),
             RowKind::Group(GroupId(10)),
-            RowKind::NoGroup(SectionId(1)),
             RowKind::Note(NoteId(100)),
         ];
         let destinations = [
             RowKind::Section(SectionId(3)),
             RowKind::Group(GroupId(12)),
-            RowKind::NoGroup(SectionId(3)),
             RowKind::Note(NoteId(101)),
         ];
+        // A note drops only on a group: notes never live directly in a section.
         let allowed = [
-            [true, false, false, false],
-            [true, true, false, false],
-            [false, false, false, false],
-            [true, true, true, false],
+            [true, false, false],
+            [true, true, false],
+            [false, true, false],
         ];
         for (i, source) in sources.into_iter().enumerate() {
             for (j, destination) in destinations.into_iter().enumerate() {
@@ -981,17 +922,14 @@ mod tests {
     }
 
     #[test]
-    fn same_location_moves_missing_items_and_nogroup_sources_are_invalid() {
+    fn same_location_moves_missing_items_and_note_to_section_drops_are_invalid() {
         let catalog = catalog();
         for (source, destination) in [
             (RowKind::Note(NoteId(100)), RowKind::Group(GroupId(10))),
-            (RowKind::Note(NoteId(101)), RowKind::Section(SectionId(1))),
-            (RowKind::Note(NoteId(101)), RowKind::NoGroup(SectionId(1))),
+            (RowKind::Note(NoteId(101)), RowKind::Group(GroupId(11))),
+            (RowKind::Note(NoteId(100)), RowKind::Section(SectionId(1))),
+            (RowKind::Note(NoteId(100)), RowKind::Section(SectionId(2))),
             (RowKind::Group(GroupId(10)), RowKind::Section(SectionId(1))),
-            (
-                RowKind::NoGroup(SectionId(1)),
-                RowKind::Section(SectionId(2)),
-            ),
             (RowKind::Note(NoteId(999)), RowKind::Group(GroupId(20))),
             (RowKind::Note(NoteId(100)), RowKind::Group(GroupId(999))),
         ] {
@@ -1057,6 +995,24 @@ mod tests {
         assert!(drag
             .refresh(Duration::from_secs(3), 7, &catalog(), &geometry())
             .is_empty());
+        assert!(
+            drag.preview().unwrap().target.is_none(),
+            "a section springs open for a note but is never its drop target"
+        );
+        let events = drag.release(
+            Some(position),
+            Duration::from_secs(3),
+            7,
+            &catalog(),
+            &geometry(),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [DragEvent::Cancelled {
+                reason: CancelReason::InvalidTarget,
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -1122,7 +1078,7 @@ mod tests {
             DragEvent::Commit {
                 op: Op::MoveNote {
                     note: NoteId(100),
-                    to: Parent::Group(GroupId(20))
+                    to: GroupId(20)
                 },
                 ..
             }
@@ -1154,7 +1110,7 @@ mod tests {
             })
         ));
         let mut changed = catalog();
-        changed.notes[0].1 = Parent::Section(SectionId(2));
+        changed.notes[0].1 = GroupId(20);
         let mut drag = started();
         assert!(matches!(
             drag.validate(7, &changed),
@@ -1270,27 +1226,35 @@ mod tests {
     }
 
     #[test]
-    fn removed_section_and_nogroup_destinations_cancel() {
-        for kind in [
-            RowKind::Section(SectionId(2)),
-            RowKind::NoGroup(SectionId(2)),
-        ] {
-            let geometry = Geometry {
-                root: root(),
-                rows: vec![row(kind, 50.0)],
-            };
-            let mut drag = started();
-            drag.motion(
-                Point::new(30.0, 60.0),
-                Duration::ZERO,
-                7,
-                &catalog(),
-                &geometry,
-            );
-            let mut changed = catalog();
-            changed.sections.retain(|id| *id != SectionId(2));
-            assert_target_change_cancels(drag, &changed, &geometry, CancelReason::TargetRemoved);
-        }
+    fn removed_section_destination_cancels() {
+        let geometry = Geometry {
+            root: root(),
+            rows: vec![row(RowKind::Section(SectionId(2)), 50.0)],
+        };
+        let mut drag = Drag::default();
+        assert!(drag.press(
+            RowKind::Group(GroupId(10)),
+            Point::new(30.0, 10.0),
+            7,
+            &catalog()
+        ));
+        drag.motion(
+            Point::new(30.0, 60.0),
+            Duration::ZERO,
+            7,
+            &catalog(),
+            &geometry,
+        );
+        assert_eq!(
+            drag.preview().unwrap().target.unwrap().action,
+            DropAction::MoveGroup {
+                group: GroupId(10),
+                to: SectionId(2)
+            }
+        );
+        let mut changed = catalog();
+        changed.sections.retain(|id| *id != SectionId(2));
+        assert_target_change_cancels(drag, &changed, &geometry, CancelReason::TargetRemoved);
     }
 
     #[test]
@@ -1352,30 +1316,32 @@ mod tests {
 
     #[test]
     fn ordinary_pointer_motion_can_select_another_model_valid_destination() {
+        let mut geometry = geometry();
+        geometry.rows.push(row(RowKind::Group(GroupId(11)), 150.0));
         let mut drag = started();
         drag.motion(
             Point::new(30.0, 60.0),
             Duration::ZERO,
             7,
             &catalog(),
-            &geometry(),
+            &geometry,
         );
         let events = drag.motion(
-            Point::new(30.0, 110.0),
+            Point::new(30.0, 160.0),
             Duration::ZERO,
             7,
             &catalog(),
-            &geometry(),
+            &geometry,
         );
         assert!(!events
             .iter()
             .any(|event| matches!(event, DragEvent::Cancelled { .. })));
         let events = drag.release(
-            Some(Point::new(30.0, 110.0)),
+            Some(Point::new(30.0, 160.0)),
             Duration::ZERO,
             7,
             &catalog(),
-            &geometry(),
+            &geometry,
         );
         assert_eq!(commits(&events), 1);
         assert!(events.iter().any(|event| matches!(
@@ -1383,7 +1349,7 @@ mod tests {
             DragEvent::Commit {
                 op: Op::MoveNote {
                     note: NoteId(100),
-                    to: Parent::Section(SectionId(2))
+                    to: GroupId(11)
                 },
                 ..
             }
@@ -1666,7 +1632,7 @@ mod tests {
             [DragEvent::Activate { .. }]
         ));
         let mut changed = catalog();
-        changed.notes[0].1 = Parent::Section(SectionId(2));
+        changed.notes[0].1 = GroupId(20);
         let mut drag = first.clone();
         assert!(matches!(
             click(
@@ -1701,32 +1667,6 @@ mod tests {
             .as_slice(),
             [DragEvent::Activate { .. }]
         ));
-    }
-
-    #[test]
-    fn no_group_row_is_never_a_rename_target_or_real_drag_source() {
-        let kind = RowKind::NoGroup(SectionId(1));
-        assert_eq!(kind.item(), None);
-        let geometry = Geometry {
-            root: root(),
-            rows: vec![row(kind, 0.0)],
-        };
-        let mut drag = Drag::default();
-        for now in [Duration::ZERO, Duration::from_millis(100)] {
-            assert!(matches!(
-                click(
-                    &mut drag,
-                    kind,
-                    Point::new(30.0, 10.0),
-                    now,
-                    7,
-                    &catalog(),
-                    &geometry
-                )
-                .as_slice(),
-                [DragEvent::Activate { .. }]
-            ));
-        }
     }
 
     #[test]

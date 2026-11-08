@@ -23,7 +23,7 @@ pub enum Op {
         name: String,
     },
     CreateNote {
-        parent: Parent,
+        group: GroupId,
         title: String,
     },
     Rename {
@@ -35,7 +35,7 @@ pub enum Op {
     },
     MoveNote {
         note: NoteId,
-        to: Parent,
+        to: GroupId,
     },
     MoveGroup {
         group: GroupId,
@@ -55,12 +55,12 @@ pub enum Op {
     OpenNote {
         note: Option<NoteId>,
     },
-    /// Select exactly this parent, including an empty ungrouped section parent.
+    /// Select exactly this parent; a section parent means no group is selected.
     SelectParent {
         parent: Parent,
     },
-    /// Section-row navigation: direct notes, then the first ordered group,
-    /// otherwise the empty section. `selected_parent` exposes the resolved parent.
+    /// Section-row navigation: the first ordered group, otherwise the empty
+    /// section. `selected_parent` exposes the resolved parent.
     SelectSection {
         section: SectionId,
     },
@@ -74,7 +74,7 @@ pub enum Op {
     },
     ResetWidths,
     SetSort {
-        parent: Parent,
+        group: GroupId,
         mode: String,
     },
     EditDraft {
@@ -488,7 +488,7 @@ impl Session {
         }
         if let Some(document) = &self.document {
             self.index.set_content(document.note, &document.text, true);
-            self.selected_parent = Some(document.entry.parent);
+            self.selected_parent = Some(Parent::Group(document.entry.group));
         } else if self
             .selected_parent
             .is_some_and(|parent| self.model.parent_path(parent).is_none())
@@ -562,8 +562,8 @@ impl Session {
                 self.state.reorder(&path, None, &siblings)?;
                 self.finish_structure(events)
             }
-            Op::CreateNote { parent, title } => {
-                let path = self.parent_path(parent)?;
+            Op::CreateNote { group, title } => {
+                let path = self.parent_path(Parent::Group(group))?;
                 let receipt = self
                     .store
                     .create_file(&path, &title, b"")
@@ -571,7 +571,7 @@ impl Session {
                 let id = NoteId(self.model.allocate_id());
                 self.model.notes.push(Note {
                     id,
-                    parent,
+                    group,
                     title: model::note_title(receipt.path.file_name()),
                     path: receipt.path,
                     subtitle: None,
@@ -631,8 +631,8 @@ impl Session {
                 }
                 self.persist_metadata(events)
             }
-            Op::SetSort { parent, mode } => {
-                let path = self.parent_path(parent)?;
+            Op::SetSort { group, mode } => {
+                let path = self.parent_path(Parent::Group(group))?;
                 self.state.set_sort(&path, &mode)?;
                 self.sort_model();
                 events.push(Event::TreeChanged);
@@ -655,7 +655,7 @@ impl Session {
             }
             Op::MoveNote { note, to } => {
                 let from = self.note_path(note)?;
-                let parent = self.parent_path(to)?;
+                let parent = self.parent_path(Parent::Group(to))?;
                 self.barrier(&from, now, events)?;
                 let title = self
                     .model
@@ -831,7 +831,7 @@ impl Session {
             .map(|note| {
                 self.model
                     .note(note)
-                    .map(|note| note.parent)
+                    .map(|note| Parent::Group(note.group))
                     .ok_or("The note no longer exists")
             })
             .transpose()?;
@@ -913,28 +913,28 @@ impl Session {
     }
 
     fn first_in_parent(&self, parent: Parent) -> Option<NoteId> {
+        let Parent::Group(group) = parent else {
+            return None;
+        };
         self.model
             .notes
             .iter()
-            .find(|note| note.parent == parent)
+            .find(|note| note.group == group)
             .map(|note| note.id)
     }
 
+    /// A section's first group, or the bare section when it has none yet.
     fn section_parent(&self, section: SectionId) -> Parent {
-        let parent = Parent::Section(section);
-        if self.first_in_parent(parent).is_some() {
-            return parent;
-        }
         self.model
             .groups
             .iter()
             .find(|group| group.section == section)
-            .map_or(parent, |group| Parent::Group(group.id))
+            .map_or(Parent::Section(section), |group| Parent::Group(group.id))
     }
 
     fn resolve_selection(&self, path: &RelPath) -> Option<(Parent, Option<NoteId>)> {
         if let Some(note) = self.model.notes.iter().find(|note| note.path == *path) {
-            return Some((note.parent, Some(note.id)));
+            return Some((Parent::Group(note.group), Some(note.id)));
         }
         let parent = self
             .model
@@ -947,13 +947,13 @@ impl Session {
                     .sections
                     .iter()
                     .find(|section| section.path == *path)
-                    .map(|section| Parent::Section(section.id))
+                    .map(|section| self.section_parent(section.id))
             })?;
         let last = self.state.last_open_note().and_then(|path| {
             self.model
                 .notes
                 .iter()
-                .find(|note| note.parent == parent && note.path == path)
+                .find(|note| Parent::Group(note.group) == parent && note.path == path)
                 .map(|note| note.id)
         });
         match last {
@@ -1420,20 +1420,13 @@ impl Session {
                 let parent = receipt.path.parent();
                 let destination = self
                     .model
-                    .sections
+                    .groups
                     .iter()
-                    .find(|section| Some(&section.path) == parent.as_ref())
-                    .map(|section| Parent::Section(section.id))
-                    .or_else(|| {
-                        self.model
-                            .groups
-                            .iter()
-                            .find(|group| Some(&group.path) == parent.as_ref())
-                            .map(|group| Parent::Group(group.id))
-                    });
-                if let Some(parent) = destination {
+                    .find(|group| Some(&group.path) == parent.as_ref())
+                    .map(|group| group.id);
+                if let Some(group) = destination {
                     if let Some(note) = self.model.notes.iter_mut().find(|note| note.id == id) {
-                        note.parent = parent;
+                        note.group = group;
                     }
                 }
             }
@@ -1482,7 +1475,7 @@ impl Session {
         });
         if let Some(document) = &self.document {
             if target == ItemRef::Note(document.note) {
-                self.selected_parent = Some(document.entry.parent);
+                self.selected_parent = Some(Parent::Group(document.entry.group));
                 self.state.set_selection(Some(&document.entry.path));
                 self.state.set_last_open_note(Some(&document.entry.path));
             }
@@ -1551,17 +1544,13 @@ impl Session {
         // until document reconciliation has durably preserved or closed it.
         if let Some(document) = &self.document {
             if scanned.note(document.note).is_none() {
-                let section = match document.entry.parent {
-                    Parent::Section(section) => Some(section),
-                    Parent::Group(group) => {
-                        if scanned.group(group).is_none() {
-                            if let Some(entry) = self.model.group(group) {
-                                scanned.groups.push(entry.clone());
-                            }
-                        }
-                        self.model.group(group).map(|group| group.section)
+                let group = document.entry.group;
+                if scanned.group(group).is_none() {
+                    if let Some(entry) = self.model.group(group) {
+                        scanned.groups.push(entry.clone());
                     }
-                };
+                }
+                let section = self.model.group(group).map(|group| group.section);
                 if let Some(section) = section {
                     if scanned.section(section).is_none() {
                         if let Some(entry) = self.model.section(section) {
@@ -1638,24 +1627,13 @@ impl Session {
         });
         let title_sort: HashMap<_, _> = self
             .model
-            .sections
+            .groups
             .iter()
-            .map(|section| {
-                (
-                    Parent::Section(section.id),
-                    self.state.sort(&section.path) == "title",
-                )
-            })
-            .chain(self.model.groups.iter().map(|group| {
-                (
-                    Parent::Group(group.id),
-                    self.state.sort(&group.path) == "title",
-                )
-            }))
+            .map(|group| (group.id, self.state.sort(&group.path) == "title"))
             .collect();
         self.model.notes.sort_by(|left, right| {
-            left.parent.cmp(&right.parent).then_with(|| {
-                let modified = if title_sort.get(&left.parent).copied().unwrap_or(false) {
+            left.group.cmp(&right.group).then_with(|| {
+                let modified = if title_sort.get(&left.group).copied().unwrap_or(false) {
                     std::cmp::Ordering::Equal
                 } else {
                     right.modified.cmp(&left.modified)
@@ -1825,8 +1803,8 @@ mod tests {
     #[test]
     fn periodic_reconciliation_without_a_watcher_refreshes_exact_closed_note_bytes() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("S")).unwrap();
-        let path = root.path().join("S/note.md");
+        fs::create_dir_all(root.path().join("S/H")).unwrap();
+        let path = root.path().join("S/H/note.md");
         fs::write(&path, "before").unwrap();
         let mut session = Session::open(root.path()).unwrap();
         session.watcher = None;
@@ -1856,8 +1834,8 @@ mod tests {
     #[test]
     fn scan_callbacks_do_not_insert_a_replacement_id_at_a_retained_active_draft_path() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("S")).unwrap();
-        fs::write(root.path().join("S/note.md"), "baseline").unwrap();
+        fs::create_dir_all(root.path().join("S/H")).unwrap();
+        fs::write(root.path().join("S/H/note.md"), "baseline").unwrap();
         let mut session = Session::open(root.path()).unwrap();
         let id = session.model.notes[0].id;
         session
@@ -1883,7 +1861,7 @@ mod tests {
         assert_eq!(session.document().unwrap().text, "live draft");
         assert!(session.document().unwrap().dirty());
         assert_eq!(
-            fs::read_to_string(root.path().join("S/note.md")).unwrap(),
+            fs::read_to_string(root.path().join("S/H/note.md")).unwrap(),
             "baseline"
         );
     }
@@ -1950,10 +1928,11 @@ mod tests {
     fn workspace() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("S/G")).unwrap();
+        fs::create_dir_all(root.path().join("S/H")).unwrap();
         for (path, text) in [
             ("S/G/a.md", "alpha"),
             ("S/G/b.md", "bravo"),
-            ("S/c.md", "charlie"),
+            ("S/H/c.md", "charlie"),
         ] {
             fs::write(root.path().join(path), text).unwrap();
         }
@@ -2002,8 +1981,8 @@ mod tests {
             .unwrap()
             .set_times(FileTimes::new().set_modified(modified))
             .unwrap();
-        fs::remove_file(root.path().join("S/c.md")).unwrap();
-        fs::write(root.path().join("S/d.md"), "delta").unwrap();
+        fs::remove_file(root.path().join("S/H/c.md")).unwrap();
+        fs::write(root.path().join("S/H/d.md"), "delta").unwrap();
         let job = begin(&mut session, 2);
         // A poll while a job is outstanding must not start a second scan.
         assert!(session.apply_at(Op::Tick, secs(4)).unwrap().is_empty());
@@ -2012,10 +1991,10 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, Event::TreeChanged)));
-        assert_eq!(paths(&session), ["S/G/a.md", "S/G/b.md", "S/d.md"]);
+        assert_eq!(paths(&session), ["S/G/a.md", "S/G/b.md", "S/H/d.md"]);
         assert_eq!(id_at(&session, "S/G/b.md"), b);
         assert_eq!(session.index.content(b), Some("BRAVO"));
-        assert_eq!(search(&session, "delta"), [id_at(&session, "S/d.md")]);
+        assert_eq!(search(&session, "delta"), [id_at(&session, "S/H/d.md")]);
         assert!(search(&session, "charlie").is_empty());
     }
 
@@ -2029,8 +2008,14 @@ mod tests {
             session.watcher = None;
             session.set_background_reconcile(true);
             let a = id_at(&session, "S/G/a.md");
-            let c = id_at(&session, "S/c.md");
-            let section = session.model.sections[0].id;
+            let c = id_at(&session, "S/H/c.md");
+            let group = session
+                .model
+                .groups
+                .iter()
+                .find(|group| group.name == "H")
+                .unwrap()
+                .id;
             let job = begin(&mut session, 1);
             let early = run_before_mutation.then(|| job.result());
             let late = if run_before_mutation {
@@ -2059,13 +2044,13 @@ mod tests {
             session
                 .apply_at(
                     Op::CreateNote {
-                        parent: Parent::Section(section),
+                        group,
                         title: "created".into(),
                     },
                     secs(1),
                 )
                 .unwrap();
-            let expected = ["S/G/b.md", "S/G/renamed.md", "S/created.md"];
+            let expected = ["S/G/b.md", "S/G/renamed.md", "S/H/created.md"];
             assert_eq!(paths(&session), expected);
             let result = match (early, late) {
                 (Some(result), None) => result,
@@ -2116,7 +2101,7 @@ mod tests {
                 .unwrap();
             if external_create {
                 // Forces a full tree merge rather than the unchanged fast path.
-                fs::write(root.path().join("S/d.md"), "delta").unwrap();
+                fs::write(root.path().join("S/H/d.md"), "delta").unwrap();
             }
             let job = begin(&mut session, 1);
             // The worker reads either the pre-save bytes and metadata (the
@@ -2144,9 +2129,9 @@ mod tests {
                     .any(|event| matches!(event, Event::TreeChanged)),
                 external_create
             );
-            let mut expected = vec!["S/G/a.md", "S/G/b.md", "S/c.md"];
+            let mut expected = vec!["S/G/a.md", "S/G/b.md", "S/H/c.md"];
             if external_create {
-                expected.push("S/d.md");
+                expected.push("S/H/d.md");
             }
             assert_eq!(paths(&session), expected);
             assert_eq!(
@@ -2219,8 +2204,8 @@ mod tests {
     fn results_from_a_replaced_or_reopened_workspace_are_dropped() {
         let root = workspace();
         let other = tempfile::tempdir().unwrap();
-        fs::create_dir(other.path().join("Other")).unwrap();
-        fs::write(other.path().join("Other/x.md"), "x-ray").unwrap();
+        fs::create_dir_all(other.path().join("Other/G")).unwrap();
+        fs::write(other.path().join("Other/G/x.md"), "x-ray").unwrap();
         let mut session = background_session(root.path());
         let job = begin(&mut session, 1);
         session
@@ -2234,7 +2219,7 @@ mod tests {
         assert!(session.background_reconcile);
         let events = finish(&mut session, job.run(), 1).unwrap();
         assert!(events.is_empty());
-        assert_eq!(paths(&session), ["Other/x.md"]);
+        assert_eq!(paths(&session), ["Other/G/x.md"]);
         assert!(search(&session, "alpha").is_empty());
 
         // A different Session for the same root starts with the same generation.
@@ -2261,7 +2246,7 @@ mod tests {
                 secs(0),
             )
             .unwrap();
-        fs::write(root.path().join("S/e.md"), "echo").unwrap();
+        fs::write(root.path().join("S/H/e.md"), "echo").unwrap();
         let events = session.apply_at(Op::Tick, secs(1)).unwrap();
         assert!(events
             .iter()
@@ -2281,7 +2266,7 @@ mod tests {
         assert!(error.message.contains("retried"), "{}", error.message);
         assert!(finish(&mut session, abandoned, 1).unwrap().is_empty());
 
-        fs::write(root.path().join("S/e.md"), "echo").unwrap();
+        fs::write(root.path().join("S/H/e.md"), "echo").unwrap();
         session.apply_at(Op::Tick, secs(1)).unwrap();
         let result = session.take_reconcile_job().unwrap().run();
         assert!(finish(&mut session, result.clone(), 1)
@@ -2289,6 +2274,6 @@ mod tests {
             .iter()
             .any(|event| matches!(event, Event::TreeChanged)));
         assert!(finish(&mut session, result, 1).unwrap().is_empty());
-        assert_eq!(search(&session, "echo"), [id_at(&session, "S/e.md")]);
+        assert_eq!(search(&session, "echo"), [id_at(&session, "S/H/e.md")]);
     }
 }

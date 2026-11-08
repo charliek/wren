@@ -19,9 +19,9 @@ from tools.wrentest.x11 import request_close
 
 def workspace(path: Path) -> Path:
     (path / "S1" / "G").mkdir(parents=True)
-    (path / "S2").mkdir()
+    (path / "S2" / "H").mkdir(parents=True)
     (path / "S1" / "G" / "a.md").write_text("seed\n", encoding="utf-8")
-    (path / "S2" / "b.md").write_text("other\n", encoding="utf-8")
+    (path / "S2" / "H" / "b.md").write_text("other\n", encoding="utf-8")
     return path
 
 
@@ -179,7 +179,8 @@ def test_failed_save_keeps_draft_and_blocks_transition(tmp_path: Path, transitio
         section = item(snapshot, "sections", "S1")["id"]
         group = item(snapshot, "groups", "S1/G")["id"]
         destination = item(snapshot, "sections", "S2")["id"]
-        other_note = item(snapshot, "notes", "S2/b.md")["id"]
+        destination_group = item(snapshot, "groups", "S2/H")["id"]
+        other_note = item(snapshot, "notes", "S2/H/b.md")["id"]
         expected = append(app, "unsaved draft")
         app.client.call("test.fail_next", {"fault": "write"})
         with pytest.raises(RemoteError):
@@ -190,7 +191,7 @@ def test_failed_save_keeps_draft_and_blocks_transition(tmp_path: Path, transitio
                 target = {kind: {"note": note, "group": group, "section": section}[kind]}
                 op(app, "rename", target=target, new_name="Renamed")
             elif transition == "move_note":
-                op(app, "move_note", note=note, to={"section": destination})
+                op(app, "move_note", note=note, to={"group": destination_group})
             elif transition == "move_group":
                 op(app, "move_group", group=group, to=destination)
             elif transition.startswith("delete_"):

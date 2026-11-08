@@ -141,7 +141,7 @@ def test_palette_reordering_uses_full_siblings_and_persists_after_optional_warni
             source = nav.item(app, "groups", "Atlas/Review")["id"]
             before = nav.item(app, "groups", "Atlas/Research")["id"]
             nav.gateway(app, "filter.set", pane="groups", query="rsrch")
-            expected = ["Atlas/Empty group", "Atlas/Review", "Atlas/Research"]
+            expected = ["Atlas/Empty group", "Atlas/Review", "Atlas/Research", "Atlas/Workbench"]
         modal = nav.gateway(app, "palette.open", mode="reorder", target={kind: source})["navigation"]["modal"]
         assert modal["source"]["item"] == {kind: source}
         index = next(index for index, row in enumerate(modal["results"])

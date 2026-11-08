@@ -58,7 +58,7 @@ pub struct Group {
 #[derive(Clone, Debug)]
 pub struct Note {
     pub id: NoteId,
-    pub parent: Parent,
+    pub group: GroupId,
     pub title: String,
     pub path: RelPath,
     pub subtitle: Option<String>,
@@ -206,12 +206,9 @@ impl Workspace {
                 if let Ok(rp) = RelPath::new(&new) {
                     note.title = note_title(rp.file_name());
                     note.path = rp;
-                    note.subtitle = match note.parent {
-                        Parent::Group(gid) => group_paths
-                            .get(&gid)
-                            .and_then(|gp| compute_subtitle(note.path.as_path(), gp)),
-                        Parent::Section(_) => None,
-                    };
+                    note.subtitle = group_paths
+                        .get(&note.group)
+                        .and_then(|gp| compute_subtitle(note.path.as_path(), gp));
                 }
             }
         }
@@ -529,7 +526,7 @@ mod tests {
         });
         ws.notes.push(Note {
             id: nid,
-            parent: Parent::Group(gid),
+            group: gid,
             title: "design".into(),
             path: rel("Projects/WebApp/design.md"),
             subtitle: None,
@@ -571,7 +568,6 @@ mod tests {
         let gid = GroupId(ws.allocate_id());
         let nid1 = NoteId(ws.allocate_id());
         let nid2 = NoteId(ws.allocate_id());
-        let nid3 = NoteId(ws.allocate_id());
 
         ws.sections.push(Section {
             id: sid,
@@ -586,7 +582,7 @@ mod tests {
         });
         ws.notes.push(Note {
             id: nid1,
-            parent: Parent::Group(gid),
+            group: gid,
             title: "design".into(),
             path: rel("Projects/WebApp/design.md"),
             subtitle: None,
@@ -595,21 +591,12 @@ mod tests {
         });
         ws.notes.push(Note {
             id: nid2,
-            parent: Parent::Group(gid),
+            group: gid,
             title: "arch".into(),
             path: rel("Projects/WebApp/docs/arch.md"),
             subtitle: Some("docs/arch.md".into()),
             modified: SystemTime::UNIX_EPOCH,
             bytes: 100,
-        });
-        ws.notes.push(Note {
-            id: nid3,
-            parent: Parent::Section(sid),
-            title: "plan".into(),
-            path: rel("Projects/plan.md"),
-            subtitle: None,
-            modified: SystemTime::UNIX_EPOCH,
-            bytes: 20,
         });
         ws
     }
@@ -621,7 +608,6 @@ mod tests {
         let gid = ws.groups[0].id;
         let nid1 = ws.notes[0].id;
         let nid2 = ws.notes[1].id;
-        let nid3 = ws.notes[2].id;
 
         ws.remap_paths(&rel("Projects"), &rel("Work"));
 
@@ -647,9 +633,6 @@ mod tests {
             Path::new("Work/WebApp/docs/arch.md"),
         );
         assert_eq!(ws.notes[1].subtitle.as_deref(), Some("docs/arch.md"));
-
-        assert_eq!(ws.notes[2].id, nid3);
-        assert_eq!(ws.notes[2].path.as_path(), Path::new("Work/plan.md"));
     }
 
     #[test]
@@ -671,8 +654,6 @@ mod tests {
             ws.notes[1].path.as_path(),
             Path::new("Projects/Frontend/docs/arch.md"),
         );
-        // Section-level note not affected
-        assert_eq!(ws.notes[2].path.as_path(), Path::new("Projects/plan.md"));
     }
 
     #[test]

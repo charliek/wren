@@ -20,8 +20,8 @@ fn ms(value: u64) -> Duration {
 
 fn fixture() -> (TempDir, Session, NoteId) {
     let root = TempDir::new().unwrap();
-    fs::create_dir(root.path().join("S")).unwrap();
-    fs::write(root.path().join("S/a.md"), "baseline").unwrap();
+    fs::create_dir_all(root.path().join("S/G")).unwrap();
+    fs::write(root.path().join("S/G/a.md"), "baseline").unwrap();
     let mut session = Session::with_trash(root.path(), Box::new(NoTrash)).unwrap();
     let note = session.model().notes[0].id;
     session
@@ -43,7 +43,7 @@ fn draft(session: &mut Session, note: NoteId, text: &str) {
 }
 
 fn copies(root: &Path) -> Vec<std::path::PathBuf> {
-    fs::read_dir(root.join("S"))
+    fs::read_dir(root.join("S/G"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
@@ -65,7 +65,7 @@ fn assert_recovered(root: &Path, session: &Session, text: &str) {
         text.as_bytes()
     );
     assert!(
-        !root.join("S/a.md").exists(),
+        !root.join("S/G/a.md").exists(),
         "External deletion must not resurrect the original"
     );
 }
@@ -74,7 +74,7 @@ fn assert_recovered(root: &Path, session: &Session, text: &str) {
 fn unrelated_tree_refresh_cannot_orphan_a_deleted_dirty_document() {
     let (root, mut session, note) = fixture();
     draft(&mut session, note, "draft-only");
-    fs::remove_file(root.path().join("S/a.md")).unwrap();
+    fs::remove_file(root.path().join("S/G/a.md")).unwrap();
     session
         .apply_at(Op::CreateSection { name: "New".into() }, ms(100))
         .unwrap();
@@ -96,7 +96,7 @@ fn retry_backoff_reconciliation_keeps_a_deleted_draft_recoverable() {
     draft(&mut session, note, "draft-only");
     session.fail_next(Fault::Write);
     assert!(session.apply_at(Op::Tick, ms(750)).is_err());
-    fs::remove_file(root.path().join("S/a.md")).unwrap();
+    fs::remove_file(root.path().join("S/G/a.md")).unwrap();
     session.apply_at(Op::Reconcile, ms(800)).unwrap();
     assert!(session.model().note(note).is_some());
     assert!(copies(root.path()).is_empty());
@@ -110,7 +110,7 @@ fn inactive_write_cannot_bypass_the_loaded_baseline() {
     session
         .apply_at(Op::OpenNote { note: None }, ms(0))
         .unwrap();
-    fs::write(root.path().join("S/a.md"), "external-version").unwrap();
+    fs::write(root.path().join("S/G/a.md"), "external-version").unwrap();
     assert!(session
         .apply_at(
             Op::WriteNote {
@@ -121,7 +121,7 @@ fn inactive_write_cannot_bypass_the_loaded_baseline() {
         )
         .is_err());
     assert_eq!(
-        fs::read_to_string(root.path().join("S/a.md")).unwrap(),
+        fs::read_to_string(root.path().join("S/G/a.md")).unwrap(),
         "external-version"
     );
     assert!(copies(root.path()).is_empty());
@@ -131,14 +131,14 @@ fn inactive_write_cannot_bypass_the_loaded_baseline() {
 fn failed_convergent_save_releases_the_ticket_and_can_retry() {
     let (root, mut session, note) = fixture();
     draft(&mut session, note, "converged");
-    fs::write(root.path().join("S/a.md"), "converged").unwrap();
+    fs::write(root.path().join("S/G/a.md"), "converged").unwrap();
     session.fail_next(Fault::Write);
     assert!(session.apply_at(Op::Reconcile, ms(100)).is_err());
     assert!(session.document().unwrap().dirty());
     session.apply_at(Op::Flush, ms(101)).unwrap();
     assert!(!session.document().unwrap().dirty());
     assert_eq!(
-        fs::read_to_string(root.path().join("S/a.md")).unwrap(),
+        fs::read_to_string(root.path().join("S/G/a.md")).unwrap(),
         "converged"
     );
 }
@@ -147,7 +147,7 @@ fn failed_convergent_save_releases_the_ticket_and_can_retry() {
 fn invalid_external_text_cannot_create_a_conflict_copy_feedback_loop() {
     let (root, mut session, note) = fixture();
     draft(&mut session, note, "local version");
-    fs::write(root.path().join("S/a.md"), [0xff, 0xfe]).unwrap();
+    fs::write(root.path().join("S/G/a.md"), [0xff, 0xfe]).unwrap();
     session.fail_next(Fault::DirectorySync);
     assert!(session.apply_at(Op::Reconcile, ms(100)).is_err());
     let copy = copies(root.path());
@@ -162,7 +162,7 @@ fn invalid_external_text_cannot_create_a_conflict_copy_feedback_loop() {
         modified
     );
     assert!(session.document().unwrap().dirty());
-    fs::write(root.path().join("S/a.md"), "external repaired").unwrap();
+    fs::write(root.path().join("S/G/a.md"), "external repaired").unwrap();
     session.apply_at(Op::Reconcile, ms(1200)).unwrap();
     assert!(!session.document().unwrap().dirty());
     assert_eq!(session.document().unwrap().text, "external repaired");
@@ -172,7 +172,7 @@ fn invalid_external_text_cannot_create_a_conflict_copy_feedback_loop() {
 #[test]
 fn clean_deleted_note_is_not_kept_as_a_phantom_draft() {
     let (root, mut session, note) = fixture();
-    fs::remove_file(root.path().join("S/a.md")).unwrap();
+    fs::remove_file(root.path().join("S/G/a.md")).unwrap();
     session.apply_at(Op::Reconcile, ms(1)).unwrap();
     assert!(session.document().is_none());
     assert!(session.model().note(note).is_none());

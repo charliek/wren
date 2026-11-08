@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use iced::Task;
-use wren_core::model::{ItemRef, NoteId, Parent, SectionId, Workspace};
+use wren_core::model::{GroupId, ItemRef, Parent, SectionId, Workspace};
 #[cfg(feature = "smoke-test")]
 use wren_core::ops::Document;
 use wren_core::ops::{Event, ExternalChangeKind, Op, Session};
@@ -103,7 +103,7 @@ impl EffectBefore {
                     })
             }
             Op::MoveNote { note, to } => session.model().note(*note).is_some_and(|note| {
-                note.parent == *to && self.path.as_deref() != Some(note.path.as_path())
+                note.group == *to && self.path.as_deref() != Some(note.path.as_path())
             }),
             Op::MoveGroup { group, to } => session.model().group(*group).is_some_and(|group| {
                 group.section == *to && self.path.as_deref() != Some(group.path.as_path())
@@ -130,10 +130,10 @@ impl EffectBefore {
             Op::SetLayout { layout } => session.state().layout() == layout,
             Op::SetWidth { layout, pane, .. } => session.state().width(layout, pane).is_some(),
             Op::ResetWidths => true,
-            Op::SetSort { parent, mode } => session
+            Op::SetSort { group, mode } => session
                 .model()
-                .parent_path(*parent)
-                .is_some_and(|path| session.state().sort(path) == mode),
+                .group(*group)
+                .is_some_and(|group| session.state().sort(&group.path) == mode),
             _ => false,
         }
     }
@@ -143,7 +143,7 @@ impl EffectBefore {
 pub enum DialogKind {
     CreateSection,
     CreateGroup(SectionId),
-    CreateNote(Parent),
+    CreateNote(GroupId),
     Rename(ItemRef),
     Delete(ItemRef),
 }
@@ -157,7 +157,7 @@ pub(super) struct Dialog {
 #[cfg(feature = "smoke-test")]
 #[derive(Debug, Clone)]
 pub(super) struct DocumentProjection {
-    pub note: NoteId,
+    pub note: wren_core::model::NoteId,
     pub text: String,
     pub path: PathBuf,
     pub dirty: bool,
@@ -364,9 +364,9 @@ impl App {
                 ) => expected == section,
                 (
                     DialogKind::CreateNote(expected),
-                    Op::CreateNote { parent, .. },
+                    Op::CreateNote { group, .. },
                     Event::Created(ItemRef::Note(_)),
-                ) => expected == parent,
+                ) => expected == group,
                 _ => false,
             })
         });
@@ -377,8 +377,16 @@ impl App {
         if !events.is_empty() || error.is_some() {
             self.sync_editor(false);
         }
-        if let Some(note) = created {
-            let selection = self.process_core(Op::OpenNote { note: Some(note) });
+        let follow_up = match created {
+            Some(ItemRef::Note(note)) => Some(Op::OpenNote { note: Some(note) }),
+            // A new group is where the next note goes, so select it.
+            Some(ItemRef::Group(group)) => Some(Op::SelectParent {
+                parent: Parent::Group(group),
+            }),
+            _ => None,
+        };
+        if let Some(op) = follow_up {
+            let selection = self.process_core(op);
             if core_error.is_none() {
                 core_error = selection.core_error;
             }
@@ -735,11 +743,13 @@ impl App {
         }
     }
 
-    fn process_events(&mut self, events: &[Event]) -> Option<NoteId> {
+    fn process_events(&mut self, events: &[Event]) -> Option<ItemRef> {
         let mut created = None;
         for event in events {
             match event {
-                Event::Created(ItemRef::Note(note)) => created = Some(*note),
+                Event::Created(item @ (ItemRef::Note(_) | ItemRef::Group(_))) => {
+                    created = Some(*item);
+                }
                 Event::Warning(message) => self.banner = Some(message.clone()),
                 Event::ExternalChange { kind, .. } => match kind {
                     ExternalChangeKind::Reloaded => {}
@@ -779,16 +789,11 @@ impl App {
         }
         self.selected_note = note;
         if let Some(entry) = note.and_then(|note| session.model().note(note)) {
-            match entry.parent {
-                Parent::Section(section) => {
-                    self.selected_section = Some(section);
-                    self.selected_group = None;
-                }
-                Parent::Group(group) => {
-                    self.selected_group = Some(group);
-                    self.selected_section = session.model().group(group).map(|group| group.section);
-                }
-            }
+            self.selected_group = Some(entry.group);
+            self.selected_section = session
+                .model()
+                .group(entry.group)
+                .map(|group| group.section);
         } else {
             self.selected_section = session
                 .selected_parent()
@@ -932,10 +937,7 @@ impl App {
         let op = match dialog.kind {
             DialogKind::CreateSection => Op::CreateSection { name },
             DialogKind::CreateGroup(section) => Op::CreateGroup { section, name },
-            DialogKind::CreateNote(parent) => Op::CreateNote {
-                parent,
-                title: name,
-            },
+            DialogKind::CreateNote(group) => Op::CreateNote { group, title: name },
             DialogKind::Rename(target) => Op::Rename {
                 target,
                 new_name: name,
@@ -967,8 +969,12 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, App) {
         let directory = crate::test_support::tempdir();
-        std::fs::create_dir(directory.path().join("Inbox")).unwrap();
-        std::fs::write(directory.path().join("Inbox/Note.md"), "first\nsecond").unwrap();
+        std::fs::create_dir_all(directory.path().join("Inbox/General")).unwrap();
+        std::fs::write(
+            directory.path().join("Inbox/General/Note.md"),
+            "first\nsecond",
+        )
+        .unwrap();
         let (mut app, _) = App::new(Options {
             editor: true,
             ..Options::default()
@@ -1051,7 +1057,7 @@ mod tests {
         let _ = app.apply_core(Op::Flush).unwrap();
         assert_eq!(std::fs::read(&metadata).unwrap(), original);
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Inbox/Note.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
             "first\nsecond retained draft"
         );
         assert!(app.metadata_warning.is_some());
@@ -1067,7 +1073,7 @@ mod tests {
         );
         assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Inbox/Note.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
             "first\nsecond"
         );
         let _ = app.update(Message::Editor(editor_view::Message::Undo));
@@ -1082,25 +1088,31 @@ mod tests {
         );
         let _ = app.apply_core(Op::Flush).unwrap();
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Inbox/Note.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
             app.editor.text()
         );
     }
 
     #[test]
     fn rename_move_and_theme_changes_preserve_live_history_and_cursor() {
-        let (_directory, mut app) = fixture();
-        let _ = app
-            .apply_core(Op::CreateSection {
-                name: "Archive".into(),
-            })
-            .unwrap();
+        let (directory, mut app) = fixture();
+        // Created on disk: a CreateGroup op would select the new group and close the note.
+        std::fs::create_dir_all(directory.path().join("Archive/Shelf")).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
         let destination = app
             .model()
             .unwrap()
             .sections
             .iter()
             .find(|section| section.name == "Archive")
+            .unwrap()
+            .id;
+        let shelf = app
+            .model()
+            .unwrap()
+            .groups
+            .iter()
+            .find(|group| group.name == "Shelf")
             .unwrap()
             .id;
         let note = app.selected_note.unwrap();
@@ -1112,17 +1124,13 @@ mod tests {
                 new_name: "Renamed".into(),
             })
             .unwrap();
-        let _ = app
-            .apply_core(Op::MoveNote {
-                note,
-                to: Parent::Section(destination),
-            })
-            .unwrap();
+        let _ = app.apply_core(Op::MoveNote { note, to: shelf }).unwrap();
         let _ = app.update(Message::ChooseTheme(Some(wren_core::theme::LIGHT)));
         assert_eq!(app.editor.cursor(), cursor);
         assert!(app.editor.can_undo());
         assert_eq!(app.selected_note, Some(note));
         assert_eq!(app.selected_section, Some(destination));
+        assert_eq!(app.selected_group, Some(shelf));
         let _ = app.update(Message::Editor(editor_view::Message::Undo));
         assert_eq!(app.editor.text(), "first\nsecond");
         assert_eq!(
@@ -1156,13 +1164,13 @@ mod tests {
             .is_some());
         assert_eq!(app.editor.text(), "first\nsecond unsaved");
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Inbox/Note.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
             "first\nsecond"
         );
         app.window_unfocused().unwrap();
         assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Inbox/Note.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
             app.editor.text()
         );
     }
@@ -1219,8 +1227,8 @@ mod tests {
                 new_name: "Published".into()
             })
             .is_err());
-        assert!(directory.path().join("Inbox/Published.md").exists());
-        assert!(!directory.path().join("Inbox/Note.md").exists());
+        assert!(directory.path().join("Inbox/General/Published.md").exists());
+        assert!(!directory.path().join("Inbox/General/Note.md").exists());
         assert_eq!(
             app.session
                 .as_ref()
@@ -1229,7 +1237,7 @@ mod tests {
                 .unwrap()
                 .path()
                 .as_path(),
-            std::path::Path::new("Inbox/Published.md")
+            std::path::Path::new("Inbox/General/Published.md")
         );
         assert_eq!(app.editor.cursor(), cursor);
         assert!(app.editor.can_undo());
@@ -1238,14 +1246,14 @@ mod tests {
     #[test]
     fn committed_create_error_still_projects_and_selects_the_new_note() {
         let (_directory, mut app) = fixture();
-        let parent = app.selected_parent().unwrap();
+        let group = app.selected_group.unwrap();
         app.session
             .as_mut()
             .unwrap()
             .fail_next(Fault::DirectorySync);
         assert!(app
             .apply_core(Op::CreateNote {
-                parent,
+                group,
                 title: "Created".into()
             })
             .is_err());
@@ -1270,11 +1278,11 @@ mod tests {
         for kind in 0..3 {
             let (directory, mut app) = fixture();
             let section = app.selected_section.unwrap();
-            let parent = app.selected_parent().unwrap();
+            let group = app.selected_group.unwrap();
             let dialog = match kind {
                 0 => DialogKind::CreateSection,
                 1 => DialogKind::CreateGroup(section),
-                _ => DialogKind::CreateNote(parent),
+                _ => DialogKind::CreateNote(group),
             };
             let _ = app.show_dialog(dialog);
             app.dialog.as_mut().unwrap().name = "Created".into();
@@ -1293,7 +1301,7 @@ mod tests {
             let path = match kind {
                 0 => "Created",
                 1 => "Inbox/Created",
-                _ => "Inbox/Created.md",
+                _ => "Inbox/General/Created.md",
             };
             assert!(directory.path().join(path).exists());
             if kind != 2 {
@@ -1326,7 +1334,7 @@ mod tests {
             let dialog = match kind {
                 0 => DialogKind::CreateSection,
                 1 => DialogKind::CreateGroup(app.selected_section.unwrap()),
-                _ => DialogKind::CreateNote(app.selected_parent().unwrap()),
+                _ => DialogKind::CreateNote(app.selected_group.unwrap()),
             };
             let _ = app.show_dialog(dialog);
             app.dialog.as_mut().unwrap().name = "Created".into();
@@ -1341,7 +1349,7 @@ mod tests {
             let path = match kind {
                 0 => "Created",
                 1 => "Inbox/Created",
-                _ => "Inbox/Created.md",
+                _ => "Inbox/General/Created.md",
             };
             assert!(!directory.path().join(path).exists());
             let _ = app.update(Message::SubmitDialog);
@@ -1370,7 +1378,7 @@ mod tests {
             selection: None,
         });
         std::fs::write(
-            directory.path().join("Inbox/Note.md"),
+            directory.path().join("Inbox/General/Note.md"),
             "external\nreplacement",
         )
         .unwrap();
@@ -1390,7 +1398,11 @@ mod tests {
     fn conflict_error_reloads_the_original_without_reverting_committed_events() {
         let (directory, mut app) = fixture();
         append(&mut app, " local");
-        std::fs::write(directory.path().join("Inbox/Note.md"), "external original").unwrap();
+        std::fs::write(
+            directory.path().join("Inbox/General/Note.md"),
+            "external original",
+        )
+        .unwrap();
         assert!(app.apply_core(Op::Flush).is_err());
         assert_eq!(app.editor.text(), "external original");
         assert_eq!(
@@ -1410,7 +1422,7 @@ mod tests {
         let (directory, mut app) = fixture();
         let old = app.selected_note;
         append(&mut app, " recovered");
-        std::fs::remove_file(directory.path().join("Inbox/Note.md")).unwrap();
+        std::fs::remove_file(directory.path().join("Inbox/General/Note.md")).unwrap();
         assert!(app.apply_core(Op::Flush).is_err());
         assert_ne!(app.selected_note, old);
         assert_eq!(
@@ -1429,7 +1441,7 @@ mod tests {
         for removed in [false, true] {
             let (directory, mut app) = fixture();
             append(&mut app, " local recovery");
-            let original = directory.path().join("Inbox/Note.md");
+            let original = directory.path().join("Inbox/General/Note.md");
             if removed {
                 std::fs::remove_file(&original).unwrap();
             } else {
@@ -1445,7 +1457,7 @@ mod tests {
             assert!(!copy.as_path().is_absolute());
             assert_eq!(
                 copy.parent().unwrap().as_path(),
-                std::path::Path::new("Inbox")
+                std::path::Path::new("Inbox/General")
             );
             assert_eq!(
                 std::fs::read_to_string(directory.path().join(copy.as_path())).unwrap(),
@@ -1470,7 +1482,11 @@ mod tests {
     fn a_replacement_workspace_clears_the_old_conflict_link_but_a_failed_open_does_not() {
         let (directory, mut app) = fixture();
         append(&mut app, " local recovery");
-        std::fs::write(directory.path().join("Inbox/Note.md"), "external bytes").unwrap();
+        std::fs::write(
+            directory.path().join("Inbox/General/Note.md"),
+            "external bytes",
+        )
+        .unwrap();
         let _ = app.process_core(Op::Flush);
         let link = app
             .conflict_copy
@@ -1481,8 +1497,8 @@ mod tests {
         let _ = app.workspace_loaded(app.load_generation, slot);
         assert_eq!(app.conflict_copy, Some(link));
         let next = crate::test_support::tempdir();
-        std::fs::create_dir(next.path().join("Inbox")).unwrap();
-        std::fs::write(next.path().join("Inbox/Other.md"), "new workspace").unwrap();
+        std::fs::create_dir_all(next.path().join("Inbox/General")).unwrap();
+        std::fs::write(next.path().join("Inbox/General/Other.md"), "new workspace").unwrap();
         let previous = app.session.take();
         let slot = returning(&mut app, load(previous, next.path().into()));
         let _ = app.workspace_loaded(app.load_generation, slot);
@@ -1626,8 +1642,12 @@ mod tests {
         let stored = ancestor.join("workspace");
         let foreign = root.path().join("foreign");
         std::fs::create_dir_all(&stored).unwrap();
-        std::fs::create_dir_all(foreign.join("workspace/Inbox")).unwrap();
-        std::fs::write(foreign.join("workspace/Inbox/Foreign.md"), "foreign bytes").unwrap();
+        std::fs::create_dir_all(foreign.join("workspace/Inbox/General")).unwrap();
+        std::fs::write(
+            foreign.join("workspace/Inbox/General/Foreign.md"),
+            "foreign bytes",
+        )
+        .unwrap();
         let mut config = wren_core::config::Config::load_from(configdir.path());
         config.add(&stored, Some("Registered")).unwrap();
         config.set_active(&stored).unwrap();
@@ -1665,8 +1685,8 @@ mod tests {
         let configdir = crate::test_support::tempdir();
         std::fs::write(configdir.path().join("config.toml"), "invalid = [").unwrap();
         let root = crate::test_support::tempdir();
-        std::fs::create_dir(root.path().join("Inbox")).unwrap();
-        std::fs::write(root.path().join("Inbox/Fresh.md"), "fresh bytes").unwrap();
+        std::fs::create_dir_all(root.path().join("Inbox/General")).unwrap();
+        std::fs::write(root.path().join("Inbox/General/Fresh.md"), "fresh bytes").unwrap();
         let (mut app, _) = App::with_config(
             Options {
                 workspace: Some(root.path().into()),
@@ -1692,7 +1712,7 @@ mod tests {
         append(&mut app, " edited");
         let _ = app.apply_core(Op::Flush).unwrap();
         assert_eq!(
-            std::fs::read_to_string(root.path().join("Inbox/Fresh.md")).unwrap(),
+            std::fs::read_to_string(root.path().join("Inbox/General/Fresh.md")).unwrap(),
             "fresh bytes edited"
         );
         assert_eq!(
@@ -1706,8 +1726,8 @@ mod tests {
         let (_directory, mut app) = fixture();
         let next = crate::test_support::tempdir();
         std::fs::create_dir(next.path().join("Empty")).unwrap();
-        std::fs::create_dir(next.path().join("WithNote")).unwrap();
-        std::fs::write(next.path().join("WithNote/Other.md"), "other").unwrap();
+        std::fs::create_dir_all(next.path().join("WithNote/Group")).unwrap();
+        std::fs::write(next.path().join("WithNote/Group/Other.md"), "other").unwrap();
         let mut preferences = Session::open(next.path()).unwrap();
         let empty = preferences
             .model()
@@ -1760,24 +1780,27 @@ mod tests {
         let _ = app.show_dialog(DialogKind::Rename(ItemRef::Note(original)));
         app.dialog.as_mut().unwrap().name = "Wrong workspace".into();
         let next = crate::test_support::tempdir();
-        std::fs::create_dir(next.path().join("Inbox")).unwrap();
-        std::fs::write(next.path().join("Inbox/Other.md"), "other").unwrap();
+        std::fs::create_dir_all(next.path().join("Inbox/General")).unwrap();
+        std::fs::write(next.path().join("Inbox/General/Other.md"), "other").unwrap();
         let previous = app.session.take();
         let slot = returning(&mut app, load(previous, next.path().into()));
         let _ = app.workspace_loaded(app.load_generation, slot);
         assert_eq!(app.selected_note, Some(original));
         assert!(app.dialog.is_none());
         let _ = app.submit_dialog(false);
-        assert!(next.path().join("Inbox/Other.md").exists());
-        assert!(!next.path().join("Inbox/Wrong workspace.md").exists());
+        assert!(next.path().join("Inbox/General/Other.md").exists());
+        assert!(!next
+            .path()
+            .join("Inbox/General/Wrong workspace.md")
+            .exists());
     }
 
     #[test]
     fn registry_failure_after_switch_keeps_new_session_and_warning_but_cannot_replay_picker() {
         let (_directory, mut app) = fixture();
         let next = crate::test_support::tempdir();
-        std::fs::create_dir(next.path().join("Section")).unwrap();
-        std::fs::write(next.path().join("Section/Other.md"), "other").unwrap();
+        std::fs::create_dir_all(next.path().join("Section/Group")).unwrap();
+        std::fs::write(next.path().join("Section/Group/Other.md"), "other").unwrap();
         let configdir = crate::test_support::tempdir();
         std::fs::write(configdir.path().join("config.toml"), "invalid = [").unwrap();
         app.config = Some(wren_core::config::Config::load_from(configdir.path()));
@@ -1875,7 +1898,11 @@ mod tests {
         drop(app.session.take());
         let slot = returning(&mut app, load(None, directory.path().into()));
         let _ = app.workspace_loaded(app.load_generation, slot);
-        std::fs::write(directory.path().join("Inbox/External.md"), "outside").unwrap();
+        std::fs::write(
+            directory.path().join("Inbox/General/External.md"),
+            "outside",
+        )
+        .unwrap();
         let prepare = |app: &mut App| {
             // A watcher hint or the one-second poll prepares the job.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1931,7 +1958,7 @@ mod tests {
         let _ = app.show_dialog(DialogKind::Delete(ItemRef::Note(note)));
         let _ = app.update(Message::SubmitDialog);
         assert!(app.dialog.is_some());
-        assert!(directory.path().join("Inbox/Note.md").exists());
+        assert!(directory.path().join("Inbox/General/Note.md").exists());
         let _ = app.update(Message::Escape);
         assert!(app.dialog.is_none());
     }
@@ -2013,7 +2040,8 @@ mod tests {
                     assert!(app.banner.as_deref().unwrap().contains("Write"));
                 } else {
                     assert_eq!(
-                        std::fs::read_to_string(directory.path().join("Inbox/Note.md")).unwrap(),
+                        std::fs::read_to_string(directory.path().join("Inbox/General/Note.md"))
+                            .unwrap(),
                         app.editor.text()
                     );
                 }
@@ -2106,8 +2134,8 @@ mod tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .unwrap();
-        std::fs::create_dir(second.path().join("Section")).unwrap();
-        std::fs::write(second.path().join("Section/Note.md"), "quarantined").unwrap();
+        std::fs::create_dir_all(second.path().join("Section/Group")).unwrap();
+        std::fs::write(second.path().join("Section/Group/Note.md"), "quarantined").unwrap();
         let first = load_workspace(None, first.path().into(), Some(sandbox.path().into()))
             .session
             .unwrap();
@@ -2129,7 +2157,7 @@ mod tests {
             std::fs::read_to_string(sandbox.path().join("trash/item-00000000")).unwrap(),
             "quarantined"
         );
-        assert!(!second.path().join("Section/Note.md").exists());
+        assert!(!second.path().join("Section/Group/Note.md").exists());
     }
 
     #[cfg(feature = "smoke-test")]

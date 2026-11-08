@@ -35,16 +35,21 @@ SAMPLE = {
     "1-1s/Alice Chen/2026-10-21.md": "# 1:1 — Alice Chen · Oct 21\n\n- Promo criteria walkthrough\n",
     "1-1s/Bob Ruiz/2026-11-03.md": "# 1:1 — Bob Ruiz\n\n- On-call load\n",
     "1-1s/Priya Nair/2026-11-02.md": "# 1:1 — Priya Nair\n\n- Design review\n",
-    "1-1s/Team sync.md": "# Team sync\n",
+    "1-1s/Team/Team sync.md": "# Team sync\n",
     "Projects/API Migration/Design notes.md": "# Design notes\n\nRead path first.\n",
     "Projects/API Migration/Cutover plan.md": "# Cutover plan\n",
-    "Projects/Quarterly planning.md": "# Quarterly planning\n",
-    "Inbox/scratch.md": "scratch\n",
-    "Reference/Promo rubric.md": "# Promo rubric\n\nScope, impact, and influence.\n",
+    "Projects/Planning/Quarterly planning.md": "# Quarterly planning\n",
+    "Inbox/Triage/scratch.md": "scratch\n",
+    "Reference/Promotions/Promo rubric.md": "# Promo rubric\n\nScope, impact, and influence.\n",
 }
 
 
+# A section with no groups yet, for the empty-state scenes.
+EMPTY_SECTION = "Archive"
+
+
 def build_workspace(root: Path) -> None:
+    (root / EMPTY_SECTION).mkdir(parents=True)
     for relative, text in SAMPLE.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +69,21 @@ def main() -> int:
     out = (args.out / args.theme).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
+    def shot(client, name: str) -> None:
+        path = out / f"{name}.png"
+        path.unlink(missing_ok=True)
+        time.sleep(0.3)
+        client.call("app.screenshot", {"path": str(path)})
+        print(path)
+
     with tempfile.TemporaryDirectory() as temp:
+        blank = Path(temp).resolve() / "blank"
+        blank.mkdir()
+        with WrenApp(workspace=blank, evaluation=False) as app:
+            app.client.call("theme.set", {"id": args.theme})
+            wait_for(lambda: app.client.call("session.get")["root"], timeout=10)
+            shot(app.client, "empty-workspace")
+
         workspace = Path(temp).resolve() / "work"
         build_workspace(workspace)
         with WrenApp(workspace=workspace, evaluation=False) as app:
@@ -72,12 +91,8 @@ def main() -> int:
             client.call("theme.set", {"id": args.theme})
             wait_for(lambda: client.call("session.get")["notes"], timeout=10)
 
-            def shot(name: str) -> None:
-                path = out / f"{name}.png"
-                path.unlink(missing_ok=True)
-                time.sleep(0.3)
-                client.call("app.screenshot", {"path": str(path)})
-                print(path)
+            def shot_here(name: str) -> None:
+                shot(client, name)
 
             note = next(
                 row for row in client.call("session.get")["notes"]
@@ -85,9 +100,9 @@ def main() -> int:
             )
             client.call("core.apply", {"op": "open_note", "note": note["id"]})
             time.sleep(0.3)
-            shot("columns")
+            shot_here("columns")
             client.call("view.layout", {"layout": "outline"})
-            shot("outline")
+            shot_here("outline")
             client.call("view.layout", {"layout": "columns"})
             for mode, query in [
                 ("commands", ""),
@@ -100,16 +115,25 @@ def main() -> int:
                 client.call("palette.open", {"mode": mode})
                 if query:
                     client.call("palette.query", {"query": query})
-                shot(f"palette-{mode}")
+                shot_here(f"palette-{mode}")
                 client.call("palette.close")
             for _ in range(4):
                 client.call("command.run", {"id": "font.increase"})
-            shot("text-larger")
+            shot_here("text-larger")
             client.call("command.run", {"id": "font.reset"})
             client.call("view.focus", {"enabled": True})
-            shot("focus")
+            shot_here("focus")
             client.call("view.focus", {"enabled": False})
-            wait_for(lambda: True, timeout=1)
+            archive = next(
+                row for row in client.call("session.get")["sections"]
+                if row["path"] == EMPTY_SECTION
+            )
+            client.call("core.apply", {"op": "select_section", "section": archive["id"]})
+            shot_here("empty-section")
+            client.call("core.apply", {
+                "op": "create_group", "section": archive["id"], "name": "2026",
+            })
+            shot_here("empty-group")
     return 0
 
 

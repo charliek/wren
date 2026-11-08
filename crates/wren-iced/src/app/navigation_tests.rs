@@ -4,7 +4,7 @@ use crate::editor_view;
 use iced::widget::text_editor::{Action, Edit, Motion};
 use wren_core::config::Config;
 use wren_core::fs_store::Fault;
-use wren_core::model::{ItemRef, NoteId, Parent};
+use wren_core::model::{GroupId, ItemRef, NoteId, Parent};
 use wren_core::ops::{Op, Session};
 
 use super::commands::{Command, CommandId, Disposition};
@@ -15,11 +15,17 @@ use crate::panes::{Layout, Pane};
 
 fn fixture() -> (tempfile::TempDir, App) {
     let directory = crate::test_support::tempdir();
-    for path in ["Alpha", "Alpha/Group", "Beta", "Beta/Destination"] {
+    for path in [
+        "Alpha",
+        "Alpha/Group",
+        "Alpha/Inbox",
+        "Beta",
+        "Beta/Destination",
+    ] {
         std::fs::create_dir(directory.path().join(path)).unwrap();
     }
     for (path, text) in [
-        ("Alpha/First.md", "first body"),
+        ("Alpha/Inbox/First.md", "first body"),
         ("Alpha/Group/Second.md", "second body"),
         ("Beta/Destination/Third.md", "third body"),
     ] {
@@ -48,6 +54,15 @@ fn note(app: &App, title: &str) -> NoteId {
         .unwrap()
         .id
 }
+fn group(app: &App, name: &str) -> GroupId {
+    app.model()
+        .unwrap()
+        .groups
+        .iter()
+        .find(|group| group.name == name)
+        .unwrap()
+        .id
+}
 fn append(app: &mut App, text: &str) {
     let _ = app.edit(editor_view::Message::Action(Action::Move(
         Motion::DocumentEnd,
@@ -70,7 +85,7 @@ fn target(app: &App, note: NoteId, query: &str) -> SearchTarget {
 fn command_context_is_explicit_and_palette_groups_filter_without_empty_headers() {
     let (_directory, mut app) = fixture();
     assert!(app.command_enabled(CommandId::RenameNote));
-    assert!(!app.command_enabled(CommandId::RenameGroup));
+    assert!(app.command_enabled(CommandId::RenameGroup));
     assert!(app.command_enabled(CommandId::RenameSection));
     let _ = app.open_palette(Mode::Commands);
     let _ = app.palette_query("Layout: Outline".into());
@@ -199,21 +214,22 @@ fn explicit_navigation_clears_only_filters_that_hide_its_destination() {
 }
 
 #[test]
-fn jumping_back_to_ungrouped_notes_clears_only_a_conflicting_groups_filter() {
-    for query in ["Destination", "No group"] {
+fn jumping_back_to_another_group_clears_only_a_conflicting_groups_filter() {
+    for query in ["Destination", "Inbox"] {
         let (_directory, mut app) = fixture();
         let first = note(&app, "First");
         let second = note(&app, "Second");
+        let inbox = group(&app, "Inbox");
         let _ = app.dispatch(Command::OpenNote(target(&app, second, "")));
         app.filters.sections = "Alpha".into();
         app.filters.groups = query.into();
         app.filters.notes = "body".into();
         app.filters.outline = "Alpha".into();
-        let expected = if query == "No group" { query } else { "" };
+        let expected = if query == "Inbox" { query } else { "" };
         let result = app.dispatch(Command::Run(CommandId::Back));
         assert_eq!(result.processed.disposition, Disposition::Completed);
         assert_eq!(app.selected_note, Some(first));
-        assert_eq!(app.selected_group, None);
+        assert_eq!(app.selected_group, Some(inbox));
         assert_eq!(app.filters.groups, expected);
         assert_eq!(app.filters.sections, "Alpha");
         assert_eq!(app.filters.notes, "body");
@@ -231,24 +247,80 @@ fn jumping_back_to_ungrouped_notes_clears_only_a_conflicting_groups_filter() {
 }
 
 #[test]
-fn moving_into_an_ungrouped_parent_reveals_its_synthetic_group_without_clearing_other_filters() {
+fn moving_into_a_filtered_out_group_reveals_it_without_clearing_other_filters() {
     let (_directory, mut app) = fixture();
     let second = note(&app, "Second");
+    let inbox = group(&app, "Inbox");
     let _ = app.dispatch(Command::OpenNote(target(&app, second, "")));
-    let section = app.selected_section.unwrap();
     app.filters.sections = "Alpha".into();
-    app.filters.groups = "Destination".into();
+    app.filters.groups = "Group".into();
     app.filters.notes = "Second".into();
     app.filters.outline = "Alpha".into();
     let _ = app.open_palette(Mode::MoveNote(second));
-    let destination = super::palette::Key::Destination(Parent::Section(section));
+    let destination = super::palette::Key::Destination(Parent::Group(inbox));
     let result = app.activate_palette_key(app.workspace_generation(), destination);
     assert_eq!(result.processed.disposition, Disposition::Completed);
-    assert_eq!(app.selected_group, None);
+    assert_eq!(app.selected_group, Some(inbox));
     assert_eq!(app.filters.groups, "");
     assert_eq!(app.filters.sections, "Alpha");
     assert_eq!(app.filters.notes, "Second");
     assert_eq!(app.filters.outline, "Alpha");
+}
+
+#[test]
+fn a_section_without_groups_is_selectable_but_blocks_note_creation_and_sorting() {
+    let (directory, mut app) = fixture();
+    std::fs::create_dir(directory.path().join("Empty")).unwrap();
+    let _ = app.process_core(Op::Reconcile);
+    let empty = app
+        .model()
+        .unwrap()
+        .sections
+        .iter()
+        .find(|section| section.name == "Empty")
+        .unwrap()
+        .id;
+    let result = app.dispatch(Command::SelectSection(empty));
+    assert!(result.processed.disposition.committed());
+    assert_eq!(app.selected_section, Some(empty));
+    assert_eq!(app.selected_group, None);
+    assert_eq!(app.selected_note, None);
+    assert!(app.note_hits().is_empty());
+    assert!(app.command_enabled(CommandId::NewGroup));
+    for id in [
+        CommandId::NewNote,
+        CommandId::NewDatedNote,
+        CommandId::SortModified,
+        CommandId::SortTitle,
+        CommandId::RenameGroup,
+    ] {
+        assert!(!app.command_enabled(id), "{id:?}");
+    }
+    let count = app.model().unwrap().notes.len();
+    for id in [CommandId::NewNote, CommandId::NewDatedNote] {
+        let result = app.dispatch(Command::Run(id));
+        assert_eq!(result.processed.disposition, Disposition::Blocked);
+        assert_eq!(
+            result.processed.warning.as_deref(),
+            Some("Create a group first; notes live in groups")
+        );
+        assert!(app.dialog.is_none());
+    }
+    assert_eq!(
+        app.dispatch(Command::Sort("title".into()))
+            .processed
+            .disposition,
+        Disposition::Blocked
+    );
+    assert_eq!(app.model().unwrap().notes.len(), count);
+
+    let _ = app.dispatch(Command::SelectParent(Parent::Group(group(&app, "Inbox"))));
+    assert!(app.command_enabled(CommandId::NewNote));
+    let _ = app.dispatch(Command::Run(CommandId::NewNote));
+    assert!(matches!(
+        app.dialog.as_ref().unwrap().kind,
+        DialogKind::CreateNote(id) if id == group(&app, "Inbox")
+    ));
 }
 
 #[test]
@@ -389,31 +461,52 @@ fn empty_tree_reconciliation_refreshes_move_destinations_without_an_index_revisi
     for move_group in [false, true] {
         let (directory, mut app) = fixture();
         let revision = app.session.as_ref().unwrap().index().revision();
-        for path in ["Empty", "Empty/Old", "Empty section", "Empty section 2"] {
+        for path in [
+            "Empty",
+            "Empty/Old",
+            "Empty/Shelf",
+            "Empty section",
+            "Empty section 2",
+        ] {
             std::fs::create_dir(directory.path().join(path)).unwrap();
         }
         let setup = app.process_core(Op::Reconcile);
         assert_eq!(setup.processed.disposition, Disposition::Completed);
         assert_eq!(app.session.as_ref().unwrap().index().revision(), revision);
-        let mode = if move_group {
-            Mode::MoveGroup(app.model().unwrap().groups[0].id)
+        // Groups move between sections; notes move only between groups.
+        let (mode, chosen, removed, added) = if move_group {
+            (
+                Mode::MoveGroup(app.model().unwrap().groups[0].id),
+                "Empty section 2",
+                "Empty section",
+                "Empty section 3",
+            )
         } else {
-            Mode::MoveNote(app.selected_note.unwrap())
+            (
+                Mode::MoveNote(app.selected_note.unwrap()),
+                "Empty/Shelf",
+                "Empty/Old",
+                "Empty/Zed",
+            )
         };
         let _ = app.open_palette(mode);
         let _ = app.palette_query("  Empty  ".into());
         let palette = app.palette.as_ref().unwrap();
+        assert!(palette
+            .results
+            .iter()
+            .all(|row| row.path.contains('/') != move_group));
         let active = palette
             .results
             .iter()
-            .position(|row| row.path == "Empty section 2")
+            .position(|row| row.path == chosen)
             .unwrap();
         let selected = palette.results[active].key.clone();
         let _ = app.palette_step(active as i32);
 
         std::fs::remove_dir(directory.path().join("Empty/Old")).unwrap();
         std::fs::remove_dir(directory.path().join("Empty section")).unwrap();
-        std::fs::create_dir(directory.path().join("Empty/New")).unwrap();
+        std::fs::create_dir(directory.path().join("Empty/Zed")).unwrap();
         std::fs::create_dir(directory.path().join("Empty section 3")).unwrap();
         let outcome = app.process_core(Op::Reconcile);
         assert_eq!(outcome.processed.disposition, Disposition::Completed);
@@ -422,18 +515,15 @@ fn empty_tree_reconciliation_refreshes_move_destinations_without_an_index_revisi
         assert_eq!(palette.revision, revision);
         assert_eq!(palette.mode, mode);
         assert_eq!(palette.query, "  Empty  ");
+        assert!(palette.results.iter().all(|row| row.path != removed));
         assert!(palette
             .results
             .iter()
-            .all(|row| row.path != "Empty/Old" && row.path != "Empty section"));
+            .any(|row| row.path == added && row.enabled));
         assert!(palette
             .results
             .iter()
-            .any(|row| row.path == "Empty section 3" && row.enabled));
-        assert_eq!(
-            palette.results.iter().any(|row| row.path == "Empty/New"),
-            !move_group
-        );
+            .all(|row| row.path.contains('/') != move_group));
         assert_eq!(palette.active, Some(active - 1));
         assert_eq!(palette.results[palette.active.unwrap()].key, selected);
         assert!(outcome.task.units() > 0, "changed results must be revealed");
@@ -557,7 +647,7 @@ fn active_draft_search_does_not_flush_and_title_hits_do_not_override_find() {
     assert_eq!(palette.results.len(), 1);
     assert!(palette.results[0].content_hit);
     assert_eq!(
-        std::fs::read_to_string(directory.path().join("Alpha/First.md")).unwrap(),
+        std::fs::read_to_string(directory.path().join("Alpha/Inbox/First.md")).unwrap(),
         "first body"
     );
     let _ = app.close_palette();
@@ -575,7 +665,7 @@ fn stale_search_range_is_recomputed_against_current_text_without_replacing_find_
     let (directory, mut app) = fixture();
     let first = app.selected_note.unwrap();
     let stale = target(&app, first, "body");
-    std::fs::write(directory.path().join("Alpha/First.md"), "body first").unwrap();
+    std::fs::write(directory.path().join("Alpha/Inbox/First.md"), "body first").unwrap();
     let _ = app.process_core(Op::Reconcile);
     let _ = app.update(Message::FindChanged("first".into()));
     let _ = app.dispatch(Command::OpenNote(stale));
@@ -593,7 +683,11 @@ fn failed_and_conflict_cancelled_search_activation_preserve_recoverable_overlay(
         let _ = app.open_palette(Mode::Jump);
         let _ = app.palette_query("Second".into());
         if external_conflict {
-            std::fs::write(directory.path().join("Alpha/First.md"), "external bytes").unwrap();
+            std::fs::write(
+                directory.path().join("Alpha/Inbox/First.md"),
+                "external bytes",
+            )
+            .unwrap();
         } else {
             app.session.as_mut().unwrap().fail_next(Fault::Write);
         }
@@ -637,7 +731,7 @@ fn committed_move_warning_dismisses_mutating_picker_and_cannot_replay() {
     assert!(app.palette.is_none());
     assert!(app.banner.is_some());
     assert!(directory.path().join("Beta/Destination/First.md").exists());
-    assert!(!directory.path().join("Alpha/First.md").exists());
+    assert!(!directory.path().join("Alpha/Inbox/First.md").exists());
     let replay = app.activate_palette(None);
     assert_eq!(replay.processed.disposition, Disposition::Blocked);
     assert!(!directory
@@ -674,7 +768,7 @@ fn external_deletion_recovery_cancels_rename_and_delete_without_dismissing_the_d
             Command::Rename(ItemRef::Note(first))
         });
         app.dialog.as_mut().unwrap().name = "Must not publish".into();
-        std::fs::remove_file(directory.path().join("Alpha/First.md")).unwrap();
+        std::fs::remove_file(directory.path().join("Alpha/Inbox/First.md")).unwrap();
         let _ = app.submit_dialog(delete);
         let processed = app.last_processed.as_ref().unwrap();
         assert_eq!(processed.disposition, Disposition::Blocked);
@@ -688,7 +782,10 @@ fn external_deletion_recovery_cancels_rename_and_delete_without_dismissing_the_d
         assert!(app.model().unwrap().note(first).is_none());
         assert_ne!(app.selected_note, Some(first));
         assert_eq!(app.editor.text(), "first body recovered draft");
-        assert!(!directory.path().join("Alpha/Must not publish.md").exists());
+        assert!(!directory
+            .path()
+            .join("Alpha/Inbox/Must not publish.md")
+            .exists());
         assert_eq!(app.model().unwrap().notes.len(), 3);
         let recovery = app
             .model()
@@ -736,11 +833,11 @@ fn committed_rename_and_delete_partial_failures_still_dismiss_with_a_warning() {
         );
         assert!(app.dialog.is_none());
         assert!(app.banner.is_some());
-        assert!(!directory.path().join("Alpha/First.md").exists());
+        assert!(!directory.path().join("Alpha/Inbox/First.md").exists());
         if delete {
             assert!(app.model().unwrap().note(first).is_none());
         } else {
-            assert!(directory.path().join("Alpha/Published.md").exists());
+            assert!(directory.path().join("Alpha/Inbox/Published.md").exists());
             assert_eq!(app.selected_note, Some(first));
         }
     }
@@ -851,14 +948,14 @@ fn committed_rename_dialog_dismisses_but_failed_rename_remains_retryable() {
     app.session.as_mut().unwrap().fail_next(Fault::FileSync);
     let _ = app.submit_dialog(false);
     assert!(app.dialog.is_none());
-    assert!(directory.path().join("Alpha/Renamed.md").exists());
+    assert!(directory.path().join("Alpha/Inbox/Renamed.md").exists());
     append(&mut app, " pending");
     let _ = app.dispatch(Command::Rename(ItemRef::Note(first)));
     app.dialog.as_mut().unwrap().name = "Unpublished".into();
     app.session.as_mut().unwrap().fail_next(Fault::Write);
     let _ = app.submit_dialog(false);
     assert!(app.dialog.is_some());
-    assert!(!directory.path().join("Alpha/Unpublished.md").exists());
+    assert!(!directory.path().join("Alpha/Inbox/Unpublished.md").exists());
 }
 
 #[test]
@@ -955,7 +1052,7 @@ fn remove_active_registration_does_not_close_session_flush_draft_or_delete_files
     assert!(app.config.as_ref().unwrap().workspaces().is_empty());
     assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
     assert_eq!(
-        std::fs::read_to_string(directory.path().join("Alpha/First.md")).unwrap(),
+        std::fs::read_to_string(directory.path().join("Alpha/Inbox/First.md")).unwrap(),
         "first body"
     );
 }
@@ -1096,7 +1193,7 @@ fn spring_browsing_is_transient_and_a_failed_blur_clears_preview_before_the_barr
             generation,
             op: Op::MoveNote {
                 note: selected.unwrap(),
-                to: wren_core::model::Parent::Section(beta),
+                to: group(&app, "Destination"),
             },
         },
     );
@@ -1177,5 +1274,5 @@ fn destructive_command_needs_explicit_target_and_return_is_never_confirmation() 
     )));
     let _ = app.update(Message::SubmitDialog);
     assert!(app.dialog.is_some());
-    assert!(directory.path().join("Alpha/First.md").exists());
+    assert!(directory.path().join("Alpha/Inbox/First.md").exists());
 }

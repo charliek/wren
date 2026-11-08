@@ -327,10 +327,8 @@ impl App {
             NewGroup | RenameSection | DeleteSection | RevealSection | ReorderSection => {
                 self.selected_section.is_some() && self.session.is_some()
             }
-            NewNote | NewDatedNote | SortModified | SortTitle => {
-                self.selected_parent().is_some() && self.session.is_some()
-            }
-            RenameGroup | DeleteGroup | RevealGroup | MoveGroup | ReorderGroup => {
+            NewNote | NewDatedNote | SortModified | SortTitle | RenameGroup | DeleteGroup
+            | RevealGroup | MoveGroup | ReorderGroup => {
                 self.selected_group.is_some() && self.session.is_some()
             }
             RenameNote | DeleteNote | RevealNote | MoveNote | Find => {
@@ -358,7 +356,13 @@ impl App {
         match command {
             Command::Run(id) => {
                 if !self.command_enabled(id) {
-                    return self.blocked("This command is unavailable in the current context");
+                    let needs_group = matches!(id, CommandId::NewNote | CommandId::NewDatedNote)
+                        && self.selected_section.is_some();
+                    return self.blocked(if needs_group {
+                        "Create a group first; notes live in groups"
+                    } else {
+                        "This command is unavailable in the current context"
+                    });
                 }
                 self.run_command(id)
             }
@@ -445,10 +449,10 @@ impl App {
                 })
             }
             Command::Sort(mode) => {
-                let Some(parent) = self.selected_parent() else {
-                    return self.blocked("Select a section or group first");
+                let Some(group) = self.selected_group else {
+                    return self.blocked("Select a group first");
                 };
-                self.process_core(Op::SetSort { parent, mode })
+                self.process_core(Op::SetSort { group, mode })
             }
             Command::Filter { pane, query } => {
                 if let Err(error) = wren_core::index::validate_query(&query) {
@@ -502,11 +506,11 @@ impl App {
                 self.selected_section.expect("enabled section"),
             )),
             NewNote => self.command_dialog(DialogKind::CreateNote(
-                self.selected_parent().expect("enabled parent"),
+                self.selected_group.expect("enabled group"),
             )),
             NewDatedNote => {
                 let outcome = self.process_core(Op::CreateNote {
-                    parent: self.selected_parent().expect("enabled parent"),
+                    group: self.selected_group.expect("enabled group"),
                     title: wren_core::ops::dated_title(),
                 });
                 if outcome.processed.disposition.committed() {
@@ -641,7 +645,7 @@ impl App {
                 None
             }
             ItemRef::Group(group) => Some(Parent::Section(model.group(group)?.section)),
-            ItemRef::Note(note) => Some(model.note(note)?.parent),
+            ItemRef::Note(note) => Some(Parent::Group(model.note(note)?.group)),
         };
         Some(ItemTarget {
             generation: self.workspace_generation(),
@@ -853,9 +857,9 @@ mod tests {
             std::fs::create_dir(directory.path().join(path)).unwrap();
         }
         for (path, text) in [
-            ("Alpha/First.md", "first body"),
-            ("Alpha/Peer.md", "peer body"),
-            ("Beta/Other.md", "other body"),
+            ("Alpha/A/First.md", "first body"),
+            ("Alpha/A/Peer.md", "peer body"),
+            ("Beta/Foreign/Other.md", "other body"),
         ] {
             std::fs::write(directory.path().join(path), text).unwrap();
         }
@@ -1062,7 +1066,7 @@ mod tests {
         assert_eq!(app.filters.notes, "First");
         assert_eq!(app.filters.outline, "First");
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Alpha/First.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Alpha/A/First.md")).unwrap(),
             "first body"
         );
         for query in ["x".repeat(4096), "a ".repeat(128)] {
@@ -1102,13 +1106,13 @@ mod tests {
         assert_eq!(app.editor.text(), text);
         app.dialog.as_mut().unwrap().name = "Renamed peer".into();
         let _ = app.submit_dialog(false);
-        assert!(directory.path().join("Alpha/Renamed peer.md").exists());
-        assert!(!directory.path().join("Alpha/Peer.md").exists());
+        assert!(directory.path().join("Alpha/A/Renamed peer.md").exists());
+        assert!(!directory.path().join("Alpha/A/Peer.md").exists());
         assert_eq!(app.selected_note, selected);
         assert_eq!(app.editor.text(), text);
         assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Alpha/First.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Alpha/A/First.md")).unwrap(),
             "first body"
         );
     }
@@ -1153,11 +1157,14 @@ mod tests {
             generation,
             app.layout,
             DragEvent::Rename {
-                generation,
-                row: RowKind::NoGroup(section(&app, "Alpha")),
+                generation: generation + 1,
+                row: RowKind::Note(peer),
             },
         );
-        assert!(app.dialog.is_none());
+        assert!(
+            app.dialog.is_none(),
+            "a mismatched gesture generation is ignored"
+        );
         let _ = app.drag_event(
             generation,
             app.layout,
@@ -1231,7 +1238,10 @@ mod tests {
         assert!(app.dialog.as_ref().unwrap().error.is_some());
         assert_eq!(app.selected_note, selected);
         assert!(app.editor.text().ends_with(" retained"));
-        assert!(!directory.path().join("Alpha/Must not publish.md").exists());
+        assert!(!directory
+            .path()
+            .join("Alpha/A/Must not publish.md")
+            .exists());
     }
 
     #[test]
@@ -1528,7 +1538,7 @@ mod tests {
         let selected = app.selected_note.unwrap();
         append(&mut app, " retained");
         let _ = app.open_palette(Mode::MoveNote(selected));
-        let _ = app.palette_query("Beta No group".into());
+        let _ = app.palette_query("Beta Foreign".into());
         app.session.as_mut().unwrap().fail_next(Fault::Write);
         let blocked = app.activate_palette(None);
         assert_eq!(blocked.processed.disposition, Disposition::Blocked);
@@ -1609,7 +1619,7 @@ mod tests {
         assert!(app.palette.as_ref().unwrap().error.is_some());
         assert_eq!(app.config.as_ref().unwrap().workspaces()[0].path, stored);
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Alpha/First.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Alpha/A/First.md")).unwrap(),
             "first body"
         );
     }
@@ -1667,7 +1677,11 @@ mod tests {
     fn generated_conflict_copy_opens_the_preserved_local_bytes_not_the_external_original() {
         let (directory, mut app) = fixture();
         append(&mut app, " local draft");
-        std::fs::write(directory.path().join("Alpha/First.md"), "external version").unwrap();
+        std::fs::write(
+            directory.path().join("Alpha/A/First.md"),
+            "external version",
+        )
+        .unwrap();
         let outcome = app.process_core(Op::Flush);
         assert_eq!(outcome.processed.disposition, Disposition::Blocked);
         assert_eq!(app.editor.text(), "external version");
@@ -1689,7 +1703,7 @@ mod tests {
             path
         );
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Alpha/First.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Alpha/A/First.md")).unwrap(),
             "external version"
         );
     }
@@ -1701,8 +1715,8 @@ mod tests {
         let selected = app.selected_note;
         let text = app.editor.text();
         for (generation, path) in [
-            (app.workspace_generation() + 1, "Alpha/Peer.md"),
-            (app.workspace_generation(), "Alpha/Missing.md"),
+            (app.workspace_generation() + 1, "Alpha/A/Peer.md"),
+            (app.workspace_generation(), "Alpha/A/Missing.md"),
         ] {
             app.conflict_copy = Some((generation, RelPath::new(path).unwrap()));
             app.banner = Some("Keep conflict warning".into());

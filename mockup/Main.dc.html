@@ -419,8 +419,10 @@ class Component extends DCLogic {
           { id: 'alice', section: 'oneonone', name: 'Alice Chen' },
           { id: 'bob', section: 'oneonone', name: 'Bob Ruiz' },
           { id: 'priya', section: 'oneonone', name: 'Priya Nair' },
+          { id: 'templates', section: 'oneonone', name: 'Templates' },
           { id: 'api', section: 'projects', name: 'API Migration' },
           { id: 'q1', section: 'projects', name: 'Q1 Planning' },
+          { id: 'triage', section: 'inbox', name: 'Triage' },
           { id: 'onboarding', section: 'reference', name: 'Onboarding' },
           { id: 'runbooks', section: 'reference', name: 'Runbooks' }
         ],
@@ -464,7 +466,7 @@ class Component extends DCLogic {
           ]),
           n('p1030', 'oneonone', 'priya', '2026-10-30', 'Oct 30'),
           n('p1016', 'oneonone', 'priya', '2026-10-16', 'Oct 16'),
-          n('tmpl', 'oneonone', null, '1:1 template', 'Aug 12', [
+          n('tmpl', 'oneonone', 'templates', '1:1 template', 'Aug 12', [
             '# 1:1 — {person} · {date}',
             '',
             '## Agenda',
@@ -498,15 +500,15 @@ class Component extends DCLogic {
           n('apirisk', 'projects', 'api', 'Risks', 'Oct 25'),
           n('q1goals', 'projects', 'q1', 'Draft goals', 'Oct 29'),
           n('q1hc', 'projects', 'q1', 'Headcount asks', 'Oct 20'),
-          n('qplan', 'projects', null, 'Quarterly planning', 'Oct 18'),
-          n('scratch', 'inbox', null, 'scratch', 'Today', [
+          n('qplan', 'projects', 'q1', 'Quarterly planning', 'Oct 18'),
+          n('scratch', 'inbox', 'triage', 'scratch', 'Today', [
             '# scratch',
             '',
             '- look into the flaky deploy job',
             '- promo calibration is Nov 18'
           ]),
-          n('links', 'inbox', null, 'Links to read', 'Nov 1'),
-          n('design', 'inbox', null, 'Meeting with design', 'Oct 31'),
+          n('links', 'inbox', 'triage', 'Links to read', 'Nov 1'),
+          n('design', 'inbox', 'triage', 'Meeting with design', 'Oct 31'),
           n('first', 'reference', 'onboarding', 'First week', 'Jul 8'),
           n('access', 'reference', 'onboarding', 'Accounts & access', 'Jul 8'),
           n('gloss', 'reference', 'onboarding', 'Glossary', 'Jun 2'),
@@ -524,15 +526,16 @@ class Component extends DCLogic {
         groups: [
           { id: 'house', section: 'home', name: 'House projects' },
           { id: 'garden', section: 'home', name: 'Garden' },
-          { id: 'books', section: 'reading', name: '2026 books' }
+          { id: 'books', section: 'reading', name: '2026 books' },
+          { id: 'someday', section: 'ideas', name: 'Someday' }
         ],
         notes: [
           n('gutters', 'home', 'house', 'Gutters', 'Oct 12', ['# Gutters', '', '- [ ] Get two quotes', '- [ ] Clean before the first freeze']),
           n('paint', 'home', 'house', 'Kitchen paint', 'Sep 28'),
           n('plant', 'home', 'garden', 'Spring planting', 'Oct 3'),
           n('list', 'reading', 'books', 'Reading list', 'Nov 1', ['# Reading list', '', '- [x] The Pragmatic Programmer', '- [ ] A Philosophy of Software Design']),
-          n('apps', 'ideas', null, 'App ideas', 'Today', ['# App ideas', '', '- A notes app with **structure**: sections, groups, notes', '- One open note at a time, no tabs']),
-          n('trips', 'ideas', null, 'Weekend trips', 'Oct 20')
+          n('apps', 'ideas', 'someday', 'App ideas', 'Today', ['# App ideas', '', '- A notes app with **structure**: sections, groups, notes', '- One open note at a time, no tabs']),
+          n('trips', 'ideas', 'someday', 'Weekend trips', 'Oct 20')
         ]
       }
     };
@@ -569,7 +572,6 @@ class Component extends DCLogic {
   }
 
   firstGroup(ws, sid) {
-    if (this.notesIn(ws, sid, '_root').length) return '_root';
     var g = this.groupsIn(ws, sid);
     return g.length ? g[0].id : '_root';
   }
@@ -745,8 +747,6 @@ class Component extends DCLogic {
     });
 
     var gl = [];
-    var rootCount = this.notesIn(ws, viewSection, '_root').length;
-    if (rootCount) gl.push({ id: '_root', name: '(No group)', count: rootCount });
     this.groupsIn(ws, viewSection).forEach(function (g) { gl.push({ id: g.id, name: g.name, count: self.notesIn(ws, viewSection, g.id).length }); });
     var gq = st.groupQ.toLowerCase();
     var groups = gl.filter(function (g) { return !gq || g.name.toLowerCase().indexOf(gq) >= 0; }).map(function (g) {
@@ -850,7 +850,7 @@ class Component extends DCLogic {
     } else if (st.pmode === 'move') {
       chip = 'Move “' + (note ? note.title : '') + '” to'; placeholder = 'Destination…';
       ws.sections.forEach(function (s) {
-        var dests = [{ sid: s.id, gid: null, label: s.name, sub: 'Section root, no group' }];
+        var dests = [];
         self.groupsIn(ws, s.id).forEach(function (g) { dests.push({ sid: s.id, gid: g.id, label: s.name + ' › ' + g.name, sub: '' }); });
         dests.forEach(function (d) {
           if (!note) return;
@@ -870,8 +870,6 @@ class Component extends DCLogic {
     ws.sections.forEach(function (s) {
       var sMatch = !oq || s.name.toLowerCase().indexOf(oq) >= 0;
       var kidsAll = [];
-      var rootN = self.notesIn(ws, s.id, '_root').length;
-      if (rootN) kidsAll.push({ id: '_root', name: '(No group)', count: rootN });
       self.groupsIn(ws, s.id).forEach(function (g) { kidsAll.push({ id: g.id, name: g.name, count: self.notesIn(ws, s.id, g.id).length }); });
       var kids = kidsAll.filter(function (g) { return sMatch || g.name.toLowerCase().indexOf(oq) >= 0; });
       if (!sMatch && !kids.length) return;
@@ -961,7 +959,7 @@ class Component extends DCLogic {
         if (gOpen) gNotes.forEach(function (n) { pushNote(n, 50); });
       });
     });
-    var scopeCrumb = curSec ? curSec.name + (curGrp ? ' › ' + curGrp.name : (st.group === '_root' ? ' › (No group)' : '')) : '';
+    var scopeCrumb = curSec ? curSec.name + (curGrp ? ' › ' + curGrp.name : '') : '';
 
     var gLeft = 252, gTop = 176, dropIdx = -1;
     if (layout === 'outline') { outline.forEach(function (o, i) { if (o.isDrop) dropIdx = i; }); gLeft = 150; }
@@ -1044,7 +1042,7 @@ class Component extends DCLogic {
       groups: groups, groupQ: st.groupQ, emptyGroups: groups.length === 0,
       groupsHeading: viewSec ? 'Groups · ' + viewSec.name : 'Groups',
       notes: notes, noteQ: st.noteQ, emptyNotes: notes.length === 0,
-      notesHeading: curGrp ? 'Notes · ' + curGrp.name : 'Notes · No group',
+      notesHeading: curGrp ? 'Notes · ' + curGrp.name : 'Notes',
       crumbSection: nSec ? nSec.name : ws.name,
       hasCrumbGroup: !!nGrp, crumbGroup: nGrp ? nGrp.name : '',
       noteTitle: note ? note.title : 'Nothing open',

@@ -3,7 +3,7 @@ use iced::widget::{
     text_input,
 };
 use iced::{Border, Element, Fill, Shrink};
-use wren_core::model::{Note, Parent, SectionId, Workspace};
+use wren_core::model::{GroupId, Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
 
@@ -448,35 +448,14 @@ impl App {
         let section = self.browser_section();
         let mut count = 0;
         if let (Some(model), Some(section)) = (self.model(), section) {
-            let root_count = model
-                .notes
-                .iter()
-                .filter(|note| note.parent == Parent::Section(section))
-                .count();
-            if matches_name(&self.filters.groups, "(No group)") {
-                items = items.push(self.tree_row(
-                    registry,
-                    RowKind::NoGroup(section),
-                    "(No group)",
-                    root_count,
-                    self.selected_section == Some(section) && self.selected_group.is_none(),
-                    (0, None),
-                ));
-                count += 1;
-            }
             for group in model.groups.iter().filter(|group| {
                 group.section == section && matches_name(&self.filters.groups, &group.name)
             }) {
-                let notes = model
-                    .notes
-                    .iter()
-                    .filter(|note| note.parent == Parent::Group(group.id))
-                    .count();
                 items = items.push(self.tree_row(
                     registry,
                     RowKind::Group(group.id),
                     &group.name,
-                    notes,
+                    group_count(model, group.id),
                     self.selected_group == Some(group.id),
                     (0, None),
                 ));
@@ -484,7 +463,13 @@ impl App {
             }
         }
         if count == 0 {
-            items = items.push(self.empty_label("No groups match."));
+            items = items.push(self.empty_label(if section.is_none() {
+                "Create a section first."
+            } else if self.filters.groups.trim().is_empty() {
+                "No groups yet."
+            } else {
+                "No groups match."
+            }));
         }
         let heading = section
             .and_then(|id| self.model()?.section(id))
@@ -522,35 +507,15 @@ impl App {
                     continue;
                 }
                 let section_matches = matches_name(&self.filters.outline, &section.name);
-                let root_count = model
-                    .notes
-                    .iter()
-                    .filter(|note| note.parent == Parent::Section(*id))
-                    .count();
-                if section_matches || matches_name(&self.filters.outline, "(No group)") {
-                    items = items.push(self.tree_row(
-                        registry,
-                        RowKind::NoGroup(*id),
-                        "(No group)",
-                        root_count,
-                        self.selected_section == Some(*id) && self.selected_group.is_none(),
-                        (22, None),
-                    ));
-                }
                 for group in model.groups.iter().filter(|group| {
                     group.section == *id
                         && (section_matches || matches_name(&self.filters.outline, &group.name))
                 }) {
-                    let count = model
-                        .notes
-                        .iter()
-                        .filter(|note| note.parent == Parent::Group(group.id))
-                        .count();
                     items = items.push(self.tree_row(
                         registry,
                         RowKind::Group(group.id),
                         &group.name,
-                        count,
+                        group_count(model, group.id),
                         self.selected_group == Some(group.id),
                         (22, None),
                     ));
@@ -629,7 +594,14 @@ impl App {
             }
         }
         if hits.is_empty() {
-            items = items.push(self.empty_label(if self.filters.notes.is_empty() {
+            let parent = self.browser_parent();
+            items = items.push(self.empty_label(if parent.is_none() {
+                "Create a section first.".to_string()
+            } else if self.spring_section.is_some() {
+                "Choose a group.".to_string()
+            } else if !matches!(parent, Some(Parent::Group(_))) {
+                "Create a group first.".to_string()
+            } else if self.filters.notes.is_empty() {
                 self.shortcut_label(CommandId::NewNote.key()).map_or_else(
                     || "No notes here yet.".to_string(),
                     |shortcut| format!("No notes here yet. Press {shortcut}."),
@@ -658,7 +630,10 @@ impl App {
             colors.muted,
         ))
         .padding(0)
-        .on_press_maybe(parent.map(|_| Message::Command(Command::Sort(next_sort.into()))))
+        .on_press_maybe(
+            matches!(parent, Some(Parent::Group(_)))
+                .then(|| Message::Command(Command::Sort(next_sort.into()))),
+        )
         .style(move |_, status| chrome::control(self.definition, status, false, true));
         let footer = chrome::top_rule(
             container(
@@ -748,11 +723,10 @@ impl App {
             model
                 .notes
                 .iter()
-                .filter(|note| match note.parent {
-                    Parent::Section(id) => id == section,
-                    Parent::Group(id) => model
-                        .group(id)
-                        .is_some_and(|group| group.section == section),
+                .filter(|note| {
+                    model
+                        .group(note.group)
+                        .is_some_and(|group| group.section == section)
                 })
                 .count()
         })
@@ -898,16 +872,33 @@ impl App {
             .height(Fill);
         let editor: Element<'_, Message> = container(editor).center_x(Fill).height(Fill).into();
         let mut empty = column![].spacing(14).align_x(iced::Center);
+        let (prompt, action, command) = if self.selected_section.is_none() {
+            (
+                "Create a section to start writing.",
+                "New section…",
+                CommandId::NewSection,
+            )
+        } else if self.selected_group.is_none() {
+            (
+                "Create a group to start writing.",
+                "New group…",
+                CommandId::NewGroup,
+            )
+        } else {
+            (
+                "Select a note, or create one here.",
+                "New note…",
+                CommandId::NewNote,
+            )
+        };
         if self.selected_note.is_none() {
             empty = empty.push(
                 text(if self.loading.is_some() {
                     "Opening workspace…"
                 } else if self.session.is_none() {
                     "Your notes. Your folders."
-                } else if self.selected_section.is_none() {
-                    "Create a section to start writing."
                 } else {
-                    "Select a note, or create one here."
+                    prompt
                 })
                 .size(18)
                 .color(theme::color(colors.muted)),
@@ -933,18 +924,8 @@ impl App {
                         .spacing(10),
                     );
                 } else {
-                    empty = empty.push(self.small_button(
-                        if self.selected_section.is_some() {
-                            "New note…"
-                        } else {
-                            "New section…"
-                        },
-                        Message::Command(Command::Run(if self.selected_section.is_some() {
-                            CommandId::NewNote
-                        } else {
-                            CommandId::NewSection
-                        })),
-                    ));
+                    empty = empty
+                        .push(self.small_button(action, Message::Command(Command::Run(command))));
                 }
             }
         }
@@ -1109,6 +1090,14 @@ impl App {
             .style(move |_| chrome::dialog(self.definition))
             .into()
     }
+}
+
+fn group_count(model: &Workspace, group: GroupId) -> usize {
+    model
+        .notes
+        .iter()
+        .filter(|note| note.group == group)
+        .count()
 }
 
 fn modified_label(note: &Note) -> String {

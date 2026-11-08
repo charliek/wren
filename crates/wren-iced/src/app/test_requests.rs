@@ -466,11 +466,6 @@ impl App {
                 let section_matches = model.section(section).is_some_and(|section| {
                     super::navigation::matches_name(&self.filters.outline, &section.name)
                 });
-                if section_matches
-                    || super::navigation::matches_name(&self.filters.outline, "(No group)")
-                {
-                    outline_rows.push(row_json(crate::drag::RowKind::NoGroup(section)));
-                }
                 outline_rows.extend(
                     model
                         .groups
@@ -488,10 +483,7 @@ impl App {
             }
         }
         let mut visible_parents = Vec::new();
-        if let Some(section) = self.browser_section() {
-            if super::navigation::matches_name(&self.filters.groups, "(No group)") {
-                visible_parents.push(row_json(crate::drag::RowKind::NoGroup(section)));
-            }
+        if self.browser_section().is_some() {
             visible_parents.extend(
                 visible_groups
                     .iter()
@@ -582,7 +574,7 @@ impl App {
                 "id":group.id.0,"section":group.section.0,"name":group.name,"path":group.path.as_path().to_string_lossy(),
             })).collect::<Vec<_>>()).unwrap_or_default(),
             "notes":model.map(|model| model.notes.iter().map(|note| json!({
-                "id":note.id.0,"parent":parent_json(note.parent),"title":note.title,
+                "id":note.id.0,"parent":parent_json(Parent::Group(note.group)),"title":note.title,
                 "path":note.path.as_path().to_string_lossy(),"subtitle":note.subtitle,"bytes":note.bytes,
             })).collect::<Vec<_>>()).unwrap_or_default(),
             "document":document.map(|document| json!({
@@ -723,7 +715,6 @@ fn row_json(row: crate::drag::RowKind) -> Value {
     match row {
         crate::drag::RowKind::Section(section) => json!({"section":section.0}),
         crate::drag::RowKind::Group(group) => json!({"group":group.0}),
-        crate::drag::RowKind::NoGroup(section) => json!({"no_group":section.0}),
         crate::drag::RowKind::Note(note) => json!({"note":note.0}),
     }
 }
@@ -746,7 +737,7 @@ fn core_op(params: &Value) -> Result<Op, String> {
             name: string(params, "name")?.into(),
         },
         "create_note" => Op::CreateNote {
-            parent: parent(params.get("parent").ok_or("parent is required")?)?,
+            group: group(params.get("parent").ok_or("parent is required")?)?,
             title: string(params, "title")?.into(),
         },
         "select_parent" => Op::SelectParent {
@@ -774,7 +765,7 @@ fn core_op(params: &Value) -> Result<Op, String> {
         },
         "move_note" => Op::MoveNote {
             note: NoteId(id(params, "note")?),
-            to: parent(params.get("to").ok_or("to is required")?)?,
+            to: group(params.get("to").ok_or("to is required")?)?,
         },
         "move_group" => Op::MoveGroup {
             group: GroupId(id(params, "group")?),
@@ -823,6 +814,13 @@ fn parent(value: &Value) -> Result<Parent, String> {
         ItemRef::Section(id) => Ok(Parent::Section(id)),
         ItemRef::Group(id) => Ok(Parent::Group(id)),
         ItemRef::Note(_) => Err("parent must contain a section or group ID".into()),
+    }
+}
+
+fn group(value: &Value) -> Result<GroupId, String> {
+    match target(value)? {
+        ItemRef::Group(id) => Ok(id),
+        _ => Err("notes live in groups; expected a group ID".into()),
     }
 }
 
@@ -939,7 +937,6 @@ mod tests {
         for params in [
             json!({"op":"create_section","name":"Section"}),
             json!({"op":"create_group","section":1,"name":"Group"}),
-            json!({"op":"create_note","parent":{"section":1},"title":"Note"}),
             json!({"op":"create_note","parent":{"group":2},"title":"Note"}),
             json!({"op":"open_note","note":3}),
             json!({"op":"open_note","note":null}),
@@ -960,7 +957,14 @@ mod tests {
             core_op(&json!({"op":"move_note","note":3,"to":{"group":2}})).unwrap(),
             Op::MoveNote {
                 note: NoteId(3),
-                to: Parent::Group(GroupId(2))
+                to: GroupId(2)
+            }
+        ));
+        assert!(matches!(
+            core_op(&json!({"op":"create_note","parent":{"group":2},"title":"Note"})).unwrap(),
+            Op::CreateNote {
+                group: GroupId(2),
+                ..
             }
         ));
     }
@@ -1022,6 +1026,8 @@ mod tests {
             json!({"op":"edit_draft","note":1,"contents":"bypass"}),
             json!({"op":"write_note","note":1,"contents":"bypass"}),
             json!({"op":"create_note","parent":{"note":1},"title":"No"}),
+            json!({"op":"create_note","parent":{"section":1},"title":"No"}),
+            json!({"op":"move_note","note":3,"to":{"section":1}}),
             json!({"op":"delete","target":{"note":1,"group":2}}),
             json!({"op":"delete","target":{"path":"Section/Note.md"}}),
             json!({"op":"open_note","note":-1}),
@@ -1035,9 +1041,9 @@ mod tests {
 
     fn navigation_fixture() -> (tempfile::TempDir, App) {
         let directory = crate::test_support::tempdir();
-        std::fs::create_dir(directory.path().join("Section")).unwrap();
-        std::fs::write(directory.path().join("Section/First.md"), "first").unwrap();
-        std::fs::write(directory.path().join("Section/Second.md"), "second").unwrap();
+        std::fs::create_dir_all(directory.path().join("Section/Group")).unwrap();
+        std::fs::write(directory.path().join("Section/Group/First.md"), "first").unwrap();
+        std::fs::write(directory.path().join("Section/Group/Second.md"), "second").unwrap();
         let (mut app, _) = App::new(Options {
             editor: true,
             ..Options::default()
@@ -1080,7 +1086,7 @@ mod tests {
         assert_eq!(app.navigation_snapshot()["modal"]["query"], "Second");
         assert_eq!(app.editor.text(), "dirty first");
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("Section/First.md")).unwrap(),
+            std::fs::read_to_string(directory.path().join("Section/Group/First.md")).unwrap(),
             "first"
         );
     }
@@ -1277,8 +1283,8 @@ mod tests {
     #[test]
     fn snapshot_reports_active_draft_identity_and_dirty_state() {
         let directory = crate::test_support::tempdir();
-        std::fs::create_dir(directory.path().join("Section")).unwrap();
-        std::fs::write(directory.path().join("Section/Note.md"), "saved").unwrap();
+        std::fs::create_dir_all(directory.path().join("Section/Group")).unwrap();
+        std::fs::write(directory.path().join("Section/Group/Note.md"), "saved").unwrap();
         let (mut app, _) = App::new(Options {
             editor: true,
             ..Options::default()
@@ -1298,10 +1304,10 @@ mod tests {
         assert_eq!(snapshot["selected_note"], note.0);
         assert_eq!(snapshot["document"]["note"], note.0);
         assert_eq!(snapshot["document"]["text"], "draft saved");
-        assert_eq!(snapshot["document"]["path"], "Section/Note.md");
+        assert_eq!(snapshot["document"]["path"], "Section/Group/Note.md");
         assert_eq!(snapshot["document"]["dirty"], true);
         assert!(snapshot["document"]["error"].is_null());
-        assert!(snapshot["notes"][0]["parent"]["section"].is_u64());
+        assert!(snapshot["notes"][0]["parent"]["group"].is_u64());
         let _ = app.apply_core(Op::Flush).unwrap();
         assert_eq!(app.session_snapshot()["document"]["dirty"], false);
     }
