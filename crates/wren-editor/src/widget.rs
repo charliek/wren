@@ -547,24 +547,29 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 
         if self.line_numbers {
             let right = bounds.x + ROW_INSET + self.metrics.gutter - GUTTER_PADDING_RIGHT;
-            for row in rows.iter().filter(|row| row.starts_line) {
-                renderer.fill_text(
-                    Text {
-                        content: (row.line + 1).to_string(),
-                        bounds: Size::new(self.metrics.gutter - GUTTER_PADDING_RIGHT, row.height),
-                        size: Pixels(self.metrics.text),
-                        line_height: self.metrics.line_height(),
-                        font: self.highlighter_settings.font,
-                        align_x: text::Alignment::Right,
-                        align_y: alignment::Vertical::Top,
-                        shaping: text::Shaping::Basic,
-                        wrapping: Wrapping::None,
-                    },
-                    Point::new(right, text_bounds.y + row.top),
-                    style.gutter,
-                    rows_clip,
-                );
-            }
+            clip(renderer, rows_clip, |renderer| {
+                for row in rows.iter().filter(|row| row.starts_line) {
+                    renderer.fill_text(
+                        Text {
+                            content: (row.line + 1).to_string(),
+                            bounds: Size::new(
+                                self.metrics.gutter - GUTTER_PADDING_RIGHT,
+                                row.height,
+                            ),
+                            size: Pixels(self.metrics.text),
+                            line_height: self.metrics.line_height(),
+                            font: self.highlighter_settings.font,
+                            align_x: text::Alignment::Right,
+                            align_y: alignment::Vertical::Top,
+                            shaping: text::Shaping::Basic,
+                            wrapping: Wrapping::None,
+                        },
+                        Point::new(right, text_bounds.y + row.top),
+                        style.gutter,
+                        rows_clip,
+                    );
+                }
+            });
         }
 
         let translation = text_bounds.position() - Point::ORIGIN;
@@ -590,7 +595,9 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 
         // The Cosmic engine hands the renderer a weak buffer reference, which
         // a later mutation would detach, so the text goes after every query.
-        editor.draw(renderer, text_bounds.position(), style.value, text_bounds);
+        clip(renderer, text_bounds, |renderer| {
+            editor.draw(renderer, text_bounds.position(), style.value, text_bounds);
+        });
 
         // Quads sort beneath text within a layer; strikes and the caret must
         // paint over the glyphs.
@@ -670,6 +677,19 @@ impl<'a> From<TextEditor<'a>> for Element<'a, Message> {
     fn from(text_editor: TextEditor<'a>) -> Self {
         Self::new(text_editor)
     }
+}
+
+/// How far inside its clip rectangle [`clip`] places the layer.
+const CLIP_INSET: f32 = 0.01;
+
+/// Draws `draw` clipped to `bounds` on every renderer. tiny-skia masks text
+/// only when the text's own extent pokes out of its layer, and the editor's
+/// text and gutter numbers are sized exactly to their areas, so a row
+/// scrolled half out of view would paint into the padding. A layer a hair
+/// inside `bounds` makes it mask; wgpu rounds its scissor to whole pixels,
+/// where the hair vanishes.
+fn clip(renderer: &mut Renderer, bounds: Rectangle, draw: impl FnOnce(&mut Renderer)) {
+    renderer.with_layer(bounds.shrink(CLIP_INSET), draw);
 }
 
 fn apply_binding(

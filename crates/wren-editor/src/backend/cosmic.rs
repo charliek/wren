@@ -43,7 +43,6 @@ use std::sync::{Arc, PoisonError, RwLockWriteGuard, Weak};
 use iced::advanced::graphics::text::{
     self as graphics, cosmic_text, FontSystem, Raw, Renderer as _, Version,
 };
-use iced::advanced::renderer::Renderer as _;
 use iced::advanced::text::editor::Direction;
 use iced::advanced::text::highlighter::{self, Highlighter};
 use iced::advanced::text::{LineHeight, Wrapping};
@@ -429,7 +428,8 @@ impl Engine {
     }
 
     /// Hand the buffer to the renderer. The weak reference is taken last, so
-    /// no later mutation in this frame detaches it.
+    /// no later mutation in this frame detaches it. tiny-skia ignores
+    /// `Raw::clip_bounds`, so the caller clips with a layer.
     pub fn draw(
         &self,
         renderer: &mut Renderer,
@@ -442,14 +442,11 @@ impl Engine {
         };
         debug_assert_eq!(Arc::strong_count(buffer), 1, "the engine shares its buffer");
         let buffer: Weak<cosmic_text::Buffer> = Arc::downgrade(buffer);
-        // tiny-skia ignores `Raw::clip_bounds`; a layer clips on every renderer.
-        renderer.with_layer(clip_bounds, |renderer| {
-            renderer.fill_raw(Raw {
-                buffer,
-                position,
-                color,
-                clip_bounds,
-            });
+        renderer.fill_raw(Raw {
+            buffer,
+            position,
+            color,
+            clip_bounds,
         });
     }
 

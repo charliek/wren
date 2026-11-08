@@ -182,7 +182,8 @@ impl Backend {
         }
     }
 
-    /// Draw the text at `position`, clipped to `clip_bounds`.
+    /// Draw the text at `position`. tiny-skia does not honour `clip_bounds`
+    /// for editor text, so the caller also clips with a layer.
     pub fn draw(
         &self,
         renderer: &mut Renderer,
