@@ -1219,6 +1219,12 @@ impl App {
                 contents =
                     contents.push(text("current").size(11).color(theme::color(colors.accent)));
             }
+            if let Some(state) = match result.key {
+                Key::Command(id) => self.command_state(id),
+                _ => None,
+            } {
+                contents = contents.push(chrome::label(state, 11, colors.muted));
+            }
             if let Some(heading) = result.heading {
                 contents = contents.push(chrome::label(
                     format!("H{}", heading.level),

@@ -200,6 +200,12 @@ def main() -> int:
             client.call("palette.step", {"delta": 12})
             shot_here("palette-markdown")
             client.call("palette.close")
+            # The settings commands, each showing the value it flips.
+            for name, query in [("palette-assist", "assist"), ("palette-engine", "engine")]:
+                client.call("palette.open", {"mode": "commands"})
+                client.call("palette.query", {"query": query})
+                shot_here(name)
+                client.call("palette.close")
             runbook_note = next(
                 row for row in client.call("session.get")["notes"]
                 if row["path"].endswith("Cutover runbook.md")

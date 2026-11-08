@@ -406,7 +406,7 @@ The **sibling run** is the ordered items with the same container, quote depth, i
 
 ### 5.7 Commands
 
-Two palette commands also flip the rollout settings and save them to `config.conf`, just as the theme picker saves its choice: `editor.toggle_markdown_assist` ("Toggle Markdown assist") and `editor.toggle_engine` ("Switch editor engine (classic / advanced)"). Both are App scope and have no default binding.
+Two palette commands also flip the rollout settings and save them to `config.conf`, just as the theme picker saves its choice: `editor.toggle_markdown_assist` ("Toggle Markdown assist") and `editor.toggle_engine` ("Switch editor engine (classic / advanced)"). Both are App scope and have no default binding. Landed on `md-follow`: Markdown assist sits at the end of the "Markdown" palette group and stays enabled when assist is off, the engine switch is in "App" beside the settings commands, and each row shows the value it flips (`on`/`off`, `classic`/`advanced`) as a muted label. A command flips the in-memory setting and applies it first, so it takes effect with no `config.conf` or when the write fails, then saves through `save_setting`.
 
 | Command key | macOS | Linux | Behavior |
 |---|---|---|---|

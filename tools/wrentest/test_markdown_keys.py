@@ -356,6 +356,36 @@ def test_markdown_commands_are_unavailable_without_assist(keys_app) -> None:
         assert editor.call("editor.get")["text"] == "- [ ] a\nb"
 
 
+def test_settings_commands_switch_the_engine_and_markdown_assist(keys_app, engine) -> None:  # noqa: F811
+    other = "advanced" if engine == "classic" else "classic"
+    with keys_app("keys-settings-commands") as app:
+        editor = Editor(app)
+        get = lambda: editor.call("editor.get")  # noqa: E731
+        settings = app.settings_path
+        editor.load("- a\n- b", 1, 3)
+
+        assert run(app, "editor.toggle_engine") == "completed"
+        state = get()
+        assert state["engine"] == other
+        assert (state["text"], cursor(state)) == ("- a\n- b", (1, 3))
+        assert f"editor-engine = {other}\n" in settings.read_text()
+
+        assert run(app, "editor.toggle_markdown_assist") == "completed"
+        assert "markdown-assist = off\n" in settings.read_text()
+        assert editor.press("enter")["text"] == "- a\n- b\n"
+        assert run(app, "markdown.bold") == "blocked"
+
+        assert run(app, "editor.toggle_markdown_assist") == "completed"
+        assert "markdown-assist = on\n" in settings.read_text()
+        editor.load("- a", 0, 3)
+        assert editor.press("enter")["text"] == "- a\n- "
+
+        assert run(app, "editor.toggle_engine") == "completed"
+        state = get()
+        assert (state["engine"], state["text"], cursor(state)) == (engine, "- a\n- ", (1, 2))
+        assert f"editor-engine = {engine}\n" in settings.read_text()
+
+
 def test_markdown_shortcuts_act_only_in_the_focused_editor(keys_app) -> None:
     with keys_app("keys-shortcuts") as app:
         call = app.client.call

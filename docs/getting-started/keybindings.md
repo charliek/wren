@@ -71,7 +71,9 @@ blocks, front matter, and HTML, Enter only keeps the indentation and any
 quote or list prefix, and Tab inserts a tab or spaces like the line above.
 
 With `markdown-assist = off` in [`config.conf`](../reference/configuration.md),
-Enter, Shift+Enter, and Home are plain again. Backspace still deletes a
+or after the palette's **Toggle Markdown assist** (which saves the choice
+there and shows whether assist is on), Enter, Shift+Enter, and Home are
+plain again. Backspace still deletes a
 whole character, and Tab still inserts spaces to the next multiple of 4.
 Over a selection that spans lines, Tab indents each line by 4 spaces (a tab
 on a line that starts with one) instead of replacing them, and Shift+Tab
@@ -214,7 +216,13 @@ font.choose  font.increase  font.decrease  font.reset  workspace.switch
 workspace.add  workspace.remove  settings.open  settings.reload  app.quit
 palette.commands  markdown.toggle_task  markdown.bold  markdown.italic
 markdown.code  edit.move_line_up  edit.move_line_down
+editor.toggle_markdown_assist  editor.toggle_engine
 ```
+
+`editor.toggle_markdown_assist` and `editor.toggle_engine` have no default
+key. They flip `markdown-assist` and `editor-engine`, save the change to
+`config.conf`, and apply it at once; switching engines keeps the note's
+text and cursor but clears its undo history.
 
 An unknown action or an invalid trigger is skipped, and the line is named
 in the warning banner.

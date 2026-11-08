@@ -64,7 +64,9 @@ The Markdown commands run two ways: `command.run` (`{"id": "markdown.bold"}`)
 runs one as the palette does, at the editor's cursor whatever has the
 keyboard, and `shortcut` runs one as its key does, routing the bound key
 through the editor's key policy and acting only while the editor is
-focused.
+focused. The settings commands `editor.toggle_engine` and
+`editor.toggle_markdown_assist` run through `command.run` too, and each
+palette row reports the value such a command flips as its `state`.
 
 The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor

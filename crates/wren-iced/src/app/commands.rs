@@ -59,6 +59,8 @@ pub enum CommandId {
     Code,
     MoveLineUp,
     MoveLineDown,
+    ToggleMarkdownAssist,
+    SwitchEngine,
 }
 
 /// Who runs a command from its shortcut.
@@ -148,6 +150,13 @@ definitions![
         "Move line down",
         "Markdown",
         Editor
+    ),
+    (
+        ToggleMarkdownAssist,
+        "editor.toggle_markdown_assist",
+        "Toggle Markdown assist",
+        "Markdown",
+        App
     ),
     (NewGroup, "group.new", "New group…", "Workspace", App),
     (NewSection, "section.new", "New section…", "Workspace", App),
@@ -299,6 +308,13 @@ definitions![
         ReloadSettings,
         "settings.reload",
         "Reload settings",
+        "App",
+        App
+    ),
+    (
+        SwitchEngine,
+        "editor.toggle_engine",
+        "Switch editor engine (classic / advanced)",
         "App",
         App
     ),
@@ -469,7 +485,8 @@ impl App {
         match id {
             AddWorkspace => self.folder_request.is_none(),
             SwitchWorkspace | ChooseTheme | ChooseFont | TextBigger | TextSmaller | TextReset
-            | OpenSettings | ReloadSettings | CommandPalette | Quit => true,
+            | OpenSettings | ReloadSettings | CommandPalette | Quit | ToggleMarkdownAssist
+            | SwitchEngine => true,
             RemoveWorkspace => self
                 .config
                 .as_ref()
@@ -740,6 +757,8 @@ impl App {
             TextBigger => self.step_text_size(Some(1.0)),
             TextSmaller => self.step_text_size(Some(-1.0)),
             TextReset => self.step_text_size(None),
+            ToggleMarkdownAssist => self.toggle_markdown_assist(),
+            SwitchEngine => self.toggle_editor_engine(),
             CommandPalette => self.open_palette(Mode::Commands),
             OpenSettings => self.open_settings(),
             ReloadSettings => {
