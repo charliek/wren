@@ -331,6 +331,18 @@ struct State {
 }
 
 impl State {
+    fn new(highlighter_settings: HighlighterSettings) -> Self {
+        Self {
+            focus: None,
+            preedit: None,
+            last_click: None,
+            drag_click: None,
+            partial_scroll: 0.0,
+            highlighter: RefCell::new(MarkdownHighlighter::new(&highlighter_settings)),
+            highlighter_settings,
+        }
+    }
+
     /// Whether an input method is composing text. An opened input method
     /// starts with an empty preedit, which is not composing yet.
     fn is_composing(&self) -> bool {
@@ -377,6 +389,9 @@ impl operation::Focusable for State {
 
     fn unfocus(&mut self) {
         self.focus = None;
+        // Preedit events reach only a focused editor, so one that ends while
+        // another field has the keyboard would leave the guard on.
+        self.preedit = None;
     }
 }
 
@@ -386,15 +401,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State {
-            focus: None,
-            preedit: None,
-            last_click: None,
-            drag_click: None,
-            partial_scroll: 0.0,
-            highlighter: RefCell::new(MarkdownHighlighter::new(&self.highlighter_settings)),
-            highlighter_settings: self.highlighter_settings,
-        })
+        tree::State::new(State::new(self.highlighter_settings))
     }
 
     fn size(&self) -> Size<Length> {
@@ -787,7 +794,7 @@ fn apply_binding(
 
     match binding {
         Binding::Unfocus => {
-            state.focus = None;
+            operation::Focusable::unfocus(state);
             state.drag_click = None;
         }
         Binding::Copy => {
@@ -1037,6 +1044,26 @@ mod tests {
         );
     }
     use crate::fixtures;
+
+    #[test]
+    fn losing_focus_ends_a_composition() {
+        use operation::Focusable as _;
+
+        let mut state = State::new(HighlighterSettings {
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
+        });
+        state.focus();
+        state.preedit = Some(input_method::Preedit {
+            content: "にほ".into(),
+            selection: None,
+            text_size: None,
+        });
+        assert!(state.is_composing());
+        state.unfocus();
+        state.focus();
+        assert!(!state.is_composing());
+    }
 
     #[test]
     fn continuation_rows_do_not_start_a_line() {

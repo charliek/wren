@@ -36,7 +36,8 @@ pub(crate) struct Context<'a> {
     pub policy: Option<&'a KeyPolicy>,
 }
 
-/// Custom key-binding handler.  Asks the host's [`KeyPolicy`] first, then
+/// Custom key-binding handler.  Leaves an input method its editing keys
+/// while it composes, asks the host's [`KeyPolicy`], then
 /// intercepts Undo, Redo, and Find shortcuts, and turns the editing keys into
 /// [`Message::Intent`]s.
 ///
@@ -59,12 +60,27 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
     let m = key_press.modifiers;
     let key = &key_press.key;
     let physical = key_press.physical_key;
+    let named = match key.as_ref() {
+        Key::Named(named) => Some(named),
+        _ => None,
+    };
+    // Whatever the modifiers: Ctrl+Enter is still an Enter to an input method.
+    if context.composing
+        && matches!(
+            named,
+            Some(Named::Enter | Named::Tab | Named::Backspace | Named::Delete)
+        )
+    {
+        return None;
+    }
 
     match context
         .policy
         .map_or(KeyRoute::Pass, |policy| policy(key, physical, m))
     {
         KeyRoute::Host => return None,
+        // An editor command never edits the text under an open preedit.
+        KeyRoute::Intent(_) if context.composing => return None,
         KeyRoute::Intent(wanted) => return Some(intent(wanted)),
         KeyRoute::Pass => {}
     }
@@ -88,19 +104,6 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
     // Find: Ctrl/Cmd + F
     if m.command() && !m.shift() && key.to_latin(physical) == Some('f') {
         return Some(Binding::Custom(Message::Find));
-    }
-
-    let named = match key.as_ref() {
-        Key::Named(named) => Some(named),
-        _ => None,
-    };
-    if context.composing
-        && matches!(
-            named,
-            Some(Named::Enter | Named::Tab | Named::Backspace | Named::Delete)
-        )
-    {
-        return None;
     }
 
     // iced has no Tab binding (its text is a control character), and a Tab
@@ -397,6 +400,35 @@ mod tests {
         );
         assert!(unfocused.is_none());
         assert!(!asked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn host_editor_commands_wait_for_a_composition_to_end() {
+        let policy = host_policy();
+        let composing = Context {
+            policy: Some(&policy),
+            ..COMPOSING
+        };
+        let ctrl = Modifiers::CTRL;
+        assert!(press(Key::Named(Named::Enter), ctrl, None, composing).is_none());
+        for key in [Named::Tab, Named::Backspace, Named::Delete] {
+            assert!(
+                press(Key::Named(key), ctrl, None, composing).is_none(),
+                "{key:?}"
+            );
+        }
+        assert!(press(Key::Character("b".into()), ctrl, None, composing).is_none());
+        // Host shortcuts and the editor's own keys are unchanged.
+        assert!(press(Key::Character("f".into()), ctrl, None, composing).is_none());
+        assert!(matches!(
+            press(
+                Key::Character("a".into()),
+                Modifiers::empty(),
+                Some("a"),
+                composing
+            ),
+            Some(Binding::Insert('a'))
+        ));
     }
 
     #[test]

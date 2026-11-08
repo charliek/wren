@@ -73,7 +73,8 @@ Shift+Tab does nothing, ⌘⌫ deletes to the start of the line, and the word
 deletes and note motions work as above.
 
 While an input method is composing text, Enter, Tab, Backspace, and Delete
-belong to it.
+belong to it, with or without modifiers, and the Markdown commands below
+wait until it finishes.
 
 ### Markdown commands
 

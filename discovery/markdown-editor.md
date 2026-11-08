@@ -406,7 +406,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - An accelerator bound to an **App** command → `KeyRoute::Host` → `None`. The editor doesn't also handle it: Ctrl+F on Linux opens find once, through the app, and a user binding of `ctrl+z` takes it from Undo.
 - Anything else → `KeyRoute::Pass`, the editor's own handling below.
 - On macOS, a key with ⌘ held never becomes an `Insert`, so an unbound ⌘B types nothing.
-- While an IME preedit is non-empty, Enter, Tab, Backspace, and Delete go to the IME untouched.
+- While an IME preedit is non-empty, Enter, Tab, Backspace, and Delete go to the IME untouched, whatever the modifiers, and no key runs an Editor command. This is checked before the `KeyPolicy`. The preedit is cleared when the editor loses focus, since the IME's later events go to whichever field has it.
 - Backspace, Delete, the word and line deletes, Tab, Shift+Tab, and ⌘↑ / ⌘↓ always map to `Message::Intent`; Enter, Shift+Enter, Home, and Shift+Home do only with assist on. The keys are read by post-processing `Binding::from_key_press`, so iced's platform mappings (⌘← and ⌃A as Home, ⌃H as Backspace) carry over. Word deletes take ⌥ on macOS, and Ctrl or Alt on Linux.
 - **With assist off** the editor edits plain text, keeping the fixes that are not about Markdown: Enter, Shift+Enter, and Home are iced's own; Backspace deletes a grapheme cluster (at column 0, the line break); Tab inserts spaces to the next multiple of 4, replacing a selection as typing does; ⌘⌫ deletes to column 0; Shift+Tab and the §5.7 commands do nothing. Delete, the word deletes, and the document motions are the planner's either way, since they know nothing of Markdown.
 - Editor commands stay out of the macOS menu bar in P0.
