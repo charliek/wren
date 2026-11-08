@@ -217,6 +217,9 @@ def test_actual_client_pixels_retain_scrolled_viewport_across_chrome(viewport_wo
     assert call("editor.undo")["text"] == one
     call("core.apply", {"op": "flush"})
     call("editor.cursor", {"line": 0, "column": 0, "selection": None})
+    # The footer's word count follows an edit on a later tick.
+    wait_for(lambda: call("editor.get")["words"] == len(one.split()),
+             description="settled word count")
     before_editor = editor_identity(app)
     before_session = call("session.get")
     assert before_editor["can_undo"] is True and before_editor["can_redo"] is True

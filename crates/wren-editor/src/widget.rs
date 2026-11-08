@@ -54,7 +54,8 @@ use iced::{
 };
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
-use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::keys::KeyPolicy;
 use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
@@ -259,6 +260,8 @@ pub struct TextEditor<'a> {
     style: Style,
     line_numbers: bool,
     metrics: Metrics,
+    markdown_assist: bool,
+    key_policy: Option<&'a KeyPolicy>,
     last_status: Option<Status>,
 }
 
@@ -270,6 +273,7 @@ impl<'a> TextEditor<'a> {
         style: Style,
         line_numbers: bool,
         metrics: Metrics,
+        markdown_assist: bool,
     ) -> Self {
         Self {
             id: widget::Id::from(id),
@@ -278,8 +282,16 @@ impl<'a> TextEditor<'a> {
             style,
             line_numbers,
             metrics,
+            markdown_assist,
+            key_policy: None,
             last_status: None,
         }
+    }
+
+    /// Ask `policy` about each key press first (see [`KeyPolicy`]).
+    pub fn key_policy(mut self, policy: Option<&'a KeyPolicy>) -> Self {
+        self.key_policy = policy;
+        self
     }
 
     fn padding(&self) -> Padding {
@@ -329,6 +341,28 @@ struct State {
     highlighter_settings: HighlighterSettings,
 }
 
+impl State {
+    fn new(highlighter_settings: HighlighterSettings) -> Self {
+        Self {
+            focus: None,
+            preedit: None,
+            last_click: None,
+            drag_click: None,
+            partial_scroll: 0.0,
+            highlighter: RefCell::new(MarkdownHighlighter::new(&highlighter_settings)),
+            highlighter_settings,
+        }
+    }
+
+    /// Whether an input method is composing text. An opened input method
+    /// starts with an empty preedit, which is not composing yet.
+    fn is_composing(&self) -> bool {
+        self.preedit
+            .as_ref()
+            .is_some_and(|preedit| !preedit.content.is_empty())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Focus {
     updated_at: Instant,
@@ -366,6 +400,9 @@ impl operation::Focusable for State {
 
     fn unfocus(&mut self) {
         self.focus = None;
+        // Preedit events reach only a focused editor, so one that ends while
+        // another field has the keyboard would leave the guard on.
+        self.preedit = None;
     }
 }
 
@@ -375,15 +412,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State {
-            focus: None,
-            preedit: None,
-            last_click: None,
-            drag_click: None,
-            partial_scroll: 0.0,
-            highlighter: RefCell::new(MarkdownHighlighter::new(&self.highlighter_settings)),
-            highlighter_settings: self.highlighter_settings,
-        })
+        tree::State::new(State::new(self.highlighter_settings))
     }
 
     fn size(&self) -> Size<Length> {
@@ -467,9 +496,18 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             _ => {}
         }
 
-        if let Some(update) =
-            Update::from_event(event, state, layout.bounds(), self.padding(), cursor)
-        {
+        if let Some(update) = Update::from_event(
+            event,
+            state,
+            layout.bounds(),
+            self.padding(),
+            cursor,
+            crate::keys::Context {
+                markdown_assist: self.markdown_assist,
+                composing: state.is_composing(),
+                policy: self.key_policy,
+            },
+        ) {
             match update {
                 Update::Click(click) => {
                     let action = match click.kind() {
@@ -818,7 +856,7 @@ fn apply_binding(
 
     match binding {
         Binding::Unfocus => {
-            state.focus = None;
+            operation::Focusable::unfocus(state);
             state.drag_click = None;
         }
         Binding::Copy => {
@@ -880,6 +918,7 @@ impl Update {
         bounds: Rectangle,
         padding: Padding,
         cursor: mouse::Cursor,
+        keys: crate::keys::Context<'_>,
     ) -> Option<Self> {
         match event {
             Event::Mouse(event) => match event {
@@ -952,14 +991,17 @@ impl Update {
                 } else {
                     Status::Active
                 };
-                crate::keys::key_binding(KeyPress {
-                    key: key.clone(),
-                    modified_key: modified_key.clone(),
-                    physical_key: *physical_key,
-                    modifiers: *modifiers,
-                    text: text.clone(),
-                    status,
-                })
+                crate::keys::key_binding(
+                    KeyPress {
+                        key: key.clone(),
+                        modified_key: modified_key.clone(),
+                        physical_key: *physical_key,
+                        modifiers: *modifiers,
+                        text: text.clone(),
+                        status,
+                    },
+                    keys,
+                )
                 .map(Update::Binding)
             }
             _ => None,
@@ -1107,6 +1149,26 @@ mod tests {
     use crate::fixtures;
 
     #[test]
+    fn losing_focus_ends_a_composition() {
+        use operation::Focusable as _;
+
+        let mut state = State::new(HighlighterSettings {
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
+        });
+        state.focus();
+        state.preedit = Some(input_method::Preedit {
+            content: "にほ".into(),
+            selection: None,
+            text_size: None,
+        });
+        assert!(state.is_composing());
+        state.unfocus();
+        state.focus();
+        assert!(!state.is_composing());
+    }
+
+    #[test]
     fn continuation_rows_do_not_start_a_line() {
         assert!(starts_line([].into_iter()));
         assert!(starts_line([0, 1, 2].into_iter()));
@@ -1143,10 +1205,26 @@ mod tests {
             front_matter_end: None,
         };
         let style = fixtures::STYLE;
-        let shown =
-            TextEditor::new(&content, "e", settings, style, true, Metrics::default()).padding();
-        let hidden =
-            TextEditor::new(&content, "e", settings, style, false, Metrics::default()).padding();
+        let shown = TextEditor::new(
+            &content,
+            "e",
+            settings,
+            style,
+            true,
+            Metrics::default(),
+            true,
+        )
+        .padding();
+        let hidden = TextEditor::new(
+            &content,
+            "e",
+            settings,
+            style,
+            false,
+            Metrics::default(),
+            true,
+        )
+        .padding();
         assert_eq!((shown.left, shown.top, shown.bottom), (60.0, 24.0, 24.0));
         assert_eq!(hidden.left, 16.0);
     }

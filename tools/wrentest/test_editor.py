@@ -237,6 +237,15 @@ def test_five_thousand_line_edit_measurements(editor_app) -> None:
         assert state["text"] == initial["text"] + "x" * 16
         assert call("editor.undo")["text"] == initial["text"] + "x" * 15
         assert call("editor.redo")["text"] == state["text"]
+        # Smart Enter and Backspace in a 5,000-item list: the planner reads
+        # the list around the cursor, and its cost must stay near a plain edit.
+        smart: dict[str, list[int]] = {"enter": [], "backspace": []}
+        for _ in range(6):
+            for intent in ("enter", "backspace"):
+                before = len(call("editor.get")["edit_micros"])
+                timings = call("editor.command", {"intent": intent})["edit_micros"]
+                assert len(timings) == before + 1, intent
+                smart[intent].append(timings[-1])
         capture(app, artifacts / "large-editor.png")
         measurements = {
             "build": "debug", "lines": 5000, "bytes": len(initial["text"].encode()),
@@ -244,6 +253,8 @@ def test_five_thousand_line_edit_measurements(editor_app) -> None:
             "rpc_roundtrip_ms_max": max(roundtrips),
             "edit_handler_us_p50": statistics.median(state["edit_micros"]),
             "edit_handler_us_max": max(state["edit_micros"]),
+            "smart_enter_us_p50": statistics.median(smart["enter"]),
+            "smart_backspace_us_p50": statistics.median(smart["backspace"]),
             "renderer": os.environ.get("ICED_BACKEND", "default"),
             "display": "wayland" if os.environ.get("WAYLAND_DISPLAY") else "x11",
         }
@@ -252,6 +263,10 @@ def test_five_thousand_line_edit_measurements(editor_app) -> None:
         # A generous regression ceiling for shared software-rendered CI; the
         # spike report records actual values, not this timeout as typing latency.
         assert max(roundtrips) < 2000
+        # Measured at 4-11 ms each in a debug build, most of it one scan of
+        # the list; a key whose cost grew faster than the note would show here.
+        assert statistics.median(smart["enter"]) < 100_000
+        assert statistics.median(smart["backspace"]) < 100_000
 
 
 def xdo(*args: str) -> str:

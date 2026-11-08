@@ -5,7 +5,7 @@ use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 use iced::Task;
 use serde_json::{json, Value};
 
-use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
+use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget, Scope};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
 use crate::panes::{Pane, PANES};
@@ -74,6 +74,27 @@ impl App {
             "shortcut" => {
                 // A key binding firing, with its active-column scoping.
                 let id = CommandId::parse(string(params, "id")?).ok_or("Unknown command ID")?;
+                if id.scope() == Scope::Editor {
+                    // The editor's key policy routes the bound key, and only
+                    // a focused editor sees it.
+                    let keymap = &self.preferences.keymap;
+                    let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
+                    let wren_editor::KeyRoute::Intent(intent) =
+                        super::preferences::key_route(
+                            keymap,
+                            trigger,
+                            self.editor.markdown_assist(),
+                        )
+                    else {
+                        return Err("The editor does not route this command's key".into());
+                    };
+                    let request = Arc::clone(request);
+                    return Ok(iced::widget::operation::is_focused("note-editor").map(
+                        move |focused| {
+                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(intent))
+                        },
+                    ));
+                }
                 let task = self.run_shortcut(id);
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
@@ -132,7 +153,7 @@ impl App {
                 }
                 let contents = string(params, "text")?;
                 self.editor.replace_text(contents, false);
-                self.words = contents.split_whitespace().count();
+                self.set_words(contents);
                 self.edit_revision += 1;
                 self.edit_micros.clear();
                 self.find_query.clear();
@@ -188,6 +209,15 @@ impl App {
                     _ => return Err("unknown editor action".into()),
                 };
                 let task = self.edit(wren_editor::Message::Action(action));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task.chain(focus_editor()));
+            }
+            "editor.command" => {
+                // An editing key as the editor widget sends it, through the
+                // same App::edit path.
+                self.ensure_editor_ready()?;
+                let intent = intent(string(params, "intent")?)?;
+                let task = self.edit(wren_editor::Message::Intent(intent));
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
             }
@@ -603,7 +633,7 @@ impl App {
             "can_undo":self.editor.can_undo(),"can_redo":self.editor.can_redo(),
             "find_open":self.find_open,"find_query":self.find_query,"find_count":self.editor.find_count(),
             "find_current":self.editor.find_current(),"edit_micros":self.edit_micros,
-            "soft_wrap":true,"theme":self.definition.id,
+            "soft_wrap":true,"theme":self.definition.id,"markdown_assist":self.editor.markdown_assist(),
             "engine":match self.editor.backend() {
                 wren_editor::BackendKind::Iced => "classic",
                 wren_editor::BackendKind::Owned => "advanced",
@@ -615,6 +645,34 @@ impl App {
             },
         })
     }
+}
+
+fn intent(name: &str) -> Result<wren_editor::Intent, String> {
+    use wren_editor::Intent;
+    Ok(match name {
+        "enter" => Intent::Enter,
+        "shift_enter" => Intent::ShiftEnter,
+        "tab" => Intent::Tab,
+        "shift_tab" => Intent::ShiftTab,
+        "backspace" => Intent::Backspace,
+        "delete" => Intent::Delete,
+        "delete_word_back" => Intent::DeleteWordBackward,
+        "delete_word_forward" => Intent::DeleteWordForward,
+        "delete_to_line_start" => Intent::DeleteToTextStart,
+        "home" => Intent::Home { extend: false },
+        "select_home" => Intent::Home { extend: true },
+        "document_start" => Intent::DocumentStart { extend: false },
+        "select_document_start" => Intent::DocumentStart { extend: true },
+        "document_end" => Intent::DocumentEnd { extend: false },
+        "select_document_end" => Intent::DocumentEnd { extend: true },
+        "toggle_task" => Intent::ToggleTask,
+        "bold" => Intent::Bold,
+        "italic" => Intent::Italic,
+        "code" => Intent::Code,
+        "move_line_up" => Intent::MoveLineUp,
+        "move_line_down" => Intent::MoveLineDown,
+        _ => return Err(format!("unknown editor intent {name:?}")),
+    })
 }
 
 fn result_key(value: &Value) -> Result<Key, String> {

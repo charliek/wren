@@ -69,7 +69,9 @@ when one lands, move what users need into `docs/` and trim the note.
   lines. Command keys (`note.new`, `palette.commands`, …) are the stable
   names for config, the palette, menus, and the test protocol. To add a
   command, add a `CommandId` and a `definitions!` row, and handle it in
-  `run_command`.
+  `run_command`. A row's scope is `App`, or `Editor` for a command whose key
+  only the focused editor runs (through the `KeyPolicy` built from the
+  keymap); `App::key_input` ignores Editor keys.
 - macOS uses Command as the app modifier; Linux uses Alt, leaving Ctrl to
   text editing. `keys::alt_filter` drops the text of Alt presses on Linux
   so shortcuts never type their letter.

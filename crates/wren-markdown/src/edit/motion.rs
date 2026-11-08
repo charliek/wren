@@ -11,14 +11,25 @@ pub(super) fn home<L: Lines + ?Sized>(base: &L, sel: Selection, extend: bool) ->
     let head = sel.head;
     let text = base.line(head.line);
     let floor = bom_len(head.line, text);
-    let an = Analysis::new(base, None);
-    let text_start = an.recs[head.line].info.text_start.clamp(floor, text.len());
+    let text_start = text_start(base, head.line, floor);
     let col = if head.col == text_start {
         floor
     } else {
         text_start
     };
     move_to(sel, Pos::new(head.line, col), extend)
+}
+
+/// Line `l`'s text start, at or after `floor` (its byte order mark).
+pub(super) fn text_start<L: Lines + ?Sized>(base: &L, l: usize, floor: usize) -> usize {
+    let text = base.line(l);
+    // No block markup starts with a letter, so the scan, which reads every
+    // line up to this one, can be skipped.
+    if text[floor..].starts_with(char::is_alphabetic) {
+        return floor;
+    }
+    let an = Analysis::through(base, l);
+    an.recs[l].info.text_start.clamp(floor, text.len())
 }
 
 pub(super) fn document_start<L: Lines + ?Sized>(

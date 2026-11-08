@@ -9,24 +9,13 @@ use super::*;
 pub(super) fn backspace<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Options) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
-        return delete_between(base, sel.start(), sel.end());
+        return delete_between(sel.start(), sel.end());
     }
     let p = sel.head;
-    let an = Analysis::new(base, Some(p.line));
-    let mut d = Draft::new(base);
-    let mut marks = sel;
-    let mut runs = Vec::new();
-    let mut requests = Vec::new();
-    if markup(&mut d, &an, p, &mut marks, &mut runs, &mut requests)
-        || indentation(&mut d, &an, p, opts.indent_width, &mut marks)
-    {
-        if opts.renumber {
-            for request in requests {
-                renumber(&mut d, &an, request, &mut marks);
-            }
-            renumber_runs(&mut d, &runs, &[], &mut marks);
+    if may_end_markup(&base.line(p.line)[..p.col]) {
+        if let Some(plan) = markup_or_indentation(base, p, sel, opts) {
+            return plan;
         }
-        return finish(base, &d, marks);
     }
     let text = base.line(p.line);
     let floor = bom_len(p.line, text);
@@ -43,7 +32,47 @@ pub(super) fn backspace<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Opti
     } else {
         p
     };
-    delete_between(base, from, p)
+    delete_between(from, p)
+}
+
+/// Whether `before`, a line's text before the cursor, could all be
+/// indentation and markup: only then can rules 1 and 2 apply, and only then
+/// is the document scanned.
+pub(super) fn may_end_markup(before: &str) -> bool {
+    before.chars().all(|c| {
+        c.is_whitespace()
+            || c.is_ascii_digit()
+            || matches!(
+                c,
+                '>' | '-' | '*' | '+' | '.' | ')' | '[' | ']' | 'x' | 'X' | '#' | '\u{feff}'
+            )
+    })
+}
+
+/// Rules 1 and 2 at the caret `p`, when one applies.
+pub(super) fn markup_or_indentation<L: Lines + ?Sized>(
+    base: &L,
+    p: Pos,
+    sel: Selection,
+    opts: &Options,
+) -> Option<EditPlan> {
+    let an = Analysis::new(base, Some(p.line));
+    let mut d = Draft::new(base);
+    let mut marks = sel;
+    let mut runs = Vec::new();
+    let mut requests = Vec::new();
+    if markup(&mut d, &an, p, &mut marks, &mut runs, &mut requests)
+        || indentation(&mut d, &an, p, opts.indent_width, &mut marks)
+    {
+        if opts.renumber {
+            for request in requests {
+                renumber(&mut d, &an, request, &mut marks);
+            }
+            renumber_runs(&mut d, &runs, &[], &mut marks);
+        }
+        return Some(finish(base, &d, marks));
+    }
+    None
 }
 
 /// Rule 1: the cursor sits exactly at the end of the line's markup.
@@ -183,7 +212,7 @@ fn indentation(d: &mut Draft, an: &Analysis, p: Pos, width: usize, marks: &mut S
 pub(super) fn forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
-        return delete_between(base, sel.start(), sel.end());
+        return delete_between(sel.start(), sel.end());
     }
     let p = sel.head;
     let text = base.line(p.line);
@@ -199,7 +228,7 @@ pub(super) fn forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     } else {
         p
     };
-    delete_between(base, p, to)
+    delete_between(p, to)
 }
 
 /// Delete back over any whitespace and then one word (or one other
@@ -208,7 +237,7 @@ pub(super) fn forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
 pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
-        return delete_between(base, sel.start(), sel.end());
+        return delete_between(sel.start(), sel.end());
     }
     let p = sel.head;
     let text = base.line(p.line);
@@ -223,7 +252,7 @@ pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> Edit
     }
     i = i.saturating_sub(1);
     let from = floor + segments.get(i).map_or(0, |s| s.0);
-    delete_between(base, Pos::new(p.line, from), p)
+    delete_between(Pos::new(p.line, from), p)
 }
 
 /// Delete forward over any whitespace and then one word; at the end of a
@@ -231,7 +260,7 @@ pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> Edit
 pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
-        return delete_between(base, sel.start(), sel.end());
+        return delete_between(sel.start(), sel.end());
     }
     let p = sel.head;
     let text = base.line(p.line);
@@ -243,7 +272,7 @@ pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditP
         .split_word_bound_indices()
         .find(|(_, segment)| !is_space(segment))
         .map_or(rest.len(), |(i, segment)| i + segment.len());
-    delete_between(base, p, Pos::new(p.line, p.col + to))
+    delete_between(p, Pos::new(p.line, p.col + to))
 }
 
 /// Delete back to the line's text start, or from there (or from inside the
@@ -251,7 +280,7 @@ pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditP
 pub(super) fn to_text_start<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
-        return delete_between(base, sel.start(), sel.end());
+        return delete_between(sel.start(), sel.end());
     }
     let p = sel.head;
     let text = base.line(p.line);
@@ -259,14 +288,13 @@ pub(super) fn to_text_start<L: Lines + ?Sized>(base: &L, sel: Selection) -> Edit
     if p.col <= floor {
         return join_back(base, p);
     }
-    let an = Analysis::new(base, None);
-    let text_start = an.recs[p.line].info.text_start.clamp(floor, text.len());
+    let text_start = super::motion::text_start(base, p.line, floor);
     let from = if p.col > text_start {
         text_start
     } else {
         floor
     };
-    delete_between(base, Pos::new(p.line, from), p)
+    delete_between(Pos::new(p.line, from), p)
 }
 
 /// Delete the line break before line `p.line`, if there is one.
@@ -275,18 +303,28 @@ fn join_back<L: Lines + ?Sized>(base: &L, p: Pos) -> EditPlan {
         return unchanged(Selection::caret(p));
     }
     let from = Pos::new(p.line - 1, base.line(p.line - 1).len());
-    delete_between(base, from, p)
+    delete_between(from, p)
 }
 
 fn is_space(segment: &str) -> bool {
     segment.chars().all(char::is_whitespace)
 }
 
-/// Delete the text between two positions, leaving the cursor there.
-pub(super) fn delete_between<L: Lines + ?Sized>(base: &L, from: Pos, to: Pos) -> EditPlan {
-    let mut d = Draft::new(base);
-    d.delete(from, to);
-    finish(base, &d, Selection::caret(from))
+/// Delete the text between two positions, leaving the cursor there. The
+/// edit is made directly, without a draft of the whole document.
+pub(super) fn delete_between(from: Pos, to: Pos) -> EditPlan {
+    EditPlan {
+        edits: if from < to {
+            vec![Replace {
+                start: from,
+                end: to,
+                text: String::new(),
+            }]
+        } else {
+            Vec::new()
+        },
+        selection: Selection::caret(from),
+    }
 }
 
 #[cfg(test)]

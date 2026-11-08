@@ -6,7 +6,7 @@ core and a thin desktop crate on top.
 | Crate | Role |
 |---|---|
 | `crates/wren-core` | The model, scanning, storage, autosave, search index, settings, and keybindings. No iced dependency. |
-| `crates/wren-markdown` | Markdown structure with no UI dependency: the one block classifier (`block`), the heading outline, and the edit planner. The search index's note previews and the editor's highlighting both classify lines with `block`. |
+| `crates/wren-markdown` | Markdown structure with no UI dependency: the one block classifier (`block`), the heading outline, and the edit planner, which turns an editing intent (Enter, Tab, Backspace, Home, …) at a selection into replacements. The search index's note previews and the editor's highlighting both classify lines with `block`. |
 | `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, and find. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends on iced and `wren-markdown` only; the app passes in colours and the font. |
 | `crates/wren-iced` | The desktop app (binary `wren`): views, widgets, the command table, gestures, and the macOS menu bar. |
 | `crates/wren-sparkle` | The macOS Sparkle updater bridge. The only crate allowed `unsafe`; empty on Linux. |
@@ -35,12 +35,37 @@ an action runs.
 ## Commands and keybindings
 
 A command has a `CommandId`, a stable key (`note.new`, `navigation.jump`), a
-palette label, and a group. To add one, add a `CommandId`, a `definitions!`
-row in `app/commands.rs`, and a case in `run_command`. Default shortcuts live
-in `wren_core::keybind::default_bindings`; users override them with
-`keybind` lines. macOS uses Command as the app modifier and Linux uses Alt,
-leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
+palette label, a group, and a scope. To add one, add a `CommandId`, a
+`definitions!` row in `app/commands.rs`, and a case in `run_command`. Default
+shortcuts live in `wren_core::keybind::default_bindings`; users override them
+with `keybind` lines. macOS uses Command as the app modifier and Linux uses
+Alt, leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
 presses on Linux so shortcuts never type their letter.
+
+The scope says who runs a command from its key. An **App** command runs
+wherever the keyboard is. An **Editor** command (`markdown.*`, `edit.*`)
+runs only in the focused editor: `App::key_input` ignores its key, and the
+editor widget turns it into an intent instead. The editor learns which key
+is which from a `wren_editor::KeyPolicy` that the app builds from the
+keymap, reading keys through the same `keys::shortcut` as its own
+shortcuts. The widget asks the policy before handling any key: an App
+command's key is ignored, so a shortcut never also edits the text, and an
+Editor command's key becomes its `Message::Intent`. From the palette, an
+Editor command always runs, through `App::edit` at the editor's cursor.
+
+## Editing keys
+
+The editor widget turns its editing keys (Enter, Tab, Backspace, Delete,
+the word deletes, Home, …) into `wren_editor::Message::Intent`. It reads
+them from iced's own key bindings, so the platform mappings (⌘← and ⌃A as
+Home on macOS) carry over. Like every other edit, an intent reaches
+`App::edit`, which hands it to `EditorView::intent`. That plans it with
+`wren_markdown::plan` over the editor's lines in place, without copying the
+text, and applies the plan as one undo unit, writing each inserted line
+break in the line ending of the line it splits. After any change,
+`App::edit` sends the draft to the `Session` (so autosave sees it) and bumps
+the edit revision; the footer's word count follows on the next tick, at most
+250 ms later.
 
 ## Storage safety
 

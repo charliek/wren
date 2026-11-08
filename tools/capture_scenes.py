@@ -104,7 +104,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
-    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic")
+    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic",
+                        help="the editor-engine setting")
     args = parser.parse_args()
     out = args.out if args.engine == "classic" else args.out / args.engine
     out = (out / args.theme).resolve()
@@ -172,6 +173,11 @@ def main() -> int:
                     client.call("palette.query", {"query": query})
                 shot_here(f"palette-{mode}")
                 client.call("palette.close")
+            # The editor's commands, highlighted down in their own group.
+            client.call("palette.open", {"mode": "commands"})
+            client.call("palette.step", {"delta": 12})
+            shot_here("palette-markdown")
+            client.call("palette.close")
             for _ in range(4):
                 client.call("command.run", {"id": "font.increase"})
             shot_here("text-larger")
@@ -179,6 +185,38 @@ def main() -> int:
             client.call("view.focus", {"enabled": True})
             shot_here("focus")
             client.call("view.focus", {"enabled": False})
+            # Smart keys: continue the task list, nest an item, and continue
+            # the nested list.
+            client.call("editor.cursor", {"line": 5, "column": len("- [x] Share Q4 roadmap"),
+                                          "selection": None})
+            for step in ("enter", "Draft the cutover note", "enter", "tab",
+                         "Ask Bob about on-call", "enter", "Loop in Priya", "enter", "enter"):
+                if step in ("enter", "tab"):
+                    client.call("editor.command", {"intent": step})
+                else:
+                    client.call("editor.insert", {"text": step})
+            shot_here("editor-smart-keys")
+
+            # Markdown commands at the cursor: check a task, format three
+            # words, and move a line up.
+            def at_word(word: str) -> None:
+                lines = client.call("editor.get")["text"].split("\n")
+                line = next(index for index, text in enumerate(lines) if word in text)
+                client.call("editor.cursor", {
+                    "line": line, "column": len(lines[line].split(word)[0].encode()) + 1,
+                    "selection": None,
+                })
+
+            for word, command in [
+                ("Review promo", "markdown.toggle_task"),
+                ("cutover.", "markdown.bold"),
+                ("promo timeline", "markdown.italic"),
+                ("timeline", "markdown.code"),
+                ("She asked", "edit.move_line_up"),
+            ]:
+                at_word(word)
+                client.call("command.run", {"id": command})
+            shot_here("editor-markdown-commands")
             archive = next(
                 row for row in client.call("session.get")["sections"]
                 if row["path"] == EMPTY_SECTION

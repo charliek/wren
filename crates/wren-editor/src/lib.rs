@@ -9,7 +9,8 @@
 //! edits and absolute scrolling. Both pass the same test suite.
 //!
 //! The crate knows nothing about its host: colours arrive as a [`Style`] and a
-//! [`Palette`], and the font through [`EditorView::set_font`].
+//! [`Palette`], the font through [`EditorView::set_font`], and which keys are
+//! the host's shortcuts or bound editor commands through a [`KeyPolicy`].
 
 mod backend;
 mod edit;
@@ -17,6 +18,7 @@ mod find;
 mod highlighter;
 mod history;
 mod keys;
+mod plain;
 mod widget;
 
 #[cfg(test)]
@@ -32,6 +34,8 @@ use iced::{Color, Element, Font};
 
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
+pub use keys::{KeyPolicy, KeyRoute};
+pub use wren_markdown::Intent;
 
 use backend::Lines;
 use find::{
@@ -106,6 +110,9 @@ pub enum Message {
     Redo,
     /// Open the find bar (Ctrl/Cmd+F).  The parent owns the bar UI and focus.
     Find,
+    /// An editing key that depends on the text around the cursor: Enter,
+    /// Tab, Backspace, Home, and the like. See [`EditorView::intent`].
+    Intent(Intent),
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +140,15 @@ pub struct EditorView {
     /// The text's `block::front_matter_end`, kept current after every
     /// change for the highlighter, which cannot look ahead.
     front_matter_end: Option<usize>,
+    markdown_assist: bool,
+    key_policy: Option<KeyPolicy>,
 }
+
+/// How the planner indents and renumbers.
+const PLAN_OPTIONS: wren_markdown::Options = wren_markdown::Options {
+    indent_width: 4,
+    renumber: true,
+};
 
 impl EditorView {
     /// Create a new editor pre-populated with `text`, on iced's engine.
@@ -153,9 +168,28 @@ impl EditorView {
             metrics: widget::Metrics::default(),
             font: Font::MONOSPACE,
             front_matter_end: None,
+            markdown_assist: true,
+            key_policy: None,
         };
         view.refresh_front_matter();
         view
+    }
+
+    /// Let the host route key presses before the editor handles them; see
+    /// [`KeyPolicy`]. Without one, every key is the editor's.
+    pub fn set_key_policy(&mut self, policy: KeyPolicy) {
+        self.key_policy = Some(policy);
+    }
+
+    /// Turn the Markdown-aware keys on or off (on by default). Off, Enter
+    /// and Home are iced's own, and the other editing keys work on plain
+    /// text; see [`EditorView::intent`].
+    pub fn set_markdown_assist(&mut self, on: bool) {
+        self.markdown_assist = on;
+    }
+
+    pub fn markdown_assist(&self) -> bool {
+        self.markdown_assist
     }
 
     /// Editor text size in points; row and caret heights scale with it.
@@ -206,7 +240,9 @@ impl EditorView {
             style,
             self.line_numbers,
             self.metrics,
+            self.markdown_assist,
         )
+        .key_policy(self.key_policy.as_ref())
         .into()
     }
 
@@ -271,6 +307,67 @@ impl EditorView {
         }
         self.select(selection);
         changed
+    }
+
+    /// Carry out an editing [`Intent`] at the cursor as one undoable change.
+    ///
+    /// With Markdown assist on, `wren_markdown` plans it over the borrowed
+    /// lines, and the plan is applied as with [`EditorView::apply`]. Home
+    /// first stops at the start of a wrapped visual row, which only the
+    /// layout knows. With assist off, Enter and Home are iced's own, Tab
+    /// inserts spaces to the next multiple of 4 (or indents the lines of a
+    /// selection that spans lines), Shift+Tab outdents, Backspace deletes a
+    /// grapheme cluster, the line delete goes to column 0, and the Markdown
+    /// commands do nothing; Delete, the word deletes, and the document motions are the
+    /// same either way.
+    ///
+    /// Returns whether the text changed.
+    pub fn intent(&mut self, intent: Intent) -> bool {
+        // A double- or triple-click selection reports its click point, not
+        // its bounds, until it is normalized.
+        let cursor = self.snapshot_cursor();
+        match intent {
+            Intent::Enter | Intent::ShiftEnter if !self.markdown_assist => {
+                return self.perform(Action::Edit(Edit::Enter));
+            }
+            Intent::Home { extend } => {
+                let home = if extend {
+                    Action::Select(Motion::Home)
+                } else {
+                    Action::Move(Motion::Home)
+                };
+                self.history.break_group();
+                // iced's Home goes to the start of the visual row. Only a
+                // continuation row starts past column 0, and a cursor already
+                // at a row start does not move; otherwise that is the stop.
+                self.content.perform(home);
+                let moved = self.content.cursor().position;
+                let row_start = moved.line == cursor.position.line
+                    && moved.column > 0
+                    && moved != cursor.position;
+                if !self.markdown_assist || row_start {
+                    return false;
+                }
+                self.select(cursor);
+            }
+            _ => {}
+        }
+        let selection = markdown_selection(cursor);
+        let assist = self.markdown_assist;
+        let plan = self.content.with_lines(|lines| {
+            let plain = (!assist)
+                .then(|| plain::plan(lines, selection, intent))
+                .flatten();
+            plain.unwrap_or_else(|| wren_markdown::plan(&lines, selection, intent, &PLAN_OPTIONS))
+        });
+        if plan.edits.is_empty() {
+            // A motion, or a key with nothing to do: no text to snapshot.
+            self.history.break_group();
+            self.select(iced_cursor(plan.selection));
+            return false;
+        }
+        let edits: Vec<Replace> = plan.edits.into_iter().map(Replace::from).collect();
+        self.apply(&edits, iced_cursor(plan.selection))
     }
 
     /// Undo the last edit unit.
@@ -677,6 +774,25 @@ impl EditorView {
 // ---------------------------------------------------------------------------
 // Cursor clamping
 // ---------------------------------------------------------------------------
+
+fn markdown_selection(cursor: Cursor) -> wren_markdown::Selection {
+    let pos = |at: Position| wren_markdown::Pos::new(at.line, at.column);
+    wren_markdown::Selection::new(
+        pos(cursor.selection.unwrap_or(cursor.position)),
+        pos(cursor.position),
+    )
+}
+
+fn iced_cursor(selection: wren_markdown::Selection) -> Cursor {
+    let position = |at: wren_markdown::Pos| Position {
+        line: at.line,
+        column: at.col,
+    };
+    Cursor {
+        position: position(selection.head),
+        selection: (!selection.is_empty()).then(|| position(selection.anchor)),
+    }
+}
 
 fn clamp_cursor(cursor: Cursor, lines: Lines<'_>) -> Cursor {
     Cursor {
@@ -2282,6 +2398,151 @@ mod tests {
             ev.scroll_to_line(1, Placement::NearTop);
             ev.content.lay_out(size);
             assert_eq!(top(&ev), (0, 0.0));
+        }
+
+        fn caret(line: usize, column: usize) -> Cursor {
+            Cursor {
+                position: Position { line, column },
+                selection: None,
+            }
+        }
+
+        #[test]
+        fn smart_enter_continues_a_list_in_the_notes_ending_as_one_undo_unit() {
+            for ending in ["\n", "\r\n", "\r", "\n\r"] {
+                let text = ["- a", "- [x] b"].join(ending);
+                let mut ev = editor(&text);
+                ev.move_cursor(caret(1, 7));
+                assert!(ev.intent(Intent::Enter));
+                assert_eq!(ev.text(), ["- a", "- [x] b", "- [ ] "].join(ending));
+                assert_eq!(ev.cursor(), caret(2, 6));
+                // Enter on the empty item exits the list.
+                assert!(ev.intent(Intent::Enter));
+                assert_eq!(ev.text(), ["- a", "- [x] b", "", ""].join(ending));
+                assert!(ev.undo());
+                assert!(ev.undo());
+                assert_eq!(ev.text(), text);
+                assert_eq!(ev.cursor(), caret(1, 7));
+                assert!(!ev.can_undo());
+            }
+        }
+
+        #[test]
+        fn tab_and_shift_tab_nest_and_renumber() {
+            let mut ev = editor("1. a\n2. b\n3. c");
+            ev.move_cursor(caret(1, 4));
+            assert!(ev.intent(Intent::Tab));
+            assert_eq!(ev.text(), "1. a\n   1. b\n2. c");
+            assert_eq!(ev.cursor(), caret(1, 7));
+            assert!(ev.intent(Intent::ShiftTab));
+            assert_eq!(ev.text(), "1. a\n2. b\n3. c");
+            // No previous sibling: Tab is consumed and changes nothing.
+            ev.move_cursor(caret(0, 4));
+            assert!(!ev.intent(Intent::Tab));
+            assert_eq!(ev.text(), "1. a\n2. b\n3. c");
+        }
+
+        #[test]
+        fn intents_act_on_the_bounds_of_a_word_or_line_selection() {
+            let mut ev = editor("hello world");
+            ev.move_cursor(caret(0, 2));
+            ev.content.perform(Action::SelectWord);
+            assert!(ev.intent(Intent::Backspace));
+            assert_eq!(ev.text(), " world");
+            assert!(ev.undo());
+            assert_eq!(ev.selected_text().as_deref(), Some("hello"));
+
+            let mut ev = editor("- one\n- two");
+            ev.move_cursor(caret(0, 3));
+            ev.content.perform(Action::SelectLine);
+            assert_eq!(ev.selected_text().as_deref(), Some("- one"));
+            assert!(ev.intent(Intent::Delete));
+            assert_eq!(ev.text(), "\n- two");
+        }
+
+        #[test]
+        fn smart_backspace_and_home_follow_the_markup() {
+            let mut ev = editor("- a\n- [ ] ");
+            ev.move_cursor(caret(1, 6));
+            assert!(ev.intent(Intent::Backspace));
+            assert_eq!(ev.text(), "- a\n- ");
+            assert!(ev.intent(Intent::Backspace));
+            assert_eq!(ev.text(), "- a\n  ");
+
+            let mut ev = editor("> - [ ] task");
+            ev.move_cursor(caret(0, 12));
+            assert!(!ev.intent(Intent::Home { extend: false }));
+            assert_eq!(ev.cursor(), caret(0, 8));
+            assert!(!ev.intent(Intent::Home { extend: false }));
+            assert_eq!(ev.cursor(), caret(0, 0));
+            ev.move_cursor(caret(0, 12));
+            ev.intent(Intent::Home { extend: true });
+            assert_eq!(
+                ev.cursor(),
+                Cursor {
+                    position: Position { line: 0, column: 8 },
+                    selection: Some(Position { line: 0, column: 12 }),
+                }
+            );
+            assert!(!ev.can_undo());
+        }
+
+        #[test]
+        fn home_stops_at_a_wrapped_rows_start_first() {
+            let text = format!("- {}", "wrapped words ".repeat(12));
+            let mut ev = editor(&text);
+            ev.content.lay_out(iced::Size::new(160.0, 400.0));
+            ev.move_cursor(caret(0, text.len()));
+            ev.intent(Intent::Home { extend: false });
+            let row_start = ev.cursor().position.column;
+            assert!(row_start > 2 && row_start < text.len(), "{row_start}");
+            // At the row's start, Home plans: the text start, then column 0.
+            ev.intent(Intent::Home { extend: false });
+            assert_eq!(ev.cursor(), caret(0, 2));
+            ev.intent(Intent::Home { extend: false });
+            assert_eq!(ev.cursor(), caret(0, 0));
+            // On the first row the planner's cycle runs at once.
+            ev.move_cursor(caret(0, 5));
+            ev.intent(Intent::Home { extend: false });
+            assert_eq!(ev.cursor(), caret(0, 2));
+        }
+
+        #[test]
+        fn without_assist_the_keys_edit_plain_text() {
+            let mut ev = editor("- a");
+            ev.set_markdown_assist(false);
+            ev.move_cursor(caret(0, 3));
+            assert!(ev.intent(Intent::Enter));
+            assert_eq!(ev.text(), "- a\n");
+            assert!(ev.intent(Intent::Tab));
+            assert_eq!(ev.text(), "- a\n    ");
+            assert!(ev.intent(Intent::ShiftTab));
+            assert_eq!(ev.text(), "- a\n");
+            assert!(ev.intent(Intent::Tab));
+            assert!(ev.intent(Intent::Backspace));
+            assert_eq!(ev.text(), "- a\n   ");
+            ev.intent(Intent::Home { extend: false });
+            assert_eq!(ev.cursor(), caret(1, 0));
+            assert!(ev.intent(Intent::Backspace));
+            assert_eq!(ev.text(), "- a   ");
+            assert!(!ev.intent(Intent::ToggleTask));
+            ev.replace_text("e\u{301}🇯🇵", false);
+            ev.move_cursor(caret(0, "e\u{301}🇯🇵".len()));
+            assert!(ev.intent(Intent::Backspace));
+            assert_eq!(ev.text(), "e\u{301}");
+            assert!(ev.intent(Intent::DeleteToTextStart));
+            assert_eq!(ev.text(), "");
+            // Tab over several lines indents them rather than replacing them.
+            ev.replace_text("one\ntwo\nthree", false);
+            ev.move_cursor(Cursor {
+                position: Position { line: 2, column: 5 },
+                selection: Some(Position { line: 0, column: 0 }),
+            });
+            assert!(ev.intent(Intent::Tab));
+            assert_eq!(ev.text(), "    one\n    two\n    three");
+            assert_eq!(ev.selected_text().as_deref(), Some("    one\n    two\n    three"));
+            assert!(ev.intent(Intent::ShiftTab));
+            assert_eq!(ev.text(), "one\ntwo\nthree");
         }
 
         #[test]

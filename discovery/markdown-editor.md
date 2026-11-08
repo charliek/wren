@@ -200,7 +200,9 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 - **Scroll:** `replace_text` saves and restores scroll. For the outline jump, set the scroll before the cursor.
 - **Acceptance:** measure draw time on tiny-skia, which repaints the whole text area on every caret blink because `Raw` is never equal.
 
-**Every text change goes through `App::edit`.** Smart keys arrive as `Message::Intent`. Commands send the same message through `self.edit(...)`. `App::edit`'s post-change half becomes one helper that issues `EditDraft`, the revision bump, and the word count, so autosave sees every edit. The word count leaves the keystroke path: it is debounced on the existing tick.
+**Every text change goes through `App::edit`.** Smart keys arrive as `Message::Intent`. Commands send the same message through `self.edit(...)`. `App::edit`'s post-change half becomes one helper (`App::text_changed`) that issues `EditDraft` and the revision bump, so autosave sees every edit. The word count leaves the keystroke path: the existing tick recounts it at most 250 ms after the first edit since the last count. That is a throttle rather than a strict debounce, so steady typing still updates the footer; the tick also runs without a session (the `--editor` spike) while a recount is due.
+
+**Planner cost.** A line's scan record depends only on the lines up to it (front matter, which looks ahead for its closing fence, is found over the whole document first), so a plan that reads no later line scans only that far. Delete, the word deletes, and a selection delete make their edit directly, with no scan. Backspace scans only when the text before the cursor could all be indentation and markup. Home and the line delete skip the scan on a line that starts with a letter, and otherwise scan up to the line. Enter on a line outside any container scans up to the line. The draft diff compares only the lines between the untouched ends. A seeded test checks each shortcut against the full scan. Enter and Backspace inside a list, Tab, and the commands still scan the whole note: about 4 ms in a debug build and 0.3 ms in release at the end of a 5,000-item list. A scanner checkpoint cache in the editor, like the highlighter's, would bound those; `test_five_thousand_line_edit_measurements` times smart Enter and Backspace.
 
 ## 5. Behavior spec (P0)
 
@@ -416,12 +418,14 @@ The `markdown.*` and `edit.*` commands have **Editor scope** (§5.8). In the pal
 
 ### 5.8 Key routing
 
-Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the widget a `KeyPolicy` built from the keymap, and `key_binding` consults it **first**:
-- An accelerator bound to an **Editor** command → `Binding::Custom(Message::Command(id))`. `App::key_input` ignores Editor-scoped commands, so they fire only while the editor is focused.
-- An accelerator bound to an **App** command → `None`. The editor doesn't also handle it.
+Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the widget a `KeyPolicy` (`Arc<dyn Fn(&Key, Physical, Modifiers) -> KeyRoute>`) built from the keymap, reading keys through the same `keys::shortcut` as the app's own shortcuts, and `key_binding` consults it **first**, right after the focus check and before Undo, Redo, and Find:
+- An accelerator bound to an **Editor** command → `KeyRoute::Intent(intent)` → `Binding::Custom(Message::Intent(intent))`, the command's planner intent, so the widget needs no host command ids. `App::key_input` ignores Editor-scoped commands, so they fire only while the editor is focused.
+- An accelerator bound to an **App** command → `KeyRoute::Host` → `None`. The editor doesn't also handle it: Ctrl+F on Linux opens find once, through the app, and a user binding of `ctrl+z` takes it from Undo.
+- Anything else → `KeyRoute::Pass`, the editor's own handling below.
 - On macOS, a key with ⌘ held never becomes an `Insert`, so an unbound ⌘B types nothing.
-- While an IME preedit is non-empty, Enter, Tab, Backspace, and Delete go to the IME untouched.
-- With assist on, Enter, Shift+Enter, Tab, Shift+Tab, Backspace, Delete, the word and line deletes, Home, and Shift+Home map to `Message::Intent`.
+- While an IME preedit is non-empty, Enter, Tab, Backspace, and Delete go to the IME untouched, whatever the modifiers, and no key runs an Editor command. This is checked before the `KeyPolicy`. The preedit is cleared when the editor loses focus, since the IME's later events go to whichever field has it.
+- Backspace, Delete, the word and line deletes, Tab, Shift+Tab, and ⌘↑ / ⌘↓ always map to `Message::Intent`; Enter, Shift+Enter, Home, and Shift+Home do only with assist on. The keys are read by post-processing `Binding::from_key_press`, so iced's platform mappings (⌘← and ⌃A as Home, ⌃H as Backspace) carry over. Word deletes take ⌥ on macOS, and Ctrl or Alt on Linux.
+- **With assist off** the editor edits plain text, keeping the fixes that are not about Markdown: Enter, Shift+Enter, and Home are iced's own; Backspace deletes a grapheme cluster (at column 0, the line break); Tab inserts spaces to the next multiple of 4, replacing a selection inside one line as typing does; over a selection that spans lines, Tab indents each covered line (not empty ones) by 4 spaces, or a tab where the line starts with one, and keeps the selection, so it never replaces several lines; Shift+Tab takes the same step (a tab, or up to 4 spaces) off each covered line, or off the cursor's line; ⌘⌫ deletes to column 0; the §5.7 commands do nothing, and the host's `KeyPolicy` passes their keys to the editor's own handling, so Ctrl+Enter (⌘↵) breaks the line and Alt+↑ (⌥↑) moves the cursor as before the commands existed. Delete, the word deletes, and the document motions are the planner's either way, since they know nothing of Markdown.
 - Editor commands stay out of the macOS menu bar in P0.
 
 ### 5.9 Outline palette
@@ -581,13 +585,13 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 3. **`wren-markdown`:** the `edit` planner for §5.2–5.7, the CodeMirror corpus, and the divergence table.
 4. **`wren-editor`:** the `Backend` seam with Iced only. Then the owned engine behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.*
 5. **Point the highlighter, `done_task_ranges`, and `index.rs` at `wren-markdown::block`.** Done. The strike ranges come from the highlighter's per-line decorations rather than a separate scan. A note's search preview is its first paragraph line outside front matter and headings (setext ones included), so a note whose only body is code or an empty item has no preview.
-6. **Intents:**
+6. **Intents** (done on `md-keys`):
    - the `Message::Intent` / `EditorView::apply` path;
    - the `App::edit` helper and the debounced word count;
    - the `markdown-assist` setting;
    - key mapping and the IME guard;
    - the `editor.command` RPC and `native_x11` cases.
-7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs.
+7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs (done on `md-keys`). The commands sit in a "Markdown" palette group. With assist off they are disabled in the palette, and their keys stay the editor's and do nothing. The `shortcut` test request runs an Editor command the widget's way: the bound key through the policy, only while the editor is focused.
 8. **The outline palette.**
 9. **Harness work:** settings support, engine parametrization, and the scenes. Then review.
 

@@ -54,6 +54,8 @@ The fixture has **5,000 logical lines / 334,999 UTF-8 bytes**. Sixteen independe
 
 The wgpu X11, wgpu Wayland, and tiny-skia Wayland runs were concurrent. Numbers are a local debug-build baseline, not a release benchmark or guaranteed latency ceiling. The shared-CI RPC regression ceiling is intentionally much looser (2 seconds) and must not be mistaken for an acceptable interactive target.
 
+The same case also times six smart Enter and six smart Backspace presses (`editor.command`) at the end of the fixture, which is one 5,000-item list. On X11 / tiny-skia, a debug build measured handler medians of 5–11 ms for Enter and 4–6 ms for Backspace across the two engines. Most of that is one scan of the list by the Markdown planner. The test fails when either median passes 100 ms.
+
 Native X11 injection of `native input` (12 characters with a requested 15 ms inter-key delay) reached the observed correct document state in **226.81 ms on wgpu** and **265.49 ms on tiny-skia**. These times include injection delay, process startup for xdotool, and state observation. A subsequent screenshot contains the edited document. They do not measure per-keystroke key-to-photon latency. No claim of sub-frame latency is made.
 
 ### Screenshot regression found and fixed

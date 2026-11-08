@@ -35,6 +35,8 @@ COMMANDS = {
     "workspace.switch", "workspace.add", "workspace.remove",
     "section.reorder", "group.reorder", "note.open_conflict",
     "settings.open", "settings.reload", "app.quit",
+    "markdown.toggle_task", "markdown.bold", "markdown.italic", "markdown.code",
+    "edit.move_line_up", "edit.move_line_down",
 }
 DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
 FIRST = "Atlas/Research/Note 1.md"
@@ -246,7 +248,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         by_id = {row["key"]["command"]: row for row in rows}
         assert set(by_id) == COMMANDS
         assert len(rows) == len(COMMANDS)
-        assert {row["group"] for row in rows} == {"This note", "Go", "View", "Workspace", "App"}
+        assert {row["group"] for row in rows} == {"This note", "Markdown", "Go", "View", "Workspace",
+                                                   "App"}
         assert all(row["title"] for row in rows)
         for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict"}:
             assert by_id[key]["enabled"] is True, key
@@ -263,7 +266,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         by_id = {row["key"]["command"]: row for row in rows}
         for key in ("note.rename", "note.delete", "note.reveal", "note.move", "navigation.find",
                     "group.rename", "group.delete", "group.reveal", "group.move",
-                    "note.new", "note.new_dated", "notes.sort_title"):
+                    "note.new", "note.new_dated", "notes.sort_title",
+                    "markdown.toggle_task", "markdown.bold", "edit.move_line_up"):
             assert by_id[key]["enabled"] is False, key
         for key in ("group.new", "section.rename"):
             assert by_id[key]["enabled"] is True, key

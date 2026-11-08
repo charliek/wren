@@ -40,7 +40,8 @@ the file.
 
 ### Editor engines
 
-The editor cases in `tools/wrentest/test_editor.py` run on each text engine
+The editor cases in `tools/wrentest/test_editor.py` and
+`tools/wrentest/test_markdown_keys.py` run on each text engine
 that `WRENTEST_ENGINE` names: `classic` (the default), `advanced`, or both,
 comma-separated. Each case starts Wren with `editor-engine` set to its engine,
 checks that `editor.get` reports that engine, and gets the engine in its test
@@ -52,6 +53,18 @@ ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced \
   uv run --locked --group test python tools/run_display.py x11 -- \
   uv run --locked --group test pytest tools/wrentest/test_editor.py
 ```
+
+`test_markdown_keys.py` drives the Markdown-aware keys with the
+`editor.command` request, `{"intent": "enter"}` and the like (`shift_enter`,
+`tab`, `shift_tab`, `backspace`, `delete`, `delete_word_back`,
+`delete_word_forward`, `delete_to_line_start`, `home`, `select_home`, …). It
+reaches the app's edit path the same way the editor widget's keys do and
+returns the editor snapshot; its `native_x11` case presses the real keys.
+The Markdown commands run two ways: `command.run` (`{"id": "markdown.bold"}`)
+runs one as the palette does, at the editor's cursor whatever has the
+keyboard, and `shortcut` runs one as its key does, routing the bound key
+through the editor's key policy and acting only while the editor is
+focused.
 
 The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor

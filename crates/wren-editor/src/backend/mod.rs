@@ -274,9 +274,10 @@ impl<'a> Lines<'a> {
     }
 }
 
+/// The planner reads the buffer's lines in place.
 impl wren_markdown::Lines for Lines<'_> {
     fn line_count(&self) -> usize {
-        self.len()
+        self.0.lines.len()
     }
 
     fn line(&self, i: usize) -> &str {

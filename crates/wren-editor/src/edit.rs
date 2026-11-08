@@ -31,6 +31,20 @@ impl Replace {
     }
 }
 
+impl From<wren_markdown::Replace> for Replace {
+    fn from(replace: wren_markdown::Replace) -> Self {
+        let position = |at: wren_markdown::Pos| Position {
+            line: at.line,
+            column: at.col,
+        };
+        Self {
+            start: position(replace.start),
+            end: position(replace.end),
+            text: replace.text,
+        }
+    }
+}
+
 /// `edits` from the top of the document down, or `None` when one is off
 /// the text, splits a character, runs backwards, or overlaps another.
 /// Insertions at the same place keep their order.

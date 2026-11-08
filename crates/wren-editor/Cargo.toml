@@ -18,4 +18,5 @@ test-support = []
 # The workspace's iced: iced always pulls in winit, which needs a windowing
 # feature on Linux, and the widget draws through the concrete iced::Renderer.
 iced.workspace = true
+unicode-segmentation.workspace = true
 wren-markdown.workspace = true

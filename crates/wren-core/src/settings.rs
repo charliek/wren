@@ -115,6 +115,8 @@ pub struct Settings {
     pub editor_font_family: Option<String>,
     pub line_numbers: bool,
     pub editor_engine: EditorEngine,
+    /// The Markdown-aware Enter, Tab, Backspace, and Home.
+    pub markdown_assist: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -128,6 +130,7 @@ impl Default for Settings {
             editor_font_family: None,
             line_numbers: true,
             editor_engine: EditorEngine::default(),
+            markdown_assist: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -201,6 +204,10 @@ impl Settings {
                 },
                 "editor-engine" => match EditorEngine::parse(value) {
                     Some(engine) => settings.editor_engine = engine,
+                    None => invalid(),
+                },
+                "markdown-assist" => match parse_bool(value) {
+                    Some(enabled) => settings.markdown_assist = enabled,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -371,6 +378,11 @@ pub const TEMPLATE: &str = "\
 # editor engine, under evaluation).
 # editor-engine = classic
 
+# Markdown assist: Enter continues lists and quotes, Tab nests list items,
+# Backspace removes markup, and Home stops at the text after the markup.
+# Off, the Markdown commands (toggle task, bold, move line, ...) are disabled.
+# markdown-assist = on
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -445,6 +457,25 @@ mod tests {
         for engine in [EditorEngine::Classic, EditorEngine::Advanced] {
             assert_eq!(EditorEngine::parse(engine.value()), Some(engine));
         }
+    }
+
+    #[test]
+    fn markdown_assist_defaults_on_and_parses_booleans() {
+        assert!(Settings::default().markdown_assist);
+        for (value, enabled) in [
+            ("off", false),
+            ("on", true),
+            ("false", false),
+            ("YES", true),
+        ] {
+            let settings = Settings::parse(&format!("markdown-assist = {value}\n"));
+            assert_eq!(settings.markdown_assist, enabled, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        let settings = Settings::parse("markdown-assist = off\nmarkdown-assist = sometimes\n");
+        assert!(!settings.markdown_assist);
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("markdown-assist"));
     }
 
     #[test]
