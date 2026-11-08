@@ -17,6 +17,7 @@ use crate::{EditPlan, Intent, Lines, Options, Pos, Replace, Selection};
 mod delete;
 mod motion;
 mod tab;
+mod task;
 
 /// Plan `intent` at `sel`.
 ///
@@ -45,6 +46,7 @@ pub fn plan(
         Intent::Home { extend } => motion::home(lines, sel, extend),
         Intent::DocumentStart { extend } => motion::document_start(lines, sel, extend),
         Intent::DocumentEnd { extend } => motion::document_end(lines, sel, extend),
+        Intent::ToggleTask => task::toggle(lines, sel),
         _ => unchanged(clamp_selection(lines, sel)),
     }
 }
@@ -1091,6 +1093,14 @@ impl Analysis {
             }
         }
         None
+    }
+
+    /// Every container open on line `l`, including those a lazy line does
+    /// not continue.
+    fn open_stack(&self, l: usize) -> Vec<Container> {
+        (0..self.recs[l].len)
+            .map(|slot| self.opened(l, slot).1)
+            .collect()
     }
 
     /// The slot of the innermost list item line `l` opens.
