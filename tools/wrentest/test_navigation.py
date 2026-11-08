@@ -20,7 +20,7 @@ import pytest
 
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture
-from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory
+from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
 from tools.wrentest.ui import WrenApp, wait_for
 
 
@@ -1190,8 +1190,7 @@ def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
         image = capture(app, artifacts / "focus.png")
         viewport = navigation(app)["viewport"]
         assert image.pixel(image.width - 5, image.height // 2)[:3] == BACKGROUNDS[theme]
-        # saved_editor_view centers its 760px maximum editor; TextEditor pads 16px.
-        left = max(0, (viewport["width"] - 760) / 2)
+        left = editor_column(navigation(app))[0]
         assert color_count(image, viewport, (left + 16, 115, left + 500, 220), body) > 70
         assert session(app)["document"]["text"] == (vault / FIRST).read_text(encoding="utf-8")
         gateway(app, "view.focus", enabled=False)

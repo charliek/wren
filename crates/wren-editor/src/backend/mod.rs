@@ -254,9 +254,9 @@ impl Backend {
             Self::Iced(editor) => {
                 editor.highlight(font, highlighter, |highlight| highlight.to_format())
             }
-            Self::Owned(engine) => {
-                engine.highlight(font, highlighter, |highlight| highlight.to_format())
-            }
+            Self::Owned(engine) => engine.highlight(font, highlighter, |highlight| {
+                (highlight.to_format(), highlight.scale())
+            }),
         }
     }
 
@@ -340,7 +340,9 @@ mod tests {
     use crate::fixtures;
     use crate::highlighter::Settings;
 
-    const TEXT: &str = "# Title\nshort\nwrapped words wrapped words wrapped words\n\n- [x] done 🐦";
+    // H4 is body sized, so both engines lay it out alike.
+    const TEXT: &str =
+        "#### Title\nshort\nwrapped words wrapped words wrapped words\n\n- [x] done 🐦";
 
     fn update(
         backend: &mut Backend,

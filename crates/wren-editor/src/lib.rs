@@ -151,6 +151,8 @@ pub struct EditorView {
     find_current: Option<usize>,
     line_numbers: bool,
     metrics: widget::Metrics,
+    /// Row height as a multiple of the text size.
+    line_height: f32,
     font: Font,
     /// The text's `block::front_matter_end`, kept current after every
     /// change for the highlighter, which cannot look ahead.
@@ -181,6 +183,7 @@ impl EditorView {
             find_current: None,
             line_numbers: true,
             metrics: widget::Metrics::default(),
+            line_height: widget::DEFAULT_LINE_HEIGHT,
             font: Font::MONOSPACE,
             front_matter_end: None,
             markdown_assist: true,
@@ -209,7 +212,14 @@ impl EditorView {
 
     /// Editor text size in points; row and caret heights scale with it.
     pub fn set_font_size(&mut self, size: f32) {
-        self.metrics = widget::Metrics::for_size(size);
+        self.metrics = widget::Metrics::new(size, self.line_height);
+    }
+
+    /// Row height as a multiple of the text size (1.7 by default), kept
+    /// across text size changes.
+    pub fn set_line_height(&mut self, ratio: f32) {
+        self.line_height = ratio;
+        self.metrics = widget::Metrics::new(self.metrics.text, ratio);
     }
 
     /// The editor font; bold and italic spans use its variants. Defaults to
@@ -228,6 +238,12 @@ impl EditorView {
         self.metrics.text
     }
 
+    /// The height of a body row, in pixels.
+    #[cfg(feature = "test-support")]
+    pub fn row_height(&self) -> f32 {
+        self.metrics.line
+    }
+
     /// Show or hide the line-number gutter (shown by default).
     pub fn set_line_numbers(&mut self, line_numbers: bool) {
         self.line_numbers = line_numbers;
@@ -239,11 +255,18 @@ impl EditorView {
 
     /// Build the iced widget tree for the editor.
     ///
-    /// Uses the editor font, 14 px / 24 px line height scaled with the text
-    /// size, soft-wrap, a 52 px line-number gutter unless hidden, `style` for
-    /// the surface, and Markdown highlighting in `palette` colours.  Returns
-    /// `Element<'_, Message>` so the parent can map it to its own message type.
-    pub fn view(&self, style: Style, palette: Palette) -> Element<'_, Message> {
+    /// Uses the editor font, rows the line-height ratio times the text size,
+    /// soft-wrap, a 52 px line-number gutter unless hidden, `style` for the
+    /// surface, and Markdown highlighting in `palette` colours. The column
+    /// of gutter and text grows to `max_width` and is centred past it.
+    /// Returns `Element<'_, Message>` so the parent can map it to its own
+    /// message type.
+    pub fn view(
+        &self,
+        style: Style,
+        palette: Palette,
+        max_width: Option<f32>,
+    ) -> Element<'_, Message> {
         TextEditor::new(
             &self.content,
             "note-editor",
@@ -258,6 +281,7 @@ impl EditorView {
             self.markdown_assist,
         )
         .key_policy(self.key_policy.as_ref())
+        .max_width(max_width)
         .into()
     }
 
@@ -947,6 +971,17 @@ mod tests {
         assert_eq!(edit_kind(&Action::Edit(Edit::Backspace)), EditKind::Delete);
         assert_eq!(edit_kind(&Action::Edit(Edit::Delete)), EditKind::Delete);
         assert_eq!(edit_kind(&Action::Edit(Edit::Indent)), EditKind::Replace);
+    }
+
+    #[test]
+    fn a_text_size_change_keeps_the_line_height_ratio() {
+        let mut ev = EditorView::new("x");
+        ev.set_line_height(2.0);
+        assert_eq!(ev.metrics, widget::Metrics::new(14.0, 2.0));
+        ev.set_font_size(20.0);
+        assert_eq!(ev.metrics.line, 40.0);
+        ev.set_line_height(widget::DEFAULT_LINE_HEIGHT);
+        assert_eq!(ev.metrics, widget::Metrics::for_size(20.0));
     }
 
     #[test]
@@ -2066,7 +2101,7 @@ mod tests {
             // This is a structural test: view() takes &self, so it cannot clone
             // content by moving it. We verify the text is unchanged after view().
             let ev = editor("test content");
-            let _element = ev.view(fixtures::STYLE, fixtures::DARK);
+            let _element = ev.view(fixtures::STYLE, fixtures::DARK, Some(760.0));
             // If this compiles and runs without panicking, content was borrowed not moved.
             assert_eq!(ev.text(), "test content");
         }

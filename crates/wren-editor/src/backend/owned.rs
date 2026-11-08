@@ -55,6 +55,8 @@ use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size};
 
 use cosmic_text::Edit as _;
 
+use crate::highlighter::Scale;
+
 pub struct Engine {
     editor: cosmic_text::Editor<'static>,
     font: Font,
@@ -66,6 +68,13 @@ pub struct Engine {
     /// The x that Up, Down, PageUp, and PageDown aim for, kept across a run
     /// of them so a short line does not pull the column in.
     goal_x: Option<i32>,
+    /// The cursor moved since the last highlight. The update scrolled to it
+    /// while unstyled rows still had body heights, so once highlighting
+    /// sizes them the view follows the cursor again.
+    follow_cursor: bool,
+    /// The `(line, above)` of a `scroll_to` since the last highlight, placed
+    /// again once highlighting sizes the rows above `line`.
+    scroll_target: Option<(usize, f32)>,
 }
 
 impl Engine {
@@ -89,6 +98,8 @@ impl Engine {
             topmost_line_changed: Some(0),
             version: font_system.version(),
             goal_x: None,
+            follow_cursor: false,
+            scroll_target: None,
         }
     }
 
@@ -109,10 +120,11 @@ impl Engine {
             None,
         );
         buffer.set_scroll(scroll);
-        let cursor = clamp(buffer, cursor);
+        let clamped = clamp(buffer, cursor);
         self.editor.set_selection(cosmic_text::Selection::None);
-        self.editor.set_cursor(cursor);
+        self.editor.set_cursor(clamped);
         self.goal_x = None;
+        self.note_cursor_move(cursor);
         self.mark_changed(0);
     }
 
@@ -120,12 +132,14 @@ impl Engine {
     /// literally, and put the cursor after it.
     pub fn replace_range(&mut self, start: Position, end: Position, text: &str) {
         self.debug_assert_unshared();
+        let before = self.editor.cursor();
         let start = to_cursor(start);
         self.editor.set_selection(cosmic_text::Selection::None);
         self.editor.delete_range(start, to_cursor(end));
         let after = self.editor.insert_at(start, text, None);
         self.editor.set_cursor(after);
         self.goal_x = None;
+        self.note_cursor_move(before);
         self.mark_changed(start.line);
     }
 
@@ -133,6 +147,8 @@ impl Engine {
     /// as far as needed to show the cursor.
     pub fn restore_view(&mut self, cursor: Cursor, scroll: cosmic_text::Scroll) {
         self.move_to(cursor);
+        self.follow_cursor = true;
+        self.scroll_target = None;
         let cursor = self.editor.cursor();
         let laid_out = self.bounds != Size::ZERO;
         let mut font_system = font_system();
@@ -160,6 +176,8 @@ impl Engine {
         if laid_out {
             buffer.shape_until_scroll(font_system.raw(), false);
         }
+        self.follow_cursor = false;
+        self.scroll_target = None;
     }
 
     /// Put `line`'s first row `above` pixels below the top of the view,
@@ -175,6 +193,7 @@ impl Engine {
         if laid_out {
             buffer.shape_until_scroll(font_system.raw(), false);
         }
+        self.scroll_target = Some((line, above));
     }
 
     pub fn buffer(&self) -> &cosmic_text::Buffer {
@@ -215,6 +234,11 @@ impl Engine {
 
     pub fn perform(&mut self, action: Action) {
         self.debug_assert_unshared();
+        let before = self.editor.cursor();
+        if let Action::Scroll { .. } = action {
+            self.follow_cursor = false;
+            self.scroll_target = None;
+        }
         let mut font_system = font_system();
         let font_system = font_system.raw();
         let editor = &mut self.editor;
@@ -329,10 +353,12 @@ impl Engine {
                 editor.action(font_system, cosmic_text::Action::Scroll { pixels });
             }
         }
+        self.note_cursor_move(before);
     }
 
     pub fn move_to(&mut self, cursor: Cursor) {
         self.debug_assert_unshared();
+        let before = self.editor.cursor();
         self.goal_x = None;
         self.editor.set_cursor(to_cursor(cursor.position));
         // Like iced, `None` leaves an existing selection in place.
@@ -340,6 +366,7 @@ impl Engine {
             self.editor
                 .set_selection(cosmic_text::Selection::Normal(to_cursor(selection)));
         }
+        self.note_cursor_move(before);
     }
 
     pub fn update(
@@ -379,6 +406,8 @@ impl Engine {
                 font_system.raw(),
                 cosmic_text::Metrics::new(new_size.0, new_line_height.0),
             );
+            // Sized spans hold metrics derived from the old body metrics.
+            self.topmost_line_changed = Some(0);
         }
 
         let new_wrap = graphics::to_wrap(new_wrapping);
@@ -406,19 +435,60 @@ impl Engine {
         let _ = buffer_mut(&mut self.editor).line_layout(font_system.raw(), line);
     }
 
+    /// Style the visible lines from `highlighter`. Unlike iced's
+    /// `Format`, each span also carries a [`Scale`], which sets its text
+    /// size and its row's height from the body metrics.
+    ///
+    /// Styling runs a page past the view and the cursor, so a PageDown or a
+    /// short scroll measures rows that already have their own heights. When
+    /// styling resizes rows, the view is placed again: at the pending
+    /// `scroll_to` target, then as far as needed to show a moved cursor.
     pub fn highlight<H: Highlighter>(
         &mut self,
         font: Font,
         highlighter: &mut H,
-        format_highlight: impl Fn(&H::Highlight) -> highlighter::Format<Font>,
+        format_highlight: impl Fn(&H::Highlight) -> (highlighter::Format<Font>, Scale),
     ) {
         self.debug_assert_unshared();
+        let restyled = self.restyle(font, highlighter, format_highlight);
+        let follow = std::mem::take(&mut self.follow_cursor);
+        let target = self.scroll_target.take();
+        if !restyled {
+            return;
+        }
+        let cursor = self.editor.cursor();
+        let mut font_system = font_system();
+        let buffer = buffer_mut(&mut self.editor);
+        if let Some((line, above)) = target {
+            let line = line.min(buffer.lines.len().saturating_sub(1));
+            buffer.set_scroll(cosmic_text::Scroll::new(line, -above, 0.0));
+        }
+        buffer.shape_until_scroll(font_system.raw(), false);
+        if follow {
+            buffer.shape_until_cursor(font_system.raw(), cursor, false);
+        }
+        let _ = buffer.line_layout(font_system.raw(), cursor.line);
+    }
+
+    /// Apply `highlighter`'s spans from its current line through a page past
+    /// both the last visible line and the cursor's line. Returns whether any
+    /// line's style changed.
+    fn restyle<H: Highlighter>(
+        &mut self,
+        font: Font,
+        highlighter: &mut H,
+        format_highlight: impl Fn(&H::Highlight) -> (highlighter::Format<Font>, Scale),
+    ) -> bool {
         let buffer = self.buffer();
         let Some(last_line) = buffer.lines.len().checked_sub(1) else {
-            return;
+            return false;
         };
+        let body = buffer.metrics();
         let scroll = buffer.scroll();
-        let mut window = (self.bounds.height / buffer.metrics().line_height).ceil() as i32;
+        let page = (self.bounds.height / body.line_height).ceil() as usize;
+        // The view starts `scroll.vertical` into its first line.
+        let mut window =
+            ((scroll.vertical.max(0.0) + self.bounds.height) / body.line_height).ceil() as usize;
         let last_visible_line = buffer
             .lines
             .get(scroll.line..)
@@ -427,7 +497,7 @@ impl Engine {
             .enumerate()
             .find_map(|(i, line)| {
                 // An unshaped line is assumed to take one row.
-                let rows = line.layout_opt().map_or(1, Vec::len) as i32;
+                let rows = line.layout_opt().map_or(1, Vec::len);
                 if window > rows {
                     window -= rows;
                     None
@@ -435,35 +505,43 @@ impl Engine {
                     Some(scroll.line + i)
                 }
             })
-            .unwrap_or(last_line)
-            .min(last_line);
+            .unwrap_or(last_line);
+        // A line holds at least one row, so a page of rows spans at most
+        // one more line than it has rows.
+        let through = (last_visible_line.max(self.editor.cursor().line) + page + 1).min(last_line);
 
         let current_line = highlighter.current_line();
-        if current_line > last_visible_line {
-            return;
+        if current_line > through {
+            return false;
         }
 
-        let mut font_system = font_system();
         let attributes = graphics::to_attributes(font);
-        for line in &mut buffer_mut(&mut self.editor).lines[current_line..=last_visible_line] {
+        let mut changed = false;
+        for line in &mut buffer_mut(&mut self.editor).lines[current_line..=through] {
             let mut list = cosmic_text::AttrsList::new(&attributes);
             for (range, highlight) in highlighter.highlight_line(line.text()) {
-                let format = format_highlight(&highlight);
-                if format.color.is_some() || format.font.is_some() {
-                    list.add_span(
-                        range,
-                        &cosmic_text::Attrs {
-                            color_opt: format.color.map(graphics::to_color),
-                            ..format
-                                .font
-                                .map_or_else(|| attributes.clone(), graphics::to_attributes)
-                        },
-                    );
+                let (format, scale) = format_highlight(&highlight);
+                let sized = scale != Scale::BODY;
+                if format.color.is_some() || format.font.is_some() || sized {
+                    let mut span = cosmic_text::Attrs {
+                        color_opt: format.color.map(graphics::to_color),
+                        ..format
+                            .font
+                            .map_or_else(|| attributes.clone(), graphics::to_attributes)
+                    };
+                    if sized {
+                        // Whole-pixel rows keep every row below on the pixel grid.
+                        span = span.metrics(cosmic_text::Metrics::new(
+                            body.font_size * scale.text,
+                            (body.line_height * scale.row).round(),
+                        ));
+                    }
+                    list.add_span(range, &span);
                 }
             }
-            let _ = line.set_attrs_list(list);
+            changed |= line.set_attrs_list(list);
         }
-        self.editor.shape_as_needed(font_system.raw(), false);
+        changed
     }
 
     /// The caret or the selection rectangles, relative to the text origin;
@@ -541,6 +619,12 @@ impl Engine {
             color,
             clip_bounds,
         });
+    }
+
+    /// Have the next highlight follow the cursor if it left `before`, as
+    /// cosmic-text's editor does on its next shaping.
+    fn note_cursor_move(&mut self, before: cosmic_text::Cursor) {
+        self.follow_cursor |= self.editor.cursor() != before;
     }
 
     fn mark_changed(&mut self, line: usize) {
@@ -652,12 +736,28 @@ fn move_cursor(
         Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
     );
     let from = editor.cursor();
-    let moved = buffer_mut(editor).cursor_motion(
-        font_system,
-        from,
-        goal_x.filter(|_| vertical),
-        to_motion(motion),
-    );
+    let buffer = buffer_mut(editor);
+    let moved = match motion {
+        Motion::PageUp | Motion::PageDown => {
+            let down = motion == Motion::PageDown;
+            let row = if down {
+                cosmic_text::Motion::Down
+            } else {
+                cosmic_text::Motion::Up
+            };
+            page_rows(buffer, font_system, from, down).and_then(|rows| {
+                (0..rows).try_fold((from, *goal_x), |(cursor, goal), _| {
+                    buffer.cursor_motion(font_system, cursor, goal, row)
+                })
+            })
+        }
+        _ => buffer.cursor_motion(
+            font_system,
+            from,
+            goal_x.filter(|_| vertical),
+            to_motion(motion),
+        ),
+    };
     match moved {
         Some((cursor, goal)) => {
             editor.set_cursor(cursor);
@@ -665,6 +765,55 @@ fn move_cursor(
         }
         None if !vertical => *goal_x = None,
         None => {}
+    }
+}
+
+/// How many rows a page moves from `cursor`: as many as fit in the view,
+/// each counted at its own height, so a page over taller heading rows moves
+/// fewer of them (cosmic-text counts body rows). At the edge of the text one
+/// more row lets the last motion settle there as cosmic-text's would.
+fn page_rows(
+    buffer: &mut cosmic_text::Buffer,
+    font_system: &mut cosmic_text::FontSystem,
+    cursor: cosmic_text::Cursor,
+    down: bool,
+) -> Option<usize> {
+    let page = buffer.size().1?;
+    let body = buffer.metrics().line_height;
+    let start = buffer.layout_cursor(font_system, cursor)?;
+    let (mut line, mut row) = (start.line, start.layout);
+    let (mut rows, mut moved) = (0, 0.0);
+    loop {
+        if down {
+            let count = buffer.line_layout(font_system, line)?.len();
+            if row + 1 < count {
+                row += 1;
+            } else if line + 1 < buffer.lines.len() {
+                (line, row) = (line + 1, 0);
+            } else {
+                return Some(rows + 1);
+            }
+        } else if row > 0 {
+            row -= 1;
+        } else if line > 0 {
+            line -= 1;
+            row = buffer
+                .line_layout(font_system, line)?
+                .len()
+                .saturating_sub(1);
+        } else {
+            return Some(rows + 1);
+        }
+        let height = buffer
+            .line_layout(font_system, line)?
+            .get(row)
+            .and_then(|layout| layout.line_height_opt)
+            .unwrap_or(body);
+        if moved + height > page {
+            return Some(rows);
+        }
+        moved += height;
+        rows += 1;
     }
 }
 
@@ -809,7 +958,9 @@ mod tests {
             Wrapping::WordOrGlyph,
             highlighter,
         );
-        engine.highlight(font, highlighter, |highlight| highlight.to_format());
+        engine.highlight(font, highlighter, |highlight| {
+            (highlight.to_format(), highlight.scale())
+        });
     }
 
     fn weak(engine: &Engine) -> Weak<cosmic_text::Buffer> {
@@ -1064,6 +1215,184 @@ mod tests {
         assert_eq!(engine.cursor(), at(5, 1));
         engine.perform(Action::Move(Motion::Up));
         assert_eq!(engine.cursor(), at(4, 9));
+    }
+
+    #[test]
+    fn heading_rows_place_the_caret_selection_and_clicks_by_their_own_height() {
+        fixtures::load_font();
+        let mut engine = Engine::with_text("# Title\nbody\n## Two");
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        let caret = |engine: &mut Engine, highlighter: &mut MarkdownHighlighter, at| {
+            engine.move_to(at);
+            update(engine, highlighter, 400.0, fixtures::FONT);
+            match engine.selection() {
+                Some(Selection::Caret(point)) => point,
+                other => panic!("{other:?}"),
+            }
+        };
+        // Rows: H1 32 px, body 24 px, H2 28 px.
+        assert_eq!(caret(&mut engine, &mut highlighter, at(1, 0)).y, 32.0);
+        assert_eq!(caret(&mut engine, &mut highlighter, at(2, 0)).y, 56.0);
+        // Heading glyphs are wider than body ones.
+        let heading = caret(&mut engine, &mut highlighter, at(0, 7)).x;
+        let body = caret(&mut engine, &mut highlighter, at(1, 4)).x;
+        assert!(heading / 5.0 > body / 4.0 * 1.3, "{heading} {body}");
+
+        engine.move_to(Cursor {
+            position: Position { line: 2, column: 4 },
+            selection: Some(Position { line: 0, column: 2 }),
+        });
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        let Some(Selection::Range(ranges)) = engine.selection() else {
+            panic!("a selection");
+        };
+        let rows: Vec<_> = ranges.iter().map(|range| (range.y, range.height)).collect();
+        assert_eq!(rows, [(0.0, 32.0), (32.0, 24.0), (56.0, 28.0)]);
+
+        for (y, line) in [(31.0, 0), (33.0, 1), (55.0, 1), (57.0, 2), (83.0, 2)] {
+            engine.perform(Action::Click(Point::new(1.0, y)));
+            assert_eq!(engine.cursor().position.line, line, "y = {y}");
+        }
+    }
+
+    #[test]
+    fn a_new_text_size_or_line_height_resizes_the_heading_rows() {
+        fixtures::load_font();
+        let mut engine = Engine::with_text("# Title\nbody");
+        let mut highlighter = highlighter();
+        let heights = |engine: &mut Engine, highlighter: &mut MarkdownHighlighter, line: f32| {
+            engine.update(
+                Size::new(300.0, 400.0),
+                fixtures::FONT,
+                Pixels(14.0),
+                LineHeight::Absolute(Pixels(line)),
+                Wrapping::WordOrGlyph,
+                highlighter,
+            );
+            engine.highlight(fixtures::FONT, highlighter, |highlight| {
+                (highlight.to_format(), highlight.scale())
+            });
+            engine
+                .buffer()
+                .layout_runs()
+                .map(|run| run.line_height)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(heights(&mut engine, &mut highlighter, 24.0), [32.0, 24.0]);
+        assert_eq!(heights(&mut engine, &mut highlighter, 28.0), [38.0, 28.0]);
+        assert_eq!(heights(&mut engine, &mut highlighter, 18.0), [24.0, 18.0]);
+    }
+
+    #[test]
+    fn a_page_counts_heading_rows_at_their_own_height() {
+        fixtures::load_font();
+        // Ten H1 rows of 32 px: a 120 px page holds three, not five.
+        let text = (0..10)
+            .map(|i| format!("# Heading {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut engine = Engine::with_text(&text);
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 120.0, fixtures::FONT);
+        engine.move_to(at(0, 4));
+        engine.perform(Action::Move(Motion::PageDown));
+        update(&mut engine, &mut highlighter, 120.0, fixtures::FONT);
+        assert_eq!(engine.cursor(), at(3, 4));
+        engine.perform(Action::Move(Motion::PageUp));
+        assert_eq!(engine.cursor(), at(0, 4));
+        // At the end of the text a page settles on the last row.
+        engine.move_to(at(9, 4));
+        engine.perform(Action::Move(Motion::PageDown));
+        assert_eq!(engine.cursor().position.line, 9);
+    }
+
+    /// The cursor line's first visible row as `(top, height)`, if it lies
+    /// wholly inside the view.
+    fn cursor_row_in_view(engine: &Engine) -> Option<(f32, f32)> {
+        let line = engine.editor.cursor().line;
+        let height = engine.bounds().height;
+        engine
+            .buffer()
+            .layout_runs()
+            .find(|run| run.line_i == line)
+            .map(|run| (run.line_top, run.line_height))
+            .filter(|(top, row)| *top >= 0.0 && top + row <= height)
+    }
+
+    fn mixed_headings(blocks: usize) -> String {
+        (0..blocks)
+            .map(|i| format!("# Section {i}\nbody\nbody\n## Sub {i}\nbody"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_end_of_a_heading_dense_note_stays_in_view() {
+        fixtures::load_font();
+        let mut engine = Engine::with_text(&mixed_headings(300));
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 300.0, fixtures::FONT);
+        engine.perform(Action::Move(Motion::DocumentEnd));
+        update(&mut engine, &mut highlighter, 300.0, fixtures::FONT);
+        assert_eq!(engine.cursor().position.line, 1499);
+        let (top, row) = cursor_row_in_view(&engine).expect("the caret's row is in view");
+        assert_eq!(top + row, 300.0);
+        assert!(matches!(engine.selection(), Some(Selection::Caret(_))));
+    }
+
+    #[test]
+    fn pages_over_dense_headings_move_a_view_of_rows_and_keep_the_caret_in_view() {
+        fixtures::load_font();
+        // 32 px H1 rows: a 300 px view holds nine.
+        let text = (0..200)
+            .map(|i| format!("# Heading {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut engine = Engine::with_text(&text);
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 300.0, fixtures::FONT);
+        for page in 1..=5 {
+            engine.perform(Action::Move(Motion::PageDown));
+            update(&mut engine, &mut highlighter, 300.0, fixtures::FONT);
+            assert_eq!(engine.cursor().position.line, 9 * page, "page {page}");
+            assert!(cursor_row_in_view(&engine).is_some(), "page {page}");
+        }
+        for page in (0..5).rev() {
+            engine.perform(Action::Move(Motion::PageUp));
+            update(&mut engine, &mut highlighter, 300.0, fixtures::FONT);
+            assert_eq!(engine.cursor().position.line, 9 * page, "page {page}");
+            assert!(cursor_row_in_view(&engine).is_some(), "page {page}");
+        }
+    }
+
+    #[test]
+    fn a_forward_scroll_over_unstyled_headings_lands_where_it_was_asked() {
+        fixtures::load_font();
+        let text = (0..400)
+            .map(|i| format!("# Section {i}\nbody {i}\n## Sub {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut engine = Engine::with_text(&text);
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        let top = |engine: &Engine, line: usize| {
+            engine
+                .buffer()
+                .layout_runs()
+                .find(|run| run.line_i == line)
+                .map(|run| run.line_top)
+        };
+        for line in [300, 900, 30] {
+            engine.scroll_to(line, 96.0);
+            update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+            assert_eq!(top(&engine, line), Some(96.0), "line {line}");
+        }
+        // A scroll after the jump is not undone by the next highlight.
+        engine.scroll_to(600, 96.0);
+        engine.perform(Action::Scroll { lines: 2 });
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        assert!(top(&engine, 600).is_some_and(|top| top < 96.0));
     }
 
     #[test]

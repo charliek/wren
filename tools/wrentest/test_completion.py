@@ -11,7 +11,7 @@ from tools.wrentest import test_gestures as gestures
 from tools.wrentest import test_navigation as nav
 from tools.wrentest.test_gestures import native_workspace
 from tools.wrentest.test_navigation import vault, vault_factory
-from tools.wrentest.test_setup import artifact_directory
+from tools.wrentest.test_setup import artifact_directory, editor_column
 from tools.wrentest.ui import WrenApp, wait_for
 from tools.wrentest.x11 import read_pixels
 
@@ -237,7 +237,7 @@ def test_screenshot_draws_the_current_editor_after_layout(vault, theme, body):
             current = nav.navigation(app)
             viewport = current["viewport"]
             assert (image.width, image.height) == (result["width"], result["height"])
-            left = ((viewport["width"] - 760) / 2 if focused else sum(current["effective_widths"].values()))
+            left = editor_column(current)[0]
             assert nav.color_count(image, viewport, (left + 16, 115, left + 500, 220), body) > 70, "The rebuilt editor's glyphs were not drawn before capture"
             assert nav.editor_identity(app.client.call("editor.get")) == before
 

@@ -80,8 +80,19 @@ Build with `--features smoke-test`, then run `tools/capture_scenes.py`
 to `target/scenes/<theme>/`, or with `--engine advanced` to
 `target/scenes/advanced/<theme>/`. The `markdown` scene shows a note with
 every construct the editor highlights and a selection across blank lines;
-check it on both engines in both themes after changing the highlighter or
-the editor's drawing.
+the `headings` scenes show every heading level, one wrapping, with the caret
+and then a selection on it; and each has a `-wide` twin with the browser
+columns folded, where the editor's column is centred. Check them on both
+engines in both themes after changing the highlighter or the editor's
+drawing. `--setting key=value` (repeatable) starts Wren with more settings
+and `--label` files the PNGs under a directory of their own; `--only
+markdown` shoots just these editor scenes:
+
+```bash
+ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
+  python3 tools/capture_scenes.py --engine advanced --theme light \
+  --setting editor-line-height=2 --label tall --only markdown
+```
 
 ## macOS
 

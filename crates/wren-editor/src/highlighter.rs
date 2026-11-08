@@ -12,7 +12,9 @@
 //!   - Fenced and indented code: muted body, faint fences; fenced blocks get
 //!     the widget's code band.
 //!   - ATX headings (`#`–`######`): faint markers, bold `heading` H1,
-//!     `heading2` H2, and primary H3–H6.
+//!     `heading2` H2, and primary H3–H6. Each span carries a [`Scale`]:
+//!     H1–H3 text is set larger and their rows are taller, on engines that
+//!     can size spans.
 //!   - Block quotes: faint markers, italic `quote` text.
 //!   - List markers and open task boxes: accent colour.
 //!   - Completed tasks: faint markers and `completed` text, struck through.
@@ -50,15 +52,50 @@ use crate::Palette;
 
 const CHECKPOINT_INTERVAL: usize = 50;
 
+/// Heading text sizes in ems, H1 first.
+const HEADING_EMS: [f32; 6] = [1.35, 1.18, 1.05, 1.0, 1.0, 1.0];
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// How a span is sized against body text, as multiples of the text size
+/// and of the row height. iced's `Format` has no size, so only the owned
+/// engine applies it; classic sets every span at the body size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scale {
+    pub text: f32,
+    /// The row's height; a row is as tall as its tallest span asks.
+    pub row: f32,
+}
+
+impl Scale {
+    pub const BODY: Self = Self {
+        text: 1.0,
+        row: 1.0,
+    };
+
+    /// A level-`level` heading's text.
+    fn heading(level: u8) -> Self {
+        let em = HEADING_EMS[usize::from(level.clamp(1, 6)) - 1];
+        Self { text: em, row: em }
+    }
+
+    /// A heading's markers: the body size, in the heading's row.
+    fn heading_markers(level: u8) -> Self {
+        Self {
+            text: 1.0,
+            ..Self::heading(level)
+        }
+    }
+}
 
 /// Highlight produced for a byte range within a line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Highlight {
     color: Option<Color>,
     font: Option<Font>,
+    scale: Scale,
 }
 
 impl Highlight {
@@ -70,10 +107,15 @@ impl Highlight {
         }
     }
 
+    pub fn scale(self) -> Scale {
+        self.scale
+    }
+
     fn colored(color: Color) -> Self {
         Self {
             color: Some(color),
             font: None,
+            scale: Scale::BODY,
         }
     }
 
@@ -84,6 +126,7 @@ impl Highlight {
                 weight: font::Weight::Bold,
                 ..base
             }),
+            scale: Scale::BODY,
         }
     }
 
@@ -94,7 +137,12 @@ impl Highlight {
                 style: font::Style::Italic,
                 ..base
             }),
+            scale: Scale::BODY,
         }
+    }
+
+    fn sized(self, scale: Scale) -> Self {
+        Self { scale, ..self }
     }
 }
 
@@ -335,7 +383,7 @@ fn line_highlights(
     match &info.kind {
         Kind::Blank | Kind::FrontMatter => {}
         Kind::Heading { level, text } => {
-            let faint = Highlight::colored(ink.faint);
+            let faint = Highlight::colored(ink.faint).sized(Scale::heading_markers(*level));
             if text.is_empty() {
                 spans.push(body, faint);
             } else {
@@ -345,7 +393,10 @@ fn line_highlights(
                     _ => ink.text,
                 };
                 spans.push(info.prefix_end..text.start, faint);
-                spans.push(text.clone(), Highlight::bold(color, ink.font));
+                spans.push(
+                    text.clone(),
+                    Highlight::bold(color, ink.font).sized(Scale::heading(*level)),
+                );
                 spans.push(text.end..line.len(), faint);
             }
         }
@@ -768,6 +819,7 @@ impl<'a> Cells<'a> {
                 let highlight = Highlight {
                     color: cell.color,
                     font,
+                    scale: Scale::BODY,
                 };
                 spans.push(start..start + character.len_utf8(), highlight);
             }
@@ -900,6 +952,41 @@ mod tests {
     }
 
     #[test]
+    fn headings_scale_their_text_and_rows_but_markers_keep_the_body_size() {
+        let scales = |line: &str| -> Vec<(String, f32, f32)> {
+            highlights_for(line)
+                .into_iter()
+                .map(|(range, h)| (line[range].to_owned(), h.scale.text, h.scale.row))
+                .collect()
+        };
+        let row = |text: &str, em: f32| vec![("# ".to_owned(), 1.0, em), (text.to_owned(), em, em)];
+        assert_eq!(scales("# Title"), row("Title", 1.35));
+        assert_eq!(
+            scales("## Title ##"),
+            [
+                ("## ".to_owned(), 1.0, 1.18),
+                ("Title".to_owned(), 1.18, 1.18),
+                (" ##".to_owned(), 1.0, 1.18)
+            ]
+        );
+        assert_eq!(scales("### T")[1], ("T".to_owned(), 1.05, 1.05));
+        for line in ["#### T", "###### T", "Body", "- item", "#notaheading"] {
+            assert!(
+                highlights_for(line)
+                    .iter()
+                    .all(|(_, h)| h.scale == Scale::BODY),
+                "{line}"
+            );
+        }
+        // An empty heading already takes its row's height.
+        assert_eq!(scales("#"), [("#".to_owned(), 1.0, 1.35)]);
+        // A quote's marker stays body sized inside a heading row.
+        let quoted = scales("> # Q");
+        assert_eq!(quoted[0], ("> ".to_owned(), 1.0, 1.0));
+        assert_eq!(quoted[2], ("Q".to_owned(), 1.35, 1.35));
+    }
+
+    #[test]
     fn closing_hashes_and_quoted_headings_are_marked_up() {
         let p = dark_palette();
         let line = "> ## Title ##";
@@ -907,7 +994,9 @@ mod tests {
         assert_eq!(
             colored(line, &spans),
             [
-                ("> ## ", Some(p.faint)),
+                // The quote marker keeps the body row; the heading's sizes it.
+                ("> ", Some(p.faint)),
+                ("## ", Some(p.faint)),
                 ("Title", Some(p.heading2)),
                 (" ##", Some(p.faint)),
             ]

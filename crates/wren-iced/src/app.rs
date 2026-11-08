@@ -693,7 +693,11 @@ impl App {
             );
         }
         let (style, palette) = theme::editor_colors(self.definition);
-        body = body.push(self.editor.view(style, palette).map(Message::Editor));
+        body = body.push(
+            self.editor
+                .view(style, palette, self.editor_max_width())
+                .map(Message::Editor),
+        );
         let cursor = self.editor.cursor();
         body = body.push(
             container(
