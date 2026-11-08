@@ -981,6 +981,9 @@ struct VisualRow {
     baseline: f32,
     /// Whether this is the first visual row of its logical line.
     starts_line: bool,
+    /// Whether this is the last visual row of its logical line, which may
+    /// lie below the viewport.
+    ends_line: bool,
     /// Where the row's glyphs end.
     width: f32,
     /// Horizontal `(start, end)` of each strike-through on the row.
@@ -1019,6 +1022,10 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
                 baseline: run.line_y,
                 width: run.line_w,
                 starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
+                ends_line: buffer.lines[run.line_i]
+                    .layout_opt()
+                    .and_then(|layout| layout.last())
+                    .is_none_or(|last| std::ptr::eq(last.glyphs.as_slice(), run.glyphs)),
                 code: decor.is_some_and(|decor| decor.code),
                 strikes: decor.map(|decor| spans(&decor.strikes)).unwrap_or_default(),
                 code_spans: decor
@@ -1040,12 +1047,8 @@ fn selected_breaks(rows: &[VisualRow], cursor: Cursor, advance: f32) -> Vec<Rect
     let first = anchor.line.min(cursor.position.line);
     let last = anchor.line.max(cursor.position.line);
     rows.iter()
-        .enumerate()
-        .filter(|(i, row)| {
-            (first..last).contains(&row.line)
-                && rows.get(i + 1).is_none_or(|next| next.line != row.line)
-        })
-        .map(|(_, row)| Rectangle {
+        .filter(|row| row.ends_line && (first..last).contains(&row.line))
+        .map(|row| Rectangle {
             x: row.width,
             y: row.top,
             width: advance,
@@ -1149,6 +1152,10 @@ mod tests {
     }
 
     fn laid_out(kind: BackendKind, text: &str, width: f32) -> Vec<VisualRow> {
+        laid_out_in(kind, text, Size::new(width, 1000.0))
+    }
+
+    fn laid_out_in(kind: BackendKind, text: &str, size: Size) -> Vec<VisualRow> {
         fixtures::load_font();
         let mut editor = Backend::with_text(kind, text);
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
@@ -1157,7 +1164,7 @@ mod tests {
             front_matter_end: None,
         });
         editor.update(
-            Size::new(width, 1000.0),
+            size,
             fixtures::FONT,
             Pixels(TEXT_SIZE),
             line_height(),
@@ -1224,6 +1231,14 @@ mod tests {
                 selection: None,
             };
             assert!(selected_breaks(&rows, caret, 8.0).is_empty());
+
+            // A line that wraps on below the viewport has no break in view.
+            let text = "a\nwrapped words wrapped words wrapped words\nz";
+            let rows = laid_out_in(kind, text, Size::new(120.0, 2.0 * LINE_HEIGHT));
+            assert_eq!(rows.iter().map(|row| row.line).collect::<Vec<_>>(), [0, 1]);
+            let cells = selected_breaks(&rows, select((0, 0), (2, 1)), 8.0);
+            let found: Vec<_> = cells.iter().map(|cell| (cell.x, cell.y)).collect();
+            assert_eq!(found, [(rows[0].width, rows[0].top)], "{kind:?}");
         }
     }
 
