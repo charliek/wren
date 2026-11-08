@@ -440,6 +440,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
   | `completed` | `faint` | Text of done tasks and `~~strike~~`, readable at ≥ 4.5:1 contrast. Strike quads and markers stay `faint`. |
   | `text_selection` | `selected` | The editor selection fill. |
 
+- **wren-26's second editor commit also comes across.** Milestone 5 absorbs `e17c877` along with `df7a6c1`: H2 uses `heading2`, done and struck text use `completed`, and the selection uses `text_selection`. Theme side `516231c` changes the Wren Light accent to `#a14808`; when merging `test_editor.py`, keep our engine parametrization and their light tuple `(0xA1, 0x48, 0x08)`. Default pane widths now live in `workspace_state.rs` (`PANE_WIDTHS`, used by `Op::ResetWidths`).
 - **Notify wren-26** whenever `editor_colors`, `Palette`, `Style`, or the highlight test in `test_editor.py` changes.
 
 **Design-review defaults** for the P1 visual items:
