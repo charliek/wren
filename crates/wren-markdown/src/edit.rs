@@ -16,6 +16,7 @@ use crate::{EditPlan, Intent, Lines, Options, Pos, Replace, Selection};
 
 mod delete;
 mod motion;
+mod move_line;
 mod tab;
 mod task;
 mod wrap;
@@ -51,7 +52,8 @@ pub fn plan(
         Intent::Bold => wrap::toggle(lines, sel, wrap::Style::Bold),
         Intent::Italic => wrap::toggle(lines, sel, wrap::Style::Italic),
         Intent::Code => wrap::toggle(lines, sel, wrap::Style::Code),
-        _ => unchanged(clamp_selection(lines, sel)),
+        Intent::MoveLineUp => move_line::move_lines(lines, sel, true, opts),
+        Intent::MoveLineDown => move_line::move_lines(lines, sel, false, opts),
     }
 }
 
