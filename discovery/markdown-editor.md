@@ -596,6 +596,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs (done on `md-keys`). The commands sit in a "Markdown" palette group. With assist off they are disabled in the palette, and their keys stay the editor's and do nothing. The `shortcut` test request runs an Editor command the widget's way: the bound key through the policy, only while the editor is focused.
 8. **The outline palette.**
 9. **Harness work:** settings support, engine parametrization, and the scenes. Then review.
+10. **Follow-ups** (done on `md-follow`): the group word deletes (§5.5), the two settings commands (§5.7) with `palette-assist` and `palette-engine` scenes, and the IME reveal and edge anchor (§9).
 
 **Promotion bar for `editor-engine = advanced` as the default:**
 - the shared suite passes on both backends in all four lanes;
