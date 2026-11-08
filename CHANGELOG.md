@@ -25,6 +25,12 @@ version's section as its notes, and publishes to the apt repo. See
 - **Focus mode toggles with ⌘Y on macOS and Alt+Y on Linux**, replacing ⌘\ /
   Alt+\. A `keybind` line in `config.conf` can still bind it elsewhere.
 
+### Fixed
+
+- **Only one filter field holds focus at a time.** Clicking a filter left any
+  filter to its right focused too, with a focus ring and caret in each, because
+  the click never reached them.
+
 ## v0.0.2 — 2026-11-07
 
 ### Changed

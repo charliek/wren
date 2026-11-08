@@ -194,6 +194,13 @@ impl App {
                 }
                 request.respond(Ok(self.editor_snapshot()));
             }
+            "focus.get" => {
+                let request = Arc::clone(request);
+                return Ok(iced::advanced::widget::operate(Focused::default()).map(move |focused| {
+                    let bounds: serde_json::Map<String, Value> = focused.bounds.iter().map(|(name, b)| ((*name).to_string(), json!({"x":b.x,"y":b.y,"width":b.width,"height":b.height}))).collect();
+                    Message::Reply(Arc::clone(&request), Ok(json!({"named":focused.named,"unnamed":focused.unnamed,"bounds":bounds})))
+                }));
+            }
             "editor.focus" => {
                 request.respond(Ok(Value::Null));
                 return Ok(focus_editor());
@@ -831,6 +838,64 @@ fn position(params: &Value) -> Result<Position, String> {
         line: index("line")?,
         column: index("column")?,
     })
+}
+
+/// Text-entry widgets the `focus.get` op reports by name.
+const FOCUS_NAMES: &[&str] = &[
+    "filter-sections",
+    "filter-groups",
+    "filter-notes",
+    "filter-outline",
+    "note-editor",
+    "find-query",
+    "palette-query",
+    "item-name",
+];
+
+/// Every focused widget in the tree: the known ones by name, the rest (pane
+/// grips during a resize) as a count. `bounds` places each known widget on
+/// screen, focused or not, so a test can click it.
+#[derive(Debug, Clone, Default)]
+struct Focused {
+    named: Vec<&'static str>,
+    unnamed: usize,
+    bounds: Vec<(&'static str, iced::Rectangle)>,
+}
+
+impl iced::advanced::widget::Operation<Focused> for Focused {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<Focused>),
+    ) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+    ) {
+        let name = id.and_then(|id| {
+            FOCUS_NAMES
+                .iter()
+                .copied()
+                .find(|name| *id == iced::advanced::widget::Id::new(name))
+        });
+        if let Some(name) = name {
+            self.bounds.push((name, bounds));
+        }
+        if state.is_focused() {
+            match name {
+                Some(name) => self.named.push(name),
+                None => self.unnamed += 1,
+            }
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<Focused> {
+        iced::advanced::widget::operation::Outcome::Some(self.clone())
+    }
 }
 
 #[cfg(target_os = "macos")]

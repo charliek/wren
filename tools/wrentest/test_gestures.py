@@ -741,3 +741,39 @@ def test_native_filtered_section_and_group_reorders_keep_full_siblings_and_persi
     assert after["document"]["path"] == ORIGIN
     assert after["document"]["text"] == before_document["text"]
     assert files(root) == original_files
+
+
+@pytest.mark.native_x11
+def test_native_clicks_leave_exactly_one_text_widget_focused(native_workspace) -> None:
+    app, root, window = native_workspace
+    before_document = session(app)["document"]
+    original_files = files(root)
+
+    def focus():
+        return app.client.call("focus.get")
+
+    def click(name: str) -> None:
+        move(window, point_in(focus()["bounds"][name]))
+        xdo("click", "1")
+        try:
+            wait_for(lambda: (lambda state: state if state["named"] == [name] and state["unnamed"] == 0 else None)(focus()),
+                     timeout=3, description=f"{name} is the only focused widget")
+        except TimeoutError:
+            state = focus()
+            raise AssertionError(f"after clicking {name}: focused {state['named']}, {state['unnamed']} unnamed") from None
+
+    # Right to left: a press captured by an earlier pane's input used to stop
+    # at that pane, leaving every input to its right focused as well.
+    for layout, names in (
+        ("columns", ("note-editor", "filter-notes", "filter-groups", "filter-sections")),
+        ("outline", ("note-editor", "filter-notes", "filter-outline")),
+    ):
+        fixture_gateway(app, "view.layout", layout=layout)
+        for name in names:
+            click(name)
+    type_text(window, "zz")
+    wait_for(lambda: navigation(app)["filters"]["outline"] == "zz", timeout=3,
+             description="typing reaches the focused filter")
+    assert navigation(app)["filters"]["notes"] == ""
+    assert session(app)["document"] == before_document
+    assert files(root) == original_files

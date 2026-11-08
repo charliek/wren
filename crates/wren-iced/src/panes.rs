@@ -764,11 +764,12 @@ impl<Message: Send + 'static, R: text::Renderer<Font = Font>> Widget<Message, ic
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if shell.is_event_captured() {
-            return;
-        }
+        // A captured event still reaches the content: a text input elsewhere
+        // that captured a press must not keep this pane's input focused, and
+        // iced's own containers pass captured events to every child the same
+        // way. Only the grip, which would act on it, stays out.
         let grip = tree.state.downcast_mut::<GripState<Message>>();
-        let ownership = if grip.root_enabled {
+        let ownership = if grip.root_enabled && !shell.is_event_captured() {
             owns_event(
                 &mut grip.gesture,
                 event,

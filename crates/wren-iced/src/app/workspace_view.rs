@@ -338,6 +338,7 @@ impl App {
         query: &'a str,
     ) -> Element<'a, Message> {
         let input = text_input(placeholder, query)
+            .id(format!("filter-{pane}"))
             .size(12)
             .padding(iced::Padding {
                 top: 7.0,
@@ -351,14 +352,31 @@ impl App {
                     query,
                 })
             })
-            .style(move |_, status| chrome::input(self.definition, status, true));
-        let icon = container(chrome::icon(
+            .style(move |_, status| text_input::Style {
+                background: iced::Color::TRANSPARENT.into(),
+                ..chrome::input(self.definition, status, true)
+            });
+        // The icon and the field's fill sit under a transparent input, not on
+        // top of it: a Stack stops updating its children once an event is
+        // captured, so anything above the input would hide from it a press
+        // another pane already captured, and it would keep its focus.
+        let backdrop = container(chrome::icon(
             Icon::Search,
             13.0,
             self.definition.colors.faint,
         ))
-        .padding([8, 9]);
-        container(stack![input, icon])
+        .padding([8, 9])
+        .width(Fill)
+        .height(Fill)
+        .style(move |_| container::Style {
+            background: Some(theme::color(self.definition.colors.input).into()),
+            border: Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        });
+        container(stack![backdrop, input])
             .padding(iced::Padding {
                 top: 0.0,
                 right: 10.0,
