@@ -19,6 +19,16 @@ version's section as its notes, and publishes to the apt repo. See
   (`dracula`), Catppuccin Mocha (`catppuccin-mocha`) and Catppuccin Macchiato
   (`catppuccin-macchiato`), each meeting the same 4.5:1 text contrast as the
   other built-ins.
+- **Text size shortcuts:** ⌘+ / ⌘- / ⌘0 (Alt on Linux) make the note text
+  bigger, smaller, or back to the default, one point at a time, and save the
+  size to `config.conf` as `editor-font-size`. ⌘= works too, without Shift.
+  The line-number gutter widens with the text.
+- **Editor font picker:** **Change editor font…** in the command palette
+  lists the installed monospace fonts, bundled JetBrains Mono first, and
+  saves the choice as `editor-font-family`. That setting accepts any
+  installed family, including proportional ones, if you set it by hand.
+- **Live preview in the theme and font pickers.** Moving the highlight shows
+  that theme or font right away. Enter keeps it; Esc puts the saved one back.
 
 ### Changed
 

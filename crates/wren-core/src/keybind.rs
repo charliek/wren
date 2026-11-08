@@ -223,6 +223,14 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{p}+bracketleft"), "navigation.back"),
         (format!("{p}+bracketright"), "navigation.forward"),
         (format!("{p}+y"), "view.focus"),
+        // `+` is Shift+`=` on US layouts, and most people press it unshifted.
+        // Toolkits report the shifted press as either key, so bind both.
+        (format!("{p}+plus"), "font.increase"),
+        (format!("{p}+equal"), "font.increase"),
+        (format!("{p}+shift+equal"), "font.increase"),
+        (format!("{p}+shift+plus"), "font.increase"),
+        (format!("{p}+minus"), "font.decrease"),
+        (format!("{p}+0"), "font.reset"),
     ];
     match platform {
         Platform::Mac => bindings.extend([

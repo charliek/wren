@@ -14,6 +14,9 @@ and Ctrl+A keep working in the editor and in every text field.
 | New dated note | ⇧⌘N | Alt+Shift+N | `note.new_dated` |
 | Back / Forward | ⌘[ / ⌘] | Alt+[ / Alt+] | `navigation.back` / `navigation.forward` |
 | Toggle focus mode | ⌘Y | Alt+Y | `view.focus` |
+| Increase text size | ⌘+ or ⌘= | Alt++ or Alt+= | `font.increase` |
+| Decrease text size | ⌘- | Alt+- | `font.decrease` |
+| Reset text size | ⌘0 | Alt+0 | `font.reset` |
 | Layout: Columns | ⌥⌘1 | Ctrl+Alt+1 | `view.columns` |
 | Layout: Outline | ⌥⌘2 | Ctrl+Alt+2 | `view.outline` |
 | Open settings file | ⌘, | — | `settings.open` |
@@ -62,7 +65,8 @@ group.move  group.reorder  section.new  section.rename  section.delete
 section.reveal  section.reorder  navigation.jump  navigation.search
 navigation.find  navigation.back  navigation.forward  view.focus
 view.columns  view.outline  view.reset_widths  notes.sort_modified
-notes.sort_title  theme.choose  workspace.switch  workspace.add
+notes.sort_title  theme.choose  font.choose  font.increase  font.decrease
+font.reset  workspace.switch  workspace.add
 workspace.remove  settings.open  settings.reload  app.quit
 palette.commands
 ```

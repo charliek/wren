@@ -38,6 +38,8 @@ pub struct App {
     system_mode: Mode,
     /// A theme forced by the smoke/test harness, bypassing settings.
     theme_override: Option<Theme>,
+    /// The theme or font picker row shown live; see `sync_preview`.
+    preview: preferences::Preview,
     preferences: preferences::Preferences,
     editor: EditorView,
     find_open: bool,
@@ -222,6 +224,7 @@ impl App {
             toolkit_theme: theme::from_definition(definition),
             system_mode: Mode::None,
             theme_override,
+            preview: preferences::Preview::default(),
             preferences,
             editor: EditorView::new(&contents),
             find_open: false,
@@ -304,6 +307,14 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        // Every way a picker row gets highlighted, or the picker closes,
+        // arrives as a message, so the preview follows from here.
+        self.sync_preview();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             #[cfg(feature = "smoke-test")]
             Message::Test(event) => match event {

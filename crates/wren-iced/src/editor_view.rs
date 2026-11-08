@@ -64,6 +64,7 @@ pub struct EditorView {
     find_current: Option<usize>,
     line_numbers: bool,
     metrics: widget::Metrics,
+    font: iced::Font,
 }
 
 impl EditorView {
@@ -77,12 +78,27 @@ impl EditorView {
             find_current: None,
             line_numbers: true,
             metrics: widget::Metrics::default(),
+            font: crate::fonts::EDITOR,
         }
     }
 
     /// Editor text size in points; row and caret heights scale with it.
     pub fn set_font_size(&mut self, size: f32) {
         self.metrics = widget::Metrics::for_size(size);
+    }
+
+    pub fn set_font(&mut self, font: iced::Font) {
+        self.font = font;
+    }
+
+    #[cfg(feature = "smoke-test")]
+    pub fn font(&self) -> iced::Font {
+        self.font
+    }
+
+    #[cfg(feature = "smoke-test")]
+    pub fn font_size(&self) -> f32 {
+        self.metrics.text
     }
 
     /// Show or hide the line-number gutter (shown by default).
@@ -96,7 +112,8 @@ impl EditorView {
 
     /// Build the iced widget tree for the editor.
     ///
-    /// Uses JetBrains Mono (bundled by the parent), 14 px / 24 px line height,
+    /// Uses the editor font (bundled JetBrains Mono unless the user picked
+    /// another), 14 px / 24 px line height scaled with the text size,
     /// soft-wrap, a 52 px line-number gutter unless hidden, and Markdown
     /// highlighting mapped to `theme` semantic colours.  Returns
     /// `Element<'_, Message>` so the parent can map it to its own message type.
@@ -104,7 +121,10 @@ impl EditorView {
         TextEditor::new(
             &self.content,
             "note-editor",
-            HighlighterSettings { theme },
+            HighlighterSettings {
+                theme,
+                font: self.font,
+            },
             editor_style(theme),
             self.line_numbers,
             self.metrics,

@@ -58,43 +58,45 @@ impl Highlight {
         }
     }
 
-    fn bold(color: Color) -> Self {
+    fn bold(color: Color, base: Font) -> Self {
         Self {
             color: Some(color),
             font: Some(Font {
                 weight: font::Weight::Bold,
-                ..Font::with_name("JetBrains Mono")
+                ..base
             }),
         }
     }
 
-    fn italic(color: Color) -> Self {
+    fn italic(color: Color, base: Font) -> Self {
         Self {
             color: Some(color),
             font: Some(Font {
                 style: font::Style::Italic,
-                ..Font::with_name("JetBrains Mono")
+                ..base
             }),
         }
     }
 
-    fn bold_italic(color: Color) -> Self {
+    fn bold_italic(color: Color, base: Font) -> Self {
         Self {
             color: Some(color),
             font: Some(Font {
                 weight: font::Weight::Bold,
                 style: font::Style::Italic,
-                ..Font::with_name("JetBrains Mono")
+                ..base
             }),
         }
     }
 }
 
-/// Settings for the [`MarkdownHighlighter`].  Changing the theme triggers a
-/// full re-highlight.
+/// Settings for the [`MarkdownHighlighter`].  Changing the theme or the
+/// editor font triggers a full re-highlight.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub theme: Theme,
+    /// The editor font; bold and italic spans are its variants.
+    pub font: Font,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,12 +114,14 @@ struct Palette {
     accent: Color,
     danger: Color,
     success: Color,
+    font: Font,
 }
 
 impl Palette {
     fn from_theme(t: Theme) -> Self {
         let c = t.colors;
         Self {
+            font: crate::fonts::EDITOR,
             text: rgb(c.text),
             muted: rgb(c.muted),
             faint: rgb(c.faint),
@@ -197,7 +201,10 @@ impl highlighter::Highlighter for MarkdownHighlighter {
             self.current_state.in_code_block = !self.current_state.in_code_block;
         }
 
-        let palette = Palette::from_theme(self.settings.theme);
+        let palette = Palette {
+            font: self.settings.font,
+            ..Palette::from_theme(self.settings.theme)
+        };
         let highlights = compute_highlights(line, state_before, &self.current_state, &palette);
 
         self.current_line += 1;
@@ -273,7 +280,7 @@ fn compute_highlights(
             } else {
                 palette.text
             };
-            result.push((marker_end..line.len(), Highlight::bold(color)));
+            result.push((marker_end..line.len(), Highlight::bold(color, palette.font)));
         }
         return result;
     }
@@ -447,7 +454,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     extract_emphasis(
         line,
         "***",
-        Highlight::bold_italic(palette.text),
+        Highlight::bold_italic(palette.text, palette.font),
         palette.faint,
         &mut spans,
         &mut occupied,
@@ -455,7 +462,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     extract_emphasis(
         line,
         "___",
-        Highlight::bold_italic(palette.text),
+        Highlight::bold_italic(palette.text, palette.font),
         palette.faint,
         &mut spans,
         &mut occupied,
@@ -465,7 +472,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     extract_emphasis(
         line,
         "**",
-        Highlight::bold(palette.text),
+        Highlight::bold(palette.text, palette.font),
         palette.faint,
         &mut spans,
         &mut occupied,
@@ -473,7 +480,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     extract_emphasis(
         line,
         "__",
-        Highlight::bold(palette.text),
+        Highlight::bold(palette.text, palette.font),
         palette.faint,
         &mut spans,
         &mut occupied,
@@ -483,7 +490,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     extract_emphasis(
         line,
         "*",
-        Highlight::italic(palette.text),
+        Highlight::italic(palette.text, palette.font),
         palette.faint,
         &mut spans,
         &mut occupied,
@@ -491,7 +498,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
     extract_emphasis(
         line,
         "_",
-        Highlight::italic(palette.text),
+        Highlight::italic(palette.text, palette.font),
         palette.faint,
         &mut spans,
         &mut occupied,
@@ -1081,7 +1088,10 @@ mod tests {
 
     #[test]
     fn code_block_toggle_tracked_in_highlight_line() {
-        let settings = Settings { theme: theme::DARK };
+        let settings = Settings {
+            theme: theme::DARK,
+            font: crate::fonts::EDITOR,
+        };
         let mut h = MarkdownHighlighter::new(&settings);
         let p = dark_palette();
 
@@ -1120,7 +1130,10 @@ mod tests {
 
     #[test]
     fn change_line_resyncs_to_snapshot() {
-        let settings = Settings { theme: theme::DARK };
+        let settings = Settings {
+            theme: theme::DARK,
+            font: crate::fonts::EDITOR,
+        };
         let mut h = MarkdownHighlighter::new(&settings);
         let p = dark_palette();
 
@@ -1155,10 +1168,14 @@ mod tests {
     }
 
     #[test]
-    fn update_with_new_theme_changes_colours() {
-        let dark_settings = Settings { theme: theme::DARK };
+    fn update_with_new_theme_and_font_changes_colours_and_bold_family() {
+        let dark_settings = Settings {
+            theme: theme::DARK,
+            font: crate::fonts::EDITOR,
+        };
         let light_settings = Settings {
             theme: theme::LIGHT,
+            font: Font::with_name("Fira Code"),
         };
         let mut h = MarkdownHighlighter::new(&dark_settings);
         h.update(&light_settings);
@@ -1167,5 +1184,8 @@ mod tests {
         assert!(!spans.is_empty());
         assert_eq!(spans[0].1.color, Some(rgb(theme::LIGHT.colors.faint)));
         assert_eq!(spans[1].1.color, Some(rgb(theme::LIGHT.colors.accent)));
+        let bold = spans[1].1.font.unwrap();
+        assert_eq!(bold.family, font::Family::Name("Fira Code"));
+        assert_eq!(bold.weight, font::Weight::Bold);
     }
 }

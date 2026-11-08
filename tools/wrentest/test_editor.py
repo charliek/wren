@@ -256,3 +256,80 @@ def test_native_large_document_typing() -> None:
                         "injected_delay_ms": 15, "injection_to_observed_state_ms": elapsed_ms}, indent=2) + "\n"
         )
         assert elapsed_ms < 5000
+
+
+@pytest.mark.native_x11
+def test_native_text_size_shortcuts_resize_and_save() -> None:
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    with WrenApp(artifacts_dir=artifact_directory("editor-text-size")) as app:
+        call = app.client.call
+        config = app.sandbox / "home_root" / "config" / "wren" / "config.conf"
+        call("editor.set", {"text": ""})
+        window = focus_native(app)
+        assert call("editor.get")["font_size"] == 14
+        # `alt+plus` is Shift+= to the X server; `alt+equal` is unshifted.
+        for key, size in (("alt+equal", 15), ("alt+plus", 16), ("alt+minus", 15)):
+            xdo("key", "--window", window, "--clearmodifiers", key)
+            wait_for(lambda size=size: call("editor.get")["font_size"] == size,
+                     description=f"{key} → {size}")
+        assert "editor-font-size = 15\n" in config.read_text()
+        xdo("key", "--window", window, "--clearmodifiers", "alt+0")
+        wait_for(lambda: call("editor.get")["font_size"] == 14, description="reset")
+        assert "editor-font-size = 14\n" in config.read_text()
+        # The shortcuts never type into the note.
+        assert call("editor.get")["text"] == ""
+
+
+def test_theme_and_font_pickers_preview_live_and_restore() -> None:
+    with WrenApp(artifacts_dir=artifact_directory("editor-pickers")) as app:
+        call = app.client.call
+        config = app.sandbox / "home_root" / "config" / "wren" / "config.conf"
+        shown = call("editor.get")["theme"]
+
+        modal = call("palette.open", {"mode": "themes"})["navigation"]["modal"]
+        assert modal["active_key"] == {"theme": "system"}
+        call("palette.query", {"query": "nord"})
+        assert call("editor.get")["theme"] == "nord"
+        call("palette.close")
+        assert call("editor.get")["theme"] == shown
+        assert not config.exists()
+
+        modal = call("palette.open", {"mode": "fonts"})["navigation"]["modal"]
+        assert modal["active_key"] == {"font": "JetBrains Mono"}
+        assert modal["results"][0]["path"] == "Bundled"
+        assert call("editor.get")["font_family"] == "JetBrains Mono"
+        others = [row["key"]["font"] for row in modal["results"] if not row["current"]]
+        if others:
+            index = next(i for i, row in enumerate(modal["results"])
+                         if row["key"] == {"font": others[0]})
+            active = modal["active_index"]
+            call("palette.step", {"delta": index - active})
+            assert call("editor.get")["font_family"] == others[0]
+            call("palette.activate", {})
+            assert call("editor.get")["font_family"] == others[0]
+            assert f'editor-font-family = "{others[0]}"\n' in config.read_text()
+
+
+def test_font_changes_with_the_cursor_off_screen_keep_the_editor_alive() -> None:
+    """A font change reshapes only the visible lines; the caret's line must
+    still be laid out when it is off-screen."""
+    with WrenApp(artifacts_dir=artifact_directory("editor-font-offscreen")) as app:
+        call = app.client.call
+        text = "\n".join(f"Line {number} of a long note" for number in range(1, 200))
+        call("editor.set", {"text": text})
+
+        def switch_font() -> None:
+            call("palette.open", {"mode": "fonts"})
+            rows = call("navigation.get")["modal"]["results"]
+            call("palette.step", {"delta": 1 if len(rows) > 1 else 0})
+            call("palette.close")
+            assert call("editor.get")["font_family"] == "JetBrains Mono"
+
+        call("editor.action", {"kind": "move", "motion": "end"})
+        for _ in range(14):
+            call("command.run", {"id": "font.increase"})
+        switch_font()
+        call("editor.action", {"kind": "move", "motion": "start"})
+        call("editor.action", {"kind": "scroll", "lines": 400})
+        switch_font()
+        assert call("editor.get")["text"] == text

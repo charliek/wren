@@ -3,15 +3,24 @@
 use std::path::{Path, PathBuf};
 
 use iced::theme::Mode as SystemMode;
-use iced::Task;
+use iced::{Font, Task};
 use wren_core::keybind::{self, Keymap, Platform};
 use wren_core::settings::{self, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 
 use super::commands::{Command, CommandId, Disposition, Gateway};
-use super::palette::Mode;
+use super::palette::{Key, Mode};
 use super::{focus_editor, workspace, App, Message};
+use crate::fonts;
 use crate::keys::{Input, Nav};
+
+/// The theme or editor font picker row being previewed. `theme` is
+/// `Some(None)` while previewing "System".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Preview {
+    pub theme: Option<Option<&'static str>>,
+    pub font: Option<&'static str>,
+}
 
 /// Settings plus the derived keymap and the file they came from.
 pub struct Preferences {
@@ -23,6 +32,21 @@ pub struct Preferences {
     /// The warning last shown for these settings, so a clean reload can
     /// retract it.
     shown_warning: Option<String>,
+}
+
+/// The theme for a picker row: `None` follows the system.
+fn theme_for(id: Option<&str>, mode: SystemMode) -> Theme {
+    let appearance = appearance(mode);
+    let choice = id.map_or_else(ThemeChoice::system, |id| ThemeChoice::Fixed(id.into()));
+    definitions::builtin(choice.resolve(appearance))
+        .unwrap_or_else(|| definitions::for_appearance(appearance))
+}
+
+fn appearance(mode: SystemMode) -> Appearance {
+    match mode {
+        SystemMode::Light => Appearance::Light,
+        SystemMode::Dark | SystemMode::None => Appearance::Dark,
+    }
 }
 
 /// Read and parse the settings file; read errors become warnings.
@@ -90,10 +114,7 @@ impl Preferences {
     /// The theme to show for the system `mode`, plus a warning when the
     /// configured theme id is unknown.
     pub fn theme(&self, mode: SystemMode) -> (Theme, Option<String>) {
-        let appearance = match mode {
-            SystemMode::Light => Appearance::Light,
-            SystemMode::Dark | SystemMode::None => Appearance::Dark,
-        };
+        let appearance = appearance(mode);
         let id = self.settings.theme.resolve(appearance);
         match definitions::builtin(id) {
             Some(theme) => (theme, None),
@@ -104,8 +125,26 @@ impl Preferences {
         }
     }
 
+    /// The configured editor font, plus a warning when that family is not
+    /// installed.
+    pub fn editor_font(&self) -> (Font, Option<String>) {
+        let family = self.settings.editor_font_family.as_deref();
+        match fonts::editor_font(family) {
+            Some(font) => (font, None),
+            None => (
+                fonts::EDITOR,
+                Some(format!(
+                    "Unknown editor font {:?}; using {}.",
+                    family.unwrap_or_default(),
+                    fonts::EDITOR_FAMILY
+                )),
+            ),
+        }
+    }
+
     fn warning(&self) -> Option<String> {
         let mut warnings = self.settings.warnings.clone();
+        warnings.extend(self.editor_font().1);
         for mode in [SystemMode::Dark, SystemMode::Light] {
             if let Some(warning) = self.theme(mode).1 {
                 if !warnings.contains(&warning) {
@@ -129,11 +168,15 @@ impl App {
         self.preferences.keymap.label(action, Platform::current())
     }
 
-    /// Recompute the theme from the explicit override, settings, and system.
+    /// Recompute the theme from the picker preview, the explicit override,
+    /// settings, and system.
     pub(super) fn apply_theme(&mut self) {
-        let theme = self
-            .theme_override
-            .unwrap_or_else(|| self.preferences.theme(self.system_mode).0);
+        let theme = match self.preview.theme {
+            Some(id) => theme_for(id, self.system_mode),
+            None => self
+                .theme_override
+                .unwrap_or_else(|| self.preferences.theme(self.system_mode).0),
+        };
         if theme != self.definition {
             self.definition = theme;
             self.toolkit_theme = crate::theme::from_definition(theme);
@@ -142,12 +185,14 @@ impl App {
 
     /// Re-read `config.conf` and apply it. Returns any settings warning.
     pub(super) fn reload_settings(&mut self, force: bool) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        let keymap = self.preferences.keymap.clone();
         if !self.preferences.reload(force) {
             return None;
         }
         self.apply_preferences();
         #[cfg(target_os = "macos")]
-        if self.window.is_some() {
+        if self.window.is_some() && self.preferences.keymap != keymap {
             crate::macos_menu::install(&self.preferences.keymap);
         }
         let warning = self.preferences.warning();
@@ -166,10 +211,46 @@ impl App {
     }
 
     pub(super) fn apply_preferences(&mut self) {
-        self.apply_theme();
+        self.apply_shown();
         let settings = &self.preferences.settings;
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
+    }
+
+    /// Show the theme and editor font: the saved ones, or the picker row
+    /// being previewed.
+    fn apply_shown(&mut self) {
+        self.apply_theme();
+        let font = self
+            .preview
+            .font
+            .map_or_else(|| self.preferences.editor_font().0, Font::with_name);
+        self.editor.set_font(font);
+    }
+
+    /// Follow the theme or font picker's highlighted row. Moving onto a row
+    /// other than the saved choice previews it; leaving the picker any way
+    /// but choosing a row restores the saved choice.
+    pub(super) fn sync_preview(&mut self) {
+        let highlighted = self.palette.as_ref().and_then(|palette| {
+            let row = palette.results.get(palette.active?)?;
+            (!row.current).then_some(&row.key)
+        });
+        let preview = match highlighted {
+            Some(Key::Theme(id)) => Preview {
+                theme: Some(*id),
+                font: None,
+            },
+            Some(Key::Font(family)) => Preview {
+                theme: None,
+                font: Some(*family),
+            },
+            _ => Preview::default(),
+        };
+        if preview != self.preview {
+            self.preview = preview;
+            self.apply_shown();
+        }
     }
 
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
@@ -183,32 +264,69 @@ impl App {
         let choice = id.map_or_else(ThemeChoice::system, |id| ThemeChoice::Fixed(id.into()));
         self.preferences.settings.theme = choice.clone();
         self.theme_override = None;
-        self.apply_theme();
         self.palette = None;
-        let saved = self.preferences.path.clone().map(|path| {
-            settings::write_value(&path, "theme", &choice.value())
-                .map_err(|error| format!("Could not save the theme to {}: {error}", path.display()))
+        self.preview = Preview::default();
+        self.apply_shown();
+        let warning = self.save_setting("theme", &choice.value());
+        self.saved(warning, focus_editor())
+    }
+
+    /// Persist an editor font family from the picker.
+    pub(super) fn choose_font(&mut self, family: &'static str) -> Gateway {
+        self.preferences.settings.editor_font_family = Some(family.into());
+        self.palette = None;
+        self.preview = Preview::default();
+        self.apply_shown();
+        let warning = self.save_setting("editor-font-family", &format!("\"{family}\""));
+        self.saved(warning, focus_editor())
+    }
+
+    /// Step the editor text size by `delta` points, or back to the default
+    /// for `None`, and save it. At either limit this is a no-op.
+    pub(super) fn step_text_size(&mut self, delta: Option<f32>) -> Gateway {
+        let current = self.preferences.settings.editor_font_size;
+        let size = delta.map_or(settings::DEFAULT_FONT_SIZE, |delta| {
+            (current + delta).clamp(settings::MIN_FONT_SIZE, settings::MAX_FONT_SIZE)
         });
-        let warning = match saved {
-            // Re-read the merged file so edits made outside Wren since the
-            // last reload apply now rather than being marked as seen.
-            Some(Ok(())) => self.reload_settings(true),
-            Some(Err(warning)) => {
+        // Leaving the palette returns focus to the note; a shortcut leaves
+        // focus where it was (a filter field, say).
+        let task = if self.palette.take().is_some() {
+            focus_editor()
+        } else {
+            Task::none()
+        };
+        if size == current {
+            return self.finish_action(Disposition::Completed, None, task);
+        }
+        self.preferences.settings.editor_font_size = size;
+        self.editor.set_font_size(size);
+        let warning = self.save_setting("editor-font-size", &size.to_string());
+        self.saved(warning, task)
+    }
+
+    /// Write one setting to `config.conf`, then re-read the merged file so
+    /// edits made outside Wren since the last reload apply now rather than
+    /// being marked as seen. Returns the warning to report, if any.
+    fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
+        let path = self.preferences.path.clone()?;
+        match settings::write_value(&path, key, value) {
+            Ok(()) => self.reload_settings(true),
+            Err(error) => {
+                let warning = format!("Could not save {key} to {}: {error}", path.display());
                 self.banner = Some(warning.clone());
                 self.banner_kind = workspace::WarningKind::General;
                 Some(warning)
             }
-            None => None,
+        }
+    }
+
+    fn saved(&mut self, warning: Option<String>, task: Task<Message>) -> Gateway {
+        let disposition = if warning.is_some() {
+            Disposition::CommittedWarning
+        } else {
+            Disposition::Completed
         };
-        self.finish_action(
-            if warning.is_some() {
-                Disposition::CommittedWarning
-            } else {
-                Disposition::Completed
-            },
-            warning,
-            focus_editor(),
-        )
+        self.finish_action(disposition, warning, task)
     }
 
     /// Open `config.conf` in the user's editor, creating it from the template.
@@ -323,6 +441,7 @@ pub fn shortcut(id: CommandId) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::commands::Command;
 
     #[test]
     fn every_default_binding_names_a_real_command() {
@@ -387,6 +506,134 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn text_size_shortcuts_step_clamp_reset_and_save_one_line() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "# mine\neditor-font-size = 31\ntheme = nord\n").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        let size = |app: &App| app.preferences.settings.editor_font_size;
+        let _ = app.update(shortcut(CommandId::TextBigger));
+        assert_eq!(size(&app), 32.0);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\neditor-font-size = 32\ntheme = nord\n"
+        );
+        let _ = app.update(shortcut(CommandId::TextBigger));
+        assert_eq!(size(&app), settings::MAX_FONT_SIZE);
+        let _ = app.update(shortcut(CommandId::TextSmaller));
+        assert_eq!(size(&app), 31.0);
+        let _ = app.update(shortcut(CommandId::TextReset));
+        assert_eq!(size(&app), settings::DEFAULT_FONT_SIZE);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("editor-font-size = 14\n"));
+        assert_eq!(app.last_processed.as_ref().unwrap().warning, None);
+        // `=` and `+`, however the toolkit reports the shift, reach the command.
+        for trigger in ["plus", "shift+plus", "equal", "shift+equal"] {
+            let accel =
+                keybind::parse_trigger(&format!("{}+{trigger}", Platform::current().primary()))
+                    .unwrap();
+            assert_eq!(app.preferences.keymap.action(&accel), Some("font.increase"));
+        }
+    }
+
+    fn app_with_settings(text: &str) -> (App, std::path::PathBuf, tempfile::TempDir) {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, text).unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (app, _) = App::with_config(options, None, Some(path.clone()));
+        (app, path, directory)
+    }
+
+    fn active_key(app: &App) -> Key {
+        let palette = app.palette.as_ref().unwrap();
+        palette.results[palette.active.unwrap()].key.clone()
+    }
+
+    #[test]
+    fn the_theme_picker_previews_the_highlighted_row_and_restores_on_close() {
+        let (mut app, path, _directory) = app_with_settings("theme = nord\n");
+        let _ = app.update(Message::Command(Command::Run(CommandId::ChooseTheme)));
+        // It opens on the saved theme, so nothing changes yet.
+        assert_eq!(active_key(&app), Key::Theme(Some(definitions::NORD.id)));
+        assert_eq!(app.definition, definitions::NORD);
+        let _ = app.update(Message::Key(Input::Nav(Nav::Down)));
+        assert_eq!(app.definition, definitions::GRUVBOX_DARK);
+        let _ = app.update(Message::PaletteQuery("light".into()));
+        assert_eq!(active_key(&app), Key::Theme(Some(definitions::LIGHT.id)));
+        assert_eq!(app.definition, definitions::LIGHT);
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.definition, definitions::NORD);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = nord\n");
+        // Enter keeps the previewed theme and saves it.
+        let _ = app.update(Message::Command(Command::Run(CommandId::ChooseTheme)));
+        let _ = app.update(Message::Key(Input::Nav(Nav::Down)));
+        let _ = app.update(Message::Key(Input::Nav(Nav::Enter)));
+        assert!(app.palette.is_none());
+        assert_eq!(app.definition, definitions::GRUVBOX_DARK);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theme = gruvbox-dark\n"
+        );
+    }
+
+    #[test]
+    fn the_font_picker_lists_the_bundled_font_and_saves_a_quoted_family() {
+        let (mut app, path, _directory) = app_with_settings("editor-font-size = 16\n");
+        let _ = app.update(Message::Command(Command::Run(CommandId::ChooseFont)));
+        assert_eq!(active_key(&app), Key::Font(fonts::EDITOR_FAMILY));
+        let rows = &app.palette.as_ref().unwrap().results;
+        assert!(rows.iter().filter(|row| row.current).count() == 1);
+        if let Some(other) = rows
+            .iter()
+            .find(|row| !row.current)
+            .map(|row| row.key.clone())
+        {
+            // Highlight another installed monospace family: it previews.
+            while active_key(&app) != other {
+                let _ = app.update(Message::Key(Input::Nav(Nav::Down)));
+            }
+            let Key::Font(family) = other else {
+                unreachable!()
+            };
+            assert_eq!(app.preview.font, Some(family));
+            let _ = app.update(Message::PaletteClose);
+            assert_eq!(app.preview, Preview::default());
+        }
+        let _ = app.update(Message::Command(Command::Run(CommandId::ChooseFont)));
+        let _ = app.update(Message::Key(Input::Nav(Nav::Enter)));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "editor-font-size = 16\neditor-font-family = \"JetBrains Mono\"\n"
+        );
+        assert_eq!(
+            app.preferences.settings.editor_font_family.as_deref(),
+            Some(fonts::EDITOR_FAMILY)
+        );
+        assert!(app.banner.is_none());
+    }
+
+    #[test]
+    fn an_unknown_editor_font_warns_and_uses_the_bundled_font() {
+        let (app, _path, _directory) =
+            app_with_settings("editor-font-family = \"No Such Font Wren\"\n");
+        assert_eq!(app.preferences.editor_font().0, fonts::EDITOR);
+        assert!(app
+            .banner
+            .as_deref()
+            .unwrap()
+            .contains("Unknown editor font \"No Such Font Wren\""));
     }
 
     #[test]

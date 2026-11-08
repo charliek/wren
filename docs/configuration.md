@@ -16,8 +16,9 @@ such as an unknown key or an invalid value show in the warning banner and
 never stop Wren from starting.
 
 The syntax matches Ghostty and Roost: one `key = value` per line, with `#`
-comments. When Wren saves a setting itself (choosing a theme in the
-palette), it rewrites only that one line.
+comments. When Wren saves a setting itself (choosing a theme or editor
+font in the palette, or changing the text size with ⌘+ / ⌘-), it rewrites
+only that one line.
 
 > `config.conf` is yours. The separate `config.toml` in the platform config
 > directory (`~/Library/Application Support/Wren/` on macOS,
@@ -29,7 +30,8 @@ palette), it rewrites only that one line.
 | Key | Values | Default | Effect |
 |---|---|---|---|
 | `theme` | `system`, a theme id, or `light:<id>,dark:<id>` | `system` | The color theme. `system` uses Wren Dark or Wren Light to match the OS appearance. |
-| `editor-font-size` | number from 9 to 32 | `14` | Editor text size in points. |
+| `editor-font-size` | number from 9 to 32 | `14` | Editor text size in points. ⌘+ / ⌘- / ⌘0 (Alt on Linux) change it one point at a time, or reset it, and save the result here. |
+| `editor-font-family` | an installed font family, quoted | `"JetBrains Mono"` (bundled) | The editor font. **Change editor font…** lists the monospace ones; any installed family works here. An unknown family warns and uses JetBrains Mono. |
 | `line-numbers` | `true` / `false` | `true` | Show the editor's line-number gutter. |
 | `keybind` | `<trigger> = <action>` | see [Keybindings](keybindings.md) | Add, replace, or remove a shortcut. Repeatable; later lines win. |
 
@@ -55,6 +57,23 @@ palette), it rewrites only that one line.
 ```conf
 theme = light:solarized-light,dark:nord
 ```
+
+## Editor font
+
+**Change editor font…** in the command palette lists the monospace fonts
+installed on your system, with the bundled JetBrains Mono first. Moving the
+highlight previews each font in the open note; ↵ saves it as
+`editor-font-family`, and Esc keeps the font you had. **Change theme…**
+previews the same way.
+
+```conf
+editor-font-family = "Fira Code"
+editor-font-size = 16
+```
+
+A family the picker doesn't list (a proportional font such as `"Inter"`)
+works too when you set it here. Markdown tables and code blocks won't line
+up in a proportional font.
 
 ## Example
 

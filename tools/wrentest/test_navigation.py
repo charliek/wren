@@ -31,6 +31,7 @@ COMMANDS = {
     "navigation.jump", "navigation.search", "navigation.find", "navigation.back",
     "navigation.forward", "view.focus", "view.columns", "view.outline",
     "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
+    "font.choose", "font.increase", "font.decrease", "font.reset",
     "workspace.switch", "workspace.add", "workspace.remove",
     "section.reorder", "group.reorder", "note.open_conflict",
     "settings.open", "settings.reload", "app.quit",
@@ -933,6 +934,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         enabled = {row["key"]["command"] for row in rows if row["enabled"]}
         assert enabled == {
             "workspace.add", "workspace.switch", "theme.choose",
+            "font.choose", "font.increase", "font.decrease", "font.reset",
             "settings.open", "settings.reload", "app.quit",
         }
         gateway(app, "palette.close")

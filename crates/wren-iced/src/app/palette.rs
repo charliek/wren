@@ -29,6 +29,7 @@ pub enum Mode {
     ItemActions(ItemRef),
     Reorder(ItemRef),
     Themes,
+    Fonts,
 }
 
 impl Mode {
@@ -43,6 +44,7 @@ impl Mode {
             Self::ItemActions(_) => "item_actions",
             Self::Reorder(_) => "reorder",
             Self::Themes => "themes",
+            Self::Fonts => "fonts",
         }
     }
 
@@ -56,6 +58,7 @@ impl Mode {
             Self::ItemActions(_) => "Choose an action for this item…",
             Self::Reorder(_) => "Choose a position among all siblings…",
             Self::Themes => "Choose a theme…",
+            Self::Fonts => "Choose an editor font…",
         }
     }
 
@@ -68,6 +71,7 @@ impl Mode {
             Self::Reorder(_) => Some("Reorder"),
             Self::Jump => Some("Jump"),
             Self::Themes => Some("Theme"),
+            Self::Fonts => Some("Editor font"),
             _ => None,
         }
     }
@@ -86,6 +90,8 @@ pub enum Key {
     Workspace(PathBuf),
     /// `None` follows the system appearance.
     Theme(Option<&'static str>),
+    /// An installed font family.
+    Font(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +112,7 @@ pub enum Action {
     Reorder(ReorderTarget),
     Workspace(PathBuf),
     Theme(Option<&'static str>),
+    Font(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +182,15 @@ impl Palette {
                 return;
             }
         }
-        self.active = retained.or_else(|| (!results.is_empty()).then_some(0));
+        // A picker of settings opens on the saved choice, so browsing starts
+        // from it and the live preview begins only when the highlight moves.
+        let saved = (matches!(self.mode, Mode::Themes | Mode::Fonts)
+            && self.query.trim().is_empty())
+        .then(|| results.iter().position(|row| row.current))
+        .flatten();
+        self.active = retained
+            .or(saved)
+            .or_else(|| (!results.is_empty()).then_some(0));
         self.results = results;
     }
 
@@ -203,8 +218,10 @@ impl App {
         if self.dialog.is_some() || self.loading.is_some() {
             return self.blocked("Close the dialog or wait for the workspace to finish opening");
         }
-        if !matches!(mode, Mode::Commands | Mode::Workspaces | Mode::Themes)
-            && self.session.is_none()
+        if !matches!(
+            mode,
+            Mode::Commands | Mode::Workspaces | Mode::Themes | Mode::Fonts
+        ) && self.session.is_none()
         {
             return self.blocked("Open a workspace first");
         }
@@ -423,6 +440,39 @@ impl App {
                     rows.push(row);
                 }
             }
+            Mode::Fonts => {
+                let families = fonts::families();
+                let saved = self.preferences.settings.editor_font_family.as_deref();
+                let current = match saved {
+                    None => Some(fonts::EDITOR_FAMILY),
+                    Some(name) => families.find(name),
+                };
+                // A hand-configured family the picker would not list (a
+                // proportional font) still shows, as the current row.
+                let configured =
+                    current.filter(|name| families.monospace().all(|row| row != *name));
+                for family in configured.into_iter().chain(families.monospace()) {
+                    if fuzzy_score(&query, family).is_none() {
+                        continue;
+                    }
+                    let note = if family == fonts::EDITOR_FAMILY {
+                        "Bundled"
+                    } else if Some(family) == configured {
+                        "Configured in config.conf"
+                    } else {
+                        ""
+                    };
+                    let mut row = action_row(
+                        Key::Font(family),
+                        family.into(),
+                        note.into(),
+                        true,
+                        Action::Font(family),
+                    );
+                    row.current = Some(family) == current;
+                    rows.push(row);
+                }
+            }
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
                     for id in item_commands(item) {
@@ -596,6 +646,7 @@ impl App {
             Action::ItemCommand { target, id } => self.dispatch(Command::ItemAction { target, id }),
             Action::Reorder(target) => self.dispatch(Command::Reorder(target)),
             Action::Theme(id) => self.choose_theme(id),
+            Action::Font(family) => self.choose_font(family),
             Action::Workspace(path) => {
                 if workspace_removal {
                     self.dispatch(Command::RemoveWorkspace(path))
@@ -918,6 +969,7 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
         Key::Reorder(target) => format!("reorder-{target:?}"),
         Key::Workspace(path) => format!("workspace-{}", path.display()),
         Key::Theme(id) => format!("theme-{}", id.unwrap_or("system")),
+        Key::Font(family) => format!("font-{family}"),
     };
     iced::advanced::widget::Id::from(format!("palette-row-{generation}-{key}"))
 }

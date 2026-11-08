@@ -30,9 +30,12 @@ thread_local! {
 /// from the keymap so a rebinding in `config.conf` shows in the menu.
 pub fn install(keymap: &Keymap) {
     let item = |action: &str, label: &str| {
+        // The first binding muda can show: it has no key for `+`, so text
+        // size shows its `=` binding.
         let accelerator = keymap
-            .accel(action)
-            .and_then(|accel| accel.to_string().parse::<Accelerator>().ok());
+            .bindings()
+            .filter(|(_, bound)| *bound == action)
+            .find_map(|(accel, _)| accel.to_string().parse::<Accelerator>().ok());
         MenuItem::with_id(action, label, true, accelerator)
     };
     let about = AboutMetadata {
@@ -77,6 +80,17 @@ pub fn install(keymap: &Keymap) {
             &item("navigation.forward", "Forward"),
         ],
     );
+    let view_menu = Submenu::with_items(
+        "View",
+        true,
+        &[
+            &item("font.increase", "Increase Text Size"),
+            &item("font.decrease", "Decrease Text Size"),
+            &item("font.reset", "Reset Text Size"),
+            &PredefinedMenuItem::separator(),
+            &item("font.choose", "Change Editor Font…"),
+        ],
+    );
     let window_menu = Submenu::with_items(
         "Window",
         true,
@@ -87,10 +101,12 @@ pub fn install(keymap: &Keymap) {
             &PredefinedMenuItem::bring_all_to_front(None),
         ],
     );
-    let (Ok(app_menu), Ok(go_menu), Ok(window_menu)) = (app_menu, go_menu, window_menu) else {
+    let (Ok(app_menu), Ok(go_menu), Ok(view_menu), Ok(window_menu)) =
+        (app_menu, go_menu, view_menu, window_menu)
+    else {
         return;
     };
-    let Ok(menu) = Menu::with_items(&[&app_menu, &go_menu, &window_menu]) else {
+    let Ok(menu) = Menu::with_items(&[&app_menu, &go_menu, &view_menu, &window_menu]) else {
         return;
     };
     menu.init_for_nsapp();

@@ -294,6 +294,7 @@ impl App {
                     "search" => Mode::Search,
                     "workspaces" => Mode::Workspaces,
                     "themes" => Mode::Themes,
+                    "fonts" => Mode::Fonts,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -606,6 +607,11 @@ impl App {
             "find_open":self.find_open,"find_query":self.find_query,"find_count":self.editor.find_count(),
             "find_current":self.editor.find_current(),"edit_micros":self.edit_micros,
             "soft_wrap":true,"theme":self.definition.id,
+            "font_size":self.editor.font_size(),
+            "font_family":match self.editor.font().family {
+                iced::font::Family::Name(name) => name,
+                _ => "",
+            },
         })
     }
 }
@@ -633,6 +639,13 @@ fn result_key(value: &Value) -> Result<Key, String> {
         } else {
             Some(wren_core::theme::builtin(id).ok_or("Unknown theme")?.id)
         }));
+    }
+    if object.contains_key("font") {
+        let family = string(value, "font")?;
+        return crate::fonts::families()
+            .find(family)
+            .map(Key::Font)
+            .ok_or_else(|| "Unknown font family".into());
     }
     if object.contains_key("workspace") {
         return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
@@ -672,6 +685,7 @@ fn key_json(key: &Key) -> Value {
         Key::Destination(parent) => json!({"destination":parent_json(*parent)}),
         Key::Workspace(path) => json!({"workspace":path}),
         Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),
+        Key::Font(family) => json!({"font":family}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }

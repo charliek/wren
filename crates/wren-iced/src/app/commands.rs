@@ -44,6 +44,10 @@ pub enum CommandId {
     SortModified,
     SortTitle,
     ChooseTheme,
+    ChooseFont,
+    TextBigger,
+    TextSmaller,
+    TextReset,
     OpenSettings,
     ReloadSettings,
     CommandPalette,
@@ -149,6 +153,10 @@ definitions![
     ),
     (SortTitle, "notes.sort_title", "Sort notes: title", "View"),
     (ChooseTheme, "theme.choose", "Change theme…", "View"),
+    (ChooseFont, "font.choose", "Change editor font…", "View"),
+    (TextBigger, "font.increase", "Increase text size", "View"),
+    (TextSmaller, "font.decrease", "Decrease text size", "View"),
+    (TextReset, "font.reset", "Reset text size", "View"),
     (
         SwitchWorkspace,
         "workspace.switch",
@@ -307,8 +315,8 @@ impl App {
         }
         match id {
             AddWorkspace => self.folder_request.is_none(),
-            SwitchWorkspace | ChooseTheme | OpenSettings | ReloadSettings | CommandPalette
-            | Quit => true,
+            SwitchWorkspace | ChooseTheme | ChooseFont | TextBigger | TextSmaller | TextReset
+            | OpenSettings | ReloadSettings | CommandPalette | Quit => true,
             RemoveWorkspace => self
                 .config
                 .as_ref()
@@ -596,6 +604,10 @@ impl App {
                 self.close_palette_after(outcome)
             }
             ChooseTheme => self.open_palette(Mode::Themes),
+            ChooseFont => self.open_palette(Mode::Fonts),
+            TextBigger => self.step_text_size(Some(1.0)),
+            TextSmaller => self.step_text_size(Some(-1.0)),
+            TextReset => self.step_text_size(None),
             CommandPalette => self.open_palette(Mode::Commands),
             OpenSettings => self.open_settings(),
             ReloadSettings => {

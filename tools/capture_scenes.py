@@ -95,12 +95,17 @@ def main() -> int:
                 ("search", "promo"),
                 ("workspaces", ""),
                 ("themes", ""),
+                ("fonts", ""),
             ]:
                 client.call("palette.open", {"mode": mode})
                 if query:
                     client.call("palette.query", {"query": query})
                 shot(f"palette-{mode}")
                 client.call("palette.close")
+            for _ in range(4):
+                client.call("command.run", {"id": "font.increase"})
+            shot("text-larger")
+            client.call("command.run", {"id": "font.reset"})
             client.call("view.focus", {"enabled": True})
             shot("focus")
             client.call("view.focus", {"enabled": False})

@@ -292,7 +292,13 @@ Jump to note… (⌘P)           Search workspace… (⌘⇧F)   Find in note (�
 Back (⌘[)   Forward (⌘])     Toggle focus mode (⌘Y)
 Layout: Columns (⌘⌥1)        Layout: Outline (⌘⌥2)     Reset column widths
 Sort notes: modified / title
+Change theme…                Change editor font…
+Increase text size (⌘+)      Decrease text size (⌘-)   Reset text size (⌘0)
 ```
+
+The theme and editor font pickers preview the highlighted row live, and
+restore the saved choice unless one is chosen. Text size steps one point
+between 9 and 32 and is saved to `config.conf`.
 
 **Delete** always moves to the OS trash (`trash` crate) and never unlinks
 directly. Deleting a section or group that has notes in it asks for

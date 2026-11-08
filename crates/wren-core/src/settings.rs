@@ -83,6 +83,8 @@ impl ThemeChoice {
 pub struct Settings {
     pub theme: ThemeChoice,
     pub editor_font_size: f32,
+    /// A font family name; `None` uses the bundled JetBrains Mono.
+    pub editor_font_family: Option<String>,
     pub line_numbers: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
@@ -94,6 +96,7 @@ impl Default for Settings {
         Self {
             theme: ThemeChoice::default(),
             editor_font_size: DEFAULT_FONT_SIZE,
+            editor_font_family: None,
             line_numbers: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
@@ -157,6 +160,10 @@ impl Settings {
                         settings.editor_font_size = size
                     }
                     _ => invalid(),
+                },
+                "editor-font-family" => match value.trim() {
+                    "" => invalid(),
+                    family => settings.editor_font_family = Some(family.into()),
                 },
                 "line-numbers" => match parse_bool(value) {
                     Some(enabled) => settings.line_numbers = enabled,
@@ -316,8 +323,12 @@ pub const TEMPLATE: &str = "\
 # catppuccin-macchiato.
 # theme = system
 
-# Editor text size in points (9–32).
+# Editor text size in points (9–32). Cmd/Alt + plus, minus, and 0 change it.
 # editor-font-size = 14
+
+# Editor font family: any installed font. “Change editor font…” lists the
+# monospace ones.
+# editor-font-family = \"JetBrains Mono\"
 
 # Show the line-number gutter.
 # line-numbers = true
@@ -348,12 +359,14 @@ mod tests {
             "# comment\n\
              theme = light:solarized-light, dark:nord\n\
              editor-font-size = 16\n\
+             editor-font-family = \"Fira Code\"\n\
              line-numbers = off\n\
              keybind = ctrl+shift+p = palette.commands\n\
              keybind = \"alt+k = unbind\"\n\
              editor-font-size = 100\n\
              mystery = 1\n\
-             no equals sign\n",
+             no equals sign\n\
+             editor-font-family = \"\"\n",
         );
         assert_eq!(
             settings.theme,
@@ -363,6 +376,7 @@ mod tests {
             }
         );
         assert_eq!(settings.editor_font_size, 16.0);
+        assert_eq!(settings.editor_font_family.as_deref(), Some("Fira Code"));
         assert!(!settings.line_numbers);
         assert_eq!(
             settings.keybinds,
@@ -371,10 +385,11 @@ mod tests {
                 ("alt+k".into(), "unbind".into())
             ]
         );
-        assert_eq!(settings.warnings.len(), 3, "{:?}", settings.warnings);
-        assert!(settings.warnings[0].contains("line 7"));
+        assert_eq!(settings.warnings.len(), 4, "{:?}", settings.warnings);
+        assert!(settings.warnings[0].contains("line 8"));
         assert!(settings.warnings[1].contains("mystery"));
-        assert!(settings.warnings[2].contains("line 9"));
+        assert!(settings.warnings[2].contains("line 10"));
+        assert!(settings.warnings[3].contains("editor-font-family"));
     }
 
     #[test]

@@ -48,17 +48,16 @@ use iced::advanced::{clipboard, input_method, Clipboard, InputMethod, Shell};
 use iced::keyboard;
 use iced::time::{Duration, Instant};
 use iced::widget::text_editor::{
-    Action, Binding, Cursor, Edit, KeyPress, Line, LineEnding, Selection, Status,
+    Action, Binding, Cursor, Edit, KeyPress, Line, LineEnding, Position, Selection, Status,
 };
 use iced::{
-    alignment, window, Color, Element, Event, Font, Length, Padding, Pixels, Point, Rectangle,
-    Renderer, Size, Theme, Vector,
+    alignment, window, Color, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer,
+    Size, Theme, Vector,
 };
 
 use super::markdown_highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
 use super::Message;
 
-const FONT: Font = Font::with_name("JetBrains Mono");
 const TEXT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 24.0;
 /// Horizontal inset of each mockup row (`editorWrap` padding).
@@ -70,17 +69,21 @@ const BARE_TEXT_INSET: f32 = 8.0;
 const VERTICAL_PADDING: f32 = 24.0;
 const CARET_WIDTH: f32 = 2.0;
 const CARET_HEIGHT: f32 = 18.0;
-/// JetBrains Mono OS/2 `sxHeight` (550) over its 1000 units per em.
+/// JetBrains Mono OS/2 `sxHeight` (550) over its 1000 units per em; other
+/// monospace fonts sit close enough for the strike-through.
 const X_HEIGHT_EM: f32 = 0.55;
 const STRIKE_THICKNESS: f32 = 1.0;
 
-/// Text size, row height, and caret height, scaled together from the
-/// mockup's 14 px text / 24 px rows / 18 px caret.
+/// Text size, row height, caret height, and gutter width, scaled together
+/// from the mockup's 14 px text / 24 px rows / 18 px caret / 52 px gutter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     pub text: f32,
     pub line: f32,
     pub caret: f32,
+    /// The gutter's width; only its number column scales, so larger text
+    /// keeps room for four digits.
+    pub gutter: f32,
 }
 
 impl Metrics {
@@ -90,6 +93,7 @@ impl Metrics {
             text,
             line: (LINE_HEIGHT * scale).round(),
             caret: (CARET_HEIGHT * scale).round(),
+            gutter: GUTTER_PADDING_RIGHT + ((GUTTER_WIDTH - GUTTER_PADDING_RIGHT) * scale).round(),
         }
     }
 
@@ -233,7 +237,7 @@ impl<'a> TextEditor<'a> {
 
     fn padding(&self) -> Padding {
         let left = if self.line_numbers {
-            ROW_INSET + GUTTER_WIDTH
+            ROW_INSET + self.metrics.gutter
         } else {
             ROW_INSET + BARE_TEXT_INSET
         };
@@ -266,6 +270,27 @@ impl<'a> TextEditor<'a> {
             purpose: input_method::Purpose::Normal,
             preedit: state.preedit.as_ref().map(input_method::Preedit::as_ref),
         }
+    }
+}
+
+/// After a font change iced reshapes only the scrolled-to lines, and the
+/// caret and IME queries panic on an unshaped cursor line (an off-screen
+/// cursor, after scrolling or a text size change). A cursor move makes the
+/// next update shape up to the cursor and scroll to it; cosmic-text ignores a
+/// move to the same place, so step away first.
+fn reshape_to_cursor(editor: &mut RawEditor) {
+    let cursor = editor.cursor();
+    let elsewhere = if cursor.position.line == 0 && cursor.position.column == 0 {
+        (editor.line_count() > 1).then_some(Position { line: 1, column: 0 })
+    } else {
+        Some(Position { line: 0, column: 0 })
+    };
+    if let Some(position) = elsewhere {
+        editor.move_to(Cursor {
+            position,
+            selection: None,
+        });
+        editor.move_to(cursor);
     }
 }
 
@@ -352,6 +377,9 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         let mut editor = self.content.0.borrow_mut();
         let state = tree.state.downcast_mut::<State>();
 
+        if state.highlighter_settings.font != self.highlighter_settings.font {
+            reshape_to_cursor(&mut editor);
+        }
         if state.highlighter_settings != self.highlighter_settings {
             state
                 .highlighter
@@ -363,7 +391,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         let limits = limits.width(Length::Fill).height(Length::Fill);
         editor.update(
             limits.shrink(self.padding()).max(),
-            FONT,
+            self.highlighter_settings.font,
             Pixels(self.metrics.text),
             self.metrics.line_height(),
             Wrapping::WordOrGlyph,
@@ -515,7 +543,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         let style = self.style;
 
         editor.highlight(
-            FONT,
+            self.highlighter_settings.font,
             state.highlighter.borrow_mut().deref_mut(),
             |highlight| highlight.to_format(),
         );
@@ -558,15 +586,15 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         }
 
         if self.line_numbers {
-            let right = bounds.x + ROW_INSET + GUTTER_WIDTH - GUTTER_PADDING_RIGHT;
+            let right = bounds.x + ROW_INSET + self.metrics.gutter - GUTTER_PADDING_RIGHT;
             for row in rows.iter().filter(|row| row.starts_line) {
                 renderer.fill_text(
                     Text {
                         content: (row.line + 1).to_string(),
-                        bounds: Size::new(GUTTER_WIDTH - GUTTER_PADDING_RIGHT, row.height),
+                        bounds: Size::new(self.metrics.gutter - GUTTER_PADDING_RIGHT, row.height),
                         size: Pixels(self.metrics.text),
                         line_height: self.metrics.line_height(),
-                        font: FONT,
+                        font: self.highlighter_settings.font,
                         align_x: text::Alignment::Right,
                         align_y: alignment::Vertical::Top,
                         shaping: text::Shaping::Basic,
@@ -925,7 +953,8 @@ mod tests {
             Metrics {
                 text: 14.0,
                 line: 24.0,
-                caret: 18.0
+                caret: 18.0,
+                gutter: 52.0,
             }
         );
         assert_eq!(
@@ -933,7 +962,8 @@ mod tests {
             Metrics {
                 text: 21.0,
                 line: 36.0,
-                caret: 27.0
+                caret: 27.0,
+                gutter: 69.0,
             }
         );
     }
@@ -971,7 +1001,10 @@ mod tests {
     #[test]
     fn padding_reserves_the_gutter_only_when_shown() {
         let content = Content::with_text("");
-        let settings = HighlighterSettings { theme: theme::DARK };
+        let settings = HighlighterSettings {
+            theme: theme::DARK,
+            font: crate::fonts::EDITOR,
+        };
         let style = Style {
             background: Color::BLACK,
             value: Color::WHITE,
@@ -997,10 +1030,13 @@ mod tests {
                 "../../../../third_party/jetbrains-mono/JetBrainsMono-Regular.ttf"
             )));
         let mut editor = RawEditor::with_text(text);
-        let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings { theme: theme::DARK });
+        let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
+            theme: theme::DARK,
+            font: crate::fonts::EDITOR,
+        });
         editor.update(
             Size::new(width, 1000.0),
-            FONT,
+            crate::fonts::EDITOR,
             Pixels(TEXT_SIZE),
             line_height(),
             Wrapping::WordOrGlyph,
