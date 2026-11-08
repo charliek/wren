@@ -13,3 +13,9 @@
 # to track which secret files it manages. See https://github.com/charliek/envsecrets
 # envsecrets
 .secrets/wren-sparkle-ed-private.key
+
+# Docs build output
+site-build/
+
+# Zensical differential-build cache (root only)
+/.cache/

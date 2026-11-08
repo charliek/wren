@@ -30,7 +30,7 @@ open, other shortcuts are ignored, except the palette shortcut itself
 
 ## Custom keybindings
 
-Add `keybind` lines to [`config.conf`](configuration.md):
+Add `keybind` lines to [`config.conf`](../reference/configuration.md):
 
 ```conf
 keybind = <trigger> = <action>

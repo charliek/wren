@@ -68,9 +68,19 @@ On Linux the build needs the usual windowing development libraries
 
 ## Documentation
 
-- [Keybindings](docs/keybindings.md): platform defaults and custom bindings
-- [Configuration](docs/configuration.md): `config.conf`, themes, and editor
-  settings
-- [SPEC.md](SPEC.md) and [MOCKUP.md](MOCKUP.md): the product design
-- [PLAN.md](PLAN.md): the implementation record and verification evidence
-- [CLAUDE.md](CLAUDE.md): architecture and contributor conventions
+The documentation site is at <https://charliek.github.io/wren/>, built from
+`docs/` with [Zensical](https://zensical.org/):
+
+- [First run](docs/getting-started/first-run.md): workspaces, sections,
+  groups, and notes
+- [Keybindings](docs/getting-started/keybindings.md): platform defaults and
+  custom bindings
+- [Configuration](docs/reference/configuration.md): `config.conf`, themes,
+  and editor settings
+- [Architecture](docs/development/architecture.md) and
+  [Testing](docs/development/testing.md): for contributors
+
+Preview it locally with `uv run --group docs zensical serve`
+(<http://127.0.0.1:7072/>). Designs that are planned but not built yet live
+in [`discovery/`](discovery/README.md). Contributor conventions are in
+[CLAUDE.md](CLAUDE.md).

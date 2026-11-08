@@ -1,5 +1,9 @@
 # Editor spike: Linux go, native macOS acceptance deferred
 
+> Historical record of the M0 go/no-go decision on iced's editor. The
+> editor has moved on since; see [Architecture](architecture.md) for how it
+> fits today.
+
 ## Decision
 
 **Go for the Linux prototype on iced 0.14.** The real editor passes typing, shortcuts, Unicode selection/paste, grouped undo/redo, literal find, wrapping, highlighting, and theme/scroll preservation checks. This is not a claim that native macOS Japanese IME or every desktop/input method has been accepted. Those checks are explicitly deferred by the approved plan.

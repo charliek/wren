@@ -2,9 +2,10 @@
 
 Wren is a structured Markdown notes app for macOS and Linux: plain `.md`
 files in a fixed *Workspace → Section → Group → Note* hierarchy, one open
-document at a time, and autosave. `SPEC.md` decides behavior, `MOCKUP.md`
-(with `mockup/*.dc.html`) decides look and feel, and `PLAN.md` records what
-was built and verified.
+document at a time, and autosave. `docs/` (published with Zensical to
+https://charliek.github.io/wren/) describes current behavior for users and
+contributors. `discovery/` holds designs that are planned or in progress;
+when one lands, move what users need into `docs/` and trim the note.
 
 ## Layout
 
@@ -28,6 +29,10 @@ was built and verified.
   - `macos_menu.rs` is the native menu bar.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
+- `docs/`: the documentation site (`zensical.toml` at the root). Keep it
+  in step with behavior changes: keybindings, settings, and on-disk rules.
+- `discovery/`: working design notes, deliberately outside `docs/` because
+  everything under `docs/` is published.
 - `tools/`: the Python functional harness (`wrentest/`, which drives a real
   window over a private test socket), its unit tests (`wrentest_unit/`),
   packaging (`package.py`), `capture_scenes.py` for visual review,
@@ -70,6 +75,7 @@ was built and verified.
 make check                       # fmt, clippy (normal + smoke-test), all Rust tests, Python units
 ICED_BACKEND=tiny-skia make smoke-x11   # real-window functional suite under Xvfb (~2.5 min)
 make smoke-wayland               # same suite on headless Weston, minus X11-native cases
+uv run --locked --group docs zensical build --strict  # docs site; run for changes under docs/
 ```
 
 - **Never run a normal `cargo build` while a smoke suite is running.** It

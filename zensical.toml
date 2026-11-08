@@ -1,0 +1,114 @@
+# =============================================================================
+# Documentation Style Guidelines
+# =============================================================================
+# - Professional, direct tone (no marketing language)
+# - Tables for all CLI options and configuration fields
+# - Code blocks with language hints (yaml, bash, json)
+# - Use admonitions sparingly (only for important notes/warnings)
+# - Examples should be copy-pasteable
+# - Keep pages focused and concise - one topic per page
+# - No deep troubleshooting guides - keep it minimal but useful
+# =============================================================================
+
+[project]
+
+site_name = "Wren"
+site_description = "Structured Markdown notes for macOS and Linux: plain files in a fixed Workspace, Section, Group, Note hierarchy"
+site_author = "Wren Contributors"
+site_url = "https://charliek.github.io/wren/"
+
+repo_name = "charliek/wren"
+repo_url = "https://github.com/charliek/wren"
+edit_uri = "edit/main/docs/"
+
+docs_dir = "docs"
+site_dir = "site-build"
+
+dev_addr = "127.0.0.1:7072"
+
+# Working notes live in /discovery at the repo root, not under docs/.
+# Zensical has no exclude_docs equivalent; files in docs_dir are published.
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = [
+    { "Installation" = "getting-started/installation.md" },
+    { "First Run" = "getting-started/first-run.md" },
+    { "Keybindings" = "getting-started/keybindings.md" },
+  ] },
+  { "Reference" = [
+    { "Configuration" = "reference/configuration.md" },
+    { "Workspace Folder" = "reference/workspace-folder.md" },
+    { "Autosave and External Edits" = "reference/autosave.md" },
+  ] },
+  { "Development" = [
+    { "Architecture" = "development/architecture.md" },
+    { "Testing" = "development/testing.md" },
+    { "Editor Spike" = "development/editor-spike.md" },
+  ] },
+]
+
+# -----------------------------------------------------------------------------
+# Theme
+# -----------------------------------------------------------------------------
+# The shared StrideLabs theme supplies the palette, the self-hosted type stack
+# (no Google Fonts requests), the feature toggles, and the owl + project-icon
+# header lockup. Anything set here overrides it.
+#
+# To opt this repo out of the shared look entirely, drop `name` and set
+# `variant = "modern"` (or "classic" for the Material for MkDocs appearance).
+[project.theme]
+name = "stridelabs"
+
+# The icon that says *which* tool this is -- rendered beside the shared owl.
+# Any icon from the sets Zensical ships: material, lucide, fontawesome,
+# octicons, simple.
+[project.theme.icon]
+logo = "material/bird"
+
+# -----------------------------------------------------------------------------
+# Extra
+# -----------------------------------------------------------------------------
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/charliek/wren"
+
+# -----------------------------------------------------------------------------
+# Markdown extensions
+# -----------------------------------------------------------------------------
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.md_in_html]
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.details]
+
+# NOTE: the callable namespace is "zensical.extensions.emoji", not
+# "material.extensions.emoji" - the latter aborts the build under Zensical
+# with ModuleNotFoundError: No module named 'material'.
+[project.markdown_extensions.pymdownx.emoji]
+emoji_generator = "zensical.extensions.emoji.to_svg"
+emoji_index = "zensical.extensions.emoji.twemoji"
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.snippets]
+
+# Mermaid works with no further configuration - Zensical initializes the JS
+# runtime itself when it sees a mermaid fence.
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true
