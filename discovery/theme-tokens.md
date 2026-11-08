@@ -22,11 +22,14 @@ and the editor side stays out of `crates/wren-core/src/theme.rs`.
 
 | Token | Meaning |
 |---|---|
-| `heading` | H1 and H2 text (bold). H3–H6 stay `text`. |
+| `heading` | H1 text (bold). |
+| `heading2` | H2 text (bold). H3–H6 stay `text`. |
 | `link` | Link text and bare `http(s)://` URLs. Brackets and destinations are `faint`. |
 | `code` | Inline code spans. It replaces the old use of `success`, which is now status only. |
 | `code_block` | A background band behind fenced code blocks, fences included. |
 | `quote` | Block-quote text, drawn italic. The `>` marker is `faint`. |
+| `completed` | The text of done tasks and of `~~struck~~` words: readable de-emphasis. Markers and strike lines stay `faint`. |
+| `text_selection` | The editor's selection fill, apart from list rows' `selected`. |
 | `selected_inactive` | Selected list rows in columns without keyboard focus. App only. |
 
 Every built-in theme defines all of them. The tests in `theme.rs` require:
@@ -35,29 +38,37 @@ Every built-in theme defines all of them. The tests in `theme.rs` require:
 - `code` at 4.5:1 or better on `code_block`;
 - `code_block` at least 1 L* away from `editor`.
 
-Round 2 may add `heading2` (a separate H2 color) and `text_selection` (the
-editor's selection fill, split from list rows' `selected`). Both are planned
-as `Colors` fields with the same mapping pattern.
+Round 2 adds rules for the new tokens. `quote` and `completed` must not
+outshine `body`. Inside a `text_selection`, body text must stay at 4.5:1 or
+better, syntax colors at 3.5:1, and `faint` at 3:1.
+
+The interim editor mapping, until the theme lands, is:
+- `heading2` ← `heading`
+- `completed` ← `faint`
+- `text_selection` ← `selected`
 
 ## What the editor side needs
 
 On `md-editor`, `wren-iced/src/theme.rs::editor_colors` maps a theme onto
 `wren_editor::Style` and `wren_editor::Palette`. The integration adds:
 
-- `Palette`: `heading`, `link`, `code`, and `quote`. `success` and `danger`
+- `Palette`: `heading`, `heading2`, `link`, `code`, `quote`, and `completed`. `success` and `danger`
   can then leave the palette: code and strikethrough no longer use them.
-- `Style`: `code_block`, the band color.
+- `Style`: `code_block`, the band color. `selection` maps from
+  `text_selection`.
 
 The highlighter's mapping (the `df7a6c1` commit on `design/theme-polish`):
 
-- H1–H2 are bold `heading`, and H3–H6 are bold `text`. `#` markers are `faint`.
+- H1 is bold `heading`, H2 is bold `heading2`, and H3–H6 are bold `text`.
+  `#` markers are `faint`.
+- A done task (`- [x] text`) has a `faint` marker and `completed` text.
+  `~~struck~~` has `faint` tildes and `completed` text.
 - `[text](url)` and `[text][ref]`: the brackets and destination are `faint`,
   and the text is `link`. Bare `http(s)://` URLs are `link`, with trailing
   sentence punctuation excluded.
 - `> quote`: the marker is `faint`, and the text is italic `quote`. Inline
   markup inside a quote keeps its own style.
 - `` `code` `` is `code`. Fenced block bodies stay `muted` on the band.
-- `~~strike~~` is `faint`, not `danger`.
 - **Emphasis markers carry their span's font.** `**`, `*`, `***`, `__`, and
   `_` keep the `faint` color, but use the bold or italic face of the text
   they wrap. cosmic-text shapes each word in the font of its first glyph, so

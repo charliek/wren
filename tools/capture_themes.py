@@ -30,6 +30,7 @@ SAMPLE = {
     FEATURE_NOTE: """# Cutover plan — read path
 
 Owner: **Alice Chen** · Reviewers: *Bob*, *Priya* · Status: `in review`
+Spec: [rollout doc](https://wiki.internal/rollout) · live at https://status.internal
 
 ## Goals
 
@@ -131,6 +132,12 @@ def capture(theme: str, workspace: Path, out: Path) -> None:
             client.call("palette.close")
         client.call("view.focus", {"enabled": True})
         shot("focus")
+        # A text selection across a heading, a task list, and a done task.
+        client.call("editor.focus")
+        client.call("editor.cursor", {
+            "line": 11, "column": 20, "selection": {"line": 5, "column": 0},
+        })
+        shot("focus-selection")
         client.call("view.focus", {"enabled": False})
 
 

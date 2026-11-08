@@ -29,7 +29,7 @@ REMOTE = f"{SECTIONS[1]}/Remote"
 ORIGIN = f"{SOURCE}/Origin.md"
 PICKER_A = f"{SOURCE}/Picker A.md"
 PICKER_B = f"{SOURCE}/Picker B.md"
-DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
+DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 WIDTH_LIMITS = {"sections": (140, 360), "groups": (150, 400), "notes": (200, 480)}
 
 
@@ -418,7 +418,7 @@ def test_native_dividers_update_live_clamp_and_persist_independently_on_restart(
     narrowed = resize(app, root, window, "sections", -240)
     assert narrowed["preferred_widths"]["sections"] == 140
     widened = resize(app, root, window, "notes", 64)
-    assert widened["preferred_widths"] == {"sections": 140, "groups": 220, "notes": 344}
+    assert widened["preferred_widths"] == {"sections": 140, "groups": 192, "notes": 320}
     assert editor_identity(app) == before_editor
     assert session(app)["document"] == before_document
     expected = widened["preferred_widths"]
@@ -426,7 +426,7 @@ def test_native_dividers_update_live_clamp_and_persist_independently_on_restart(
     assert navigation(app)["preferred_widths"] == expected
     table = metadata(root)["widths"]
     assert table["columns"]["sections"] == 140
-    assert table["columns"]["notes"] == 344
+    assert table["columns"]["notes"] == 320
     assert session(app)["document"]["path"] == ORIGIN
     assert session(app)["document"]["text"] == before_document["text"]
 
@@ -450,9 +450,9 @@ def test_native_divider_escape_restores_width_without_touching_dirty_text_or_sel
         start = seam(app, "notes")
         with held_button(window, start):
             move(window, (start[0] + 80, start[1]))
-            wait_width(app, "notes", 360)
+            wait_width(app, "notes", 336)
             keys(window, "Escape")
-            wait_width(app, "notes", 280)
+            wait_width(app, "notes", 256)
             assert editor_identity(app) == before_editor
         idle(app)
         assert navigation(app)["preferred_widths"] == before["preferred_widths"]
@@ -472,16 +472,16 @@ def test_native_double_click_resets_only_the_target_divider(native_workspace) ->
     before_editor = editor_identity(app)
     resize(app, root, window, "sections", 32)
     resized = resize(app, root, window, "groups", 64)
-    assert resized["preferred_widths"]["groups"] == 284
+    assert resized["preferred_widths"]["groups"] == 256
     expected = dict(resized["preferred_widths"])
-    expected["groups"] = 220
+    expected["groups"] = 192
     move(window, seam(app, "groups"))
     xdo("click", "--repeat", "2", "--delay", "80", "1")
-    wait_width(app, "groups", 220)
-    stored_width(root, "groups", 220)
+    wait_width(app, "groups", 192)
+    stored_width(root, "groups", 192)
     idle(app)
     assert navigation(app)["preferred_widths"] == expected
-    assert metadata(root)["widths"]["columns"]["sections"] == 232
+    assert metadata(root)["widths"]["columns"]["sections"] == 208
     assert editor_identity(app) == before_editor
     assert session(app)["document"]["dirty"] is False
 
@@ -492,8 +492,8 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
     before_editor = editor_identity(app)
     move(window, seam(app, "sections"))
     xdo("click", "1")
-    stored_width(root, "sections", 200)
-    for key, expected in (("Right", 216), ("Right", 232), ("Left", 216)):
+    stored_width(root, "sections", 176)
+    for key, expected in (("Right", 192), ("Right", 208), ("Left", 192)):
         keys(window, key)
         wait_width(app, "sections", expected)
         stored_width(root, "sections", expected)
@@ -502,12 +502,12 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
     type_text(window, "Visible")
     wait_for(lambda: navigation(app)["filters"]["groups"] == "Visible",
              description="Tab moves from the Sections grip to the real Groups input")
-    assert navigation(app)["preferred_widths"]["sections"] == 216
+    assert navigation(app)["preferred_widths"]["sections"] == 192
     move(window, seam(app, "sections"))
     xdo("click", "1")
     keys(window, "Right")
-    wait_width(app, "sections", 232)
-    stored_width(root, "sections", 232)
+    wait_width(app, "sections", 208)
+    stored_width(root, "sections", 208)
     keys(window, "shift+Tab")
     settle_focus()
     type_text(window, "Visible")
@@ -515,7 +515,7 @@ def test_native_focused_divider_steps_sixteen_pixels_and_tab_traverses_real_widg
              description="Shift+Tab moves from the grip to the real Sections input")
     after = navigation(app)
     assert after["filters"]["groups"] == after["filters"]["sections"] == "Visible"
-    assert after["preferred_widths"] == {"sections": 232, "groups": 220, "notes": 280}
+    assert after["preferred_widths"] == {"sections": 208, "groups": 192, "notes": 256}
     assert editor_identity(app) == before_editor
     assert session(app)["document"]["dirty"] is False
 
@@ -527,7 +527,7 @@ def test_native_narrow_window_compresses_actual_panes_and_wide_restores_preferre
     for pane, delta in (("sections", 80), ("groups", 80), ("notes", 60)):
         resize(app, root, window, pane, delta)
     preferred = navigation(app)["preferred_widths"]
-    assert preferred == {"sections": 280, "groups": 300, "notes": 340}
+    assert preferred == {"sections": 256, "groups": 272, "notes": 316}
     old_disk = (root / ".wren/workspace.toml").read_bytes()
     narrow = window_size(app, window, 760, 700)
     assert narrow["preferred_widths"] == preferred
@@ -538,7 +538,7 @@ def test_native_narrow_window_compresses_actual_panes_and_wide_restores_preferre
     assert_browser_geometry(app, narrow)
     assert (root / ".wren/workspace.toml").read_bytes() == old_disk
     compressed = resize(app, root, window, "sections", 32)
-    assert compressed["preferred_widths"]["sections"] == 312, (
+    assert compressed["preferred_widths"]["sections"] == 288, (
         "A compressed seam must anchor its drag to the preferred, not effective, width"
     )
     assert_browser_geometry(app, compressed)

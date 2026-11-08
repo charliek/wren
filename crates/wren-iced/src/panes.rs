@@ -38,9 +38,9 @@ pub struct Limits {
 impl Pane {
     pub const fn limits(self) -> Limits {
         let (default, min, max) = match self {
-            Self::Sections => (200.0, 140.0, 360.0),
-            Self::Groups => (220.0, 150.0, 400.0),
-            Self::Notes => (280.0, 200.0, 480.0),
+            Self::Sections => (176.0, 140.0, 360.0),
+            Self::Groups => (192.0, 150.0, 400.0),
+            Self::Notes => (256.0, 200.0, 480.0),
         };
         Limits { default, min, max }
     }
@@ -933,10 +933,10 @@ mod tests {
     #[test]
     fn defaults_and_clamps() {
         let mut widths = Widths::default();
-        assert_eq!(widths.get(Pane::Sections), 200.0);
+        assert_eq!(widths.get(Pane::Sections), 176.0);
         assert_eq!(widths.set(Pane::Notes, -5.0), 200.0);
         assert_eq!(widths.set(Pane::Groups, 900.0), 400.0);
-        assert_eq!(widths.set(Pane::Sections, f32::NAN), 200.0);
+        assert_eq!(widths.set(Pane::Sections, f32::NAN), 176.0);
         for pane in PANES {
             widths.reset(pane);
         }
@@ -950,11 +950,11 @@ mod tests {
     fn compression_is_proportional_until_floors_then_editor_shrinks() {
         let widths = Widths::default();
         let normal = widths.effective(&PANES, 1200.0);
-        assert_eq!(normal.editor, 500.0);
-        let squeezed = widths.effective(&PANES, 880.0);
-        assert!((squeezed.get(Pane::Sections) - 160.0).abs() < 0.01);
-        assert!((squeezed.get(Pane::Groups) - 176.0).abs() < 0.01);
-        assert!((squeezed.get(Pane::Notes) - 224.0).abs() < 0.01);
+        assert_eq!(normal.editor, 576.0);
+        let squeezed = widths.effective(&PANES, 788.0);
+        assert!((squeezed.get(Pane::Sections) - 132.0).abs() < 0.01);
+        assert!((squeezed.get(Pane::Groups) - 144.0).abs() < 0.01);
+        assert!((squeezed.get(Pane::Notes) - 192.0).abs() < 0.01);
         assert!((squeezed.editor - 320.0).abs() < 0.01);
         let near_floor = widths.effective(&PANES, 700.0);
         assert!((near_floor.get(Pane::Sections) - 120.0).abs() < 0.01);
@@ -976,11 +976,11 @@ mod tests {
         let notes_only = widths.effective(&[Pane::Notes], 1200.0);
         assert_eq!(notes_only.get(Pane::Sections), 0.0);
         assert_eq!(notes_only.get(Pane::Groups), 0.0);
-        assert_eq!(notes_only.get(Pane::Notes), 280.0);
-        assert_eq!(notes_only.browser(), 280.0);
-        assert_eq!(notes_only.editor, 920.0);
+        assert_eq!(notes_only.get(Pane::Notes), 256.0);
+        assert_eq!(notes_only.browser(), 256.0);
+        assert_eq!(notes_only.editor, 944.0);
         let groups_and_notes = widths.effective(&[Pane::Groups, Pane::Notes], 1200.0);
-        assert_eq!(groups_and_notes.browser(), 500.0);
+        assert_eq!(groups_and_notes.browser(), 448.0);
         assert_eq!(groups_and_notes.get(Pane::Sections), 0.0);
         let narrow = widths.effective(&[Pane::Notes], 400.0);
         assert_eq!(narrow.get(Pane::Notes), 120.0);
@@ -1012,6 +1012,7 @@ mod tests {
         let store = wren_core::fs_store::FsStore::open(directory.path()).unwrap();
         let mut state = WorkspaceState::load(&store);
         let mut widths = Widths::from_state(&state);
+        assert_eq!(widths, Widths::default(), "core and app share defaults");
         widths.set(Pane::Sections, 310.0);
         widths.store(&mut state, Pane::Sections).unwrap();
         assert_eq!(state.width("sections"), Some(310));
@@ -1212,7 +1213,7 @@ mod tests {
             ),
             Ownership::Own(vec![ResizeEvent::Reset {
                 pane: Pane::Groups,
-                width: 220.0
+                width: 192.0
             }])
         );
         assert_eq!(

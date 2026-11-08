@@ -608,9 +608,7 @@ impl Session {
                 self.persist_metadata(events)
             }
             Op::ResetWidths => {
-                for (pane, width) in [("sections", 200), ("groups", 220), ("notes", 280)] {
-                    self.state.set_width(pane, width)?;
-                }
+                self.state.reset_widths()?;
                 self.persist_metadata(events)
             }
             Op::SetSort { group, mode } => {

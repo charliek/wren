@@ -30,8 +30,10 @@ pub struct Colors {
     pub success: Rgb,
     pub warning: Rgb,
     pub danger: Rgb,
-    /// Editor heading text (H1 and H2; deeper levels use `text`).
+    /// H1 text in the editor.
     pub heading: Rgb,
+    /// H2 text in the editor; H3 and deeper use `text`.
+    pub heading2: Rgb,
     /// Link text in the editor; the URL itself stays `faint`.
     pub link: Rgb,
     /// Inline code spans and fenced code-block text.
@@ -40,8 +42,14 @@ pub struct Colors {
     pub code_block: Rgb,
     /// Block-quote text.
     pub quote: Rgb,
+    /// The text of completed tasks and struck-through words: readable, but
+    /// quieter than `body`. Their markers and strike lines stay `faint`.
+    pub completed: Rgb,
     /// Selected rows in columns without keyboard focus.
     pub selected_inactive: Rgb,
+    /// The editor's text-selection fill, kept apart from list rows so faint
+    /// markers stay legible inside a selection.
+    pub text_selection: Rgb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,11 +87,14 @@ pub const WREN_DARK: Theme = Theme {
         warning: Rgb(0xef, 0x8a, 0x4c),
         danger: Rgb(0xf0, 0x88, 0x88),
         heading: Rgb(0xf0, 0xb4, 0x5a),
+        heading2: Rgb(0xdc, 0xbf, 0x91),
         link: Rgb(0x7f, 0xb0, 0xe6),
         code: Rgb(0x7f, 0xd1, 0xa0),
         code_block: Rgb(0x18, 0x1b, 0x21),
         quote: Rgb(0xa3, 0xaa, 0xb5),
+        completed: Rgb(0xa3, 0xaa, 0xb5),
         selected_inactive: Rgb(0x20, 0x24, 0x2c),
+        text_selection: Rgb(0x28, 0x30, 0x42),
     },
 };
 
@@ -99,7 +110,7 @@ pub const WREN_LIGHT: Theme = Theme {
         input: Rgb(0xff, 0xff, 0xff),
         control: Rgb(0xf7, 0xf8, 0xfa),
         raised: Rgb(0xff, 0xff, 0xff),
-        selected: Rgb(0xda, 0xe3, 0xef),
+        selected: Rgb(0xd2, 0xdd, 0xec),
         current_line: Rgb(0xeb, 0xee, 0xf4),
         divider: Rgb(0xd5, 0xd9, 0xe0),
         control_border: Rgb(0xc4, 0xca, 0xd4),
@@ -109,16 +120,19 @@ pub const WREN_LIGHT: Theme = Theme {
         body: Rgb(0x31, 0x38, 0x44),
         muted: Rgb(0x58, 0x61, 0x70),
         faint: Rgb(0x60, 0x6a, 0x78),
-        accent: Rgb(0xb0, 0x4f, 0x0a),
+        accent: Rgb(0xa1, 0x48, 0x08),
         success: Rgb(0x19, 0x73, 0x42),
-        warning: Rgb(0x8a, 0x65, 0x00),
+        warning: Rgb(0x7a, 0x6a, 0x00),
         danger: Rgb(0xb3, 0x2d, 0x36),
-        heading: Rgb(0xb0, 0x4f, 0x0a),
+        heading: Rgb(0xa1, 0x48, 0x08),
+        heading2: Rgb(0x7a, 0x4a, 0x1e),
         link: Rgb(0x1f, 0x5f, 0xbf),
         code: Rgb(0x19, 0x73, 0x42),
         code_block: Rgb(0xef, 0xf1, 0xf5),
         quote: Rgb(0x58, 0x61, 0x70),
+        completed: Rgb(0x58, 0x61, 0x70),
         selected_inactive: Rgb(0xe4, 0xe8, 0xee),
+        text_selection: Rgb(0xd3, 0xde, 0xf0),
     },
 };
 
@@ -149,11 +163,14 @@ pub const NORD: Theme = Theme {
         warning: Rgb(0xeb, 0xcb, 0x8b),
         danger: Rgb(0xec, 0x8f, 0x8f),
         heading: Rgb(0x88, 0xc0, 0xd0),
+        heading2: Rgb(0x81, 0xa1, 0xc1),
         link: Rgb(0x81, 0xa1, 0xc1),
         code: Rgb(0xa3, 0xbe, 0x8c),
         code_block: Rgb(0x2a, 0x2f, 0x3a),
         quote: Rgb(0xc0, 0xc8, 0xd6),
+        completed: Rgb(0xa8, 0xb2, 0xc3),
         selected_inactive: Rgb(0x3b, 0x42, 0x52),
+        text_selection: Rgb(0x3e, 0x46, 0x57),
     },
 };
 
@@ -184,11 +201,14 @@ pub const GRUVBOX_DARK: Theme = Theme {
         warning: Rgb(0xfe, 0x80, 0x19),
         danger: Rgb(0xfb, 0x6b, 0x5b),
         heading: Rgb(0xfa, 0xbd, 0x2f),
+        heading2: Rgb(0xfe, 0x80, 0x19),
         link: Rgb(0x83, 0xa5, 0x98),
         code: Rgb(0x8e, 0xc0, 0x7c),
-        code_block: Rgb(0x24, 0x24, 0x24),
+        code_block: Rgb(0x1d, 0x20, 0x21),
         quote: Rgb(0xbd, 0xae, 0x93),
+        completed: Rgb(0xbd, 0xae, 0x93),
         selected_inactive: Rgb(0x3c, 0x38, 0x36),
+        text_selection: Rgb(0x3c, 0x38, 0x36),
     },
 };
 
@@ -204,26 +224,29 @@ pub const SOLARIZED_LIGHT: Theme = Theme {
         input: Rgb(0xff, 0xfb, 0xf0),
         control: Rgb(0xf7, 0xf0, 0xdc),
         raised: Rgb(0xff, 0xfb, 0xf0),
-        selected: Rgb(0xec, 0xe4, 0xcc),
+        selected: Rgb(0xe4, 0xdb, 0xbf),
         current_line: Rgb(0xf4, 0xec, 0xd6),
         divider: Rgb(0xe2, 0xda, 0xc2),
         control_border: Rgb(0xd3, 0xcb, 0xb3),
         dialog_border: Rgb(0xc6, 0xbe, 0xa6),
         selected_border: Rgb(0xb9, 0xb0, 0x98),
         text: Rgb(0x07, 0x36, 0x42),
-        body: Rgb(0x3d, 0x59, 0x61),
-        muted: Rgb(0x58, 0x6e, 0x75),
+        body: Rgb(0x27, 0x4a, 0x52),
+        muted: Rgb(0x4a, 0x63, 0x6b),
         faint: Rgb(0x76, 0x87, 0x8a),
         accent: Rgb(0xb5, 0x3f, 0x0e),
         success: Rgb(0x3d, 0x6b, 0x00),
         warning: Rgb(0x8a, 0x68, 0x00),
         danger: Rgb(0xc0, 0x26, 0x2b),
         heading: Rgb(0xb5, 0x3f, 0x0e),
+        heading2: Rgb(0x7d, 0x62, 0x00),
         link: Rgb(0x1f, 0x6a, 0xa6),
         code: Rgb(0x16, 0x75, 0x6d),
-        code_block: Rgb(0xf5, 0xee, 0xdb),
+        code_block: Rgb(0xf2, 0xe9, 0xce),
         quote: Rgb(0x58, 0x6e, 0x75),
+        completed: Rgb(0x58, 0x6e, 0x75),
         selected_inactive: Rgb(0xef, 0xe7, 0xd1),
+        text_selection: Rgb(0xef, 0xe7, 0xce),
     },
 };
 
@@ -254,11 +277,14 @@ pub const ROSE_PINE: Theme = Theme {
         warning: Rgb(0xf6, 0xc1, 0x77),
         danger: Rgb(0xeb, 0x6f, 0x92),
         heading: Rgb(0xeb, 0xbc, 0xba),
+        heading2: Rgb(0xf6, 0xc1, 0x77),
         link: Rgb(0xc4, 0xa7, 0xe7),
         code: Rgb(0x9c, 0xcf, 0xd8),
-        code_block: Rgb(0x1d, 0x1b, 0x2b),
+        code_block: Rgb(0x21, 0x1f, 0x30),
         quote: Rgb(0xb6, 0xb2, 0xcf),
+        completed: Rgb(0x98, 0x93, 0xb2),
         selected_inactive: Rgb(0x26, 0x23, 0x3a),
+        text_selection: Rgb(0x2a, 0x27, 0x40),
     },
 };
 
@@ -274,7 +300,7 @@ pub const EVERFOREST_DARK: Theme = Theme {
         input: Rgb(0x29, 0x31, 0x36),
         control: Rgb(0x37, 0x41, 0x45),
         raised: Rgb(0x3a, 0x44, 0x49),
-        selected: Rgb(0x3f, 0x4a, 0x4f),
+        selected: Rgb(0x42, 0x4d, 0x52),
         current_line: Rgb(0x34, 0x3e, 0x44),
         divider: Rgb(0x3d, 0x48, 0x4d),
         control_border: Rgb(0x4f, 0x5b, 0x58),
@@ -285,15 +311,18 @@ pub const EVERFOREST_DARK: Theme = Theme {
         muted: Rgb(0xa9, 0xb4, 0xab),
         faint: Rgb(0x85, 0x92, 0x89),
         accent: Rgb(0xa7, 0xc0, 0x80),
-        success: Rgb(0xa7, 0xc0, 0x80),
+        success: Rgb(0x83, 0xc0, 0x92),
         warning: Rgb(0xdb, 0xbc, 0x7f),
         danger: Rgb(0xe6, 0x7e, 0x80),
-        heading: Rgb(0xa7, 0xc0, 0x80),
+        heading: Rgb(0xe6, 0x98, 0x75),
+        heading2: Rgb(0xa7, 0xc0, 0x80),
         link: Rgb(0x7f, 0xbb, 0xb3),
         code: Rgb(0x83, 0xc0, 0x92),
         code_block: Rgb(0x28, 0x30, 0x35),
         quote: Rgb(0xa9, 0xb4, 0xab),
+        completed: Rgb(0xa9, 0xb4, 0xab),
         selected_inactive: Rgb(0x3a, 0x44, 0x49),
+        text_selection: Rgb(0x39, 0x43, 0x47),
     },
 };
 
@@ -324,11 +353,14 @@ pub const TOKYO_NIGHT: Theme = Theme {
         warning: Rgb(0xe0, 0xaf, 0x68),
         danger: Rgb(0xf7, 0x76, 0x8e),
         heading: Rgb(0x7a, 0xa2, 0xf7),
+        heading2: Rgb(0xff, 0x9e, 0x64),
         link: Rgb(0x7d, 0xcf, 0xff),
         code: Rgb(0xbb, 0x9a, 0xf7),
         code_block: Rgb(0x16, 0x16, 0x1e),
-        quote: Rgb(0xa9, 0xb1, 0xd6),
+        quote: Rgb(0x9a, 0xa5, 0xce),
+        completed: Rgb(0x9a, 0xa5, 0xce),
         selected_inactive: Rgb(0x22, 0x25, 0x38),
+        text_selection: Rgb(0x25, 0x2d, 0x49),
     },
 };
 
@@ -344,7 +376,7 @@ pub const DRACULA: Theme = Theme {
         input: Rgb(0x21, 0x22, 0x2c),
         control: Rgb(0x2c, 0x2f, 0x3c),
         raised: Rgb(0x34, 0x37, 0x46),
-        selected: Rgb(0x44, 0x47, 0x5a),
+        selected: Rgb(0x3d, 0x40, 0x52),
         current_line: Rgb(0x31, 0x33, 0x41),
         divider: Rgb(0x34, 0x37, 0x46),
         control_border: Rgb(0x44, 0x47, 0x5a),
@@ -359,11 +391,14 @@ pub const DRACULA: Theme = Theme {
         warning: Rgb(0xff, 0xb8, 0x6c),
         danger: Rgb(0xff, 0x6e, 0x6e),
         heading: Rgb(0xbd, 0x93, 0xf9),
+        heading2: Rgb(0xff, 0x79, 0xc6),
         link: Rgb(0x8b, 0xe9, 0xfd),
         code: Rgb(0x50, 0xfa, 0x7b),
         code_block: Rgb(0x22, 0x23, 0x2e),
-        quote: Rgb(0xf1, 0xfa, 0x8c),
+        quote: Rgb(0xd4, 0xdc, 0x7c),
+        completed: Rgb(0xb8, 0xbc, 0xd8),
         selected_inactive: Rgb(0x34, 0x37, 0x46),
+        text_selection: Rgb(0x3a, 0x3d, 0x4e),
     },
 };
 
@@ -379,7 +414,7 @@ pub const CATPPUCCIN_MOCHA: Theme = Theme {
         input: Rgb(0x18, 0x18, 0x25),
         control: Rgb(0x25, 0x25, 0x36),
         raised: Rgb(0x31, 0x32, 0x44),
-        selected: Rgb(0x45, 0x47, 0x5a),
+        selected: Rgb(0x3a, 0x3c, 0x50),
         current_line: Rgb(0x24, 0x24, 0x35),
         divider: Rgb(0x31, 0x32, 0x44),
         control_border: Rgb(0x45, 0x47, 0x5a),
@@ -394,11 +429,14 @@ pub const CATPPUCCIN_MOCHA: Theme = Theme {
         warning: Rgb(0xf9, 0xe2, 0xaf),
         danger: Rgb(0xf3, 0x8b, 0xa8),
         heading: Rgb(0xcb, 0xa6, 0xf7),
+        heading2: Rgb(0xb4, 0xbe, 0xfe),
         link: Rgb(0x89, 0xb4, 0xfa),
         code: Rgb(0xa6, 0xe3, 0xa1),
         code_block: Rgb(0x18, 0x18, 0x25),
-        quote: Rgb(0xba, 0xc2, 0xde),
-        selected_inactive: Rgb(0x31, 0x32, 0x44),
+        quote: Rgb(0xa6, 0xad, 0xc8),
+        completed: Rgb(0xa6, 0xad, 0xc8),
+        selected_inactive: Rgb(0x2a, 0x2b, 0x3c),
+        text_selection: Rgb(0x31, 0x32, 0x44),
     },
 };
 
@@ -414,7 +452,7 @@ pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
         input: Rgb(0x1e, 0x20, 0x30),
         control: Rgb(0x2a, 0x2e, 0x41),
         raised: Rgb(0x36, 0x3a, 0x4f),
-        selected: Rgb(0x49, 0x4d, 0x64),
+        selected: Rgb(0x3d, 0x41, 0x57),
         current_line: Rgb(0x29, 0x2d, 0x40),
         divider: Rgb(0x36, 0x3a, 0x4f),
         control_border: Rgb(0x49, 0x4d, 0x64),
@@ -429,11 +467,14 @@ pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
         warning: Rgb(0xee, 0xd4, 0x9f),
         danger: Rgb(0xed, 0x87, 0x96),
         heading: Rgb(0xc6, 0xa0, 0xf6),
+        heading2: Rgb(0xb7, 0xbd, 0xf8),
         link: Rgb(0x8a, 0xad, 0xf4),
         code: Rgb(0xa6, 0xda, 0x95),
         code_block: Rgb(0x1e, 0x20, 0x30),
-        quote: Rgb(0xb8, 0xc0, 0xe0),
-        selected_inactive: Rgb(0x36, 0x3a, 0x4f),
+        quote: Rgb(0xa5, 0xad, 0xcb),
+        completed: Rgb(0xa5, 0xad, 0xcb),
+        selected_inactive: Rgb(0x2f, 0x33, 0x46),
+        text_selection: Rgb(0x36, 0x3a, 0x4f),
     },
 };
 
@@ -534,13 +575,45 @@ mod tests {
                     );
                 }
             }
-            for foreground in [c.heading, c.link, c.code, c.quote] {
+            for foreground in [c.heading, c.heading2, c.link, c.code, c.quote, c.completed] {
                 assert!(
                     contrast(foreground, c.editor) >= 4.5,
                     "{}: {foreground:?} on the editor",
                     theme.name
                 );
             }
+            // A quote and a done task are voices beside the body, never louder.
+            let on_editor = |color| contrast(color, c.editor);
+            assert!(
+                on_editor(c.quote) <= on_editor(c.body),
+                "{}: quote",
+                theme.name
+            );
+            assert!(
+                on_editor(c.completed) < on_editor(c.body),
+                "{}: done",
+                theme.name
+            );
+            // Search matches are drawn in the accent on the active palette row.
+            assert!(
+                contrast(c.accent, c.selected) >= 4.0,
+                "{}: accent on selected",
+                theme.name
+            );
+            // Selected text stays readable; syntax colors may soften a little.
+            assert!(contrast(c.body, c.text_selection) >= 4.5, "{}", theme.name);
+            for foreground in [c.heading, c.link, c.code] {
+                assert!(
+                    contrast(foreground, c.text_selection) >= 3.5,
+                    "{}: {foreground:?} on the text selection",
+                    theme.name
+                );
+            }
+            assert!(
+                contrast(c.faint, c.text_selection) >= 3.0,
+                "{}: faint markers inside a text selection",
+                theme.name
+            );
             assert!(contrast(c.code, c.code_block) >= 4.5, "{}", theme.name);
             for background in [c.selected, c.selected_inactive] {
                 for foreground in [c.text, c.muted] {
@@ -606,7 +679,15 @@ mod tests {
                 step(c.current_line, c.editor) >= 2.5,
                 "{name}: current line"
             );
-            assert!(step(c.code_block, c.editor) >= 1.0, "{name}: code block");
+            assert!(step(c.code_block, c.editor) >= 2.0, "{name}: code block");
+            assert!(
+                step(c.text_selection, c.editor) >= 4.0,
+                "{name}: text selection"
+            );
+            assert!(
+                step(c.selected, c.selected_inactive) >= 3.0,
+                "{name}: the focused selection must read apart from the inactive one"
+            );
             assert!(
                 step(c.selected_inactive, c.pane) >= 2.0,
                 "{name}: inactive row"

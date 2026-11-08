@@ -277,6 +277,13 @@ impl WorkspaceState {
         Ok(())
     }
 
+    pub fn reset_widths(&mut self) -> Result<(), String> {
+        for (pane, default, _, _) in PANE_WIDTHS {
+            self.set_width(pane, default)?;
+        }
+        Ok(())
+    }
+
     /// Per-section/group note sort mode. The default is most recently modified.
     pub fn sort(&self, parent: &RelPath) -> &str {
         parent
@@ -544,14 +551,18 @@ fn check_sort(mode: &str) -> Result<(), String> {
     }
 }
 
-/// Default, minimum, and maximum width of each browser pane.
+/// Each browser pane's key with its default, minimum, and maximum width.
+const PANE_WIDTHS: [(&str, u16, u16, u16); 3] = [
+    ("sections", 176, 140, 360),
+    ("groups", 192, 150, 400),
+    ("notes", 256, 200, 480),
+];
+
 fn width_limits(pane: &str) -> Option<(u16, u16, u16)> {
-    match pane {
-        "sections" => Some((200, 140, 360)),
-        "groups" => Some((220, 150, 400)),
-        "notes" => Some((280, 200, 480)),
-        _ => None,
-    }
+    PANE_WIDTHS
+        .iter()
+        .find(|(key, ..)| *key == pane)
+        .map(|&(_, default, min, max)| (default, min, max))
 }
 
 fn validate(table: &Table) -> Result<(), String> {
@@ -679,7 +690,7 @@ mod tests {
         let mut state = WorkspaceState::load(&store);
         assert!(state.writable());
         assert_eq!(state.warning(), None);
-        assert_eq!(state.width("notes"), Some(280));
+        assert_eq!(state.width("notes"), Some(256));
         assert_eq!(state.selection(), None);
         assert!(state.history().is_empty());
         assert!(state.order().is_empty());
@@ -718,7 +729,7 @@ mod tests {
         let (_directory, mut store) = fixture(Some(b""));
         let mut state = WorkspaceState::load(&store);
         assert!(state.writable());
-        assert_eq!(state.width("notes"), Some(280));
+        assert_eq!(state.width("notes"), Some(256));
         state.save(&mut store).unwrap();
         assert!(WorkspaceState::load(&store).writable());
     }
@@ -821,12 +832,12 @@ mod tests {
             let mut state = WorkspaceState::load(&store);
             assert!(!state.writable(), "{}", String::from_utf8_lossy(bytes));
             assert!(state.warning().is_some());
-            assert_eq!(state.width("notes"), Some(280));
+            assert_eq!(state.width("notes"), Some(256));
             assert_eq!(state.selection(), None);
             assert_eq!(state.last_open_note(), None);
             assert!(state.history().is_empty());
             assert!(state.order().is_empty());
-            assert_eq!(state.width("sections"), Some(200));
+            assert_eq!(state.width("sections"), Some(176));
             state.set_width("notes", 300).unwrap();
             assert!(state.save(&mut store).is_err());
             assert_eq!(fs::read(directory.path().join(STATE_PATH)).unwrap(), *bytes);
@@ -880,7 +891,7 @@ mod tests {
                 let mut state = WorkspaceState::load(&store);
                 assert!(!state.writable(), "{field}: {path:?}");
                 assert!(state.warning().is_some());
-                assert_eq!(state.width("notes"), Some(280));
+                assert_eq!(state.width("notes"), Some(256));
                 assert!(state.save(&mut store).is_err());
                 assert_eq!(fs::read(directory.path().join(STATE_PATH)).unwrap(), bytes);
             }
@@ -918,7 +929,7 @@ mod tests {
         assert!(!read.unwrap_err().is_not_found());
         assert!(!state.writable());
         assert!(state.warning().is_some());
-        assert_eq!(state.width("notes"), Some(280));
+        assert_eq!(state.width("notes"), Some(256));
         assert!(save.is_err());
         assert_eq!(fs::read(path).unwrap(), original);
     }
@@ -1276,9 +1287,9 @@ mod tests {
         let (_directory, store) = fixture(None);
         let mut state = WorkspaceState::load(&store);
         for (pane, default, min, max) in [
-            ("sections", 200, 140, 360),
-            ("groups", 220, 150, 400),
-            ("notes", 280, 200, 480),
+            ("sections", 176, 140, 360),
+            ("groups", 192, 150, 400),
+            ("notes", 256, 200, 480),
         ] {
             assert_eq!(state.width(pane), Some(default));
             state.set_width(pane, 0).unwrap();

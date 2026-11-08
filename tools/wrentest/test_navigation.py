@@ -40,7 +40,7 @@ COMMANDS = {
     "edit.move_line_up", "edit.move_line_down",
     "editor.toggle_markdown_assist", "editor.toggle_engine",
 }
-DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
+DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
 TENTH = "Atlas/Research/Note 10.md"
@@ -1136,8 +1136,8 @@ def color_count(image, viewport: dict, rectangle: tuple[float, float, float, flo
 @pytest.mark.parametrize("theme,inactive,selected,text,body,raised,accent", [
     ("dark", (0x20, 0x24, 0x2C), (0x2A, 0x31, 0x40), (0xE6, 0xE8, 0xEC), (0xD5, 0xD9, 0xE0),
      (0x1C, 0x1F, 0x26), (0xF0, 0xB4, 0x5A)),
-    ("light", (0xE4, 0xE8, 0xEE), (0xDA, 0xE3, 0xEF), (0x20, 0x24, 0x2D), (0x31, 0x38, 0x44),
-     (0xFF, 0xFF, 0xFF), (0xB0, 0x4F, 0x0A)),
+    ("light", (0xE4, 0xE8, 0xEE), (0xD2, 0xDD, 0xEC), (0x20, 0x24, 0x2D), (0x31, 0x38, 0x44),
+     (0xFF, 0xFF, 0xFF), (0xA1, 0x48, 0x08)),
 ])
 def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
     vault: Path, theme: str, inactive: tuple, selected: tuple, text: tuple, body: tuple,

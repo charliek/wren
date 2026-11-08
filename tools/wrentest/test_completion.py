@@ -246,7 +246,7 @@ def test_screenshot_draws_the_current_editor_after_layout(vault, theme, body):
 @pytest.mark.parametrize("widget", ["hover", "focus"])
 @pytest.mark.parametrize("theme,raised,accent", [
     ("dark", (28, 31, 38), (240, 180, 90)),
-    ("light", (255, 255, 255), (0xB0, 0x4F, 0x0A)),
+    ("light", (255, 255, 255), (0xA1, 0x48, 0x08)),
 ])
 def test_screenshot_matches_native_hover_and_focused_input_styles(native_workspace, theme, raised, accent, widget):
     app, root, window = native_workspace

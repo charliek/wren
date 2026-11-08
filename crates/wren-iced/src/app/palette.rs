@@ -1110,6 +1110,8 @@ impl App {
                 rows * 76.0 + (rows - 1.0) * 2.0 + 12.0
             };
             list_height = list_height.min(content.max(160.0));
+        } else {
+            list_height = snapped_list_height(&palette.results, list_height);
         }
         let mut input = row![].spacing(8).align_y(iced::Center);
         if search {
@@ -1157,18 +1159,18 @@ impl App {
         } else {
             input.push(chrome::keycap("esc", self.definition))
         };
-        let mut results = column![].spacing(2).padding(6);
+        let mut results = column![].spacing(RESULT_SPACING).padding(RESULT_PADDING);
         let mut last_group = "";
         for (index, result) in palette.results.iter().enumerate() {
             if result.group != last_group && !result.group.is_empty() {
                 results = results.push(
                     container(
                         text(result.group.to_uppercase())
-                            .size(11)
+                            .size(GROUP_HEADER_SIZE)
                             .font(fonts::SEMIBOLD)
                             .color(theme::color(colors.muted)),
                     )
-                    .padding([8, 10]),
+                    .padding([GROUP_HEADER_PADDING, 10.0]),
                 );
                 last_group = result.group;
             }
@@ -1251,13 +1253,7 @@ impl App {
             }
             let active = palette.active == Some(index);
             let row = button(container(contents).center_y(Fill))
-                .height(if search {
-                    76
-                } else if result.path.is_empty() {
-                    44
-                } else {
-                    54
-                })
+                .height(row_height(search, result))
                 .on_press_maybe((result.enabled && self.loading.is_none()).then_some(
                     Message::PaletteChoose(palette.generation, result.key.clone()),
                 ))
@@ -1367,6 +1363,43 @@ impl App {
         ]
         .into()
     }
+}
+
+const RESULT_SPACING: f32 = 2.0;
+const RESULT_PADDING: f32 = 6.0;
+const GROUP_HEADER_SIZE: f32 = 11.0;
+const GROUP_HEADER_PADDING: f32 = 8.0;
+/// The header label at iced's default 1.3 line height, plus its padding.
+const GROUP_HEADER_HEIGHT: f32 = GROUP_HEADER_SIZE * 1.3 + 2.0 * GROUP_HEADER_PADDING;
+
+fn row_height(search: bool, result: &ResultRow) -> f32 {
+    if search {
+        76.0
+    } else if result.path.is_empty() {
+        44.0
+    } else {
+        54.0
+    }
+}
+
+/// Shortens an overflowing non-search list to the end of its last whole
+/// result, so the visible list never ends on a group header or a cut row.
+fn snapped_list_height(results: &[ResultRow], available: f32) -> f32 {
+    let mut end = RESULT_PADDING - RESULT_SPACING;
+    let mut last_group = "";
+    let mut fitted = None;
+    for result in results {
+        if result.group != last_group && !result.group.is_empty() {
+            end += RESULT_SPACING + GROUP_HEADER_HEIGHT;
+            last_group = result.group;
+        }
+        end += RESULT_SPACING + row_height(false, result);
+        if end > available {
+            return fitted.unwrap_or(available);
+        }
+        fitted = Some(end);
+    }
+    available
 }
 
 pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::Id {
@@ -1799,6 +1832,58 @@ mod tests {
         assert_eq!(outcome.processed.disposition, Disposition::Blocked);
         assert!(app.palette.is_none());
         assert!(app.outline_origin.is_none());
+    }
+
+    fn grouped(note: u64, group: &'static str, path: &str) -> ResultRow {
+        ResultRow {
+            group,
+            path: path.into(),
+            ..row(note)
+        }
+    }
+
+    #[test]
+    fn overflowing_lists_end_on_a_whole_row_and_never_on_a_header() {
+        let header = GROUP_HEADER_HEIGHT;
+        let results = [
+            grouped(1, "Note", ""),
+            grouped(2, "Note", ""),
+            grouped(3, "Note", ""),
+            grouped(4, "Go", ""),
+            grouped(5, "Go", "a/b"),
+        ];
+        let third = 6.0 + header + 3.0 * (2.0 + 44.0);
+        let go_header = third + 2.0 + header;
+        let fourth = go_header + 2.0 + 44.0;
+        let fifth = fourth + 2.0 + 54.0;
+        let close = |available: f32, expected: f32| {
+            let snapped = snapped_list_height(&results, available);
+            assert!(
+                (snapped - expected).abs() < 0.01,
+                "{available}: {snapped} != {expected}"
+            );
+        };
+        close(go_header + 10.0, third);
+        close(fourth + 0.01, fourth);
+        close(fifth - 1.0, fourth);
+        assert_eq!(
+            snapped_list_height(&results, fifth + 6.0),
+            fifth + 6.0,
+            "a list that fits keeps its height"
+        );
+        assert_eq!(
+            snapped_list_height(&results, 40.0),
+            40.0,
+            "a window too short for one row keeps the minimum"
+        );
+    }
+
+    #[test]
+    fn ungrouped_rows_snap_without_headers() {
+        let results: Vec<_> = (0..20).map(row).collect();
+        let snapped = snapped_list_height(&results, 400.0);
+        assert_eq!(snapped, 6.0 + 8.0 * 46.0 - 2.0);
+        assert_eq!(snapped_list_height(&[], 400.0), 400.0);
     }
 
     #[test]
