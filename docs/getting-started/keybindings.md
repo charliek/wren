@@ -44,10 +44,11 @@ Add Shift to Home and the motions to select as you go. Word deletes take
 the spaces next to the cursor, then one word or one run of punctuation:
 `foo bar  ` loses `bar  `, `foo!!` loses `!!`, and `**bold**` loses the
 closing `**`. Words follow Unicode's rules, so `a.b`, `3.14`, and `can't`
-go whole. At either end of a line, a word delete joins the next or previous
-line. Backspace and Delete
-always remove a whole character, so an emoji or an accented letter goes in
-one press. Tab never moves the keyboard out of the editor.
+go whole, and a run of Chinese or Japanese characters (Han, Hiragana, and
+Katakana) goes together up to the next space or punctuation. At either end
+of a line, a word delete joins the next or previous line. Backspace and
+Delete always remove a whole character, so an emoji or an accented letter
+goes in one press. Tab never moves the keyboard out of the editor.
 
 ### Markdown assist
 

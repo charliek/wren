@@ -366,7 +366,7 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
 **Word deletes:**
 - ⌥⌫ / Ctrl+⌫ deletes back one **group**, and ⌥⌦ / Ctrl+⌦ deletes forward one group. This is the convention of CodeMirror's `deleteGroupBackward`, VS Code's `deleteWordLeft`, Zed and Sublime.
   - Whitespace next to the cursor goes first. Then one run of a single character class goes with it.
-  - There are two classes: **word** (UAX #29 word segments, so `a.b`, `3.14` and `can't` stay whole) and **punctuation**. Consecutive punctuation is one run.
+  - There are three classes: **word** (UAX #29 word segments, so `a.b`, `3.14` and `can't` stay whole), **CJK** (Han, Hiragana and Katakana) and **punctuation**. Consecutive CJK is one run, and so is consecutive punctuation.
   - Examples:
 
     | Before | After |
@@ -376,7 +376,7 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
     | `**bold**\|` | `**bold\|` |
     | `- [ ] \|` | `- [ \|` |
 
-  - A segment with a letter or digit is a word; any other non-space segment, emoji included, is punctuation. UAX #29 has no dictionary, so each CJK ideograph is a word of its own (`日本語|` → `日本|`), while a run of emoji goes together and a joined sequence is never split (`ok👍👍|` → `ok|`). Landed on `md-follow` in `wren-markdown/src/edit/delete.rs`.
+  - A segment that starts with a Han, Hiragana or Katakana character is CJK; any other segment with a letter or digit is a word; any other non-space segment, emoji included, is punctuation. UAX #29 has no dictionary and splits Han and Hiragana per character, so the planner joins the run, as VS Code and Sublime do: `日本語のテキスト|` → `|`, and `日本語、テスト|` → `日本語、|`. A run of emoji goes together and a joined sequence is never split (`ok👍👍|` → `ok|`). Landed on `md-follow` in `wren-markdown/src/edit/delete.rs`; the CJK run came from review (one ideograph per press made the delete no better than Backspace in Japanese and Chinese notes).
   - Markup separated by spaces is not grouped further. Clearing a marker is the job of smart Backspace and ⌘⌫.
   - At either end of a line, the line break goes.
 - ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`. A cursor inside the markup also deletes to column 0, and at column 0 the line break goes.
