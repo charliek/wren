@@ -370,6 +370,51 @@ impl App {
         self.saved(warning, task)
     }
 
+    /// Flip `markdown-assist`, apply it, and save it.
+    pub(super) fn toggle_markdown_assist(&mut self) -> Gateway {
+        let enabled = !self.preferences.settings.markdown_assist;
+        self.preferences.settings.markdown_assist = enabled;
+        self.save_toggle("markdown-assist", if enabled { "on" } else { "off" })
+    }
+
+    /// Move the editor to the other engine, keeping its text and cursor
+    /// (undo history is dropped), and save the choice.
+    pub(super) fn toggle_editor_engine(&mut self) -> Gateway {
+        let engine = match self.preferences.settings.editor_engine {
+            EditorEngine::Classic => EditorEngine::Advanced,
+            EditorEngine::Advanced => EditorEngine::Classic,
+        };
+        self.preferences.settings.editor_engine = engine;
+        self.save_toggle("editor-engine", engine.value())
+    }
+
+    /// Apply a flipped setting before saving it, so it takes effect even
+    /// with nowhere to save or when the save fails.
+    fn save_toggle(&mut self, key: &str, value: &str) -> Gateway {
+        self.apply_preferences();
+        let task = if self.palette.take().is_some() {
+            self.column_focus()
+        } else {
+            Task::none()
+        };
+        let warning = self.save_setting(key, value);
+        self.saved(warning, task)
+    }
+
+    /// The current value a settings command flips, for its palette row.
+    pub(super) fn command_state(&self, id: CommandId) -> Option<&'static str> {
+        let settings = &self.preferences.settings;
+        match id {
+            CommandId::ToggleMarkdownAssist => Some(if settings.markdown_assist {
+                "on"
+            } else {
+                "off"
+            }),
+            CommandId::SwitchEngine => Some(settings.editor_engine.value()),
+            _ => None,
+        }
+    }
+
     /// Write one setting to `config.conf`, then re-read the merged file so
     /// edits made outside Wren since the last reload apply now rather than
     /// being marked as seen. Returns the warning to report, if any.
@@ -788,6 +833,117 @@ mod tests {
         assert!(!app.editor.markdown_assist());
         let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
         assert!(app.editor.text().ends_with("\n- item\n- \n"));
+    }
+
+    #[test]
+    fn the_markdown_assist_command_flips_saves_and_applies_the_setting() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+        use wren_editor::Intent;
+
+        let (mut app, path, _directory) = app_with_settings("# mine\ntheme = nord\n");
+        let run = |app: &mut App| {
+            let _ = app.update(Message::Command(Command::Run(
+                CommandId::ToggleMarkdownAssist,
+            )));
+            assert_eq!(app.last_processed.as_ref().unwrap().warning, None);
+        };
+        assert_eq!(
+            app.command_state(CommandId::ToggleMarkdownAssist),
+            Some("on")
+        );
+        run(&mut app);
+        assert!(!app.editor.markdown_assist());
+        assert_eq!(
+            app.command_state(CommandId::ToggleMarkdownAssist),
+            Some("off")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\ntheme = nord\nmarkdown-assist = off\n"
+        );
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
+            std::sync::Arc::new("\n- item".into()),
+        ))));
+        let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
+        assert!(app.editor.text().ends_with("\n- item\n"));
+        // The Markdown commands follow it.
+        assert!(!app.command_enabled(CommandId::Bold));
+
+        run(&mut app);
+        assert!(app.editor.markdown_assist());
+        assert!(app.command_enabled(CommandId::Bold));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\ntheme = nord\nmarkdown-assist = on\n"
+        );
+    }
+
+    #[test]
+    fn the_engine_command_switches_live_and_saves_keeping_text_and_cursor() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+
+        let (mut app, path, _directory) = app_with_settings("");
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Insert(
+            '!',
+        ))));
+        let text = app.editor.text();
+        let cursor = app.editor.cursor();
+        assert!(app.editor.can_undo());
+
+        // From the palette, which the command closes.
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        let row = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .find(|row| row.key == Key::Command(CommandId::SwitchEngine))
+            .unwrap();
+        assert!(row.enabled);
+        assert_eq!(app.command_state(CommandId::SwitchEngine), Some("classic"));
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        assert!(app.palette.is_none());
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert_eq!(app.editor.text(), text);
+        assert_eq!(app.editor.cursor(), cursor);
+        assert!(!app.editor.can_undo());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "editor-engine = advanced\n"
+        );
+        assert_eq!(app.command_state(CommandId::SwitchEngine), Some("advanced"));
+
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        assert_eq!(app.editor.text(), text);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "editor-engine = classic\n"
+        );
+    }
+
+    #[test]
+    fn the_settings_commands_apply_with_nowhere_to_save() {
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, None);
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        let _ = app.update(Message::Command(Command::Run(
+            CommandId::ToggleMarkdownAssist,
+        )));
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert!(!app.editor.markdown_assist());
+        assert!(app.last_processed.as_ref().unwrap().disposition.committed());
     }
 
     #[test]

@@ -231,9 +231,9 @@ pub(super) fn forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     delete_between(p, to)
 }
 
-/// Delete back over any whitespace and then one word (or one other
-/// segment) by Unicode word boundaries; at the start of a line, the line
-/// break.
+/// Delete back one group (§5.5): the whitespace before the cursor, then
+/// one word, one run of CJK, or one run of punctuation; at the start of a
+/// line, the line break.
 pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
@@ -246,17 +246,27 @@ pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> Edit
         return join_back(base, p);
     }
     let segments: Vec<(usize, &str)> = text[floor..p.col].split_word_bound_indices().collect();
-    let mut i = segments.len();
-    while i > 0 && is_space(segments[i - 1].1) {
+    let classes: Vec<Class> = segments.iter().map(|s| Class::of(s.1)).collect();
+    let mut i = classes.len();
+    while i > 0 && classes[i - 1] == Class::Space {
         i -= 1;
     }
-    i = i.saturating_sub(1);
-    let from = floor + segments.get(i).map_or(0, |s| s.0);
+    match i.checked_sub(1).map(|last| classes[last]) {
+        Some(Class::Word) => i -= 1,
+        Some(class @ (Class::Cjk | Class::Punctuation)) => {
+            while i > 0 && classes[i - 1] == class {
+                i -= 1;
+            }
+        }
+        Some(Class::Space) | None => {}
+    }
+    let from = floor + segments.get(i).map_or(p.col - floor, |s| s.0);
     delete_between(Pos::new(p.line, from), p)
 }
 
-/// Delete forward over any whitespace and then one word; at the end of a
-/// line, the line break.
+/// Delete forward one group: the whitespace after the cursor, then one
+/// word, one run of CJK, or one run of punctuation; at the end of a line,
+/// the line break.
 pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
@@ -268,11 +278,66 @@ pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditP
         return forward(base, sel);
     }
     let rest = &text[p.col..];
-    let to = rest
+    let mut segments = rest
         .split_word_bound_indices()
-        .find(|(_, segment)| !is_space(segment))
-        .map_or(rest.len(), |(i, segment)| i + segment.len());
+        .map(|(i, s)| (i + s.len(), Class::of(s)))
+        .skip_while(|&(_, class)| class == Class::Space)
+        .peekable();
+    let to = match segments.next() {
+        Some((end, Class::Word)) => end,
+        Some((mut end, class @ (Class::Cjk | Class::Punctuation))) => {
+            while let Some(&(next, _)) = segments.peek().filter(|s| s.1 == class) {
+                end = next;
+                segments.next();
+            }
+            end
+        }
+        Some((_, Class::Space)) | None => rest.len(),
+    };
     delete_between(p, Pos::new(p.line, p.col + to))
+}
+
+/// The character class of a word-bound segment, for the group deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Space,
+    /// A UAX #29 word: any segment with a letter or digit in it.
+    Word,
+    /// Han, Hiragana, or Katakana. UAX #29 has no dictionary and splits
+    /// these per character, so consecutive segments form one run.
+    Cjk,
+    /// Everything else, emoji included; consecutive segments form one run.
+    Punctuation,
+}
+
+impl Class {
+    fn of(segment: &str) -> Class {
+        if segment.chars().all(char::is_whitespace) {
+            Class::Space
+        } else if segment.chars().next().is_some_and(is_cjk) {
+            Class::Cjk
+        } else if segment.chars().any(char::is_alphanumeric) {
+            Class::Word
+        } else {
+            Class::Punctuation
+        }
+    }
+}
+
+/// Han ideographs and kana, with the ideographic iteration and closing
+/// marks.
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3005}'..='\u{3007}'
+            | '\u{3040}'..='\u{30ff}'
+            | '\u{31f0}'..='\u{31ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ff66}'..='\u{ff9f}'
+            | '\u{20000}'..='\u{3134f}'
+    )
 }
 
 /// Delete back to the line's text start, or from there (or from inside the
@@ -304,10 +369,6 @@ fn join_back<L: Lines + ?Sized>(base: &L, p: Pos) -> EditPlan {
     }
     let from = Pos::new(p.line - 1, base.line(p.line - 1).len());
     delete_between(from, p)
-}
-
-fn is_space(segment: &str) -> bool {
-    segment.chars().all(char::is_whitespace)
 }
 
 /// Delete the text between two positions, leaving the cursor there. The
@@ -498,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn word_deletes_follow_unicode_word_boundaries() {
+    fn word_deletes_take_whitespace_then_one_group() {
         check(
             Intent::DeleteWordBackward,
             &[
@@ -507,18 +568,24 @@ mod tests {
                 ("foo |", "|"),
                 ("foo, bar|", "foo, |"),
                 ("foo,|", "foo|"),
+                ("foo!!|", "foo|"),
+                ("foo ?!|", "foo |"),
+                ("**bold**|", "**bold|"),
+                ("**bold|", "**|"),
+                ("- [ ] |", "- [ |"),
+                ("- [ |", "- |"),
+                ("- |", "|"),
                 ("snake_case|", "|"),
                 ("can't|", "|"),
                 ("a.b|", "|"),
                 ("3.14|", "|"),
-                ("foo!!|", "foo!|"),
-                ("- [ ] |", "- [ |"),
-                ("日本語|", "日本|"),
                 ("foo ba|r", "foo |r"),
+                ("  |foo", "|foo"),
                 ("a\n|b", "a|b"),
+                ("a\n  |b", "a\n|b"),
                 ("|", "|"),
                 ("\u{feff}ab|", "\u{feff}|"),
-                ("- |", "|"),
+                ("\u{feff}|ab", "\u{feff}|ab"),
             ],
         );
         check(
@@ -528,8 +595,52 @@ mod tests {
                 ("|  bar baz", "| baz"),
                 ("f|oo bar", "f| bar"),
                 ("|,foo", "|foo"),
+                ("|!!foo", "|foo"),
+                ("|** bold", "| bold"),
+                ("|**bold**", "|bold**"),
+                ("| [ ] a", "| ] a"),
+                ("|a.b c", "| c"),
+                ("|3.14!", "|!"),
+                ("|can't stop", "| stop"),
                 ("a|\nb", "a|b"),
                 ("a|  \nb", "a|\nb"),
+            ],
+        );
+    }
+
+    #[test]
+    fn word_deletes_take_a_cjk_run_whole_and_group_emoji() {
+        // UAX #29 splits Han and Hiragana per character, so the planner
+        // joins a run of CJK; an emoji is a symbol, so a run of them goes
+        // together, and a joined sequence is never split.
+        check(
+            Intent::DeleteWordBackward,
+            &[
+                ("日本語|", "|"),
+                ("ひらがな|", "|"),
+                ("カタカナ|", "|"),
+                ("日本語のテキスト|", "|"),
+                ("foo 日本|", "foo |"),
+                ("foo日本|", "foo|"),
+                ("日本語。|", "日本語|"),
+                ("日本語、テスト|", "日本語、|"),
+                ("時々|", "|"),
+                ("ok👍👍|", "ok|"),
+                ("ok 👨\u{200d}👩\u{200d}👧|", "ok |"),
+                ("🇫🇷!|", "|"),
+                ("e\u{301}te\u{301}|", "|"),
+            ],
+        );
+        check(
+            Intent::DeleteWordForward,
+            &[
+                ("|日本語", "|"),
+                ("|ひらがな ok", "| ok"),
+                ("|日本語。", "|。"),
+                ("|日本foo", "|foo"),
+                ("|👍👍ok", "|ok"),
+                ("|👨\u{200d}👩\u{200d}👧 a", "| a"),
+                ("|e\u{301}te\u{301}!", "|!"),
             ],
         );
     }

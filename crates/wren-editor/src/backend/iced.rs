@@ -16,7 +16,16 @@ use iced::{Color, Point, Rectangle, Renderer};
 pub(super) fn reshape_to_cursor(editor: &mut RawEditor) {
     let cursor = editor.cursor();
     let elsewhere = if cursor.position.line == 0 && cursor.position.column == 0 {
-        (editor.line_count() > 1).then_some(Position { line: 1, column: 0 })
+        if editor.line_count() > 1 {
+            Some(Position { line: 1, column: 0 })
+        } else {
+            // One wrapped line can still scroll its start out of view.
+            editor
+                .line(0)
+                .map(|line| line.text.len())
+                .filter(|&end| end > 0)
+                .map(|column| Position { line: 0, column })
+        }
     } else {
         Some(Position { line: 0, column: 0 })
     };

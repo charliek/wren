@@ -41,10 +41,14 @@ Quit.
 | Start of the line (smart, below) | Home, ⌘←, or ⌃A | Home |
 
 Add Shift to Home and the motions to select as you go. Word deletes take
-the spaces next to the cursor with the word, and stop at punctuation that
-is not part of a word, so `foo!!` loses one `!`. Backspace and Delete
-always remove a whole character, so an emoji or an accented letter goes in
-one press. Tab never moves the keyboard out of the editor.
+the spaces next to the cursor, then one word or one run of punctuation:
+`foo bar  ` loses `bar  `, `foo!!` loses `!!`, and `**bold**` loses the
+closing `**`. Words follow Unicode's rules, so `a.b`, `3.14`, and `can't`
+go whole, and a run of Chinese or Japanese characters (Han, Hiragana, and
+Katakana) goes together up to the next space or punctuation. At either end
+of a line, a word delete joins the next or previous line. Backspace and
+Delete always remove a whole character, so an emoji or an accented letter
+goes in one press. Tab never moves the keyboard out of the editor.
 
 ### Markdown assist
 
@@ -68,7 +72,9 @@ blocks, front matter, and HTML, Enter only keeps the indentation and any
 quote or list prefix, and Tab inserts a tab or spaces like the line above.
 
 With `markdown-assist = off` in [`config.conf`](../reference/configuration.md),
-Enter, Shift+Enter, and Home are plain again. Backspace still deletes a
+or after the palette's **Toggle Markdown assist** (which saves the choice
+there and shows whether assist is on), Enter, Shift+Enter, and Home are
+plain again. Backspace still deletes a
 whole character, and Tab still inserts spaces to the next multiple of 4.
 Over a selection that spans lines, Tab indents each line by 4 spaces (a tab
 on a line that starts with one) instead of replacing them, and Shift+Tab
@@ -77,7 +83,9 @@ start of the line, and the word deletes and note motions work as above.
 
 While an input method is composing text, Enter, Tab, Backspace, and Delete
 belong to it, with or without modifiers, and the Markdown commands below
-wait until it finishes.
+wait until it finishes. When you start composing with the cursor scrolled
+out of view, the editor scrolls back to it, so the candidate window opens
+beside the text you are writing.
 
 ### Markdown commands
 
@@ -211,7 +219,13 @@ font.choose  font.increase  font.decrease  font.reset  workspace.switch
 workspace.add  workspace.remove  settings.open  settings.reload  app.quit
 palette.commands  markdown.toggle_task  markdown.bold  markdown.italic
 markdown.code  edit.move_line_up  edit.move_line_down
+editor.toggle_markdown_assist  editor.toggle_engine
 ```
+
+`editor.toggle_markdown_assist` and `editor.toggle_engine` have no default
+key. They flip `markdown-assist` and `editor-engine`, save the change to
+`config.conf`, and apply it at once; switching engines keeps the note's
+text and cursor but clears its undo history.
 
 An unknown action or an invalid trigger is skipped, and the line is named
 in the warning banner.

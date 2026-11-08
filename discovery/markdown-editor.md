@@ -366,7 +366,7 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
 **Word deletes:**
 - ⌥⌫ / Ctrl+⌫ deletes back one **group**, and ⌥⌦ / Ctrl+⌦ deletes forward one group. This is the convention of CodeMirror's `deleteGroupBackward`, VS Code's `deleteWordLeft`, Zed and Sublime.
   - Whitespace next to the cursor goes first. Then one run of a single character class goes with it.
-  - There are two classes: **word** (UAX #29 word segments, so `a.b`, `3.14` and `can't` stay whole) and **punctuation**. Consecutive punctuation is one run.
+  - There are three classes: **word** (UAX #29 word segments, so `a.b`, `3.14` and `can't` stay whole), **CJK** (Han, Hiragana and Katakana) and **punctuation**. Consecutive CJK is one run, and so is consecutive punctuation.
   - Examples:
 
     | Before | After |
@@ -376,6 +376,7 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
     | `**bold**\|` | `**bold\|` |
     | `- [ ] \|` | `- [ \|` |
 
+  - A segment that starts with a Han, Hiragana or Katakana character is CJK; any other segment with a letter or digit is a word; any other non-space segment, emoji included, is punctuation. UAX #29 has no dictionary and splits Han and Hiragana per character, so the planner joins the run, as VS Code and Sublime do: `日本語のテキスト|` → `|`, and `日本語、テスト|` → `日本語、|`. A run of emoji goes together and a joined sequence is never split (`ok👍👍|` → `ok|`). Landed on `md-follow` in `wren-markdown/src/edit/delete.rs`; the CJK run came from review (one ideograph per press made the delete no better than Backspace in Japanese and Chinese notes).
   - Markup separated by spaces is not grouped further. Clearing a marker is the job of smart Backspace and ⌘⌫.
   - At either end of a line, the line break goes.
 - ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`. A cursor inside the markup also deletes to column 0, and at column 0 the line break goes.
@@ -405,7 +406,7 @@ The **sibling run** is the ordered items with the same container, quote depth, i
 
 ### 5.7 Commands
 
-Two palette commands also flip the rollout settings and save them to `config.conf`, just as the theme picker saves its choice: `editor.toggle_markdown_assist` ("Toggle Markdown assist") and `editor.toggle_engine` ("Switch editor engine (classic / advanced)"). Both are App scope and have no default binding.
+Two palette commands also flip the rollout settings and save them to `config.conf`, just as the theme picker saves its choice: `editor.toggle_markdown_assist` ("Toggle Markdown assist") and `editor.toggle_engine` ("Switch editor engine (classic / advanced)"). Both are App scope and have no default binding. Landed on `md-follow`: Markdown assist sits at the end of the "Markdown" palette group and stays enabled when assist is off, the engine switch is in "App" beside the settings commands, and each row shows the value it flips (`on`/`off`, `classic`/`advanced`) as a muted label. A command flips the in-memory setting and applies it first, so it takes effect with no `config.conf` or when the write fails, then saves through `save_setting`.
 
 | Command key | macOS | Linux | Behavior |
 |---|---|---|---|
@@ -595,6 +596,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs (done on `md-keys`). The commands sit in a "Markdown" palette group. With assist off they are disabled in the palette, and their keys stay the editor's and do nothing. The `shortcut` test request runs an Editor command the widget's way: the bound key through the policy, only while the editor is focused.
 8. **The outline palette.**
 9. **Harness work:** settings support, engine parametrization, and the scenes. Then review.
+10. **Follow-ups** (done on `md-follow`): the group word deletes (§5.5), the two settings commands (§5.7) with `palette-assist` and `palette-engine` scenes, and the IME reveal and edge anchor (§9). A review round then fixed the anchor and the reveal on a wrapped first line, made word deletes take a run of CJK whole, and added functional word-delete cases with undo and the real Ctrl+⌫ and Alt+⌫ keys.
 
 **Promotion bar for `editor-engine = advanced` as the default:**
 - the shared suite passes on both backends in all four lanes;
@@ -612,5 +614,5 @@ There is **no iced upgrade while two backends exist.**
 - **Blockquote exit:** one Enter with a blank line left, chosen over CodeMirror's two empty lines.
 - **macOS ⌘E** is the system's "Use Selection for Find". We take it for inline code; revisit if it bothers people.
 - **A Mac console check is needed** for ⌘+letter and IME. ssh cannot send synthetic keys.
-- **IME anchor off screen (decided).** When a composition starts, which is the first non-empty preedit, the editor scrolls the caret into view. TextEdit, VS Code and Zed all reveal the insertion point when typing begins, so the candidate window always has a real anchor. If the caret is still off screen in the frame before that scroll, the anchor is the caret's column, clamped to the nearest view edge, never the corner. Disabling the IME is never an option.
+- **IME anchor off screen (decided).** When a composition starts, which is the first non-empty preedit, the editor scrolls the caret into view. TextEdit, VS Code and Zed all reveal the insertion point when typing begins, so the candidate window always has a real anchor. If the caret is still off screen in the frame before that scroll, the anchor is the caret's column, clamped to the nearest view edge, never the corner. Disabling the IME is never an option. Landed on `md-follow`: `Backend::ime_position` clamps every anchor with `clamp_ime_anchor` (the owned engine takes the off-screen caret's x from its line layout, which `update` always shapes), and the widget's `State::set_preedit` reports the first non-empty preedit, on which `Backend::reveal_cursor` scrolls the owned engine at once and makes iced scroll on the layout the widget invalidates. After review, the owned engine picks the edge by visual row when the caret is on the scroll line (a wrapped row there can sit above the view), and iced's reveal steps to the line's end and back when the cursor is at the start of a one-line note, where there is no line 1 to step to.
 - **Mixed endings, known edge case:** a CR line followed by an emptied LF line (`a\r` then `\n`) serializes as one CRLF break, so the editor shows one more line than a reload of the saved text. Rewriting the empty line's ending to CR after such an edit would close it; not done in this milestone.

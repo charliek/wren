@@ -38,6 +38,7 @@ COMMANDS = {
     "settings.open", "settings.reload", "app.quit",
     "markdown.toggle_task", "markdown.bold", "markdown.italic", "markdown.code",
     "edit.move_line_up", "edit.move_line_down",
+    "editor.toggle_markdown_assist", "editor.toggle_engine",
 }
 DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
 FIRST = "Atlas/Research/Note 1.md"
@@ -252,6 +253,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         assert {row["group"] for row in rows} == {"This note", "Markdown", "Go", "View", "Workspace",
                                                    "App"}
         assert all(row["title"] for row in rows)
+        assert {key: row["state"] for key, row in by_id.items() if row["state"]} == {
+            "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic"}
         for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict"}:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
@@ -939,6 +942,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
             "workspace.add", "workspace.switch", "theme.choose",
             "font.choose", "font.increase", "font.decrease", "font.reset",
             "settings.open", "settings.reload", "app.quit",
+            "editor.toggle_markdown_assist", "editor.toggle_engine",
         }
         gateway(app, "palette.close")
         command(app, "note.new", disposition="blocked")

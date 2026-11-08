@@ -135,6 +135,25 @@ def test_backspace_removes_markup_then_whole_characters(keys_app) -> None:
         assert editor.press("delete_to_line_start")["text"] == ""
 
 
+def test_word_deletes_take_one_group_and_undo_restores_it(keys_app) -> None:
+    cases = [
+        ("delete_word_back", "foo!!", 5, "foo", 3),
+        ("delete_word_back", "**bold**", 8, "**bold", 6),
+        ("delete_word_back", "- [ ] ", 6, "- [ ", 4),
+        ("delete_word_back", "ok👍👍", len("ok👍👍".encode()), "ok", 2),
+        ("delete_word_back", "日本語のテキスト", len("日本語のテキスト".encode()), "", 0),
+        ("delete_word_forward", "!!foo", 0, "foo", 0),
+    ]
+    with keys_app("keys-word-delete") as app:
+        editor = Editor(app)
+        for intent, before, column, after, at in cases:
+            editor.load(before, 0, column)
+            state = editor.press(intent)
+            assert (state["text"], cursor(state)) == (after, (0, at)), (intent, before)
+            state = editor.call("editor.undo")
+            assert (state["text"], cursor(state)) == (before, (0, column)), (intent, before)
+
+
 def test_home_toggles_between_the_text_and_column_0(keys_app) -> None:
     with keys_app("keys-home") as app:
         editor = Editor(app)
@@ -276,6 +295,14 @@ def test_native_smart_keys(keys_app) -> None:
         key("BackSpace")
         native_text(app, "- a\n  ", "BackSpace turns the marker into indentation")
 
+        call("editor.set", {"text": "foo **bold**!!"})
+        key("ctrl+End", "ctrl+BackSpace")
+        native_text(app, "foo **bold", "ctrl+BackSpace takes one run of punctuation")
+        key("alt+BackSpace")
+        native_text(app, "foo **", "alt+BackSpace takes one word")
+        key("ctrl+z")
+        native_text(app, "foo **bold", "ctrl+z restores the word")
+
 
 @pytest.mark.native_x11
 def test_native_keys_with_assist_off(keys_app) -> None:
@@ -354,6 +381,36 @@ def test_markdown_commands_are_unavailable_without_assist(keys_app) -> None:
         for command in ["markdown.toggle_task", "markdown.bold", "edit.move_line_down"]:
             assert run(app, command) == "blocked", command
         assert editor.call("editor.get")["text"] == "- [ ] a\nb"
+
+
+def test_settings_commands_switch_the_engine_and_markdown_assist(keys_app, engine) -> None:  # noqa: F811
+    other = "advanced" if engine == "classic" else "classic"
+    with keys_app("keys-settings-commands") as app:
+        editor = Editor(app)
+        get = lambda: editor.call("editor.get")  # noqa: E731
+        settings = app.settings_path
+        editor.load("- a\n- b", 1, 3)
+
+        assert run(app, "editor.toggle_engine") == "completed"
+        state = get()
+        assert state["engine"] == other
+        assert (state["text"], cursor(state)) == ("- a\n- b", (1, 3))
+        assert f"editor-engine = {other}\n" in settings.read_text()
+
+        assert run(app, "editor.toggle_markdown_assist") == "completed"
+        assert "markdown-assist = off\n" in settings.read_text()
+        assert editor.press("enter")["text"] == "- a\n- b\n"
+        assert run(app, "markdown.bold") == "blocked"
+
+        assert run(app, "editor.toggle_markdown_assist") == "completed"
+        assert "markdown-assist = on\n" in settings.read_text()
+        editor.load("- a", 0, 3)
+        assert editor.press("enter")["text"] == "- a\n- "
+
+        assert run(app, "editor.toggle_engine") == "completed"
+        state = get()
+        assert (state["engine"], state["text"], cursor(state)) == (engine, "- a\n- ", (1, 2))
+        assert f"editor-engine = {engine}\n" in settings.read_text()
 
 
 def test_markdown_shortcuts_act_only_in_the_focused_editor(keys_app) -> None:
