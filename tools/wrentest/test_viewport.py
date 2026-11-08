@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.test_editor import focus_native, xdo
-from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory
+from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
 from tools.wrentest.ui import WrenApp, wait_for
 from tools.wrentest.x11 import RGBImage, read_pixels
 
@@ -67,13 +67,7 @@ def body_rectangle(app: WrenApp) -> tuple[int, int, int, int]:
     root = app.client.call("navigation.bounds", timeout=3)["root"]
     assert root["width"] == current["viewport"]["width"], (root, current["viewport"])
     assert root["height"] > 600 and root["y"] == 48, root
-    if current["focus"]:
-        editor_width = min(root["width"], 760)
-        left = root["x"] + (root["width"] - editor_width) / 2
-    else:
-        browser_width = sum(current["effective_widths"].values())
-        editor_width = root["width"] - browser_width
-        left = root["x"] + browser_width
+    left, editor_width = editor_column(current, root["x"])
     assert editor_width >= 580, "Every fixture line must remain unwrapped"
     # The saved editor header is 49px plus its bottom rule. With no banner or
     # find bar, the body starts at client y=98, followed by the editor's 24px

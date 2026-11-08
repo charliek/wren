@@ -886,11 +886,10 @@ impl App {
         .height(if self.find_open { 44 } else { 0 })
         .clip(true);
         let (style, palette) = theme::editor_colors(self.definition);
-        let editor = container(self.editor.view(style, palette).map(Message::Editor))
-            .width(Fill)
-            .max_width(if self.focus { 760.0 } else { f32::MAX })
-            .height(Fill);
-        let editor: Element<'_, Message> = container(editor).center_x(Fill).height(Fill).into();
+        let editor: Element<'_, Message> = self
+            .editor
+            .view(style, palette, self.editor_max_width())
+            .map(Message::Editor);
         let mut empty = column![].spacing(14).align_x(iced::Center);
         let (prompt, action, command) = if self.selected_section.is_none() {
             (

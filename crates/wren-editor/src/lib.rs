@@ -255,11 +255,18 @@ impl EditorView {
 
     /// Build the iced widget tree for the editor.
     ///
-    /// Uses the editor font, 14 px / 24 px line height scaled with the text
-    /// size, soft-wrap, a 52 px line-number gutter unless hidden, `style` for
-    /// the surface, and Markdown highlighting in `palette` colours.  Returns
-    /// `Element<'_, Message>` so the parent can map it to its own message type.
-    pub fn view(&self, style: Style, palette: Palette) -> Element<'_, Message> {
+    /// Uses the editor font, rows the line-height ratio times the text size,
+    /// soft-wrap, a 52 px line-number gutter unless hidden, `style` for the
+    /// surface, and Markdown highlighting in `palette` colours. The column
+    /// of gutter and text grows to `max_width` and is centred past it.
+    /// Returns `Element<'_, Message>` so the parent can map it to its own
+    /// message type.
+    pub fn view(
+        &self,
+        style: Style,
+        palette: Palette,
+        max_width: Option<f32>,
+    ) -> Element<'_, Message> {
         TextEditor::new(
             &self.content,
             "note-editor",
@@ -274,6 +281,7 @@ impl EditorView {
             self.markdown_assist,
         )
         .key_policy(self.key_policy.as_ref())
+        .max_width(max_width)
         .into()
     }
 
@@ -2093,7 +2101,7 @@ mod tests {
             // This is a structural test: view() takes &self, so it cannot clone
             // content by moving it. We verify the text is unchanged after view().
             let ev = editor("test content");
-            let _element = ev.view(fixtures::STYLE, fixtures::DARK);
+            let _element = ev.view(fixtures::STYLE, fixtures::DARK, Some(760.0));
             // If this compiles and runs without panicking, content was borrowed not moved.
             assert_eq!(ev.text(), "test content");
         }

@@ -48,4 +48,7 @@ asks first when a section or group still holds notes.
 | **Back / Forward** (⌘[ / ⌘], Alt on Linux) | Notes you visited. |
 
 **Focus mode** (⌘Y / Alt+Y) hides the browser columns so only the editor
-shows; press it again to bring them back.
+shows, in a centred 760 px column; press it again to bring them back. The
+editor keeps to the same column width outside focus mode too, centred once
+its pane is wider; `editor-max-width` in
+[Configuration](../reference/configuration.md) changes it.

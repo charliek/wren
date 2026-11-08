@@ -198,6 +198,17 @@ impl Preferences {
 }
 
 impl App {
+    /// The widest the editor's column grows: the setting, except that focus
+    /// mode always centres one.
+    pub(super) fn editor_max_width(&self) -> Option<f32> {
+        let width = self.preferences.settings.editor_max_width;
+        if self.focus {
+            Some(width.unwrap_or(settings::DEFAULT_MAX_WIDTH))
+        } else {
+            width
+        }
+    }
+
     /// The displayed shortcut for a command key, in platform notation.
     pub(super) fn shortcut_label(&self, action: &str) -> Option<String> {
         self.preferences.keymap.label(action, Platform::current())
@@ -602,6 +613,30 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn focus_mode_always_centres_a_column_and_otherwise_follows_the_setting() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let options = || super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor_max_width(), Some(760.0));
+        app.focus = true;
+        assert_eq!(app.editor_max_width(), Some(760.0));
+        std::fs::write(&path, "editor-max-width = none\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor_max_width(), Some(760.0));
+        app.focus = false;
+        assert_eq!(app.editor_max_width(), None);
+        std::fs::write(&path, "editor-max-width = 1000\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor_max_width(), Some(1000.0));
+        app.focus = true;
+        assert_eq!(app.editor_max_width(), Some(1000.0));
     }
 
     #[test]

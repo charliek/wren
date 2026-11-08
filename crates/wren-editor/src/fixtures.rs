@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use iced::advanced::graphics::text::font_system;
 use iced::{Color, Font};
 
+use crate::highlighter::Settings;
 use crate::{Palette, Style};
 
 pub const FONT: Font = Font::with_name("JetBrains Mono");
@@ -32,6 +33,12 @@ pub const DARK: Palette = Palette {
     code: Color::from_rgb8(0x7f, 0xd1, 0xa0),
     quote: Color::from_rgb8(0xa3, 0xaa, 0xb6),
     completed: Color::from_rgb8(0x9a, 0xa1, 0xac),
+};
+
+pub const SETTINGS: Settings = Settings {
+    palette: DARK,
+    font: FONT,
+    front_matter_end: None,
 };
 
 pub const LIGHT: Palette = Palette {

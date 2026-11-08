@@ -275,6 +275,9 @@ pub struct TextEditor<'a> {
     style: Style,
     line_numbers: bool,
     metrics: Metrics,
+    /// The widest the column of gutter and text grows; past it the column
+    /// is centred.
+    max_width: Option<f32>,
     markdown_assist: bool,
     key_policy: Option<&'a KeyPolicy>,
     last_status: Option<Status>,
@@ -297,10 +300,18 @@ impl<'a> TextEditor<'a> {
             style,
             line_numbers,
             metrics,
+            max_width: None,
             markdown_assist,
             key_policy: None,
             last_status: None,
         }
+    }
+
+    /// Cap the column of gutter and text at `max_width`, centred in the
+    /// widget; `None` lets it fill the widget.
+    pub fn max_width(mut self, max_width: Option<f32>) -> Self {
+        self.max_width = max_width;
+        self
     }
 
     /// Ask `policy` about each key press first (see [`KeyPolicy`]).
@@ -309,7 +320,22 @@ impl<'a> TextEditor<'a> {
         self
     }
 
-    fn padding(&self) -> Padding {
+    /// The space on either side of the column in a widget `width` wide,
+    /// in whole pixels so the text stays on the pixel grid.
+    fn margin(&self, width: f32) -> f32 {
+        self.max_width
+            .map_or(0.0, |max| ((width - max) / 2.0).max(0.0).floor())
+    }
+
+    /// The column's horizontal extent in `bounds`.
+    fn column(&self, bounds: Rectangle) -> (f32, f32) {
+        let margin = self.margin(bounds.width);
+        (bounds.x + margin, bounds.width - 2.0 * margin)
+    }
+
+    /// The space around the text in a widget `width` wide.
+    fn padding(&self, width: f32) -> Padding {
+        let margin = self.margin(width);
         let left = if self.line_numbers {
             ROW_INSET + self.metrics.gutter
         } else {
@@ -317,9 +343,9 @@ impl<'a> TextEditor<'a> {
         };
         Padding {
             top: VERTICAL_PADDING,
-            right: ROW_INSET,
+            right: margin + ROW_INSET,
             bottom: VERTICAL_PADDING,
-            left,
+            left: margin + left,
         }
     }
 
@@ -332,7 +358,8 @@ impl<'a> TextEditor<'a> {
             return InputMethod::Disabled;
         };
 
-        let text_bounds = layout.bounds().shrink(self.padding());
+        let bounds = layout.bounds();
+        let text_bounds = bounds.shrink(self.padding(bounds.width));
         let translation = text_bounds.position() - Point::ORIGIN;
         let Some(cursor) = self.content.0.borrow().ime_position() else {
             return InputMethod::Disabled;
@@ -459,7 +486,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 
         let limits = limits.width(Length::Fill).height(Length::Fill);
         editor.update(
-            limits.shrink(self.padding()).max(),
+            limits.shrink(self.padding(limits.max().width)).max(),
             self.highlighter_settings.font,
             Pixels(self.metrics.text),
             self.metrics.line_height(),
@@ -515,7 +542,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             event,
             state,
             layout.bounds(),
-            self.padding(),
+            self.padding(layout.bounds().width),
             cursor,
             crate::keys::Context {
                 markdown_assist: self.markdown_assist,
@@ -633,7 +660,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             style.background,
         );
 
-        let text_bounds = bounds.shrink(self.padding());
+        let text_bounds = bounds.shrink(self.padding(bounds.width));
+        let (column_x, column_width) = self.column(bounds);
         // Rows span the full width, but scroll out under the vertical padding.
         let rows_clip = Rectangle {
             x: bounds.x,
@@ -651,7 +679,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             let band = Rectangle {
                 x: code_left,
                 y: text_bounds.y + row.top,
-                width: (bounds.x + bounds.width - ROW_INSET - code_left).max(0.0),
+                width: (column_x + column_width - ROW_INSET - code_left).max(0.0),
                 height: row.height,
             };
             if let Some(band) = band.intersection(&rows_clip) {
@@ -667,9 +695,9 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 
         for row in rows.iter().filter(|row| row.line == cursor_line) {
             let band = Rectangle {
-                x: bounds.x + ROW_INSET,
+                x: column_x + ROW_INSET,
                 y: text_bounds.y + row.top,
-                width: (bounds.width - 2.0 * ROW_INSET).max(0.0),
+                width: (column_width - 2.0 * ROW_INSET).max(0.0),
                 height: row.height,
             };
             if let Some(band) = band.intersection(&rows_clip) {
@@ -706,7 +734,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         }
 
         if self.line_numbers {
-            let right = bounds.x + ROW_INSET + self.metrics.gutter - GUTTER_PADDING_RIGHT;
+            let right = column_x + ROW_INSET + self.metrics.gutter - GUTTER_PADDING_RIGHT;
             clip(renderer, rows_clip, |renderer| {
                 for row in rows.iter().filter(|row| row.starts_line) {
                     let color = if row.line == cursor_line {
@@ -1231,34 +1259,47 @@ mod tests {
     #[test]
     fn padding_reserves_the_gutter_only_when_shown() {
         let content = Content::new(BackendKind::Iced, "");
-        let settings = HighlighterSettings {
-            palette: fixtures::DARK,
-            font: fixtures::FONT,
-            front_matter_end: None,
+        let editor = |line_numbers| {
+            TextEditor::new(
+                &content,
+                "e",
+                fixtures::SETTINGS,
+                fixtures::STYLE,
+                line_numbers,
+                Metrics::default(),
+                true,
+            )
         };
-        let style = fixtures::STYLE;
-        let shown = TextEditor::new(
-            &content,
-            "e",
-            settings,
-            style,
-            true,
-            Metrics::default(),
-            true,
-        )
-        .padding();
-        let hidden = TextEditor::new(
-            &content,
-            "e",
-            settings,
-            style,
-            false,
-            Metrics::default(),
-            true,
-        )
-        .padding();
+        let shown = editor(true).padding(600.0);
+        let hidden = editor(false).padding(600.0);
         assert_eq!((shown.left, shown.top, shown.bottom), (60.0, 24.0, 24.0));
         assert_eq!(hidden.left, 16.0);
+    }
+
+    #[test]
+    fn a_maximum_width_centres_the_column_once_the_widget_is_wider() {
+        let content = Content::new(BackendKind::Iced, "");
+        let editor = TextEditor::new(
+            &content,
+            "e",
+            fixtures::SETTINGS,
+            fixtures::STYLE,
+            true,
+            Metrics::default(),
+            true,
+        )
+        .max_width(Some(760.0));
+        let narrow = editor.padding(600.0);
+        assert_eq!((narrow.left, narrow.right), (60.0, 8.0));
+        let wide = editor.padding(1001.0);
+        assert_eq!((wide.left, wide.right), (60.0 + 120.0, 8.0 + 120.0));
+        let bounds = Rectangle::new(Point::new(280.0, 98.0), Size::new(1000.0, 600.0));
+        assert_eq!(editor.column(bounds), (400.0, 760.0));
+        let text = bounds.shrink(editor.padding(bounds.width));
+        // The text column is the 760 px column less the gutter and insets.
+        assert_eq!((text.x, text.width), (460.0, 692.0));
+        let uncapped = editor.max_width(None);
+        assert_eq!(uncapped.column(bounds), (280.0, 1000.0));
     }
 
     fn laid_out(kind: BackendKind, text: &str, width: f32) -> Vec<VisualRow> {
