@@ -3,7 +3,7 @@
 ## Gates
 
 ```bash
-make check                              # fmt, clippy (normal + smoke-test), Rust tests, Python units
+make check                              # fmt, clippy (normal, smoke-test, wren-editor alone), Rust tests, Python units
 ICED_BACKEND=tiny-skia make smoke-x11   # real-window functional suite under Xvfb
 make smoke-wayland                      # same suite on headless Weston, minus X11-native cases
 uv run --locked --group docs zensical build --strict # the docs site, for changes under docs/
