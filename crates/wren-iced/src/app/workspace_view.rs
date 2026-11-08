@@ -98,10 +98,7 @@ impl App {
                 container(iced::widget::space())
                     .width(Fill)
                     .height(Fill)
-                    .style(|_| container::Style {
-                        background: Some(iced::Color::from_rgba(0.025, 0.028, 0.04, 0.60).into()),
-                        ..Default::default()
-                    }),
+                    .style(move |_| chrome::scrim(self.definition)),
             )
             .on_press(Message::CancelDialog);
             stack![
@@ -574,7 +571,11 @@ impl App {
                     &hit.snippet.text
                 };
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
-                let sub = format!("{} · {}", modified_label(note), preview);
+                let sub = if preview.is_empty() {
+                    modified_label(note)
+                } else {
+                    format!("{} · {}", modified_label(note), preview)
+                };
                 let mut label = column![
                     ellipsis(&note.title, 13.0, theme::color(colors.text)).font(fonts::MEDIUM)
                 ]
@@ -716,19 +717,26 @@ impl App {
             .into()
     }
 
-    /// The selected row in the active column gets an accent border; selected
-    /// rows elsewhere keep the quieter selection border.
+    /// The selected row in the active column gets the selection fill and an
+    /// accent border; selected rows elsewhere mark the path with a quieter
+    /// fill and no border.
     fn row_style(&self, selected: bool, column: Column) -> container::Style {
         let colors = self.definition.colors;
+        let active = selected && self.column == column;
         container::Style {
-            background: selected.then(|| theme::color(colors.selected).into()),
+            background: selected.then(|| {
+                theme::color(if active {
+                    colors.selected
+                } else {
+                    colors.selected_inactive
+                })
+                .into()
+            }),
             border: Border {
-                color: if !selected {
-                    iced::Color::TRANSPARENT
-                } else if self.column == column {
+                color: if active {
                     theme::color(colors.accent)
                 } else {
-                    theme::color(colors.selected_border)
+                    iced::Color::TRANSPARENT
                 },
                 width: 1.0,
                 radius: 6.0.into(),

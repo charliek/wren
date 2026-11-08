@@ -139,7 +139,7 @@ def capture(app: WrenApp, path: Path) -> png.PNG:
 # the accent, inline code the success colour, and code bands current_line.
 @pytest.mark.parametrize("theme,heading,code", [
     ("dark", (0xF0, 0xB4, 0x5A), (0x7F, 0xD1, 0xA0)),
-    ("light", (0x9A, 0x58, 0x00), (0x19, 0x73, 0x42)),
+    ("light", (0xB0, 0x4F, 0x0A), (0x19, 0x73, 0x42)),
 ])
 def test_editor_highlighting_renders_in_both_themes(theme, heading, code, editor_app) -> None:
     artifacts = artifact_directory(f"editor-highlight-{theme}")

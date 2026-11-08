@@ -56,6 +56,19 @@ pub fn surface(definition: Theme, background: Rgb, radius: f32, border: bool) ->
     }
 }
 
+/// The backdrop behind dialogs and the palette. Light themes dim less, so
+/// the window recedes instead of turning gray.
+pub fn scrim(definition: Theme) -> container::Style {
+    let alpha = match definition.appearance {
+        wren_core::theme::Appearance::Dark => 0.60,
+        wren_core::theme::Appearance::Light => 0.32,
+    };
+    container::Style {
+        background: Some(iced::Color::from_rgba(0.025, 0.028, 0.04, alpha).into()),
+        ..Default::default()
+    }
+}
+
 pub fn dialog(definition: Theme) -> container::Style {
     // tiny-skia's shadow pass ignores damage clipping and can cover the dialog.
     // The scrim and border provide separation consistently on both renderers.

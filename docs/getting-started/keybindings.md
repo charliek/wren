@@ -138,7 +138,9 @@ does both exactly. The outline also works in the in-memory editor
 
 One of Sections, Groups, Notes, or the editor has the keyboard at a time.
 Its header turns to the accent color with a small dot, and its selected
-row gets an accent border.
+row gets the selection fill and an accent border. The selected rows in the
+other columns keep a quieter fill, so the path to the open note stays
+visible.
 
 | Key | In Sections, Groups, or Notes |
 |---|---|

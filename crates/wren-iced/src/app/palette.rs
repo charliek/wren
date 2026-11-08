@@ -1098,8 +1098,19 @@ impl App {
         };
         let top =
             (if search { 72.0_f32 } else { 96.0_f32 }).min((self.viewport.height * 0.16).max(8.0));
-        let list_height =
+        let mut list_height =
             (self.viewport.height - top - 134.0).clamp(40.0, if search { 460.0 } else { 400.0 });
+        if search {
+            // Search hugs its results (76 px rows, 2 px gaps, 6 px padding)
+            // instead of framing a mostly empty panel.
+            let rows = palette.results.len() as f32;
+            let content = if rows == 0.0 {
+                48.0
+            } else {
+                rows * 76.0 + (rows - 1.0) * 2.0 + 12.0
+            };
+            list_height = list_height.min(content.max(160.0));
+        }
         let mut input = row![].spacing(8).align_y(iced::Center);
         if search {
             input = input.push(chrome::icon(chrome::Icon::Search, 16.0, colors.muted));
@@ -1199,15 +1210,18 @@ impl App {
             let indent = result
                 .heading
                 .map_or(0.0, |heading| f32::from(heading.depth) * 16.0);
-            let mut contents = row![container(label)
-                .padding(iced::Padding {
-                    left: indent,
-                    ..iced::Padding::ZERO
-                })
-                .width(Fill)]
-            .spacing(12)
-            .align_y(iced::Center)
-            .clip(true);
+            let mut contents = row![].spacing(12).align_y(iced::Center).clip(true);
+            if let Key::Theme(id) = &result.key {
+                contents = contents.push(theme_swatch(*id));
+            }
+            contents = contents.push(
+                container(label)
+                    .padding(iced::Padding {
+                        left: indent,
+                        ..iced::Padding::ZERO
+                    })
+                    .width(Fill),
+            );
             if search {
                 contents = contents.push(chrome::label(
                     if result.content_hit { "text" } else { "title" },
@@ -1334,10 +1348,7 @@ impl App {
             container(iced::widget::space())
                 .width(Fill)
                 .height(Fill)
-                .style(move |_| container::Style {
-                    background: Some(iced::Color::from_rgba(0.025, 0.028, 0.04, 0.60).into()),
-                    ..Default::default()
-                }),
+                .style(move |_| chrome::scrim(self.definition)),
         )
         .on_press(Message::PaletteClose);
         stack![
@@ -1473,6 +1484,62 @@ pub(super) fn highlighted_text<'a>(
         }
     }
     chrome::label(snippet, 12, definition.colors.muted).into()
+}
+
+/// A miniature of a theme for its picker row: the editor surface with a
+/// heading stroke and a body stroke. The System row shows its light and dark
+/// pair side by side.
+fn theme_swatch<'a>(id: Option<&'static str>) -> Element<'a, Message> {
+    fn half<'a>(
+        definition: definitions::Theme,
+        width: f32,
+        radius: iced::border::Radius,
+    ) -> Element<'a, Message> {
+        let colors = definition.colors;
+        let stroke = |color, length| {
+            container(iced::widget::space())
+                .width(length)
+                .height(3)
+                .style(move |_| container::Style {
+                    background: Some(theme::color(color).into()),
+                    border: iced::Border {
+                        radius: 1.5.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+        };
+        container(
+            column![
+                stroke(colors.heading, width * 0.45),
+                stroke(colors.body, width * 0.7),
+                stroke(colors.link, width * 0.35),
+            ]
+            .spacing(3),
+        )
+        .padding([6, 6])
+        .width(width)
+        .height(28)
+        .style(move |_| container::Style {
+            background: Some(theme::color(colors.editor).into()),
+            border: iced::Border {
+                color: theme::color(colors.control_border),
+                width: 1.0,
+                radius,
+            },
+            ..Default::default()
+        })
+        .into()
+    }
+    let radius = iced::border::Radius::new(6.0);
+    match id.and_then(definitions::builtin) {
+        Some(definition) => half(definition, 44.0, radius),
+        None => row![
+            half(definitions::LIGHT, 22.0, radius.right(0.0)),
+            half(definitions::DARK, 22.0, radius.left(0.0)),
+        ]
+        .into(),
+    }
 }
 
 #[cfg(test)]
