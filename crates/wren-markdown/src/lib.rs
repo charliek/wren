@@ -2,8 +2,8 @@
 //!
 //! The crate knows nothing about a UI toolkit. An editor hands it the
 //! document's lines through [`Lines`] and gets back line classifications
-//! ([`block`]) and, for each editing [`Intent`], an [`EditPlan`] of
-//! replacements to apply.
+//! ([`block`]), a heading outline ([`outline`]), and, for each editing
+//! [`Intent`], an [`EditPlan`] of replacements to apply.
 //!
 //! Positions are `(line, byte column)` pairs. Line text never includes its
 //! line ending, and inserted text always uses `'\n'`; the editor translates
@@ -12,6 +12,7 @@
 use std::ops::Range;
 
 pub mod block;
+pub mod outline;
 
 /// Random access to a document's lines.
 ///
