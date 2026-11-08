@@ -54,7 +54,7 @@ use iced::{
 };
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
-use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
@@ -210,6 +210,7 @@ impl Content {
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
             palette: crate::fixtures::DARK,
             font: crate::fixtures::FONT,
+            front_matter_end: None,
         });
         let backend = self.0.get_mut();
         backend.update(
@@ -577,7 +578,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             width: bounds.width,
             height: text_bounds.height,
         };
-        let rows = visual_rows(editor.buffer());
+        let rows = visual_rows(editor.buffer(), &state.highlighter.borrow());
         let cursor_line = editor.cursor().position.line;
 
         for row in rows.iter().filter(|row| row.line == cursor_line) {
@@ -655,10 +656,10 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         // Quads sort beneath text within a layer; strikes and the caret must
         // paint over the glyphs.
         renderer.with_layer(rows_clip, |renderer| {
-            for row in &rows {
-                let Some((start, end)) = row.strike else {
-                    continue;
-                };
+            for (row, &(start, end)) in rows
+                .iter()
+                .flat_map(|row| row.strikes.iter().map(move |strike| (row, strike)))
+            {
                 let y =
                     (text_bounds.y + row.baseline - self.metrics.text * X_HEIGHT_EM / 2.0).round();
                 renderer.fill_quad(
@@ -919,37 +920,37 @@ struct VisualRow {
     baseline: f32,
     /// Whether this is the first visual row of its logical line.
     starts_line: bool,
-    /// Horizontal `(start, end)` of the completed-task strike, if any.
-    strike: Option<(f32, f32)>,
+    /// Horizontal `(start, end)` of each strike-through on the row.
+    strikes: Vec<(f32, f32)>,
 }
 
-/// Collects the visible rows of `buffer` (already scrolled by the editor).
-fn visual_rows(buffer: &cosmic_text::Buffer) -> Vec<VisualRow> {
-    let runs: Vec<_> = buffer.layout_runs().collect();
-    let Some(last_line) = runs.last().map(|run| run.line_i) else {
-        return Vec::new();
-    };
-    // Fence state crosses lines, so scan from the top through the last visible line.
-    let struck: Vec<_> =
-        highlighter::done_task_ranges(buffer.lines[..=last_line].iter().map(|line| line.text()))
-            .collect();
-
-    runs.iter()
-        .map(|run| VisualRow {
-            line: run.line_i,
-            top: run.line_top,
-            height: run.line_height,
-            baseline: run.line_y,
-            starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
-            strike: struck[run.line_i].clone().and_then(|range| {
-                strike_span(
-                    run.text,
-                    run.glyphs
-                        .iter()
-                        .map(|glyph| (glyph.start..glyph.end, glyph.x, glyph.w)),
-                    range,
-                )
-            }),
+/// Collects the visible rows of `buffer` (already scrolled by the editor),
+/// with the decoration `highlighter` left for each line.
+fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) -> Vec<VisualRow> {
+    buffer
+        .layout_runs()
+        .map(|run| {
+            let decor = highlighter.decor(run.line_i);
+            VisualRow {
+                line: run.line_i,
+                top: run.line_top,
+                height: run.line_height,
+                baseline: run.line_y,
+                starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
+                strikes: decor
+                    .into_iter()
+                    .flat_map(|decor| &decor.strikes)
+                    .filter_map(|range| {
+                        strike_span(
+                            run.text,
+                            run.glyphs
+                                .iter()
+                                .map(|glyph| (glyph.start..glyph.end, glyph.x, glyph.w)),
+                            range.clone(),
+                        )
+                    })
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -1037,6 +1038,7 @@ mod tests {
         let settings = HighlighterSettings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
+            front_matter_end: None,
         };
         let style = fixtures::STYLE;
         let shown =
@@ -1047,12 +1049,13 @@ mod tests {
         assert_eq!(hidden.left, 16.0);
     }
 
-    fn laid_out(kind: BackendKind, text: &str, width: f32) -> Backend {
+    fn laid_out(kind: BackendKind, text: &str, width: f32) -> Vec<VisualRow> {
         fixtures::load_font();
         let mut editor = Backend::with_text(kind, text);
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
+            front_matter_end: None,
         });
         editor.update(
             Size::new(width, 1000.0),
@@ -1062,18 +1065,18 @@ mod tests {
             Wrapping::WordOrGlyph,
             &mut highlighter,
         );
-        editor
+        editor.highlight(fixtures::FONT, &mut highlighter);
+        visual_rows(editor.buffer(), &highlighter)
     }
 
     #[test]
     fn wrapped_lines_number_only_their_first_visual_row() {
         for kind in BackendKind::ALL {
-            let editor = laid_out(
+            let rows = laid_out(
                 kind,
                 "short\nwrapped words wrapped words wrapped words\n\nend",
                 120.0,
             );
-            let rows = visual_rows(editor.buffer());
             let numbered: Vec<_> = rows
                 .iter()
                 .filter(|row| row.starts_line)
@@ -1090,19 +1093,18 @@ mod tests {
     #[test]
     fn only_completed_tasks_outside_code_are_struck() {
         for kind in BackendKind::ALL {
-            let editor = laid_out(
+            let rows = laid_out(
                 kind,
-                "- [x] done\n- [ ] open\n```\n- [x] code\n```\n- [X] Done",
+                "- [x] done\n- [ ] open\n```\n- [x] code\n```\n- [X] Done\n- a\n  - [x] b",
                 600.0,
             );
-            let struck: Vec<_> = visual_rows(editor.buffer())
+            let struck: Vec<_> = rows
                 .iter()
-                .filter(|row| row.strike.is_some())
+                .filter(|row| !row.strikes.is_empty())
                 .map(|row| row.line)
                 .collect();
-            assert_eq!(struck, [0, 5], "{kind:?}");
-            let row = &visual_rows(editor.buffer())[0];
-            let (start, end) = row.strike.unwrap();
+            assert_eq!(struck, [0, 5, 7], "{kind:?}");
+            let (start, end) = rows[0].strikes[0];
             // "- [x] " is six monospace cells; "done" is four more.
             let cell = start / 6.0;
             assert!(cell > 7.0 && cell < 10.0, "{start}");

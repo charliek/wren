@@ -23,8 +23,9 @@ when one lands, move what users need into `docs/` and trim the note.
   `lib.rs` holds `EditorView` and `Message`; `widget.rs` is a fork of iced's
   text editor with the gutter, current line, and caret; `backend/` holds
   the two text engines behind `Content` (`iced.rs`, iced's own editor, and
-  `cosmic.rs`, an owned cosmic-text editor drawn with `fill_raw`), and the
-  editor tests run on both; plus `highlighter.rs`, `history.rs` (snapshot
+  `owned.rs`, an owned cosmic-text editor drawn with `fill_raw`), and the
+  editor tests run on both; plus `highlighter.rs` (spans and per-line
+  decorations from `wren_markdown::block`), `history.rs` (snapshot
   undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
   accessors sit behind its `test-support` feature, which
   `wren-iced/smoke-test` enables.
@@ -43,7 +44,9 @@ when one lands, move what users need into `docs/` and trim the note.
   iced or Wren dependency (only `unicode-segmentation`), so it can be
   extracted later. `block.rs` is the line classifier and container scanner,
   `outline.rs` the heading outline, and `edit.rs` plus `edit/` plan each
-  editing `Intent` as an `EditPlan` of replacements. Nothing uses it yet.
+  editing `Intent` as an `EditPlan` of replacements. `block` is Wren's one
+  classifier: the editor's highlighter and the search index's previews use
+  it.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it

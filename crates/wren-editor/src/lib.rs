@@ -117,6 +117,9 @@ pub struct EditorView {
     line_numbers: bool,
     metrics: widget::Metrics,
     font: Font,
+    /// The text's `block::front_matter_end`, kept current after every
+    /// change for the highlighter, which cannot look ahead.
+    front_matter_end: Option<usize>,
 }
 
 impl EditorView {
@@ -127,7 +130,7 @@ impl EditorView {
 
     /// Create a new editor pre-populated with `text`, on the `kind` engine.
     pub fn with_backend(kind: BackendKind, text: &str) -> Self {
-        Self {
+        let mut view = Self {
             content: Content::new(kind, text),
             history: History::new(),
             find_query: String::new(),
@@ -136,7 +139,10 @@ impl EditorView {
             line_numbers: true,
             metrics: widget::Metrics::default(),
             font: Font::MONOSPACE,
-        }
+            front_matter_end: None,
+        };
+        view.refresh_front_matter();
+        view
     }
 
     /// Editor text size in points; row and caret heights scale with it.
@@ -182,6 +188,7 @@ impl EditorView {
             HighlighterSettings {
                 palette,
                 font: self.font,
+                front_matter_end: self.front_matter_end,
             },
             style,
             self.line_numbers,
@@ -210,7 +217,7 @@ impl EditorView {
                 return false;
             }
             self.history.before_edit(before, kind, now);
-            self.recompute_find();
+            self.text_changed();
             true
         } else {
             self.history.break_group();
@@ -245,7 +252,7 @@ impl EditorView {
         if changed {
             self.history
                 .before_edit(before, EditKind::Replace, Instant::now());
-            self.recompute_find();
+            self.text_changed();
         } else {
             self.history.break_group();
         }
@@ -400,7 +407,7 @@ impl EditorView {
         }
         self.history.clear();
         self.find_current = None;
-        self.recompute_find();
+        self.text_changed();
     }
 
     /// The engine the editor runs on.
@@ -422,7 +429,7 @@ impl EditorView {
         self.content.move_to(clamped);
         self.history.clear();
         self.find_current = None;
-        self.recompute_find();
+        self.text_changed();
         true
     }
 
@@ -606,11 +613,23 @@ impl EditorView {
         let cursor = self.clamped(snapshot.cursor);
         self.content.restore_view(cursor, snapshot.scroll);
         self.find_current = None;
-        self.recompute_find();
+        self.text_changed();
     }
 
     fn clamped(&self, cursor: Cursor) -> Cursor {
         self.content.with_lines(|lines| clamp_cursor(cursor, lines))
+    }
+
+    /// Refresh what derives from the text after it changed.
+    fn text_changed(&mut self) {
+        self.refresh_front_matter();
+        self.recompute_find();
+    }
+
+    fn refresh_front_matter(&mut self) {
+        self.front_matter_end = self.content.with_lines(|lines| {
+            (lines.len() > 0).then(|| wren_markdown::block::front_matter_end(&lines))?
+        });
     }
 
     fn recompute_find(&mut self) {
@@ -976,6 +995,41 @@ mod tests {
             for c in s.chars() {
                 ev.perform(Action::Edit(Edit::Insert(c)));
             }
+        }
+
+        #[test]
+        fn front_matter_end_follows_every_kind_of_change() {
+            let mut ev = editor("---\ntitle: x\n---\nbody");
+            assert_eq!(ev.front_matter_end, Some(2));
+            // Typing into the closing delimiter unbalances the front matter.
+            let caret = |line, column| Cursor {
+                position: Position { line, column },
+                selection: None,
+            };
+            ev.move_cursor(caret(2, 3));
+            assert!(ev.perform(Action::Edit(Edit::Insert('x'))));
+            assert_eq!(ev.front_matter_end, None);
+            assert!(ev.undo());
+            assert_eq!(ev.front_matter_end, Some(2));
+            assert!(ev.redo());
+            assert_eq!(ev.front_matter_end, None);
+            let close = Replace {
+                start: Position { line: 2, column: 0 },
+                end: Position { line: 2, column: 4 },
+                text: "\n...".into(),
+            };
+            assert!(ev.apply(&[close], caret(0, 0)));
+            assert_eq!(ev.front_matter_end, Some(3));
+            ev.replace_text("# no front matter", true);
+            assert_eq!(ev.front_matter_end, None);
+            ev.replace_text("---\n# comment\n---", false);
+            assert_eq!(ev.front_matter_end, Some(2));
+            let other = crate::BackendKind::ALL
+                .into_iter()
+                .find(|&kind| kind != KIND)
+                .unwrap();
+            assert!(ev.set_backend(other, "---\na: b\n\n...\n"));
+            assert_eq!(ev.front_matter_end, Some(3));
         }
 
         #[test]

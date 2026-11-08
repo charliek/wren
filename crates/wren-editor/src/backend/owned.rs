@@ -755,6 +755,7 @@ mod tests {
         MarkdownHighlighter::new(&Settings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
+            front_matter_end: None,
         })
     }
 
