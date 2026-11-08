@@ -1,11 +1,11 @@
 //! The heading outline of a document.
 //!
-//! Headings come from [`block::scan`](crate::block::scan), so nothing in
-//! code-like lines (fences, indented code, HTML blocks) or front matter is
-//! a heading. Headings inside block quotes and list items are included:
-//! they render as headings, and a note that nests its sections under list
-//! items still wants them in its outline. ATX and setext headings both
-//! count; headings whose plain text is empty are skipped.
+//! Headings come from [`block::scan`], so nothing in code-like lines
+//! (fences, indented code, HTML blocks) or front matter is a heading.
+//! Headings inside block quotes and list items are included: they render as
+//! headings, and a note that nests its sections under list items still wants
+//! them in its outline. ATX and setext headings both count; headings whose
+//! plain text is empty are skipped.
 
 use std::ops::Range;
 
