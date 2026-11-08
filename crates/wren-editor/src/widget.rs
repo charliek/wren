@@ -52,7 +52,7 @@ use iced::{
     Theme, Vector,
 };
 
-use crate::backend::{Backend, Lines};
+use crate::backend::{Backend, BackendKind, Lines};
 use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::{Message, Style};
 
@@ -119,9 +119,18 @@ fn line_height() -> LineHeight {
 pub struct Content(RefCell<Backend>);
 
 impl Content {
-    /// Creates a [`Content`] with the given text.
-    pub fn with_text(text: &str) -> Self {
-        Self(RefCell::new(Backend::with_text(text)))
+    /// Creates a [`Content`] with the given text on the `kind` engine.
+    pub fn new(kind: BackendKind, text: &str) -> Self {
+        Self(RefCell::new(Backend::with_text(kind, text)))
+    }
+
+    pub fn kind(&self) -> BackendKind {
+        self.0.borrow().kind()
+    }
+
+    /// Replaces the text on the same engine; see [`Backend::replace_text`].
+    pub fn replace_text(&mut self, text: &str) {
+        self.0.get_mut().replace_text(text);
     }
 
     /// Performs an [`Action`] on the [`Content`].
@@ -558,8 +567,6 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             }
         }
 
-        editor.draw(renderer, text_bounds.position(), style.value, text_bounds);
-
         let translation = text_bounds.position() - Point::ORIGIN;
         let selection = state
             .focus
@@ -580,6 +587,10 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                 );
             }
         }
+
+        // The Cosmic engine hands the renderer a weak buffer reference, which
+        // a later mutation would detach, so the text goes after every query.
+        editor.draw(renderer, text_bounds.position(), style.value, text_bounds);
 
         // Quads sort beneath text within a layer; strikes and the caret must
         // paint over the glyphs.
@@ -949,7 +960,7 @@ mod tests {
 
     #[test]
     fn padding_reserves_the_gutter_only_when_shown() {
-        let content = Content::with_text("");
+        let content = Content::new(BackendKind::Iced, "");
         let settings = HighlighterSettings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
@@ -963,9 +974,9 @@ mod tests {
         assert_eq!(hidden.left, 16.0);
     }
 
-    fn laid_out(text: &str, width: f32) -> Backend {
+    fn laid_out(kind: BackendKind, text: &str, width: f32) -> Backend {
         fixtures::load_font();
-        let mut editor = Backend::with_text(text);
+        let mut editor = Backend::with_text(kind, text);
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
@@ -983,40 +994,46 @@ mod tests {
 
     #[test]
     fn wrapped_lines_number_only_their_first_visual_row() {
-        let editor = laid_out(
-            "short\nwrapped words wrapped words wrapped words\n\nend",
-            120.0,
-        );
-        let rows = visual_rows(editor.buffer());
-        let numbered: Vec<_> = rows
-            .iter()
-            .filter(|row| row.starts_line)
-            .map(|row| row.line)
-            .collect();
-        assert_eq!(numbered, [0, 1, 2, 3]);
-        assert!(rows.iter().filter(|row| row.line == 1).count() > 1);
-        for pair in rows.windows(2) {
-            assert_eq!(pair[1].top, pair[0].top + LINE_HEIGHT);
+        for kind in BackendKind::ALL {
+            let editor = laid_out(
+                kind,
+                "short\nwrapped words wrapped words wrapped words\n\nend",
+                120.0,
+            );
+            let rows = visual_rows(editor.buffer());
+            let numbered: Vec<_> = rows
+                .iter()
+                .filter(|row| row.starts_line)
+                .map(|row| row.line)
+                .collect();
+            assert_eq!(numbered, [0, 1, 2, 3], "{kind:?}");
+            assert!(rows.iter().filter(|row| row.line == 1).count() > 1);
+            for pair in rows.windows(2) {
+                assert_eq!(pair[1].top, pair[0].top + LINE_HEIGHT);
+            }
         }
     }
 
     #[test]
     fn only_completed_tasks_outside_code_are_struck() {
-        let editor = laid_out(
-            "- [x] done\n- [ ] open\n```\n- [x] code\n```\n- [X] Done",
-            600.0,
-        );
-        let struck: Vec<_> = visual_rows(editor.buffer())
-            .iter()
-            .filter(|row| row.strike.is_some())
-            .map(|row| row.line)
-            .collect();
-        assert_eq!(struck, [0, 5]);
-        let row = &visual_rows(editor.buffer())[0];
-        let (start, end) = row.strike.unwrap();
-        // "- [x] " is six monospace cells; "done" is four more.
-        let cell = start / 6.0;
-        assert!(cell > 7.0 && cell < 10.0, "{start}");
-        assert!((end - start - 4.0 * cell).abs() < 0.5, "{start}..{end}");
+        for kind in BackendKind::ALL {
+            let editor = laid_out(
+                kind,
+                "- [x] done\n- [ ] open\n```\n- [x] code\n```\n- [X] Done",
+                600.0,
+            );
+            let struck: Vec<_> = visual_rows(editor.buffer())
+                .iter()
+                .filter(|row| row.strike.is_some())
+                .map(|row| row.line)
+                .collect();
+            assert_eq!(struck, [0, 5], "{kind:?}");
+            let row = &visual_rows(editor.buffer())[0];
+            let (start, end) = row.strike.unwrap();
+            // "- [x] " is six monospace cells; "done" is four more.
+            let cell = start / 6.0;
+            assert!(cell > 7.0 && cell < 10.0, "{start}");
+            assert!((end - start - 4.0 * cell).abs() < 0.5, "{start}..{end}");
+        }
     }
 }

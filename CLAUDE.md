@@ -21,10 +21,13 @@ when one lands, move what users need into `docs/` and trim the note.
   types so it can be extracted later. It must not depend on `wren-core` or
   know app messages; the host passes in a `Style`, a `Palette`, and the font.
   `lib.rs` holds `EditorView` and `Message`; `widget.rs` is a fork of iced's
-  text editor with the gutter, current line, and caret; plus
-  `highlighter.rs`, `history.rs` (snapshot undo), `find.rs`, and `keys.rs`
-  (the editor's own shortcuts). Test-only accessors sit behind its
-  `test-support` feature, which `wren-iced/smoke-test` enables.
+  text editor with the gutter, current line, and caret; `backend/` holds
+  the two text engines behind `Content` (`iced.rs`, iced's own editor, and
+  `cosmic.rs`, an owned cosmic-text editor drawn with `fill_raw`), and the
+  editor tests run on both; plus `highlighter.rs`, `history.rs` (snapshot
+  undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
+  accessors sit behind its `test-support` feature, which
+  `wren-iced/smoke-test` enables.
 - `crates/wren-iced/`: the desktop app (binary `wren`).
   - `app.rs` holds `App`, `Message`, `update`, `view`, and `subscription`;
     its submodules live in `app/`: `commands.rs` (the command table and

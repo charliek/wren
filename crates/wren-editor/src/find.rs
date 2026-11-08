@@ -184,6 +184,7 @@ pub(crate) fn byte_offset_to_position(lines: Lines<'_>, mut offset: usize) -> Po
 mod tests {
     use super::*;
     use crate::widget::Content;
+    use crate::BackendKind;
 
     #[test]
     fn first_match_stream_agrees_with_literal_find_on_small_unicode_inputs() {
@@ -199,15 +200,17 @@ mod tests {
             ("no match", "missing"),
             ("anything", ""),
         ] {
-            let content = Content::with_text(text);
             let expected = find_all_matches(text, query)
                 .first()
                 .map(|&(start, end)| start..end);
-            assert_eq!(
-                content.with_lines(|lines| first_content_match(lines, query)),
-                expected,
-                "{text:?}, {query:?}"
-            );
+            for kind in BackendKind::ALL {
+                let content = Content::new(kind, text);
+                assert_eq!(
+                    content.with_lines(|lines| first_content_match(lines, query)),
+                    expected,
+                    "{kind:?}, {text:?}, {query:?}"
+                );
+            }
         }
     }
 
