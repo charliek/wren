@@ -42,10 +42,7 @@ Round 2 adds rules for the new tokens. `quote` and `completed` must not
 outshine `body`. Inside a `text_selection`, body text must stay at 4.5:1 or
 better, syntax colors at 3.5:1, and `faint` at 3:1.
 
-The interim editor mapping, until the theme lands, is:
-- `heading2` ← `heading`
-- `completed` ← `faint`
-- `text_selection` ← `selected`
+The editor maps every token directly in `wren-iced`'s `theme::editor_colors`. A test pins that mapping.
 
 ## What the editor side needs
 

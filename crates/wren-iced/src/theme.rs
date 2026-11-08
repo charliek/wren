@@ -22,19 +22,16 @@ pub fn from_definition(definition: theme::Theme) -> Theme {
 }
 
 /// The editor's surface and Markdown highlighting colours for `definition`.
-///
-/// The syntax and band fields map onto existing theme colours until the
-/// theme gains tokens of its own (`discovery/markdown-editor.md`, §6).
 pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_editor::Palette) {
     let c = definition.colors;
     let style = wren_editor::Style {
         background: color(c.editor),
         value: color(c.body),
-        text_selection: color(c.selected),
+        text_selection: color(c.text_selection),
         gutter: color(c.faint),
         gutter_current: color(c.body),
         current_line: color(c.current_line),
-        code_block: color(c.current_line),
+        code_block: color(c.code_block),
         caret: color(c.accent),
         strike: color(c.faint),
     };
@@ -43,12 +40,12 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
         muted: color(c.muted),
         faint: color(c.faint),
         accent: color(c.accent),
-        heading: color(c.accent),
-        heading2: color(c.accent),
-        link: color(c.accent),
-        code: color(c.success),
-        quote: color(c.muted),
-        completed: color(c.faint),
+        heading: color(c.heading),
+        heading2: color(c.heading2),
+        link: color(c.link),
+        code: color(c.code),
+        quote: color(c.quote),
+        completed: color(c.completed),
     };
     (style, palette)
 }
@@ -84,19 +81,19 @@ mod tests {
     }
 
     #[test]
-    fn syntax_and_band_fields_use_their_interim_theme_colours() {
+    fn syntax_and_band_fields_use_the_theme_syntax_tokens() {
         for theme in theme::BUILT_INS {
             let c = theme.colors;
             let (style, palette) = editor_colors(*theme);
-            assert_eq!(style.text_selection, color(c.selected));
-            assert_eq!(style.code_block, color(c.current_line));
+            assert_eq!(style.text_selection, color(c.text_selection));
+            assert_eq!(style.code_block, color(c.code_block));
             assert_eq!(style.gutter_current, color(c.body));
-            for heading in [palette.heading, palette.heading2, palette.link] {
-                assert_eq!(heading, color(c.accent));
-            }
-            assert_eq!(palette.code, color(c.success));
-            assert_eq!(palette.quote, color(c.muted));
-            assert_eq!(palette.completed, color(c.faint));
+            assert_eq!(palette.heading, color(c.heading));
+            assert_eq!(palette.heading2, color(c.heading2));
+            assert_eq!(palette.link, color(c.link));
+            assert_eq!(palette.code, color(c.code));
+            assert_eq!(palette.quote, color(c.quote));
+            assert_eq!(palette.completed, color(c.completed));
         }
     }
 
