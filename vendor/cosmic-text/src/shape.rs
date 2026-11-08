@@ -1227,10 +1227,16 @@ impl ShapeLine {
         let hang = if wrap == Wrap::None || hanging_indent == 0 {
             0.
         } else {
-            let prefix = self.spans.iter().flat_map(|span| &span.words);
-            let prefix = prefix.flat_map(|word| &word.glyphs);
-            let prefix = prefix.filter(|glyph| glyph.start < hanging_indent);
-            let hang: f32 = prefix.map(|glyph| glyph.width(font_size)).sum();
+            let glyphs = self.spans.iter().flat_map(|span| &span.words);
+            let glyphs = glyphs.flat_map(|word| &word.glyphs);
+            let width = |glyph: &ShapeGlyph| glyph.width(font_size);
+            // An LTR line's prefix glyphs come first, so stop after them;
+            // an RTL line's words are stored in visual order.
+            let hang: f32 = if self.rtl {
+                glyphs.filter(|glyph| glyph.start < hanging_indent).map(width).sum()
+            } else {
+                glyphs.take_while(|glyph| glyph.start < hanging_indent).map(width).sum()
+            };
             hang.min(first_limit / 2.)
         };
         let limit = |rows: usize| if rows == 0 { first_limit } else { first_limit - hang };

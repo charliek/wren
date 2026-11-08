@@ -22,7 +22,9 @@ files are not vendored. Each change is marked in the source with a
   last argument (`ShapeLine::layout` passes 0):
   * The indent is the summed advance of the shaped glyphs that start before
     the offset, so it is measured in the line's own fonts and needs no
-    second layout pass. It is capped at half the wrap width, and is 0 with
+    second layout pass. On an LTR line the scan stops at the first glyph
+    past the offset; an RTL line stores its words in visual order, so it
+    scans them all. It is capped at half the wrap width, and is 0 with
     `Wrap::None`.
   * Wrapping checks the first row against the full width and every later
     row against the width minus the indent. All ten
