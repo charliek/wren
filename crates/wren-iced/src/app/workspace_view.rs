@@ -571,31 +571,28 @@ impl App {
                     &hit.snippet.text
                 };
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
-                let sub = if preview.is_empty() {
-                    modified_label(note)
-                } else {
-                    format!("{} · {}", modified_label(note), preview)
-                };
-                let mut label = column![
-                    ellipsis(&note.title, 13.0, theme::color(colors.text)).font(fonts::MEDIUM)
+                // The age sits at the end of the title row, so the second
+                // row is all preview.
+                let title = row![
+                    ellipsis(&note.title, 13.0, theme::color(colors.text))
+                        .font(fonts::MEDIUM)
+                        .width(Fill),
+                    chrome::label(modified_label(note), 11, colors.muted)
                 ]
-                .spacing(3)
-                .clip(true);
-                if self.filters.notes.trim().is_empty() {
-                    label = label.push(ellipsis(sub, 12.0, theme::color(colors.muted)));
-                } else {
+                .spacing(8)
+                .align_y(iced::Center);
+                let mut label = column![title].spacing(3).clip(true);
+                if !self.filters.notes.trim().is_empty() {
                     label = label.push(
-                        row![
-                            chrome::label(format!("{} ·", modified_label(note)), 12, colors.muted),
-                            super::palette::highlighted_text(
-                                hit.snippet.text.clone(),
-                                hit.snippet.highlight.clone(),
-                                self.definition
-                            )
-                        ]
-                        .spacing(4)
+                        container(super::palette::highlighted_text(
+                            hit.snippet.text.clone(),
+                            hit.snippet.highlight.clone(),
+                            self.definition,
+                        ))
                         .clip(true),
                     );
+                } else if !preview.is_empty() {
+                    label = label.push(ellipsis(preview, 12.0, theme::color(colors.muted)));
                 }
                 if let Some(path) = &note.subtitle {
                     label = label.push(chrome::label(path, 11, colors.faint).font(fonts::EDITOR));
