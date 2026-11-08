@@ -475,26 +475,44 @@ impl Engine {
         }
     }
 
-    /// Where an input method should anchor: the caret or the selection's
-    /// first visible row, else the edge of the view nearest the cursor.
-    pub fn ime_position(&self) -> Option<Point> {
+    /// Where an input method should anchor, relative to the text origin:
+    /// the caret or the selection's first visible row. A caret out of view
+    /// keeps its column on a row just past the view's nearest edge, for the
+    /// caller to clamp.
+    pub fn ime_anchor(&self) -> Option<Point> {
         let anchor = match self.editor.selection_bounds() {
             Some((start, end)) => self.ranges(start, end).first().map(Rectangle::position),
             None => self.caret(),
         };
         anchor.or_else(|| {
+            let cursor = self.editor.cursor();
             let buffer = self.buffer();
-            let below = self.editor.cursor().line >= buffer.scroll().line;
+            let x = buffer.lines[cursor.line]
+                .layout_opt()
+                .and_then(|layout| caret_row(layout, cursor))
+                .map_or(0.0, |(_, x)| x);
             let line_height = buffer.metrics().line_height;
+            let below = cursor.line >= buffer.scroll().line;
             Some(Point::new(
-                0.0,
+                x,
                 if below {
-                    (self.bounds.height - line_height).max(0.0)
+                    self.bounds.height
                 } else {
-                    0.0
+                    -line_height
                 },
             ))
         })
+    }
+
+    /// Scroll as little as needed to show the cursor.
+    pub fn reveal_cursor(&mut self) {
+        self.debug_assert_unshared();
+        if self.bounds == Size::ZERO {
+            return;
+        }
+        let cursor = self.editor.cursor();
+        let mut font_system = font_system();
+        buffer_mut(&mut self.editor).shape_until_cursor(font_system.raw(), cursor, false);
     }
 
     /// Hand the buffer to the renderer. The weak reference is taken last, so

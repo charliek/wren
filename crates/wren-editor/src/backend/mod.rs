@@ -161,16 +161,26 @@ impl Backend {
     }
 
     /// Where an input method should anchor its candidate window, relative to
-    /// the text origin.
+    /// the text origin: the caret, or the selection's first row. When that is
+    /// out of view, the anchor keeps its column on the nearest view edge.
     pub fn ime_position(&self) -> Option<Point> {
-        match self {
+        let anchor = match self {
             Self::Iced(editor) => match editor.selection() {
-                Selection::Caret(position) => Some(position),
-                Selection::Range(ranges) => {
-                    Some(ranges.first().cloned().unwrap_or_default().position())
-                }
+                Selection::Caret(position) => position,
+                Selection::Range(ranges) => ranges.first().cloned().unwrap_or_default().position(),
             },
-            Self::Owned(engine) => engine.ime_position(),
+            Self::Owned(engine) => engine.ime_anchor()?,
+        };
+        let line_height = self.buffer().metrics().line_height;
+        Some(clamp_ime_anchor(anchor, self.bounds(), line_height))
+    }
+
+    /// Scroll as little as needed to show the cursor, keeping the cursor
+    /// and the selection. Owned scrolls now; iced on its next update.
+    pub fn reveal_cursor(&mut self) {
+        match self {
+            Self::Iced(editor) => iced::reshape_to_cursor(editor),
+            Self::Owned(engine) => engine.reveal_cursor(),
         }
     }
 
@@ -311,6 +321,16 @@ pub(crate) fn ending(ending: cosmic_text::LineEnding) -> LineEnding {
     }
 }
 
+/// Keep an input method anchor inside a view of `view` size: a row above
+/// the view moves to its top row and one below to its bottom row, keeping
+/// its column, so the candidate window stays next to where the text goes.
+pub(crate) fn clamp_ime_anchor(anchor: Point, view: Size, line_height: f32) -> Point {
+    Point::new(
+        anchor.x.clamp(0.0, view.width.max(0.0)),
+        anchor.y.clamp(0.0, (view.height - line_height).max(0.0)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use ::iced::advanced::text::highlighter::Highlighter as _;
@@ -399,25 +419,106 @@ mod tests {
     }
 
     #[test]
-    fn an_off_screen_caret_has_no_rectangle_and_the_ime_anchors_at_the_near_edge() {
+    fn an_off_screen_ime_anchor_keeps_its_column_on_the_nearest_edge() {
         let text = (0..60)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let size = Size::new(300.0, 120.0);
-        let (mut owned, mut highlighter) = laid_out(BackendKind::Owned, &text, size);
-        owned.perform(Action::Scroll { lines: 30 });
-        update(&mut owned, &mut highlighter, size, fixtures::FONT);
-        assert!(owned.selection().is_none());
-        assert_eq!(owned.ime_position(), Some(Point::ORIGIN));
+        let bottom = 120.0 - 24.0;
+        for kind in BackendKind::ALL {
+            let (mut backend, mut highlighter) = laid_out(kind, &text, size);
+            let mut step = |backend: &mut Backend, action: Action| {
+                backend.perform(action);
+                update(backend, &mut highlighter, size, fixtures::FONT);
+            };
+            step(&mut backend, Action::Move(Motion::End));
+            let Some(Selection::Caret(caret)) = backend.selection() else {
+                panic!("{kind:?}: a visible caret");
+            };
+            assert!(caret.x > 0.0 && caret.y == 0.0, "{kind:?}: {caret:?}");
+            assert_eq!(backend.ime_position(), Some(caret), "{kind:?}");
+            step(&mut backend, Action::Scroll { lines: 30 });
+            assert_eq!(
+                backend.ime_position(),
+                Some(Point::new(caret.x, 0.0)),
+                "{kind:?}: above the view"
+            );
+            if kind == BackendKind::Owned {
+                assert!(backend.selection().is_none());
+            }
 
-        owned.perform(Action::Move(Motion::DocumentEnd));
-        update(&mut owned, &mut highlighter, size, fixtures::FONT);
-        assert!(matches!(owned.selection(), Some(Selection::Caret(_))));
-        owned.perform(Action::Scroll { lines: -60 });
-        update(&mut owned, &mut highlighter, size, fixtures::FONT);
-        assert!(owned.selection().is_none());
-        assert_eq!(owned.ime_position(), Some(Point::new(0.0, 96.0)));
+            step(&mut backend, Action::Move(Motion::DocumentEnd));
+            let Some(Selection::Caret(caret)) = backend.selection() else {
+                panic!("{kind:?}: a visible caret");
+            };
+            step(&mut backend, Action::Scroll { lines: -60 });
+            assert_eq!(
+                backend.ime_position(),
+                Some(Point::new(caret.x, bottom)),
+                "{kind:?}: below the view"
+            );
+
+            // Revealing the cursor brings the real caret back as the anchor.
+            backend.reveal_cursor();
+            update(&mut backend, &mut highlighter, size, fixtures::FONT);
+            let Some(Selection::Caret(shown)) = backend.selection() else {
+                panic!("{kind:?}: a revealed caret");
+            };
+            assert!(shown.y >= 0.0 && shown.y <= bottom, "{kind:?}: {shown:?}");
+            assert_eq!(shown.x, caret.x, "{kind:?}");
+            assert_eq!(backend.ime_position(), Some(shown), "{kind:?}");
+            assert_eq!(backend.cursor().position.line, 59, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn reveal_keeps_the_selection_and_scrolls_only_when_needed() {
+        let text = (0..60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let size = Size::new(300.0, 120.0);
+        for kind in BackendKind::ALL {
+            let (mut backend, mut highlighter) = laid_out(kind, &text, size);
+            backend.perform(Action::Select(Motion::Down));
+            update(&mut backend, &mut highlighter, size, fixtures::FONT);
+            let cursor = backend.cursor();
+            let scroll = backend.scroll();
+            backend.reveal_cursor();
+            update(&mut backend, &mut highlighter, size, fixtures::FONT);
+            assert_eq!(backend.cursor(), cursor, "{kind:?}");
+            assert_eq!(backend.scroll(), scroll, "{kind:?}: already in view");
+
+            backend.perform(Action::Scroll { lines: 40 });
+            update(&mut backend, &mut highlighter, size, fixtures::FONT);
+            backend.reveal_cursor();
+            update(&mut backend, &mut highlighter, size, fixtures::FONT);
+            assert_eq!(backend.cursor(), cursor, "{kind:?}");
+            assert!(
+                backend.scroll().line <= 1,
+                "{kind:?}: {:?}",
+                backend.scroll()
+            );
+        }
+    }
+
+    #[test]
+    fn ime_anchors_clamp_to_the_view_rows_keeping_their_column() {
+        let view = Size::new(300.0, 120.0);
+        let at = |x, y| clamp_ime_anchor(Point::new(x, y), view, 24.0);
+        assert_eq!(at(40.0, 48.0), Point::new(40.0, 48.0));
+        assert_eq!(at(40.0, -500.0), Point::new(40.0, 0.0));
+        assert_eq!(at(40.0, 96.0), Point::new(40.0, 96.0));
+        assert_eq!(at(40.0, 97.0), Point::new(40.0, 96.0));
+        assert_eq!(at(40.0, 5000.0), Point::new(40.0, 96.0));
+        assert_eq!(at(400.0, 48.0), Point::new(300.0, 48.0));
+        assert_eq!(at(-3.0, 48.0), Point::new(0.0, 48.0));
+        // A view shorter than a row anchors on its top.
+        let short = clamp_ime_anchor(Point::new(10.0, 50.0), Size::new(300.0, 10.0), 24.0);
+        assert_eq!(short, Point::new(10.0, 0.0));
+        let empty = clamp_ime_anchor(Point::new(10.0, 50.0), Size::ZERO, 24.0);
+        assert_eq!(empty, Point::ORIGIN);
     }
 
     #[test]

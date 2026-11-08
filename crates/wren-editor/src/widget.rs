@@ -366,6 +366,25 @@ impl State {
             .as_ref()
             .is_some_and(|preedit| !preedit.content.is_empty())
     }
+
+    /// Take the input method's preedit. Returns whether it starts a
+    /// composition: the first non-empty preedit.
+    fn set_preedit(&mut self, preedit: Option<input_method::Preedit>) -> bool {
+        let starts =
+            !self.is_composing() && preedit.as_ref().is_some_and(|new| !new.content.is_empty());
+        self.preedit = preedit;
+        starts
+    }
+}
+
+/// Take a preedit; when it starts a composition, scroll the caret into view
+/// so the candidate window has a real anchor. Returns whether it did.
+fn take_preedit(state: &mut State, content: &Content, preedit: input_method::Preedit) -> bool {
+    let starts = state.set_preedit(Some(preedit));
+    if starts {
+        content.0.borrow_mut().reveal_cursor();
+    }
+    starts
 }
 
 #[derive(Debug, Clone)]
@@ -546,15 +565,20 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                 }
                 Update::InputMethod(update) => match update {
                     Ime::Toggle(is_open) => {
-                        state.preedit = is_open.then(input_method::Preedit::new);
+                        state.set_preedit(is_open.then(input_method::Preedit::new));
                         shell.request_redraw();
                     }
                     Ime::Preedit { content, selection } => {
-                        state.preedit = Some(input_method::Preedit {
+                        let preedit = input_method::Preedit {
                             content,
                             selection,
                             text_size: Some(Pixels(self.metrics.text)),
-                        });
+                        };
+                        // The iced engine scrolls to the caret when it is
+                        // next laid out.
+                        if take_preedit(state, self.content, preedit) {
+                            shell.invalidate_layout();
+                        }
                         shell.request_redraw();
                     }
                     Ime::Commit(text) => {
@@ -1172,6 +1196,96 @@ mod tests {
         state.unfocus();
         state.focus();
         assert!(!state.is_composing());
+    }
+
+    fn preedit(content: &str) -> input_method::Preedit {
+        input_method::Preedit {
+            content: content.into(),
+            selection: None,
+            text_size: None,
+        }
+    }
+
+    #[test]
+    fn only_the_first_non_empty_preedit_starts_a_composition() {
+        let mut state = State::new(HighlighterSettings {
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
+            front_matter_end: None,
+        });
+        // An input method opens with an empty preedit.
+        assert!(!state.set_preedit(Some(input_method::Preedit::new())));
+        assert!(state.set_preedit(Some(preedit("に"))));
+        assert!(!state.set_preedit(Some(preedit("にほ"))));
+        // Cleared, it can start again.
+        assert!(!state.set_preedit(Some(preedit(""))));
+        assert!(state.set_preedit(Some(preedit("ん"))));
+        assert!(!state.set_preedit(None));
+        assert!(state.set_preedit(Some(preedit("a"))));
+    }
+
+    #[test]
+    fn a_composition_starting_off_screen_scrolls_the_caret_into_view() {
+        fixtures::load_font();
+        let text = (0..60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let size = Size::new(300.0, 120.0);
+        for kind in BackendKind::ALL {
+            let content = Content::new(kind, &text);
+            let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
+                palette: fixtures::DARK,
+                font: fixtures::FONT,
+                front_matter_end: None,
+            });
+            let lay_out = |content: &Content, highlighter: &mut MarkdownHighlighter| {
+                content.0.borrow_mut().update(
+                    size,
+                    fixtures::FONT,
+                    Pixels(TEXT_SIZE),
+                    line_height(),
+                    Wrapping::WordOrGlyph,
+                    highlighter,
+                );
+            };
+            lay_out(&content, &mut highlighter);
+            let scroll_by = |content: &Content, highlighter: &mut MarkdownHighlighter, lines| {
+                content.0.borrow_mut().perform(Action::Scroll { lines });
+                lay_out(content, highlighter);
+            };
+            scroll_by(&content, &mut highlighter, 30);
+            let away = content.scroll();
+            assert!(away.line > 0, "{kind:?}");
+            let mut state = State::new(HighlighterSettings {
+                palette: fixtures::DARK,
+                font: fixtures::FONT,
+                front_matter_end: None,
+            });
+
+            // Opening the input method moves nothing; composing does.
+            state.set_preedit(Some(input_method::Preedit::new()));
+            assert!(
+                take_preedit(&mut state, &content, preedit("に")),
+                "{kind:?}"
+            );
+            lay_out(&content, &mut highlighter);
+            assert_eq!(content.scroll().line, 0, "{kind:?}");
+            assert_eq!(content.cursor().position.line, 0, "{kind:?}");
+            assert!(
+                matches!(content.0.borrow().selection(), Some(Selection::Caret(_))),
+                "{kind:?}"
+            );
+
+            // Scrolling away mid-composition stays put on the next preedit.
+            scroll_by(&content, &mut highlighter, 30);
+            assert!(
+                !take_preedit(&mut state, &content, preedit("にほ")),
+                "{kind:?}"
+            );
+            lay_out(&content, &mut highlighter);
+            assert_eq!(content.scroll(), away, "{kind:?}");
+        }
     }
 
     #[test]

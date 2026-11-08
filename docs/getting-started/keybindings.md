@@ -82,7 +82,9 @@ start of the line, and the word deletes and note motions work as above.
 
 While an input method is composing text, Enter, Tab, Backspace, and Delete
 belong to it, with or without modifiers, and the Markdown commands below
-wait until it finishes.
+wait until it finishes. When you start composing with the cursor scrolled
+out of view, the editor scrolls back to it, so the candidate window opens
+beside the text you are writing.
 
 ### Markdown commands
 
