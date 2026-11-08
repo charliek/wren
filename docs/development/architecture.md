@@ -62,7 +62,9 @@ Home on macOS) carry over. Like every other edit, an intent reaches
 `App::edit`, which hands it to `EditorView::intent`. That plans it with
 `wren_markdown::plan` over the editor's lines in place, without copying the
 text, and applies the plan as one undo unit, writing each inserted line
-break in the line ending of the line it splits. After any change,
+break in the line ending of the line it splits (or a neighbouring one,
+where a lone CR and LF would otherwise meet and read back as one break).
+After any change,
 `App::edit` sends the draft to the `Session` (so autosave sees it) and bumps
 the edit revision; the footer's word count follows on the next tick, at most
 250 ms later.

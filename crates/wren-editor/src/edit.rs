@@ -87,6 +87,97 @@ pub(crate) fn split_ending(lines: Lines<'_>, end: Position) -> LineEnding {
         .unwrap_or(LineEnding::Lf)
 }
 
+/// The ending for the line breaks in `text`, which replaces `start..end`.
+///
+/// It is [`split_ending`]'s, unless that would make a break run into the
+/// bytes on either side and read back as one: a lone CR line above a break
+/// that starts with LF (`\r` + `\n`), a lone LF above one that starts with
+/// CR, or a break that ends in CR before an empty rest of line whose own
+/// ending starts with LF. The editor would show a line that a reload loses.
+/// Then the first ending that keeps every break apart is used instead,
+/// trying the line above's first.
+pub(crate) fn break_ending(
+    lines: Lines<'_>,
+    start: Position,
+    end: Position,
+    text: &str,
+) -> LineEnding {
+    let chosen = split_ending(lines, end);
+    if !text.contains(['\r', '\n']) {
+        return chosen;
+    }
+    let ending_of = |line: usize| lines.get(line).map(|line| line.ending);
+    let above = match start.line.checked_sub(1) {
+        Some(line) if start.column == 0 => ending_of(line).unwrap_or(LineEnding::None),
+        _ => LineEnding::None,
+    };
+    let after = lines.get(end.line).map(|line| {
+        if line.text.len() > end.column {
+            ""
+        } else {
+            line.ending.as_str()
+        }
+    });
+    let breaks = |text: &str| wren_markdown::line_ranges(text).count() - 1;
+    let apart = |ending: LineEnding| {
+        let inserted = with_breaks(text, ending);
+        let after = after.unwrap_or("");
+        let joined = format!("{}{inserted}{after}", above.as_str());
+        breaks(&joined) == breaks(above.as_str()) + breaks(&inserted) + breaks(after)
+    };
+    [
+        chosen,
+        above,
+        LineEnding::Lf,
+        LineEnding::CrLf,
+        LineEnding::Cr,
+        LineEnding::LfCr,
+    ]
+    .into_iter()
+    .filter(|ending| *ending != LineEnding::None)
+    .find(|ending| apart(*ending))
+    .unwrap_or(chosen)
+}
+
+/// Whether ending `above` followed directly by `below` (an empty line's)
+/// reads back as fewer breaks: `\r` + `\n`, or `\n` + `\r`.
+fn fuse(above: LineEnding, below: LineEnding) -> bool {
+    let breaks = |text: &str| wren_markdown::line_ranges(text).count() - 1;
+    let joined = format!("{}{}", above.as_str(), below.as_str());
+    breaks(&joined) < breaks(above.as_str()) + breaks(below.as_str())
+}
+
+/// The first empty line in `lines` (a range of line indices) whose ending
+/// runs into the line above's, as a deletion can leave it (`a\rb\nc` less
+/// `b`), with an ending that keeps it apart from both neighbours. Saved
+/// as is, the line would be gone on reload.
+pub(crate) fn fused_line(
+    lines: Lines<'_>,
+    range: std::ops::RangeInclusive<usize>,
+) -> Option<(usize, LineEnding)> {
+    let line = |index: usize| lines.get(index);
+    range.filter(|index| *index > 0).find_map(|index| {
+        let own = line(index)?;
+        let above = line(index - 1)?.ending;
+        if !own.text.is_empty() || !fuse(above, own.ending) {
+            return None;
+        }
+        let below = line(index + 1)
+            .filter(|below| below.text.is_empty())
+            .map_or(LineEnding::None, |below| below.ending);
+        [
+            above,
+            LineEnding::Lf,
+            LineEnding::CrLf,
+            LineEnding::Cr,
+            LineEnding::LfCr,
+        ]
+        .into_iter()
+        .find(|ending| !fuse(above, *ending) && !fuse(*ending, below))
+        .map(|ending| (index, ending))
+    })
+}
+
 /// `text` with every line break (LF, CRLF, CR, or LFCR) written as `ending`.
 pub(crate) fn with_breaks(text: &str, ending: LineEnding) -> Cow<'_, str> {
     let lines = || LineIter::new(text).map(|(range, found)| (range, backend::ending(found)));

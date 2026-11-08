@@ -300,6 +300,14 @@ impl EditorView {
             let before = self.snapshot();
             let action = self.with_document_breaks(action);
             self.content.perform(action);
+            let edited = before.cursor.position.line.min(
+                before
+                    .cursor
+                    .selection
+                    .map_or(usize::MAX, |anchor| anchor.line),
+            );
+            let cursor = self.content.cursor();
+            self.keep_lines_apart(edited.saturating_sub(1)..=cursor.position.line + 1);
             if self.content.text() == before.text {
                 self.history.break_group();
                 return false;
@@ -329,12 +337,14 @@ impl EditorView {
         };
         let before = self.snapshot();
         for replace in order.iter().rev() {
-            let ending = self
-                .content
-                .with_lines(|lines| edit::split_ending(lines, replace.end));
+            let ending = self.content.with_lines(|lines| {
+                edit::break_ending(lines, replace.start, replace.end, &replace.text)
+            });
             let text = edit::with_breaks(&replace.text, ending);
             self.content
                 .replace_range(replace.start, replace.end, &text);
+            let last = replace.start.line + wren_markdown::line_ranges(&text).count();
+            self.keep_lines_apart(replace.start.line.saturating_sub(1)..=last);
         }
         let changed = self.content.text() != before.text;
         if changed {
@@ -785,22 +795,47 @@ impl EditorView {
         self.content.move_to(clamped);
     }
 
+    /// Rewrite the ending of each empty line in `range` that would run into
+    /// the line above's on disk, keeping the cursor. Line count and text are
+    /// unchanged, so positions elsewhere stay valid.
+    fn keep_lines_apart(&mut self, range: std::ops::RangeInclusive<usize>) {
+        let cursor = self.content.cursor();
+        let mut moved = false;
+        while let Some((line, ending)) = self
+            .content
+            .with_lines(|lines| edit::fused_line(lines, range.clone()))
+        {
+            let start = text_editor::Position { line, column: 0 };
+            let end = text_editor::Position {
+                line: line + 1,
+                column: 0,
+            };
+            self.content.replace_range(start, end, ending.as_str());
+            moved = true;
+        }
+        if moved {
+            self.select(cursor);
+        }
+    }
+
     /// `action` with the line breaks it inserts written in the ending of the
     /// line they split, so Enter, paste, and IME commits match the note.
     fn with_document_breaks(&self, action: Action) -> Action {
-        let ending = || {
+        let ending = |text: &str| {
             let cursor = self.content.cursor();
             let anchor = cursor.selection.unwrap_or(cursor.position);
-            let end = std::cmp::max_by_key(anchor, cursor.position, |at| (at.line, at.column));
+            let key = |at: &text_editor::Position| (at.line, at.column);
+            let start = std::cmp::min_by_key(anchor, cursor.position, key);
+            let end = std::cmp::max_by_key(anchor, cursor.position, key);
             self.content
-                .with_lines(|lines| edit::split_ending(lines, end))
+                .with_lines(|lines| edit::break_ending(lines, start, end, text))
         };
         match action {
-            Action::Edit(Edit::Enter | Edit::Insert('\n')) => match ending() {
+            Action::Edit(Edit::Enter | Edit::Insert('\n')) => match ending("\n") {
                 text_editor::LineEnding::Lf => Action::Edit(Edit::Enter),
                 other => Action::Edit(Edit::Paste(Arc::new(other.as_str().to_owned()))),
             },
-            Action::Edit(Edit::Paste(text)) => match edit::with_breaks(&text, ending()) {
+            Action::Edit(Edit::Paste(text)) => match edit::with_breaks(&text, ending(&text)) {
                 Cow::Borrowed(_) => Action::Edit(Edit::Paste(text)),
                 Cow::Owned(text) => Action::Edit(Edit::Paste(Arc::new(text))),
             },
@@ -2389,6 +2424,86 @@ mod tests {
             assert_eq!(ev.line_count(), 6);
             assert!(ev.undo());
             assert_eq!(ev.text(), "- a\r\n- b\n- c\r- d");
+        }
+
+        #[test]
+        fn inserted_breaks_never_fuse_with_a_neighbouring_lone_cr_or_lf() {
+            let reloaded = |ev: &EditorView| EditorView::new(&ev.text()).line_count();
+            // A break at column 0 below a lone CR (or LF) line, and one that
+            // ends before an empty rest of line whose ending starts with LF.
+            for (text, start, end) in [
+                ("a\rb\nc", pos(1, 0), pos(1, 0)),
+                ("a\nb\rc", pos(1, 0), pos(1, 0)),
+                ("a\rb\r\nc", pos(1, 0), pos(1, 0)),
+                ("a\nb\n\rc", pos(1, 0), pos(1, 0)),
+                ("a\rb\nc", pos(1, 0), pos(1, 1)),
+                ("a\rb\rc\nd", pos(1, 0), pos(2, 1)),
+                ("a\r\rb\nc", pos(1, 0), pos(2, 1)),
+            ] {
+                let cursor = Cursor {
+                    position: end,
+                    selection: (start != end).then_some(start),
+                };
+                for edit in [
+                    Action::Edit(Edit::Enter),
+                    Action::Edit(Edit::Paste(Arc::new("\n".into()))),
+                    Action::Edit(Edit::Paste(Arc::new("\r".into()))),
+                    Action::Edit(Edit::Paste(Arc::new("\nx\n".into()))),
+                ] {
+                    let mut ev = editor(text);
+                    ev.move_cursor(cursor);
+                    assert!(ev.perform(edit.clone()));
+                    assert_eq!(ev.line_count(), reloaded(&ev), "{text:?} {edit:?}");
+                }
+                for inserted in ["\n", "\r\n", "\n- ", "x\n"] {
+                    let mut ev = editor(text);
+                    let plan = [Replace {
+                        start,
+                        end,
+                        text: inserted.into(),
+                    }];
+                    assert!(ev.apply(&plan, super::at(0, 0)));
+                    assert_eq!(ev.line_count(), reloaded(&ev), "{text:?} {inserted:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn deleting_a_lines_text_never_fuses_its_ending_with_the_line_above() {
+            let reloaded = |ev: &EditorView| EditorView::new(&ev.text()).line_count();
+            for (text, start, end) in [
+                ("a\rb\nc", pos(1, 0), pos(1, 1)),
+                ("a\nb\rc", pos(1, 0), pos(1, 1)),
+                ("a\nb\r\nc", pos(1, 0), pos(1, 1)),
+                ("a\rb\n\nc", pos(1, 0), pos(1, 1)),
+                ("a\rx\rb\nc", pos(1, 0), pos(2, 1)),
+            ] {
+                for delete in [Edit::Backspace, Edit::Delete] {
+                    let mut ev = editor(text);
+                    ev.move_cursor(Cursor {
+                        position: end,
+                        selection: Some(start),
+                    });
+                    assert!(ev.perform(Action::Edit(delete.clone())));
+                    assert_eq!(ev.line_count(), reloaded(&ev), "{text:?} {delete:?}");
+                    assert_eq!(ev.cursor(), super::at(start.line, 0), "{text:?}");
+                    assert!(ev.undo());
+                    assert_eq!(ev.text(), text);
+                }
+                let mut ev = editor(text);
+                let plan = [Replace {
+                    start,
+                    end,
+                    text: String::new(),
+                }];
+                assert!(ev.apply(&plan, super::at(start.line, 0)));
+                assert_eq!(ev.line_count(), reloaded(&ev), "{text:?} apply");
+            }
+            // A plain Backspace that empties a line.
+            let mut ev = editor("a\rb\n\nc");
+            ev.move_cursor(super::at(1, 1));
+            assert!(ev.perform(Action::Edit(Edit::Backspace)));
+            assert_eq!(ev.line_count(), reloaded(&ev));
         }
 
         #[test]
