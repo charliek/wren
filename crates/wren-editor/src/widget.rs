@@ -248,6 +248,7 @@ pub struct TextEditor<'a> {
     style: Style,
     line_numbers: bool,
     metrics: Metrics,
+    markdown_assist: bool,
     last_status: Option<Status>,
 }
 
@@ -259,6 +260,7 @@ impl<'a> TextEditor<'a> {
         style: Style,
         line_numbers: bool,
         metrics: Metrics,
+        markdown_assist: bool,
     ) -> Self {
         Self {
             id: widget::Id::from(id),
@@ -267,6 +269,7 @@ impl<'a> TextEditor<'a> {
             style,
             line_numbers,
             metrics,
+            markdown_assist,
             last_status: None,
         }
     }
@@ -316,6 +319,16 @@ struct State {
     partial_scroll: f32,
     highlighter: RefCell<MarkdownHighlighter>,
     highlighter_settings: HighlighterSettings,
+}
+
+impl State {
+    /// Whether an input method is composing text. An opened input method
+    /// starts with an empty preedit, which is not composing yet.
+    fn is_composing(&self) -> bool {
+        self.preedit
+            .as_ref()
+            .is_some_and(|preedit| !preedit.content.is_empty())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -456,9 +469,14 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             _ => {}
         }
 
-        if let Some(update) =
-            Update::from_event(event, state, layout.bounds(), self.padding(), cursor)
-        {
+        if let Some(update) = Update::from_event(
+            event,
+            state,
+            layout.bounds(),
+            self.padding(),
+            cursor,
+            self.markdown_assist,
+        ) {
             match update {
                 Update::Click(click) => {
                     let action = match click.kind() {
@@ -818,6 +836,7 @@ impl Update {
         bounds: Rectangle,
         padding: Padding,
         cursor: mouse::Cursor,
+        markdown_assist: bool,
     ) -> Option<Self> {
         match event {
             Event::Mouse(event) => match event {
@@ -890,14 +909,20 @@ impl Update {
                 } else {
                     Status::Active
                 };
-                crate::keys::key_binding(KeyPress {
-                    key: key.clone(),
-                    modified_key: modified_key.clone(),
-                    physical_key: *physical_key,
-                    modifiers: *modifiers,
-                    text: text.clone(),
-                    status,
-                })
+                crate::keys::key_binding(
+                    KeyPress {
+                        key: key.clone(),
+                        modified_key: modified_key.clone(),
+                        physical_key: *physical_key,
+                        modifiers: *modifiers,
+                        text: text.clone(),
+                        status,
+                    },
+                    crate::keys::Context {
+                        markdown_assist,
+                        composing: state.is_composing(),
+                    },
+                )
                 .map(Update::Binding)
             }
             _ => None,
@@ -1039,10 +1064,26 @@ mod tests {
             font: fixtures::FONT,
         };
         let style = fixtures::STYLE;
-        let shown =
-            TextEditor::new(&content, "e", settings, style, true, Metrics::default()).padding();
-        let hidden =
-            TextEditor::new(&content, "e", settings, style, false, Metrics::default()).padding();
+        let shown = TextEditor::new(
+            &content,
+            "e",
+            settings,
+            style,
+            true,
+            Metrics::default(),
+            true,
+        )
+        .padding();
+        let hidden = TextEditor::new(
+            &content,
+            "e",
+            settings,
+            style,
+            false,
+            Metrics::default(),
+            true,
+        )
+        .padding();
         assert_eq!((shown.left, shown.top, shown.bottom), (60.0, 24.0, 24.0));
         assert_eq!(hidden.left, 16.0);
     }

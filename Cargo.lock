@@ -5032,6 +5032,8 @@ name = "wren-editor"
 version = "0.0.3"
 dependencies = [
  "iced",
+ "unicode-segmentation",
+ "wren-markdown",
 ]
 
 [[package]]

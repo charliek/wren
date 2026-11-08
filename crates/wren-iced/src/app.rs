@@ -529,6 +529,10 @@ impl App {
                 }
                 self.editor.perform(action)
             }
+            wren_editor::Message::Intent(intent) => {
+                self.column = columns::Column::Editor;
+                self.editor.intent(intent)
+            }
             wren_editor::Message::Undo => self.editor.undo(),
             wren_editor::Message::Redo => self.editor.redo(),
             wren_editor::Message::Find => {
