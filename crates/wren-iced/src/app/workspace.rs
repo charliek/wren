@@ -786,6 +786,7 @@ impl App {
         if identity_changed || self.editor.text() != text {
             self.editor.replace_text(text, !identity_changed);
             self.words = text.split_whitespace().count();
+            self.words_due = None;
             self.edit_revision += 1;
             self.editor_note = note;
         }

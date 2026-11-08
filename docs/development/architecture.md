@@ -6,7 +6,8 @@ core and a thin desktop crate on top.
 | Crate | Role |
 |---|---|
 | `crates/wren-core` | The model, scanning, storage, autosave, search index, settings, and keybindings. No iced dependency. |
-| `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, and find. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends on iced only; the app passes in colours and the font. |
+| `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, and find. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends on iced and `wren-markdown` only; the app passes in colours and the font. |
+| `crates/wren-markdown` | Markdown structure and editing rules with no toolkit: the line classifier, the heading outline, and the planner that turns an editing intent (Enter, Tab, Backspace, Home, …) at a selection into replacements. |
 | `crates/wren-iced` | The desktop app (binary `wren`): views, widgets, the command table, gestures, and the macOS menu bar. |
 | `crates/wren-sparkle` | The macOS Sparkle updater bridge. The only crate allowed `unsafe`; empty on Linux. |
 | `tools/` | The Python functional harness, packaging, scene capture, and release helpers. |
@@ -40,6 +41,20 @@ in `wren_core::keybind::default_bindings`; users override them with
 `keybind` lines. macOS uses Command as the app modifier and Linux uses Alt,
 leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
 presses on Linux so shortcuts never type their letter.
+
+## Editing keys
+
+The editor widget turns its editing keys (Enter, Tab, Backspace, Delete,
+the word deletes, Home, …) into `wren_editor::Message::Intent`. It reads
+them from iced's own key bindings, so the platform mappings (⌘← and ⌃A as
+Home on macOS) carry over. Like every other edit, an intent reaches
+`App::edit`, which hands it to `EditorView::intent`. That plans it with
+`wren_markdown::plan` over the editor's lines in place, without copying the
+text, and applies the plan as one undo unit, writing each inserted line
+break in the line ending of the line it splits. After any change,
+`App::edit` sends the draft to the `Session` (so autosave sees it) and bumps
+the edit revision; the footer's word count follows on the next tick, at most
+250 ms later.
 
 ## Storage safety
 

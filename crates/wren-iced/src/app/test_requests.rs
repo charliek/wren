@@ -132,7 +132,7 @@ impl App {
                 }
                 let contents = string(params, "text")?;
                 self.editor.replace_text(contents, false);
-                self.words = contents.split_whitespace().count();
+                self.set_words(contents);
                 self.edit_revision += 1;
                 self.edit_micros.clear();
                 self.find_query.clear();

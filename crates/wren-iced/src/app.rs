@@ -46,6 +46,8 @@ pub struct App {
     find_open: bool,
     find_query: String,
     words: usize,
+    /// When `words` is next recounted, after an edit.
+    words_due: Option<Instant>,
     edit_revision: u64,
     edit_micros: Vec<u64>,
     window: Option<iced::window::Id>,
@@ -164,6 +166,10 @@ pub enum Message {
     ),
 }
 
+/// How long the footer's word count may lag the text. Counting reads the
+/// whole note, too slow in a debug build to repeat on every keystroke.
+const WORD_COUNT_DELAY: Duration = Duration::from_millis(250);
+
 pub fn spike_text(large: bool) -> String {
     if large {
         (0..5000)
@@ -233,6 +239,7 @@ impl App {
             find_open: false,
             find_query: String::new(),
             words,
+            words_due: None,
             edit_revision: 0,
             edit_micros: Vec::new(),
             window: None,
@@ -385,6 +392,7 @@ impl App {
             #[cfg(target_os = "macos")]
             Message::MenuCommand(key) => return self.menu_command(&key),
             Message::Tick => {
+                self.count_words(Instant::now());
                 if self.session.is_some() {
                     let task = self.process_core(Op::Tick).task;
                     return self.spawn_reconcile(task);
@@ -542,21 +550,40 @@ impl App {
             }
         };
         if changed {
-            if let Some(note) = self.selected_note {
-                let _ = self.apply_core(Op::EditDraft {
-                    note,
-                    contents: self.editor.text(),
-                });
-            }
-            self.edit_revision += 1;
-            self.words = self.editor.text().split_whitespace().count();
-            if self.edit_micros.len() == 256 {
-                self.edit_micros.remove(0);
-            }
-            self.edit_micros
-                .push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+            self.text_changed(started);
         }
         Task::none()
+    }
+
+    /// What follows every change to the editor's text: the session draft,
+    /// which autosave saves, the edit revision, and a word recount on a
+    /// later tick.
+    fn text_changed(&mut self, started: Instant) {
+        if let Some(note) = self.selected_note {
+            let _ = self.apply_core(Op::EditDraft {
+                note,
+                contents: self.editor.text(),
+            });
+        }
+        self.edit_revision += 1;
+        self.words_due.get_or_insert(started + WORD_COUNT_DELAY);
+        if self.edit_micros.len() == 256 {
+            self.edit_micros.remove(0);
+        }
+        self.edit_micros
+            .push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+    }
+
+    /// Recount the words once an edit's delay has passed.
+    fn count_words(&mut self, now: Instant) {
+        if self.words_due.is_some_and(|due| now >= due) {
+            self.set_words(&self.editor.text());
+        }
+    }
+
+    fn set_words(&mut self, text: &str) {
+        self.words = text.split_whitespace().count();
+        self.words_due = None;
     }
 
     #[cfg(feature = "smoke-test")]
@@ -716,7 +743,7 @@ impl App {
                 _ => None,
             }),
         ];
-        if self.session.is_some() {
+        if self.session.is_some() || self.words_due.is_some() {
             subscriptions.push(iced::time::every(Duration::from_millis(25)).map(|_| Message::Tick));
         }
         #[cfg(target_os = "macos")]
@@ -758,6 +785,37 @@ mod tests {
         assert_eq!(app.definition, definitions::DARK);
         let _ = app.update(Message::ChooseTheme(None));
         assert_eq!(app.definition, definitions::LIGHT);
+    }
+
+    #[test]
+    fn the_word_count_follows_edits_on_a_later_tick() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        let words = app.words;
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        ))));
+        assert_eq!(app.words_due, None);
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+            Edit::Paste(Arc::new(" two words".into())),
+        ))));
+        let due = app.words_due.expect("a recount is due");
+        assert_eq!(app.words, words);
+        // Later edits keep the first deadline, so typing cannot starve it.
+        let _ = app.update(Message::Editor(wren_editor::Message::Intent(
+            wren_editor::Intent::Enter,
+        )));
+        assert_eq!(app.words_due, Some(due));
+        app.count_words(due - Duration::from_millis(1));
+        assert_eq!(app.words, words);
+        app.count_words(due);
+        assert_eq!(app.words, words + 2);
+        assert_eq!(app.words_due, None);
+        assert_eq!(app.edit_revision, 2);
     }
 
     #[test]
