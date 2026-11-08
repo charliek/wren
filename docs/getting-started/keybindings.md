@@ -54,6 +54,21 @@ leftmost open column, `‹ Section › Group`: click a name, or `‹`, to open
 that column again. Moving left only ever unfolds, and a single click never
 changes what is folded. Every column is open again after a restart.
 
+A few shortcuts act on the active column:
+
+| Shortcut | Sections | Groups | Notes | Editor |
+|---|---|---|---|---|
+| ⌘P / Alt+P | Jump to section | Jump to group, this section's first | Jump to note | Jump to note |
+| ⌘N / Alt+N | New section | New group | New note | New note |
+| ⌘R / Alt+R | Rename section | Rename group | Rename note | Rename note |
+| ⌘F / Alt+F | Filter sections | Filter groups | Search titles and text | Find in note |
+
+Picking a section or group from its jump list selects it and moves one
+column right, like ↵. Pressing ⌘P again in that list widens it to every
+note. Esc in a filter box leaves the filter and keeps the column. Commands
+chosen from the palette always do what their label says, whichever column
+is active.
+
 ## Custom keybindings
 
 Add `keybind` lines to [`config.conf`](../reference/configuration.md):

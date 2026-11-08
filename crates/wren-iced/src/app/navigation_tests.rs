@@ -1572,4 +1572,168 @@ mod columns {
             "preferences are untouched"
         );
     }
+
+    fn press(app: &mut App, id: CommandId) {
+        let _ = app.update(super::super::preferences::shortcut(id));
+    }
+
+    fn walk_to(app: &mut App, column: Column) {
+        while app.column != column {
+            let _ = run(app, CommandId::ColumnLeft);
+        }
+    }
+
+    #[test]
+    fn new_and_rename_shortcuts_act_on_the_active_column() {
+        let (_directory, mut app) = fixture();
+        let alpha = section(&app, "Alpha");
+        let inbox = group(&app, "Inbox");
+        let first = note(&app, "First");
+        for (column, create, rename) in [
+            (
+                Column::Editor,
+                DialogKind::CreateNote(inbox),
+                ItemRef::Note(first),
+            ),
+            (
+                Column::Notes,
+                DialogKind::CreateNote(inbox),
+                ItemRef::Note(first),
+            ),
+            (
+                Column::Groups,
+                DialogKind::CreateGroup(alpha),
+                ItemRef::Group(inbox),
+            ),
+            (
+                Column::Sections,
+                DialogKind::CreateSection,
+                ItemRef::Section(alpha),
+            ),
+        ] {
+            walk_to(&mut app, column);
+            press(&mut app, CommandId::NewNote);
+            assert_eq!(app.dialog.as_ref().unwrap().kind, create, "{column:?}");
+            let _ = app.update(Message::CancelDialog);
+            press(&mut app, CommandId::RenameNote);
+            assert_eq!(
+                app.dialog.as_ref().unwrap().kind,
+                DialogKind::Rename(rename),
+                "{column:?}"
+            );
+            let _ = app.update(Message::CancelDialog);
+            assert_eq!(app.column, column, "closing the dialog keeps the column");
+        }
+    }
+
+    #[test]
+    fn palette_rows_are_never_scoped() {
+        let (_directory, mut app) = fixture();
+        walk_to(&mut app, Column::Groups);
+        let _ = app.open_palette(Mode::Commands);
+        let _ = app.palette_query("Rename note".into());
+        let _ = app.activate_palette(None);
+        assert!(matches!(
+            app.dialog.as_ref().unwrap().kind,
+            DialogKind::Rename(ItemRef::Note(_))
+        ));
+    }
+
+    #[test]
+    fn jump_lists_the_active_columns_items_and_a_pick_moves_right() {
+        let (_directory, mut app) = fixture();
+        walk_to(&mut app, Column::Sections);
+        press(&mut app, CommandId::Jump);
+        let palette = app.palette.as_ref().unwrap();
+        assert_eq!(palette.mode, Mode::JumpSection);
+        let titles: Vec<_> = palette
+            .results
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Alpha", "Beta"]);
+        assert!(palette.results[0].current);
+        let _ = app.palette_query("bta".into());
+        let _ = app.activate_palette(None);
+        assert!(app.palette.is_none());
+        assert_eq!(app.selected_section, Some(section(&app, "Beta")));
+        assert_eq!((app.column, app.fold), (Column::Groups, 1));
+
+        let _ = app.dispatch(Command::OpenColumn(Column::Sections));
+        key(&mut app, Nav::Up);
+        key(&mut app, Nav::Enter);
+        press(&mut app, CommandId::Jump);
+        let palette = app.palette.as_ref().unwrap();
+        assert_eq!(palette.mode, Mode::JumpGroup);
+        // The selected section's groups come first, then the rest.
+        let rows: Vec<_> = palette
+            .results
+            .iter()
+            .map(|row| (row.title.as_str(), row.path.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Group", "Alpha"),
+                ("Inbox", "Alpha"),
+                ("Destination", "Beta")
+            ]
+        );
+        let _ = app.palette_query("dest".into());
+        let _ = app.activate_palette(None);
+        assert_eq!(app.selected_group, Some(group(&app, "Destination")));
+        assert_eq!(app.selected_note, Some(note(&app, "Third")));
+        assert_eq!((app.column, app.fold), (Column::Notes, 2));
+    }
+
+    #[test]
+    fn jump_again_widens_to_every_note_and_notes_jump_is_unscoped() {
+        let (_directory, mut app) = fixture();
+        walk_to(&mut app, Column::Groups);
+        press(&mut app, CommandId::Jump);
+        assert_eq!(app.palette.as_ref().unwrap().mode, Mode::JumpGroup);
+        press(&mut app, CommandId::Jump);
+        assert_eq!(app.palette.as_ref().unwrap().mode, Mode::Jump);
+        let _ = app.close_palette();
+        walk_to(&mut app, Column::Groups);
+        let _ = run(&mut app, CommandId::ColumnRight);
+        press(&mut app, CommandId::Jump);
+        assert_eq!(app.palette.as_ref().unwrap().mode, Mode::Jump);
+    }
+
+    #[test]
+    fn find_and_filters_belong_to_the_active_column() {
+        let (_directory, mut app) = fixture();
+        walk_to(&mut app, Column::Groups);
+        press(&mut app, CommandId::Find);
+        assert!(
+            !app.find_open,
+            "Find in a browser column filters it instead"
+        );
+        assert_eq!(app.column, Column::Groups);
+        // A filter box handing back Esc keeps the column; Esc elsewhere returns.
+        let _ = app.update(Message::Key(Input::Nav(Nav::FieldEscape)));
+        assert_eq!(app.column, Column::Groups);
+        let _ = app.dispatch(Command::Filter {
+            pane: "sections".into(),
+            query: "a".into(),
+        });
+        assert_eq!(
+            app.column,
+            Column::Sections,
+            "typing in a filter activates its column"
+        );
+        let _ = app.open_palette(Mode::Commands);
+        let _ = app.update(Message::Key(Input::Nav(Nav::FieldEscape)));
+        assert!(
+            app.palette.is_none(),
+            "the palette still closes on its own Esc"
+        );
+        assert_eq!(app.column, Column::Sections);
+        let _ = run(&mut app, CommandId::ColumnRight);
+        let _ = run(&mut app, CommandId::ColumnRight);
+        let _ = run(&mut app, CommandId::ColumnRight);
+        press(&mut app, CommandId::Find);
+        assert!(app.find_open, "Find in the editor is find-in-note");
+    }
 }

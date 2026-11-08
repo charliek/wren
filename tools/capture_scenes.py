@@ -108,6 +108,10 @@ def main() -> int:
             for name in ("column-groups-folded", "column-notes-folded", "column-editor-folded"):
                 client.call("command.run", {"id": "navigation.column_right"})
                 shot_here(name)
+            client.call("column.open", {"column": "groups"})
+            client.call("shortcut", {"id": "navigation.jump"})
+            shot_here("palette-jump-group")
+            client.call("palette.close")
             # Unfold, then return to the editor through Jump, which keeps the fold.
             client.call("column.open", {"column": "sections"})
             client.call("palette.open", {"mode": "jump"})

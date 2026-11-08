@@ -26,7 +26,13 @@ version's section as its notes, and publishes to the apt repo. See
   Sections (and then Groups) into a `‹ Section › Group` path at the top of
   the leftmost open column, giving the editor their width. Click a name or
   `‹` to unfold; moving left only unfolds. Notes never folds.
-- **⌘R (Alt+R on Linux) renames the open note.**
+- **Shortcuts follow the active column.** ⌘P jumps among sections or
+  groups when one of those columns is active (⌘P again widens to every
+  note), ⌘N creates a section or group there, ⌘F filters that column, and
+  ⌘R renames its selection; Alt on Linux. The title-bar Jump button follows
+  too. Palette commands are unchanged.
+- **⌘R (Alt+R on Linux) renames** the open note, or the selected section or
+  group in their columns.
 
 - **Four more dark themes:** Tokyo Night (`tokyo-night`), Dracula
   (`dracula`), Catppuccin Mocha (`catppuccin-mocha`) and Catppuccin Macchiato

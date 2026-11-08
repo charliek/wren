@@ -706,7 +706,7 @@ impl App {
             iced::event::listen_with(|event, status, _| match event {
                 iced::Event::Keyboard(event) => crate::keys::input(&event)
                     .filter(|input| crate::keys::reaches_app(input, status))
-                    .map(Message::Key),
+                    .map(|input| Message::Key(crate::keys::with_status(input, status))),
                 _ => None,
             }),
         ];

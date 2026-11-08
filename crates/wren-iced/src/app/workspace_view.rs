@@ -168,7 +168,15 @@ impl App {
         let compact = self.viewport.width < 1120.0;
         let mut right = row![].spacing(6).align_y(iced::Center);
         if !compact {
-            right = right.push(self.shortcut_button("Jump to note", CommandId::Jump));
+            right = right.push(self.scoped_button(
+                match self.column {
+                    Column::Sections => "Jump to section",
+                    Column::Groups => "Jump to group",
+                    Column::Notes | Column::Editor => "Jump to note",
+                },
+                CommandId::Jump,
+                Command::Scoped(CommandId::Jump),
+            ));
         }
         right = right.push(self.shortcut_button("Search", CommandId::Search));
         right = right.push(
@@ -212,6 +220,15 @@ impl App {
     }
 
     fn shortcut_button<'a>(&'a self, label: &'a str, id: CommandId) -> button::Button<'a, Message> {
+        self.scoped_button(label, id, Command::Run(id))
+    }
+
+    fn scoped_button<'a>(
+        &'a self,
+        label: &'a str,
+        id: CommandId,
+        command: Command,
+    ) -> button::Button<'a, Message> {
         let mut contents = row![text(label).size(12)].spacing(8).align_y(iced::Center);
         if let Some(shortcut) = self.shortcut_label(id.key()) {
             contents = contents.push(chrome::keycap_owned(shortcut, self.definition));
@@ -221,7 +238,7 @@ impl App {
             .padding([0, 10])
             .on_press_maybe(
                 self.command_enabled(id)
-                    .then_some(Message::Command(Command::Run(id))),
+                    .then_some(Message::Command(command)),
             )
             .style(move |_, status| chrome::control(self.definition, status, false, false))
     }

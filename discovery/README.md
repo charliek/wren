@@ -7,4 +7,4 @@ what users need into `docs/` and delete or trim the note here.
 
 | Note | Status |
 |---|---|
-| [Keyboard drill-down navigation](keyboard-drill-down.md) | Designed, not started |
+| [Keyboard drill-down navigation](keyboard-drill-down.md) | Implemented 2026-11-08 |

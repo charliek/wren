@@ -138,7 +138,7 @@ impl EffectBefore {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogKind {
     CreateSection,
     CreateGroup(SectionId),

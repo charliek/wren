@@ -4,8 +4,9 @@
 use iced::Task;
 use wren_core::model::{GroupId, NoteId, Parent, SectionId};
 
-use super::commands::{Command, Disposition, Gateway};
+use super::commands::{Command, CommandId, Disposition, Gateway};
 use super::navigation::matches_name;
+use super::palette::Mode;
 use super::palette::SearchTarget;
 use super::{App, Message};
 use crate::panes::{Pane, PANES};
@@ -20,13 +21,21 @@ pub enum Column {
 }
 
 impl Column {
-    #[cfg(feature = "smoke-test")]
     pub const fn key(self) -> &'static str {
         match self {
             Self::Sections => "sections",
             Self::Groups => "groups",
             Self::Notes => "notes",
             Self::Editor => "editor",
+        }
+    }
+
+    pub fn parse_pane(pane: &str) -> Option<Self> {
+        match pane {
+            "sections" => Some(Self::Sections),
+            "groups" => Some(Self::Groups),
+            "notes" => Some(Self::Notes),
+            _ => None,
         }
     }
 
@@ -217,6 +226,44 @@ impl App {
         self.fold = self.fold.min(previous.fold());
         let task = self.activate_column(previous);
         self.finish_action(Disposition::Completed, None, task)
+    }
+
+    /// A shortcut acts on the active column: ⌘P jumps among its items, ⌘N
+    /// creates one, ⌘F filters it, ⌘R renames its selection. Palette rows
+    /// never come through here, so they always do what their label says.
+    pub(super) fn run_scoped(&mut self, id: CommandId) -> Gateway {
+        use CommandId::{
+            Find, Jump, NewGroup, NewNote, NewSection, RenameGroup, RenameNote, RenameSection,
+        };
+        let scoped = match (self.column, id) {
+            (Column::Sections, Jump) => return self.open_palette(Mode::JumpSection),
+            (Column::Groups, Jump) => return self.open_palette(Mode::JumpGroup),
+            (column, Find) if column.is_browser() => {
+                let task = iced::widget::operation::focus(format!("filter-{}", column.key()));
+                return self.finish_action(Disposition::Completed, None, task);
+            }
+            (Column::Sections, NewNote) => NewSection,
+            (Column::Groups, NewNote) => NewGroup,
+            (Column::Sections, RenameNote) => RenameSection,
+            (Column::Groups, RenameNote) => RenameGroup,
+            _ => id,
+        };
+        self.dispatch(Command::Run(scoped))
+    }
+
+    /// A pick from a scoped jump: select it, then move one column right as ↵ does.
+    pub(super) fn jump_into(&mut self, column: Column, select: Command) -> Gateway {
+        self.column = column;
+        let selected = self.dispatch(select);
+        if !selected.processed.disposition.committed() {
+            return selected;
+        }
+        self.palette = None;
+        let right = self.column_right();
+        Gateway {
+            task: Task::batch([selected.task, right.task]),
+            ..selected
+        }
     }
 
     /// Esc: back to writing, keeping the selection. Leaving a browser column

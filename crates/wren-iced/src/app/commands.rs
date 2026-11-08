@@ -228,6 +228,8 @@ pub enum Command {
     SelectSection(wren_core::model::SectionId),
     /// Unfold and activate a column, as a breadcrumb click does.
     OpenColumn(super::columns::Column),
+    /// Run a command scoped to the active column, as its shortcut does.
+    Scoped(CommandId),
     Focus(Option<bool>),
     Width {
         pane: Pane,
@@ -392,6 +394,7 @@ impl App {
                 outcome
             }
             Command::OpenColumn(column) => self.open_column(column),
+            Command::Scoped(id) => self.run_scoped(id),
             Command::Focus(enabled) => {
                 if self.session.is_none() {
                     return self.blocked("No workspace is open");
@@ -425,6 +428,10 @@ impl App {
                 }
                 if !self.filters.set(&pane, query) {
                     return self.blocked("Unknown browser filter");
+                }
+                // Typing in a column's filter means working in that column.
+                if let Some(column) = super::columns::Column::parse_pane(&pane) {
+                    self.column = column;
                 }
                 self.finish_action(Disposition::Completed, None, Task::none())
             }

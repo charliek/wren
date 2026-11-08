@@ -6,7 +6,7 @@ use iced::widget::{
 };
 use iced::{Element, Fill, Task};
 use wren_core::index::{fuzzy_score, QueryKind, Scope};
-use wren_core::model::{GroupId, ItemRef, NoteId, Parent};
+use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::Op;
 
 use super::commands::{
@@ -22,6 +22,10 @@ use wren_core::theme as definitions;
 pub enum Mode {
     Commands,
     Jump,
+    /// ⌘P from the Sections column.
+    JumpSection,
+    /// ⌘P from the Groups column: every group, the selected section's first.
+    JumpGroup,
     Search,
     Workspaces,
     MoveNote(NoteId),
@@ -37,6 +41,8 @@ impl Mode {
         match self {
             Self::Commands => "commands",
             Self::Jump => "jump",
+            Self::JumpSection => "jump_section",
+            Self::JumpGroup => "jump_group",
             Self::Search => "search",
             Self::Workspaces => "workspaces",
             Self::MoveNote(_) => "move_note",
@@ -52,6 +58,8 @@ impl Mode {
         match self {
             Self::Commands => "Type a command…",
             Self::Jump => "Jump to a note…",
+            Self::JumpSection => "Jump to a section…",
+            Self::JumpGroup => "Jump to a group…",
             Self::Search => "Search all notes in this workspace",
             Self::Workspaces => "Find a workspace…",
             Self::MoveNote(_) | Self::MoveGroup(_) => "Choose a destination…",
@@ -70,6 +78,8 @@ impl Mode {
             Self::ItemActions(_) => Some("Item actions"),
             Self::Reorder(_) => Some("Reorder"),
             Self::Jump => Some("Jump"),
+            Self::JumpSection => Some("Sections"),
+            Self::JumpGroup => Some("Groups"),
             Self::Themes => Some("Theme"),
             Self::Fonts => Some("Editor font"),
             _ => None,
@@ -81,6 +91,8 @@ impl Mode {
 pub enum Key {
     Command(CommandId),
     Note(NoteId),
+    Section(SectionId),
+    Group(GroupId),
     Destination(Parent),
     ItemAction {
         target: ItemTarget,
@@ -107,8 +119,14 @@ pub struct SearchTarget {
 pub enum Action {
     Command(CommandId),
     Note(SearchTarget),
+    /// Select and move one column right, like ↵ in the browser.
+    Section(SectionId),
+    Group(GroupId),
     Destination(Parent),
-    ItemCommand { target: ItemTarget, id: CommandId },
+    ItemCommand {
+        target: ItemTarget,
+        id: CommandId,
+    },
     Reorder(ReorderTarget),
     Workspace(PathBuf),
     Theme(Option<&'static str>),
@@ -368,6 +386,64 @@ impl App {
                                 content_match: hit.content_match,
                             }),
                         });
+                    }
+                }
+            }
+            Mode::JumpSection => {
+                if let Some(model) = self.model() {
+                    let mut ranked: Vec<_> = model
+                        .sections
+                        .iter()
+                        .filter_map(|section| {
+                            fuzzy_score(&query, &section.name).map(|score| (score, section))
+                        })
+                        .collect();
+                    // Stable: equal scores (an empty query) keep the manual order.
+                    ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+                    for (_, section) in ranked {
+                        let groups = model
+                            .groups
+                            .iter()
+                            .filter(|group| group.section == section.id)
+                            .count();
+                        let mut row = action_row(
+                            Key::Section(section.id),
+                            section.name.clone(),
+                            format!("{groups} {}", if groups == 1 { "group" } else { "groups" }),
+                            true,
+                            Action::Section(section.id),
+                        );
+                        row.current = self.selected_section == Some(section.id);
+                        rows.push(row);
+                    }
+                }
+            }
+            Mode::JumpGroup => {
+                if let Some(model) = self.model() {
+                    let current = self.selected_section;
+                    let mut ranked: Vec<_> = model
+                        .groups
+                        .iter()
+                        .filter_map(|group| {
+                            let section = model.section(group.section)?;
+                            let haystack = format!("{} {}", group.name, section.name);
+                            fuzzy_score(&query, &haystack).map(|score| (score, group, section))
+                        })
+                        .collect();
+                    ranked.sort_by(|a, b| {
+                        b.0.cmp(&a.0)
+                            .then_with(|| (Some(b.2.id) == current).cmp(&(Some(a.2.id) == current)))
+                    });
+                    for (_, group, section) in ranked {
+                        let mut row = action_row(
+                            Key::Group(group.id),
+                            group.name.clone(),
+                            section.name.clone(),
+                            true,
+                            Action::Group(group.id),
+                        );
+                        row.current = self.selected_group == Some(group.id);
+                        rows.push(row);
                     }
                 }
             }
@@ -647,6 +723,14 @@ impl App {
                 self.column = super::columns::Column::Editor;
                 self.dispatch(Command::OpenNote(target))
             }
+            Action::Section(section) => self.jump_into(
+                super::columns::Column::Sections,
+                Command::SelectSection(section),
+            ),
+            Action::Group(group) => self.jump_into(
+                super::columns::Column::Groups,
+                Command::SelectParent(Parent::Group(group)),
+            ),
             Action::ItemCommand { target, id } => self.dispatch(Command::ItemAction { target, id }),
             Action::Reorder(target) => self.dispatch(Command::Reorder(target)),
             Action::Theme(id) => self.choose_theme(id),
@@ -971,6 +1055,8 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
     let key = match key {
         Key::Command(id) => id.key().into(),
         Key::Note(note) => format!("note-{}", note.0),
+        Key::Section(section) => format!("section-{}", section.0),
+        Key::Group(group) => format!("group-{}", group.0),
         Key::Destination(parent) => format!("parent-{parent:?}"),
         Key::ItemAction { target, id } => format!("item-{target:?}-{}", id.key()),
         Key::Reorder(target) => format!("reorder-{target:?}"),

@@ -11,6 +11,8 @@ use wren_core::keybind::{canonical_key, Accel, Mods};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nav {
     Escape,
+    /// Esc that a text field already handled (it unfocuses itself).
+    FieldEscape,
     Up,
     Down,
     Left,
@@ -61,8 +63,19 @@ pub fn input(event: &keyboard::Event) -> Option<Input> {
 /// belong to that widget; Escape and shortcuts always reach the app.
 pub fn reaches_app(input: &Input, status: iced::event::Status) -> bool {
     match input {
-        Input::Nav(Nav::Escape) | Input::Accel(_) => true,
+        Input::Nav(Nav::Escape | Nav::FieldEscape) | Input::Accel(_) => true,
         Input::Nav(_) => status == iced::event::Status::Ignored,
+    }
+}
+
+/// Mark an Esc a text field captured, so the app can tell leaving a filter
+/// box apart from leaving a column.
+pub fn with_status(input: Input, status: iced::event::Status) -> Input {
+    match input {
+        Input::Nav(Nav::Escape) if status == iced::event::Status::Captured => {
+            Input::Nav(Nav::FieldEscape)
+        }
+        input => input,
     }
 }
 
@@ -476,6 +489,14 @@ mod tests {
             assert!(!reaches_app(&Input::Nav(nav), Status::Captured));
         }
         assert!(reaches_app(&Input::Nav(Nav::Escape), Status::Captured));
+        assert_eq!(
+            with_status(Input::Nav(Nav::Escape), Status::Captured),
+            Input::Nav(Nav::FieldEscape)
+        );
+        assert_eq!(
+            with_status(Input::Nav(Nav::Escape), Status::Ignored),
+            Input::Nav(Nav::Escape)
+        );
         let accel = Input::Accel(parse_trigger("alt+shift+bracketleft").unwrap());
         assert!(reaches_app(&accel, Status::Captured));
     }

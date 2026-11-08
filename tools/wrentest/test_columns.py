@@ -305,3 +305,97 @@ def test_native_breadcrumb_back_button_unfolds_one_column_at_a_time(native_works
         wait_for(lambda: (navigation(app)["column"], navigation(app)["fold"]) == expected,
                  description=f"breadcrumb back opens {expected[0]}")
     assert navigation(app)["dialog"] is None and navigation(app)["modal"] is None
+
+
+def shortcut(app: WrenApp, command_id: str) -> dict:
+    return app.client.call("shortcut", {"id": command_id})
+
+
+def test_shortcuts_act_on_the_active_column_and_palette_rows_do_not(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("columns-scoped")) as app:
+        jump(app, FIRST)
+        atlas = item(app, "sections", "Atlas")["id"]
+        research = item(app, "groups", "Atlas/Research")["id"]
+        expected = {
+            "editor": ("CreateNote", "Rename(Note"),
+            "notes": ("CreateNote", "Rename(Note"),
+            "groups": (f"CreateGroup(SectionId({atlas}))", f"Rename(Group(GroupId({research}))"),
+            "sections": ("CreateSection", f"Rename(Section(SectionId({atlas}))"),
+        }
+        for name, (create, rename) in expected.items():
+            if name != "editor":
+                command(app, "navigation.column_left")
+            assert column(app) == name
+            dialog = shortcut(app, "note.new")["dialog"]
+            assert dialog["kind"].startswith(create), (name, dialog)
+            app.client.call("dialog.close")
+            dialog = shortcut(app, "note.rename")["dialog"]
+            assert dialog["kind"].startswith(rename), (name, dialog)
+            app.client.call("dialog.close")
+            assert column(app) == name
+
+        # A palette row does what its label says, whatever the column.
+        command(app, "navigation.column_right")
+        assert column(app) == "groups"
+        app.client.call("palette.open", {"mode": "commands"})
+        app.client.call("palette.query", {"query": "Rename note"})
+        app.client.call("palette.activate", {})
+        assert navigation(app)["dialog"]["kind"].startswith("Rename(Note")
+
+
+def test_scoped_jump_picks_move_right_and_jump_again_widens(vault: Path) -> None:
+    artifacts = artifact_directory("columns-jump")
+    with WrenApp(workspace=vault, artifacts_dir=artifacts) as app:
+        jump(app, FIRST)
+        for _ in range(3):
+            command(app, "navigation.column_left")
+        modal = shortcut(app, "navigation.jump")["modal"]
+        assert modal["mode"] == "jump_section"
+        assert [row["title"] for row in modal["results"]] == ["Atlas", "Boreal", "Empty section"]
+        capture(app, artifacts / "jump-section.png")
+        app.client.call("palette.query", {"query": "brl"})
+        state = app.client.call("palette.activate", {})["navigation"]
+        assert state["modal"] is None
+        assert state["selected_section"] == item(app, "sections", "Boreal")["id"]
+        assert (state["column"], state["fold"]) == ("groups", 1)
+
+        modal = shortcut(app, "navigation.jump")["modal"]
+        assert modal["mode"] == "jump_group"
+        sections = [row["path"] for row in modal["results"]]
+        assert sections[:2] == ["Boreal", "Boreal"], "the selected section's groups come first"
+        capture(app, artifacts / "jump-group.png")
+        assert shortcut(app, "navigation.jump")["modal"]["mode"] == "jump", "⌘P again widens"
+        app.client.call("palette.close")
+        modal = shortcut(app, "navigation.jump")["modal"]
+        app.client.call("palette.query", {"query": "atlas review"})
+        state = app.client.call("palette.activate", {})["navigation"]
+        assert state["selected_group"] == item(app, "groups", "Atlas/Review")["id"]
+        assert (state["column"], state["fold"]) == ("notes", 2)
+        assert document_path(app) == "Atlas/Review/Peer check.md"
+
+
+@pytest.mark.native_x11
+def test_native_alt_p_and_alt_f_follow_the_active_column(native_workspace) -> None:
+    app, root, window = native_workspace
+    original_files = native.files(root)
+    native.keys(window, "alt+shift+bracketleft", "alt+shift+bracketleft", "alt+shift+bracketleft")
+    wait_for(lambda: column(app) == "sections", description="three column moves reach Sections")
+    native.keys(window, "alt+f")
+    wait_focus(app, ["filter-sections"])
+    native.type_text(window, "C Vis")
+    wait_for(lambda: navigation(app)["filters"]["sections"] == "C Vis", description="Alt+F filters Sections")
+    native.keys(window, "Escape")
+    wait_focus(app, [])
+    assert column(app) == "sections", "Esc in a filter box keeps the column"
+    native.keys(window, "Down")
+    remote = native.item(app, "sections", native.SECTIONS[2])["id"]
+    wait_for(lambda: navigation(app)["selected_section"] == remote,
+             description="Down selects the only visible row")
+    native.keys(window, "alt+p")
+    wait_for(lambda: (navigation(app)["modal"] or {}).get("mode") == "jump_section",
+             description="Alt+P in Sections jumps among sections")
+    native.type_text(window, "A Visible")
+    native.keys(window, "Return")
+    wait_for(lambda: (column(app), navigation(app)["fold"]) == ("groups", 1),
+             description="a section pick moves right")
+    assert native.files(root) == original_files

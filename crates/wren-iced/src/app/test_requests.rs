@@ -72,6 +72,13 @@ impl App {
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }
+            "shortcut" => {
+                // A key binding firing, with its active-column scoping.
+                let id = CommandId::parse(string(params, "id")?).ok_or("Unknown command ID")?;
+                let task = self.run_shortcut(id);
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
             "row.click" => {
                 let row = row_param(params)?;
                 let generation = self.gesture_generation;
@@ -318,6 +325,8 @@ impl App {
                 let mode = match string(params, "mode")? {
                     "commands" => Mode::Commands,
                     "jump" => Mode::Jump,
+                    "jump_section" => Mode::JumpSection,
+                    "jump_group" => Mode::JumpGroup,
                     "search" => Mode::Search,
                     "workspaces" => Mode::Workspaces,
                     "themes" => Mode::Themes,
@@ -618,6 +627,12 @@ fn result_key(value: &Value) -> Result<Key, String> {
     if object.contains_key("note") {
         return Ok(Key::Note(NoteId(id(value, "note")?)));
     }
+    if object.contains_key("section") {
+        return Ok(Key::Section(SectionId(id(value, "section")?)));
+    }
+    if object.contains_key("group") {
+        return Ok(Key::Group(GroupId(id(value, "group")?)));
+    }
     if let Some(destination) = object.get("destination") {
         return Ok(Key::Destination(parent(destination)?));
     }
@@ -671,6 +686,8 @@ fn key_json(key: &Key) -> Value {
             json!({"command":super::commands::DEFINITIONS.iter().find(|definition| definition.id == *id).map(|definition| definition.key)})
         }
         Key::Note(note) => json!({"note":note.0}),
+        Key::Section(section) => json!({"section":section.0}),
+        Key::Group(group) => json!({"group":group.0}),
         Key::Destination(parent) => json!({"destination":parent_json(*parent)}),
         Key::Workspace(path) => json!({"workspace":path}),
         Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),

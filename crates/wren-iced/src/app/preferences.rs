@@ -8,7 +8,7 @@ use wren_core::keybind::{self, Keymap, Platform};
 use wren_core::settings::{self, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 
-use super::commands::{Command, CommandId, Disposition, Gateway};
+use super::commands::{CommandId, Disposition, Gateway};
 use super::palette::{Key, Mode};
 use super::{workspace, App, Message};
 use crate::fonts;
@@ -376,6 +376,15 @@ impl App {
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
         let accel = match input {
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),
+            // A filter box handed back the keyboard: stay in its column. The
+            // palette, a dialog, and the find bar still close as with Esc.
+            Input::Nav(Nav::FieldEscape) => {
+                return if self.palette.is_some() || self.dialog.is_some() || self.find_open {
+                    self.update(Message::Escape)
+                } else {
+                    self.column_focus()
+                };
+            }
             Input::Nav(nav) => {
                 if self.palette.is_some() {
                     return match nav {
@@ -393,7 +402,7 @@ impl App {
                     Nav::Down => self.step_column(1).task,
                     Nav::Enter | Nav::Right => self.column_right().task,
                     Nav::Left => self.column_left().task,
-                    Nav::Escape => Task::none(),
+                    Nav::Escape | Nav::FieldEscape => Task::none(),
                 };
             }
             Input::Accel(accel) => accel,
@@ -409,7 +418,7 @@ impl App {
         self.run_shortcut(id)
     }
 
-    fn run_shortcut(&mut self, id: CommandId) -> Task<Message> {
+    pub(super) fn run_shortcut(&mut self, id: CommandId) -> Task<Message> {
         // Quitting stays available everywhere. Otherwise an open dialog or
         // palette owns the keyboard: only the palette shortcut (to close it)
         // gets through.
@@ -417,18 +426,21 @@ impl App {
             if self.dialog.is_some() {
                 return Task::none();
             }
-            if self.palette.is_some() {
-                return if id == CommandId::CommandPalette {
-                    self.close_palette().task
-                } else {
-                    Task::none()
+            if let Some(palette) = &self.palette {
+                return match (id, palette.mode) {
+                    (CommandId::CommandPalette, _) => self.close_palette().task,
+                    // ⌘P again widens a section or group jump to every note.
+                    (CommandId::Jump, Mode::JumpSection | Mode::JumpGroup) => {
+                        self.open_palette(Mode::Jump).task
+                    }
+                    _ => Task::none(),
                 };
             }
         }
         if id == CommandId::CommandPalette {
             return self.open_palette(Mode::Commands).task;
         }
-        self.dispatch(Command::Run(id)).task
+        self.run_scoped(id).task
     }
 }
 
