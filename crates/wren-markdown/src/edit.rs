@@ -306,12 +306,16 @@ fn split(
 
 /// Leave the innermost container: the line keeps only `outer`, the prefix
 /// of the containers outside it. After a paragraph line a blank line is
-/// left behind, so the next text does not continue that paragraph lazily.
+/// left behind, so the next text does not continue that paragraph lazily,
+/// and before text a blank line is left below, so what is typed does not run
+/// into it (a following `2.` cannot interrupt a paragraph, and plain text
+/// would join it).
 fn exit(d: &mut Draft, an: &Analysis, ctx: &Line, outer: String) -> Pos {
     let l = ctx.l;
     let after_paragraph = l > 0 && an.recs[l - 1].info.kind == Kind::Prose;
-    if after_paragraph {
-        d.set(l, format!("{}{}", ctx.head(), trim_ws_end(&outer)));
+    let gap = trim_ws_end(&outer).to_owned();
+    let caret = if after_paragraph {
+        d.set(l, format!("{}{gap}", ctx.head()));
         let col = outer.len();
         d.insert(l + 1, outer);
         Pos::new(l + 1, col)
@@ -320,7 +324,15 @@ fn exit(d: &mut Draft, an: &Analysis, ctx: &Line, outer: String) -> Pos {
         let col = line.len();
         d.set(l, line);
         Pos::new(l, col)
+    };
+    let text_below = an
+        .recs
+        .get(l + 1)
+        .is_some_and(|rec| rec.info.kind != Kind::Blank);
+    if text_below {
+        d.insert(caret.line + 1, gap);
     }
+    caret
 }
 
 /// Enter on an item holding only its marker: a nested item moves out one
@@ -337,18 +349,7 @@ fn empty_item(
             return done;
         }
     }
-    let outer = ctx.outer(slot);
-    let caret = exit(d, an, ctx, outer.clone());
-    // Text right below would otherwise run into what is typed here: a
-    // following `2.` cannot interrupt a paragraph, so it would become
-    // paragraph text too.
-    let text_below = an
-        .recs
-        .get(ctx.l + 1)
-        .is_some_and(|rec| rec.info.kind != Kind::Blank);
-    if text_below {
-        d.insert(caret.line + 1, trim_ws_end(&outer).to_owned());
-    }
+    let caret = exit(d, an, ctx, ctx.outer(slot));
     let mut requests = Vec::new();
     if let Marker::Ordered {
         number, delimiter, ..
@@ -1766,6 +1767,10 @@ mod tests {
                 ("> - a\n> - |\n> - c", "> - a\n>\n> |\n>\n> - c"),
                 ("- a\n- |\ntext", "- a\n\n|\n\ntext"),
                 ("- a\n- |\n\n- c", "- a\n\n|\n\n- c"),
+                // A quote exit leaves the same gap before text below.
+                ("> a\n> |\nfoo", "> a\n\n|\n\nfoo"),
+                ("> a\n> |\n> b", "> a\n\n|\n\n> b"),
+                ("> > a\n> > |\n> > b", "> > a\n>\n> |\n>\n> > b"),
             ],
         );
     }

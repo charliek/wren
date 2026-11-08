@@ -281,7 +281,7 @@ At the outermost level the marker is removed. **After a paragraph line a blank l
 | `> > a⏎> > \|` | `> > a⏎>⏎> \|` |
 | `> - \|` | `> \|` |
 
-**When text follows on the next line, a blank line is left below the cursor as well**, so the item that follows does not run into what is typed. An ordered item other than 1 cannot interrupt a paragraph, so without the gap `1. a⏎⏎foo⏎2. c` would read `2. c` as paragraph text. The rest of the list is still renumbered (§5.6):
+**When text follows on the next line, a blank line is left below the cursor as well**, so what follows does not run into what is typed. Every exit does this, a quote's as well as an item's: without it, `> a⏎> |⏎foo` would join what is typed to `foo` in one paragraph. An ordered item other than 1 cannot interrupt a paragraph, so without the gap `1. a⏎⏎foo⏎2. c` would read `2. c` as paragraph text. The rest of the list is still renumbered (§5.6):
 
 | Before | After |
 |---|---|
@@ -289,6 +289,7 @@ At the outermost level the marker is removed. **After a paragraph line a blank l
 | `- a⏎- \|⏎- c` | `- a⏎⏎\|⏎⏎- c` |
 | `> - a⏎> - \|⏎> - c` | `> - a⏎>⏎> \|⏎>⏎> - c` |
 | `1. \|⏎2. b` (first line) | `\|⏎⏎1. b` |
+| `> a⏎> \|⏎foo` | `> a⏎⏎\|⏎⏎foo` |
 
 ### 5.3 Shift+Enter
 
