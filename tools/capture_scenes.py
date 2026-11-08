@@ -65,7 +65,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
+    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic",
+                        help="the editor-engine setting")
     args = parser.parse_args()
+    settings = f"editor-engine = {args.engine}\n"
     out = (args.out / args.theme).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -79,14 +82,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temp:
         blank = Path(temp).resolve() / "blank"
         blank.mkdir()
-        with WrenApp(workspace=blank, evaluation=False) as app:
+        with WrenApp(workspace=blank, evaluation=False, settings=settings) as app:
             app.client.call("theme.set", {"id": args.theme})
             wait_for(lambda: app.client.call("session.get")["root"], timeout=10)
             shot(app.client, "empty-workspace")
 
         workspace = Path(temp).resolve() / "work"
         build_workspace(workspace)
-        with WrenApp(workspace=workspace, evaluation=False) as app:
+        with WrenApp(workspace=workspace, evaluation=False, settings=settings) as app:
             client = app.client
             client.call("theme.set", {"id": args.theme})
             wait_for(lambda: client.call("session.get")["notes"], timeout=10)
@@ -137,6 +140,17 @@ def main() -> int:
             client.call("view.focus", {"enabled": True})
             shot_here("focus")
             client.call("view.focus", {"enabled": False})
+            # Smart keys: continue the task list, nest an item, and continue
+            # the nested list.
+            client.call("editor.cursor", {"line": 5, "column": len("- [x] Share Q4 roadmap"),
+                                          "selection": None})
+            for step in ("enter", "Draft the cutover note", "enter", "tab",
+                         "Ask Bob about on-call", "enter", "Loop in Priya", "enter", "enter"):
+                if step in ("enter", "tab"):
+                    client.call("editor.command", {"intent": step})
+                else:
+                    client.call("editor.insert", {"text": step})
+            shot_here("editor-smart-keys")
             archive = next(
                 row for row in client.call("session.get")["sections"]
                 if row["path"] == EMPTY_SECTION
