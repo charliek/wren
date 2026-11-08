@@ -857,6 +857,96 @@ mod tests {
         );
     }
 
+    /// Laid-out selection, paging, Enter, and history over wrapped CRLF rows
+    /// leave both engines with the same text, cursor, selection, and scroll.
+    #[test]
+    fn laid_out_editing_matches_across_engines() {
+        use iced::Point;
+
+        let size = iced::Size::new(300.0, 160.0);
+        let long = "wrapped words fill this row ".repeat(4);
+        let text = (0..40)
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!("{i} {long}")
+                } else {
+                    format!("line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let script = || {
+            let edit = |edit| Step::Act(Action::Edit(edit));
+            vec![
+                Step::Act(Action::Click(Point::new(30.0, 30.0))),
+                Step::Act(Action::SelectWord),
+                edit(Edit::Insert('X')),
+                Step::Undo,
+                edit(Edit::Insert('Y')),
+                Step::Act(Action::Move(Motion::PageDown)),
+                Step::Act(Action::Select(Motion::PageDown)),
+                Step::Act(Action::Move(Motion::PageUp)),
+                Step::Act(Action::Move(Motion::Up)),
+                Step::Act(Action::Move(Motion::Up)),
+                edit(Edit::Enter),
+                Step::Act(Action::Click(Point::new(20.0, 50.0))),
+                Step::Act(Action::Drag(Point::new(120.0, 110.0))),
+                edit(Edit::Backspace),
+                Step::Undo,
+                Step::Act(Action::SelectLine),
+                edit(Edit::Insert('Z')),
+                Step::Undo,
+                Step::Redo,
+                Step::Undo,
+                Step::Undo,
+                Step::Undo,
+            ]
+        };
+        let trace = |kind| {
+            let mut ev = EditorView::with_backend(kind, &text);
+            ev.content.lay_out(size);
+            script()
+                .into_iter()
+                .map(|step| {
+                    match step {
+                        Step::Act(action) => {
+                            ev.perform(action);
+                        }
+                        Step::Undo => {
+                            ev.undo();
+                        }
+                        Step::Redo => {
+                            ev.redo();
+                        }
+                    }
+                    ev.content.lay_out(size);
+                    (
+                        ev.text(),
+                        ev.cursor(),
+                        ev.selected_text(),
+                        ev.content.scroll().line,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        enum Step {
+            Act(Action),
+            Undo,
+            Redo,
+        }
+        let iced = trace(BackendKind::Iced);
+        let cosmic = trace(BackendKind::Cosmic);
+        for (step, (iced, cosmic)) in iced.iter().zip(&cosmic).enumerate() {
+            assert_eq!(iced, cosmic, "step {step}");
+        }
+        // Enter wrote CRLF, and the view scrolled along the way.
+        assert!(iced
+            .iter()
+            .all(|(text, ..)| text.matches('\n').count() == text.matches("\r\n").count()));
+        assert!(iced.iter().any(|(.., line)| *line > 0));
+        assert_eq!(iced.last().unwrap().0, text);
+    }
+
     /// Instantiates the tests once per engine, as `on_iced` and `on_cosmic`.
     macro_rules! on_each_backend {
         ($($tests:tt)*) => {
