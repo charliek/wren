@@ -295,9 +295,10 @@ impl EditorView {
     /// lines, and the plan is applied as with [`EditorView::apply`]. Home
     /// first stops at the start of a wrapped visual row, which only the
     /// layout knows. With assist off, Enter and Home are iced's own, Tab
-    /// inserts spaces to the next multiple of 4, Backspace deletes a grapheme
-    /// cluster, the line delete goes to column 0, and the Markdown commands do
-    /// nothing; Delete, the word deletes, and the document motions are the
+    /// inserts spaces to the next multiple of 4 (or indents the lines of a
+    /// selection that spans lines), Shift+Tab outdents, Backspace deletes a
+    /// grapheme cluster, the line delete goes to column 0, and the Markdown
+    /// commands do nothing; Delete, the word deletes, and the document motions are the
     /// same either way.
     ///
     /// Returns whether the text changed.
@@ -2448,7 +2449,9 @@ mod tests {
             assert_eq!(ev.text(), "- a\n");
             assert!(ev.intent(Intent::Tab));
             assert_eq!(ev.text(), "- a\n    ");
-            assert!(!ev.intent(Intent::ShiftTab));
+            assert!(ev.intent(Intent::ShiftTab));
+            assert_eq!(ev.text(), "- a\n");
+            assert!(ev.intent(Intent::Tab));
             assert!(ev.intent(Intent::Backspace));
             assert_eq!(ev.text(), "- a\n   ");
             ev.intent(Intent::Home { extend: false });
@@ -2462,6 +2465,17 @@ mod tests {
             assert_eq!(ev.text(), "e\u{301}");
             assert!(ev.intent(Intent::DeleteToTextStart));
             assert_eq!(ev.text(), "");
+            // Tab over several lines indents them rather than replacing them.
+            ev.replace_text("one\ntwo\nthree", false);
+            ev.move_cursor(Cursor {
+                position: Position { line: 2, column: 5 },
+                selection: Some(Position { line: 0, column: 0 }),
+            });
+            assert!(ev.intent(Intent::Tab));
+            assert_eq!(ev.text(), "    one\n    two\n    three");
+            assert_eq!(ev.selected_text().as_deref(), Some("    one\n    two\n    three"));
+            assert!(ev.intent(Intent::ShiftTab));
+            assert_eq!(ev.text(), "one\ntwo\nthree");
         }
 
         #[test]

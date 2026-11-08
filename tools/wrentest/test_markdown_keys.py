@@ -157,10 +157,19 @@ def test_with_assist_off_the_keys_edit_plain_text(keys_app) -> None:
         editor.load("- a", 0, 3)
         assert editor.press("enter")["text"] == "- a\n"
         assert editor.press("tab")["text"] == "- a\n    "
-        assert editor.press("shift_tab")["text"] == "- a\n    "
+        assert editor.press("shift_tab")["text"] == "- a\n"
+        assert editor.press("tab")["text"] == "- a\n    "
         assert editor.press("backspace")["text"] == "- a\n   "
         editor.load("- [ ] task", 0, 10)
         assert cursor(editor.press("home")) == (0, 0)
+        # Tab over several lines indents them; it never replaces them.
+        editor.load("one\ntwo\nthree", 2, 5)
+        editor.call("editor.cursor", {"line": 2, "column": 5,
+                                      "selection": {"line": 0, "column": 0}})
+        state = editor.press("tab")
+        assert state["text"] == "    one\n    two\n    three"
+        assert state["selected_text"] == state["text"]
+        assert editor.press("shift_tab")["text"] == "one\ntwo\nthree"
 
 
 def test_the_word_count_catches_up_after_smart_edits(keys_app) -> None:

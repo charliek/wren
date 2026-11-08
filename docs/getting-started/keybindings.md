@@ -68,9 +68,11 @@ quote or list prefix, and Tab inserts a tab or spaces like the line above.
 
 With `markdown-assist = off` in [`config.conf`](../reference/configuration.md),
 Enter, Shift+Enter, and Home are plain again. Backspace still deletes a
-whole character, Tab still inserts spaces to the next multiple of 4,
-Shift+Tab does nothing, ⌘⌫ deletes to the start of the line, and the word
-deletes and note motions work as above.
+whole character, and Tab still inserts spaces to the next multiple of 4.
+Over a selection that spans lines, Tab indents each line by 4 spaces (a tab
+on a line that starts with one) instead of replacing them, and Shift+Tab
+takes one step off each line, or off the cursor's line. ⌘⌫ deletes to the
+start of the line, and the word deletes and note motions work as above.
 
 While an input method is composing text, Enter, Tab, Backspace, and Delete
 belong to it, with or without modifiers, and the Markdown commands below
