@@ -52,7 +52,7 @@ use iced::{
     Theme, Vector,
 };
 
-use crate::backend::{Backend, BackendKind, Lines};
+use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::{Message, Style};
 
@@ -151,6 +151,11 @@ impl Content {
     /// See [`Backend::restore_view`].
     pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
         self.0.get_mut().restore_view(cursor, scroll);
+    }
+
+    /// See [`Backend::scroll_to_line`].
+    pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
+        self.0.get_mut().scroll_to_line(line, placement);
     }
 
     /// Where the view is scrolled.

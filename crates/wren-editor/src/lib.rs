@@ -30,7 +30,7 @@ use std::time::Instant;
 use iced::widget::text_editor::{self, Action, Cursor, Edit, Motion, Position};
 use iced::{Color, Element, Font};
 
-pub use backend::BackendKind;
+pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
 
 use backend::Lines;
@@ -361,6 +361,19 @@ impl EditorView {
             return false;
         };
         self.select_byte_range(range)
+    }
+
+    /// Scroll so `line` sits at `placement`, without moving the cursor. Near
+    /// the end of the text the view stops at the last line. To jump to a
+    /// line, scroll first and then move the cursor there.
+    ///
+    /// The Cosmic engine places the line exactly. iced can only scroll by
+    /// whole rows from where it is, and counts a line it has never laid out
+    /// as one row, so a wrapped line between the view and the target leaves
+    /// the target off by that line's extra rows.
+    pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
+        self.history.break_group();
+        self.content.scroll_to_line(line, placement);
     }
 
     // -----------------------------------------------------------------------
@@ -2055,6 +2068,41 @@ mod tests {
             let mut ev = editor("");
             assert!(ev.perform(Action::Edit(Edit::Enter)));
             assert_eq!(ev.text(), "\n");
+        }
+
+        #[test]
+        fn scroll_to_line_places_the_line_and_stops_at_the_end() {
+            let size = iced::Size::new(300.0, 240.0);
+            let mut ev = editor(&super::numbered_lines(200));
+            ev.content.lay_out(size);
+            let top = |ev: &EditorView| (ev.content.scroll().line, ev.content.scroll().vertical);
+
+            ev.scroll_to_line(100, Placement::Top);
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (100, 0.0));
+            // Ten rows in view: a quarter down is two rows.
+            ev.scroll_to_line(150, Placement::NearTop);
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (148, 0.0));
+            ev.scroll_to_line(20, Placement::NearTop);
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (18, 0.0));
+            // Moving the cursor there afterwards keeps the view.
+            ev.move_cursor(super::at(20, 0));
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (18, 0.0));
+            assert_eq!(ev.cursor(), super::at(20, 0));
+
+            // The last screenful does not scroll past the end.
+            ev.scroll_to_line(197, Placement::Top);
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (190, 0.0));
+            ev.scroll_to_line(5_000, Placement::Top);
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (190, 0.0));
+            ev.scroll_to_line(1, Placement::NearTop);
+            ev.content.lay_out(size);
+            assert_eq!(top(&ev), (0, 0.0));
         }
 
         #[test]

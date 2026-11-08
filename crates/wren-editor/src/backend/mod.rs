@@ -31,6 +31,17 @@ impl BackendKind {
     pub const ALL: [Self; 2] = [Self::Iced, Self::Cosmic];
 }
 
+/// Where [`EditorView::scroll_to_line`](crate::EditorView::scroll_to_line)
+/// puts its line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// The line's first row at the top of the view.
+    Top,
+    /// The line's first row a quarter of the way down the view, so the lines
+    /// above it show where it sits.
+    NearTop,
+}
+
 /// A document's text, cursor, and layout.
 pub enum Backend {
     Iced(RawEditor),
@@ -83,6 +94,22 @@ impl Backend {
         match self {
             Self::Iced(editor) => editor.move_to(cursor),
             Self::Cosmic(engine) => engine.restore_view(cursor, scroll),
+        }
+    }
+
+    /// Scroll so `line` sits at `placement`. Near the end of the text the
+    /// view stops at the last line rather than scroll past it. The cursor
+    /// does not move; moving it onto `line` afterwards needs no more scroll.
+    pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
+        let line_height = self.buffer().metrics().line_height;
+        let above = match placement {
+            Placement::Top => 0.0,
+            Placement::NearTop => (self.bounds().height / line_height / 4.0).floor() * line_height,
+        };
+        let line = line.min(self.line_count().saturating_sub(1));
+        match self {
+            Self::Iced(editor) => iced::scroll_to(editor, line, above),
+            Self::Cosmic(engine) => engine.scroll_to(line, above),
         }
     }
 

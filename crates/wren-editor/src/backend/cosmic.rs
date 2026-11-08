@@ -36,7 +36,9 @@
 //! panic when the cursor is not laid out; the font-system lock is taken once
 //! per entry point and survives poisoning; highlight bounds tolerate
 //! unshaped lines; edits accumulate the topmost changed line instead of
-//! overwriting it; and `replace_text` keeps the scroll position.
+//! overwriting it; `replace_text` keeps the scroll position; and the engine,
+//! not cosmic-text's editor, owns the goal column of vertical motions, so it
+//! can forget it on every other motion, click, and edit.
 
 use std::sync::{Arc, PoisonError, RwLockWriteGuard, Weak};
 
@@ -59,6 +61,9 @@ pub struct Engine {
     /// highlighter to resume there.
     topmost_line_changed: Option<usize>,
     version: Version,
+    /// The x that Up, Down, PageUp, and PageDown aim for, kept across a run
+    /// of them so a short line does not pull the column in.
+    goal_x: Option<i32>,
 }
 
 impl Engine {
@@ -81,6 +86,7 @@ impl Engine {
             bounds: Size::ZERO,
             topmost_line_changed: Some(0),
             version: font_system.version(),
+            goal_x: None,
         }
     }
 
@@ -104,6 +110,7 @@ impl Engine {
         let cursor = clamp(buffer, cursor);
         self.editor.set_selection(cosmic_text::Selection::None);
         self.editor.set_cursor(cursor);
+        self.goal_x = None;
         self.mark_changed(0);
     }
 
@@ -116,6 +123,7 @@ impl Engine {
         self.editor.delete_range(start, to_cursor(end));
         let after = self.editor.insert_at(start, text, None);
         self.editor.set_cursor(after);
+        self.goal_x = None;
         self.mark_changed(start.line);
     }
 
@@ -131,6 +139,21 @@ impl Engine {
         // Before the first layout there is no view to keep the cursor in.
         if laid_out {
             buffer.shape_until_cursor(font_system.raw(), cursor, false);
+        }
+    }
+
+    /// Put `line`'s first row `above` pixels below the top of the view,
+    /// stopping at the end of the text.
+    pub fn scroll_to(&mut self, line: usize, above: f32) {
+        self.debug_assert_unshared();
+        let laid_out = self.bounds != Size::ZERO;
+        let mut font_system = font_system();
+        let buffer = buffer_mut(&mut self.editor);
+        buffer.set_scroll(cosmic_text::Scroll::new(line, -above, 0.0));
+        // Shaping settles the negative offset onto the lines above and keeps
+        // the view inside the text; before the first layout the update does.
+        if laid_out {
+            buffer.shape_until_scroll(font_system.raw(), false);
         }
     }
 
@@ -175,6 +198,13 @@ impl Engine {
         let mut font_system = font_system();
         let font_system = font_system.raw();
         let editor = &mut self.editor;
+        let goal_x = &mut self.goal_x;
+        if !matches!(
+            action,
+            Action::Move(_) | Action::Select(_) | Action::Scroll { .. }
+        ) {
+            *goal_x = None;
+        }
 
         match action {
             Action::Move(motion) => {
@@ -186,19 +216,19 @@ impl Engine {
                         | Motion::End
                         | Motion::DocumentStart
                         | Motion::DocumentEnd => {
-                            editor.action(
-                                font_system,
-                                cosmic_text::Action::Motion(to_motion(motion)),
-                            );
+                            move_cursor(editor, goal_x, font_system, motion);
                         }
                         // Others collapse the selection to the side they point at.
-                        _ => editor.set_cursor(match motion.direction() {
-                            Direction::Left => start,
-                            Direction::Right => end,
-                        }),
+                        _ => {
+                            *goal_x = None;
+                            editor.set_cursor(match motion.direction() {
+                                Direction::Left => start,
+                                Direction::Right => end,
+                            });
+                        }
                     }
                 } else {
-                    editor.action(font_system, cosmic_text::Action::Motion(to_motion(motion)));
+                    move_cursor(editor, goal_x, font_system, motion);
                 }
             }
             Action::Select(motion) => {
@@ -206,7 +236,7 @@ impl Engine {
                 if editor.selection_bounds().is_none() {
                     editor.set_selection(cosmic_text::Selection::Normal(cursor));
                 }
-                editor.action(font_system, cosmic_text::Action::Motion(to_motion(motion)));
+                move_cursor(editor, goal_x, font_system, motion);
                 deselect_if_empty(editor);
             }
             Action::SelectWord => {
@@ -283,6 +313,7 @@ impl Engine {
 
     pub fn move_to(&mut self, cursor: Cursor) {
         self.debug_assert_unshared();
+        self.goal_x = None;
         self.editor.set_cursor(to_cursor(cursor.position));
         // Like iced, `None` leaves an existing selection in place.
         if let Some(selection) = cursor.selection {
@@ -562,6 +593,35 @@ fn clamp(buffer: &cosmic_text::Buffer, cursor: cosmic_text::Cursor) -> cosmic_te
         line,
         index,
         ..cursor
+    }
+}
+
+/// Move the cursor by `motion`. A vertical motion aims for `goal_x`, and
+/// keeps it for the next one; any other motion forgets it.
+fn move_cursor(
+    editor: &mut cosmic_text::Editor<'static>,
+    goal_x: &mut Option<i32>,
+    font_system: &mut cosmic_text::FontSystem,
+    motion: Motion,
+) {
+    let vertical = matches!(
+        motion,
+        Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
+    );
+    let from = editor.cursor();
+    let moved = buffer_mut(editor).cursor_motion(
+        font_system,
+        from,
+        goal_x.filter(|_| vertical),
+        to_motion(motion),
+    );
+    match moved {
+        Some((cursor, goal)) => {
+            editor.set_cursor(cursor);
+            *goal_x = goal.filter(|_| vertical);
+        }
+        None if !vertical => *goal_x = None,
+        None => {}
     }
 }
 
@@ -850,5 +910,140 @@ mod tests {
         assert_eq!(caret_x(std::slice::from_ref(&ligature), 0), 30.0);
         assert_eq!(caret_x(std::slice::from_ref(&ligature), 1), 20.0);
         assert_eq!(caret_x(&[], 0), 0.0);
+    }
+
+    fn at(line: usize, column: usize) -> Cursor {
+        Cursor {
+            position: Position { line, column },
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn vertical_motions_keep_their_goal_column_until_anything_else_moves() {
+        fixtures::load_font();
+        let mut engine = Engine::with_text("0123456789\nab\n0123456789\n0123456789\n0123456789");
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        let mut step = |engine: &mut Engine, action: Action| {
+            engine.perform(action);
+            update(engine, &mut highlighter, 400.0, fixtures::FONT);
+            engine.cursor()
+        };
+        let down = || Action::Move(Motion::Down);
+        let up = || Action::Move(Motion::Up);
+
+        engine.move_to(at(0, 8));
+        assert_eq!(step(&mut engine, down()), at(1, 2));
+        assert_eq!(step(&mut engine, down()), at(2, 8));
+        // A horizontal motion sets a new goal.
+        assert_eq!(step(&mut engine, Action::Move(Motion::Left)), at(2, 7));
+        assert_eq!(step(&mut engine, up()), at(1, 2));
+        assert_eq!(step(&mut engine, up()), at(0, 7));
+
+        // So does a programmatic move, which cosmic-text's own editor keeps.
+        engine.move_to(at(0, 9));
+        assert_eq!(step(&mut engine, down()), at(1, 2));
+        engine.move_to(at(1, 1));
+        assert_eq!(step(&mut engine, down()), at(2, 1));
+
+        // And an edit, a click, and a selection.
+        engine.move_to(at(0, 9));
+        assert_eq!(step(&mut engine, down()), at(1, 2));
+        assert_eq!(step(&mut engine, Action::Edit(Edit::Insert('c'))), at(1, 3));
+        assert_eq!(step(&mut engine, down()), at(2, 3));
+        assert_eq!(
+            step(&mut engine, Action::Click(Point::new(1.0, 30.0))),
+            at(1, 0)
+        );
+        assert_eq!(step(&mut engine, down()), at(2, 0));
+        assert_eq!(
+            step(&mut engine, Action::Select(Motion::End))
+                .position
+                .column,
+            10
+        );
+        assert_eq!(
+            step(&mut engine, Action::Select(Motion::Down)).position,
+            Position {
+                line: 3,
+                column: 10
+            }
+        );
+
+        // Selecting vertically keeps the goal like moving does.
+        engine.move_to(at(0, 9));
+        assert_eq!(
+            step(&mut engine, Action::Select(Motion::Down)).position,
+            Position { line: 1, column: 3 }
+        );
+        assert_eq!(
+            step(&mut engine, Action::Select(Motion::Down)).position,
+            Position { line: 2, column: 9 }
+        );
+        // Scrolling is not a motion and keeps it.
+        // Collapsing the selection to its end is a motion of its own.
+        assert_eq!(step(&mut engine, Action::Move(Motion::Right)), at(2, 9));
+        assert_eq!(step(&mut engine, down()), at(3, 9));
+        let _ = step(&mut engine, Action::Scroll { lines: 1 });
+        engine.perform(Action::Move(Motion::Up));
+        engine.perform(Action::Move(Motion::Up));
+        engine.perform(Action::Move(Motion::Up));
+        assert_eq!(engine.cursor(), at(0, 9));
+    }
+
+    #[test]
+    fn page_motions_keep_the_goal_column() {
+        fixtures::load_font();
+        let text = (0..60)
+            .map(|i| {
+                if i % 2 == 0 {
+                    "long line here".to_owned()
+                } else {
+                    "x".to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut engine = Engine::with_text(&text);
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 120.0, fixtures::FONT);
+        engine.move_to(at(0, 9));
+        engine.perform(Action::Move(Motion::PageDown));
+        update(&mut engine, &mut highlighter, 120.0, fixtures::FONT);
+        assert_eq!(engine.cursor(), at(5, 1));
+        engine.perform(Action::Move(Motion::PageDown));
+        update(&mut engine, &mut highlighter, 120.0, fixtures::FONT);
+        assert_eq!(engine.cursor(), at(10, 9));
+        engine.perform(Action::Move(Motion::PageUp));
+        update(&mut engine, &mut highlighter, 120.0, fixtures::FONT);
+        assert_eq!(engine.cursor(), at(5, 1));
+        engine.perform(Action::Move(Motion::Up));
+        assert_eq!(engine.cursor(), at(4, 9));
+    }
+
+    #[test]
+    fn range_replacement_and_restored_views_rehighlight_and_forget_the_goal() {
+        fixtures::load_font();
+        let mut engine = Engine::with_text("0123456789\nab\n0123456789");
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        engine.move_to(at(0, 8));
+        engine.perform(Action::Move(Motion::Down));
+        assert!(engine.goal_x.is_some());
+        engine.replace_range(
+            Position { line: 1, column: 0 },
+            Position { line: 1, column: 2 },
+            "AB\r\nC",
+        );
+        assert_eq!(engine.goal_x, None);
+        assert_eq!(engine.topmost_line_changed, Some(1));
+        assert_eq!(engine.cursor(), at(2, 1));
+        assert_eq!(engine.buffer().lines[1].text(), "AB");
+        assert_eq!(engine.buffer().lines[2].text(), "C");
+        engine.perform(Action::Move(Motion::Down));
+        assert!(engine.goal_x.is_some());
+        engine.restore_view(at(0, 1), cosmic_text::Scroll::default());
+        assert_eq!(engine.goal_x, None);
     }
 }

@@ -38,6 +38,30 @@ pub(super) fn replace_range(editor: &mut RawEditor, start: Position, end: Positi
     editor.perform(Action::Edit(Edit::Paste(Arc::new(text.to_owned()))));
 }
 
+/// iced scrolls only relative to where it is, in whole rows, so count the
+/// rows from the top of the view to `above` pixels over `line`. A line not yet
+/// laid out counts as one row, which is exact unless it wraps.
+pub(super) fn scroll_to(editor: &mut RawEditor, line: usize, above: f32) {
+    let buffer = editor.buffer();
+    let line_height = buffer.metrics().line_height;
+    let scroll = buffer.scroll();
+    let rows = |lines: std::ops::Range<usize>| -> f32 {
+        buffer.lines[lines]
+            .iter()
+            .map(|line| line.layout_opt().map_or(1, Vec::len) as f32)
+            .sum()
+    };
+    let to_line = if line >= scroll.line {
+        rows(scroll.line..line)
+    } else {
+        -rows(line..scroll.line)
+    } * line_height;
+    let pixels = to_line - scroll.vertical - above;
+    editor.perform(Action::Scroll {
+        lines: (pixels / line_height).round() as i32,
+    });
+}
+
 pub(super) fn draw(
     editor: &RawEditor,
     renderer: &mut Renderer,
