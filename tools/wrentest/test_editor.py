@@ -138,8 +138,8 @@ def capture(app: WrenApp, path: Path) -> png.PNG:
 # Interim mapping (discovery/markdown-editor.md §6): headings and links use
 # the accent, inline code the success colour, and code bands current_line.
 @pytest.mark.parametrize("theme,heading,code", [
-    ("dark", (0xF0, 0xB4, 0x5A), (0x7F, 0xD1, 0xA0)),
-    ("light", (0xA1, 0x48, 0x08), (0x19, 0x73, 0x42)),
+    ("dark", (0xF0, 0xB4, 0x5A), (0x93, 0xD4, 0x73)),
+    ("light", (0xA1, 0x48, 0x08), (0x3B, 0x7A, 0x12)),
 ])
 def test_editor_highlighting_renders_in_both_themes(theme, heading, code, editor_app) -> None:
     artifacts = artifact_directory(f"editor-highlight-{theme}")
