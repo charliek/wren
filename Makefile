@@ -104,10 +104,12 @@ clippy:
 check: fmt-check clippy test test-python check-patches
 
 # A [patch.crates-io] entry silently stops applying when a dependency bump
-# needs a newer version, so assert the vendored swash is still the one used.
+# needs a newer version, so assert the vendored crates are still the ones used.
 check-patches:
 	@cargo tree --locked -p wren-iced | grep -q 'swash v0.2.10 (.*vendor/swash)' || \
 		( echo "swash [patch.crates-io] not applied"; exit 1 )
+	@cargo tree --locked -p wren-iced | grep -q 'cosmic-text v0.15.0 (.*vendor/cosmic-text)' || \
+		( echo "cosmic-text [patch.crates-io] not applied"; exit 1 )
 
 build-smoke:
 	cargo build --locked -p wren-iced --features smoke-test

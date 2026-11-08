@@ -10,8 +10,9 @@ smoke-test build under the test harness, and writes one PNG per scene:
 to `<out>/advanced/<theme>/` instead of `<out>/<theme>/`. Each `--setting
 key=value` adds a `config.conf` line (`--setting editor-line-height=2`), and
 `--label` names a further directory level for them. `--only markdown` shoots
-just the editor scenes: the Markdown tour, the headings note, and both again
-with the browser columns folded so the editor is wider than its column.
+just the editor scenes: the Markdown tour, the headings note, the long list
+items, and all three again with the browser columns folded so the editor is
+wider than its column.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -82,6 +83,30 @@ Last line of prose.
 HEADINGS_CURSOR = {"line": 0, "column": 60}
 HEADINGS_SELECTION = ({"line": 0, "column": 40}, {"line": 2, "column": 6})
 
+# Wrapped list items, tasks, headings in items, and quotes, for the
+# `hanging-indent` scene. The blank lines keep each block from running on
+# lazily into the last.
+LONG_ITEMS = """# Long items
+
+- A bullet item long enough to wrap onto a second row and then a third, so each continuation row lines up under the text and not under the dash
+  - A nested item that also runs long enough to wrap, hanging under its own content column one level in
+    1. An ordered child whose wrapped rows sit under the text after its number, not under the digit
+- [ ] An open task whose wrapped rows hang under its box, at the content column, where a plain item's text starts
+- [x] A finished task that wraps as well, struck through on every row it covers
+
+10. A two-digit number moves the content column right, and the continuation rows move with it
+
+- # A first-level heading inside a list item, long enough to wrap under its text
+- ## A second-level heading in the next item hangs its taller rows the same way
+
+> A quoted paragraph long enough to wrap: its continuation rows start after the quote marker and its space, not at the edge
+> - A list inside a quote hangs under the item's text, past both the quote marker and the dash
+
+Plain prose has no container, so when it wraps its rows start at the left edge of the editor as before.
+"""
+# The selection runs from the first item's second row into the nested item.
+LONG_ITEMS_SELECTION = ({"line": 2, "column": 90}, {"line": 3, "column": 40})
+
 
 SAMPLE = {
     "1-1s/Alice Chen/2026-11-04.md": (
@@ -127,6 +152,7 @@ def runbook() -> str:
 
 
 SAMPLE["Projects/API Migration/Cutover runbook.md"] = runbook()
+SAMPLE["Inbox/Triage/Long items.md"] = LONG_ITEMS
 
 # A section with no groups yet, for the empty-state scenes.
 EMPTY_SECTION = "Archive"
@@ -152,8 +178,8 @@ def open_note(client, name: str) -> None:
 
 
 def editor_scenes(client, shot_here, suffix: str = "") -> None:
-    """The Markdown tour and the headings note, selected, with the editor
-    focused."""
+    """The Markdown tour, the headings note, and the long list items, selected,
+    with the editor focused."""
     open_note(client, "Markdown tour.md")
     anchor, position = MARKDOWN_SELECTION
     client.call("editor.cursor", {**position, "selection": anchor})
@@ -166,6 +192,12 @@ def editor_scenes(client, shot_here, suffix: str = "") -> None:
     anchor, position = HEADINGS_SELECTION
     client.call("editor.cursor", {**position, "selection": anchor})
     shot_here(f"headings-selected{suffix}")
+    # Wrapped rows hang under their item's content (advanced engine).
+    open_note(client, "Long items.md")
+    anchor, position = LONG_ITEMS_SELECTION
+    client.call("editor.cursor", {**position, "selection": anchor})
+    client.call("editor.focus")
+    shot_here(f"hanging-indent{suffix}")
 
 
 def folded_editor_scenes(client, shot_here) -> None:

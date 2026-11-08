@@ -228,7 +228,10 @@ impl Backend {
         }
     }
 
-    /// Lay the text out for `bounds` and shape what is visible.
+    /// Lay the text out for `bounds` and shape and highlight what is visible.
+    /// Highlighting here, not only before drawing, matters because spans
+    /// change the layout (fonts, and the advanced engine's hanging indent),
+    /// and events can arrive before the next frame is drawn.
     pub fn update(
         &mut self,
         bounds: Size,
@@ -246,6 +249,7 @@ impl Backend {
                 engine.update(bounds, font, size, line_height, wrapping, highlighter);
             }
         }
+        self.highlight(font, highlighter);
     }
 
     /// Apply the highlighter's spans to the visible lines.
@@ -358,7 +362,6 @@ mod tests {
             Wrapping::WordOrGlyph,
             highlighter,
         );
-        backend.highlight(font, highlighter);
     }
 
     fn laid_out(kind: BackendKind, text: &str, size: Size) -> (Backend, MarkdownHighlighter) {
@@ -573,6 +576,29 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn an_update_hangs_wrapped_rows_before_anything_is_drawn() {
+        // Keys and clicks can arrive between an update and the next frame,
+        // and they move over the layout the update left.
+        let text = "- wrapped text that runs well past the width of the pane, then on";
+        let size = Size::new(300.0, 400.0);
+        let (mut owned, mut highlighter) = laid_out(BackendKind::Owned, text, size);
+        let hang = |backend: &Backend| {
+            let rows = backend.buffer().lines[0].layout_opt().unwrap();
+            assert!(rows.len() > 1);
+            rows[1].glyphs[0].x
+        };
+        assert!(hang(&owned) > 0.0);
+        owned.perform(Action::Move(Motion::DocumentStart));
+        owned.perform(Action::Edit(Edit::Insert('-')));
+        owned.perform(Action::Edit(Edit::Insert(' ')));
+        update(&mut owned, &mut highlighter, size, fixtures::FONT);
+        assert_eq!(owned.buffer().lines[0].text(), format!("- {text}"));
+        let first = &owned.buffer().lines[0].layout_opt().unwrap()[0];
+        let content = first.glyphs.iter().find(|glyph| glyph.start == 4).unwrap();
+        assert_eq!(hang(&owned), content.x);
     }
 
     #[test]
