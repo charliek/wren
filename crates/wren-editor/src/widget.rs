@@ -1129,6 +1129,7 @@ fn glyph_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures;
 
     #[test]
     fn metrics_scale_from_the_mockup_sizes() {
@@ -1151,7 +1152,6 @@ mod tests {
             }
         );
     }
-    use crate::fixtures;
 
     #[test]
     fn losing_focus_ends_a_composition() {
@@ -1160,6 +1160,7 @@ mod tests {
         let mut state = State::new(HighlighterSettings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
+            front_matter_end: None,
         });
         state.focus();
         state.preedit = Some(input_method::Preedit {
