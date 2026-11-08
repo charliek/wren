@@ -147,7 +147,8 @@ crates/wren-editor/     the iced 0.14 editor component; deps: iced, wren-markdow
   backend/iced.rs     Backend::Iced: today's iced_graphics::text::Editor
   backend/cosmic.rs   Backend::Cosmic: an owned cosmic_text::Editor, ported from
                       iced_graphics' editor glue (MIT notice), drawn via fill_raw
-  highlighter.rs      MarkdownHighlighter (moved), classifying with wren-markdown::block
+  highlighter.rs      MarkdownHighlighter (moved), classifying with wren-markdown::block;
+                      its Settings carry front_matter_end (§5.1)
   history.rs          snapshot undo (moved) plus a scroll field and diff-apply
   find.rs             literal find (moved out of editor_view.rs)
   keys.rs             key_binding: intents, the IME guard, KeyPolicy
@@ -167,7 +168,7 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 **Backends.** `widget::Content` wraps `enum Backend { Iced(RawEditor), Cosmic(cosmic::Engine) }`.
 - There is one `TextEditor` widget and one `EditorView`, and both backends share one test suite.
 - The widget branches only on drawing (`fill_editor` or `fill_raw`) and on the few engine calls: `perform`, `move_to`, `cursor`, `selection`, `line`, `line_count`, `bounds`, `update`, `highlight`, `buffer`.
-- Planning runs inside a borrow: `content.with_lines(|lines| plan(lines, sel, intent, &opts))`. `Lines` is implemented over `&cosmic_text::Buffer`, so no line is copied.
+- Planning runs inside a borrow: `content.with_lines(|lines| plan(lines, sel, intent, &opts))`. Both backends expose a `&cosmic_text::Buffer` (iced's `Editor::buffer()`, and the owned engine's buffer), and `wren-editor` wraps it in a newtype that implements `Lines` with `buffer.lines[i].text()`, so no line is copied. A newtype is needed because the orphan rule forbids implementing `wren_markdown::Lines` for `cosmic_text::Buffer` in `wren-editor`, and `wren-markdown` must not depend on cosmic-text. `Editor::line()` cannot back `Lines`: it returns a `Cow`, not a borrowed `&str`.
 
 **Undo.** Keep the snapshot `History` (200 entries, 32 MiB, 1 s typing coalesce) for both backends.
 - Snapshots also record the scroll position.
@@ -209,6 +210,11 @@ Notation: `|` is the cursor, `«…»` is a selection, `⏎` is a line break, `�
 
 A forward scanner keeps a **container stack**: blockquote `>` levels and list items, each with an indent, a content column, and a quote depth. The scanner state is `Clone`, so the highlighter can checkpoint it every 50 lines.
 
+Front matter is the one rule that needs lookahead: line 0's `---` opens front matter only if a closing delimiter comes later. A highlighter sees one line at a time, so it cannot find out itself. Instead:
+- The highlighter's `Settings` carry `front_matter_end: Option<usize>`, and it builds its scanner with `Scanner::with_front_matter(end)`. Fed that way, line by line, the scanner gives exactly what `scan()` gives.
+- `EditorView` recomputes `block::front_matter_end` after every change (including undo and `replace_text`) and passes it in the settings. It is cheap: it reads past line 0 only when line 0 is `---`, and stops at the closing delimiter.
+- When the value changes, iced calls `Highlighter::update`, which drops every checkpoint and restarts from line 0, because each checkpoint embeds the old value (`Scanner::front_matter_end` reports it). Edits that leave the value unchanged keep the usual `change_line` resync.
+
 Each line is classified as one of:
 
 | Kind | Rules |
@@ -241,9 +247,9 @@ Enter **always** returns a plan; it never falls back to iced's stock Enter, whic
 | `> quote\|` | `> quote⏎> \|` | Also `> - a\|` → `> - a⏎> - \|`. |
 | `··- sub\|` | `··- sub⏎··- \|` | Keeps the indent. |
 | `- a\|⏎··- b` | `- a⏎··- \|⏎··- b` | An item with children gets a first child. |
-| `- \|item` | `- ⏎- \|item` | Inserts an empty item above; the cursor stays with the text. Directly after a paragraph line it inserts a blank line instead: `Para⏎- \|x` → `Para⏎⏎- \|x`. |
+| `- \|item` | `-⏎- \|item` | Inserts an empty item above (trimmed, like any markup-only line); the cursor stays with the text. Where an empty item would not read as one, directly after a paragraph line, it inserts a blank line instead: `Para⏎- \|x` → `Para⏎⏎- \|x`. |
 | `-\| item`, `- [\| ] x` | as if at `text_start` | The cursor sits inside the markup. |
-| `··\|- a` | `··⏎··\|- a` | The cursor sits in the indentation: plain newline with carry-over. |
+| `··\|- a` | `⏎··\|- a` | The cursor sits in the indentation: plain newline with carry-over. The line left behind is trimmed. |
 | `- a⏎⏎- b\|` | `- a⏎⏎- b⏎⏎- \|` | A loose list stays loose. |
 | `- foo··\|` | `- foo··⏎- \|` | A hard line break is kept. Only lines that become whitespace-only or markup-only are trimmed. |
 | `····text\|` | `····text⏎····\|` | Carry-over copies only the whitespace left of the cursor. |
@@ -261,7 +267,9 @@ Enter **always** returns a plan; it never falls back to iced's stock Enter, whic
 
 The outdented item takes the marker that Enter at the end of its parent would produce: the parent's bullet, or the parent's number + 1 with its delimiter, plus `[ ] ` if the parent is a task.
 
-At the outermost level the marker is removed **and a blank line is left**, so the next text is not a lazy continuation:
+A marker alone right under a paragraph line in the same container (`- a⏎··- |`) is paragraph text or a setext underline to CommonMark, since an empty item cannot interrupt a paragraph. Enter reads it as the empty item the writer meant.
+
+At the outermost level the marker is removed. **After a paragraph line a blank line is left**, so the next text is not a lazy continuation:
 
 | Before | After |
 |---|---|
@@ -270,6 +278,15 @@ At the outermost level the marker is removed **and a blank line is left**, so th
 | `> a⏎> \|` | `> a⏎⏎\|` |
 | `> > a⏎> > \|` | `> > a⏎>⏎> \|` |
 | `> - \|` | `> \|` |
+
+**When text follows on the next line, a blank line is left below the cursor as well**, so the item that follows does not run into what is typed. An ordered item other than 1 cannot interrupt a paragraph, so without the gap `1. a⏎⏎foo⏎2. c` would read `2. c` as paragraph text. The rest of the list is still renumbered (§5.6):
+
+| Before | After |
+|---|---|
+| `1. a⏎2. \|⏎3. c` | `1. a⏎⏎\|⏎⏎2. c` |
+| `- a⏎- \|⏎- c` | `- a⏎⏎\|⏎⏎- c` |
+| `> - a⏎> - \|⏎> - c` | `> - a⏎>⏎> \|⏎>⏎> - c` |
+| `1. \|⏎2. b` (first line) | `\|⏎⏎1. b` |
 
 ### 5.3 Shift+Enter
 
@@ -285,37 +302,39 @@ In a code-like context, Shift+Enter is the same as Enter.
 
 ### 5.4 Tab and Shift+Tab
 
-**Indent stops on a line** are column 0, plus the content column of each enclosing list item, found by scanning upward within the container. Outside lists the stops are multiples of 4. Indentation is measured from the innermost quote's content start, and `>` prefixes are copied unchanged.
+**Indent stops on a line** are column 0, plus the content column of each enclosing list item, found by scanning upward within the container. Outside lists the stops are multiples of 4, and past the deepest item's content column they continue every 4 columns. Indentation is measured from the innermost quote's content start, and `>` prefixes are copied unchanged.
 
 **Tab on a list line** (empty selection, cursor anywhere on the line):
 - The item **and its subtree** become children of the **previous sibling**: their indent becomes that sibling's content column. The subtree is the following lines indented deeper than the item, up to the first non-blank line at the item's indent or shallower.
 - If there is no previous sibling at that level, Tab does nothing and consumes the key. This guards against `x⏎⏎- a` turning into indented code.
-- The new number is the last number of an existing nested list at the target level + 1, otherwise 1. Both runs are renumbered.
+- The new marker is the one Enter at the end of an existing nested list at the target level would give (its bullet, or its last number + 1), otherwise the item's own bullet or 1. Both runs are renumbered.
 - Examples:
   - `- a⏎- b|` → `- a⏎··- b|`
   - `1. a⏎2. b|` → `1. a⏎···1. b|`
   - `1. a⏎···1. x⏎2. b|` → `1. a⏎···1. x⏎···2. b|`
   - `> - a⏎> - b|` → `> - a⏎> ··- b|`
-- Indentation characters: keep the existing leading bytes, and append `\t` if the line's indent starts with a tab, otherwise spaces.
+- Indentation characters: keep the existing leading bytes, and append `\t` if the line's indent starts with a tab, otherwise spaces. Appended tabs reach the next tab stop at or past the target, which still nests the item (`- x⏎\t- a⏎\t- b|` → `- x⏎\t- a⏎\t\t- b|`). At the top level a leading tab is 4 columns, which makes the line indented code, so there Tab is the code Tab (`\t- a⏎\t- b|` → `\t- a⏎\t- b\t|`). The subtree moves by exactly the same number of columns, gaining tabs only where its indentation is all tabs.
 
 **Shift+Tab on a list line:**
 - The item and its subtree move to the parent's indent, taking the parent level's marker style and numbering. Its own task state is kept: `1. a⏎···- [x] b|` → `1. a⏎2. [x] b|`.
-- Following siblings become its children and are renumbered from 1: `1. a⏎···1. x⏎···2. y|⏎···3. z` → `1. a⏎···1. x⏎2. y|⏎···1. z`.
+- Following siblings become its children and are renumbered from 1: `1. a⏎···1. x⏎···2. y|⏎···3. z` → `1. a⏎···1. x⏎2. y|⏎···1. z`. The first of them is set to 1 before anything is rescanned, because an ordered item that starts a list under a paragraph line reads as paragraph text unless it is 1. When the new marker is wider than the old one, they shift right to stay inside it.
 - A top-level item with 1–3 spaces of indent moves to column 0. At column 0 it does nothing.
 - If a tab character crosses the target column, it is replaced with spaces.
 
 **Smart Tab on a blank or whitespace-only line** (the cursor at the line's end):
-- The first Tab pads to the **nearest stop that is deeper than the current indent**, considering the previous non-blank line's indent and content column. After `- [ ] task` the stop is 2, never 6.
-- Later presses add 4 spaces.
+- The first Tab pads to the **nearest stop that is deeper than the current indent**, considering the previous non-blank line's indent and content column and the content columns of the items the blank line is inside. After `- [ ] task` the stop is 2, never 6.
+- Later presses, once no such stop is deeper, add 4 spaces.
 - On the first line of a document, Tab inserts spaces to the next multiple of 4.
 
 **Selections:**
 - A selection that ends at column 0 does not include that line. Blank lines are never indented.
 - With a multi-line selection, Tab and Shift+Tab apply one delta to every line, taken from the first list line, or 4 if there is none. Shift+Tab removes `min(delta, indent)` from each line. The selection is kept.
+  - The first list line's delta is what Tab or Shift+Tab would move it by: up to its previous sibling's content column, or back to its parent's indent (or its container's column 0). With no previous sibling, multi-line Tab does nothing, the same guard as a single line.
+  - Only indentation changes; markers stay. The first list line is numbered to join its new run (1 when it starts a nested list), the sibling after the selection is restarted at 1 when Shift+Tab leaves it behind as a child, and every touched run is renumbered.
 - With a single-line non-empty selection, Tab indents the line and never replaces the selection.
 
 **Plain lines:**
-- Tab inserts spaces to the next multiple of 4 at the cursor, or `\t` if the line's indent starts with a tab.
+- Tab inserts spaces to the next multiple of 4 at the cursor, or `\t` if the line's indent starts with a tab. A cursor inside quote markers inserts after them.
 - Shift+Tab removes leading whitespace back to the previous stop, or does nothing at column 0.
 
 **Code-like contexts:**
@@ -328,24 +347,26 @@ Tab never moves focus.
 
 **Backspace** with an empty selection, in order:
 
-1. **Cursor exactly at the end of the markup.** The first applicable rule wins:
-   1. Extra spaces after the markup go first: `>···|` → `> |`, `> -····|` → `> - |`.
+1. **Cursor exactly at the end of the markup**, which is the line's `text_start` when its innermost container's marker is on the line. Continuation lines carry no marker, so they go on to rule 2. Code-like lines skip rules 1 and 2. The first applicable rule wins:
+   1. Extra spaces after the markup go first: `>···|` → `> |`, `> -····|` → `> - |`. The markup ends one space or tab past the `>`, the list marker, or the task box.
    2. A task box goes next: `- [ ] |` → `- |`.
-   3. A nested item outdents one level, with the same marker rules as Shift+Tab: `····- |` → `··- |`.
-   4. An item that has a previous sibling has its marker replaced by spaces, becoming a continuation paragraph: `- a⏎- |b` → `- a⏎··|b`. It is then renumbered.
+   3. A nested item outdents one level, with the same marker rules as Shift+Tab: `····- |` → `··- |`. An empty marker that only reads as an item to the writer (§5.2, under a paragraph line) outdents the way Enter's exit does.
+   4. An item that has a previous sibling has its marker replaced by spaces up to that sibling's content column, becoming a continuation paragraph: `- a⏎- |b` → `- a⏎··|b`. The later items are then renumbered.
    5. A top-level item with no previous sibling has its marker removed: `- |` → `|`.
    6. A quote level is removed: `> > |` → `> |`.
 2. **Only whitespace on the line before the cursor, and nothing after it.** Delete back to the previous indent stop (§5.4).
-3. **Otherwise,** delete one grapheme cluster.
+3. **Otherwise,** delete one grapheme cluster, or at column 0 the line break before the line.
 
-**Delete** removes one grapheme cluster.
+A byte order mark on the first line is never deleted. With a selection, Backspace and every delete below remove the selection.
+
+**Delete** removes one grapheme cluster, or at the end of a line the line break after it.
 
 **Word deletes:**
-- ⌥⌫ / Ctrl+⌫ deletes back to the previous word boundary (Unicode word segmentation), and ⌥⌦ / Ctrl+⌦ forward to the next one.
-- ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`.
+- ⌥⌫ / Ctrl+⌫ deletes back to the previous word boundary (Unicode word segmentation), and ⌥⌦ / Ctrl+⌦ forward to the next one. Whitespace next to the cursor goes with the word: `foo bar··|` → `foo |`. Segments are UAX #29 word segments: punctuation that joins letters or digits stays in the word (`a.b|`, `3.14|`, and `can't|` each go whole), and any other punctuation character is a segment of its own (`foo!!|` → `foo!|`, `- [ ] |` → `- [ |`). Runs of markup are not grouped. At either end of a line, the line break goes.
+- ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`. A cursor inside the markup also deletes to column 0, and at column 0 the line break goes.
 
 **Home and Shift+Home** (also ⌘← and ⌃A on macOS; ⌃A becomes the smart toggle on purpose):
-- The cycle is: start of the visual row (when the cursor is on a wrapped continuation row), then `text_start`, then column 0, then repeat.
+- The cycle is: start of the visual row (when the cursor is on a wrapped continuation row), then `text_start`, then column 0, then repeat. Only the editor's layout knows where visual rows begin, so the editor takes the first stop itself and plans `Intent::Home` (a motion with no edits) only when the cursor is not on a continuation row, or already at its start.
 - A cursor inside the indentation or markup moves forward to `text_start`.
 - `text_start` is after the indent, quote markers, list marker, task box, and an ATX heading's `#`s.
 - Shift+Home extends the selection through the same stops.
@@ -359,7 +380,7 @@ The **sibling run** is the ordered items with the same container, quote depth, i
 - It ends at a less-indented non-blank line, a heading, a fence, a thematic break, or a different delimiter or bullet.
 
 **When it runs:**
-- **After Enter, Backspace, or exit,** renumber the rest of the run only while the existing numbers are sequential.
+- **After Enter, Backspace, or exit,** renumber the rest of the run only while the existing numbers are sequential. That includes the first item after the change: it is renumbered only if it was in sequence with the item it followed before the edit, so a deliberate gap or a countdown is left alone (`1. a|⏎5. b` Enter → `1. a⏎2. |⏎5. b`; `3. a|⏎1. b` → `3. a⏎4. |⏎1. b`; Backspace `1. a⏎2. |b⏎5. c` → `1. a⏎···|b⏎5. c`). CodeMirror always renumbers the first one. Items that become children of an outdented item start a new list and are always numbered from 1.
 - **All-same numbering:** if a neighbouring sibling has the same number as the current item (`1.`, `1.`), keep that number and renumber nothing.
 - **After Tab, Shift+Tab, or a line move,** renumber both affected runs from their start numbers.
 
@@ -371,9 +392,9 @@ The **sibling run** is the ordered items with the same container, quote depth, i
 
 | Command key | macOS | Linux | Behavior |
 |---|---|---|---|
-| `markdown.toggle_task` | ⌘↵ | Ctrl+Enter | `- [ ] a\|` ↔ `- [x] a\|`; `- a` → `- [ ] a`; `1. a` → `1. [ ] a`; `> a` → `> - [ ] a`; `a` → `- [ ] a`; an empty document → `- [ ] \|`. The cursor keeps its text offset. A selection marks every task line done if any is open, otherwise marks them all open. Plain lines are promoted only when no selected line is a task. Blank lines are skipped. In code it does nothing. |
-| `markdown.bold` / `markdown.italic` / `markdown.code` | ⌘B / ⌘I / ⌘E | Ctrl+B / Ctrl+I / Ctrl+E | Wrap with `**`, `*`, or `` ` ``. The selection is trimmed of edge whitespace and clamped to `text_start`; with a multi-line selection, each line is wrapped. With no selection, the word at the cursor is wrapped, or, not on a word, an empty pair is inserted around the cursor. Already wrapped (markers just inside or just outside the selection, `*`/`_` alike) means unwrap. Code that contains a backtick uses a longer fence and padding. |
-| `edit.move_line_up` / `edit.move_line_down` | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | Moves the lines the selection covers, keeping the selection and each line's own ending, then renumbers both runs. Moving the last line, which has no ending, works: `a⏎b\|` up → `b\|⏎a`. At the top or bottom of the document it does nothing. Never renumbers inside code. |
+| `markdown.toggle_task` | ⌘↵ | Ctrl+Enter | `- [ ] a\|` ↔ `- [x] a\|`; `- a` → `- [ ] a`; `1. a` → `1. [ ] a`; `> a` → `> - [ ] a`; `a` → `- [ ] a`; an empty document → `- [ ] \|`. The cursor keeps its text offset. A selection marks every task line done if any is open, otherwise marks them all open. Plain lines are promoted only when no selected line is a task. Blank lines are skipped. In code it does nothing. A continuation or lazy line acts on its item's box. Headings, thematic breaks, and setext headings (the text lines and the underline, so `Foo\|⏎===` stays a heading) are not promoted. A cursor on a blank line gets a task at its indentation. |
+| `markdown.bold` / `markdown.italic` / `markdown.code` | ⌘B / ⌘I / ⌘E | Ctrl+B / Ctrl+I / Ctrl+E | Wrap with `**`, `*`, or `` ` ``. The selection is trimmed of edge whitespace and clamped to `text_start`; with a multi-line selection, each line is wrapped. With no selection, the word at the cursor is wrapped, or, not on a word, an empty pair is inserted around the cursor. Already wrapped (markers just inside or just outside the selection, `*`/`_` alike) means unwrap. Code that contains a backtick uses a longer fence and padding. A run of three markers is both bold and italic: `**«a»**` italic → `***«a»***`. Over several lines, every line is unwrapped if all are wrapped, otherwise the unwrapped ones are wrapped. A whitespace-only selection gets an empty pair. Code lines are left alone. |
+| `edit.move_line_up` / `edit.move_line_down` | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | Moves the lines the selection covers, keeping the selection, then renumbers both runs. Moving the last line, which has no ending, works: `a⏎b\|` up → `b\|⏎a`. At the top or bottom of the document it does nothing. Never renumbers inside code. Line endings stay in place while line text moves, since a plan writes breaks as `\n` and the editor gives each the ending of the line it splits; only a mixed-ending document can tell. A run counts from the number its first line had before the move (`1. a⏎2. b\|` up → `1. b\|⏎2. a`), and the item that lands first gets that number before anything is rescanned, so a list under a paragraph line survives (`x⏎1. a⏎2. b\|` up → `x⏎1. b\|⏎2. a`, where `2. b` alone could not interrupt `x`). A byte order mark stays at the start. |
 | `navigation.outline` | ⇧⌘O | Alt+Shift+O | The outline palette (§5.9). |
 
 The `markdown.*` and `edit.*` commands have **Editor scope** (§5.8). In the palette they always run: they focus the editor and act at its cursor. With `markdown-assist = off` they are disabled.
@@ -480,6 +501,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
   - HTML;
   - tab indent units;
   - multi-cursor cases (dropped).
+- A seeded random test plans every intent at random selections (some off the document or inside a character) in 30,000 small generated documents with mixed endings and a BOM. It checks that edits are in bounds, on character boundaries, in order, and apart, that they write only `\n`, and that the selection is valid in the edited lines.
 
 **`wren-editor`:**
 - The existing `editor_view` and widget tests run against `Backend::ALL`.
@@ -498,6 +520,40 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - One case checks that Alt+↑ with the Notes column active leaves the text alone.
 
 **Visual:** `capture_scenes.py` gets a list-heavy note scene, an outline palette scene, and a tiny-skia mid-row scroll scene, in both themes.
+
+### 7.1 CodeMirror divergences
+
+`crates/wren-markdown/src/edit.rs` ports 39 of the 40 Enter cases of CodeMirror's `insertNewlineContinueMarkup` suite (`test/test-commands.ts` at `f90daf6e`). The cases below assert §5 instead of CodeMirror. "Declines" means CodeMirror's command returns false and the host's plain newline runs; Wren's Enter always plans (§5.2).
+
+| CodeMirror case | Before | CodeMirror | Wren |
+|---|---|---|---|
+| doesn't continue anything at the top level | `one\|` | declines | `one⏎\|` |
+| doesn't do anything in non-Markdown content | `- <div\|>` | declines | `- <div⏎··\|>`: HTML is code-like, and the item's indent continues. |
+| will end blockquotes after two empty lines | `> one⏎>⏎> \|` | `> one⏎⏎\|` | `> one⏎>⏎\|`: one Enter on an empty quote line ends the quote (§9). |
+| will end nested blockquotes after two empty lines | `> > one⏎> >⏎> > \|` | `> > one⏎> ⏎> \|` | `> > one⏎> >⏎> \|` |
+| can drop trailing space when pressing enter in a blockquote | `>··\|` | `>⏎> \|` | `\|`: an empty quote line exits. |
+| can move list markup when pressing enter directly after it | ` - one⏎ - \|` | ` - one⏎⏎ - \|` | ` - one⏎⏎\|`: Enter on an empty item exits instead of loosening the list. |
+| exits tight list after second item | ` - one⏎ - two⏎ - \|` | ` - one⏎ - two⏎\|` | ` - one⏎ - two⏎⏎\|`: the blank line keeps the next text out of the paragraph. |
+| will keep the current ordered list number when moving a marker | ` 1. one⏎ 2. \|` | ` 1. one⏎⏎ 2. \|` | ` 1. one⏎⏎\|` |
+| can move list markup inside a blockquote | `> 1. one⏎> 2. \|` | `> 1. one⏎>⏎> 2. \|` | `> 1. one⏎>⏎> \|` |
+| doesn't fire when the cursor is before the markup depth | `- a⏎\|bc` | declines | `- a⏎⏎\|bc`, the plain newline. |
+| doesn't fire in lazily continued paragraphs | `1. a⏎b c\|` | declines | `1. a⏎b c⏎\|`, the plain newline. |
+| doesn't take effect in fenced code | `- ```foo\|`, `> - ```foo\|` | declines | `- ```foo⏎··\|`, `> - ```foo⏎>···\|`: code keeps its container prefix. |
+| can continue markup for multiple cursors | | | Dropped: Wren has one cursor. |
+
+`- |x` at the start of the text agrees with CodeMirror (`1. |x⏎2. y` → `1.⏎2. |x⏎3. y`). §5.2 only differs right after a paragraph line, which the corpus does not cover.
+
+`crates/wren-markdown/src/edit/delete.rs` ports 16 of the 17 Backspace cases of the `deleteMarkupBackward` suite at the same commit. Where CodeMirror's command declines, its host deletes a character; Wren's Backspace always plans (§5.5), so the case asserts that plan. Backspace on the first item agrees with CodeMirror (` - |` → `|`), as do the quote, extra-space, marker, and indentation cases.
+
+| CodeMirror case | Before | CodeMirror | Wren |
+|---|---|---|---|
+| does nothing in regular text | `one\|` | declines | `on\|`, one grapheme. |
+| does nothing at the top level | `one⏎\|` | declines | `one\|`, the line break. |
+| does nothing in a continued list item | `- Foo⏎-⏎··\|Welcome` | declines | `- Foo⏎-⏎·\|Welcome`: a continuation line has no marker, and text follows the cursor. |
+| doesn't delete normal text in continued list items | `- ⏎a \|b` | declines | `- ⏎a\|b` |
+| normalizes whitespace on deleting (tab indent unit) | `··- one⏎··- \|` | `··- one⏎\t\|` | `··- one⏎····\|`: tab indent units; the line's indentation has no tab, so it stays spaces. |
+| doesn't kick in in a continued paragraph under a quote | `> q⏎rs\|t` | declines | `> q⏎r\|t` |
+| can delete for multiple cursors | | | Dropped: Wren has one cursor. |
 
 ## 8. Milestones and commit order
 

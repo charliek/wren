@@ -1,0 +1,15 @@
+[package]
+name = "wren-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Markdown structure and editing rules for plain-text editors"
+
+# Kept free of iced and wren-core so it can be extracted and published.
+[lints]
+workspace = true
+
+[dependencies]
+unicode-segmentation.workspace = true
