@@ -121,6 +121,10 @@ pub struct LineDecor {
     pub strikes: Vec<Range<usize>>,
     /// Inline code spans, backticks included, to set on a chip.
     pub code_spans: Vec<Range<usize>>,
+    /// The byte that wrapped rows hang under: the end of the line's
+    /// container prefix, so a list item's rows line up under its content
+    /// and a quote's under the text after `>`.
+    pub hang: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +305,10 @@ fn line_highlights(
     ink: &Ink,
 ) -> (Vec<(Range<usize>, Highlight)>, LineDecor) {
     let mut spans = Spans::default();
-    let mut decor = LineDecor::default();
+    let mut decor = LineDecor {
+        hang: info.prefix_end,
+        ..LineDecor::default()
+    };
     let body = info.prefix_end..line.len();
 
     if info.kind == Kind::FrontMatter {

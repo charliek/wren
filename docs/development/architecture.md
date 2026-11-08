@@ -67,6 +67,26 @@ break in the line ending of the line it splits. After any change,
 the edit revision; the footer's word count follows on the next tick, at most
 250 ms later.
 
+## Hanging indent and the vendored cosmic-text
+
+On the `advanced` engine, the wrapped rows of a list item or a block quote
+start under the line's content column: after `- `, `10. `, or `> `, and for
+a task under its box, not after it. cosmic-text 0.15 has one wrap width per
+line, so Wren vendors it under `vendor/cosmic-text` with a small patch (see
+its `WREN.md`): each `BufferLine` takes a hanging indent as a byte offset,
+measured from the line's shaped glyphs, and its continuation rows wrap that
+much narrower and start that far in. Hit-testing and drawing follow the glyph
+positions; the engine's caret and selection read them too, and its ↑ and ↓
+aim at the caret's x rather than cosmic-text's glyph index. The offset is the
+end of the line's container prefix, which the highlighter's block scanner
+records with each line it styles, so an edit that changes a marker re-hangs
+the lines from there down. The `classic` engine's buffer belongs to iced, so
+it wraps every row at the left edge.
+
+`[patch.crates-io]` stops applying silently once a dependency needs a newer
+version, so `make check` (`check-patches`) fails unless the vendored `swash`
+and `cosmic-text` are the ones in the build.
+
 ## Storage safety
 
 - Storage walks validated workspace-relative paths through no-follow

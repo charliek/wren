@@ -127,7 +127,7 @@ Clones are in `../thirdparty/` (`gpui-component`, `gpui-ce`, `writ`, `velotype`)
 
 None of them fits as a dependency.
 
-**Hanging indent** (wrapped list items aligned under the item text) is not possible through cosmic-text 0.15's API in any stack. It needs a small vendored cosmic-text layout patch. Wren already vendors `swash` and `iced_winit`. This is a separate spike.
+**Hanging indent** (wrapped list items aligned under the item text) is not possible through cosmic-text 0.15's API in any stack. It needs a small vendored cosmic-text layout patch. Wren already vendors `swash` and `iced_winit`. The spike landed on the owned engine (§6, *Hanging indent spike*).
 
 
 ## 4. Decision
@@ -452,7 +452,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - Wrap the selection when typing a pair character over it.
 - Find and replace.
 - A current-heading breadcrumb in the footer.
-- The **hanging indent** cosmic-text patch spike (gpui's Apache `IndentAdjustment` and writ's MIT wrap are references).
+- The **hanging indent** cosmic-text patch spike (gpui's Apache `IndentAdjustment` and writ's MIT wrap are references). Landed on the owned engine; see *Hanging indent spike* below.
 - Larger heading sizes on the owned engine (`Attrs.metrics_opt`).
 - Exact selection bounds after a double- or triple-click.
 - A maximum text width outside focus mode (centered column) and an `editor-line-height` setting. Both work on either backend; asked for by the design review.
@@ -500,7 +500,21 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 | Max text width | `editor-max-width = 760 \| none`, default 760 px, matching focus mode. |
 | Line height | `editor-line-height`, a ratio. Default 1.7 (24 px at 14 pt); accepted range 1.2–2.2. |
 | Gutter | The current line number uses `gutter_current`; other line numbers stay `faint`. |
-| Hanging indent | List items and quotes, aligned to the content column. |
+| Hanging indent | List items and quotes, aligned to the content column. Landed on `advanced` only. |
+
+**Hanging indent spike** (landed on `md-hang`):
+- **What it does.** On the owned engine, the wrapped rows of a line inside a container start at the end of its container prefix (`LineInfo::prefix_end`): the content column after `- `, `10. `, `> `, `> - `, or an item's continuation indent. A task hangs under its box (the content column), not under its text (`text_start`). Lines outside containers, including headings and top-level code, do not hang.
+- **The patch.** `vendor/cosmic-text` is cosmic-text 0.15.0 plus about 65 added and 13 changed lines in three files, recorded in its `WREN.md`. `BufferLine` gains a hanging indent given as a byte offset. `ShapeLine::layout_to_buffer` measures it from the shaped glyphs before that byte (capped at half the wrap width), wraps every row after the first that much narrower, and starts those rows that far in; their `LayoutLine::w` includes the indent. `Buffer::hit` treats a click left of a row's first glyph as the row's start (upstream compared with 0). `make check-patches` asserts the patch applies.
+- **Decisions.**
+  - The indent is a byte offset, not pixels, so cosmic-text measures it in the line's own fonts in the same layout pass, and a font or size change needs nothing from the host. writ measures its prefix the same way.
+  - Always on for `advanced`; no setting.
+  - The highlighter records each styled line's `prefix_end` in `LineDecor::hang`, and `Engine::highlight` sets it with the attributes, so an edit re-hangs exactly the lines it re-highlights (from the changed line's checkpoint down through the viewport). `Engine::highlight` now takes the concrete `MarkdownHighlighter`.
+  - ↑, ↓, PageUp, and PageDown on the owned engine aim at the caret's x (`goal_x: Option<f32>`) and pick the nearest glyph boundary on the target row. cosmic-text aims at a glyph index, which drifts by the indent between a first row and a hanging one.
+  - Selection rectangles start at a row's leftmost glyph instead of 0.
+  - **Classic does nothing.** iced owns its buffer and lays it out without the indent; its rows still start at the left edge. This is an engine difference, documented in the configuration reference.
+- **Tests.** `owned.rs`: rows of bullets, ordered items, tasks, quotes, a list in a quote, a nested item, and a continuation paragraph hang at the measured content column; prose, headings, and top-level code do not; editing the marker moves the hang (and a list opened above turns a line into a hanging continuation); the caret, a click in the indent, and full and partial selections on hanging rows; ↑/↓ keep the visual column across first and hanging rows. `test_editor.py::test_wrapped_list_rows_hang_on_the_advanced_engine` checks ↓ in the real app. The `hanging-indent` scene shows them in both themes.
+- **Upgrade risk.** Moderate and local. All the logic is in `layout_to_buffer`, about 530 lines of wrapping and positioning, so a newer release that touches it means re-applying the ten limit checks and the row offset by hand, then running the owned-engine tests. The `BufferLine` field and the `hit` change are mechanical. `check-patches` makes a silent drop impossible, and §8 already rules out an iced upgrade while two engines exist.
+- **Upstreaming.** Feasible. The patch is additive and off by default, layout with every indent at 0 is unchanged, and hanging indents are a common rich-text need (gpui and parley both have one). Upstream would likely want a pixel form alongside the byte form (an enum), the extra `layout_to_buffer` argument folded into a settings struct to avoid a breaking signature change, RTL coverage in its tests, and probably x-based Up/Down to replace its glyph-index `cursor_x_opt` (a `TODO` in `Buffer::cursor_motion`). Worth proposing once the owned engine is the default.
 
 **P2:**
 - Folding; expand and shrink the selection.

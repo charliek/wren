@@ -79,7 +79,9 @@ to `target/scenes/<theme>/`, or with `--engine advanced` to
 `target/scenes/advanced/<theme>/`. The `markdown` scene shows a note with
 every construct the editor highlights and a selection across blank lines;
 check it on both engines in both themes after changing the highlighter or
-the editor's drawing.
+the editor's drawing. The `hanging-indent` scene shows long wrapped list
+items, nested and ordered items, tasks, and quotes, with a selection across
+wrapped rows; only the advanced engine hangs them.
 
 ## macOS
 

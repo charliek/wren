@@ -60,6 +60,26 @@ See https://example.com for more.
 # between the cursor's line and the first fence so the code band shows apart.
 MARKDOWN_SELECTION = ({"line": 15, "column": 10}, {"line": 17, "column": 5})
 
+# Wrapped list items, tasks, and quotes, for the `hanging-indent` scene. The
+# blank lines keep each block from running on lazily into the last.
+LONG_ITEMS = """# Long items
+
+- A bullet item long enough to wrap onto a second row and then a third, so each continuation row lines up under the text and not under the dash
+  - A nested item that also runs long enough to wrap, hanging under its own content column one level in
+    1. An ordered child whose wrapped rows sit under the text after its number, not under the digit
+- [ ] An open task whose wrapped rows hang under its box, at the content column, where a plain item's text starts
+- [x] A finished task that wraps as well, struck through on every row it covers
+
+10. A two-digit number moves the content column right, and the continuation rows move with it
+
+> A quoted paragraph long enough to wrap: its continuation rows start after the quote marker and its space, not at the edge
+> - A list inside a quote hangs under the item's text, past both the quote marker and the dash
+
+Plain prose has no container, so when it wraps its rows start at the left edge of the editor as before.
+"""
+# The selection runs from the first item's second row into the nested item.
+LONG_ITEMS_SELECTION = ({"line": 2, "column": 90}, {"line": 3, "column": 40})
+
 
 SAMPLE = {
     "1-1s/Alice Chen/2026-11-04.md": (
@@ -104,6 +124,7 @@ def runbook() -> str:
 
 
 SAMPLE["Projects/API Migration/Cutover runbook.md"] = runbook()
+SAMPLE["Inbox/Triage/Long items.md"] = LONG_ITEMS
 
 # A section with no groups yet, for the empty-state scenes.
 EMPTY_SECTION = "Archive"
@@ -276,6 +297,14 @@ def main() -> int:
             client.call("editor.cursor", {**position, "selection": anchor})
             client.call("editor.focus")
             shot_here("markdown")
+            # Wrapped rows hang under their item's content (advanced engine).
+            client.call("palette.open", {"mode": "jump"})
+            client.call("palette.query", {"query": "Long items"})
+            client.call("palette.activate", {})
+            anchor, position = LONG_ITEMS_SELECTION
+            client.call("editor.cursor", {**position, "selection": anchor})
+            client.call("editor.focus")
+            shot_here("hanging-indent")
     return 0
 
 

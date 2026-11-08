@@ -202,6 +202,28 @@ def test_soft_wrap_renders_multiple_rows(editor_app) -> None:
         assert state["soft_wrap"] is True
 
 
+def test_wrapped_list_rows_hang_on_the_advanced_engine(engine, editor_app) -> None:
+    """The advanced engine starts an item's wrapped rows under its text, and
+    Down keeps the caret's x, so it lands the marker's width further left in
+    the row's text."""
+    if engine != "advanced":
+        pytest.skip("only the advanced engine hangs wrapped rows")
+    with editor_app(artifacts_dir=artifact_directory("editor-hanging")) as app:
+        call = app.client.call
+        call("editor.set", {"text": "- " + "wrapped words " * 40})
+
+        def down_from(column: int) -> int:
+            call("editor.cursor", {"line": 0, "column": column, "selection": None})
+            call("editor.action", {"kind": "move", "motion": "down"})
+            cursor = call("editor.get")["cursor"]
+            assert cursor["line"] == 0
+            return cursor["column"]
+
+        second_row = down_from(0)
+        assert 2 < second_row < 200
+        assert down_from(5) == second_row + 5 - len("- ")
+
+
 def test_scroll_survives_theme_roundtrip(editor_app) -> None:
     artifacts = artifact_directory("editor-scroll")
     with editor_app(artifacts_dir=artifacts) as app:

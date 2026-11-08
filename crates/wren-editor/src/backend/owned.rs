@@ -38,9 +38,11 @@
 //! panic when the cursor is not laid out; the font-system lock is taken once
 //! per entry point and survives poisoning; highlight bounds tolerate
 //! unshaped lines; edits accumulate the topmost changed line instead of
-//! overwriting it; `replace_text` keeps the scroll position; and the engine,
+//! overwriting it; `replace_text` keeps the scroll position; the engine,
 //! not cosmic-text's editor, owns the goal column of vertical motions, so it
-//! can forget it on every other motion, click, and edit.
+//! can forget it on every other motion, click, and edit, and aims them at an
+//! x rather than a glyph index; and each styled line hangs its wrapped rows
+//! under its container prefix (Wren's patched cosmic-text).
 
 use std::sync::{Arc, PoisonError, RwLockWriteGuard, Weak};
 
@@ -55,6 +57,8 @@ use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size};
 
 use cosmic_text::Edit as _;
 
+use crate::highlighter::{Highlight, MarkdownHighlighter};
+
 pub struct Engine {
     editor: cosmic_text::Editor<'static>,
     font: Font,
@@ -65,7 +69,7 @@ pub struct Engine {
     version: Version,
     /// The x that Up, Down, PageUp, and PageDown aim for, kept across a run
     /// of them so a short line does not pull the column in.
-    goal_x: Option<i32>,
+    goal_x: Option<f32>,
 }
 
 impl Engine {
@@ -406,11 +410,13 @@ impl Engine {
         let _ = buffer_mut(&mut self.editor).line_layout(font_system.raw(), line);
     }
 
-    pub fn highlight<H: Highlighter>(
+    /// Style the visible lines and hang their wrapped rows under their
+    /// container prefix.
+    pub fn highlight(
         &mut self,
         font: Font,
-        highlighter: &mut H,
-        format_highlight: impl Fn(&H::Highlight) -> highlighter::Format<Font>,
+        highlighter: &mut MarkdownHighlighter,
+        format_highlight: impl Fn(&Highlight) -> highlighter::Format<Font>,
     ) {
         self.debug_assert_unshared();
         let buffer = self.buffer();
@@ -445,7 +451,8 @@ impl Engine {
 
         let mut font_system = font_system();
         let attributes = graphics::to_attributes(font);
-        for line in &mut buffer_mut(&mut self.editor).lines[current_line..=last_visible_line] {
+        let lines = &mut buffer_mut(&mut self.editor).lines[current_line..=last_visible_line];
+        for (index, line) in (current_line..).zip(lines) {
             let mut list = cosmic_text::AttrsList::new(&attributes);
             for (range, highlight) in highlighter.highlight_line(line.text()) {
                 let format = format_highlight(&highlight);
@@ -462,6 +469,8 @@ impl Engine {
                 }
             }
             let _ = line.set_attrs_list(list);
+            let hang = highlighter.decor(index).map_or(0, |decor| decor.hang);
+            let _ = line.set_hanging_indent(hang);
         }
         self.editor.shape_as_needed(font_system.raw(), false);
     }
@@ -565,7 +574,7 @@ impl Engine {
                 } else {
                     run.text.len()
                 };
-                let (x, width) = row_span(run.glyphs, run.line_w, from, to);
+                let (x, width) = row_span(run.glyphs, from, to);
                 (width > 0.0).then_some(Rectangle {
                     x,
                     y: run.line_top,
@@ -620,29 +629,106 @@ fn clamp(buffer: &cosmic_text::Buffer, cursor: cosmic_text::Cursor) -> cosmic_te
 /// keeps it for the next one; any other motion forgets it.
 fn move_cursor(
     editor: &mut cosmic_text::Editor<'static>,
-    goal_x: &mut Option<i32>,
+    goal_x: &mut Option<f32>,
     font_system: &mut cosmic_text::FontSystem,
     motion: Motion,
 ) {
-    let vertical = matches!(
-        motion,
-        Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
-    );
     let from = editor.cursor();
-    let moved = buffer_mut(editor).cursor_motion(
-        font_system,
-        from,
-        goal_x.filter(|_| vertical),
-        to_motion(motion),
-    );
-    match moved {
-        Some((cursor, goal)) => {
+    let buffer = buffer_mut(editor);
+    // cosmic-text aims vertical motions at a glyph index, which drifts
+    // whenever rows start at different x, as hanging rows do.
+    let rows = match motion {
+        Motion::Up => Some(-1),
+        Motion::Down => Some(1),
+        Motion::PageUp | Motion::PageDown => buffer.size().1.map(|height| {
+            let rows = height as i32 / buffer.metrics().line_height as i32;
+            if motion == Motion::PageUp {
+                -rows
+            } else {
+                rows
+            }
+        }),
+        _ => None,
+    };
+    if let Some(rows) = rows {
+        if let Some((cursor, goal)) = vertical(buffer, font_system, from, *goal_x, rows) {
             editor.set_cursor(cursor);
-            *goal_x = goal.filter(|_| vertical);
+            *goal_x = Some(goal);
         }
-        None if !vertical => *goal_x = None,
-        None => {}
+        return;
     }
+    *goal_x = None;
+    if matches!(motion, Motion::PageUp | Motion::PageDown) {
+        return;
+    }
+    if let Some((cursor, _)) = buffer.cursor_motion(font_system, from, None, to_motion(motion)) {
+        editor.set_cursor(cursor);
+    }
+}
+
+/// `cursor` moved `rows` visual rows down (up when negative), at the
+/// boundary nearest `goal_x`, or its own x without one; and the x aimed for.
+/// At the first or last row it stops, and moves along that row.
+fn vertical(
+    buffer: &mut cosmic_text::Buffer,
+    font_system: &mut cosmic_text::FontSystem,
+    cursor: cosmic_text::Cursor,
+    goal_x: Option<f32>,
+    rows: i32,
+) -> Option<(cosmic_text::Cursor, f32)> {
+    let (mut row, x) = caret_row(buffer.line_layout(font_system, cursor.line)?, cursor)?;
+    let goal = goal_x.unwrap_or(x);
+    let mut line = cursor.line;
+    for _ in 0..rows.unsigned_abs() {
+        if rows < 0 {
+            if row > 0 {
+                row -= 1;
+            } else if line > 0 {
+                line -= 1;
+                row = buffer
+                    .line_layout(font_system, line)?
+                    .len()
+                    .saturating_sub(1);
+            } else {
+                break;
+            }
+        } else if row + 1 < buffer.line_layout(font_system, line)?.len() {
+            row += 1;
+        } else if line + 1 < buffer.lines.len() {
+            line += 1;
+            row = 0;
+        } else {
+            break;
+        }
+    }
+    let layout = buffer.line_layout(font_system, line)?;
+    let (index, affinity) = nearest_boundary(&layout.get(row)?.glyphs, goal);
+    Some((
+        cosmic_text::Cursor::new_with_affinity(line, index, affinity),
+        goal,
+    ))
+}
+
+/// The glyph boundary of a row nearest `x`, as a byte index and the side
+/// it sticks to: the row's start sticks forward and its end backward, so
+/// the cursor stays on this row.
+fn nearest_boundary(glyphs: &[cosmic_text::LayoutGlyph], x: f32) -> (usize, cosmic_text::Affinity) {
+    use cosmic_text::Affinity::{After, Before};
+    let mut best: Option<(f32, (usize, cosmic_text::Affinity))> = None;
+    for glyph in glyphs {
+        let (left, right) = if glyph.level.is_rtl() {
+            ((glyph.end, Before), (glyph.start, After))
+        } else {
+            ((glyph.start, After), (glyph.end, Before))
+        };
+        for (edge, boundary) in [(glyph.x, left), (glyph.x + glyph.w, right)] {
+            let distance = (edge - x).abs();
+            if best.is_none_or(|(nearest, _)| distance < nearest) {
+                best = Some((distance, boundary));
+            }
+        }
+    }
+    best.map_or((0, After), |(_, boundary)| boundary)
 }
 
 fn deselect_if_empty(editor: &mut cosmic_text::Editor<'static>) {
@@ -707,33 +793,30 @@ fn caret_x(glyphs: &[cosmic_text::LayoutGlyph], index: usize) -> f32 {
     })
 }
 
-/// The `(x, width)` of bytes `from..to` within one visual row.
-fn row_span(
-    glyphs: &[cosmic_text::LayoutGlyph],
-    row_width: f32,
-    from: usize,
-    to: usize,
-) -> (f32, f32) {
+/// The `(x, width)` of bytes `from..to` within one visual row, which starts
+/// at its leftmost glyph: a hanging row starts past 0.
+fn row_span(glyphs: &[cosmic_text::LayoutGlyph], from: usize, to: usize) -> (f32, f32) {
     let start = glyphs.first().map_or(0, |glyph| glyph.start);
     let end = glyphs.last().map_or(0, |glyph| glyph.end);
     let range = start.max(from)..end.min(to);
     if range.is_empty() {
-        (0.0, 0.0)
-    } else if range.start == start && range.end == end {
-        (0.0, row_width)
-    } else {
-        let first = glyphs
-            .iter()
-            .position(|glyph| range.start <= glyph.start)
-            .unwrap_or(0);
-        let mut glyphs = glyphs.iter();
-        let x = glyphs.by_ref().take(first).map(|glyph| glyph.w).sum();
-        let width = glyphs
-            .take_while(|glyph| range.end > glyph.start)
-            .map(|glyph| glyph.w)
-            .sum();
-        (x, width)
+        return (0.0, 0.0);
     }
+    let origin = glyphs
+        .iter()
+        .map(|glyph| glyph.x)
+        .fold(f32::INFINITY, f32::min);
+    let first = glyphs
+        .iter()
+        .position(|glyph| range.start <= glyph.start)
+        .unwrap_or(0);
+    let mut glyphs = glyphs.iter();
+    let before: f32 = glyphs.by_ref().take(first).map(|glyph| glyph.w).sum();
+    let width = glyphs
+        .take_while(|glyph| range.end > glyph.start)
+        .map(|glyph| glyph.w)
+        .sum();
+    (origin + before, width)
 }
 
 fn to_cursor(position: Position) -> cosmic_text::Cursor {
@@ -1066,5 +1149,196 @@ mod tests {
         assert!(engine.goal_x.is_some());
         engine.restore_view(at(0, 1), cosmic_text::Scroll::default());
         assert_eq!(engine.goal_x, None);
+    }
+
+    const LONG: &str =
+        "wrapped text that runs well past the width of the pane, then on for a third row";
+
+    /// Each row of `line` as `(first byte, x of its first glyph)`.
+    fn rows(engine: &Engine, line: usize) -> Vec<(usize, f32)> {
+        engine.buffer().lines[line]
+            .layout_opt()
+            .unwrap()
+            .iter()
+            .map(|row| (row.glyphs[0].start, row.glyphs[0].x))
+            .collect()
+    }
+
+    /// The x at which byte `byte` of `line`'s first row starts.
+    fn x_at(engine: &Engine, line: usize, byte: usize) -> f32 {
+        let row = &engine.buffer().lines[line].layout_opt().unwrap()[0];
+        caret_x(&row.glyphs, byte)
+    }
+
+    fn laid_out(text: &str) -> (Engine, MarkdownHighlighter) {
+        fixtures::load_font();
+        let mut engine = Engine::with_text(text);
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        (engine, highlighter)
+    }
+
+    #[test]
+    fn wrapped_rows_hang_under_the_content_column() {
+        // `(line, content byte)`: tasks hang under the box, not their text.
+        let cases = [
+            (format!("- {LONG}"), 2),
+            (format!("10. {LONG}"), 4),
+            (format!("- [ ] {LONG}"), 2),
+            (format!("> {LONG}"), 2),
+            (format!("> - {LONG}"), 4),
+            (format!("- a\n  - {LONG}"), 4),
+            (format!("- a\n\n  {LONG}"), 2),
+        ];
+        for (text, content) in cases {
+            let (engine, _) = laid_out(&text);
+            let line = engine.line_count() - 1;
+            let rows = rows(&engine, line);
+            assert!(rows.len() > 2, "{text:?} does not wrap: {rows:?}");
+            let indent = x_at(&engine, line, content);
+            assert!(indent > 0.0);
+            assert_eq!(rows[0].1, 0.0, "{text:?}");
+            for &(start, x) in &rows[1..] {
+                assert!(start > content, "{text:?}");
+                assert_eq!(x, indent, "{text:?}: {rows:?}");
+            }
+            // Each row still ends within the pane.
+            for row in engine.buffer().lines[line].layout_opt().unwrap() {
+                assert!(row.w <= 300.0, "{text:?}: {}", row.w);
+            }
+        }
+        // Prose, headings, and fenced code outside containers do not hang.
+        for text in [
+            LONG.to_owned(),
+            format!("# {LONG}"),
+            format!("```\n{LONG}\n```"),
+        ] {
+            let (engine, _) = laid_out(&text);
+            let line = usize::from(text.starts_with('`'));
+            let rows = rows(&engine, line);
+            assert!(rows.len() > 1);
+            assert!(rows.iter().all(|&(_, x)| x == 0.0), "{text:?}: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn editing_the_marker_moves_the_hang() {
+        let (mut engine, mut highlighter) = laid_out(&format!("- {LONG}"));
+        let hung = |engine: &Engine| rows(engine, 0)[1].1;
+        assert_eq!(hung(&engine), x_at(&engine, 0, 2));
+        engine.replace_range(
+            Position { line: 0, column: 0 },
+            Position { line: 0, column: 1 },
+            "100.",
+        );
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        assert_eq!(hung(&engine), x_at(&engine, 0, 5));
+        engine.replace_range(
+            Position { line: 0, column: 0 },
+            Position { line: 0, column: 5 },
+            "",
+        );
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        assert_eq!(hung(&engine), 0.0);
+        // Opening a list above turns this line into its continuation.
+        engine.replace_range(
+            Position { line: 0, column: 0 },
+            Position { line: 0, column: 0 },
+            "- a\n  ",
+        );
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        assert_eq!(rows(&engine, 1)[1].1, x_at(&engine, 1, 2));
+    }
+
+    #[test]
+    fn carets_selections_and_clicks_on_hanging_rows_follow_the_indent() {
+        let (mut engine, mut highlighter) = laid_out(&format!("> - {LONG}\nend"));
+        let rows = rows(&engine, 0);
+        let (start, indent) = rows[1];
+        let top = engine.buffer().metrics().line_height;
+        let caret = |engine: &Engine| match engine.selection() {
+            Some(Selection::Caret(point)) => point,
+            other => panic!("no caret: {other:?}"),
+        };
+
+        // The caret at a hanging row's start sits at the indent.
+        engine.perform(Action::Click(Point::new(indent + 1.0, top + 2.0)));
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        assert_eq!(engine.cursor(), at(0, start));
+        assert_eq!(caret(&engine), Point::new(indent, top));
+
+        // A click in the hanging indent lands at the row's start, not its end.
+        engine.perform(Action::Click(Point::new(2.0, top + 2.0)));
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        assert_eq!(engine.cursor(), at(0, start));
+
+        // A selection over the whole row starts at the indent too.
+        engine.move_to(Cursor {
+            position: Position {
+                line: 0,
+                column: rows[2].0,
+            },
+            selection: Some(Position {
+                line: 0,
+                column: start,
+            }),
+        });
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        let Some(Selection::Range(ranges)) = engine.selection() else {
+            panic!("no selection");
+        };
+        assert_eq!(ranges[0].x, indent);
+        assert_eq!(ranges[0].y, top);
+        assert!(ranges[0].width > 100.0);
+        engine.move_to(Cursor {
+            position: Position {
+                line: 0,
+                column: start + 3,
+            },
+            selection: Some(Position {
+                line: 0,
+                column: start + 1,
+            }),
+        });
+        update(&mut engine, &mut highlighter, 400.0, fixtures::FONT);
+        let Some(Selection::Range(ranges)) = engine.selection() else {
+            panic!("no selection");
+        };
+        assert_eq!(ranges[0].x, x_at_row(&engine, 1, start + 1));
+    }
+
+    /// The x at which byte `byte` of `line` 0's row `row` starts.
+    fn x_at_row(engine: &Engine, row: usize, byte: usize) -> f32 {
+        let row = &engine.buffer().lines[0].layout_opt().unwrap()[row];
+        caret_x(&row.glyphs, byte)
+    }
+
+    #[test]
+    fn up_and_down_keep_the_visual_column_across_hanging_rows() {
+        let (mut engine, mut highlighter) = laid_out(&format!("- {LONG}\n- {LONG}"));
+        let rows = rows(&engine, 0);
+        let (second, _) = rows[1];
+        let mut step = |engine: &mut Engine, motion: Motion| {
+            engine.perform(Action::Move(motion));
+            update(engine, &mut highlighter, 400.0, fixtures::FONT);
+            engine.cursor()
+        };
+        // Monospace: the text at byte 5 sits one column right of the row's
+        // start column, so Down keeps it over byte 3 of the hanging row.
+        engine.move_to(at(0, 5));
+        assert_eq!(step(&mut engine, Motion::Down), at(0, second + 3));
+        assert_eq!(step(&mut engine, Motion::Up), at(0, 5));
+        // From the marker, Down meets the hanging row at its start.
+        engine.move_to(at(0, 0));
+        let down = step(&mut engine, Motion::Down);
+        assert_eq!(down, at(0, second));
+        // The goal survives the clamp and comes back on the next line.
+        engine.move_to(at(0, 1));
+        assert_eq!(step(&mut engine, Motion::Down), at(0, second));
+        let last_row = rows.len() - 1;
+        for _ in 1..last_row {
+            let _ = step(&mut engine, Motion::Down);
+        }
+        assert_eq!(step(&mut engine, Motion::Down), at(1, 1));
     }
 }
