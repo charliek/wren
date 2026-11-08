@@ -86,14 +86,14 @@ pub enum EditorEngine {
     #[default]
     Classic,
     /// Wren's own cosmic-text editor.
-    Cosmic,
+    Advanced,
 }
 
 impl EditorEngine {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "classic" => Some(Self::Classic),
-            "cosmic" => Some(Self::Cosmic),
+            "advanced" => Some(Self::Advanced),
             _ => None,
         }
     }
@@ -102,7 +102,7 @@ impl EditorEngine {
     pub fn value(self) -> &'static str {
         match self {
             Self::Classic => "classic",
-            Self::Cosmic => "cosmic",
+            Self::Advanced => "advanced",
         }
     }
 }
@@ -367,8 +367,8 @@ pub const TEMPLATE: &str = "\
 # Show the line-number gutter.
 # line-numbers = true
 
-# Editor text engine: classic (iced's editor) or cosmic (Wren's own
-# cosmic-text editor, under evaluation).
+# Editor engine: classic (the current editor) or advanced (Wren's new
+# editor engine, under evaluation).
 # editor-engine = classic
 
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
@@ -433,16 +433,16 @@ mod tests {
     #[test]
     fn editor_engine_parses_either_engine_and_warns_on_others() {
         assert_eq!(Settings::default().editor_engine, EditorEngine::Classic);
-        let settings = Settings::parse("editor-engine = cosmic\n");
-        assert_eq!(settings.editor_engine, EditorEngine::Cosmic);
+        let settings = Settings::parse("editor-engine = advanced\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Advanced);
         assert!(settings.warnings.is_empty());
-        let settings = Settings::parse("editor-engine = Cosmic\neditor-engine = \"classic\"\n");
+        let settings = Settings::parse("editor-engine = Advanced\neditor-engine = \"classic\"\n");
         assert_eq!(settings.editor_engine, EditorEngine::Classic);
-        let settings = Settings::parse("editor-engine = cosmic\neditor-engine = gpui\n");
-        assert_eq!(settings.editor_engine, EditorEngine::Cosmic);
+        let settings = Settings::parse("editor-engine = advanced\neditor-engine = gpui\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Advanced);
         assert_eq!(settings.warnings.len(), 1);
         assert!(settings.warnings[0].contains("editor-engine"));
-        for engine in [EditorEngine::Classic, EditorEngine::Cosmic] {
+        for engine in [EditorEngine::Classic, EditorEngine::Advanced] {
             assert_eq!(EditorEngine::parse(engine.value()), Some(engine));
         }
     }

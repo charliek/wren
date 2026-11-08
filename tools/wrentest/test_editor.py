@@ -1,7 +1,7 @@
 """Real editor regression tests; native X11 cases exercise OS input separately.
 
 Every case runs on the text engines that ``WRENTEST_ENGINE`` names, a
-comma-separated list of ``classic`` and ``cosmic`` (default ``classic``).
+comma-separated list of ``classic`` and ``advanced`` (default ``classic``).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from tools.wrentest import png
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, wait_for
 
-ENGINES = ("classic", "cosmic")
+ENGINES = ("classic", "advanced")
 
 
 def selected_engines() -> list[str]:

@@ -606,7 +606,7 @@ impl App {
             "soft_wrap":true,"theme":self.definition.id,
             "engine":match self.editor.backend() {
                 wren_editor::BackendKind::Iced => "classic",
-                wren_editor::BackendKind::Cosmic => "cosmic",
+                wren_editor::BackendKind::Owned => "advanced",
             },
             "font_size":self.editor.font_size(),
             "font_family":match self.editor.font().family {

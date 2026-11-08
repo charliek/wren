@@ -33,7 +33,7 @@ only that one line.
 | `editor-font-size` | number from 9 to 32 | `14` | Editor text size in points. ⌘+ / ⌘- / ⌘0 (Alt on Linux) change it one point at a time, or reset it, and save the result here. |
 | `editor-font-family` | an installed font family, quoted | `"JetBrains Mono"` (bundled) | The editor font. **Change editor font…** lists the monospace ones; any installed family works here. An unknown family warns and uses JetBrains Mono. |
 | `line-numbers` | `true` / `false` | `true` | Show the editor's line-number gutter. |
-| `editor-engine` | `classic` / `cosmic` | `classic` | The editor's text engine. `classic` is iced's text editor; `cosmic` is Wren's own cosmic-text editor, which is still being evaluated. A change applies on reload: the open note moves to the new engine with its text and cursor, but its undo history is cleared. |
+| `editor-engine` | `classic` / `advanced` | `classic` | The editor engine. `classic` is the current editor; `advanced` is Wren's new editor engine, which is still being evaluated. It keeps the exact scroll position through undo and places outline jumps precisely. A change applies on reload: the open note moves to the new engine with its text and cursor, but its undo history is cleared. |
 | `keybind` | `<trigger> = <action>` | see [Keybindings](../getting-started/keybindings.md) | Add, replace, or remove a shortcut. Repeatable; later lines win. |
 
 ## Themes

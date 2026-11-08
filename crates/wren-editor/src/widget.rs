@@ -646,7 +646,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             }
         }
 
-        // The Cosmic engine hands the renderer a weak buffer reference, which
+        // The owned engine hands the renderer a weak buffer reference, which
         // a later mutation would detach, so the text goes after every query.
         clip(renderer, text_bounds, |renderer| {
             editor.draw(renderer, text_bounds.position(), style.value, text_bounds);

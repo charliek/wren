@@ -1,4 +1,4 @@
-//! `Backend::Cosmic`: a cosmic-text editor that Wren owns.
+//! `Backend::Owned`: a cosmic-text editor that Wren owns (users see it as `editor-engine = advanced`).
 //!
 //! Ported from `iced_graphics` 0.14.0, `src/text/editor.rs`
 //! (<https://github.com/iced-rs/iced>, commit

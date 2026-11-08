@@ -41,21 +41,21 @@ the file.
 ### Editor engines
 
 The editor cases in `tools/wrentest/test_editor.py` run on each text engine
-that `WRENTEST_ENGINE` names: `classic` (the default), `cosmic`, or both,
+that `WRENTEST_ENGINE` names: `classic` (the default), `advanced`, or both,
 comma-separated. Each case starts Wren with `editor-engine` set to its engine,
 checks that `editor.get` reports that engine, and gets the engine in its test
 id:
 
 ```bash
 cargo build --features smoke-test
-ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,cosmic \
+ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced \
   uv run --locked --group test python tools/run_display.py x11 -- \
   uv run --locked --group test pytest tools/wrentest/test_editor.py
 ```
 
 The `make smoke-*` targets pass the variable through, so
-`WRENTEST_ENGINE=cosmic make smoke-x11` runs the whole suite with the editor
-cases on Cosmic. CI sets `WRENTEST_ENGINE=classic,cosmic` on all four Linux
+`WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor
+cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four Linux
 smoke lanes.
 
 ## Looking at real screens

@@ -2,7 +2,7 @@
 //!
 //! Cursor columns and find ranges use UTF-8 byte offsets. Undo and redo edit
 //! only the bytes that changed, so the rest of the document keeps its layout;
-//! on the Cosmic engine they also return the view to its exact scroll.
+//! on the owned engine they also return the view to its exact scroll.
 //!
 //! The text runs on one of two engines ([`BackendKind`]): iced's own
 //! `text::Editor`, or a cosmic-text editor this crate owns, which allows range
@@ -256,7 +256,7 @@ impl EditorView {
     /// Undo the last edit unit.
     ///
     /// Returns `true` if something was restored: the text, the cursor and
-    /// selection, and on the Cosmic engine the scroll position.
+    /// selection, and on the owned engine the scroll position.
     pub fn undo(&mut self) -> bool {
         if !self.history.can_undo() {
             return false;
@@ -367,7 +367,7 @@ impl EditorView {
     /// the end of the text the view stops at the last line. To jump to a
     /// line, scroll first and then move the cursor there.
     ///
-    /// The Cosmic engine places the line exactly. iced can only scroll by
+    /// The owned engine places the line exactly. iced can only scroll by
     /// whole rows from where it is, and counts a line it has never laid out
     /// as one row, so a wrapped line between the view and the target leaves
     /// the target off by that line's extra rows.
@@ -711,8 +711,8 @@ mod tests {
     #[test]
     fn switching_engines_keeps_the_text_cursor_find_and_settings_but_drops_history() {
         for (from, to) in [
-            (BackendKind::Iced, BackendKind::Cosmic),
-            (BackendKind::Cosmic, BackendKind::Iced),
+            (BackendKind::Iced, BackendKind::Owned),
+            (BackendKind::Owned, BackendKind::Iced),
         ] {
             let mut ev = EditorView::with_backend(from, "alpha beta\r\ngamma beta");
             assert_eq!(ev.backend(), from);
@@ -756,7 +756,7 @@ mod tests {
     fn switching_engines_clamps_the_cursor_into_the_hosts_text() {
         let mut ev = EditorView::with_backend(BackendKind::Iced, "a much longer line");
         ev.perform(Action::Move(Motion::DocumentEnd));
-        assert!(ev.set_backend(BackendKind::Cosmic, "short\né"));
+        assert!(ev.set_backend(BackendKind::Owned, "short\né"));
         assert_eq!(ev.text(), "short\né");
         assert_eq!(ev.cursor().position, Position { line: 0, column: 5 });
     }
@@ -816,9 +816,9 @@ mod tests {
     }
 
     #[test]
-    fn cosmic_undo_and_redo_return_to_the_exact_scroll() {
+    fn owned_undo_and_redo_return_to_the_exact_scroll() {
         let size = iced::Size::new(300.0, 120.0);
-        let mut ev = EditorView::with_backend(BackendKind::Cosmic, &numbered_lines(200));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, &numbered_lines(200));
         ev.content.lay_out(size);
         ev.move_cursor(at(100, 0));
         ev.content.lay_out(size);
@@ -935,9 +935,9 @@ mod tests {
             Redo,
         }
         let iced = trace(BackendKind::Iced);
-        let cosmic = trace(BackendKind::Cosmic);
-        for (step, (iced, cosmic)) in iced.iter().zip(&cosmic).enumerate() {
-            assert_eq!(iced, cosmic, "step {step}");
+        let owned = trace(BackendKind::Owned);
+        for (step, (iced, owned)) in iced.iter().zip(&owned).enumerate() {
+            assert_eq!(iced, owned, "step {step}");
         }
         // Enter wrote CRLF, and the view scrolled along the way.
         assert!(iced
@@ -947,15 +947,15 @@ mod tests {
         assert_eq!(iced.last().unwrap().0, text);
     }
 
-    /// Instantiates the tests once per engine, as `on_iced` and `on_cosmic`.
+    /// Instantiates the tests once per engine, as `on_iced` and `on_owned`.
     macro_rules! on_each_backend {
         ($($tests:tt)*) => {
             mod on_iced {
                 const KIND: crate::BackendKind = crate::BackendKind::Iced;
                 $($tests)*
             }
-            mod on_cosmic {
-                const KIND: crate::BackendKind = crate::BackendKind::Cosmic;
+            mod on_owned {
+                const KIND: crate::BackendKind = crate::BackendKind::Owned;
                 $($tests)*
             }
         };

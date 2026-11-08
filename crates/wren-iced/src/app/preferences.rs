@@ -39,7 +39,7 @@ pub struct Preferences {
 pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
     match engine {
         EditorEngine::Classic => BackendKind::Iced,
-        EditorEngine::Cosmic => BackendKind::Cosmic,
+        EditorEngine::Advanced => BackendKind::Owned,
     }
 }
 
@@ -571,13 +571,13 @@ mod tests {
 
         let directory = crate::test_support::tempdir();
         let path = directory.path().join("config.conf");
-        std::fs::write(&path, "editor-engine = cosmic\n").unwrap();
+        std::fs::write(&path, "editor-engine = advanced\n").unwrap();
         let options = || super::super::Options {
             editor: true,
             ..Default::default()
         };
         let (app, _) = App::with_config(options(), None, Some(path.clone()));
-        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
 
         std::fs::write(&path, "editor-font-size = 18\nline-numbers = off\n").unwrap();
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
@@ -597,11 +597,11 @@ mod tests {
 
         std::fs::write(
             &path,
-            "editor-font-size = 18\nline-numbers = off\neditor-engine = cosmic\n",
+            "editor-font-size = 18\nline-numbers = off\neditor-engine = advanced\n",
         )
         .unwrap();
         assert_eq!(app.reload_settings(false), None);
-        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
         assert_eq!(app.editor.text(), text);
         assert_eq!(app.editor.cursor(), cursor);
         assert_eq!(app.editor.find_count(), finds);
@@ -615,9 +615,9 @@ mod tests {
             '?',
         ))));
         let text = app.editor.text();
-        std::fs::write(&path, "editor-font-size = 18\neditor-engine = cosmic\n").unwrap();
+        std::fs::write(&path, "editor-font-size = 18\neditor-engine = advanced\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
-        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
         assert!(app.editor.can_undo());
         std::fs::write(&path, "editor-engine = classic\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
@@ -660,9 +660,9 @@ mod tests {
         // rebuild reads.
         app.editor.replace_text("stale widget copy", true);
 
-        std::fs::write(&path, "editor-engine = cosmic\n").unwrap();
+        std::fs::write(&path, "editor-engine = advanced\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
-        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
         assert_eq!(app.editor.text(), "first body, drafted");
     }
 

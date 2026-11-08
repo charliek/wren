@@ -420,13 +420,13 @@ class TestWrenAppReadiness(_WrenAppTestBase):
 
         with patch.object(subprocess, "Popen", side_effect=launch):
             with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
-                         settings="editor-engine = cosmic\n") as app:
+                         settings="editor-engine = advanced\n") as app:
                 self.assertEqual(app.settings_path,
                                  app.sandbox / "home_root" / "config" / "wren" / "config.conf")
                 self.assertEqual(app.settings_path.parent.stat().st_mode & 0o777, 0o700)
                 app.settings_path.write_text("editor-font-size = 18\n", encoding="utf-8")
                 app.restart(hard=True)
-        self.assertEqual(seen, ["editor-engine = cosmic\n", "editor-font-size = 18\n"])
+        self.assertEqual(seen, ["editor-engine = advanced\n", "editor-font-size = 18\n"])
 
     def test_without_settings_no_config_file_is_written(self) -> None:
         factory = self._make_popen(_good_identify())
@@ -435,7 +435,7 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                 self.assertFalse(app.settings_path.exists())
 
     def test_settings_must_be_text(self) -> None:
-        for value in (b"editor-engine = cosmic", 1, ["editor-engine = cosmic"]):
+        for value in (b"editor-engine = advanced", 1, ["editor-engine = advanced"]):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "settings"):
                 WrenApp(settings=value)
 

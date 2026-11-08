@@ -165,19 +165,19 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 - Test-only accessors live behind a `test-support` feature, which `wren-iced/smoke-test` enables.
 - Crate names stay `wren-*` until extraction, when they can be renamed.
 
-**Backends.** `widget::Content` wraps `enum Backend { Iced(RawEditor), Cosmic(cosmic::Engine) }`.
+**Backends.** `widget::Content` wraps `enum Backend { Iced(RawEditor), Owned(owned::Engine) }`. The owned engine is Wren's own code driving cosmic-text (MIT/Apache, the text library iced already uses); it shares nothing with the GPL cosmic-edit app. Users see it as `editor-engine = advanced`.
 - There is one `TextEditor` widget and one `EditorView`, and both backends share one test suite.
 - The widget branches only on drawing (`fill_editor` or `fill_raw`) and on the few engine calls: `perform`, `move_to`, `cursor`, `selection`, `line`, `line_count`, `bounds`, `update`, `highlight`, `buffer`.
 - Planning runs inside a borrow: `content.with_lines(|lines| plan(lines, sel, intent, &opts))`. Both backends expose a `&cosmic_text::Buffer` (iced's `Editor::buffer()`, and the owned engine's buffer), and `wren-editor` wraps it in a newtype that implements `Lines` with `buffer.lines[i].text()`, so no line is copied. A newtype is needed because the orphan rule forbids implementing `wren_markdown::Lines` for `cosmic_text::Buffer` in `wren-editor`, and `wren-markdown` must not depend on cosmic-text. `Editor::line()` cannot back `Lines`: it returns a `Cow`, not a borrowed `&str`.
 
 **Undo.** Keep the snapshot `History` (200 entries, 32 MiB, 1 s typing coalesce) for both backends.
 - Snapshots also record the scroll position.
-- Undo and redo apply a snapshot as a prefix/suffix diff (select the changed middle, then replace), not by reloading the content. This keeps shaping, and on Cosmic it lets `set_scroll` restore the exact viewport.
+- Undo and redo apply a snapshot as a prefix/suffix diff (select the changed middle, then replace), not by reloading the content. This keeps shaping, and on the owned engine it lets `set_scroll` restore the exact viewport.
 - Change-based undo is deferred unless memory or performance demands it.
 
 **Applying a plan.** `EditorView::apply(plan)` runs one routine on either backend:
 1. Snapshot the text, cursor and scroll once.
-2. Apply the replacements bottom-up. Iced uses select + paste; Cosmic uses `delete_range` / `insert_at`.
+2. Apply the replacements bottom-up. Iced uses select + paste; the owned engine uses `delete_range` / `insert_at`.
 3. Translate each `\n` in the inserted text to the line ending of the line being split. On the last line, which has no ending, use the previous line's ending, else LF.
 4. Set the selection.
 5. Record one history entry, closing any open typing group.
@@ -185,11 +185,11 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 
 **Settings.**
 - `markdown-assist = on | off`, default `on`. It turns the smart keys and Markdown commands on or off on any backend.
-- `editor-engine = classic | cosmic`, default `classic` until Cosmic meets the promotion bar (§8).
+- `editor-engine = classic | advanced`, default `classic` until the owned engine meets the promotion bar (§8).
 - When the engine changes live, the app rebuilds the editor from the session draft (`replace_text`, cursor kept, history dropped) and refocuses it.
 - Once `classic` is retired, the key is still accepted and ignored for one release.
 
-**Cosmic backend requirements** (from the engine review):
+**Owned backend requirements** (from the engine review):
 - **Clipping:** draw with `renderer.with_layer(text_bounds, …)`. tiny-skia ignores `Raw.clip_bounds`.
 - **Up/Down column:** the engine owns `goal_x`. Vertical motions go through `Buffer::cursor_motion`. `goal_x` is cleared on every other motion, click, edit, undo, and programmatic move.
 - **Buffer handle:** `downgrade()` the buffer last in `draw`. The buffer is never held strongly outside the engine, and `debug_assert` checks the strong count.
@@ -415,7 +415,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 
 - **Rows:** headings from `outline.rs`, indented by level. Each row shows its parent chain as the path and is fuzzy-matched. With an empty query, the section containing the cursor is preselected.
 - **Opening:** the app stores `outline_origin` (cursor, selection, and scroll) on `App`.
-- **Moving the highlight** previews the jump. On Cosmic the heading is set near the top of the view (in the last screenful, as near as the scroll allows). On Iced it is placed best-effort.
+- **Moving the highlight** previews the jump. On the owned engine the heading is set near the top of the view (in the last screenful, as near as the scroll allows). On Iced it is placed best-effort.
 - **Enter** clears the origin, then commits and focuses the editor.
 - **Closing any other way** restores the origin in `sync_preview`: Escape, ⌘K, a dialog, or a workspace switch.
 - **Rows are keyed** by `(edit_revision, line)`. If the text changes underneath, the palette refreshes.
@@ -433,7 +433,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - Find and replace.
 - A current-heading breadcrumb in the footer.
 - The **hanging indent** cosmic-text patch spike (gpui's Apache `IndentAdjustment` and writ's MIT wrap are references).
-- Larger heading sizes on Cosmic (`Attrs.metrics_opt`).
+- Larger heading sizes on the owned engine (`Attrs.metrics_opt`).
 - Exact selection bounds after a double- or triple-click.
 - A maximum text width outside focus mode (centered column) and an `editor-line-height` setting. Both work on either backend; asked for by the design review.
 - A brighter current-line number in the gutter (`Style::gutter_current`).
@@ -505,7 +505,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 
 **`wren-editor`:**
 - The existing `editor_view` and widget tests run against `Backend::ALL`.
-- New tests cover plan application, undo and redo restoring the cursor (and, on Cosmic, the scroll), line endings, graphemes, `goal_x`, the IME guard (in widget state), `KeyPolicy` routing, and the macOS ⌘ insert guard.
+- New tests cover plan application, undo and redo restoring the cursor (and, on the owned engine, the scroll), line endings, graphemes, `goal_x`, the IME guard (in widget state), `KeyPolicy` routing, and the macOS ⌘ insert guard.
 
 **`wren-iced`:**
 - App tests check that a command edit reaches the session draft and the revision.
@@ -562,7 +562,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 1. **Extract the editor into `crates/wren-editor`** with no behavior change: `Style`/`Palette` instead of `wren_core::theme`, a `test-support` feature, and a CLAUDE.md layout update.
 2. **`wren-markdown`:** `block` and `outline` with tests. *Parallel with 1.*
 3. **`wren-markdown`:** the `edit` planner for §5.2–5.7, the CodeMirror corpus, and the divergence table.
-4. **`wren-editor`:** the `Backend` seam with Iced only. Then Cosmic behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.*
+4. **`wren-editor`:** the `Backend` seam with Iced only. Then the owned engine behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.*
 5. **Point the highlighter, `done_task_ranges`, and `index.rs` at `wren-markdown::block`.**
 6. **Intents:**
    - the `Message::Intent` / `EditorView::apply` path;
@@ -574,7 +574,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 8. **The outline palette.**
 9. **Harness work:** settings support, engine parametrization, and the scenes. Then review.
 
-**Promotion bar for `editor-engine = cosmic` as the default:**
+**Promotion bar for `editor-engine = advanced` as the default:**
 - the shared suite passes on both backends in all four lanes;
 - tiny-skia draw time is within an agreed margin of `fill_editor`;
 - a manual macOS check of IME and ⌘ keys passes;
@@ -590,5 +590,5 @@ There is **no iced upgrade while two backends exist.**
 - **Blockquote exit:** one Enter with a blank line left, chosen over CodeMirror's two empty lines.
 - **macOS ⌘E** is the system's "Use Selection for Find". We take it for inline code; revisit if it bothers people.
 - **A Mac console check is needed** for ⌘+letter and IME. ssh cannot send synthetic keys.
-- **IME anchor off screen (needs sign-off):** §4 says no rectangle falls back to `ORIGIN`. Cosmic's caret and selection rectangles are `None` off screen, but the IME anchor goes to the view edge nearest the cursor (the top-left corner when the cursor is above the view) rather than disabling the IME, which would drop an in-progress composition when the user scrolls away. Keep, or anchor at the cursor's column?
+- **IME anchor off screen (needs sign-off):** §4 says no rectangle falls back to `ORIGIN`. The owned engine's caret and selection rectangles are `None` off screen, but the IME anchor goes to the view edge nearest the cursor (the top-left corner when the cursor is above the view) rather than disabling the IME, which would drop an in-progress composition when the user scrolls away. Keep, or anchor at the cursor's column?
 - **Mixed endings, known edge case:** a CR line followed by an emptied LF line (`a\r` then `\n`) serializes as one CRLF break, so the editor shows one more line than a reload of the saved text. Rewriting the empty line's ending to CR after such an edit would close it; not done in this milestone.

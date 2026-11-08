@@ -3,8 +3,8 @@
 //! The widget and [`EditorView`](crate::EditorView) reach the engine only
 //! through [`Backend`], so each engine is a drop-in for the others.
 
-mod cosmic;
 mod iced;
+mod owned;
 
 use std::borrow::Cow;
 
@@ -24,11 +24,11 @@ pub enum BackendKind {
     #[default]
     Iced,
     /// A cosmic-text editor owned by this crate, drawn with `fill_raw`.
-    Cosmic,
+    Owned,
 }
 
 impl BackendKind {
-    pub const ALL: [Self; 2] = [Self::Iced, Self::Cosmic];
+    pub const ALL: [Self; 2] = [Self::Iced, Self::Owned];
 }
 
 /// Where [`EditorView::scroll_to_line`](crate::EditorView::scroll_to_line)
@@ -45,21 +45,21 @@ pub enum Placement {
 /// A document's text, cursor, and layout.
 pub enum Backend {
     Iced(RawEditor),
-    Cosmic(Box<cosmic::Engine>),
+    Owned(Box<owned::Engine>),
 }
 
 impl Backend {
     pub fn with_text(kind: BackendKind, text: &str) -> Self {
         match kind {
             BackendKind::Iced => Self::Iced(RawEditor::with_text(text)),
-            BackendKind::Cosmic => Self::Cosmic(Box::new(cosmic::Engine::with_text(text))),
+            BackendKind::Owned => Self::Owned(Box::new(owned::Engine::with_text(text))),
         }
     }
 
     pub fn kind(&self) -> BackendKind {
         match self {
             Self::Iced(_) => BackendKind::Iced,
-            Self::Cosmic(_) => BackendKind::Cosmic,
+            Self::Owned(_) => BackendKind::Owned,
         }
     }
 
@@ -68,7 +68,7 @@ impl Backend {
     pub fn replace_text(&mut self, text: &str) {
         match self {
             Self::Iced(editor) => *editor = RawEditor::with_text(text),
-            Self::Cosmic(engine) => engine.replace_text(text),
+            Self::Owned(engine) => engine.replace_text(text),
         }
     }
 
@@ -77,7 +77,7 @@ impl Backend {
     pub fn replace_range(&mut self, start: Position, end: Position, text: &str) {
         match self {
             Self::Iced(editor) => iced::replace_range(editor, start, end, text),
-            Self::Cosmic(engine) => engine.replace_range(start, end, text),
+            Self::Owned(engine) => engine.replace_range(start, end, text),
         }
     }
 
@@ -87,13 +87,13 @@ impl Backend {
     }
 
     /// Put the cursor at `cursor` and the view where a snapshot left it.
-    /// Cosmic restores `scroll` exactly, then scrolls only as far as needed
+    /// Owned restores `scroll` exactly, then scrolls only as far as needed
     /// to show the cursor; iced keeps its scroll and reveals the cursor on
     /// its next update.
     pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
         match self {
             Self::Iced(editor) => editor.move_to(cursor),
-            Self::Cosmic(engine) => engine.restore_view(cursor, scroll),
+            Self::Owned(engine) => engine.restore_view(cursor, scroll),
         }
     }
 
@@ -109,21 +109,21 @@ impl Backend {
         let line = line.min(self.line_count().saturating_sub(1));
         match self {
             Self::Iced(editor) => iced::scroll_to(editor, line, above),
-            Self::Cosmic(engine) => engine.scroll_to(line, above),
+            Self::Owned(engine) => engine.scroll_to(line, above),
         }
     }
 
     pub fn perform(&mut self, action: Action) {
         match self {
             Self::Iced(editor) => editor.perform(action),
-            Self::Cosmic(engine) => engine.perform(action),
+            Self::Owned(engine) => engine.perform(action),
         }
     }
 
     pub fn move_to(&mut self, cursor: Cursor) {
         match self {
             Self::Iced(editor) => editor.move_to(cursor),
-            Self::Cosmic(engine) => engine.move_to(cursor),
+            Self::Owned(engine) => engine.move_to(cursor),
         }
     }
 
@@ -131,7 +131,7 @@ impl Backend {
     pub fn cursor(&self) -> Cursor {
         match self {
             Self::Iced(editor) => editor.cursor(),
-            Self::Cosmic(engine) => engine.cursor(),
+            Self::Owned(engine) => engine.cursor(),
         }
     }
 
@@ -140,7 +140,7 @@ impl Backend {
     pub fn selection(&self) -> Option<Selection> {
         match self {
             Self::Iced(editor) => Some(editor.selection()),
-            Self::Cosmic(engine) => engine.selection(),
+            Self::Owned(engine) => engine.selection(),
         }
     }
 
@@ -154,7 +154,7 @@ impl Backend {
                     Some(ranges.first().cloned().unwrap_or_default().position())
                 }
             },
-            Self::Cosmic(engine) => engine.ime_position(),
+            Self::Owned(engine) => engine.ime_position(),
         }
     }
 
@@ -162,14 +162,14 @@ impl Backend {
     pub fn copy(&self) -> Option<String> {
         match self {
             Self::Iced(editor) => editor.copy(),
-            Self::Cosmic(engine) => engine.copy(),
+            Self::Owned(engine) => engine.copy(),
         }
     }
 
     pub fn line_count(&self) -> usize {
         match self {
             Self::Iced(editor) => editor.line_count(),
-            Self::Cosmic(engine) => engine.line_count(),
+            Self::Owned(engine) => engine.line_count(),
         }
     }
 
@@ -177,7 +177,7 @@ impl Backend {
     pub fn bounds(&self) -> Size {
         match self {
             Self::Iced(editor) => editor.bounds(),
-            Self::Cosmic(engine) => engine.bounds(),
+            Self::Owned(engine) => engine.bounds(),
         }
     }
 
@@ -185,7 +185,7 @@ impl Backend {
     pub fn buffer(&self) -> &cosmic_text::Buffer {
         match self {
             Self::Iced(editor) => editor.buffer(),
-            Self::Cosmic(engine) => engine.buffer(),
+            Self::Owned(engine) => engine.buffer(),
         }
     }
 
@@ -198,7 +198,7 @@ impl Backend {
         match self {
             Self::Iced(editor) => iced::reshape_to_cursor(editor),
             // The engine lays out the cursor line itself after every update.
-            Self::Cosmic(_) => {}
+            Self::Owned(_) => {}
         }
     }
 
@@ -216,7 +216,7 @@ impl Backend {
             Self::Iced(editor) => {
                 editor.update(bounds, font, size, line_height, wrapping, highlighter);
             }
-            Self::Cosmic(engine) => {
+            Self::Owned(engine) => {
                 engine.update(bounds, font, size, line_height, wrapping, highlighter);
             }
         }
@@ -228,7 +228,7 @@ impl Backend {
             Self::Iced(editor) => {
                 editor.highlight(font, highlighter, |highlight| highlight.to_format())
             }
-            Self::Cosmic(engine) => {
+            Self::Owned(engine) => {
                 engine.highlight(font, highlighter, |highlight| highlight.to_format())
             }
         }
@@ -245,7 +245,7 @@ impl Backend {
     ) {
         match self {
             Self::Iced(editor) => iced::draw(editor, renderer, position, color, clip_bounds),
-            Self::Cosmic(engine) => engine.draw(renderer, position, color, clip_bounds),
+            Self::Owned(engine) => engine.draw(renderer, position, color, clip_bounds),
         }
     }
 }
@@ -354,15 +354,15 @@ mod tests {
         steps.extend(std::iter::repeat_n(Action::Select(Motion::WordRight), 6));
         steps.push(Action::SelectAll);
         let (mut iced, mut iced_highlighter) = laid_out(BackendKind::Iced, TEXT, size);
-        let (mut cosmic, mut cosmic_highlighter) = laid_out(BackendKind::Cosmic, TEXT, size);
+        let (mut owned, mut owned_highlighter) = laid_out(BackendKind::Owned, TEXT, size);
         for (step, action) in steps.into_iter().enumerate() {
             iced.perform(action.clone());
-            cosmic.perform(action);
+            owned.perform(action);
             update(&mut iced, &mut iced_highlighter, size, fixtures::FONT);
-            update(&mut cosmic, &mut cosmic_highlighter, size, fixtures::FONT);
-            assert_eq!(iced.cursor(), cosmic.cursor(), "step {step}");
+            update(&mut owned, &mut owned_highlighter, size, fixtures::FONT);
+            assert_eq!(iced.cursor(), owned.cursor(), "step {step}");
             let expected = iced.selection().unwrap();
-            let actual = cosmic.selection().expect("a visible caret");
+            let actual = owned.selection().expect("a visible caret");
             assert!(
                 close(&expected, &actual),
                 "step {step}: {expected:?} vs {actual:?}"
@@ -377,19 +377,19 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let size = Size::new(300.0, 120.0);
-        let (mut cosmic, mut highlighter) = laid_out(BackendKind::Cosmic, &text, size);
-        cosmic.perform(Action::Scroll { lines: 30 });
-        update(&mut cosmic, &mut highlighter, size, fixtures::FONT);
-        assert!(cosmic.selection().is_none());
-        assert_eq!(cosmic.ime_position(), Some(Point::ORIGIN));
+        let (mut owned, mut highlighter) = laid_out(BackendKind::Owned, &text, size);
+        owned.perform(Action::Scroll { lines: 30 });
+        update(&mut owned, &mut highlighter, size, fixtures::FONT);
+        assert!(owned.selection().is_none());
+        assert_eq!(owned.ime_position(), Some(Point::ORIGIN));
 
-        cosmic.perform(Action::Move(Motion::DocumentEnd));
-        update(&mut cosmic, &mut highlighter, size, fixtures::FONT);
-        assert!(matches!(cosmic.selection(), Some(Selection::Caret(_))));
-        cosmic.perform(Action::Scroll { lines: -60 });
-        update(&mut cosmic, &mut highlighter, size, fixtures::FONT);
-        assert!(cosmic.selection().is_none());
-        assert_eq!(cosmic.ime_position(), Some(Point::new(0.0, 96.0)));
+        owned.perform(Action::Move(Motion::DocumentEnd));
+        update(&mut owned, &mut highlighter, size, fixtures::FONT);
+        assert!(matches!(owned.selection(), Some(Selection::Caret(_))));
+        owned.perform(Action::Scroll { lines: -60 });
+        update(&mut owned, &mut highlighter, size, fixtures::FONT);
+        assert!(owned.selection().is_none());
+        assert_eq!(owned.ime_position(), Some(Point::new(0.0, 96.0)));
     }
 
     #[test]

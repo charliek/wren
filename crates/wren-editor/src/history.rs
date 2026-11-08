@@ -42,7 +42,7 @@ pub enum EditKind {
 pub struct Snapshot {
     pub text: String,
     pub cursor: Cursor,
-    /// Where the view was scrolled. Only the Cosmic engine can set it back.
+    /// Where the view was scrolled. Only the owned engine can set it back.
     pub scroll: Scroll,
 }
 
