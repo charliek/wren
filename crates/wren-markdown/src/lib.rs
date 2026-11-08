@@ -110,6 +110,55 @@ impl LineEnding {
     }
 }
 
+/// The lines of `text`, split as [`Document`] splits them, found one at a
+/// time: each item is a line's byte range without its ending, and the
+/// ending. Callers that stop early (a preview's first body line) read only
+/// the lines they look at.
+pub fn line_ranges(text: &str) -> LineRanges<'_> {
+    LineRanges {
+        bytes: text.as_bytes(),
+        start: 0,
+        done: false,
+    }
+}
+
+/// The iterator returned by [`line_ranges`].
+#[derive(Clone, Debug)]
+pub struct LineRanges<'a> {
+    bytes: &'a [u8],
+    start: usize,
+    done: bool,
+}
+
+impl Iterator for LineRanges<'_> {
+    type Item = (Range<usize>, LineEnding);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let bytes = self.bytes;
+        let mut i = self.start;
+        while i < bytes.len() {
+            let ending = match (bytes[i], bytes.get(i + 1)) {
+                (b'\r', Some(b'\n')) => LineEnding::CrLf,
+                (b'\n', Some(b'\r')) => LineEnding::LfCr,
+                (b'\n', _) => LineEnding::Lf,
+                (b'\r', _) => LineEnding::Cr,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let line = self.start..i;
+            self.start = i + ending.as_str().len();
+            return Some((line, ending));
+        }
+        self.done = true;
+        Some((self.start..bytes.len(), LineEnding::None))
+    }
+}
+
 /// A whole document held as one string, split on `\n`, `\r\n`, `\r`, and
 /// `\n\r`.
 ///
@@ -123,27 +172,10 @@ pub struct Document<'a> {
 
 impl<'a> Document<'a> {
     pub fn new(text: &'a str) -> Self {
-        let bytes = text.as_bytes();
-        let mut lines = Vec::new();
-        let mut start = 0;
-        let mut i = 0;
-        while i < bytes.len() {
-            let ending = match (bytes[i], bytes.get(i + 1)) {
-                (b'\r', Some(b'\n')) => LineEnding::CrLf,
-                (b'\n', Some(b'\r')) => LineEnding::LfCr,
-                (b'\n', _) => LineEnding::Lf,
-                (b'\r', _) => LineEnding::Cr,
-                _ => {
-                    i += 1;
-                    continue;
-                }
-            };
-            lines.push((start..i, ending));
-            i += ending.as_str().len();
-            start = i;
+        Self {
+            text,
+            lines: line_ranges(text).collect(),
         }
-        lines.push((start..bytes.len(), LineEnding::None));
-        Self { text, lines }
     }
 
     pub fn text(&self) -> &'a str {
