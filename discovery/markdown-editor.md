@@ -376,6 +376,7 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
     | `**bold**\|` | `**bold\|` |
     | `- [ ] \|` | `- [ \|` |
 
+  - A segment with a letter or digit is a word; any other non-space segment, emoji included, is punctuation. UAX #29 has no dictionary, so each CJK ideograph is a word of its own (`日本語|` → `日本|`), while a run of emoji goes together and a joined sequence is never split (`ok👍👍|` → `ok|`). Landed on `md-follow` in `wren-markdown/src/edit/delete.rs`.
   - Markup separated by spaces is not grouped further. Clearing a marker is the job of smart Backspace and ⌘⌫.
   - At either end of a line, the line break goes.
 - ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`. A cursor inside the markup also deletes to column 0, and at column 0 the line break goes.

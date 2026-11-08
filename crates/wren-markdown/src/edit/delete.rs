@@ -231,8 +231,8 @@ pub(super) fn forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     delete_between(p, to)
 }
 
-/// Delete back over any whitespace and then one word (or one other
-/// segment) by Unicode word boundaries; at the start of a line, the line
+/// Delete back one group (§5.5): the whitespace before the cursor, then
+/// one word or one run of punctuation; at the start of a line, the line
 /// break.
 pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
@@ -246,17 +246,26 @@ pub(super) fn word_backward<L: Lines + ?Sized>(base: &L, sel: Selection) -> Edit
         return join_back(base, p);
     }
     let segments: Vec<(usize, &str)> = text[floor..p.col].split_word_bound_indices().collect();
-    let mut i = segments.len();
-    while i > 0 && is_space(segments[i - 1].1) {
+    let classes: Vec<Class> = segments.iter().map(|s| Class::of(s.1)).collect();
+    let mut i = classes.len();
+    while i > 0 && classes[i - 1] == Class::Space {
         i -= 1;
     }
-    i = i.saturating_sub(1);
-    let from = floor + segments.get(i).map_or(0, |s| s.0);
+    match i.checked_sub(1).map(|last| classes[last]) {
+        Some(Class::Word) => i -= 1,
+        Some(Class::Punctuation) => {
+            while i > 0 && classes[i - 1] == Class::Punctuation {
+                i -= 1;
+            }
+        }
+        Some(Class::Space) | None => {}
+    }
+    let from = floor + segments.get(i).map_or(p.col - floor, |s| s.0);
     delete_between(Pos::new(p.line, from), p)
 }
 
-/// Delete forward over any whitespace and then one word; at the end of a
-/// line, the line break.
+/// Delete forward one group: the whitespace after the cursor, then one
+/// word or one run of punctuation; at the end of a line, the line break.
 pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
@@ -268,11 +277,45 @@ pub(super) fn word_forward<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditP
         return forward(base, sel);
     }
     let rest = &text[p.col..];
-    let to = rest
+    let mut segments = rest
         .split_word_bound_indices()
-        .find(|(_, segment)| !is_space(segment))
-        .map_or(rest.len(), |(i, segment)| i + segment.len());
+        .map(|(i, s)| (i + s.len(), Class::of(s)))
+        .skip_while(|&(_, class)| class == Class::Space)
+        .peekable();
+    let to = match segments.next() {
+        Some((end, Class::Word)) => end,
+        Some((mut end, Class::Punctuation)) => {
+            while let Some(&(next, Class::Punctuation)) = segments.peek() {
+                end = next;
+                segments.next();
+            }
+            end
+        }
+        Some((_, Class::Space)) | None => rest.len(),
+    };
     delete_between(p, Pos::new(p.line, p.col + to))
+}
+
+/// The character class of a word-bound segment, for the group deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Space,
+    /// A UAX #29 word: any segment with a letter or digit in it.
+    Word,
+    /// Everything else, emoji included; consecutive segments form one run.
+    Punctuation,
+}
+
+impl Class {
+    fn of(segment: &str) -> Class {
+        if segment.chars().all(char::is_whitespace) {
+            Class::Space
+        } else if segment.chars().any(char::is_alphanumeric) {
+            Class::Word
+        } else {
+            Class::Punctuation
+        }
+    }
 }
 
 /// Delete back to the line's text start, or from there (or from inside the
@@ -304,10 +347,6 @@ fn join_back<L: Lines + ?Sized>(base: &L, p: Pos) -> EditPlan {
     }
     let from = Pos::new(p.line - 1, base.line(p.line - 1).len());
     delete_between(from, p)
-}
-
-fn is_space(segment: &str) -> bool {
-    segment.chars().all(char::is_whitespace)
 }
 
 /// Delete the text between two positions, leaving the cursor there. The
@@ -498,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn word_deletes_follow_unicode_word_boundaries() {
+    fn word_deletes_take_whitespace_then_one_group() {
         check(
             Intent::DeleteWordBackward,
             &[
@@ -507,18 +546,24 @@ mod tests {
                 ("foo |", "|"),
                 ("foo, bar|", "foo, |"),
                 ("foo,|", "foo|"),
+                ("foo!!|", "foo|"),
+                ("foo ?!|", "foo |"),
+                ("**bold**|", "**bold|"),
+                ("**bold|", "**|"),
+                ("- [ ] |", "- [ |"),
+                ("- [ |", "- |"),
+                ("- |", "|"),
                 ("snake_case|", "|"),
                 ("can't|", "|"),
                 ("a.b|", "|"),
                 ("3.14|", "|"),
-                ("foo!!|", "foo!|"),
-                ("- [ ] |", "- [ |"),
-                ("日本語|", "日本|"),
                 ("foo ba|r", "foo |r"),
+                ("  |foo", "|foo"),
                 ("a\n|b", "a|b"),
+                ("a\n  |b", "a\n|b"),
                 ("|", "|"),
                 ("\u{feff}ab|", "\u{feff}|"),
-                ("- |", "|"),
+                ("\u{feff}|ab", "\u{feff}|ab"),
             ],
         );
         check(
@@ -528,8 +573,43 @@ mod tests {
                 ("|  bar baz", "| baz"),
                 ("f|oo bar", "f| bar"),
                 ("|,foo", "|foo"),
+                ("|!!foo", "|foo"),
+                ("|** bold", "| bold"),
+                ("|**bold**", "|bold**"),
+                ("| [ ] a", "| ] a"),
+                ("|a.b c", "| c"),
+                ("|3.14!", "|!"),
+                ("|can't stop", "| stop"),
                 ("a|\nb", "a|b"),
                 ("a|  \nb", "a|\nb"),
+            ],
+        );
+    }
+
+    #[test]
+    fn word_deletes_group_cjk_and_emoji_by_segment() {
+        // Without a dictionary, UAX #29 makes each ideograph a word of its
+        // own; an emoji is a symbol, so a run of them goes together, and a
+        // joined sequence is never split.
+        check(
+            Intent::DeleteWordBackward,
+            &[
+                ("日本語|", "日本|"),
+                ("foo 日本|", "foo 日|"),
+                ("カタカナ|", "|"),
+                ("ok👍👍|", "ok|"),
+                ("ok 👨\u{200d}👩\u{200d}👧|", "ok |"),
+                ("🇫🇷!|", "|"),
+                ("e\u{301}te\u{301}|", "|"),
+            ],
+        );
+        check(
+            Intent::DeleteWordForward,
+            &[
+                ("|日本語", "|本語"),
+                ("|👍👍ok", "|ok"),
+                ("|👨\u{200d}👩\u{200d}👧 a", "| a"),
+                ("|e\u{301}te\u{301}!", "|!"),
             ],
         );
     }

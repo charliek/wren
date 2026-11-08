@@ -254,9 +254,9 @@ pub enum Intent {
     Backspace,
     /// Delete one grapheme cluster forward.
     Delete,
-    /// Delete back to the previous Unicode word boundary.
+    /// Delete back over whitespace, then one word or punctuation run.
     DeleteWordBackward,
-    /// Delete forward to the next Unicode word boundary.
+    /// Delete forward over whitespace, then one word or punctuation run.
     DeleteWordForward,
     /// Delete back to the line's text start, or from there to column 0.
     DeleteToTextStart,
