@@ -205,7 +205,8 @@ pub struct Replace {
 ///
 /// `edits` are in document order, do not overlap, and are all expressed in
 /// positions of the text *before* the plan; apply them last to first.
-/// `selection` is expressed in positions of the text *after* the plan.
+/// `selection` is expressed in positions of the text *after* the plan. A
+/// motion has no edits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EditPlan {
     pub edits: Vec<Replace>,
@@ -230,12 +231,14 @@ pub enum Intent {
     DeleteWordForward,
     /// Delete back to the line's text start, or from there to column 0.
     DeleteToTextStart,
-    /// The smart Home cycle. `row_start` is the byte column where the
-    /// cursor's visual row begins when that row is a wrapped continuation,
-    /// which only the editor's layout knows.
+    /// The smart Home cycle between the line's text start and column 0.
+    ///
+    /// Only the editor's layout knows where a wrapped line's visual rows
+    /// begin, so the editor takes that stop itself: when the cursor is on a
+    /// wrapped continuation row and not already at its start, Home moves
+    /// there without planning. Otherwise it plans this motion.
     Home {
         extend: bool,
-        row_start: Option<usize>,
     },
     DocumentStart {
         extend: bool,

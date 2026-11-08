@@ -15,6 +15,7 @@ use crate::block::{self, Container, Kind, LineInfo, ListItem, Marker, Scanner, S
 use crate::{EditPlan, Intent, Lines, Options, Pos, Replace, Selection};
 
 mod delete;
+mod motion;
 mod tab;
 
 /// Plan `intent` at `sel`.
@@ -41,6 +42,9 @@ pub fn plan(
         Intent::DeleteWordBackward => delete::word_backward(lines, sel),
         Intent::DeleteWordForward => delete::word_forward(lines, sel),
         Intent::DeleteToTextStart => delete::to_text_start(lines, sel),
+        Intent::Home { extend } => motion::home(lines, sel, extend),
+        Intent::DocumentStart { extend } => motion::document_start(lines, sel, extend),
+        Intent::DocumentEnd { extend } => motion::document_end(lines, sel, extend),
         _ => unchanged(clamp_selection(lines, sel)),
     }
 }
