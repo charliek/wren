@@ -9,26 +9,33 @@
 //! small replacements.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use crate::block::{self, Container, Kind, LineInfo, ListItem, Marker, Scanner, Segment};
 use crate::{EditPlan, Intent, Lines, Options, Pos, Replace, Selection};
 
+mod tab;
+
 /// Plan `intent` at `sel`.
 ///
-/// Returns `None` when the planner has no Markdown-specific behavior for
-/// the intent, so the editor should fall back to its own. Enter and
-/// Shift+Enter always return a plan, so the editor's own line break, which
-/// knows nothing of line endings, never runs.
+/// Every intent gets a plan, so the editor's own handling of these keys,
+/// which knows nothing of line endings or grapheme clusters, never runs. A
+/// plan with no edits and the same selection means the key was consumed
+/// with nothing to do (Tab with no previous sibling, a line move at the
+/// top of the document). Motions (Home and the document start and end)
+/// only move the selection.
 pub fn plan(
     lines: &(impl Lines + ?Sized),
     sel: Selection,
     intent: Intent,
     opts: &Options,
-) -> Option<EditPlan> {
+) -> EditPlan {
     match intent {
-        Intent::Enter => Some(enter(lines, sel, false, opts)),
-        Intent::ShiftEnter => Some(enter(lines, sel, true, opts)),
-        _ => None,
+        Intent::Enter => enter(lines, sel, false, opts),
+        Intent::ShiftEnter => enter(lines, sel, true, opts),
+        Intent::Tab => tab::indent(lines, sel, true, opts),
+        Intent::ShiftTab => tab::indent(lines, sel, false, opts),
+        _ => unchanged(clamp_selection(lines, sel)),
     }
 }
 
@@ -38,16 +45,48 @@ fn enter<L: Lines + ?Sized>(base: &L, sel: Selection, shift: bool, opts: &Option
     let mut draft = Draft::new(base);
     draft.delete(start, end);
     let analysis = Analysis::new(&draft, Some(start.line));
-    let (mut caret, requests) = break_line(&mut draft, &analysis, start, shift);
+    let (caret, requests) = break_line(&mut draft, &analysis, start, shift);
+    let mut marks = Selection::caret(caret);
     if opts.renumber {
         for request in requests {
-            renumber(&mut draft, request, &mut caret);
+            let an = Analysis::new(&draft, None);
+            renumber(&mut draft, &an, request, &mut marks);
         }
     }
+    finish(base, &draft, marks)
+}
+
+/// The plan that turns `base` into `draft`, leaving `selection`.
+fn finish<L: Lines + ?Sized>(base: &L, draft: &Draft, selection: Selection) -> EditPlan {
     EditPlan {
-        edits: diff(base, &draft),
-        selection: Selection::caret(caret),
+        edits: diff(base, draft),
+        selection,
     }
+}
+
+/// A plan that changes nothing.
+fn unchanged(selection: Selection) -> EditPlan {
+    EditPlan {
+        edits: Vec::new(),
+        selection,
+    }
+}
+
+/// `sel` with both ends clamped onto the document.
+fn clamp_selection<L: Lines + ?Sized>(lines: &L, sel: Selection) -> Selection {
+    Selection::new(clamp(lines, sel.anchor), clamp(lines, sel.head))
+}
+
+/// The first and last lines a selection covers. A selection that ends at
+/// column 0 of a later line does not cover that line.
+fn covered(sel: &Selection) -> (usize, usize) {
+    let (start, end) = (sel.start(), sel.end());
+    let last = if end.line > start.line && end.col == 0 {
+        end.line - 1
+    } else {
+        end.line
+    };
+    (start.line, last)
 }
 
 /// A request to renumber the ordered items that follow line `after` in
@@ -413,10 +452,8 @@ fn continue_item(
     // continuation lines and children) now follows the new item, whose
     // marker may be wider.
     let delta = block::advance_column(0, &marker) as isize - item.content_column as isize;
-    if delta != 0 {
-        let mut unused = Pos::default();
-        shift_item(d, an, ctx.l, slot, delta, &mut unused);
-    }
+    let mut unused = Selection::default();
+    shift_lines(d, an, ctx.l + 1, slot, delta, false, &mut unused);
     let gap = is_loose(an, ctx.l, slot, &item).then(|| trim_ws_end(&outer).to_owned());
     let prefix = marker + &task_text(ctx.line, &item);
     let caret = ctx.split(d, gap, prefix);
@@ -554,9 +591,9 @@ fn same_list(a: &ListItem, b: &ListItem) -> bool {
 
 /// Renumber the items that follow `req.after` while their numbers are
 /// sequential (§5.6), moving each renumbered item's content by the change
-/// in its marker's width.
-fn renumber(d: &mut Draft, req: Renumber, caret: &mut Pos) {
-    let an = Analysis::new(&*d, None);
+/// in its marker's width. `an` describes the draft's structure; its lines
+/// must line up with the draft's.
+fn renumber(d: &mut Draft, an: &Analysis, req: Renumber, marks: &mut Selection) {
     let mut after = req.after;
     let mut next = req.next;
     let mut previous: Option<u32> = None;
@@ -578,22 +615,130 @@ fn renumber(d: &mut Draft, req: Renumber, caret: &mut Pos) {
             break;
         }
         let start = item.marker_start;
-        edit_line(d, k, start..start + width, &digits, caret);
+        edit_line(d, k, start..start + width, &digits, marks);
         let delta = digits.len() as isize - width as isize;
-        if delta != 0 {
-            shift_item(d, &an, k, req.slot, delta, caret);
-        }
+        shift_lines(d, an, k + 1, req.slot, delta, false, marks);
         previous = Some(number);
         next += 1;
         after = k;
     }
 }
 
-/// Move the lines inside the item opened on line `k` at `slot` (its
-/// continuation lines and children) right by `delta` columns, or left when
-/// `delta` is negative and the spaces are there to remove.
-fn shift_item(d: &mut Draft, an: &Analysis, k: usize, slot: usize, delta: isize, caret: &mut Pos) {
-    for j in k + 1..an.recs.len() {
+/// An ordered run to renumber from its start after Tab, Shift+Tab, or a
+/// line move (§5.6): the run holding the item that line `line` opens at
+/// `slot`, or at its innermost item slot.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    line: usize,
+    slot: Option<usize>,
+}
+
+/// Renumber each distinct run in `runs` from its first item's number.
+///
+/// After a line move, `was` holds the original document's ordered number
+/// on each line, and a run counts from the number its first line had, so
+/// reordered items keep the run's start. Otherwise it is empty.
+fn renumber_runs(d: &mut Draft, runs: &[Run], was: &[Option<u32>], marks: &mut Selection) {
+    let an = Analysis::new(&*d, None);
+    let mut found: Vec<(usize, usize)> = Vec::new();
+    for run in runs {
+        let Some(slot) = run.slot.or_else(|| an.item_slot(run.line)) else {
+            continue;
+        };
+        let Some(first) = an.run_start(run.line, slot) else {
+            continue;
+        };
+        if !found.contains(&(first, slot)) {
+            found.push((first, slot));
+        }
+    }
+    for (first, slot) in found {
+        let start = was.get(first).copied().flatten();
+        renumber_from(d, first, slot, start, marks);
+    }
+}
+
+/// Number the run whose first item line `first` opens at `slot`
+/// consecutively from `start` (or that item's own number), unless the list
+/// numbers every item the same.
+fn renumber_from(
+    d: &mut Draft,
+    first: usize,
+    slot: usize,
+    start: Option<u32>,
+    marks: &mut Selection,
+) {
+    let an = Analysis::new(&*d, None);
+    let Some(Container::Item(head)) = an.opened_here(first, slot) else {
+        return;
+    };
+    let Marker::Ordered { number, .. } = head.marker else {
+        return;
+    };
+    if all_same(&an, first, slot, &head) {
+        return;
+    }
+    let mut next = start.unwrap_or(number);
+    let mut at = Some((first, head));
+    while let Some((j, item)) = at {
+        let Marker::Ordered { number, width, .. } = item.marker else {
+            break;
+        };
+        if !same_list(&item, &head) {
+            break;
+        }
+        let digits = digits(next, number, width);
+        if digits.len() > MAX_DIGITS {
+            break;
+        }
+        let range = item.marker_start..item.marker_start + width;
+        if d.line(j)[range.clone()] != digits {
+            edit_line(d, j, range, &digits, marks);
+            let delta = digits.len() as isize - width as isize;
+            shift_lines(d, &an, j + 1, slot, delta, false, marks);
+        }
+        next += 1;
+        at = an.next_sibling(j, slot);
+    }
+}
+
+/// Number the ordered item at the start of draft line `j`'s indentation
+/// (which starts at byte `ws`) `n`. A moved item is numbered before its
+/// run is renumbered: one that starts a new list under a paragraph line
+/// must be 1, or it reads as paragraph text, and one that joins a run must
+/// not look like part of an all-same list.
+fn set_number(d: &mut Draft, j: usize, ws: usize, n: u32, marks: &mut Selection) {
+    let text = d.line(j).to_owned();
+    let (start, _) = ws_run(&text, ws);
+    let width = text[start..].bytes().take_while(u8::is_ascii_digit).count();
+    let delimited = matches!(text.as_bytes().get(start + width), Some(b'.' | b')'));
+    if !(1..=MAX_DIGITS).contains(&width) || !delimited {
+        return;
+    }
+    let Ok(number) = text[start..start + width].parse::<u32>() else {
+        return;
+    };
+    edit_line(d, j, start..start + width, &digits(n, number, width), marks);
+}
+
+/// Move the lines inside the container at `slot`, from line `from` on,
+/// right by `delta` columns, or left when `delta` is negative and the
+/// whitespace is there to remove. It stops at the first line outside the
+/// container. Blank and lazy lines are left alone. With `keep_tabs`, a
+/// line indented only with tabs grows with tabs where they fit exactly.
+fn shift_lines(
+    d: &mut Draft,
+    an: &Analysis,
+    from: usize,
+    slot: usize,
+    delta: isize,
+    keep_tabs: bool,
+    marks: &mut Selection,
+) {
+    if delta == 0 {
+        return;
+    }
+    for j in from..an.recs.len() {
         let rec = &an.recs[j];
         if rec.info.lazy {
             continue;
@@ -605,30 +750,96 @@ fn shift_item(d: &mut Draft, an: &Analysis, k: usize, slot: usize, delta: isize,
         if is_ws(&text) {
             continue;
         }
-        let stack = an.stack(j);
-        let at = block::segments(&text, j, &stack, rec.continued)[slot].end;
-        if delta > 0 {
-            edit_line(d, j, at..at, &" ".repeat(delta.unsigned_abs()), caret);
-        } else {
-            let spaces = text.as_bytes()[..at]
-                .iter()
-                .rev()
-                .take_while(|&&b| b == b' ')
-                .count()
-                .min(delta.unsigned_abs());
-            edit_line(d, j, at - spaces..at, "", caret);
-        }
+        let at = an.line_at(j, &text);
+        let start = at.segs[slot].start;
+        let (_, cur) = ws_run(&text, start);
+        let floor = block::column(&text, start) as isize;
+        let target = (cur as isize + delta).max(floor) as usize;
+        let (end, _) = ws_run(&text, at.ws);
+        let tabs = keep_tabs && end > at.ws && text[at.ws..end].bytes().all(|b| b == b'\t');
+        let (range, pad) = reindent(&text, start, target, tabs);
+        edit_line(d, j, range, &pad, marks);
     }
 }
 
-/// Replace a byte range of one draft line, keeping the caret on the same
-/// text.
-fn edit_line(d: &mut Draft, j: usize, range: std::ops::Range<usize>, with: &str, caret: &mut Pos) {
+/// The end of the run of spaces and tabs at byte `from` of `line`, and the
+/// column it reaches.
+fn ws_run(line: &str, from: usize) -> (usize, usize) {
+    let end = from + (line.len() - from - line[from..].trim_start_matches([' ', '\t']).len());
+    (end, block::column(line, end))
+}
+
+/// The edit that makes the run of spaces and tabs at byte `from` of `line`
+/// reach column `target` (never less than the column of `from`). Growing
+/// keeps the run and pads it; shrinking keeps the bytes that end at or
+/// before `target` and pads with spaces, so a tab that crosses `target`
+/// becomes spaces. `tabs` pads with tabs where they fit exactly.
+fn reindent(line: &str, from: usize, target: usize, tabs: bool) -> (Range<usize>, String) {
+    let b = line.as_bytes();
+    let from_col = block::column(line, from);
+    let target = target.max(from_col);
+    let (end, col) = ws_run(line, from);
+    if target >= col {
+        return (end..end, padding(col, target, tabs));
+    }
+    let (mut keep, mut at) = (from, from_col);
+    loop {
+        let next = match b[keep] {
+            b'\t' => block::next_tab_stop(at),
+            _ => at + 1,
+        };
+        if next > target {
+            break;
+        }
+        at = next;
+        keep += 1;
+    }
+    (keep..end, " ".repeat(target - at))
+}
+
+/// Whitespace from column `col` to `target`: tabs while a whole tab fits
+/// (with `tabs`), then spaces.
+fn padding(mut col: usize, target: usize, tabs: bool) -> String {
+    let mut out = String::new();
+    while tabs && block::next_tab_stop(col) <= target {
+        out.push('\t');
+        col = block::next_tab_stop(col);
+    }
+    out.extend(std::iter::repeat_n(' ', target.saturating_sub(col)));
+    out
+}
+
+/// `target` moved out to the next tab stop, when indentation grows by
+/// tabs (§5.4: a tab-indented line gains tabs).
+fn tab_target(cur: usize, target: usize, tabs: bool) -> usize {
+    if !tabs || target <= cur {
+        return target;
+    }
+    let mut col = cur;
+    while col < target {
+        col = block::next_tab_stop(col);
+    }
+    col
+}
+
+/// Replace a byte range of one draft line. Marks on the line follow their
+/// text: those after the range shift, and those inside it move to the end
+/// of the new text.
+fn edit_line(d: &mut Draft, j: usize, range: Range<usize>, with: &str, marks: &mut Selection) {
     let mut text = d.line(j).to_owned();
     text.replace_range(range.clone(), with);
     d.set(j, text);
-    if caret.line == j && caret.col >= range.end {
-        caret.col = caret.col - range.len() + with.len();
+    for p in [&mut marks.anchor, &mut marks.head] {
+        if p.line != j || p.col < range.start {
+            continue;
+        }
+        p.col = if p.col >= range.end {
+            p.col - range.len() + with.len()
+        } else if p.col == range.start {
+            range.start
+        } else {
+            range.start + with.len()
+        };
     }
 }
 
@@ -729,7 +940,8 @@ fn trim_ws_end(s: &str) -> &str {
     s.trim_end_matches([' ', '\t'])
 }
 
-/// A position moved onto the document and onto a character boundary.
+/// A position moved onto the document, onto a character boundary, and past
+/// a byte order mark.
 fn clamp<L: Lines + ?Sized>(lines: &L, pos: Pos) -> Pos {
     let line = pos.line.min(lines.line_count() - 1);
     let text = lines.line(line);
@@ -737,7 +949,7 @@ fn clamp<L: Lines + ?Sized>(lines: &L, pos: Pos) -> Pos {
     while !text.is_char_boundary(col) {
         col -= 1;
     }
-    Pos::new(line, col)
+    Pos::new(line, col.max(bom_len(line, text)))
 }
 
 /// One scanned line and its place in the container stack.
@@ -871,6 +1083,56 @@ impl Analysis {
         None
     }
 
+    /// The slot of the innermost list item line `l` opens.
+    fn item_slot(&self, l: usize) -> Option<usize> {
+        let rec = &self.recs[l];
+        if rec.info.lazy {
+            return None;
+        }
+        (rec.opened_from..rec.len)
+            .rev()
+            .find(|&slot| matches!(self.opened_here(l, slot), Some(Container::Item(_))))
+    }
+
+    /// The item line `l` opens at `slot`.
+    fn item_here(&self, l: usize, slot: usize) -> Option<ListItem> {
+        match self.opened_here(l, slot) {
+            Some(Container::Item(item)) => Some(item),
+            _ => None,
+        }
+    }
+
+    /// The first line of the ordered run holding the item line `l` opens
+    /// at `slot`.
+    fn run_start(&self, l: usize, slot: usize) -> Option<usize> {
+        let item = self.item_here(l, slot)?;
+        if !matches!(item.marker, Marker::Ordered { .. }) {
+            return None;
+        }
+        let mut first = l;
+        while let Some((p, prev)) = self.prev_sibling(first, slot) {
+            if !same_list(&prev, &item) {
+                break;
+            }
+            first = p;
+        }
+        Some(first)
+    }
+
+    /// Line `l` (whose text is `text`) split into its containers.
+    fn line_at(&self, l: usize, text: &str) -> LineAt {
+        let stack = self.stack(l);
+        let segs = block::segments(text, l, &stack, self.recs[l].continued);
+        let ws = segs
+            .iter()
+            .zip(&stack)
+            .rev()
+            .find(|(_, c)| matches!(c, Container::Quote { .. }))
+            .map(|(s, _)| s.end)
+            .unwrap_or_else(|| bom_len(l, text));
+        LineAt { stack, segs, ws }
+    }
+
     /// The first child item of the item opened on line `l` at `slot`: the
     /// first line inside the item after any blank lines, if it opens an
     /// item one level deeper.
@@ -889,6 +1151,61 @@ impl Analysis {
             };
         }
         None
+    }
+}
+
+/// A line's own containers and its shares of the container prefix.
+struct LineAt {
+    stack: Vec<Container>,
+    segs: Vec<Segment>,
+    /// Where the line's indentation starts: after the innermost quote's
+    /// marker, or a byte order mark. Indentation is measured from here
+    /// (§5.4), and quote markers before it are left as they are.
+    ws: usize,
+}
+
+impl LineAt {
+    /// The content columns of the list items inside the innermost quote:
+    /// the line's indent stops besides its base column (§5.4).
+    fn item_stops(&self) -> Vec<usize> {
+        let inner = self
+            .stack
+            .iter()
+            .rposition(|c| matches!(c, Container::Quote { .. }))
+            .map_or(0, |i| i + 1);
+        self.stack[inner..]
+            .iter()
+            .map(Container::content_column)
+            .collect()
+    }
+}
+
+/// The deepest indent stop below column `cur`: `base`, the item `stops`,
+/// and beyond the deepest of those every `width` columns.
+fn previous_stop(cur: usize, base: usize, stops: &[usize], width: usize) -> usize {
+    let width = width.max(1);
+    let deepest = stops.iter().copied().fold(base, usize::max);
+    if cur > deepest {
+        deepest + (cur - deepest - 1) / width * width
+    } else {
+        stops
+            .iter()
+            .copied()
+            .filter(|&s| s < cur && s >= base)
+            .fold(base, usize::max)
+    }
+}
+
+/// The marker an item gets as the first of a new list: its own bullet, or
+/// 1 with its own delimiter.
+fn first_marker(item: &ListItem) -> String {
+    match item.marker {
+        Marker::Bullet(ch) => ch.to_string(),
+        Marker::Ordered {
+            number,
+            width,
+            delimiter,
+        } => format!("{}{delimiter}", digits(1, number, width)),
     }
 }
 
@@ -1091,7 +1408,7 @@ mod tests {
 
     /// Parse a fixture: `|` is the cursor, `«` a selection's anchor and `»`
     /// its head.
-    fn parse(fixture: &str) -> (String, Selection) {
+    pub(super) fn parse(fixture: &str) -> (String, Selection) {
         let mut text = String::new();
         let (mut anchor, mut head) = (None, None);
         let mut pos = Pos::default();
@@ -1117,7 +1434,7 @@ mod tests {
     }
 
     /// Mark a selection in `text`.
-    fn render(text: &str, sel: Selection) -> String {
+    pub(super) fn render(text: &str, sel: Selection) -> String {
         let doc = Document::new(text);
         let at = |p: Pos| {
             assert!(
@@ -1148,7 +1465,7 @@ mod tests {
     /// Apply a plan the way an editor does (plan §4): bottom-up, with each
     /// `'\n'` written as the ending of the line being split, or on the last
     /// line the previous line's, else LF.
-    fn apply(doc: &Document, plan: &EditPlan) -> String {
+    pub(super) fn apply(doc: &Document, plan: &EditPlan) -> String {
         for pair in plan.edits.windows(2) {
             assert!(
                 pair[0].end <= pair[1].start,
@@ -1201,7 +1518,7 @@ mod tests {
     /// Run each `before → after` case under every line ending, mixed
     /// endings, and with and without a final line ending.
     #[track_caller]
-    fn check_with(intent: Intent, opts: &Options, cases: &[(&str, &str)]) {
+    pub(super) fn check_with(intent: Intent, opts: &Options, cases: &[(&str, &str)]) {
         for (before, after) in cases {
             let (text, sel) = parse(before);
             let variants = ENDINGS
@@ -1220,7 +1537,7 @@ mod tests {
                         "{intent:?} on {before:?} with {name:?} endings{}",
                         if final_ending { " and a final one" } else { "" }
                     );
-                    let plan = plan(&doc, sel, intent, opts).unwrap_or_else(|| panic!("{what}"));
+                    let plan = plan(&doc, sel, intent, opts);
                     let got = render(&apply(&doc, &plan), plan.selection);
                     if name == "mixed" {
                         let tail = if final_ending { "\n" } else { "" };
@@ -1236,7 +1553,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn check(intent: Intent, cases: &[(&str, &str)]) {
+    pub(super) fn check(intent: Intent, cases: &[(&str, &str)]) {
         check_with(intent, &Options::default(), cases);
     }
 
@@ -1627,7 +1944,6 @@ mod tests {
                 Intent::Enter,
                 &Options::default(),
             )
-            .unwrap()
         };
         let insert = |line, col, text: &str| Replace {
             start: Pos::new(line, col),
@@ -1671,7 +1987,7 @@ mod tests {
     fn positions_off_the_document_are_clamped() {
         let doc = Document::new("a é");
         let sel = Selection::new(Pos::new(0, 3), Pos::new(9, 9));
-        let plan = plan(&doc, sel, Intent::Enter, &Options::default()).unwrap();
+        let plan = plan(&doc, sel, Intent::Enter, &Options::default());
         assert_eq!(render(&apply(&doc, &plan), plan.selection), "a \n|");
     }
 
@@ -1715,7 +2031,7 @@ mod tests {
                                 [Selection::caret(here), Selection::new(Pos::new(0, 0), here)]
                             {
                                 for intent in [Intent::Enter, Intent::ShiftEnter] {
-                                    let plan = plan(&doc, sel, intent, &opts).unwrap();
+                                    let plan = plan(&doc, sel, intent, &opts);
                                     // A caret always changes the text; a selection may be replaced
                                     // by the same line break.
                                     assert!(
@@ -1762,8 +2078,7 @@ mod tests {
                     Selection::caret(pos),
                     Intent::Enter,
                     &Options::default(),
-                )
-                .unwrap();
+                );
             }
             start.elapsed() / rounds
         };
