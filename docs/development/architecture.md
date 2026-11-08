@@ -92,6 +92,15 @@ its baseline meets its row's. Clicks hit-test through cosmic-text against
 the same runs, and the owned engine counts PageUp and PageDown by row
 heights rather than body rows.
 
+Row heights exist only once a line is highlighted, and highlighting runs
+when the widget draws, after the update has already scrolled. So the owned
+engine highlights a page past both the view and the cursor, which lets a
+page motion or a short scroll measure real heights. When highlighting
+resizes rows, it places the view again: at a pending `scroll_to_line`
+target, then as far as needed to show a cursor that moved since the last
+draw. A jump to the end of the note, a far Find match, and an outline jump
+forward all land where they would on a fully highlighted note.
+
 ## Storage safety
 
 - Storage walks validated workspace-relative paths through no-follow
