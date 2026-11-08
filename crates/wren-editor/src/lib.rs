@@ -12,6 +12,7 @@
 //! [`Palette`], and the font through [`EditorView::set_font`].
 
 mod backend;
+mod edit;
 mod find;
 mod highlighter;
 mod history;
@@ -21,13 +22,16 @@ mod widget;
 #[cfg(test)]
 mod fixtures;
 
+use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Instant;
 
 use iced::widget::text_editor::{self, Action, Cursor, Edit, Motion, Position};
 use iced::{Color, Element, Font};
 
 pub use backend::BackendKind;
+pub use edit::Replace;
 
 use backend::Lines;
 use find::{
@@ -199,6 +203,7 @@ impl EditorView {
             let kind = edit_kind(&action);
             let now = Instant::now();
             let before = self.snapshot();
+            let action = self.with_document_breaks(action);
             self.content.perform(action);
             if self.content.text() == before.text {
                 self.history.break_group();
@@ -212,6 +217,40 @@ impl EditorView {
             self.content.perform(action);
             false
         }
+    }
+
+    /// Apply `edits` as one undoable change, then select `selection`.
+    ///
+    /// Edit positions refer to the text before the change, and `selection` to
+    /// the text after it. Each line break an edit inserts takes the ending of
+    /// the line it splits, so a CRLF note stays CRLF. The change closes any
+    /// typing group, and find is refreshed.
+    ///
+    /// Returns whether the text changed. A plan with an edit off the text,
+    /// inside a character, backwards, or overlapping another changes nothing.
+    pub fn apply(&mut self, edits: &[Replace], selection: Cursor) -> bool {
+        let Some(order) = self.content.with_lines(|lines| edit::ordered(edits, lines)) else {
+            return false;
+        };
+        let before = self.snapshot();
+        for replace in order.iter().rev() {
+            let ending = self
+                .content
+                .with_lines(|lines| edit::split_ending(lines, replace.start, replace.end));
+            let text = edit::with_breaks(&replace.text, ending);
+            self.content
+                .replace_range(replace.start, replace.end, &text);
+        }
+        let changed = self.content.text() != before.text;
+        if changed {
+            self.history
+                .before_edit(before, EditKind::Replace, Instant::now());
+            self.recompute_find();
+        } else {
+            self.history.break_group();
+        }
+        self.select(selection);
+        changed
     }
 
     /// Undo the last edit unit.
@@ -285,12 +324,7 @@ impl EditorView {
     /// Ends the current typing group without discarding history.
     pub fn move_cursor(&mut self, cursor: Cursor) {
         self.history.break_group();
-        let clamped = self.clamped(cursor);
-        if clamped.selection.is_none() && self.content.cursor().selection.is_some() {
-            // iced's move_to leaves the old selection intact when passed None.
-            self.content.perform(Action::Move(Motion::Left));
-        }
-        self.content.move_to(clamped);
+        self.select(cursor);
     }
 
     /// Select a range in the current document's original UTF-8 bytes without
@@ -492,6 +526,44 @@ impl EditorView {
         });
         self.content.move_to(cursor);
         cursor
+    }
+
+    /// Move the cursor to `cursor`, clamped, dropping any old selection.
+    fn select(&mut self, cursor: Cursor) {
+        let clamped = self.clamped(cursor);
+        if clamped.selection.is_none() && self.content.cursor().selection.is_some() {
+            // iced's move_to leaves the old selection intact when passed None.
+            self.content.perform(Action::Move(Motion::Left));
+        }
+        self.content.move_to(clamped);
+    }
+
+    /// `action` with the line breaks it inserts written in the ending of the
+    /// line they split, so Enter, paste, and IME commits match the note.
+    fn with_document_breaks(&self, action: Action) -> Action {
+        let ending = || {
+            let cursor = self.content.cursor();
+            let anchor = cursor.selection.unwrap_or(cursor.position);
+            let (start, end) =
+                if (anchor.line, anchor.column) < (cursor.position.line, cursor.position.column) {
+                    (anchor, cursor.position)
+                } else {
+                    (cursor.position, anchor)
+                };
+            self.content
+                .with_lines(|lines| edit::split_ending(lines, start, end))
+        };
+        match action {
+            Action::Edit(Edit::Enter | Edit::Insert('\n')) => match ending() {
+                text_editor::LineEnding::Lf => Action::Edit(Edit::Enter),
+                other => Action::Edit(Edit::Paste(Arc::new(other.as_str().to_owned()))),
+            },
+            Action::Edit(Edit::Paste(text)) => match edit::with_breaks(&text, ending()) {
+                Cow::Borrowed(_) => Action::Edit(Edit::Paste(text)),
+                Cow::Owned(text) => Action::Edit(Edit::Paste(Arc::new(text))),
+            },
+            action => action,
+        }
     }
 
     fn snapshot(&mut self) -> Snapshot {
@@ -1814,6 +1886,175 @@ mod tests {
                 assert_eq!(ev.text(), "oree");
                 assert_eq!(ev.cursor(), super::at(0, 1));
             }
+        }
+
+        fn pos(line: usize, column: usize) -> Position {
+            Position { line, column }
+        }
+
+        const ENDINGS: [&str; 4] = ["\n", "\r\n", "\r", "\n\r"];
+
+        #[test]
+        fn apply_writes_inserted_breaks_in_the_split_lines_ending() {
+            for e in ENDINGS {
+                for last in ["", e] {
+                    let original = format!("one{e}two{e}three{last}");
+                    let mut ev = editor(&original);
+                    let selection = Cursor {
+                        position: pos(3, 0),
+                        selection: Some(pos(2, 0)),
+                    };
+                    assert!(ev.apply(&[Replace::insert(pos(1, 3), "\nX\n")], selection));
+                    assert_eq!(ev.text(), format!("one{e}two{e}X{e}{e}three{last}"), "{e:?}");
+                    assert_eq!(ev.cursor(), selection);
+                    assert_eq!(ev.selected_text().as_deref(), Some("X\n"));
+                    assert!(ev.undo());
+                    assert_eq!(ev.text(), original);
+                    assert!(!ev.can_undo());
+                    assert!(ev.redo());
+                    assert_eq!(ev.text(), format!("one{e}two{e}X{e}{e}three{last}"));
+                }
+
+                // The last line has no ending, so a split borrows the one above.
+                let mut ev = editor(&format!("one{e}two"));
+                assert!(ev.apply(&[Replace::insert(pos(1, 3), "\n- ")], super::at(2, 2)));
+                assert_eq!(ev.text(), format!("one{e}two{e}- "));
+                assert_eq!(ev.cursor(), super::at(2, 2));
+            }
+        }
+
+        #[test]
+        fn apply_without_an_ending_to_borrow_uses_lf() {
+            for text in ["", "solo"] {
+                let mut ev = editor(text);
+                assert!(ev.apply(&[Replace::insert(pos(0, 0), "a\r\nb\n")], super::at(2, 0)));
+                assert_eq!(ev.text(), format!("a\nb\n{text}"));
+                assert_eq!(ev.cursor(), super::at(2, 0));
+            }
+        }
+
+        #[test]
+        fn apply_runs_a_plan_bottom_up_over_mixed_endings() {
+            let mut ev = editor("- a\r\n- b\n- c\r- d");
+            let plan = [
+                Replace::insert(pos(0, 3), "\n- "),
+                Replace {
+                    start: pos(1, 2),
+                    end: pos(2, 3),
+                    text: "B\nC".into(),
+                },
+                Replace::insert(pos(3, 3), "\n- "),
+            ];
+            assert!(ev.apply(&plan, super::at(1, 2)));
+            // Line 1 ends in LF; the deletion moves line 2's CR onto it.
+            assert_eq!(ev.text(), "- a\r\n- \r\n- B\rC\r- d\r- ");
+            assert_eq!(ev.line_count(), 6);
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "- a\r\n- b\n- c\r- d");
+        }
+
+        #[test]
+        fn apply_is_one_history_entry_that_closes_the_typing_group() {
+            let mut ev = editor("ab");
+            ev.perform(Action::Move(Motion::DocumentEnd));
+            type_chars(&mut ev, "cd");
+            ev.set_find_query("x");
+            assert_eq!(ev.find_count(), 0);
+            let plan = [
+                Replace::insert(pos(0, 0), "x"),
+                Replace {
+                    start: pos(0, 1),
+                    end: pos(0, 2),
+                    text: "xx".into(),
+                },
+            ];
+            assert!(ev.apply(&plan, super::at(0, 4)));
+            assert_eq!(ev.text(), "xaxxcd");
+            assert_eq!(ev.find_count(), 3);
+            type_chars(&mut ev, "e");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "xaxxcd");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "abcd");
+            assert_eq!(ev.find_count(), 0);
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "ab");
+            assert!(!ev.can_undo());
+        }
+
+        #[test]
+        fn apply_refuses_invalid_plans_and_no_ops_record_nothing() {
+            let mut ev = editor("héllo\nworld");
+            ev.move_cursor(Cursor {
+                position: pos(1, 2),
+                selection: Some(pos(1, 0)),
+            });
+            let before = ev.cursor();
+            for plan in [
+                vec![Replace::insert(pos(0, 2), "x")],
+                vec![Replace::insert(pos(2, 0), "x")],
+                vec![Replace {
+                    start: pos(1, 3),
+                    end: pos(1, 1),
+                    text: String::new(),
+                }],
+                vec![
+                    Replace {
+                        start: pos(0, 0),
+                        end: pos(1, 1),
+                        text: String::new(),
+                    },
+                    Replace::insert(pos(0, 4), "x"),
+                ],
+            ] {
+                assert!(!ev.apply(&plan, super::at(0, 0)), "{plan:?}");
+                assert_eq!(ev.text(), "héllo\nworld");
+                assert_eq!(ev.cursor(), before);
+            }
+            // A plan that changes nothing still moves the cursor.
+            let same = Replace {
+                start: pos(0, 0),
+                end: pos(0, 1),
+                text: "h".into(),
+            };
+            assert!(!ev.apply(&[same], super::at(1, 5)));
+            assert_eq!(ev.cursor(), super::at(1, 5));
+            assert!(!ev.apply(&[], super::at(0, 1)));
+            assert_eq!(ev.cursor(), super::at(0, 1));
+            assert!(!ev.can_undo());
+        }
+
+        #[test]
+        fn enter_and_paste_write_breaks_in_the_notes_ending() {
+            for e in ENDINGS {
+                let mut ev = editor(&format!("one{e}two"));
+                ev.move_cursor(super::at(0, 3));
+                assert!(ev.perform(Action::Edit(Edit::Enter)));
+                assert_eq!(ev.text(), format!("one{e}{e}two"), "{e:?}");
+                assert_eq!(ev.cursor(), super::at(1, 0));
+                // A paste, and an IME commit, which arrives as one.
+                assert!(ev.perform(Action::Edit(Edit::Paste(Arc::new("x\ny\r\nz".into())))));
+                assert_eq!(ev.text(), format!("one{e}x{e}y{e}z{e}two"));
+                ev.perform(Action::Move(Motion::DocumentEnd));
+                assert!(ev.perform(Action::Edit(Edit::Enter)));
+                assert_eq!(ev.text(), format!("one{e}x{e}y{e}z{e}two{e}"));
+                assert!(ev.undo());
+                assert!(ev.undo());
+                assert!(ev.undo());
+                assert_eq!(ev.text(), format!("one{e}two"));
+
+                // Over a selection, the split line takes the selection end's ending.
+                let mut ev = editor(&format!("a{e}b\nc"));
+                ev.move_cursor(Cursor {
+                    position: pos(1, 1),
+                    selection: Some(pos(0, 1)),
+                });
+                assert!(ev.perform(Action::Edit(Edit::Enter)));
+                assert_eq!(ev.text(), "a\n\nc");
+            }
+            let mut ev = editor("");
+            assert!(ev.perform(Action::Edit(Edit::Enter)));
+            assert_eq!(ev.text(), "\n");
         }
 
         #[test]

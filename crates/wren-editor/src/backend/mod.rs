@@ -247,7 +247,7 @@ impl<'a> Lines<'a> {
     }
 }
 
-fn ending(ending: cosmic_text::LineEnding) -> LineEnding {
+pub(crate) fn ending(ending: cosmic_text::LineEnding) -> LineEnding {
     match ending {
         cosmic_text::LineEnding::Lf => LineEnding::Lf,
         cosmic_text::LineEnding::CrLf => LineEnding::CrLf,
