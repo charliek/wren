@@ -590,3 +590,5 @@ There is **no iced upgrade while two backends exist.**
 - **Blockquote exit:** one Enter with a blank line left, chosen over CodeMirror's two empty lines.
 - **macOS ⌘E** is the system's "Use Selection for Find". We take it for inline code; revisit if it bothers people.
 - **A Mac console check is needed** for ⌘+letter and IME. ssh cannot send synthetic keys.
+- **IME anchor off screen (needs sign-off):** §4 says no rectangle falls back to `ORIGIN`. Cosmic's caret and selection rectangles are `None` off screen, but the IME anchor goes to the view edge nearest the cursor (the top-left corner when the cursor is above the view) rather than disabling the IME, which would drop an in-progress composition when the user scrolls away. Keep, or anchor at the cursor's column?
+- **Mixed endings, known edge case:** a CR line followed by an emptied LF line (`a\r` then `\n`) serializes as one CRLF break, so the editor shows one more line than a reload of the saved text. Rewriting the empty line's ending to CR after such an edit would close it; not done in this milestone.

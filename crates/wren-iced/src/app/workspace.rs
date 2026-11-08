@@ -962,7 +962,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crate::editor_view;
     use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
     use wren_core::fs_store::Fault;
 
@@ -990,10 +989,10 @@ mod tests {
     }
 
     fn append(app: &mut App, text: &str) {
-        let _ = app.update(Message::Editor(editor_view::Message::Action(Action::Move(
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
             Motion::DocumentEnd,
         ))));
-        let _ = app.update(Message::Editor(editor_view::Message::Action(Action::Edit(
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
             Edit::Paste(Arc::new(text.into())),
         ))));
     }
@@ -1078,12 +1077,12 @@ mod tests {
             std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
             "first\nsecond"
         );
-        let _ = app.update(Message::Editor(editor_view::Message::Undo));
+        let _ = app.update(Message::Editor(wren_editor::Message::Undo));
         assert_eq!(
             app.session.as_ref().unwrap().document().unwrap().text,
             "first\nsecond"
         );
-        let _ = app.update(Message::Editor(editor_view::Message::Redo));
+        let _ = app.update(Message::Editor(wren_editor::Message::Redo));
         assert_eq!(
             app.session.as_ref().unwrap().document().unwrap().text,
             app.editor.text()
@@ -1133,13 +1132,13 @@ mod tests {
         assert_eq!(app.selected_note, Some(note));
         assert_eq!(app.selected_section, Some(destination));
         assert_eq!(app.selected_group, Some(shelf));
-        let _ = app.update(Message::Editor(editor_view::Message::Undo));
+        let _ = app.update(Message::Editor(wren_editor::Message::Undo));
         assert_eq!(app.editor.text(), "first\nsecond");
         assert_eq!(
             app.session.as_ref().unwrap().document().unwrap().text,
             app.editor.text()
         );
-        let _ = app.update(Message::Editor(editor_view::Message::Redo));
+        let _ = app.update(Message::Editor(wren_editor::Message::Redo));
         assert_eq!(app.editor.text(), "first\nsecond edit");
     }
 

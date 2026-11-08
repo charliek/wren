@@ -13,6 +13,14 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Fixed
+
+- **Line breaks keep the note's line endings.** Enter, paste, and input
+  method commits in a CRLF (or CR) note insert that ending instead of LF.
+- **Undo and redo keep the view.** They change only the text that differs,
+  so the editor no longer reloads the note and jumps to the cursor's edge of
+  the window.
+
 ## v0.0.3 — 2026-11-08
 
 ### Added

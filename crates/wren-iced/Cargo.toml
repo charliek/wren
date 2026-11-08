@@ -14,10 +14,11 @@ name = "wren"
 path = "src/main.rs"
 
 [features]
-smoke-test = ["iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rustix"]
+smoke-test = ["wren-editor/test-support", "iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rustix"]
 
 [dependencies]
 wren-core.workspace = true
+wren-editor.workspace = true
 iced.workspace = true
 rfd.workspace = true
 # Decodes the embedded window icon; its dependencies already ship via tiny-skia.
@@ -33,3 +34,5 @@ wren-sparkle.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The app's unit tests read the editor's test accessors too.
+wren-editor = { workspace = true, features = ["test-support"] }

@@ -79,6 +79,34 @@ impl ThemeChoice {
     }
 }
 
+/// The editor's text engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EditorEngine {
+    /// iced's own text editor.
+    #[default]
+    Classic,
+    /// Wren's own cosmic-text editor.
+    Cosmic,
+}
+
+impl EditorEngine {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "cosmic" => Some(Self::Cosmic),
+            _ => None,
+        }
+    }
+
+    /// The config-file spelling.
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Cosmic => "cosmic",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: ThemeChoice,
@@ -86,6 +114,7 @@ pub struct Settings {
     /// A font family name; `None` uses the bundled JetBrains Mono.
     pub editor_font_family: Option<String>,
     pub line_numbers: bool,
+    pub editor_engine: EditorEngine,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -98,6 +127,7 @@ impl Default for Settings {
             editor_font_size: DEFAULT_FONT_SIZE,
             editor_font_family: None,
             line_numbers: true,
+            editor_engine: EditorEngine::default(),
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -167,6 +197,10 @@ impl Settings {
                 },
                 "line-numbers" => match parse_bool(value) {
                     Some(enabled) => settings.line_numbers = enabled,
+                    None => invalid(),
+                },
+                "editor-engine" => match EditorEngine::parse(value) {
+                    Some(engine) => settings.editor_engine = engine,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -333,6 +367,10 @@ pub const TEMPLATE: &str = "\
 # Show the line-number gutter.
 # line-numbers = true
 
+# Editor text engine: classic (iced's editor) or cosmic (Wren's own
+# cosmic-text editor, under evaluation).
+# editor-engine = classic
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -390,6 +428,23 @@ mod tests {
         assert!(settings.warnings[1].contains("mystery"));
         assert!(settings.warnings[2].contains("line 10"));
         assert!(settings.warnings[3].contains("editor-font-family"));
+    }
+
+    #[test]
+    fn editor_engine_parses_either_engine_and_warns_on_others() {
+        assert_eq!(Settings::default().editor_engine, EditorEngine::Classic);
+        let settings = Settings::parse("editor-engine = cosmic\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Cosmic);
+        assert!(settings.warnings.is_empty());
+        let settings = Settings::parse("editor-engine = Cosmic\neditor-engine = \"classic\"\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Classic);
+        let settings = Settings::parse("editor-engine = cosmic\neditor-engine = gpui\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Cosmic);
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("editor-engine"));
+        for engine in [EditorEngine::Classic, EditorEngine::Cosmic] {
+            assert_eq!(EditorEngine::parse(engine.value()), Some(engine));
+        }
     }
 
     #[test]

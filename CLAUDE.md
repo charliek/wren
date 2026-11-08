@@ -17,15 +17,27 @@ when one lands, move what users need into `docs/` and trim the note.
   registry, `config.toml`), `settings.rs` (the user-owned `config.conf`),
   `keybind.rs` (triggers and platform default bindings), and `theme.rs`
   (built-in palettes).
+- `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
+  types so it can be extracted later. It must not depend on `wren-core` or
+  know app messages; the host passes in a `Style`, a `Palette`, and the font.
+  `lib.rs` holds `EditorView` and `Message`; `widget.rs` is a fork of iced's
+  text editor with the gutter, current line, and caret; `backend/` holds
+  the two text engines behind `Content` (`iced.rs`, iced's own editor, and
+  `cosmic.rs`, an owned cosmic-text editor drawn with `fill_raw`), and the
+  editor tests run on both; plus `highlighter.rs`, `history.rs` (snapshot
+  undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
+  accessors sit behind its `test-support` feature, which
+  `wren-iced/smoke-test` enables.
 - `crates/wren-iced/`: the desktop app (binary `wren`).
   - `app.rs` holds `App`, `Message`, `update`, `view`, and `subscription`;
     its submodules live in `app/`: `commands.rs` (the command table and
     gateway), `palette.rs`, `preferences.rs` (settings, keymap, and theme),
     `workspace.rs` (loading and core events), `workspace_view.rs`, and
     `navigation.rs`.
-  - Widgets: `editor_view/` (a fork of iced's text editor with the gutter,
-    current line, and caret), `panes.rs` (resize), `drag*.rs` (drag and
-    drop), `ellipsis.rs`, and `keys.rs`.
+  - `theme.rs` maps a `wren_core` theme to iced's and to the editor's
+    `Style` and `Palette`.
+  - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
+    `ellipsis.rs`, and `keys.rs`.
   - `macos_menu.rs` is the native menu bar.
 - `crates/wren-markdown/`: Markdown structure and editing rules, with no
   iced or Wren dependency (only `unicode-segmentation`), so it can be

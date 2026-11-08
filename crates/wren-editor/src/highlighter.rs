@@ -1,9 +1,9 @@
-//! A simple Markdown syntax highlighter that maps to Wren theme semantic colours.
+//! A simple Markdown syntax highlighter that colours spans from a [`Palette`].
 //!
 //! Implements `iced::core::text::highlighter::Highlighter` using hand-written
 //! Markdown pattern matching rather than the syntect-based `iced_highlighter`.
-//! This avoids taking colours from a fixed third-party theme and instead derives
-//! them directly from the active Wren `Theme`.
+//! This avoids taking colours from a fixed third-party theme and instead takes
+//! them from the host's [`Palette`].
 //!
 //! Supported constructs:
 //!   - Fenced code blocks (`` ``` ``): entire block content is code-coloured.
@@ -27,7 +27,8 @@ use std::ops::Range;
 use iced::advanced::text::highlighter::{self, Format};
 use iced::font::{self, Font};
 use iced::Color;
-use wren_core::theme::{Rgb, Theme};
+
+use crate::Palette;
 
 const SNAPSHOT_INTERVAL: usize = 50;
 
@@ -90,24 +91,21 @@ impl Highlight {
     }
 }
 
-/// Settings for the [`MarkdownHighlighter`].  Changing the theme or the
+/// Settings for the [`MarkdownHighlighter`].  Changing the palette or the
 /// editor font triggers a full re-highlight.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
-    pub theme: Theme,
+    pub palette: Palette,
     /// The editor font; bold and italic spans are its variants.
     pub font: Font,
 }
 
 // ---------------------------------------------------------------------------
-// Colour helpers
+// Span colours
 // ---------------------------------------------------------------------------
 
-fn rgb(Rgb(r, g, b): Rgb) -> Color {
-    Color::from_rgb8(r, g, b)
-}
-
-struct Palette {
+/// The palette plus the font whose bold and italic variants style emphasis.
+struct Ink {
     text: Color,
     muted: Color,
     faint: Color,
@@ -117,17 +115,24 @@ struct Palette {
     font: Font,
 }
 
-impl Palette {
-    fn from_theme(t: Theme) -> Self {
-        let c = t.colors;
+impl Ink {
+    fn new(palette: Palette, font: Font) -> Self {
+        let Palette {
+            text,
+            muted,
+            faint,
+            accent,
+            danger,
+            success,
+        } = palette;
         Self {
-            font: crate::fonts::EDITOR,
-            text: rgb(c.text),
-            muted: rgb(c.muted),
-            faint: rgb(c.faint),
-            accent: rgb(c.accent),
-            danger: rgb(c.danger),
-            success: rgb(c.success),
+            text,
+            muted,
+            faint,
+            accent,
+            danger,
+            success,
+            font,
         }
     }
 }
@@ -174,7 +179,7 @@ impl highlighter::Highlighter for MarkdownHighlighter {
 
     fn update(&mut self, new_settings: &Settings) {
         self.settings = *new_settings;
-        // Theme change requires re-highlighting from the beginning.
+        // New colours or a new font require re-highlighting from the beginning.
         self.reset_to(0, LineState::NORMAL);
     }
 
@@ -201,10 +206,7 @@ impl highlighter::Highlighter for MarkdownHighlighter {
             self.current_state.in_code_block = !self.current_state.in_code_block;
         }
 
-        let palette = Palette {
-            font: self.settings.font,
-            ..Palette::from_theme(self.settings.theme)
-        };
+        let palette = Ink::new(self.settings.palette, self.settings.font);
         let highlights = compute_highlights(line, state_before, &self.current_state, &palette);
 
         self.current_line += 1;
@@ -251,7 +253,7 @@ fn compute_highlights(
     line: &str,
     state_before: LineState,
     _state_after: &LineState,
-    palette: &Palette,
+    palette: &Ink,
 ) -> Vec<(Range<usize>, Highlight)> {
     if line.is_empty() {
         return vec![];
@@ -428,7 +430,7 @@ fn list_marker_end(line: &str) -> Option<usize> {
 ///
 /// Handles: inline code (highest priority), HTML comments, bold+italic, bold,
 /// italic, strikethrough.  Ranges do not overlap.
-fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> {
+fn scan_inline(line: &str, palette: &Ink) -> Vec<(Range<usize>, Highlight)> {
     // We build a priority-ordered list of non-overlapping spans.
     // First collect code spans (they cannot contain other markup).
     let chars: Vec<(usize, char)> = line.char_indices().collect();
@@ -526,7 +528,7 @@ fn scan_inline(line: &str, palette: &Palette) -> Vec<(Range<usize>, Highlight)> 
 fn extract_backtick_spans(
     _line: &str,
     chars: &[(usize, char)],
-    palette: &Palette,
+    palette: &Ink,
     spans: &mut Vec<(Range<usize>, Highlight)>,
     occupied: &mut [bool],
 ) {
@@ -671,7 +673,7 @@ fn extract_between(
 /// Extract inline links in `[text](url)` or `[text][ref]` form.
 fn extract_links(
     line: &str,
-    palette: &Palette,
+    palette: &Ink,
     spans: &mut Vec<(Range<usize>, Highlight)>,
     occupied: &mut [bool],
 ) {
@@ -740,15 +742,15 @@ fn mark_occupied(occupied: &mut [bool], range: Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures;
     use iced::advanced::text::Highlighter as _;
-    use wren_core::theme;
 
-    fn dark_palette() -> Palette {
-        Palette::from_theme(theme::DARK)
+    fn dark_palette() -> Ink {
+        Ink::new(fixtures::DARK, fixtures::FONT)
     }
 
-    fn light_palette() -> Palette {
-        Palette::from_theme(theme::LIGHT)
+    fn light_palette() -> Ink {
+        Ink::new(fixtures::LIGHT, fixtures::FONT)
     }
 
     fn highlights_for(line: &str) -> Vec<(Range<usize>, Highlight)> {
@@ -770,9 +772,9 @@ mod tests {
     // ── Headings ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn heading_markers_are_faint_and_only_h1_text_is_accent_in_both_themes() {
-        for theme in [theme::DARK, theme::LIGHT] {
-            let p = Palette::from_theme(theme);
+    fn heading_markers_are_faint_and_only_h1_text_is_accent_in_both_palettes() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
             for (level, prefix) in ["# ", "## ", "### ", "#### ", "##### ", "###### "]
                 .into_iter()
                 .enumerate()
@@ -807,8 +809,8 @@ mod tests {
 
     #[test]
     fn list_and_open_task_markers_use_accent_but_done_tasks_are_faint() {
-        for theme in [theme::DARK, theme::LIGHT] {
-            let p = Palette::from_theme(theme);
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
             for (line, end) in [
                 ("- words", 2),
                 ("* words", 2),
@@ -954,8 +956,8 @@ mod tests {
 
     #[test]
     fn bold_text_is_strong_while_its_markers_are_faint() {
-        for theme in [theme::DARK, theme::LIGHT] {
-            let p = Palette::from_theme(theme);
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
             let spans = compute_highlights(
                 "This is **bold** text.",
                 LineState::NORMAL,
@@ -1089,8 +1091,8 @@ mod tests {
     #[test]
     fn code_block_toggle_tracked_in_highlight_line() {
         let settings = Settings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         };
         let mut h = MarkdownHighlighter::new(&settings);
         let p = dark_palette();
@@ -1131,8 +1133,8 @@ mod tests {
     #[test]
     fn change_line_resyncs_to_snapshot() {
         let settings = Settings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         };
         let mut h = MarkdownHighlighter::new(&settings);
         let p = dark_palette();
@@ -1155,26 +1157,26 @@ mod tests {
         );
     }
 
-    // ── Theme switching ───────────────────────────────────────────────────────
+    // ── Palette switching ─────────────────────────────────────────────────────
 
     #[test]
-    fn light_theme_accent_differs_from_dark() {
+    fn light_palette_accent_differs_from_dark() {
         let d = dark_palette();
         let l = light_palette();
         assert_ne!(
             d.accent, l.accent,
-            "themes should have distinct accent colours"
+            "palettes should have distinct accent colours"
         );
     }
 
     #[test]
-    fn update_with_new_theme_and_font_changes_colours_and_bold_family() {
+    fn update_with_new_palette_and_font_changes_colours_and_bold_family() {
         let dark_settings = Settings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         };
         let light_settings = Settings {
-            theme: theme::LIGHT,
+            palette: fixtures::LIGHT,
             font: Font::with_name("Fira Code"),
         };
         let mut h = MarkdownHighlighter::new(&dark_settings);
@@ -1182,8 +1184,8 @@ mod tests {
 
         let spans: Vec<_> = h.highlight_line("# Heading").collect();
         assert!(!spans.is_empty());
-        assert_eq!(spans[0].1.color, Some(rgb(theme::LIGHT.colors.faint)));
-        assert_eq!(spans[1].1.color, Some(rgb(theme::LIGHT.colors.accent)));
+        assert_eq!(spans[0].1.color, Some(fixtures::LIGHT.faint));
+        assert_eq!(spans[1].1.color, Some(fixtures::LIGHT.accent));
         let bold = spans[1].1.font.unwrap();
         assert_eq!(bold.family, font::Family::Name("Fira Code"));
         assert_eq!(bold.weight, font::Weight::Bold);

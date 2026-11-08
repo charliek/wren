@@ -242,6 +242,8 @@ class ReleaseFilesTests(unittest.TestCase):
         source = script.read_text()
         self.assertIn('"${cargo[@]}" update --workspace --offline', source)
         self.assertIn(r"/^\[workspace\.package\]/,/^\[/", source)
+        # Every crate's lock entry is checked, including ones added later.
+        self.assertIn("for manifest in crates/*/Cargo.toml; do", source)
         self.assertNotRegex(source, r"(?m)^[^#]*\bgit (add|commit)\b")
 
     def test_changelog_has_an_unreleased_section_and_releasing_documents_the_secrets(self):

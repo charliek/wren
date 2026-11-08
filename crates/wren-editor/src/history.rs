@@ -2,10 +2,14 @@
 //!
 //! Inserts within [`GROUP_TIMEOUT`] coalesce until a non-edit interaction breaks
 //! the group. Time is injected for deterministic tests.
+//!
+//! A snapshot is restored by editing only the bytes that differ ([`diff`]),
+//! so the rest of the document keeps its shaping and the view its scroll.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use iced::advanced::graphics::text::cosmic_text::Scroll;
 use iced::widget::text_editor::Cursor;
 
 /// Maximum undo entries kept in memory.
@@ -33,23 +37,26 @@ pub enum EditKind {
     Replace,
 }
 
-#[derive(Debug, Clone)]
-struct Entry {
-    text: String,
-    cursor: Cursor,
+/// A document state to return to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub text: String,
+    pub cursor: Cursor,
+    /// Where the view was scrolled. Only the Cosmic engine can set it back.
+    pub scroll: Scroll,
 }
 
 #[derive(Debug)]
 struct OpenGroup {
-    before: Entry,
+    before: Snapshot,
     last_at: Instant,
 }
 
 /// Bounded undo/redo history with grouped-insert support.
 #[derive(Debug)]
 pub struct History {
-    undo: VecDeque<Entry>,
-    redo: Vec<Entry>,
+    undo: VecDeque<Snapshot>,
+    redo: Vec<Snapshot>,
     open_group: Option<OpenGroup>,
 }
 
@@ -64,7 +71,7 @@ impl History {
 
     /// Record the captured before-state of an edit that actually changed text.
     ///
-    /// `text` and `cursor` describe the content **before** the edit.  `now` is
+    /// `before` describes the content **before** the edit.  `now` is
     /// injected so callers can drive time-based grouping in tests.
     ///
     /// For [`EditKind::Insert`], consecutive calls within [`GROUP_TIMEOUT`] do
@@ -75,7 +82,7 @@ impl History {
     /// Every recorded edit invalidates redo. If a new unit's snapshot exceeds
     /// the text budget, history is cleared rather than letting undo skip it.
     /// Continuing a group retains only its original, budgeted snapshot.
-    pub fn before_edit(&mut self, text: String, cursor: Cursor, kind: EditKind, now: Instant) {
+    pub fn before_edit(&mut self, before: Snapshot, kind: EditKind, now: Instant) {
         if kind == EditKind::Insert {
             if let Some(group) = &mut self.open_group {
                 if now.saturating_duration_since(group.last_at) <= GROUP_TIMEOUT {
@@ -84,72 +91,58 @@ impl History {
                     return;
                 }
             }
-            if text.capacity() > MAX_TEXT_BYTES {
+            if before.text.capacity() > MAX_TEXT_BYTES {
                 self.clear();
                 return;
             }
             self.close_open_group();
             self.redo.clear();
             self.open_group = Some(OpenGroup {
-                before: Entry { text, cursor },
+                before,
                 last_at: now,
             });
             self.enforce_limits();
         } else {
-            if text.capacity() > MAX_TEXT_BYTES {
+            if before.text.capacity() > MAX_TEXT_BYTES {
                 self.clear();
                 return;
             }
             // Non-groupable: close any open group and push this state directly.
             self.close_open_group();
             self.redo.clear();
-            self.push_undo(Entry { text, cursor });
+            self.push_undo(before);
         }
     }
 
-    /// Return the state to restore for undo, saving `current_text`/`cursor` to redo.
+    /// Return the state to restore for undo, saving `current` to redo.
     ///
     /// Returns `None` if there is nothing to undo.
-    pub fn undo(
-        &mut self,
-        current_text: String,
-        current_cursor: Cursor,
-    ) -> Option<(String, Cursor)> {
+    pub fn undo(&mut self, current: Snapshot) -> Option<Snapshot> {
         // Finalize any open typing group before undoing.
         self.close_open_group();
         let entry = self.undo.pop_back()?;
-        if current_text.capacity() > MAX_TEXT_BYTES {
+        if current.text.capacity() > MAX_TEXT_BYTES {
             // Without this state, older redo entries would skip an undo step.
             self.redo.clear();
         } else {
-            self.redo.push(Entry {
-                text: current_text,
-                cursor: current_cursor,
-            });
+            self.redo.push(current);
             self.enforce_limits();
         }
-        Some((entry.text, entry.cursor))
+        Some(entry)
     }
 
-    /// Return the state to restore for redo, saving `current_text`/`cursor` to undo.
+    /// Return the state to restore for redo, saving `current` to undo.
     ///
     /// Returns `None` if there is nothing to redo.
-    pub fn redo(
-        &mut self,
-        current_text: String,
-        current_cursor: Cursor,
-    ) -> Option<(String, Cursor)> {
+    pub fn redo(&mut self, current: Snapshot) -> Option<Snapshot> {
         self.close_open_group();
         let entry = self.redo.pop()?;
-        if current_text.capacity() > MAX_TEXT_BYTES {
+        if current.text.capacity() > MAX_TEXT_BYTES {
             self.undo.clear();
         } else {
-            self.push_undo(Entry {
-                text: current_text,
-                cursor: current_cursor,
-            });
+            self.push_undo(current);
         }
-        Some((entry.text, entry.cursor))
+        Some(entry)
     }
 
     /// Clear all history.  Call when loading entirely new content.
@@ -180,7 +173,7 @@ impl History {
         }
     }
 
-    fn push_undo(&mut self, entry: Entry) {
+    fn push_undo(&mut self, entry: Snapshot) {
         self.undo.push_back(entry);
         self.enforce_limits();
     }
@@ -211,6 +204,64 @@ impl History {
     }
 }
 
+/// The bytes two texts differ in: `from[start..from_end]` becomes
+/// `to[start..to_end]`, and everything around it is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Change {
+    pub start: usize,
+    pub from_end: usize,
+    pub to_end: usize,
+}
+
+/// The shortest change from `from` to `to` that a cursor can address.
+///
+/// Neither end splits a character, nor falls between two line-break bytes:
+/// a cursor cannot sit inside CRLF, and text inserted beside a lone CR or LF
+/// would otherwise parse into different lines than `to` does on its own.
+pub fn diff(from: &str, to: &str) -> Change {
+    let (a, b) = (from.as_bytes(), to.as_bytes());
+    let mut start = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    while !(from.is_char_boundary(start) && to.is_char_boundary(start))
+        || between_breaks(a.get(start.wrapping_sub(1)), [a.get(start), b.get(start)])
+    {
+        start -= 1;
+    }
+    let shared = a.len().min(b.len()) - start;
+    let mut suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take(shared)
+        .take_while(|(x, y)| x == y)
+        .count();
+    loop {
+        let (from_end, to_end) = (a.len() - suffix, b.len() - suffix);
+        if from.is_char_boundary(from_end)
+            && to.is_char_boundary(to_end)
+            && !between_breaks(
+                a.get(from_end),
+                [
+                    a.get(from_end.wrapping_sub(1)),
+                    b.get(to_end.wrapping_sub(1)),
+                ],
+            )
+        {
+            return Change {
+                start,
+                from_end,
+                to_end,
+            };
+        }
+        suffix -= 1;
+    }
+}
+
+/// Whether a line-break byte `side` meets a line-break byte in `others`.
+fn between_breaks(side: Option<&u8>, others: [Option<&u8>; 2]) -> bool {
+    let is_break = |byte: Option<&u8>| matches!(byte, Some(b'\r' | b'\n'));
+    is_break(side) && others.into_iter().any(is_break)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -225,6 +276,28 @@ mod tests {
         // Using `Instant::now()` once at test start avoids clock issues.
         static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
         *BASE.get_or_init(Instant::now) + Duration::from_millis(offset_ms)
+    }
+
+    fn snapshot(text: String, cursor: Cursor) -> Snapshot {
+        Snapshot {
+            text,
+            cursor,
+            scroll: Scroll::default(),
+        }
+    }
+
+    fn edit(h: &mut History, text: String, cursor: Cursor, kind: EditKind, now: Instant) {
+        h.before_edit(snapshot(text, cursor), kind, now);
+    }
+
+    fn undo(h: &mut History, text: String, cursor: Cursor) -> Option<(String, Cursor)> {
+        h.undo(snapshot(text, cursor))
+            .map(|entry| (entry.text, entry.cursor))
+    }
+
+    fn redo(h: &mut History, text: String, cursor: Cursor) -> Option<(String, Cursor)> {
+        h.redo(snapshot(text, cursor))
+            .map(|entry| (entry.text, entry.cursor))
     }
 
     fn cur(line: usize, col: usize) -> Cursor {
@@ -249,23 +322,23 @@ mod tests {
     #[test]
     fn undo_on_empty_history_returns_none() {
         let mut h = History::new();
-        assert!(h.undo("hello".into(), cur(0, 5)).is_none());
+        assert!(undo(&mut h, "hello".into(), cur(0, 5)).is_none());
         assert!(!h.can_undo());
     }
 
     #[test]
     fn redo_on_empty_history_returns_none() {
         let mut h = History::new();
-        assert!(h.redo("hello".into(), cur(0, 5)).is_none());
+        assert!(redo(&mut h, "hello".into(), cur(0, 5)).is_none());
         assert!(!h.can_redo());
     }
 
     #[test]
     fn single_non_insert_edit_then_undo_restores_state() {
         let mut h = History::new();
-        h.before_edit("hello".into(), cur(0, 5), EditKind::Delete, at(0));
+        edit(&mut h, "hello".into(), cur(0, 5), EditKind::Delete, at(0));
         // Simulate: backspace removed 'o', content is now "hell", cursor at col 4
-        let result = h.undo("hell".into(), cur(0, 4));
+        let result = undo(&mut h, "hell".into(), cur(0, 4));
         let (text, cursor) = result.expect("should have undo");
         assert_eq!(text, "hello");
         assert_eq!(cursor, cur(0, 5));
@@ -274,13 +347,13 @@ mod tests {
     #[test]
     fn undo_then_redo_round_trips() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Paste, at(0));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Paste, at(0));
         // After paste, content is "world", cursor at col 5
-        let (text, cursor) = h.undo("world".into(), cur(0, 5)).expect("undo");
+        let (text, cursor) = undo(&mut h, "world".into(), cur(0, 5)).expect("undo");
         assert_eq!(text, "");
         assert_eq!(cursor, cur(0, 0));
 
-        let (text2, cursor2) = h.redo("".into(), cur(0, 0)).expect("redo");
+        let (text2, cursor2) = redo(&mut h, "".into(), cur(0, 0)).expect("redo");
         assert_eq!(text2, "world");
         assert_eq!(cursor2, cur(0, 5));
     }
@@ -290,72 +363,88 @@ mod tests {
     #[test]
     fn adjacent_inserts_within_timeout_produce_one_undo_entry() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Insert, at(0));
-        h.before_edit("a".into(), cur(0, 1), EditKind::Insert, at(100));
-        h.before_edit("ab".into(), cur(0, 2), EditKind::Insert, at(200));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Insert, at(0));
+        edit(&mut h, "a".into(), cur(0, 1), EditKind::Insert, at(100));
+        edit(&mut h, "ab".into(), cur(0, 2), EditKind::Insert, at(200));
         // Three inserts within 1 s → single undo entry at the initial state
-        let (text, cursor) = h.undo("abc".into(), cur(0, 3)).expect("undo");
+        let (text, cursor) = undo(&mut h, "abc".into(), cur(0, 3)).expect("undo");
         assert_eq!(text, "");
         assert_eq!(cursor, cur(0, 0));
         // Nothing left to undo
-        assert!(h.undo("".into(), cur(0, 0)).is_none());
+        assert!(undo(&mut h, "".into(), cur(0, 0)).is_none());
     }
 
     #[test]
     fn insert_after_timeout_starts_new_undo_entry() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Insert, at(0));
-        h.before_edit("a".into(), cur(0, 1), EditKind::Insert, at(500));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Insert, at(0));
+        edit(&mut h, "a".into(), cur(0, 1), EditKind::Insert, at(500));
         // 1_500 ms gap — exceeds GROUP_TIMEOUT (1 000 ms), new group
-        h.before_edit("ab".into(), cur(0, 2), EditKind::Insert, at(1_500 + 1));
-        h.before_edit("abc".into(), cur(0, 3), EditKind::Insert, at(2_000));
+        edit(
+            &mut h,
+            "ab".into(),
+            cur(0, 2),
+            EditKind::Insert,
+            at(1_500 + 1),
+        );
+        edit(&mut h, "abc".into(), cur(0, 3), EditKind::Insert, at(2_000));
 
         // First undo restores to "ab" (before the second group)
-        let (text, _) = h.undo("abcd".into(), cur(0, 4)).expect("undo 1");
+        let (text, _) = undo(&mut h, "abcd".into(), cur(0, 4)).expect("undo 1");
         assert_eq!(text, "ab");
 
         // Second undo restores to "" (before the first group)
-        let (text, _) = h.undo("ab".into(), cur(0, 2)).expect("undo 2");
+        let (text, _) = undo(&mut h, "ab".into(), cur(0, 2)).expect("undo 2");
         assert_eq!(text, "");
 
-        assert!(h.undo("".into(), cur(0, 0)).is_none());
+        assert!(undo(&mut h, "".into(), cur(0, 0)).is_none());
     }
 
     #[test]
     fn enter_is_always_standalone() {
         let mut h = History::new();
-        h.before_edit("hello".into(), cur(0, 5), EditKind::Enter, at(0));
+        edit(&mut h, "hello".into(), cur(0, 5), EditKind::Enter, at(0));
         // A subsequent insert starts its own group, not merged with Enter
-        h.before_edit("hello\n".into(), cur(1, 0), EditKind::Insert, at(10));
-        h.before_edit("hello\nw".into(), cur(1, 1), EditKind::Insert, at(20));
+        edit(
+            &mut h,
+            "hello\n".into(),
+            cur(1, 0),
+            EditKind::Insert,
+            at(10),
+        );
+        edit(
+            &mut h,
+            "hello\nw".into(),
+            cur(1, 1),
+            EditKind::Insert,
+            at(20),
+        );
 
         // Undo the insert group ("hello\n" → "hello\nw...")
-        let (text, _) = h.undo("hello\nworld".into(), cur(1, 5)).expect("undo 1");
+        let (text, _) = undo(&mut h, "hello\nworld".into(), cur(1, 5)).expect("undo 1");
         assert_eq!(text, "hello\n");
 
         // Undo the Enter
-        let (text, _) = h.undo("hello\n".into(), cur(1, 0)).expect("undo 2");
+        let (text, _) = undo(&mut h, "hello\n".into(), cur(1, 0)).expect("undo 2");
         assert_eq!(text, "hello");
 
-        assert!(h.undo("hello".into(), cur(0, 5)).is_none());
+        assert!(undo(&mut h, "hello".into(), cur(0, 5)).is_none());
     }
 
     #[test]
     fn paste_is_always_standalone() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Insert, at(0));
-        h.before_edit("a".into(), cur(0, 1), EditKind::Insert, at(100));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Insert, at(0));
+        edit(&mut h, "a".into(), cur(0, 1), EditKind::Insert, at(100));
         // Paste closes the insert group and is its own entry
-        h.before_edit("ab".into(), cur(0, 2), EditKind::Paste, at(200));
+        edit(&mut h, "ab".into(), cur(0, 2), EditKind::Paste, at(200));
 
         // Undo paste: restores state before paste
-        let (text, _) = h
-            .undo("ab paste text".into(), cur(0, 13))
-            .expect("undo paste");
+        let (text, _) = undo(&mut h, "ab paste text".into(), cur(0, 13)).expect("undo paste");
         assert_eq!(text, "ab");
 
         // Undo insert group: restores initial empty state
-        let (text, _) = h.undo("ab".into(), cur(0, 2)).expect("undo inserts");
+        let (text, _) = undo(&mut h, "ab".into(), cur(0, 2)).expect("undo inserts");
         assert_eq!(text, "");
     }
 
@@ -364,37 +453,37 @@ mod tests {
     #[test]
     fn new_edit_clears_redo_stack() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Insert, at(0));
-        h.undo("a".into(), cur(0, 1));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Insert, at(0));
+        undo(&mut h, "a".into(), cur(0, 1));
         // We now have a redo entry
         assert!(h.can_redo());
         // Any new edit must clear redo
-        h.before_edit("".into(), cur(0, 0), EditKind::Insert, at(100));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Insert, at(100));
         assert!(!h.can_redo());
     }
 
     #[test]
     fn multiple_undo_then_redo_sequences() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Delete, at(0));
-        h.before_edit("step1".into(), cur(0, 5), EditKind::Delete, at(100));
-        h.before_edit("step2".into(), cur(0, 5), EditKind::Delete, at(200));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Delete, at(0));
+        edit(&mut h, "step1".into(), cur(0, 5), EditKind::Delete, at(100));
+        edit(&mut h, "step2".into(), cur(0, 5), EditKind::Delete, at(200));
 
         // Undo all three
-        h.undo("step3".into(), cur(0, 5)).unwrap();
-        h.undo("step2".into(), cur(0, 5)).unwrap();
-        h.undo("step1".into(), cur(0, 5)).unwrap();
+        undo(&mut h, "step3".into(), cur(0, 5)).unwrap();
+        undo(&mut h, "step2".into(), cur(0, 5)).unwrap();
+        undo(&mut h, "step1".into(), cur(0, 5)).unwrap();
         assert!(!h.can_undo());
 
         // Redo two steps
-        let (t, _) = h.redo("".into(), cur(0, 0)).unwrap();
+        let (t, _) = redo(&mut h, "".into(), cur(0, 0)).unwrap();
         assert_eq!(t, "step1");
-        let (t, _) = h.redo("step1".into(), cur(0, 5)).unwrap();
+        let (t, _) = redo(&mut h, "step1".into(), cur(0, 5)).unwrap();
         assert_eq!(t, "step2");
         assert!(h.can_redo()); // step3 still available
 
         // A new edit now clears redo
-        h.before_edit("step2".into(), cur(0, 5), EditKind::Enter, at(300));
+        edit(&mut h, "step2".into(), cur(0, 5), EditKind::Enter, at(300));
         assert!(!h.can_redo());
     }
 
@@ -404,7 +493,8 @@ mod tests {
     fn undo_stack_bounded_at_max_entries() {
         let mut h = History::new();
         for i in 0..MAX_ENTRIES + 50 {
-            h.before_edit(
+            edit(
+                &mut h,
                 format!("state {i}"),
                 cur(0, i),
                 EditKind::Delete,
@@ -414,7 +504,7 @@ mod tests {
         // We can undo at most MAX_ENTRIES times
         let mut count = 0usize;
         let mut current_text = format!("state {}", MAX_ENTRIES + 50);
-        while h.undo(current_text.clone(), cur(0, 0)).is_some() {
+        while undo(&mut h, current_text.clone(), cur(0, 0)).is_some() {
             count += 1;
             current_text = format!("undo_{count}");
         }
@@ -424,15 +514,15 @@ mod tests {
     #[test]
     fn break_group_preserves_history_and_redo() {
         let mut h = History::new();
-        h.before_edit("".into(), cur(0, 0), EditKind::Insert, at(0));
+        edit(&mut h, "".into(), cur(0, 0), EditKind::Insert, at(0));
         h.break_group();
-        h.before_edit("a".into(), cur(0, 0), EditKind::Insert, at(10));
-        assert_eq!(h.undo("ba".into(), cur(0, 1)).unwrap().0, "a");
+        edit(&mut h, "a".into(), cur(0, 0), EditKind::Insert, at(10));
+        assert_eq!(undo(&mut h, "ba".into(), cur(0, 1)).unwrap().0, "a");
         h.break_group();
         assert!(h.can_redo());
-        assert_eq!(h.undo("a".into(), cur(0, 1)).unwrap().0, "");
-        assert_eq!(h.redo("".into(), cur(0, 0)).unwrap().0, "a");
-        assert_eq!(h.redo("a".into(), cur(0, 1)).unwrap().0, "ba");
+        assert_eq!(undo(&mut h, "a".into(), cur(0, 1)).unwrap().0, "");
+        assert_eq!(redo(&mut h, "".into(), cur(0, 0)).unwrap().0, "a");
+        assert_eq!(redo(&mut h, "a".into(), cur(0, 1)).unwrap().0, "ba");
     }
 
     #[test]
@@ -440,20 +530,32 @@ mod tests {
         let mut h = History::new();
         let size = MAX_TEXT_BYTES / 4;
         for i in 0..4 {
-            h.before_edit("a".repeat(size), cur(0, i), EditKind::Paste, at(i as u64));
+            edit(
+                &mut h,
+                "a".repeat(size),
+                cur(0, i),
+                EditKind::Paste,
+                at(i as u64),
+            );
         }
-        h.before_edit("b".repeat(size), cur(0, 4), EditKind::Insert, at(10));
+        edit(
+            &mut h,
+            "b".repeat(size),
+            cur(0, 4),
+            EditKind::Insert,
+            at(10),
+        );
         assert!(h.open_group.is_some());
         assert_eq!(h.undo.len(), 3);
         assert_eq!(h.retained_text_bytes(), MAX_TEXT_BYTES);
         for i in 0..3 {
-            h.undo("c".repeat(size + 1), cur(0, i)).unwrap();
+            undo(&mut h, "c".repeat(size + 1), cur(0, i)).unwrap();
             assert!(h.retained_text_bytes() <= MAX_TEXT_BYTES);
         }
         assert!(!h.can_undo());
         assert_eq!(h.redo.len(), 3);
         while h.can_redo() {
-            h.redo("d".repeat(size + 1), cur(0, 0)).unwrap();
+            redo(&mut h, "d".repeat(size + 1), cur(0, 0)).unwrap();
             assert!(h.retained_text_bytes() <= MAX_TEXT_BYTES);
         }
     }
@@ -462,8 +564,14 @@ mod tests {
     fn oversize_snapshots_clear_history_instead_of_skipping_states() {
         for kind in [EditKind::Insert, EditKind::Paste] {
             let mut h = History::new();
-            h.before_edit("a".into(), cur(0, 1), EditKind::Paste, at(0));
-            h.before_edit("x".repeat(MAX_TEXT_BYTES + 1), cur(0, 1), kind, at(10));
+            edit(&mut h, "a".into(), cur(0, 1), EditKind::Paste, at(0));
+            edit(
+                &mut h,
+                "x".repeat(MAX_TEXT_BYTES + 1),
+                cur(0, 1),
+                kind,
+                at(10),
+            );
             assert!(!h.can_undo());
             assert!(!h.can_redo());
             assert_eq!(h.retained_text_bytes(), 0);
@@ -473,16 +581,20 @@ mod tests {
     #[test]
     fn oversize_current_state_is_not_retained_on_undo_or_redo() {
         let mut h = History::new();
-        h.before_edit("a".into(), cur(0, 1), EditKind::Paste, at(0));
+        edit(&mut h, "a".into(), cur(0, 1), EditKind::Paste, at(0));
         assert_eq!(
-            h.undo("x".repeat(MAX_TEXT_BYTES + 1), cur(0, 0)).unwrap().0,
+            undo(&mut h, "x".repeat(MAX_TEXT_BYTES + 1), cur(0, 0))
+                .unwrap()
+                .0,
             "a"
         );
         assert!(!h.can_redo());
-        h.before_edit("b".into(), cur(0, 1), EditKind::Paste, at(10));
-        h.undo("c".into(), cur(0, 1)).unwrap();
+        edit(&mut h, "b".into(), cur(0, 1), EditKind::Paste, at(10));
+        undo(&mut h, "c".into(), cur(0, 1)).unwrap();
         assert_eq!(
-            h.redo("x".repeat(MAX_TEXT_BYTES + 1), cur(0, 0)).unwrap().0,
+            redo(&mut h, "x".repeat(MAX_TEXT_BYTES + 1), cur(0, 0))
+                .unwrap()
+                .0,
             "c"
         );
         assert!(!h.can_undo());
@@ -494,7 +606,7 @@ mod tests {
         let mut h = History::new();
         let mut text = String::with_capacity(MAX_TEXT_BYTES + 1);
         text.push('a');
-        h.before_edit(text, cur(0, 1), EditKind::Paste, at(0));
+        edit(&mut h, text, cur(0, 1), EditKind::Paste, at(0));
         assert!(!h.can_undo());
         assert_eq!(h.retained_text_bytes(), 0);
     }
@@ -503,9 +615,15 @@ mod tests {
     fn entry_limit_includes_the_open_group() {
         let mut h = History::new();
         for i in 0..MAX_ENTRIES {
-            h.before_edit(format!("{i}"), cur(0, 0), EditKind::Paste, at(i as u64));
+            edit(
+                &mut h,
+                format!("{i}"),
+                cur(0, 0),
+                EditKind::Paste,
+                at(i as u64),
+            );
         }
-        h.before_edit("last".into(), cur(0, 0), EditKind::Insert, at(300));
+        edit(&mut h, "last".into(), cur(0, 0), EditKind::Insert, at(300));
         assert_eq!(h.undo.len(), MAX_ENTRIES - 1);
         assert!(h.open_group.is_some());
     }
@@ -516,8 +634,14 @@ mod tests {
     fn cursor_with_selection_is_preserved_through_undo() {
         let mut h = History::new();
         let before_cursor = cur_sel(1, 10, 0, 5);
-        h.before_edit("multi\nline".into(), before_cursor, EditKind::Delete, at(0));
-        let (_, restored_cursor) = h.undo("line".into(), cur(0, 4)).expect("undo");
+        edit(
+            &mut h,
+            "multi\nline".into(),
+            before_cursor,
+            EditKind::Delete,
+            at(0),
+        );
+        let (_, restored_cursor) = undo(&mut h, "line".into(), cur(0, 4)).expect("undo");
         assert_eq!(restored_cursor, before_cursor);
     }
 
@@ -526,12 +650,12 @@ mod tests {
     #[test]
     fn clear_wipes_undo_redo_and_open_group() {
         let mut h = History::new();
-        h.before_edit("a".into(), cur(0, 1), EditKind::Insert, at(0));
-        h.undo("ab".into(), cur(0, 2));
+        edit(&mut h, "a".into(), cur(0, 1), EditKind::Insert, at(0));
+        undo(&mut h, "ab".into(), cur(0, 2));
         h.clear();
         assert!(!h.can_undo());
         assert!(!h.can_redo());
-        assert!(h.undo("any".into(), cur(0, 3)).is_none());
+        assert!(undo(&mut h, "any".into(), cur(0, 3)).is_none());
     }
 
     // --- Unicode line/column storage ---
@@ -542,11 +666,76 @@ mod tests {
         let emoji_col = "👋 hello".len(); // 4 + 1 + 5 = 10
         let before = cur(0, emoji_col);
         let mut h = History::new();
-        h.before_edit("👋 hell".into(), before, EditKind::Insert, at(0));
-        let (text, cursor) = h
-            .undo("👋 hello".into(), cur(0, emoji_col + 1))
-            .expect("undo");
+        edit(&mut h, "👋 hell".into(), before, EditKind::Insert, at(0));
+        let (text, cursor) = undo(&mut h, "👋 hello".into(), cur(0, emoji_col + 1)).expect("undo");
         assert_eq!(text, "👋 hell");
         assert_eq!(cursor.position.column, emoji_col);
+    }
+
+    // --- Snapshot diffs ---
+
+    fn change(start: usize, from_end: usize, to_end: usize) -> Change {
+        Change {
+            start,
+            from_end,
+            to_end,
+        }
+    }
+
+    #[test]
+    fn diff_spans_only_the_changed_bytes() {
+        assert_eq!(diff("same", "same"), change(4, 4, 4));
+        assert_eq!(diff("", ""), change(0, 0, 0));
+        assert_eq!(diff("", "new"), change(0, 0, 3));
+        assert_eq!(diff("hello world", "hello brave world"), change(6, 6, 12));
+        assert_eq!(diff("hello brave world", "hello world"), change(6, 12, 6));
+        assert_eq!(diff("abcabc", "abc"), change(3, 6, 3));
+        assert_eq!(diff("cat", "cut"), change(1, 2, 2));
+    }
+
+    #[test]
+    fn diff_ends_on_character_boundaries() {
+        // é is C3 A9 and è is C3 A8: they share their first byte.
+        assert_eq!(diff("é", "è"), change(0, 2, 2));
+        assert_eq!(diff("aé", "aè!"), change(1, 3, 4));
+        // 🐦 and 🐧 share three of four bytes.
+        assert_eq!(diff("🐦x", "🐧x"), change(0, 4, 4));
+    }
+
+    #[test]
+    fn diff_never_ends_between_line_break_bytes() {
+        // Splitting CRLF into CR is a change to the whole ending.
+        assert_eq!(diff("a\r\nb", "a\rb"), change(1, 3, 2));
+        assert_eq!(diff("a\rb", "a\r\nb"), change(1, 2, 3));
+        assert_eq!(diff("a\n\nb", "a\nb"), change(1, 3, 2));
+        assert_eq!(diff("a\n\rb", "a\nb"), change(1, 3, 2));
+        // A break beside ordinary text is a safe end.
+        assert_eq!(diff("a\nb", "a\nxb"), change(2, 2, 3));
+        assert_eq!(diff("a\r\nb", "a\r\nc"), change(3, 4, 4));
+    }
+
+    #[test]
+    fn snapshots_keep_their_scroll() {
+        let mut h = History::new();
+        let scrolled = Scroll::new(40, 12.0, 0.0);
+        h.before_edit(
+            Snapshot {
+                text: "a".into(),
+                cursor: cur(0, 1),
+                scroll: scrolled,
+            },
+            EditKind::Paste,
+            at(0),
+        );
+        let now = Scroll::new(3, 0.0, 0.0);
+        let restored = h
+            .undo(Snapshot {
+                text: "ab".into(),
+                cursor: cur(0, 2),
+                scroll: now,
+            })
+            .unwrap();
+        assert_eq!(restored.scroll, scrolled);
+        assert_eq!(h.redo(restored).unwrap().scroll, now);
     }
 }

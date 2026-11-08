@@ -1,7 +1,8 @@
 //! Wren's Markdown text-editor widget.
 //!
 //! Forked from `iced_widget` 0.14.2, `src/text_editor.rs`
-//! (<https://github.com/iced-rs/iced>), used under the MIT License:
+//! (<https://github.com/iced-rs/iced>, commit
+//! 54abf81d13fec06d4d9ac754b03ce2c3313e8a1f), used under the MIT License:
 //!
 //! > Copyright 2019 Héctor Ramón, Iced contributors
 //! >
@@ -30,17 +31,14 @@
 //! `Content` hides its renderer editor, and the line geometry lives in that
 //! editor's cosmic-text buffer, so this module owns its own `Content`.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ops::{DerefMut, Range};
 use std::sync::Arc;
 
-use iced::advanced::graphics::text::cosmic_text;
-use iced::advanced::graphics::text::Editor as RawEditor;
+use iced::advanced::graphics::text::cosmic_text::{self, Scroll};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
 use iced::advanced::renderer::{self, Renderer as _};
-use iced::advanced::text::editor::Editor as _;
 use iced::advanced::text::highlighter::Highlighter as _;
 use iced::advanced::text::{self, LineHeight, Renderer as _, Text, Wrapping};
 use iced::advanced::widget::{self, operation, tree, Widget};
@@ -48,15 +46,16 @@ use iced::advanced::{clipboard, input_method, Clipboard, InputMethod, Shell};
 use iced::keyboard;
 use iced::time::{Duration, Instant};
 use iced::widget::text_editor::{
-    Action, Binding, Cursor, Edit, KeyPress, Line, LineEnding, Position, Selection, Status,
+    Action, Binding, Cursor, Edit, KeyPress, LineEnding, Position, Selection, Status,
 };
 use iced::{
-    alignment, window, Color, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer,
-    Size, Theme, Vector,
+    alignment, window, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size,
+    Theme, Vector,
 };
 
-use super::markdown_highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
-use super::Message;
+use crate::backend::{Backend, BackendKind, Lines, Placement};
+use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 24.0;
@@ -114,32 +113,25 @@ fn line_height() -> LineHeight {
 }
 
 // ---------------------------------------------------------------------------
-// Style
-// ---------------------------------------------------------------------------
-
-/// Colours of the editor surface.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Style {
-    pub background: Color,
-    pub value: Color,
-    pub selection: Color,
-    pub gutter: Color,
-    pub current_line: Color,
-    pub caret: Color,
-    pub strike: Color,
-}
-
-// ---------------------------------------------------------------------------
 // Content
 // ---------------------------------------------------------------------------
 
 /// The text and cursor of a [`TextEditor`].
-pub struct Content(RefCell<RawEditor>);
+pub struct Content(RefCell<Backend>);
 
 impl Content {
-    /// Creates a [`Content`] with the given text.
-    pub fn with_text(text: &str) -> Self {
-        Self(RefCell::new(RawEditor::with_text(text)))
+    /// Creates a [`Content`] with the given text on the `kind` engine.
+    pub fn new(kind: BackendKind, text: &str) -> Self {
+        Self(RefCell::new(Backend::with_text(kind, text)))
+    }
+
+    pub fn kind(&self) -> BackendKind {
+        self.0.borrow().kind()
+    }
+
+    /// Replaces the text on the same engine; see [`Backend::replace_text`].
+    pub fn replace_text(&mut self, text: &str) {
+        self.0.get_mut().replace_text(text);
     }
 
     /// Performs an [`Action`] on the [`Content`].
@@ -152,6 +144,26 @@ impl Content {
         self.0.get_mut().move_to(cursor);
     }
 
+    /// See [`Backend::replace_range`].
+    pub fn replace_range(&mut self, start: Position, end: Position, text: &str) {
+        self.0.get_mut().replace_range(start, end, text);
+    }
+
+    /// See [`Backend::restore_view`].
+    pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
+        self.0.get_mut().restore_view(cursor, scroll);
+    }
+
+    /// See [`Backend::scroll_to_line`].
+    pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
+        self.0.get_mut().scroll_to_line(line, placement);
+    }
+
+    /// Where the view is scrolled.
+    pub fn scroll(&self) -> Scroll {
+        self.0.borrow().scroll()
+    }
+
     /// Returns the current cursor position of the [`Content`].
     pub fn cursor(&self) -> Cursor {
         self.0.borrow().cursor()
@@ -162,41 +174,65 @@ impl Content {
         self.0.borrow().line_count()
     }
 
-    /// Returns the text of the line at the given index, if it exists.
-    pub fn line(&self, index: usize) -> Option<Line<'_>> {
-        let editor = self.0.borrow();
-        let line = editor.line(index)?;
-        Some(Line {
-            text: Cow::Owned(line.text.into_owned()),
-            ending: line.ending,
-        })
-    }
-
-    /// Returns an iterator of the text of the lines in the [`Content`].
-    pub fn lines(&self) -> impl Iterator<Item = Line<'_>> {
-        (0..).map_while(|i| self.line(i))
+    /// Runs `f` over the borrowed lines, without copying any text.
+    pub fn with_lines<R>(&self, f: impl FnOnce(Lines<'_>) -> R) -> R {
+        f(self.0.borrow().lines())
     }
 
     /// Returns the text of the [`Content`].
     pub fn text(&self) -> String {
-        let mut contents = String::new();
-        let mut lines = self.lines().peekable();
-        while let Some(line) = lines.next() {
-            contents.push_str(&line.text);
-            if lines.peek().is_some() {
-                contents.push_str(if line.ending == LineEnding::None {
-                    LineEnding::default().as_str()
-                } else {
-                    line.ending.as_str()
-                });
+        self.with_lines(|lines| {
+            let mut contents = String::new();
+            let mut lines = lines.iter().peekable();
+            while let Some(line) = lines.next() {
+                contents.push_str(&line.text);
+                if lines.peek().is_some() {
+                    contents.push_str(if line.ending == LineEnding::None {
+                        LineEnding::default().as_str()
+                    } else {
+                        line.ending.as_str()
+                    });
+                }
             }
-        }
-        contents
+            contents
+        })
     }
 
     /// Returns the selected text of the [`Content`].
     pub fn selection(&self) -> Option<String> {
         self.0.borrow().copy()
+    }
+
+    /// Lays the text out in `size` the way the widget does, with the test font.
+    #[cfg(test)]
+    pub fn lay_out(&mut self, size: Size) {
+        crate::fixtures::load_font();
+        let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
+            palette: crate::fixtures::DARK,
+            font: crate::fixtures::FONT,
+        });
+        let backend = self.0.get_mut();
+        backend.update(
+            size,
+            crate::fixtures::FONT,
+            Pixels(TEXT_SIZE),
+            line_height(),
+            Wrapping::WordOrGlyph,
+            &mut highlighter,
+        );
+        backend.highlight(crate::fixtures::FONT, &mut highlighter);
+    }
+
+    /// Whether `line` still has its layout from the last update.
+    #[cfg(test)]
+    pub fn is_laid_out(&self, line: usize) -> bool {
+        self.0.borrow().buffer().lines[line].layout_opt().is_some()
+    }
+
+    /// The caret or selection rectangles; see [`Backend::selection`].
+    #[cfg(test)]
+    pub fn selection_geometry(&self) -> Option<Selection> {
+        self.0.borrow().selection()
     }
 }
 
@@ -260,9 +296,8 @@ impl<'a> TextEditor<'a> {
 
         let text_bounds = layout.bounds().shrink(self.padding());
         let translation = text_bounds.position() - Point::ORIGIN;
-        let cursor = match self.content.0.borrow().selection() {
-            Selection::Caret(position) => position,
-            Selection::Range(ranges) => ranges.first().cloned().unwrap_or_default().position(),
+        let Some(cursor) = self.content.0.borrow().ime_position() else {
+            return InputMethod::Disabled;
         };
 
         InputMethod::Enabled {
@@ -270,27 +305,6 @@ impl<'a> TextEditor<'a> {
             purpose: input_method::Purpose::Normal,
             preedit: state.preedit.as_ref().map(input_method::Preedit::as_ref),
         }
-    }
-}
-
-/// After a font change iced reshapes only the scrolled-to lines, and the
-/// caret and IME queries panic on an unshaped cursor line (an off-screen
-/// cursor, after scrolling or a text size change). A cursor move makes the
-/// next update shape up to the cursor and scroll to it; cosmic-text ignores a
-/// move to the same place, so step away first.
-fn reshape_to_cursor(editor: &mut RawEditor) {
-    let cursor = editor.cursor();
-    let elsewhere = if cursor.position.line == 0 && cursor.position.column == 0 {
-        (editor.line_count() > 1).then_some(Position { line: 1, column: 0 })
-    } else {
-        Some(Position { line: 0, column: 0 })
-    };
-    if let Some(position) = elsewhere {
-        editor.move_to(Cursor {
-            position,
-            selection: None,
-        });
-        editor.move_to(cursor);
     }
 }
 
@@ -378,7 +392,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         let state = tree.state.downcast_mut::<State>();
 
         if state.highlighter_settings.font != self.highlighter_settings.font {
-            reshape_to_cursor(&mut editor);
+            editor.font_changing();
         }
         if state.highlighter_settings != self.highlighter_settings {
             state
@@ -545,7 +559,6 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         editor.highlight(
             self.highlighter_settings.font,
             state.highlighter.borrow_mut().deref_mut(),
-            |highlight| highlight.to_format(),
         );
 
         renderer.fill_quad(
@@ -587,33 +600,36 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 
         if self.line_numbers {
             let right = bounds.x + ROW_INSET + self.metrics.gutter - GUTTER_PADDING_RIGHT;
-            for row in rows.iter().filter(|row| row.starts_line) {
-                renderer.fill_text(
-                    Text {
-                        content: (row.line + 1).to_string(),
-                        bounds: Size::new(self.metrics.gutter - GUTTER_PADDING_RIGHT, row.height),
-                        size: Pixels(self.metrics.text),
-                        line_height: self.metrics.line_height(),
-                        font: self.highlighter_settings.font,
-                        align_x: text::Alignment::Right,
-                        align_y: alignment::Vertical::Top,
-                        shaping: text::Shaping::Basic,
-                        wrapping: Wrapping::None,
-                    },
-                    Point::new(right, text_bounds.y + row.top),
-                    style.gutter,
-                    rows_clip,
-                );
-            }
+            clip(renderer, rows_clip, |renderer| {
+                for row in rows.iter().filter(|row| row.starts_line) {
+                    renderer.fill_text(
+                        Text {
+                            content: (row.line + 1).to_string(),
+                            bounds: Size::new(
+                                self.metrics.gutter - GUTTER_PADDING_RIGHT,
+                                row.height,
+                            ),
+                            size: Pixels(self.metrics.text),
+                            line_height: self.metrics.line_height(),
+                            font: self.highlighter_settings.font,
+                            align_x: text::Alignment::Right,
+                            align_y: alignment::Vertical::Top,
+                            shaping: text::Shaping::Basic,
+                            wrapping: Wrapping::None,
+                        },
+                        Point::new(right, text_bounds.y + row.top),
+                        style.gutter,
+                        rows_clip,
+                    );
+                }
+            });
         }
-
-        renderer.fill_editor(&editor, text_bounds.position(), style.value, text_bounds);
 
         let translation = text_bounds.position() - Point::ORIGIN;
         let selection = state
             .focus
             .as_ref()
-            .map(|focus| (focus, editor.selection()));
+            .and_then(|focus| Some((focus, editor.selection()?)));
 
         if let Some((_, Selection::Range(ranges))) = &selection {
             for range in ranges
@@ -629,6 +645,12 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                 );
             }
         }
+
+        // The Cosmic engine hands the renderer a weak buffer reference, which
+        // a later mutation would detach, so the text goes after every query.
+        clip(renderer, text_bounds, |renderer| {
+            editor.draw(renderer, text_bounds.position(), style.value, text_bounds);
+        });
 
         // Quads sort beneath text within a layer; strikes and the caret must
         // paint over the glyphs.
@@ -708,6 +730,19 @@ impl<'a> From<TextEditor<'a>> for Element<'a, Message> {
     fn from(text_editor: TextEditor<'a>) -> Self {
         Self::new(text_editor)
     }
+}
+
+/// How far inside its clip rectangle [`clip`] places the layer.
+const CLIP_INSET: f32 = 0.01;
+
+/// Draws `draw` clipped to `bounds` on every renderer. tiny-skia masks text
+/// only when the text's own extent pokes out of its layer, and the editor's
+/// text and gutter numbers are sized exactly to their areas, so a row
+/// scrolled half out of view would paint into the padding. A layer a hair
+/// inside `bounds` makes it mask; wgpu rounds its scissor to whole pixels,
+/// where the hair vanishes.
+fn clip(renderer: &mut Renderer, bounds: Rectangle, draw: impl FnOnce(&mut Renderer)) {
+    renderer.with_layer(bounds.shrink(CLIP_INSET), draw);
 }
 
 fn apply_binding(
@@ -855,7 +890,7 @@ impl Update {
                 } else {
                     Status::Active
                 };
-                super::key_binding(KeyPress {
+                crate::keys::key_binding(KeyPress {
                     key: key.clone(),
                     modified_key: modified_key.clone(),
                     physical_key: *physical_key,
@@ -895,10 +930,9 @@ fn visual_rows(buffer: &cosmic_text::Buffer) -> Vec<VisualRow> {
         return Vec::new();
     };
     // Fence state crosses lines, so scan from the top through the last visible line.
-    let struck: Vec<_> = markdown_highlighter::done_task_ranges(
-        buffer.lines[..=last_line].iter().map(|line| line.text()),
-    )
-    .collect();
+    let struck: Vec<_> =
+        highlighter::done_task_ranges(buffer.lines[..=last_line].iter().map(|line| line.text()))
+            .collect();
 
     runs.iter()
         .map(|run| VisualRow {
@@ -967,8 +1001,7 @@ mod tests {
             }
         );
     }
-    use iced::advanced::graphics::text::font_system;
-    use wren_core::theme;
+    use crate::fixtures;
 
     #[test]
     fn continuation_rows_do_not_start_a_line() {
@@ -1000,20 +1033,12 @@ mod tests {
 
     #[test]
     fn padding_reserves_the_gutter_only_when_shown() {
-        let content = Content::with_text("");
+        let content = Content::new(BackendKind::Iced, "");
         let settings = HighlighterSettings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         };
-        let style = Style {
-            background: Color::BLACK,
-            value: Color::WHITE,
-            selection: Color::WHITE,
-            gutter: Color::WHITE,
-            current_line: Color::WHITE,
-            caret: Color::WHITE,
-            strike: Color::WHITE,
-        };
+        let style = fixtures::STYLE;
         let shown =
             TextEditor::new(&content, "e", settings, style, true, Metrics::default()).padding();
         let hidden =
@@ -1022,21 +1047,16 @@ mod tests {
         assert_eq!(hidden.left, 16.0);
     }
 
-    fn laid_out(text: &str, width: f32) -> RawEditor {
-        font_system()
-            .write()
-            .expect("font system")
-            .load_font(Cow::Borrowed(include_bytes!(
-                "../../../../third_party/jetbrains-mono/JetBrainsMono-Regular.ttf"
-            )));
-        let mut editor = RawEditor::with_text(text);
+    fn laid_out(kind: BackendKind, text: &str, width: f32) -> Backend {
+        fixtures::load_font();
+        let mut editor = Backend::with_text(kind, text);
         let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
-            theme: theme::DARK,
-            font: crate::fonts::EDITOR,
+            palette: fixtures::DARK,
+            font: fixtures::FONT,
         });
         editor.update(
             Size::new(width, 1000.0),
-            crate::fonts::EDITOR,
+            fixtures::FONT,
             Pixels(TEXT_SIZE),
             line_height(),
             Wrapping::WordOrGlyph,
@@ -1047,40 +1067,46 @@ mod tests {
 
     #[test]
     fn wrapped_lines_number_only_their_first_visual_row() {
-        let editor = laid_out(
-            "short\nwrapped words wrapped words wrapped words\n\nend",
-            120.0,
-        );
-        let rows = visual_rows(editor.buffer());
-        let numbered: Vec<_> = rows
-            .iter()
-            .filter(|row| row.starts_line)
-            .map(|row| row.line)
-            .collect();
-        assert_eq!(numbered, [0, 1, 2, 3]);
-        assert!(rows.iter().filter(|row| row.line == 1).count() > 1);
-        for pair in rows.windows(2) {
-            assert_eq!(pair[1].top, pair[0].top + LINE_HEIGHT);
+        for kind in BackendKind::ALL {
+            let editor = laid_out(
+                kind,
+                "short\nwrapped words wrapped words wrapped words\n\nend",
+                120.0,
+            );
+            let rows = visual_rows(editor.buffer());
+            let numbered: Vec<_> = rows
+                .iter()
+                .filter(|row| row.starts_line)
+                .map(|row| row.line)
+                .collect();
+            assert_eq!(numbered, [0, 1, 2, 3], "{kind:?}");
+            assert!(rows.iter().filter(|row| row.line == 1).count() > 1);
+            for pair in rows.windows(2) {
+                assert_eq!(pair[1].top, pair[0].top + LINE_HEIGHT);
+            }
         }
     }
 
     #[test]
     fn only_completed_tasks_outside_code_are_struck() {
-        let editor = laid_out(
-            "- [x] done\n- [ ] open\n```\n- [x] code\n```\n- [X] Done",
-            600.0,
-        );
-        let struck: Vec<_> = visual_rows(editor.buffer())
-            .iter()
-            .filter(|row| row.strike.is_some())
-            .map(|row| row.line)
-            .collect();
-        assert_eq!(struck, [0, 5]);
-        let row = &visual_rows(editor.buffer())[0];
-        let (start, end) = row.strike.unwrap();
-        // "- [x] " is six monospace cells; "done" is four more.
-        let cell = start / 6.0;
-        assert!(cell > 7.0 && cell < 10.0, "{start}");
-        assert!((end - start - 4.0 * cell).abs() < 0.5, "{start}..{end}");
+        for kind in BackendKind::ALL {
+            let editor = laid_out(
+                kind,
+                "- [x] done\n- [ ] open\n```\n- [x] code\n```\n- [X] Done",
+                600.0,
+            );
+            let struck: Vec<_> = visual_rows(editor.buffer())
+                .iter()
+                .filter(|row| row.strike.is_some())
+                .map(|row| row.line)
+                .collect();
+            assert_eq!(struck, [0, 5], "{kind:?}");
+            let row = &visual_rows(editor.buffer())[0];
+            let (start, end) = row.strike.unwrap();
+            // "- [x] " is six monospace cells; "done" is four more.
+            let cell = start / 6.0;
+            assert!(cell > 7.0 && cell < 10.0, "{start}");
+            assert!((end - start - 4.0 * cell).abs() < 0.5, "{start}..{end}");
+        }
     }
 }

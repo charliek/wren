@@ -879,7 +879,8 @@ impl App {
         .padding([6, 16])
         .height(if self.find_open { 44 } else { 0 })
         .clip(true);
-        let editor = container(self.editor.view(self.definition).map(Message::Editor))
+        let (style, palette) = theme::editor_colors(self.definition);
+        let editor = container(self.editor.view(style, palette).map(Message::Editor))
             .width(Fill)
             .max_width(if self.focus { 760.0 } else { f32::MAX })
             .height(Fill);

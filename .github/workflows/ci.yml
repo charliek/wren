@@ -63,6 +63,7 @@ jobs:
     env:
       DISPLAY_BACKEND: ${{ matrix.display }}
       ICED_BACKEND: ${{ matrix.renderer }}
+      WRENTEST_ENGINE: classic,cosmic
       WGPU_BACKEND: vulkan
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:

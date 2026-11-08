@@ -1,0 +1,20 @@
+[package]
+name = "wren-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "A Markdown editor widget for iced 0.14"
+
+[lints]
+workspace = true
+
+[features]
+# Accessors the host's functional test harness reads; not part of the API.
+test-support = []
+
+[dependencies]
+# The workspace's iced: iced always pulls in winit, which needs a windowing
+# feature on Linux, and the widget draws through the concrete iced::Renderer.
+iced.workspace = true

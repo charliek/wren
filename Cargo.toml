@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wren-core", "crates/wren-iced", "crates/wren-markdown", "crates/wren-sparkle"]
+members = ["crates/wren-core", "crates/wren-editor", "crates/wren-iced", "crates/wren-markdown", "crates/wren-sparkle"]
 exclude = ["vendor/iced_winit", "vendor/swash"]
 default-members = ["crates/wren-iced"]
 
@@ -13,6 +13,7 @@ license = "MIT"
 
 [workspace.dependencies]
 wren-core = { path = "crates/wren-core" }
+wren-editor = { path = "crates/wren-editor" }
 wren-sparkle = { path = "crates/wren-sparkle" }
 wren-markdown = { path = "crates/wren-markdown" }
 iced = { version = "=0.14.0", default-features = false, features = [

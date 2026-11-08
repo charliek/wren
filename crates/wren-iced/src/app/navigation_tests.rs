@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::editor_view;
 use iced::widget::text_editor::{Action, Edit, Motion};
 use wren_core::config::Config;
 use wren_core::fs_store::Fault;
@@ -64,10 +63,10 @@ fn group(app: &App, name: &str) -> GroupId {
         .id
 }
 fn append(app: &mut App, text: &str) {
-    let _ = app.edit(editor_view::Message::Action(Action::Move(
+    let _ = app.edit(wren_editor::Message::Action(Action::Move(
         Motion::DocumentEnd,
     )));
-    let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+    let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
         Arc::new(text.into()),
     ))));
 }

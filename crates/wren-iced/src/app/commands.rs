@@ -804,7 +804,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use crate::editor_view;
     use iced::widget::text_editor::{Action as EditorAction, Edit, Motion};
     use wren_core::config::Config;
     use wren_core::fs_store::{Fault, RelPath};
@@ -878,10 +877,10 @@ mod tests {
     }
 
     fn append(app: &mut App, text: &str) {
-        let _ = app.edit(editor_view::Message::Action(EditorAction::Move(
+        let _ = app.edit(wren_editor::Message::Action(EditorAction::Move(
             Motion::DocumentEnd,
         )));
-        let _ = app.edit(editor_view::Message::Action(EditorAction::Edit(
+        let _ = app.edit(wren_editor::Message::Action(EditorAction::Edit(
             Edit::Paste(Arc::new(text.into())),
         )));
     }

@@ -141,6 +141,9 @@ class WrenApp:
     evaluation:
         Use the explicit unsaved editor when no workspace is supplied. Set to
         ``False`` to exercise normal registry restoration and onboarding.
+    settings:
+        Text for the sandbox's ``config.conf``, written before the first
+        launch. Restarts keep whatever the app has written there since.
     """
 
     def __init__(
@@ -151,10 +154,13 @@ class WrenApp:
         workspace: Path | None = None,
         extra_args: tuple[str, ...] = (),
         evaluation: bool = True,
+        settings: str | None = None,
     ) -> None:
         _validate_positive_finite(readiness_timeout, "readiness_timeout")
         if type(evaluation) is not bool:
             raise ValueError("evaluation must be bool")
+        if settings is not None and not isinstance(settings, str):
+            raise ValueError("settings must be str or None")
         self._binary = _find_binary()
         env_artifacts = os.environ.get("WREN_TEST_ARTIFACT_DIR")
         self._artifacts_base = (
@@ -167,6 +173,7 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
+        self._settings = settings
 
         self._ownroot: Path | None = None
         self._socket_path: Path | None = None
@@ -231,6 +238,11 @@ class WrenApp:
         if self._ownroot is None:
             raise RuntimeError("WrenApp is not running")
         return self._ownroot
+
+    @property
+    def settings_path(self) -> Path:
+        """The sandboxed ``config.conf`` the app reads (it may not exist)."""
+        return self.sandbox / "home_root" / _XDG_DIRS["XDG_CONFIG_HOME"] / "wren" / "config.conf"
 
     def quit(self) -> None:
         """Request a clean exit and tear down."""
@@ -338,6 +350,8 @@ class WrenApp:
         self._atexit_registered = True
 
         try:
+            if self._settings is not None:
+                self._write_settings(self._settings)
             self._start_process()
             self._wait_ready()
         except BaseException as exc:
@@ -350,6 +364,14 @@ class WrenApp:
                     f"During startup cleanup: {cleanup_err}"
                 )
             raise exc
+
+    def _write_settings(self, text: str) -> None:
+        path = self.settings_path
+        directory = self.sandbox
+        for part in path.relative_to(self.sandbox).parts[:-1]:
+            directory /= part
+            directory.mkdir(mode=0o700, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
 
     def _start_process(self) -> None:
         assert self._socket_path is not None

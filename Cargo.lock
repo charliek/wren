@@ -5028,6 +5028,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wren-editor"
+version = "0.0.3"
+dependencies = [
+ "iced",
+]
+
+[[package]]
 name = "wren-iced"
 version = "0.0.3"
 dependencies = [
@@ -5041,6 +5048,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wren-core",
+ "wren-editor",
  "wren-sparkle",
 ]
 
