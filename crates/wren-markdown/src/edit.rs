@@ -62,7 +62,7 @@ fn enter<L: Lines + ?Sized>(base: &L, sel: Selection, shift: bool, opts: &Option
     let end = clamp(base, sel.end());
     let mut draft = Draft::new(base);
     draft.delete(start, end);
-    let analysis = Analysis::new(&draft, Some(start.line));
+    let analysis = enter_analysis(&draft, start.line);
     let (caret, requests) = break_line(&mut draft, &analysis, start, shift);
     let mut marks = Selection::caret(caret);
     if opts.renumber {
@@ -72,6 +72,18 @@ fn enter<L: Lines + ?Sized>(base: &L, sel: Selection, shift: bool, opts: &Option
         }
     }
     finish(base, &draft, marks)
+}
+
+/// The analysis Enter on line `l` needs. A line outside any container
+/// breaks without reading the lines after it, so only the lines up to it are
+/// scanned; any other line may continue or renumber a list below.
+fn enter_analysis(d: &Draft, l: usize) -> Analysis {
+    let bounded = Analysis::scan(d, Some(l), l + 1);
+    if bounded.stack(l).is_empty() && as_empty_item(&bounded, l, d.line(l)).is_none() {
+        bounded
+    } else {
+        Analysis::new(d, Some(l))
+    }
 }
 
 /// The plan that turns `base` into `draft`, leaving `selection`.
@@ -1024,8 +1036,18 @@ struct Analysis {
 
 impl Analysis {
     fn new<L: Lines + ?Sized>(lines: &L, checkpoint: Option<usize>) -> Self {
+        Self::scan(lines, checkpoint, lines.line_count())
+    }
+
+    /// The analysis of lines `0..=last` only, for a plan that reads no line
+    /// after `last`. A line's record depends only on the lines up to it, so
+    /// these records are the full analysis's.
+    fn through<L: Lines + ?Sized>(lines: &L, last: usize) -> Self {
+        Self::scan(lines, None, (last + 1).min(lines.line_count()))
+    }
+
+    fn scan<L: Lines + ?Sized>(lines: &L, checkpoint: Option<usize>, count: usize) -> Self {
         let mut scanner = Scanner::with_front_matter(block::front_matter_end(lines));
-        let count = lines.line_count();
         let mut recs = Vec::with_capacity(count);
         let mut opened = Vec::new();
         let mut before = None;
@@ -1332,11 +1354,25 @@ impl Lines for Draft<'_> {
 fn diff<L: Lines + ?Sized>(base: &L, draft: &Draft) -> Vec<Replace> {
     let n = base.line_count();
     let m = draft.lines.len();
+    // Untouched lines at either end give no edits, so only the lines
+    // between them are compared. The first untouched line after them stands
+    // in for the end of the document.
+    let untouched = |j: usize, i: usize| {
+        let line = &draft.lines[j];
+        line.origin == Some(i) && matches!(line.text, Cow::Borrowed(_))
+    };
+    let lo = (0..n.min(m))
+        .find(|&k| !untouched(k, k))
+        .unwrap_or(n.min(m));
+    let tail = (1..=n.min(m) - lo)
+        .take_while(|&k| untouched(m - k, n - k))
+        .count();
+    let (n_end, m_end) = (n - tail, m - tail);
     let mut edits: Vec<Replace> = Vec::new();
-    let (mut i, mut j) = (0, 0);
+    let (mut i, mut j) = (lo, lo);
     loop {
-        let next = (j..m).find_map(|jj| draft.lines[jj].origin.map(|ii| (ii, jj)));
-        let (ii, jj) = next.unwrap_or((n, m));
+        let next = (j..m_end).find_map(|jj| draft.lines[jj].origin.map(|ii| (ii, jj)));
+        let (ii, jj) = next.unwrap_or((n_end, m_end));
         let changed = next.is_some_and(|_| match &draft.lines[jj].text {
             Cow::Borrowed(_) => false,
             Cow::Owned(text) => text != base.line(ii),
@@ -2205,51 +2241,72 @@ mod tests {
         }
     }
 
+    /// Lines the random documents are made of.
+    const LINES: [&str; 40] = [
+        "",
+        " ",
+        "  ",
+        "\t",
+        "- a",
+        "- ",
+        "-",
+        "  - b",
+        "    - c",
+        "\t- t",
+        "* s",
+        "+ p",
+        "1. x",
+        "2. y",
+        "10. z",
+        "09. pad",
+        "1) paren",
+        "- [ ] t",
+        "- [x] d",
+        "1. [X] o",
+        "> q",
+        ">",
+        "> - w",
+        "> > n",
+        ">   c",
+        "```",
+        "~~~",
+        "    code",
+        "Para",
+        "lazy text",
+        "---",
+        "===",
+        "# h",
+        "## T ##",
+        "<div>",
+        "<!-- c -->",
+        "title: x",
+        "é ü 日本",
+        "e\u{301}👨\u{200d}👩\u{200d}👧",
+        "**b** *i* `c`",
+    ];
+
+    /// A random small document with mixed line endings and maybe a byte
+    /// order mark.
+    fn random_text(rng: &mut Rng) -> String {
+        let mut text = String::new();
+        if rng.below(8) == 0 {
+            text.push('\u{feff}');
+        }
+        let count = 1 + rng.below(7);
+        for i in 0..count {
+            if i > 0 {
+                text.push_str(rng.pick(&ENDINGS));
+            }
+            text.push_str(rng.pick(&LINES));
+        }
+        if rng.below(3) == 0 {
+            text.push_str(rng.pick(&ENDINGS));
+        }
+        text
+    }
+
     #[test]
     fn random_documents_and_intents_plan_valid_edits() {
-        const LINES: [&str; 40] = [
-            "",
-            " ",
-            "  ",
-            "\t",
-            "- a",
-            "- ",
-            "-",
-            "  - b",
-            "    - c",
-            "\t- t",
-            "* s",
-            "+ p",
-            "1. x",
-            "2. y",
-            "10. z",
-            "09. pad",
-            "1) paren",
-            "- [ ] t",
-            "- [x] d",
-            "1. [X] o",
-            "> q",
-            ">",
-            "> - w",
-            "> > n",
-            ">   c",
-            "```",
-            "~~~",
-            "    code",
-            "Para",
-            "lazy text",
-            "---",
-            "===",
-            "# h",
-            "## T ##",
-            "<div>",
-            "<!-- c -->",
-            "title: x",
-            "é ü 日本",
-            "e\u{301}👨\u{200d}👩\u{200d}👧",
-            "**b** *i* `c`",
-        ];
-        const ENDINGS: [&str; 4] = ["\n", "\r\n", "\r", "\n\r"];
         let intents = [
             Intent::Enter,
             Intent::ShiftEnter,
@@ -2273,20 +2330,7 @@ mod tests {
         ];
         let mut rng = Rng(0x5eed_0f3a_3d1e_5700);
         for case in 0..30_000 {
-            let mut text = String::new();
-            if rng.below(8) == 0 {
-                text.push('\u{feff}');
-            }
-            let count = 1 + rng.below(7);
-            for i in 0..count {
-                if i > 0 {
-                    text.push_str(rng.pick(&ENDINGS));
-                }
-                text.push_str(rng.pick(&LINES));
-            }
-            if rng.below(3) == 0 {
-                text.push_str(rng.pick(&ENDINGS));
-            }
+            let text = random_text(&mut rng);
             let doc = Document::new(&text);
             // Positions may be off the document or inside a character; the
             // planner clamps them.
@@ -2310,6 +2354,65 @@ mod tests {
             let what = format!("case {case}: {intent:?} at {sel:?} in {text:?}");
             let plan = plan(&doc, sel, intent, &opts);
             assert_valid(&doc, &plan, &what);
+        }
+    }
+
+    fn full_at(doc: &Document, l: usize) -> Analysis {
+        Analysis::new(doc, Some(l))
+    }
+
+    /// The shortcuts that skip the block scan agree with it: a bounded scan
+    /// matches the full one line for line, Enter breaks a line the same way
+    /// with either, a line that starts with a letter has no markup, and
+    /// Backspace's markup and indentation rules never apply after other
+    /// text.
+    #[test]
+    fn scan_shortcuts_agree_with_the_full_scan() {
+        let mut rng = Rng(0x0b0d_5ca1_ab1e_0042);
+        let opts = Options::default();
+        for _ in 0..2_000 {
+            let text = random_text(&mut rng);
+            let doc = Document::new(&text);
+            let full = Analysis::new(&doc, None);
+            for l in 0..doc.line_count() {
+                let line = doc.line(l);
+                let floor = bom_len(l, line);
+                let bounded = Analysis::through(&doc, l);
+                assert_eq!(bounded.recs.len(), l + 1, "{text:?}");
+                assert_eq!(
+                    bounded.recs[l].info, full.recs[l].info,
+                    "line {l} of {text:?}"
+                );
+                assert_eq!(
+                    motion::text_start(&doc, l, floor),
+                    full.recs[l].info.text_start.clamp(floor, line.len()),
+                    "line {l} of {text:?}"
+                );
+                for (col, _) in line.char_indices().chain([(line.len(), ' ')]) {
+                    let p = Pos::new(l, col);
+                    for shift in [false, true] {
+                        let mut bounded = Draft::new(&doc);
+                        let an = enter_analysis(&bounded, l);
+                        let got = break_line(&mut bounded, &an, p, shift);
+                        let mut draft = Draft::new(&doc);
+                        let want = break_line(&mut draft, &full_at(&doc, l), p, shift);
+                        assert_eq!(got.0, want.0, "Enter at {p:?} in {text:?}");
+                        assert_eq!(
+                            diff(&doc, &bounded),
+                            diff(&doc, &draft),
+                            "Enter at {p:?} in {text:?}"
+                        );
+                        assert_eq!(got.1.len(), want.1.len(), "Enter at {p:?} in {text:?}");
+                    }
+                    if !delete::may_end_markup(&line[..col]) {
+                        assert!(
+                            delete::markup_or_indentation(&doc, p, Selection::caret(p), &opts)
+                                .is_none(),
+                            "{p:?} in {text:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
