@@ -6,6 +6,9 @@ smoke-test build under the test harness, and writes one PNG per scene:
     cargo build --locked -p wren-iced --features smoke-test
     python3 tools/capture_scenes.py --theme wren-dark --out target/scenes
 
+`--engine advanced` runs the editor on the advanced engine and writes to
+`<out>/<theme>-advanced/`.
+
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
 """
@@ -44,6 +47,29 @@ SAMPLE = {
 }
 
 
+
+def runbook() -> str:
+    """A note long enough that the outline scrolls the editor."""
+    parts = [
+        ("Preparation", ["Freeze window", "Stakeholders"]),
+        ("Cutover", ["Read path", "Write path", "Verification"]),
+        ("Rollback", ["Triggers", "Steps"]),
+        ("Follow-up", []),
+    ]
+    lines = ["# Cutover runbook", "", "The API migration, step by step.", ""]
+    for part, children in parts:
+        lines += [f"## {part}", ""]
+        lines += [f"- {part} item {n}: check the dashboards" for n in range(1, 7)]
+        lines.append("")
+        for child in children:
+            lines += [f"### {child}", ""]
+            lines += [f"{child} note {n}." for n in range(1, 6)]
+            lines.append("")
+    return "\n".join(lines)
+
+
+SAMPLE["Projects/API Migration/Cutover runbook.md"] = runbook()
+
 # A section with no groups yet, for the empty-state scenes.
 EMPTY_SECTION = "Archive"
 
@@ -65,8 +91,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
+    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic")
     args = parser.parse_args()
-    out = (args.out / args.theme).resolve()
+    suffix = "" if args.engine == "classic" else f"-{args.engine}"
+    out = (args.out / f"{args.theme}{suffix}").resolve()
+    settings = f"editor-engine = {args.engine}\n"
     out.mkdir(parents=True, exist_ok=True)
 
     def shot(client, name: str) -> None:
@@ -79,14 +108,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temp:
         blank = Path(temp).resolve() / "blank"
         blank.mkdir()
-        with WrenApp(workspace=blank, evaluation=False) as app:
+        with WrenApp(workspace=blank, evaluation=False, settings=settings) as app:
             app.client.call("theme.set", {"id": args.theme})
             wait_for(lambda: app.client.call("session.get")["root"], timeout=10)
             shot(app.client, "empty-workspace")
 
         workspace = Path(temp).resolve() / "work"
         build_workspace(workspace)
-        with WrenApp(workspace=workspace, evaluation=False) as app:
+        with WrenApp(workspace=workspace, evaluation=False, settings=settings) as app:
             client = app.client
             client.call("theme.set", {"id": args.theme})
             wait_for(lambda: client.call("session.get")["notes"], timeout=10)
@@ -130,6 +159,26 @@ def main() -> int:
                     client.call("palette.query", {"query": query})
                 shot_here(f"palette-{mode}")
                 client.call("palette.close")
+            runbook_note = next(
+                row for row in client.call("session.get")["notes"]
+                if row["path"].endswith("Cutover runbook.md")
+            )
+            client.call("core.apply", {"op": "open_note", "note": runbook_note["id"]})
+            client.call("palette.open", {"mode": "outline"})
+            # Previewing a heading far down scrolls the editor under the palette.
+            client.call("palette.step", {"delta": 7})
+            shot_here("palette-outline")
+            client.call("palette.query", {"query": "path"})
+            shot_here("palette-outline-filtered")
+            client.call("palette.close")
+            # Without the browser columns it docks at the right instead.
+            client.call("view.focus", {"enabled": True})
+            client.call("palette.open", {"mode": "outline"})
+            client.call("palette.step", {"delta": 8})
+            shot_here("palette-outline-focus")
+            client.call("palette.close")
+            client.call("view.focus", {"enabled": False})
+            client.call("core.apply", {"op": "open_note", "note": note["id"]})
             for _ in range(4):
                 client.call("command.run", {"id": "font.increase"})
             shot_here("text-larger")
