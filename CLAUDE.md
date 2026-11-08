@@ -103,7 +103,8 @@ uv run --locked --group docs zensical build --strict  # docs site; run for chang
   launch in that run fails with "unsupported or duplicate option".
 - To look at the real screens, build with `--features smoke-test`, then run
   `tools/capture_scenes.py` (under `tools/run_display.py x11 -- …` on
-  Linux). It writes one PNG per scene to `target/scenes/<theme>/`.
+  Linux). It writes one PNG per scene to `target/scenes/<theme>/`
+  (`--engine advanced` writes to `target/scenes/advanced/<theme>/`).
 - macOS over ssh: rsync the tree (excluding `target/`, `.venv/`,
   `.claude/`) to a Mac and build there. `capture_scenes.py` works over ssh
   against a real Metal window when a user is logged in at the console.

@@ -62,7 +62,11 @@ smoke lanes.
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`
 (under `tools/run_display.py x11 -- …` on Linux). It writes one PNG per scene
-to `target/scenes/<theme>/`.
+to `target/scenes/<theme>/`, or with `--engine advanced` to
+`target/scenes/advanced/<theme>/`. The `markdown` scene shows a note with
+every construct the editor highlights and a selection across blank lines;
+check it on both engines in both themes after changing the highlighter or
+the editor's drawing.
 
 ## macOS
 
