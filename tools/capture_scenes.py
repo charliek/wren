@@ -7,7 +7,11 @@ smoke-test build under the test harness, and writes one PNG per scene:
     python3 tools/capture_scenes.py --theme wren-dark --out target/scenes
 
 `--engine advanced` runs the editor on the owned engine; the PNGs then go
-to `<out>/advanced/<theme>/` instead of `<out>/<theme>/`.
+to `<out>/advanced/<theme>/` instead of `<out>/<theme>/`. Each `--setting
+key=value` adds a `config.conf` line (`--setting editor-line-height=2`), and
+`--label` names a further directory level for them. `--only markdown` shoots
+just the editor scenes: the Markdown tour, the headings note, and both again
+with the browser columns folded so the editor is wider than its column.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -60,6 +64,24 @@ See https://example.com for more.
 # between the cursor's line and the first fence so the code band shows apart.
 MARKDOWN_SELECTION = ({"line": 15, "column": 10}, {"line": 17, "column": 5})
 
+# Every heading level, one long enough to wrap, and markup around them.
+HEADINGS = """# A first-level heading that runs long enough to wrap onto a second row
+Body text under it, with `code` and a [link](https://wren.dev).
+## Second level ##
+- A list item between headings
+### Third level
+#### Fourth level
+##### Fifth
+###### Sixth
+#
+> # Quoted heading
+Last line of prose.
+"""
+# The cursor on the wrapped heading's second row, then a selection from the
+# middle of the heading into the body.
+HEADINGS_CURSOR = {"line": 0, "column": 60}
+HEADINGS_SELECTION = ({"line": 0, "column": 40}, {"line": 2, "column": 6})
+
 
 SAMPLE = {
     "1-1s/Alice Chen/2026-11-04.md": (
@@ -79,6 +101,7 @@ SAMPLE = {
     "Projects/Planning/Quarterly planning.md": "# Quarterly planning\n",
     "Inbox/Triage/scratch.md": "scratch\n",
     "Inbox/Triage/Markdown tour.md": MARKDOWN,
+    "Inbox/Triage/Headings.md": HEADINGS,
     "Reference/Promotions/Promo rubric.md": "# Promo rubric\n\nScope, impact, and influence.\n",
 }
 
@@ -122,16 +145,60 @@ def build_workspace(root: Path) -> None:
         os.utime(root / relative, (mtime, mtime))
 
 
+def open_note(client, name: str) -> None:
+    note = next(row for row in client.call("session.get")["notes"]
+                if row["path"].endswith(name))
+    client.call("core.apply", {"op": "open_note", "note": note["id"]})
+
+
+def editor_scenes(client, shot_here, suffix: str = "") -> None:
+    """The Markdown tour and the headings note, selected, with the editor
+    focused."""
+    open_note(client, "Markdown tour.md")
+    anchor, position = MARKDOWN_SELECTION
+    client.call("editor.cursor", {**position, "selection": anchor})
+    client.call("editor.focus")
+    shot_here(f"markdown{suffix}")
+    open_note(client, "Headings.md")
+    client.call("editor.cursor", {**HEADINGS_CURSOR, "selection": None})
+    client.call("editor.focus")
+    shot_here(f"headings{suffix}")
+    anchor, position = HEADINGS_SELECTION
+    client.call("editor.cursor", {**position, "selection": anchor})
+    shot_here(f"headings-selected{suffix}")
+
+
+def folded_editor_scenes(client, shot_here) -> None:
+    """The editor scenes with Sections and Groups folded away."""
+    for _ in range(3):
+        client.call("command.run", {"id": "navigation.column_left"})
+    for _ in range(3):
+        client.call("command.run", {"id": "navigation.column_right"})
+    editor_scenes(client, shot_here, "-wide")
+    client.call("column.open", {"column": "sections"})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
     parser.add_argument("--engine", choices=("classic", "advanced"), default="classic",
                         help="the editor-engine setting")
+    parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
+                        help="another config.conf line; repeatable")
+    parser.add_argument("--label", help="a directory level for these settings")
+    parser.add_argument("--only", choices=("markdown",), help="shoot only these scenes")
     args = parser.parse_args()
     out = args.out if args.engine == "classic" else args.out / args.engine
+    if args.label:
+        out = out / args.label
     out = (out / args.theme).resolve()
     settings = f"editor-engine = {args.engine}\n"
+    for setting in args.setting:
+        key, separator, value = setting.partition("=")
+        if not separator:
+            parser.error(f"--setting {setting!r} is not KEY=VALUE")
+        settings += f"{key.strip()} = {value.strip()}\n"
     out.mkdir(parents=True, exist_ok=True)
 
     def shot(client, name: str) -> None:
@@ -142,6 +209,22 @@ def main() -> int:
         print(path)
 
     with tempfile.TemporaryDirectory() as temp:
+        if args.only == "markdown":
+            workspace = Path(temp).resolve() / "work"
+            build_workspace(workspace)
+            with WrenApp(workspace=workspace, evaluation=False, settings=settings) as app:
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_markdown(name: str) -> None:
+                    shot(app.client, name)
+
+                editor_scenes(app.client, shot_markdown)
+                folded_editor_scenes(app.client, shot_markdown)
+            return 0
+
         blank = Path(temp).resolve() / "blank"
         blank.mkdir()
         with WrenApp(workspace=blank, evaluation=False, settings=settings) as app:
@@ -272,10 +355,8 @@ def main() -> int:
             client.call("palette.open", {"mode": "jump"})
             client.call("palette.query", {"query": "Markdown tour"})
             client.call("palette.activate", {})
-            anchor, position = MARKDOWN_SELECTION
-            client.call("editor.cursor", {**position, "selection": anchor})
-            client.call("editor.focus")
-            shot_here("markdown")
+            editor_scenes(client, shot_here)
+            folded_editor_scenes(client, shot_here)
     return 0
 
 

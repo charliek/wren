@@ -151,6 +151,8 @@ pub struct EditorView {
     find_current: Option<usize>,
     line_numbers: bool,
     metrics: widget::Metrics,
+    /// Row height as a multiple of the text size.
+    line_height: f32,
     font: Font,
     /// The text's `block::front_matter_end`, kept current after every
     /// change for the highlighter, which cannot look ahead.
@@ -181,6 +183,7 @@ impl EditorView {
             find_current: None,
             line_numbers: true,
             metrics: widget::Metrics::default(),
+            line_height: widget::DEFAULT_LINE_HEIGHT,
             font: Font::MONOSPACE,
             front_matter_end: None,
             markdown_assist: true,
@@ -209,7 +212,14 @@ impl EditorView {
 
     /// Editor text size in points; row and caret heights scale with it.
     pub fn set_font_size(&mut self, size: f32) {
-        self.metrics = widget::Metrics::for_size(size);
+        self.metrics = widget::Metrics::new(size, self.line_height);
+    }
+
+    /// Row height as a multiple of the text size (1.7 by default), kept
+    /// across text size changes.
+    pub fn set_line_height(&mut self, ratio: f32) {
+        self.line_height = ratio;
+        self.metrics = widget::Metrics::new(self.metrics.text, ratio);
     }
 
     /// The editor font; bold and italic spans use its variants. Defaults to
@@ -226,6 +236,12 @@ impl EditorView {
     #[cfg(feature = "test-support")]
     pub fn font_size(&self) -> f32 {
         self.metrics.text
+    }
+
+    /// The height of a body row, in pixels.
+    #[cfg(feature = "test-support")]
+    pub fn row_height(&self) -> f32 {
+        self.metrics.line
     }
 
     /// Show or hide the line-number gutter (shown by default).
@@ -947,6 +963,17 @@ mod tests {
         assert_eq!(edit_kind(&Action::Edit(Edit::Backspace)), EditKind::Delete);
         assert_eq!(edit_kind(&Action::Edit(Edit::Delete)), EditKind::Delete);
         assert_eq!(edit_kind(&Action::Edit(Edit::Indent)), EditKind::Replace);
+    }
+
+    #[test]
+    fn a_text_size_change_keeps_the_line_height_ratio() {
+        let mut ev = EditorView::new("x");
+        ev.set_line_height(2.0);
+        assert_eq!(ev.metrics, widget::Metrics::new(14.0, 2.0));
+        ev.set_font_size(20.0);
+        assert_eq!(ev.metrics.line, 40.0);
+        ev.set_line_height(widget::DEFAULT_LINE_HEIGHT);
+        assert_eq!(ev.metrics, widget::Metrics::for_size(20.0));
     }
 
     #[test]

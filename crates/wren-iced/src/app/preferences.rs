@@ -252,6 +252,7 @@ impl App {
     pub(super) fn apply_preferences(&mut self) {
         self.apply_shown();
         let settings = &self.preferences.settings;
+        self.editor.set_line_height(settings.editor_line_height);
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
         self.editor.set_markdown_assist(settings.markdown_assist);
@@ -601,6 +602,27 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn the_line_height_applies_on_reload_and_survives_text_size_steps() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "editor-line-height = 2\n").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        assert_eq!(app.editor.row_height(), 28.0);
+        let _ = app.step_text_size(Some(1.0));
+        assert_eq!(app.editor.row_height(), 30.0);
+        std::fs::write(&path, "editor-font-size = 15\neditor-line-height = 3\n").unwrap();
+        assert!(app
+            .reload_settings(false)
+            .unwrap()
+            .contains("editor-line-height"));
+        assert_eq!(app.editor.row_height(), 26.0);
     }
 
     #[test]

@@ -16,6 +16,10 @@ const MAX_BYTES: u64 = 1024 * 1024;
 pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// Row height as a multiple of the text size: 24 px rows at 14 pt.
+pub const DEFAULT_LINE_HEIGHT: f32 = 1.7;
+pub const MIN_LINE_HEIGHT: f32 = 1.2;
+pub const MAX_LINE_HEIGHT: f32 = 2.2;
 
 /// Which theme to show: a fixed theme, or one per system appearance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +117,8 @@ pub struct Settings {
     pub editor_font_size: f32,
     /// A font family name; `None` uses the bundled JetBrains Mono.
     pub editor_font_family: Option<String>,
+    /// Row height as a multiple of the text size.
+    pub editor_line_height: f32,
     pub line_numbers: bool,
     pub editor_engine: EditorEngine,
     /// The Markdown-aware Enter, Tab, Backspace, and Home.
@@ -128,6 +134,7 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             editor_font_size: DEFAULT_FONT_SIZE,
             editor_font_family: None,
+            editor_line_height: DEFAULT_LINE_HEIGHT,
             line_numbers: true,
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
@@ -197,6 +204,12 @@ impl Settings {
                 "editor-font-family" => match value.trim() {
                     "" => invalid(),
                     family => settings.editor_font_family = Some(family.into()),
+                },
+                "editor-line-height" => match value.parse::<f32>() {
+                    Ok(ratio) if (MIN_LINE_HEIGHT..=MAX_LINE_HEIGHT).contains(&ratio) => {
+                        settings.editor_line_height = ratio
+                    }
+                    _ => invalid(),
                 },
                 "line-numbers" => match parse_bool(value) {
                     Some(enabled) => settings.line_numbers = enabled,
@@ -371,6 +384,9 @@ pub const TEMPLATE: &str = "\
 # monospace ones.
 # editor-font-family = \"JetBrains Mono\"
 
+# Editor row height as a multiple of the text size (1.2–2.2).
+# editor-line-height = 1.7
+
 # Show the line-number gutter.
 # line-numbers = true
 
@@ -456,6 +472,24 @@ mod tests {
         assert!(settings.warnings[0].contains("editor-engine"));
         for engine in [EditorEngine::Classic, EditorEngine::Advanced] {
             assert_eq!(EditorEngine::parse(engine.value()), Some(engine));
+        }
+    }
+
+    #[test]
+    fn editor_line_height_accepts_ratios_in_range_and_warns_otherwise() {
+        assert_eq!(Settings::default().editor_line_height, DEFAULT_LINE_HEIGHT);
+        for (value, ratio) in [("1.2", 1.2), ("2.2", 2.2), ("1.45", 1.45), ("2", 2.0)] {
+            let settings = Settings::parse(&format!("editor-line-height = {value}\n"));
+            assert_eq!(settings.editor_line_height, ratio, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        for value in ["1.19", "2.3", "24px", "", "NaN"] {
+            let settings = Settings::parse(&format!(
+                "editor-line-height = 1.5\neditor-line-height = {value}\n"
+            ));
+            assert_eq!(settings.editor_line_height, 1.5, "{value}");
+            assert_eq!(settings.warnings.len(), 1, "{value}");
+            assert!(settings.warnings[0].contains("editor-line-height"));
         }
     }
 

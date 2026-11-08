@@ -59,7 +59,9 @@ use crate::keys::KeyPolicy;
 use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 24.0;
+/// Row height as a multiple of the text size: the mockup's 24 px rows at
+/// 14 px text.
+pub const DEFAULT_LINE_HEIGHT: f32 = 1.7;
 /// Horizontal inset of each mockup row (`editorWrap` padding).
 const ROW_INSET: f32 = 8.0;
 /// How far a code band reaches left of the text, into the gutter padding.
@@ -84,8 +86,9 @@ const CHIP_PADDING_X: f32 = 2.0;
 const CHIP_RADIUS: f32 = 3.0;
 const STRIKE_THICKNESS: f32 = 1.0;
 
-/// Text size, row height, caret height, and gutter width, scaled together
-/// from the mockup's 14 px text / 24 px rows / 18 px caret / 52 px gutter.
+/// Text size, row height, caret height, and gutter width. The caret and
+/// gutter scale from the mockup's 14 px text / 18 px caret / 52 px gutter;
+/// rows are the text size times a line-height ratio, in whole pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     pub text: f32,
@@ -97,14 +100,21 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn for_size(text: f32) -> Self {
+    /// Metrics for `text` px text in rows `line_height` times as tall.
+    pub fn new(text: f32, line_height: f32) -> Self {
         let scale = text / TEXT_SIZE;
+        let line = (text * line_height).round();
         Self {
             text,
-            line: (LINE_HEIGHT * scale).round(),
-            caret: (CARET_HEIGHT * scale).round(),
+            line,
+            // A tight line height must not push the caret into the next row.
+            caret: (CARET_HEIGHT * scale).round().min(line),
             gutter: GUTTER_PADDING_RIGHT + ((GUTTER_WIDTH - GUTTER_PADDING_RIGHT) * scale).round(),
         }
+    }
+
+    pub fn for_size(text: f32) -> Self {
+        Self::new(text, DEFAULT_LINE_HEIGHT)
     }
 
     fn line_height(self) -> LineHeight {
@@ -1131,6 +1141,8 @@ mod tests {
     use super::*;
     use crate::fixtures;
 
+    const LINE_HEIGHT: f32 = 24.0;
+
     #[test]
     fn metrics_scale_from_the_mockup_sizes() {
         assert_eq!(
@@ -1150,6 +1162,20 @@ mod tests {
                 caret: 27.0,
                 gutter: 69.0,
             }
+        );
+    }
+
+    #[test]
+    fn rows_follow_the_line_height_ratio_and_keep_the_caret_inside() {
+        assert_eq!(Metrics::new(14.0, 2.0).line, 28.0);
+        assert_eq!(Metrics::new(14.0, 1.3).line, 18.0);
+        let tight = Metrics::new(14.0, 1.2);
+        assert_eq!((tight.line, tight.caret), (17.0, 17.0));
+        // A new text size keeps the ratio.
+        assert_eq!(Metrics::new(20.0, 2.0).line, 40.0);
+        assert_eq!(
+            Metrics::new(20.0, 2.0).gutter,
+            Metrics::for_size(20.0).gutter
         );
     }
 
