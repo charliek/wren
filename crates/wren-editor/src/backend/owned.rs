@@ -873,8 +873,9 @@ fn page_rows(
             .get(row)
             .and_then(|layout| layout.line_height_opt)
             .unwrap_or(body);
+        // A row taller than the view is still a page, or paging would stall.
         if moved + height > page {
-            return Some(rows);
+            return Some(rows.max(1));
         }
         moved += height;
         rows += 1;
@@ -1366,6 +1367,25 @@ mod tests {
         engine.move_to(at(9, 4));
         engine.perform(Action::Move(Motion::PageDown));
         assert_eq!(engine.cursor().position.line, 9);
+    }
+
+    #[test]
+    fn a_page_shorter_than_the_next_row_still_moves_one_row() {
+        fixtures::load_font();
+        let mut engine = Engine::with_text("# A\n# B\n# C\nbody\nbody");
+        let mut highlighter = highlighter();
+        update(&mut engine, &mut highlighter, 30.0, fixtures::FONT);
+        engine.move_to(at(0, 1));
+        for line in [1, 2, 3] {
+            engine.perform(Action::Move(Motion::PageDown));
+            update(&mut engine, &mut highlighter, 30.0, fixtures::FONT);
+            assert_eq!(engine.cursor().position.line, line);
+        }
+        for line in [2, 1, 0, 0] {
+            engine.perform(Action::Move(Motion::PageUp));
+            update(&mut engine, &mut highlighter, 30.0, fixtures::FONT);
+            assert_eq!(engine.cursor().position.line, line);
+        }
     }
 
     /// The cursor line's first visible row as `(top, height)`, if it lies
