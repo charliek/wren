@@ -6,6 +6,9 @@ smoke-test build under the test harness, and writes one PNG per scene:
     cargo build --locked -p wren-iced --features smoke-test
     python3 tools/capture_scenes.py --theme wren-dark --out target/scenes
 
+`--engine advanced` runs the editor on the owned engine; the PNGs then go
+to `<out>/advanced/<theme>/` instead of `<out>/<theme>/`.
+
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
 """
@@ -22,6 +25,41 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
+
+# Every construct the highlighter draws, for the `markdown` scene.
+MARKDOWN = """---
+title: Markdown tour
+tags: [demo]
+---
+# Markdown tour
+## Lists and tasks
+- Plan the **API migration** with *Bob*
+  - Nested item with `inline code`
+    1. Ordered child
+- [x] Shipped the [design notes](https://example.com/notes)
+  - [ ] Open follow-up
+  - [x] Done nested ~~draft~~
+> Quoted text with a [link](https://wren.dev)
+> > Nested quote
+
+Selection crosses
+
+blank lines and ~~struck~~ text.
+
+**[Bold](https://x.io/a_b)** and https://x.io/Foo_(bar).
+```sh
+cargo test
+```
+~~~
+tilde fence
+~~~
+    indented code
+See https://example.com for more.
+"""
+# The selection runs from "crosses" (line 15) into line 17, leaving prose
+# between the cursor's line and the first fence so the code band shows apart.
+MARKDOWN_SELECTION = ({"line": 15, "column": 10}, {"line": 17, "column": 5})
+
 
 SAMPLE = {
     "1-1s/Alice Chen/2026-11-04.md": (
@@ -40,6 +78,7 @@ SAMPLE = {
     "Projects/API Migration/Cutover plan.md": "# Cutover plan\n",
     "Projects/Planning/Quarterly planning.md": "# Quarterly planning\n",
     "Inbox/Triage/scratch.md": "scratch\n",
+    "Inbox/Triage/Markdown tour.md": MARKDOWN,
     "Reference/Promotions/Promo rubric.md": "# Promo rubric\n\nScope, impact, and influence.\n",
 }
 
@@ -65,8 +104,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
+    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic")
     args = parser.parse_args()
-    out = (args.out / args.theme).resolve()
+    out = args.out if args.engine == "classic" else args.out / args.engine
+    out = (out / args.theme).resolve()
+    settings = f"editor-engine = {args.engine}\n"
     out.mkdir(parents=True, exist_ok=True)
 
     def shot(client, name: str) -> None:
@@ -79,14 +121,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temp:
         blank = Path(temp).resolve() / "blank"
         blank.mkdir()
-        with WrenApp(workspace=blank, evaluation=False) as app:
+        with WrenApp(workspace=blank, evaluation=False, settings=settings) as app:
             app.client.call("theme.set", {"id": args.theme})
             wait_for(lambda: app.client.call("session.get")["root"], timeout=10)
             shot(app.client, "empty-workspace")
 
         workspace = Path(temp).resolve() / "work"
         build_workspace(workspace)
-        with WrenApp(workspace=workspace, evaluation=False) as app:
+        with WrenApp(workspace=workspace, evaluation=False, settings=settings) as app:
             client = app.client
             client.call("theme.set", {"id": args.theme})
             wait_for(lambda: client.call("session.get")["notes"], timeout=10)
@@ -147,6 +189,13 @@ def main() -> int:
                 "op": "create_group", "section": archive["id"], "name": "2026",
             })
             shot_here("empty-group")
+            client.call("palette.open", {"mode": "jump"})
+            client.call("palette.query", {"query": "Markdown tour"})
+            client.call("palette.activate", {})
+            anchor, position = MARKDOWN_SELECTION
+            client.call("editor.cursor", {**position, "selection": anchor})
+            client.call("editor.focus")
+            shot_here("markdown")
     return 0
 
 

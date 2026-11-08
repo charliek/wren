@@ -274,6 +274,16 @@ impl<'a> Lines<'a> {
     }
 }
 
+impl wren_markdown::Lines for Lines<'_> {
+    fn line_count(&self) -> usize {
+        self.len()
+    }
+
+    fn line(&self, i: usize) -> &str {
+        self.0.lines[i].text()
+    }
+}
+
 pub(crate) fn ending(ending: cosmic_text::LineEnding) -> LineEnding {
     match ending {
         cosmic_text::LineEnding::Lf => LineEnding::Lf,
@@ -318,6 +328,7 @@ mod tests {
         let mut highlighter = MarkdownHighlighter::new(&Settings {
             palette: fixtures::DARK,
             font: fixtures::FONT,
+            front_matter_end: None,
         });
         update(&mut backend, &mut highlighter, size, fixtures::FONT);
         (backend, highlighter)

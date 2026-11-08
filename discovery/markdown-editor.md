@@ -457,6 +457,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - **`theme.rs` stays untouched.** This work does not edit `wren-core/src/theme.rs`.
 - **wren-26's highlighter changes come across.** Their commit `df7a6c1` (syntax tokens, the emphasis-marker font fix, links, and the `code_block` band) is folded into `wren-editor`'s highlighter in milestone 5.
 - **New color fields.** `wren_editor::Palette` gains `heading`, `link`, `code`, and `quote`. `Style` gains `code_block` and `gutter_current`.
+- **Landed in milestone 5.** The selection fill is `Style::text_selection` (renamed from `selection`, rather than a second field). `Palette` dropped `danger` and `success`, which nothing draws with any more: strikethrough is `completed` text between `faint` tildes, and it now gets the strike line that done tasks get. Done-task text is flat `completed` (no emphasis faces or code colour) except for links. The code band is for fenced blocks only; indented code stays muted without one. Under the interim mapping `code_block` equals `current_line`, so the band and the inline-code chip vanish on the cursor's line until the theme gives `code_block` its own colour.
 - **Interim mapping.** Until the new tokens land, `editor_colors` maps them as follows:
 
   | Editor field | Mapped from |
@@ -479,10 +480,11 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - **wren-26's second editor commit also comes across.** Milestone 5 absorbs `e17c877` along with `df7a6c1`: H2 uses `heading2`, done and struck text use `completed`, and the selection uses `text_selection`. Theme side `516231c` changes the Wren Light accent to `#a14808`; when merging `test_editor.py`, keep our engine parametrization and their light tuple `(0xA1, 0x48, 0x08)`. Default pane widths now live in `workspace_state.rs` (`PANE_WIDTHS`, used by `Op::ResetWidths`).
 - **Notify wren-26** whenever `editor_colors`, `Palette`, `Style`, or the highlight test in `test_editor.py` changes.
 
-**Design review round 2** (P1, widget and highlighter):
+**Design review round 2** (P1, widget and highlighter; all four landed in milestone 5):
 - **Selected newlines.** Each selected newline and each selected empty line gets a selection cell about one character wide, so a selection across blank lines reads as one block.
 - **Link destinations.** In `[text](url)` the URL uses `completed`; brackets and parens stay `faint`.
 - **Links in done tasks.** Link text on a done-task line keeps the `link` color, and the strike is still drawn.
+- **Inline precedence.** Code spans and HTML comments are found first. Links and bare URLs come next, so emphasis never pairs a `_` or `*` inside a URL. Strikethrough and emphasis are matched inside link text, and then across the line, where they can wrap whole links and other emphasis. Link destinations end at the `)` that balances their parentheses (CommonMark). Bare URLs drop trailing punctuation, and they drop a final `)` only when it is unbalanced (GFM autolinks).
 - **Inline code chip** (optional). A `code_block` background behind inline code spans, with about 2 px padding.
 
 **Design-review defaults** for the P1 visual items:
@@ -578,7 +580,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 2. **`wren-markdown`:** `block` and `outline` with tests. *Parallel with 1.*
 3. **`wren-markdown`:** the `edit` planner for §5.2–5.7, the CodeMirror corpus, and the divergence table.
 4. **`wren-editor`:** the `Backend` seam with Iced only. Then the owned engine behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.*
-5. **Point the highlighter, `done_task_ranges`, and `index.rs` at `wren-markdown::block`.**
+5. **Point the highlighter, `done_task_ranges`, and `index.rs` at `wren-markdown::block`.** Done. The strike ranges come from the highlighter's per-line decorations rather than a separate scan. A note's search preview is its first paragraph line outside front matter and headings (setext ones included), so a note whose only body is code or an empty item has no preview.
 6. **Intents:**
    - the `Message::Intent` / `EditorView::apply` path;
    - the `App::edit` helper and the debounced word count;

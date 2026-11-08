@@ -5025,6 +5025,7 @@ dependencies = [
  "tempfile",
  "toml",
  "trash",
+ "wren-markdown",
 ]
 
 [[package]]
@@ -5032,6 +5033,7 @@ name = "wren-editor"
 version = "0.0.3"
 dependencies = [
  "iced",
+ "wren-markdown",
 ]
 
 [[package]]

@@ -22,14 +22,19 @@ pub fn from_definition(definition: theme::Theme) -> Theme {
 }
 
 /// The editor's surface and Markdown highlighting colours for `definition`.
+///
+/// The syntax and band fields map onto existing theme colours until the
+/// theme gains tokens of its own (`discovery/markdown-editor.md`, §6).
 pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_editor::Palette) {
     let c = definition.colors;
     let style = wren_editor::Style {
         background: color(c.editor),
         value: color(c.body),
-        selection: color(c.selected),
+        text_selection: color(c.selected),
         gutter: color(c.faint),
+        gutter_current: color(c.body),
         current_line: color(c.current_line),
+        code_block: color(c.current_line),
         caret: color(c.accent),
         strike: color(c.faint),
     };
@@ -38,8 +43,12 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
         muted: color(c.muted),
         faint: color(c.faint),
         accent: color(c.accent),
-        danger: color(c.danger),
-        success: color(c.success),
+        heading: color(c.accent),
+        heading2: color(c.accent),
+        link: color(c.accent),
+        code: color(c.success),
+        quote: color(c.muted),
+        completed: color(c.faint),
     };
     (style, palette)
 }
@@ -75,6 +84,23 @@ mod tests {
     }
 
     #[test]
+    fn syntax_and_band_fields_use_their_interim_theme_colours() {
+        for theme in theme::BUILT_INS {
+            let c = theme.colors;
+            let (style, palette) = editor_colors(*theme);
+            assert_eq!(style.text_selection, color(c.selected));
+            assert_eq!(style.code_block, color(c.current_line));
+            assert_eq!(style.gutter_current, color(c.body));
+            for heading in [palette.heading, palette.heading2, palette.link] {
+                assert_eq!(heading, color(c.accent));
+            }
+            assert_eq!(palette.code, color(c.success));
+            assert_eq!(palette.quote, color(c.muted));
+            assert_eq!(palette.completed, color(c.faint));
+        }
+    }
+
+    #[test]
     fn editor_palette_maps_the_semantic_text_tokens() {
         for theme in theme::BUILT_INS {
             let (_, palette) = editor_colors(*theme);
@@ -83,8 +109,6 @@ mod tests {
             assert_eq!(palette.muted, color(c.muted));
             assert_eq!(palette.faint, color(c.faint));
             assert_eq!(palette.accent, color(c.accent));
-            assert_eq!(palette.danger, color(c.danger));
-            assert_eq!(palette.success, color(c.success));
         }
     }
 
