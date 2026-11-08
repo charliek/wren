@@ -30,7 +30,9 @@ files directly and adds one `.wren/` directory for its own metadata.
 - **Line endings are kept.** Wren saves a note with the line endings it
   had (LF, CRLF, CR, or a mix). A line break you type or paste takes the
   ending of the line it splits; on the last line, which has none, it takes
-  the line above's, so a CRLF note stays CRLF.
+  the line above's, so a CRLF note stays CRLF. One mix cannot be saved as
+  shown: a CR-ended line followed by an empty LF-ended line is written as
+  one CRLF break, so that blank line is gone when the note is reopened.
 - **Delete goes to the OS trash.** Wren never unlinks a note or folder.
 - **Large files are left alone.** A note over 64 MiB is not opened or
   rewritten.
