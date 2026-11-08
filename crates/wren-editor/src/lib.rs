@@ -1133,6 +1133,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn undo_after_scrolling_away_shows_the_caret() {
+        let size = iced::Size::new(300.0, 120.0);
+        for kind in BackendKind::ALL {
+            for away in [-60, 60] {
+                let mut ev = EditorView::with_backend(kind, &numbered_lines(200));
+                ev.content.lay_out(size);
+                ev.move_cursor(at(100, 3));
+                ev.content.lay_out(size);
+                assert!(ev.perform(Action::Edit(Edit::Insert('Q'))));
+                ev.content.lay_out(size);
+                ev.perform(Action::Scroll { lines: away });
+                ev.content.lay_out(size);
+
+                assert!(ev.undo());
+                ev.content.lay_out(size);
+                assert_eq!(ev.cursor(), at(100, 3), "{kind:?} {away}");
+                let Some(text_editor::Selection::Caret(caret)) = ev.content.selection_geometry()
+                else {
+                    panic!("{kind:?} {away}: a caret");
+                };
+                assert!(
+                    (0.0..size.height).contains(&caret.y),
+                    "{kind:?} {away}: {caret:?}"
+                );
+            }
+        }
+    }
+
     /// Laid-out selection, paging, Enter, and history over wrapped CRLF rows
     /// leave both engines with the same text, cursor, selection, and scroll.
     #[test]

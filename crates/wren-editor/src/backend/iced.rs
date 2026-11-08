@@ -5,7 +5,7 @@ use iced::advanced::text::editor::Editor as _;
 use iced::advanced::text::Renderer as _;
 use std::sync::Arc;
 
-use iced::widget::text_editor::{Action, Cursor, Edit, Position};
+use iced::widget::text_editor::{Action, Cursor, Edit, Position, Selection};
 use iced::{Color, Point, Rectangle, Renderer};
 
 /// After a font change iced reshapes only the scrolled-to lines, and the
@@ -36,6 +36,20 @@ pub(super) fn reshape_to_cursor(editor: &mut RawEditor) {
         });
         editor.move_to(cursor);
     }
+}
+
+/// iced's caret query panics when the cursor line has no layout, which an
+/// edit leaves on a line out of view until the view reaches it.
+pub(super) fn selection(editor: &RawEditor) -> Option<Selection> {
+    let cursor = editor.cursor();
+    let laid_out = || {
+        editor
+            .buffer()
+            .lines
+            .get(cursor.position.line)
+            .is_some_and(|line| line.layout_opt().is_some())
+    };
+    (cursor.selection.is_some() || laid_out()).then(|| editor.selection())
 }
 
 /// iced has no range edit, so select the range and paste over it.

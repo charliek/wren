@@ -92,7 +92,13 @@ impl Backend {
     /// its next update.
     pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
         match self {
-            Self::Iced(editor) => editor.move_to(cursor),
+            Self::Iced(editor) => {
+                // An undo that leaves the cursor where the paste put it is no
+                // move to iced, which would then neither scroll to it nor lay
+                // out its line.
+                editor.move_to(cursor);
+                iced::reshape_to_cursor(editor);
+            }
             Self::Owned(engine) => engine.restore_view(cursor, scroll),
         }
     }
@@ -155,7 +161,7 @@ impl Backend {
     /// `None` when the engine cannot place them.
     pub fn selection(&self) -> Option<Selection> {
         match self {
-            Self::Iced(editor) => Some(editor.selection()),
+            Self::Iced(editor) => iced::selection(editor),
             Self::Owned(engine) => engine.selection(),
         }
     }
@@ -165,7 +171,7 @@ impl Backend {
     /// out of view, the anchor keeps its column on the nearest view edge.
     pub fn ime_position(&self) -> Option<Point> {
         let anchor = match self {
-            Self::Iced(editor) => match editor.selection() {
+            Self::Iced(editor) => match iced::selection(editor)? {
                 Selection::Caret(position) => position,
                 Selection::Range(ranges) => ranges.first().cloned().unwrap_or_default().position(),
             },
