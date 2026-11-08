@@ -1273,6 +1273,11 @@ impl ShapeLine {
                     let mut fitting_start = (span.words.len(), 0);
                     for (i, word) in span.words.iter().enumerate().rev() {
                         let word_width = word.width(font_size);
+                        // Wren: a word that wraps after others lands on a
+                        // continuation row, so whether it must break is
+                        // judged at that row's width.
+                        let landing_limit =
+                            limit(visual_lines.len() + usize::from(word_range_width > 0.));
 
                         // Addition in the same order used to compute the final width, so that
                         // relayouts with that width as the `line_width` will produce the same
@@ -1292,12 +1297,12 @@ impl ShapeLine {
                             word_range_width += word_width;
                         } else if wrap == Wrap::Glyph
                             // Make sure that the word is able to fit on it's own line, if not, fall back to Glyph wrapping.
-                            || (wrap == Wrap::WordOrGlyph && word_width > limit(visual_lines.len()))
+                            || (wrap == Wrap::WordOrGlyph && word_width > landing_limit)
                         {
                             // Commit the current line so that the word starts on the next line.
                             if word_range_width > 0.
                                 && wrap == Wrap::WordOrGlyph
-                                && word_width > limit(visual_lines.len())
+                                && word_width > landing_limit
                             {
                                 add_to_visual_line(
                                     &mut current_visual_line,
@@ -1401,6 +1406,11 @@ impl ShapeLine {
                     let mut fitting_start = (0, 0);
                     for (i, word) in span.words.iter().enumerate() {
                         let word_width = word.width(font_size);
+                        // Wren: a word that wraps after others lands on a
+                        // continuation row, so whether it must break is
+                        // judged at that row's width.
+                        let landing_limit =
+                            limit(visual_lines.len() + usize::from(word_range_width > 0.));
                         if current_visual_line.w + (word_range_width + word_width)
                             <= limit(visual_lines.len())
                             // Include one blank word over the width limit since it won't be
@@ -1416,12 +1426,12 @@ impl ShapeLine {
                             word_range_width += word_width;
                         } else if wrap == Wrap::Glyph
                             // Make sure that the word is able to fit on it's own line, if not, fall back to Glyph wrapping.
-                            || (wrap == Wrap::WordOrGlyph && word_width > limit(visual_lines.len()))
+                            || (wrap == Wrap::WordOrGlyph && word_width > landing_limit)
                         {
                             // Commit the current line so that the word starts on the next line.
                             if word_range_width > 0.
                                 && wrap == Wrap::WordOrGlyph
-                                && word_width > limit(visual_lines.len())
+                                && word_width > landing_limit
                             {
                                 add_to_visual_line(
                                     &mut current_visual_line,

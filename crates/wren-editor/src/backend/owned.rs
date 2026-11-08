@@ -1207,6 +1207,26 @@ mod tests {
                 assert!(row.w <= 300.0, "{text:?}: {}", row.w);
             }
         }
+        // A word that would fit a first row but not a continuation row still
+        // breaks on the continuation row instead of running past the edge.
+        let quotes = "> ".repeat(8);
+        for (text, word_start) in [
+            (format!("- ab {}", "x".repeat(34)), 5),
+            (format!("{quotes}- ab {} and more", "Z".repeat(30)), 21),
+        ] {
+            let (engine, _) = laid_out(&text);
+            let first = &engine.buffer().lines[0].layout_opt().unwrap()[0];
+            let cell = caret_x(&first.glyphs, 1);
+            let word = text[word_start..].split(' ').next().unwrap().len() as f32 * cell;
+            let hang = rows(&engine, 0)[1].1;
+            assert!(word > 300.0 - hang && word <= 300.0, "{text:?}: {word}");
+            for row in engine.buffer().lines[0].layout_opt().unwrap() {
+                let end = row.glyphs.iter().map(|glyph| glyph.x + glyph.w);
+                let end = end.fold(0.0, f32::max);
+                assert!(end <= 300.0 + 0.01, "{text:?}: a row ends at {end}");
+                assert!(row.w <= 300.0 + 0.01, "{text:?}: {}", row.w);
+            }
+        }
         // Prose, headings, and fenced code outside containers do not hang.
         for text in [
             LONG.to_owned(),

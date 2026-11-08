@@ -11,7 +11,8 @@ and the only per-row x offset is the alignment.
 Only `src/` and the licenses are kept. `Cargo.toml` is the crates.io one
 without its `[[test]]` and `[[bench]]` targets and `[profile.test]`, whose
 files are not vendored. Each change is marked in the source with a
-`Wren:` comment. About 65 lines are added and 13 changed:
+`Wren:` comment. The source diff adds 85 lines and removes 13, so 13
+upstream lines are changed and about 70 are new:
 
 * `src/buffer_line.rs`: `BufferLine` gains `hanging_indent: usize`, a byte
   offset into the line, 0 by default, with `hanging_indent()` and
@@ -27,8 +28,14 @@ files are not vendored. Each change is marked in the source with a
     scans them all. It is capped at half the wrap width, and is 0 with
     `Wrap::None`.
   * Wrapping checks the first row against the full width and every later
-    row against the width minus the indent. All ten
-    `width_opt.unwrap_or(f32::INFINITY)` checks became `limit(rows so far)`.
+    row against the width minus the indent. The ten
+    `width_opt.unwrap_or(f32::INFINITY)` checks, five in each of the two
+    word loops, became row limits. Three per loop (does the word fit, does
+    the glyph fit) use `limit(rows so far)`. The two that decide whether a
+    word must be broken (`Wrap::WordOrGlyph`) use `landing_limit`, the
+    limit of the row the word lands on: the next row when it wraps after
+    other words. Otherwise a word that fits the full width but not a
+    continuation row was moved down whole and ran past the edge.
   * Each continuation row starts the indent in from its start edge (right
     for RTL), and has that much less room for alignment and justification.
     Its `LayoutLine::w` includes the indent, so measuring a buffer still
