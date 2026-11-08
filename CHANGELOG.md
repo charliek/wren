@@ -27,6 +27,7 @@ version's section as its notes, and publishes to the apt repo. See
   lists the installed monospace fonts, bundled JetBrains Mono first, and
   saves the choice as `editor-font-family`. That setting accepts any
   installed family, including proportional ones, if you set it by hand.
+  Bitmap-only fonts, such as macOS's GB18030 Bitmap, are left out.
 - **Live preview in the theme and font pickers.** Moving the highlight shows
   that theme or font right away. Enter keeps it; Esc puts the saved one back.
 
@@ -37,6 +38,10 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Fixed
 
+- **Fonts with malformed tables no longer crash Wren.** Wren now builds with a
+  patched copy of the swash font library carrying Roost's safety fixes. One
+  macOS font, GB18030 Bitmap, aborted a debug build when previewed in the
+  font picker.
 - **Only one filter field holds focus at a time.** Clicking a filter left any
   filter to its right focused too, with a focus ring and caret in each, because
   the click never reached them.

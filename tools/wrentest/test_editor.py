@@ -310,6 +310,25 @@ def test_theme_and_font_pickers_preview_live_and_restore() -> None:
             assert f'editor-font-family = "{others[0]}"\n' in config.read_text()
 
 
+def test_every_listed_font_previews_without_crashing(tmp_path: Path) -> None:
+    """Each installed font the picker lists is laid out and drawn. A screenshot
+    waits for a presented frame, so every font's glyphs are rasterized."""
+    with WrenApp(artifacts_dir=artifact_directory("editor-every-font")) as app:
+        call = app.client.call
+        text = "# Heading\n\nSome **bold** and *italic* text, `code`, 12345.\n- [ ] a task\n"
+        call("editor.set", {"text": text})
+        modal = call("palette.open", {"mode": "fonts"})["navigation"]["modal"]
+        rows = modal["results"]
+        call("palette.step", {"delta": -modal["active_index"]})
+        for index, row in enumerate(rows):
+            if index:
+                call("palette.step", {"delta": 1})
+            assert call("editor.get")["font_family"] == row["key"]["font"]
+            capture(app, tmp_path / f"font-{index}.png")
+        call("palette.close")
+        assert call("editor.get")["text"] == text
+
+
 def test_font_changes_with_the_cursor_off_screen_keep_the_editor_alive() -> None:
     """A font change reshapes only the visible lines; the caret's line must
     still be laid out when it is off-screen."""

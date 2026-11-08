@@ -139,17 +139,30 @@ pub fn families() -> &'static Families {
         let mut system = font_system()
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        let faces: Vec<_> = system
-            .raw()
-            .db()
+        let db = system.raw().db();
+        let faces: Vec<_> = db
             .faces()
             .flat_map(|face| {
+                let listed =
+                    face.monospaced && db.with_face_data(face.id, has_outlines).unwrap_or(false);
                 face.families
                     .iter()
-                    .map(move |(name, _)| (name.clone(), face.monospaced))
+                    .map(move |(name, _)| (name.clone(), listed))
             })
             .collect();
         Families::from_faces(faces)
+    })
+}
+
+/// Whether a face draws its glyphs from outlines. Bitmap-only faces, such as
+/// macOS's GB18030 Bitmap, come in a few fixed sizes and may have no glyph
+/// advances, which lays every word out on its own line.
+fn has_outlines(data: &[u8], index: u32) -> bool {
+    use swash::tag_from_bytes;
+    swash::FontRef::from_index(data, index as usize).is_some_and(|font| {
+        [b"glyf", b"CFF ", b"CFF2"]
+            .iter()
+            .any(|tag| font.table(tag_from_bytes(tag)).is_some())
     })
 }
 
@@ -187,6 +200,31 @@ mod tests {
         assert_eq!(families.find("inter"), Some("Inter"));
         assert_eq!(families.find(".SF NS Mono"), None);
         assert_eq!(families.find("Missing"), None);
+    }
+
+    #[test]
+    fn only_outline_faces_count_as_editor_fonts() {
+        assert!(FACES.iter().all(|face| has_outlines(face, 0)));
+        let bitmap_only = sfnt(&[b"head", b"EBLC", b"EBDT"]);
+        assert!(!has_outlines(&bitmap_only, 0));
+        assert!(has_outlines(&sfnt(&[b"head", b"CFF "]), 0));
+        assert!(!has_outlines(b"not a font", 0));
+    }
+
+    /// A font file holding only a table directory, with each table empty.
+    fn sfnt(tags: &[&[u8; 4]]) -> Vec<u8> {
+        let count = u16::try_from(tags.len()).expect("few tables");
+        let mut data = 0x0001_0000u32.to_be_bytes().to_vec();
+        data.extend(count.to_be_bytes());
+        data.extend([0; 6]);
+        let end = u32::try_from(12 + 16 * tags.len()).expect("small directory");
+        for tag in tags {
+            data.extend(*tag);
+            data.extend([0; 4]);
+            data.extend(end.to_be_bytes());
+            data.extend(0u32.to_be_bytes());
+        }
+        data
     }
 
     #[test]

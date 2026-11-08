@@ -14,7 +14,7 @@ NFPM ?= nfpm
 SPARKLE_FEED_URL ?= https://raw.githubusercontent.com/charliek/wren/main/packaging/macos/appcast.xml
 SPARKLE_PUBLIC_KEY ?= packaging/macos/sparkle-ed-public-key.txt
 
-.PHONY: help setup build run test test-python fmt fmt-check clippy check build-smoke smoke-x11 smoke-wayland perf-search package package-debug release-binary deb app dmg icons
+.PHONY: help setup build run test test-python fmt fmt-check clippy check check-patches build-smoke smoke-x11 smoke-wayland perf-search package package-debug release-binary deb app dmg icons
 
 help:
 	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.' '  make deb            Linux: build target/dist/wren_<version>_<arch>.deb with nfpm (native ARCH only).' '  make app            macOS: build and sign target/dist/macos/Wren.app (Developer ID if WREN_DEVELOPER_ID_IDENTITY is set).' '  make dmg            macOS: package that Wren.app as target/dist/Wren-<version>.dmg.' '  RELEASE_VERSION=X.Y.Z[-pre] names the release; it must equal the Cargo version.' '  make icons          Regenerate committed app icons from assets/icon/wren-icon.svg.' '  make icons ICON_COLORS="eyes=#FFAA00"  Recolor a role in the SVG, then regenerate.'
@@ -99,7 +99,13 @@ clippy:
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo clippy --workspace --all-targets --locked --features smoke-test -- -D warnings
 
-check: fmt-check clippy test test-python
+check: fmt-check clippy test test-python check-patches
+
+# A [patch.crates-io] entry silently stops applying when a dependency bump
+# needs a newer version, so assert the vendored swash is still the one used.
+check-patches:
+	@cargo tree --locked -p wren-iced | grep -q 'swash v0.2.10 (.*vendor/swash)' || \
+		( echo "swash [patch.crates-io] not applied"; exit 1 )
 
 build-smoke:
 	cargo build --locked -p wren-iced --features smoke-test

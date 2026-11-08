@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/wren-core", "crates/wren-iced", "crates/wren-sparkle"]
-exclude = ["vendor/iced_winit"]
+exclude = ["vendor/iced_winit", "vendor/swash"]
 default-members = ["crates/wren-iced"]
 
 [workspace.package]
@@ -40,9 +40,13 @@ nucleo-matcher = "=0.3.1"
 directories = "=6.0.0"
 muda = { version = "=0.21.2", default-features = false }
 rfd = { version = "=0.16.1", default-features = false, features = ["xdg-portal", "tokio", "wayland"] }
+# Already in the tree through iced's text stack; Wren reads font tables with it.
+swash = { version = "=0.2.10", default-features = false, features = ["std"] }
 
 [patch.crates-io]
 iced_winit = { path = "vendor/iced_winit" }
+# Safety fixes for fonts with malformed tables; see vendor/swash/WREN.md.
+swash = { path = "vendor/swash" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

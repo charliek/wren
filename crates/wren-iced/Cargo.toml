@@ -22,6 +22,7 @@ iced.workspace = true
 rfd.workspace = true
 # Decodes the embedded window icon; its dependencies already ship via tiny-skia.
 png.workspace = true
+swash.workspace = true
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }
