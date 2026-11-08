@@ -18,6 +18,7 @@ mod delete;
 mod motion;
 mod tab;
 mod task;
+mod wrap;
 
 /// Plan `intent` at `sel`.
 ///
@@ -47,6 +48,9 @@ pub fn plan(
         Intent::DocumentStart { extend } => motion::document_start(lines, sel, extend),
         Intent::DocumentEnd { extend } => motion::document_end(lines, sel, extend),
         Intent::ToggleTask => task::toggle(lines, sel),
+        Intent::Bold => wrap::toggle(lines, sel, wrap::Style::Bold),
+        Intent::Italic => wrap::toggle(lines, sel, wrap::Style::Italic),
+        Intent::Code => wrap::toggle(lines, sel, wrap::Style::Code),
         _ => unchanged(clamp_selection(lines, sel)),
     }
 }
