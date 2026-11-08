@@ -8,6 +8,8 @@ use std::time::SystemTime;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
+use wren_markdown::block::{self, Kind, Scanner};
+use wren_markdown::{Document, Lines as _};
 
 use crate::fs_store::{DiskFile, FsStore, RelPath};
 use crate::model::{GroupId, Note, NoteId, SectionId, Workspace};
@@ -543,78 +545,42 @@ fn lowercase(text: &str) -> String {
     }
 }
 
+/// The first body line's words: the first paragraph line that is not
+/// heading text, with its block markers (`>`, list markers, task boxes) and
+/// surrounding whitespace dropped. Classified by `wren_markdown::block`, so
+/// front matter, setext headings, and fences read as the editor reads them.
 fn body_line(text: &str) -> Range<usize> {
-    let mut offset = 0;
-    let mut after_cr = false;
-    let mut lines = text
-        .split_inclusive(['\r', '\n'])
-        .filter_map(|raw| {
-            let continuation = after_cr && raw == "\n";
-            after_cr = raw.ends_with('\r');
-            let start = offset + raw.len() - raw.trim_start().len();
-            offset += raw.len();
-            let line = raw.trim();
-            (!continuation).then_some(start..start + line.len())
-        })
-        .peekable();
-    let underline = |line: &str| {
-        !line.is_empty()
-            && (line.bytes().all(|byte| byte == b'=') || line.bytes().all(|byte| byte == b'-'))
-    };
-    while let Some(range) = lines.next() {
-        let line = &text[range.clone()];
-        if line.is_empty() {
-            continue;
-        }
-        let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
-        let heading = (1..=6).contains(&hashes)
-            && (hashes == line.len() || line[hashes..].starts_with(char::is_whitespace));
-        if heading
-            || underline(line)
-            || lines
-                .peek()
-                .is_some_and(|next| underline(&text[next.clone()]))
-        {
-            continue;
-        }
-        let skipped = line.len() - strip_block_markers(line).len();
-        return range.start + skipped..range.end;
-    }
-    0..0
-}
-
-/// Drop leading Markdown block markers (`>`, `-`/`*`/`+`, `1.`, `[ ]`/`[x]`)
-/// so previews show the line's words.
-fn strip_block_markers(mut line: &str) -> &str {
-    loop {
-        let trimmed = line.trim_start();
-        let rest = if let Some(rest) = trimmed.strip_prefix('>') {
-            rest
-        } else if let Some(rest) = ["- ", "* ", "+ "]
-            .iter()
-            .find_map(|marker| trimmed.strip_prefix(marker))
-        {
-            rest
-        } else if let Some(rest) = ["[ ] ", "[x] ", "[X] "]
-            .iter()
-            .find_map(|marker| trimmed.strip_prefix(marker))
-        {
-            rest
-        } else {
-            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
-            match trimmed[digits..]
-                .strip_prefix(". ")
-                .or_else(|| trimmed[digits..].strip_prefix(") "))
-            {
-                Some(rest) if digits > 0 => rest,
-                _ => return trimmed,
+    let document = Document::new(text);
+    let mut scanner = Scanner::with_front_matter(block::front_matter_end(&document));
+    let mut candidate: Option<(usize, Range<usize>)> = None;
+    for index in 0..document.line_count() {
+        let line = document.line(index);
+        let info = scanner.next_line(line);
+        match info.kind {
+            Kind::Prose => {
+                if candidate.is_none() {
+                    let start = document.line_range(index).start;
+                    let words = line[info.text_start..].trim_end();
+                    candidate = Some((
+                        index,
+                        start + info.text_start..start + info.text_start + words.len(),
+                    ));
+                }
             }
-        };
-        if rest.trim().is_empty() {
-            return trimmed;
+            // Paragraph lines from `start` on were heading text.
+            Kind::SetextUnderline { start, .. } => match candidate {
+                Some((line, _)) if line >= start => candidate = None,
+                Some((_, range)) => return range,
+                None => {}
+            },
+            _ => {
+                if let Some((_, range)) = candidate {
+                    return range;
+                }
+            }
         }
-        line = rest;
     }
+    candidate.map_or(0..0, |(_, range)| range)
 }
 
 fn clipped_preview(text: &str) -> Range<usize> {
@@ -1079,15 +1045,28 @@ mod tests {
             ("> - quoted item", "quoted item"),
             ("12. Numbered", "Numbered"),
             ("3) Paren", "Paren"),
-            ("-", "-"),
-            ("- [ ]", "[ ]"),
+            ("-", ""),
+            ("- [ ]", ""),
             ("Plain *emphasis*", "Plain *emphasis*"),
             ("2026-11-04 notes", "2026-11-04 notes"),
         ] {
-            assert_eq!(strip_block_markers(line), expected, "{line:?}");
+            assert_eq!(&line[body_line(line)], expected, "{line:?}");
         }
         let text = "# Title\n\n- First item\n";
         assert_eq!(&text[body_line(text)], "First item");
+    }
+
+    #[test]
+    fn previews_skip_front_matter_code_fences_and_multi_line_setext_headings() {
+        for (text, expected) in [
+            ("---\ntitle: Notes\n---\nBody", "Body"),
+            ("Two line\nheading\n---\nBody", "Body"),
+            ("```\n\n```\nAfter", "After"),
+            ("~~~\ncode\n~~~\nAfter", "After"),
+            ("Para\n\n---\n", "Para"),
+        ] {
+            assert_eq!(&text[body_line(text)], expected, "{text:?}");
+        }
     }
 
     #[test]

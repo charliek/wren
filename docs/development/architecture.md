@@ -6,6 +6,7 @@ core and a thin desktop crate on top.
 | Crate | Role |
 |---|---|
 | `crates/wren-core` | The model, scanning, storage, autosave, search index, settings, and keybindings. No iced dependency. |
+| `crates/wren-markdown` | Markdown structure with no UI dependency: the one block classifier (`block`), the heading outline, and the edit planner. The search index's note previews and the editor's highlighting both classify lines with `block`. |
 | `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, and find. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends on iced only; the app passes in colours and the font. |
 | `crates/wren-iced` | The desktop app (binary `wren`): views, widgets, the command table, gestures, and the macOS menu bar. |
 | `crates/wren-sparkle` | The macOS Sparkle updater bridge. The only crate allowed `unsafe`; empty on Linux. |
@@ -77,4 +78,6 @@ An in-memory index of every note (path, title, mtime, content) is built when
 a workspace opens and kept current from the `Session`'s own writes and
 reconciliation. Fuzzy title matching uses `nucleo-matcher`; content search is
 a case-insensitive substring scan. On 5,000 notes / 25 MB a query takes a few
-milliseconds (`make perf-search`).
+milliseconds (`make perf-search`). A note's preview is its first paragraph
+line outside front matter and headings, with list, task, and quote markers
+dropped.
