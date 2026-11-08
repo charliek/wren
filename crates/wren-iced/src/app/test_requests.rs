@@ -147,6 +147,14 @@ impl App {
                 request.respond(Ok(self.session_snapshot()));
             }
             "editor.get" => request.respond(Ok(self.editor_snapshot())),
+            "perf.view" => {
+                let mut times = self.view_micros.borrow_mut();
+                let recent: Vec<u64> = times.iter().copied().collect();
+                if params.get("clear").and_then(Value::as_bool).unwrap_or(false) {
+                    times.clear();
+                }
+                request.respond(Ok(serde_json::json!({ "view_micros": recent })));
+            }
             "editor.set" => {
                 if self.workspace_mode || self.session.is_some() || self.loading.is_some() {
                     return Err("editor.set is only available for the in-memory spike; edit saved notes through the editor".into());

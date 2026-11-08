@@ -105,6 +105,10 @@ pub struct App {
     capture_pending: bool,
     #[cfg(feature = "smoke-test")]
     frames: crate::test_capture::Frames,
+    /// How long each recent `view` took to build, for the harness's idle
+    /// and per-key ceilings. `view` takes `&self`, hence the cell.
+    #[cfg(feature = "smoke-test")]
+    view_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +312,8 @@ impl App {
             capture_pending: false,
             #[cfg(feature = "smoke-test")]
             frames: crate::test_capture::Frames::default(),
+            #[cfg(feature = "smoke-test")]
+            view_micros: Default::default(),
         };
         app.apply_preferences();
         if let Some(warning) = app.startup_settings_warning() {
@@ -626,7 +632,18 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        crate::keys::alt_filter(self.contents()).into()
+        #[cfg(feature = "smoke-test")]
+        let started = Instant::now();
+        let view = crate::keys::alt_filter(self.contents()).into();
+        #[cfg(feature = "smoke-test")]
+        {
+            let mut times = self.view_micros.borrow_mut();
+            if times.len() == 256 {
+                times.pop_front();
+            }
+            times.push_back(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+        }
+        view
     }
 
     fn contents(&self) -> Element<'_, Message> {

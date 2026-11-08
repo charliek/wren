@@ -68,6 +68,14 @@ focused. The settings commands `editor.toggle_engine` and
 `editor.toggle_markdown_assist` run through `command.run` too, and each
 palette row reports the value such a command flips as its `state`.
 
+`perf.view` returns how long each recent `App::view` took to build
+(`view_micros`, the last 256, in microseconds; `{"clear": true}` empties the
+list after reading it). `test_markdown_keys.py` opens a group of three
+5,000-line notes and holds the median view build under 5 ms at idle and
+after smart keys, and each smart key's handler under 400 ms, both generous
+ceilings for a debug build on CI. Work done on every frame, such as
+re-reading every note's preview, shows up there first.
+
 The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor
 cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four Linux

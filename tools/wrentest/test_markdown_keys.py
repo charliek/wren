@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
+import statistics
 
 import pytest
 
@@ -515,3 +517,61 @@ def test_native_alt_up_in_the_notes_column_leaves_the_text(tmp_path: Path, keys_
         key("alt+Up")
         native_text(app, "1. b\n2. a", "alt+Up in the editor")
         saved(app, note, b"1. b\n2. a")
+
+
+def large_group(root: Path) -> Path:
+    """A group of three 5,000-line notes: a list, prose under headings, and
+    headings alone, about 1.4 MB together."""
+    group = root / "S" / "G"
+    group.mkdir(parents=True)
+    words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor "
+    (group / "a.md").write_text("".join(f"- item {n} {words}\n" for n in range(5000)))
+    (group / "b.md").write_text("".join(
+        f"## Heading {n}\n" if n % 12 == 0 else "\n" if n % 12 == 1 else f"{words * 2}\n"
+        for n in range(5000)))
+    (group / "c.md").write_text("".join(f"{'#' * (n % 3 + 1)} Heading {n}\n" for n in range(5000)))
+    return group / "a.md"
+
+
+def view_micros(app: WrenApp, samples: int) -> list[int]:
+    """At least `samples` view builds, each prompted by a request."""
+    app.client.call("perf.view", {"clear": True})
+
+    def enough() -> bool:
+        app.client.call("session.get")
+        return len(app.client.call("perf.view")["view_micros"]) >= samples
+
+    wait_for(enough, timeout=10, interval=0.02, description=f"{samples} view builds")
+    return app.client.call("perf.view")["view_micros"]
+
+
+def test_a_group_of_large_notes_keeps_views_and_smart_keys_cheap(tmp_path: Path, keys_app) -> None:
+    large_group(tmp_path / "notes")
+    with keys_app("keys-large-group", workspace=tmp_path / "notes") as app:
+        open_note(app)
+        idle = view_micros(app, 30)
+        editor = Editor(app)
+        timings: dict[str, list[int]] = {"enter": [], "tab": [], "backspace": []}
+        for _ in range(4):
+            for intent in ("enter", "tab", "backspace"):
+                timings[intent].append(editor.press(intent)["edit_micros"][-1])
+        typing = view_micros(app, 30)
+        measurements = {
+            "idle_view_us_p50": statistics.median(idle),
+            "idle_view_us_max": max(idle),
+            "after_keys_view_us_p50": statistics.median(typing),
+            **{f"{intent}_us_p50": statistics.median(values) for intent, values in timings.items()},
+            "renderer": os.environ.get("ICED_BACKEND", "default"),
+            "display": "wayland" if os.environ.get("WAYLAND_DISPLAY") else "x11",
+        }
+        (artifact_directory("keys-large-group") / "measurements.json").write_text(
+            json.dumps(measurements, indent=2) + "\n")
+        print(json.dumps(measurements, sort_keys=True))
+        # Generous ceilings for a debug build on shared CI. Building the view
+        # took about 0.3 ms here before previews were re-read every frame and
+        # 10-12 ms while they were; a smart key, including the draft update
+        # and the index refresh, takes tens of milliseconds.
+        assert statistics.median(idle) < 5_000, measurements
+        assert statistics.median(typing) < 5_000, measurements
+        for intent, values in timings.items():
+            assert statistics.median(values) < 400_000, (intent, measurements)
