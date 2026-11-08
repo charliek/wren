@@ -13,6 +13,7 @@ pub struct BufferLine {
     ending: LineEnding,
     attrs_list: AttrsList,
     align: Option<Align>,
+    hanging_indent: usize,
     shape_opt: Cached<ShapeLine>,
     layout_opt: Cached<Vec<LayoutLine>>,
     shaping: Shaping,
@@ -34,6 +35,7 @@ impl BufferLine {
             ending,
             attrs_list,
             align: None,
+            hanging_indent: 0,
             shape_opt: Cached::Empty,
             layout_opt: Cached::Empty,
             shaping,
@@ -55,6 +57,7 @@ impl BufferLine {
         self.ending = ending;
         self.attrs_list = attrs_list;
         self.align = None;
+        self.hanging_indent = 0;
         self.shape_opt.set_unused();
         self.layout_opt.set_unused();
         self.shaping = shaping;
@@ -145,6 +148,31 @@ impl BufferLine {
     pub fn set_align(&mut self, align: Option<Align>) -> bool {
         if align != self.align {
             self.align = align;
+            self.reset_layout();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Wren: get the byte offset that wrapped continuation rows hang under
+    pub const fn hanging_indent(&self) -> usize {
+        self.hanging_indent
+    }
+
+    /// Wren: set the byte offset that wrapped continuation rows hang under.
+    ///
+    /// Each continuation row starts where this byte starts on the first row,
+    /// measured from the shaped glyphs before it, and wraps that much
+    /// narrower. The indent never takes more than half the wrap width. 0, the
+    /// default, turns it off. The width of a continuation row's
+    /// [`LayoutLine`] includes the indent.
+    ///
+    /// Will reset layout if it differs from the current value.
+    /// Returns true if the line was reset
+    pub fn set_hanging_indent(&mut self, index: usize) -> bool {
+        if index != self.hanging_indent {
+            self.hanging_indent = index;
             self.reset_layout();
             true
         } else {
@@ -246,6 +274,7 @@ impl BufferLine {
     ) -> &[LayoutLine] {
         if self.layout_opt.is_unused() {
             let align = self.align;
+            let hanging_indent = self.hanging_indent;
             let mut layout = self
                 .layout_opt
                 .take_unused()
@@ -259,6 +288,7 @@ impl BufferLine {
                 align,
                 &mut layout,
                 match_mono_width,
+                hanging_indent,
             );
             self.layout_opt.set_used(layout);
         }
@@ -290,6 +320,7 @@ impl BufferLine {
             ending: LineEnding::None,
             attrs_list: AttrsList::new(&Attrs::new()),
             align: None,
+            hanging_indent: 0,
             shape_opt: Cached::Empty,
             layout_opt: Cached::Empty,
             shaping: Shaping::Advanced,

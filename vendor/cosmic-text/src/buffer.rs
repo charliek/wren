@@ -911,7 +911,9 @@ impl Buffer {
                 'hit: for (glyph_i, glyph) in run.glyphs.iter().enumerate() {
                     if first_glyph {
                         first_glyph = false;
-                        if (run.rtl && x > glyph.x) || (!run.rtl && x < 0.0) {
+                        // Wren: left of the first glyph, not of 0, so a click in a
+                        // hanging indent lands at the row's start.
+                        if (run.rtl && x > glyph.x) || (!run.rtl && x < glyph.x) {
                             new_cursor_glyph = 0;
                             new_cursor_char = 0;
                         }
