@@ -28,7 +28,8 @@ COMMANDS = {
     "note.new", "note.new_dated", "note.rename", "note.delete", "note.reveal",
     "note.move", "group.new", "section.new", "group.rename", "group.delete",
     "group.reveal", "group.move", "section.rename", "section.delete", "section.reveal",
-    "navigation.jump", "navigation.search", "navigation.find", "navigation.back",
+    "navigation.jump", "navigation.search", "navigation.find", "navigation.outline",
+    "navigation.back",
     "navigation.forward", "navigation.column_left", "navigation.column_right", "view.focus",
     "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
     "font.choose", "font.increase", "font.decrease", "font.reset",
@@ -265,7 +266,7 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
         for key in ("note.rename", "note.delete", "note.reveal", "note.move", "navigation.find",
-                    "group.rename", "group.delete", "group.reveal", "group.move",
+                    "navigation.outline", "group.rename", "group.delete", "group.reveal", "group.move",
                     "note.new", "note.new_dated", "notes.sort_title",
                     "markdown.toggle_task", "markdown.bold", "edit.move_line_up"):
             assert by_id[key]["enabled"] is False, key
@@ -274,6 +275,33 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         activate(app, {"command": "note.rename"}, disposition="blocked")
         assert navigation(app)["dialog"] is None
         assert session(app)["document"] is None
+
+
+def test_outline_jumps_within_the_open_note_and_closes_when_it_changes(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("navigation-outline")) as app:
+        call = app.client.call
+        jump(app, SECOND)
+        call("editor.cursor", {"line": 3, "column": 2, "selection": None})
+        before = call("editor.get")
+        modal = palette(app, "outline")
+        assert [row["title"] for row in modal["results"]] == ["Observations"]
+        assert modal["results"][0]["current"] is True
+        gateway(app, "palette.close")
+        assert call("editor.get")["cursor"] == {"line": 3, "column": 2}
+
+        palette(app, "outline")
+        activate(app, {"heading": {"revision": before["revision"], "line": 0}})
+        after = call("editor.get")
+        assert after["cursor"] == {"line": 0, "column": 0}
+        assert (after["text"], after["revision"]) == (before["text"], before["revision"])
+        assert navigation(app)["column"] == "editor"
+        assert navigation(app)["modal"] is None
+
+        # Another note opening underneath closes the outline.
+        palette(app, "outline")
+        core(app, "open_note", note=item(app, "notes", FIRST)["id"])
+        assert session(app)["document"]["path"] == FIRST
+        assert navigation(app)["modal"] is None
 
 
 @pytest.mark.parametrize("command_id,query,name,path,collection", [

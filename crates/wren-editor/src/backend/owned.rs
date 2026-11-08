@@ -144,6 +144,24 @@ impl Engine {
         }
     }
 
+    /// Put the cursor at `cursor` and the view at `scroll`, keeping that view
+    /// even when it does not show the cursor.
+    pub fn return_to(&mut self, cursor: Cursor, scroll: cosmic_text::Scroll) {
+        self.move_to(cursor);
+        let laid_out = self.bounds != Size::ZERO;
+        let mut font_system = font_system();
+        // Shaping now settles the move, which would otherwise scroll to the
+        // cursor on the next update.
+        if laid_out {
+            self.editor.shape_as_needed(font_system.raw(), false);
+        }
+        let buffer = buffer_mut(&mut self.editor);
+        buffer.set_scroll(scroll);
+        if laid_out {
+            buffer.shape_until_scroll(font_system.raw(), false);
+        }
+    }
+
     /// Put `line`'s first row `above` pixels below the top of the view,
     /// stopping at the end of the text.
     pub fn scroll_to(&mut self, line: usize, above: f32) {

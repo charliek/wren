@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
+use iced::widget::text_editor::{Cursor, Position};
 use iced::widget::{
     button, column, container, mouse_area, opaque, row, scrollable, stack, text, text_input,
 };
@@ -8,6 +9,7 @@ use iced::{Element, Fill, Task};
 use wren_core::index::{fuzzy_score, QueryKind, Scope};
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::Op;
+use wren_editor::{Placement, Viewport};
 
 use super::commands::{
     item_commands, Command, CommandId, Disposition, Gateway, ItemTarget, ReorderTarget,
@@ -34,6 +36,8 @@ pub enum Mode {
     Reorder(ItemRef),
     Themes,
     Fonts,
+    /// The open note's headings.
+    Outline,
 }
 
 impl Mode {
@@ -51,6 +55,7 @@ impl Mode {
             Self::Reorder(_) => "reorder",
             Self::Themes => "themes",
             Self::Fonts => "fonts",
+            Self::Outline => "outline",
         }
     }
 
@@ -67,6 +72,7 @@ impl Mode {
             Self::Reorder(_) => "Choose a position among all siblings…",
             Self::Themes => "Choose a theme…",
             Self::Fonts => "Choose an editor font…",
+            Self::Outline => "Jump to a heading…",
         }
     }
 
@@ -82,6 +88,7 @@ impl Mode {
             Self::JumpGroup => Some("Groups"),
             Self::Themes => Some("Theme"),
             Self::Fonts => Some("Editor font"),
+            Self::Outline => Some("Outline"),
             _ => None,
         }
     }
@@ -104,6 +111,11 @@ pub enum Key {
     Theme(Option<&'static str>),
     /// An installed font family.
     Font(&'static str),
+    /// A heading of the open note, on `line` at editor revision `revision`.
+    Heading {
+        revision: u64,
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +143,18 @@ pub enum Action {
     Workspace(PathBuf),
     Theme(Option<&'static str>),
     Font(&'static str),
+    Heading {
+        revision: u64,
+        line: usize,
+    },
+}
+
+/// How an outline row draws its heading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadingRow {
+    pub level: u8,
+    /// Levels below the note's top heading level, for the indent.
+    pub depth: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +170,38 @@ pub struct ResultRow {
     pub current: bool,
     pub enabled: bool,
     pub action: Action,
+    pub heading: Option<HeadingRow>,
+}
+
+/// Where the editor was when the outline opened, so leaving the outline any
+/// way but choosing a heading puts it back.
+pub struct OutlineOrigin {
+    viewport: Viewport,
+    note: Option<NoteId>,
+    /// The `edit_revision` that `headings` were built from.
+    revision: u64,
+    /// The note's headings, so a query keystroke only filters them.
+    headings: Vec<OutlineHeading>,
+    /// The highlighted row as of the last change the editor acted on. It
+    /// starts as the row the outline opens on, which only a highlight move
+    /// or Enter shows.
+    highlighted: Option<Key>,
+    /// Whether the editor still shows the origin: no row has been previewed,
+    /// or none has been highlighted since.
+    at_origin: bool,
+}
+
+/// One heading of the open note, as the outline lists it.
+struct OutlineHeading {
+    title: String,
+    /// The headings it sits under, outermost first.
+    path: String,
+    level: u8,
+    /// Levels below the note's top heading level.
+    depth: u8,
+    line: usize,
+    /// Whether the outline's origin is in its section.
+    current: bool,
 }
 
 pub struct Palette {
@@ -183,9 +239,18 @@ impl Palette {
                     .cloned()
             })
             .flatten();
-        let retained = selected
-            .as_ref()
-            .and_then(|selected| results.iter().position(|row| row.key == selected.key));
+        let retained = selected.as_ref().and_then(|selected| {
+            results
+                .iter()
+                .position(|row| row.key == selected.key)
+                // Outline keys name an editor revision; after an edit the same
+                // heading has a new key.
+                .or_else(|| {
+                    (self.mode == Mode::Outline)
+                        .then(|| same_heading(&self.results, selected, &results))
+                        .flatten()
+                })
+        });
         // Enter must not turn a removed insertion anchor into a different action.
         if retained.is_none() && matches!(self.mode, Mode::Reorder(_) | Mode::ItemActions(_)) {
             if let Some(mut selected) = selected {
@@ -200,9 +265,10 @@ impl Palette {
                 return;
             }
         }
-        // A picker of settings opens on the saved choice, so browsing starts
-        // from it and the live preview begins only when the highlight moves.
-        let saved = (matches!(self.mode, Mode::Themes | Mode::Fonts)
+        // A picker of settings opens on the saved choice, and the outline on
+        // the cursor's section, so browsing starts from it and the live
+        // preview begins only when the highlight moves.
+        let saved = (matches!(self.mode, Mode::Themes | Mode::Fonts | Mode::Outline)
             && self.query.trim().is_empty())
         .then(|| results.iter().position(|row| row.current))
         .flatten();
@@ -238,10 +304,13 @@ impl App {
         }
         if !matches!(
             mode,
-            Mode::Commands | Mode::Workspaces | Mode::Themes | Mode::Fonts
+            Mode::Commands | Mode::Workspaces | Mode::Themes | Mode::Fonts | Mode::Outline
         ) && self.session.is_none()
         {
             return self.blocked("Open a workspace first");
+        }
+        if mode == Mode::Outline && self.ensure_editor_ready().is_err() {
+            return self.blocked("Open a note to see its outline");
         }
         if matches!(mode, Mode::MoveNote(note) if self.model().and_then(|model| model.note(note)).is_none())
             || matches!(mode, Mode::MoveGroup(group) if self.model().and_then(|model| model.group(group)).is_none())
@@ -264,10 +333,30 @@ impl App {
         self.settle_resize();
         self.cancel_gestures();
         self.editor.break_group();
+        if mode == Mode::Outline {
+            if let Some(origin) = self.outline_origin.take() {
+                self.return_to_origin(origin);
+            }
+            let viewport = self.editor.viewport();
+            self.outline_origin = Some(OutlineOrigin {
+                viewport,
+                note: self.editor_note,
+                revision: self.edit_revision,
+                headings: self.outline_headings(viewport.cursor().position.line),
+                highlighted: None,
+                at_origin: true,
+            });
+        }
         let mut palette = Palette::new(mode, self.workspace_generation());
         palette.source = source;
         self.palette = Some(palette);
         self.refresh_palette(true);
+        if mode == Mode::Outline {
+            let active = self.highlighted_heading();
+            if let Some(origin) = &mut self.outline_origin {
+                origin.highlighted = active;
+            }
+        }
         self.finish_action(
             Disposition::Completed,
             None,
@@ -355,6 +444,7 @@ impl App {
                             current: false,
                             enabled: self.command_enabled(definition.id),
                             action: Action::Command(definition.id),
+                            heading: None,
                         });
                     }
                 }
@@ -385,6 +475,7 @@ impl App {
                                 query: query.clone(),
                                 content_match: hit.content_match,
                             }),
+                            heading: None,
                         });
                     }
                 }
@@ -467,6 +558,7 @@ impl App {
                             current: self.model().is_some_and(|model| model.root == entry.path),
                             enabled: true,
                             action: Action::Workspace(entry.path.clone()),
+                            heading: None,
                         });
                     }
                 }
@@ -483,6 +575,7 @@ impl App {
                         current: false,
                         enabled: self.folder_request.is_none(),
                         action: Action::Command(CommandId::AddWorkspace),
+                        heading: None,
                     });
                 }
             }
@@ -550,6 +643,7 @@ impl App {
                     rows.push(row);
                 }
             }
+            Mode::Outline => rows = self.outline_rows(&query),
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
                     for id in item_commands(item) {
@@ -735,6 +829,7 @@ impl App {
             Action::Reorder(target) => self.dispatch(Command::Reorder(target)),
             Action::Theme(id) => self.choose_theme(id),
             Action::Font(family) => self.choose_font(family),
+            Action::Heading { revision, line } => self.choose_heading(revision, line),
             Action::Workspace(path) => {
                 if workspace_removal {
                     self.dispatch(Command::RemoveWorkspace(path))
@@ -769,6 +864,169 @@ impl App {
             }
         }
         outcome
+    }
+
+    /// The open note's headings, with the section holding `line` current.
+    fn outline_headings(&self, line: usize) -> Vec<OutlineHeading> {
+        let text = self.editor.text();
+        let document = wren_markdown::Document::new(&text);
+        let outline = wren_markdown::outline::Outline::new(&document);
+        let headings = outline.headings();
+        let top = headings
+            .iter()
+            .map(|heading| heading.level)
+            .min()
+            .unwrap_or(1);
+        let current = outline.section_at(line);
+        headings
+            .iter()
+            .enumerate()
+            .map(|(index, heading)| {
+                let mut path: Vec<&str> = outline
+                    .ancestors(index)
+                    .map(|parent| parent.text.as_str())
+                    .collect();
+                path.reverse();
+                OutlineHeading {
+                    title: heading.text.clone(),
+                    path: path.join(" › "),
+                    level: heading.level,
+                    depth: heading.level - top,
+                    line: heading.line,
+                    current: current == Some(index),
+                }
+            })
+            .collect()
+    }
+
+    fn outline_rows(&self, query: &str) -> Vec<ResultRow> {
+        let fresh;
+        let headings = match &self.outline_origin {
+            Some(origin) => &origin.headings,
+            None => {
+                fresh = self.outline_headings(self.editor.cursor().position.line);
+                &fresh
+            }
+        };
+        let mut ranked: Vec<_> = headings
+            .iter()
+            .filter_map(|heading| fuzzy_score(query, &heading.title).map(|score| (score, heading)))
+            .collect();
+        // Stable: equal scores (an empty query) keep the document order.
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        ranked
+            .into_iter()
+            .map(|(_, heading)| {
+                let (revision, line) = (self.edit_revision, heading.line);
+                let mut row = action_row(
+                    Key::Heading { revision, line },
+                    heading.title.clone(),
+                    heading.path.clone(),
+                    true,
+                    Action::Heading { revision, line },
+                );
+                row.current = heading.current;
+                row.heading = Some(HeadingRow {
+                    level: heading.level,
+                    depth: heading.depth,
+                });
+                row
+            })
+            .collect()
+    }
+
+    fn highlighted_heading(&self) -> Option<Key> {
+        let palette = self
+            .palette
+            .as_ref()
+            .filter(|palette| palette.mode == Mode::Outline)?;
+        let row = palette.results.get(palette.active?)?;
+        matches!(row.key, Key::Heading { .. }).then(|| row.key.clone())
+    }
+
+    /// Scroll `line` near the top of the editor and put the cursor on it.
+    fn show_heading(&mut self, line: usize) {
+        self.editor.scroll_to_line(line, Placement::NearTop);
+        self.editor.move_cursor(Cursor {
+            position: Position { line, column: 0 },
+            selection: None,
+        });
+    }
+
+    fn return_to_origin(&mut self, origin: OutlineOrigin) {
+        // A different note (a workspace switch, a deleted note) has no use
+        // for the old note's cursor.
+        if !origin.at_origin && origin.note == self.editor_note {
+            self.editor.restore_viewport(origin.viewport);
+        }
+    }
+
+    fn choose_heading(&mut self, revision: u64, line: usize) -> Gateway {
+        if revision != self.edit_revision {
+            return self.blocked("The note changed; choose the heading again");
+        }
+        self.outline_origin = None;
+        // The row the outline opened on was never shown; a previewed one is
+        // already in place, and showing it again moves nothing.
+        self.show_heading(line);
+        self.palette = None;
+        self.column = super::columns::Column::Editor;
+        self.finish_action(Disposition::Completed, None, super::focus_editor())
+    }
+
+    /// Follow the outline's highlighted row in the editor, and put the editor
+    /// back when the outline closes without a choice. Runs after every
+    /// message, so it acts only on a change: the 25 ms tick moves nothing.
+    pub(super) fn sync_outline(&mut self) -> Task<Message> {
+        let Some(origin) = &self.outline_origin else {
+            return Task::none();
+        };
+        if !self
+            .palette
+            .as_ref()
+            .is_some_and(|palette| palette.mode == Mode::Outline)
+        {
+            let origin = self.outline_origin.take().expect("outline origin");
+            self.return_to_origin(origin);
+            return Task::none();
+        }
+        if origin.note != self.editor_note {
+            self.outline_origin = None;
+            self.palette = None;
+            return self.column_focus();
+        }
+        let revised = origin.revision != self.edit_revision;
+        if revised {
+            let headings = self.outline_headings(origin.viewport.cursor().position.line);
+            let origin = self.outline_origin.as_mut().expect("outline origin");
+            origin.revision = self.edit_revision;
+            origin.headings = headings;
+            self.refresh_palette(false);
+        }
+        let highlighted = self.highlighted_heading();
+        let origin = self.outline_origin.as_mut().expect("outline origin");
+        if highlighted == origin.highlighted {
+            return Task::none();
+        }
+        origin.highlighted = highlighted.clone();
+        // New text renames every row; a row the editor never followed stays
+        // unshown, and a followed one is followed to where it moved.
+        if revised && origin.at_origin {
+            return Task::none();
+        }
+        match highlighted {
+            Some(Key::Heading { line, .. }) => {
+                origin.at_origin = false;
+                self.show_heading(line);
+            }
+            _ if !origin.at_origin => {
+                origin.at_origin = true;
+                let viewport = origin.viewport;
+                self.editor.restore_viewport(viewport);
+            }
+            _ => {}
+        }
+        Task::none()
     }
 
     pub(super) fn activate_note(&mut self, target: SearchTarget) -> Gateway {
@@ -820,6 +1078,24 @@ impl App {
         };
         let colors = self.definition.colors;
         let search = palette.mode == Mode::Search;
+        let outline = palette.mode == Mode::Outline;
+        let width = if search {
+            720.0
+        } else if outline {
+            460.0
+        } else {
+            620.0
+        };
+        // The outline previews headings in the editor, so it sits beside the
+        // text: over the browser columns when they are wide enough, else at
+        // the right, away from where lines start.
+        let align = if !outline {
+            iced::alignment::Horizontal::Center
+        } else if self.browser_width() >= width + 32.0 {
+            iced::alignment::Horizontal::Left
+        } else {
+            iced::alignment::Horizontal::Right
+        };
         let top =
             (if search { 72.0_f32 } else { 96.0_f32 }).min((self.viewport.height * 0.16).max(8.0));
         let list_height =
@@ -913,17 +1189,25 @@ impl App {
                 ));
             }
             if !search && !result.path.is_empty() {
-                let path = if palette.mode == Mode::Workspaces {
+                let path = if matches!(palette.mode, Mode::Workspaces | Mode::Outline) {
                     result.path.clone()
                 } else {
                     result.path.replace('/', " › ")
                 };
                 label = label.push(ellipsis(path, 11.0, theme::color(colors.muted)));
             }
-            let mut contents = row![label.width(Fill)]
-                .spacing(12)
-                .align_y(iced::Center)
-                .clip(true);
+            let indent = result
+                .heading
+                .map_or(0.0, |heading| f32::from(heading.depth) * 16.0);
+            let mut contents = row![container(label)
+                .padding(iced::Padding {
+                    left: indent,
+                    ..iced::Padding::ZERO
+                })
+                .width(Fill)]
+            .spacing(12)
+            .align_y(iced::Center)
+            .clip(true);
             if search {
                 contents = contents.push(chrome::label(
                     if result.content_hit { "text" } else { "title" },
@@ -934,6 +1218,13 @@ impl App {
             if result.current {
                 contents =
                     contents.push(text("current").size(11).color(theme::color(colors.accent)));
+            }
+            if let Some(heading) = result.heading {
+                contents = contents.push(chrome::label(
+                    format!("H{}", heading.level),
+                    11,
+                    colors.faint,
+                ));
             }
             if !result.shortcut.is_empty() {
                 contents = contents.push(chrome::keycap(&result.shortcut, self.definition));
@@ -963,6 +1254,8 @@ impl App {
                 container(
                     text(if search && palette.query.trim().is_empty() {
                         "Search titles and text across this workspace."
+                    } else if palette.mode == Mode::Outline && palette.query.trim().is_empty() {
+                        "No headings in this note."
                     } else {
                         "No matches."
                     })
@@ -1009,7 +1302,14 @@ impl App {
                 hints = hints.push(hint("↑↓", "move"));
             }
             hints
-                .push(hint("↵", if search { "open at match" } else { "run" }))
+                .push(hint(
+                    "↵",
+                    match palette.mode {
+                        Mode::Search => "open at match",
+                        Mode::Outline => "jump",
+                        _ => "run",
+                    },
+                ))
                 .push(hint("esc", "close"))
                 .into()
         };
@@ -1020,7 +1320,7 @@ impl App {
         let dialog = container(panel)
             .id(format!("palette-{}", palette.mode.key()))
             .max_height((self.viewport.height - top - 8.0).max(24.0))
-            .width(if search { 720.0 } else { 620.0 })
+            .width(width)
             .max_width((self.viewport.width - 32.0).max(120.0))
             .clip(true)
             .style(move |_| chrome::dialog(self.definition));
@@ -1044,7 +1344,8 @@ impl App {
                     bottom: 8.0,
                     left: 16.0
                 })
-                .center_x(Fill)
+                .width(Fill)
+                .align_x(align)
                 .height(Fill)
         ]
         .into()
@@ -1063,8 +1364,38 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
         Key::Workspace(path) => format!("workspace-{}", path.display()),
         Key::Theme(id) => format!("theme-{}", id.unwrap_or("system")),
         Key::Font(family) => format!("font-{family}"),
+        Key::Heading { revision, line } => format!("heading-{revision}-{line}"),
     };
     iced::advanced::widget::Id::from(format!("palette-row-{generation}-{key}"))
+}
+
+/// The row in `results` for the heading `selected` highlighted among `old`,
+/// after the text changed: the same title and path, counted among its
+/// namesakes when their number is unchanged, else the nearest by line.
+fn same_heading(old: &[ResultRow], selected: &ResultRow, results: &[ResultRow]) -> Option<usize> {
+    let line_of = |row: &ResultRow| match row.key {
+        Key::Heading { line, .. } => Some(line),
+        _ => None,
+    };
+    let from = line_of(selected)?;
+    let namesake = |row: &ResultRow| row.title == selected.title && row.path == selected.path;
+    let before: Vec<_> = old.iter().filter(|row| namesake(row)).collect();
+    let after: Vec<_> = (0..results.len())
+        .filter(|&index| namesake(&results[index]))
+        .collect();
+    let nearest = |candidates: &mut dyn Iterator<Item = usize>| {
+        candidates.min_by_key(|&index| line_of(&results[index]).map(|line| line.abs_diff(from)))
+    };
+    if before.len() == after.len() {
+        if let Some(occurrence) = before.iter().position(|row| row.key == selected.key) {
+            return Some(after[occurrence]);
+        }
+    }
+    nearest(&mut after.iter().copied())
+        .or_else(|| {
+            nearest(&mut (0..results.len()).filter(|&index| results[index].title == selected.title))
+        })
+        .or_else(|| nearest(&mut (0..results.len())))
 }
 
 fn action_row(key: Key, title: String, path: String, enabled: bool, action: Action) -> ResultRow {
@@ -1080,6 +1411,7 @@ fn action_row(key: Key, title: String, path: String, enabled: bool, action: Acti
         current: false,
         enabled,
         action,
+        heading: None,
     }
 }
 
@@ -1096,6 +1428,7 @@ fn destination_row(parent: Parent, title: String, path: String) -> ResultRow {
         current: false,
         enabled: true,
         action: Action::Destination(parent),
+        heading: None,
     }
 }
 
@@ -1153,7 +1486,246 @@ mod tests {
             current: false,
             enabled: true,
             action: Action::Command(CommandId::Jump),
+            heading: None,
         }
+    }
+
+    const NOTE: &str =
+        "# Guide\n\nintro\n\n## Install\n\nsteps\n\n### Linux\n\napt\n\n## Usage\n\nrun it\n";
+
+    fn outline_app(text: &str) -> App {
+        let (mut app, _) = App::new(super::super::Options {
+            editor: true,
+            ..Default::default()
+        });
+        app.editor.replace_text(text, false);
+        app
+    }
+
+    fn open_outline(app: &mut App) {
+        let _ = app.update(super::super::preferences::shortcut(CommandId::Outline));
+        assert_eq!(app.palette.as_ref().unwrap().mode, Mode::Outline);
+    }
+
+    fn key(app: &mut App, nav: crate::keys::Nav) {
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(nav)));
+    }
+
+    fn caret(line: usize, column: usize) -> Cursor {
+        Cursor {
+            position: Position { line, column },
+            selection: None,
+        }
+    }
+
+    fn active_title(app: &App) -> &str {
+        let palette = app.palette.as_ref().unwrap();
+        &palette.results[palette.active.unwrap()].title
+    }
+
+    #[test]
+    fn the_outline_lists_headings_by_level_and_opens_on_the_cursors_section() {
+        let mut app = outline_app(NOTE);
+        app.editor.move_cursor(caret(10, 1));
+        open_outline(&mut app);
+        let rows = &app.palette.as_ref().unwrap().results;
+        let summary: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                let heading = row.heading.unwrap();
+                (
+                    row.title.as_str(),
+                    row.path.as_str(),
+                    heading.level,
+                    heading.depth,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("Guide", "", 1, 0),
+                ("Install", "Guide", 2, 1),
+                ("Linux", "Guide › Install", 3, 2),
+                ("Usage", "Guide", 2, 1),
+            ]
+        );
+        assert_eq!(active_title(&app), "Linux");
+        assert!(rows[2].current);
+        // Opening previews nothing; only a highlight move does.
+        assert_eq!(app.editor.cursor(), caret(10, 1));
+        let _ = app.update(Message::PaletteQuery("usa".into()));
+        assert_eq!(active_title(&app), "Usage");
+        assert_eq!(app.editor.cursor(), caret(12, 0));
+    }
+
+    #[test]
+    fn escape_from_the_outline_restores_the_cursor_and_selection() {
+        let mut app = outline_app(NOTE);
+        let selected = Cursor {
+            position: Position {
+                line: 10,
+                column: 3,
+            },
+            selection: Some(Position {
+                line: 10,
+                column: 0,
+            }),
+        };
+        app.editor.move_cursor(selected);
+        open_outline(&mut app);
+        key(&mut app, crate::keys::Nav::Down);
+        assert_eq!(active_title(&app), "Usage");
+        assert_eq!(app.editor.cursor(), caret(12, 0));
+        // The tick, like any message, re-moves nothing once a row is shown.
+        app.editor.move_cursor(caret(0, 0));
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.editor.cursor(), caret(0, 0));
+        // No match shows the origin; a match previews again.
+        let _ = app.update(Message::PaletteQuery("zzz".into()));
+        assert_eq!(app.editor.cursor(), selected);
+        let _ = app.update(Message::PaletteQuery("inst".into()));
+        assert_eq!(app.editor.cursor(), caret(4, 0));
+
+        let _ = app.update(Message::Escape);
+        assert!(app.palette.is_none());
+        assert!(app.outline_origin.is_none());
+        assert_eq!(app.editor.cursor(), selected);
+        assert_eq!(app.editor.selected_text().as_deref(), Some("apt"));
+
+        // Closing any other way restores it too.
+        open_outline(&mut app);
+        key(&mut app, crate::keys::Nav::Up);
+        assert_eq!(app.editor.cursor(), caret(4, 0));
+        let _ = app.update(Message::PaletteClose);
+        assert_eq!(app.editor.cursor(), selected);
+    }
+
+    #[test]
+    fn enter_in_the_outline_keeps_the_heading_and_focuses_the_editor() {
+        let mut app = outline_app(NOTE);
+        app.editor.move_cursor(caret(14, 2));
+        open_outline(&mut app);
+        assert_eq!(active_title(&app), "Usage");
+        key(&mut app, crate::keys::Nav::Up);
+        key(&mut app, crate::keys::Nav::Up);
+        assert_eq!(app.editor.cursor(), caret(4, 0));
+        key(&mut app, crate::keys::Nav::Enter);
+        assert!(app.palette.is_none());
+        assert!(app.outline_origin.is_none());
+        assert_eq!(app.column, super::super::columns::Column::Editor);
+        assert_eq!(app.editor.cursor(), caret(4, 0));
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.editor.cursor(), caret(4, 0));
+
+        // Enter on the row it opened on jumps to that heading.
+        open_outline(&mut app);
+        assert_eq!(active_title(&app), "Install");
+        app.editor.move_cursor(caret(6, 1));
+        key(&mut app, crate::keys::Nav::Enter);
+        assert_eq!(app.editor.cursor(), caret(4, 0));
+    }
+
+    #[test]
+    fn outline_rows_follow_a_text_change_and_reject_stale_keys() {
+        let mut app = outline_app(NOTE);
+        open_outline(&mut app);
+        let stale = app.palette.as_ref().unwrap().results[3].key.clone();
+        key(&mut app, crate::keys::Nav::Down);
+        key(&mut app, crate::keys::Nav::Down);
+        assert_eq!(active_title(&app), "Linux");
+        app.editor
+            .replace_text(&format!("# Preface\n\n{NOTE}"), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        let palette = app.palette.as_ref().unwrap();
+        assert_eq!(palette.results.len(), 5);
+        assert!(palette.results.iter().all(
+            |row| matches!(row.key, Key::Heading { revision, .. } if revision == app.edit_revision)
+        ));
+        // The same heading stays highlighted, and the editor follows it down.
+        assert_eq!(active_title(&app), "Linux");
+        assert_eq!(app.editor.cursor(), caret(10, 0));
+        let generation = palette.generation;
+        let outcome = app.activate_palette_key(generation, stale);
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        assert!(app.palette.is_some());
+    }
+
+    #[test]
+    fn a_text_change_before_any_highlight_move_moves_nothing() {
+        let mut app = outline_app(NOTE);
+        app.editor.move_cursor(caret(14, 2));
+        open_outline(&mut app);
+        assert_eq!(active_title(&app), "Usage");
+        app.editor
+            .replace_text(&format!("{NOTE}\n## Added\n"), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        assert_eq!(active_title(&app), "Usage");
+        assert_eq!(app.editor.cursor(), caret(14, 2));
+        // The rebased row is still unshown: moving off it and back shows it.
+        key(&mut app, crate::keys::Nav::Up);
+        assert_eq!(app.editor.cursor(), caret(8, 0));
+        key(&mut app, crate::keys::Nav::Down);
+        assert_eq!(app.editor.cursor(), caret(12, 0));
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.editor.cursor(), caret(14, 2));
+    }
+
+    #[test]
+    fn a_highlighted_heading_keeps_its_place_among_namesakes_and_renamed_parents() {
+        let text = "# A\n\n## Example\n\none\n\n## Example\n\ntwo\n\n## Example\n\nthree\n";
+        let mut app = outline_app(text);
+        open_outline(&mut app);
+        for _ in 0..3 {
+            key(&mut app, crate::keys::Nav::Down);
+        }
+        assert_eq!(app.editor.cursor(), caret(10, 0));
+        app.editor.replace_text(&format!("\n{text}"), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.palette.as_ref().unwrap().active, Some(3));
+        assert_eq!(app.editor.cursor(), caret(11, 0));
+
+        // Renaming the parent changes every path; the nearest namesake wins.
+        app.editor
+            .replace_text(&format!("\n{}", text.replacen("# A", "# B", 1)), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        let palette = app.palette.as_ref().unwrap();
+        assert_eq!(palette.active, Some(3));
+        assert_eq!(palette.results[3].path, "B");
+        assert_eq!(app.editor.cursor(), caret(11, 0));
+
+        // A removed heading hands the highlight to the nearest one.
+        app.editor.replace_text("\n# B\n\none\n\n## Usage\n", true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        assert_eq!(active_title(&app), "Usage");
+        assert_eq!(app.editor.cursor(), caret(5, 0));
+    }
+
+    #[test]
+    fn a_note_without_headings_shows_an_empty_outline() {
+        let mut app = outline_app("just text\n```\n# not a heading\n```\n");
+        app.editor.move_cursor(caret(2, 4));
+        open_outline(&mut app);
+        let palette = app.palette.as_ref().unwrap();
+        assert!(palette.results.is_empty());
+        assert_eq!(palette.active, None);
+        key(&mut app, crate::keys::Nav::Enter);
+        assert!(app.palette.is_some());
+        assert_eq!(app.editor.cursor(), caret(2, 4));
+    }
+
+    #[test]
+    fn the_outline_needs_an_open_note_in_a_workspace() {
+        let (mut app, _) = App::new(super::super::Options::default());
+        let outcome = app.open_palette(Mode::Outline);
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        assert!(app.palette.is_none());
+        assert!(app.outline_origin.is_none());
     }
 
     #[test]

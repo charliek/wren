@@ -54,7 +54,7 @@ use iced::{
 };
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
-use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::keys::KeyPolicy;
 use crate::{Message, Style};
 
@@ -163,6 +163,11 @@ impl Content {
     /// See [`Backend::restore_view`].
     pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
         self.0.get_mut().restore_view(cursor, scroll);
+    }
+
+    /// See [`Backend::return_to`].
+    pub fn return_to(&mut self, cursor: Cursor, scroll: Scroll) {
+        self.0.get_mut().return_to(cursor, scroll);
     }
 
     /// See [`Backend::scroll_to_line`].

@@ -76,6 +76,8 @@ pub struct App {
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
+    /// Where the outline palette opened; see `sync_outline`.
+    outline_origin: Option<palette::OutlineOrigin>,
     widths: Widths,
     column: columns::Column,
     /// Browser panes folded from the left (0–2) by keyboard moves.
@@ -275,6 +277,7 @@ impl App {
             action_serial: 0,
             last_processed: None,
             palette: None,
+            outline_origin: None,
             widths: Widths::default(),
             column: columns::Column::Editor,
             fold: 0,
@@ -327,8 +330,8 @@ impl App {
         let task = self.handle(message);
         // Every way a picker row gets highlighted, or the picker closes,
         // arrives as a message, so the preview follows from here.
-        self.sync_preview();
-        task
+        let preview = self.sync_preview();
+        Task::batch([task, preview])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {

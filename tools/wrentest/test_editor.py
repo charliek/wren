@@ -424,6 +424,174 @@ def test_native_text_size_shortcuts_resize_and_save(editor_app) -> None:
         assert call("editor.get")["text"] == ""
 
 
+def outline_note() -> tuple[str, dict[str, int]]:
+    """A long note with two heading levels, and each heading's line."""
+    lines = ["# Handbook", ""]
+    headings = {"Handbook": 0}
+    for part in range(1, 9):
+        headings[f"Part {part}"] = len(lines)
+        lines += [f"## Part {part}", ""]
+        lines += [f"Body line {n} of part {part}." for n in range(20)]
+        lines.append("")
+        headings[f"Details {part}"] = len(lines)
+        lines += [f"### Details {part}", ""]
+        lines += [f"Detail {n} of part {part}." for n in range(5)]
+        lines.append("")
+    return "\n".join(lines), headings
+
+
+def presented(app: WrenApp, path: Path) -> dict:
+    """The editor once a frame has been drawn, so the scroll is settled."""
+    capture(app, path)
+    return app.client.call("editor.get")
+
+
+def test_outline_previews_headings_restores_on_escape_and_commits_on_enter(
+        engine, editor_app, tmp_path: Path) -> None:
+    text, headings = outline_note()
+    with editor_app(artifacts_dir=artifact_directory("editor-outline")) as app:
+        call = app.client.call
+        call("editor.set", {"text": text})
+        line = headings["Part 3"] + 6
+        call("editor.cursor", {"line": line, "column": 9, "selection": {"line": line, "column": 5}})
+        before = presented(app, tmp_path / "before.png")
+        assert before["selected_text"] == "line"
+        assert before["first_visible_line"] > 0
+
+        modal = call("palette.open", {"mode": "outline"})["navigation"]["modal"]
+        assert modal["mode"] == "outline"
+        rows = modal["results"]
+        assert [row["title"] for row in rows[:3]] == ["Handbook", "Part 1", "Details 1"]
+        assert [row["path"] for row in rows[:3]] == ["", "Handbook", "Handbook › Part 1"]
+        assert rows[2]["key"] == {"heading": {"revision": before["revision"],
+                                              "line": headings["Details 1"]}}
+        active = rows[modal["active_index"]]
+        assert active["title"] == "Part 3" and active["current"]
+        # Opening moves nothing.
+        opened = call("editor.get")
+        assert (opened["cursor"], opened["selection"]) == (before["cursor"], before["selection"])
+
+        call("palette.query", {"query": "part 7"})
+        shown = presented(app, tmp_path / "part-7.png")
+        assert shown["cursor"] == {"line": headings["Part 7"], "column": 0}
+        assert shown["selection"] is None
+        top = shown["first_visible_line"]
+        assert top <= headings["Part 7"] < top + 12, top
+        if engine == "advanced":
+            # Near the top, with a few lines above it for context.
+            assert top < headings["Part 7"], top
+        call("palette.query", {"query": ""})
+        assert call("navigation.get")["modal"]["results"][modal["active_index"]]["title"] == "Part 3"
+        assert call("editor.get")["cursor"]["line"] == headings["Part 3"]
+        call("palette.step", {"delta": 1})
+        assert call("editor.get")["cursor"]["line"] == headings["Details 3"]
+
+        call("palette.close")
+        restored = presented(app, tmp_path / "restored.png")
+        for field in ("cursor", "selection", "selected_text", "text", "revision"):
+            assert restored[field] == before[field], field
+        if engine == "advanced":
+            assert restored["first_visible_line"] == before["first_visible_line"]
+
+        call("palette.open", {"mode": "outline"})
+        call("palette.query", {"query": "details 5"})
+        chosen = call("palette.activate", {})
+        assert chosen["disposition"] == "completed"
+        assert chosen["navigation"]["modal"] is None
+        wait_for(lambda: call("focus.get")["named"] == ["note-editor"],
+                 description="the editor has the keyboard")
+        committed = presented(app, tmp_path / "committed.png")
+        assert committed["cursor"] == {"line": headings["Details 5"], "column": 0}
+        assert committed["selection"] is None
+        top = committed["first_visible_line"]
+        assert top <= headings["Details 5"] < top + 12, top
+
+
+def test_outline_leaves_a_view_away_from_the_cursor_in_place(
+        engine, editor_app, tmp_path: Path) -> None:
+    text, _ = outline_note()
+    with editor_app(artifacts_dir=artifact_directory("editor-outline-away")) as app:
+        call = app.client.call
+        call("editor.set", {"text": text})
+        caret = {"line": 2, "column": 0}
+        selection = {"line": 5, "column": 4, "selection": {"line": 5, "column": 0}}
+        for name, origin in (("caret", caret), ("selection", selection)):
+            call("editor.cursor", origin)
+            presented(app, tmp_path / f"{name}-origin.png")
+            call("editor.action", {"kind": "scroll", "lines": 100})
+            before = presented(app, tmp_path / f"{name}-away.png")
+            assert before["first_visible_line"] >= 90, before["first_visible_line"]
+
+            # Opening and closing with nothing previewed moves nothing.
+            call("palette.open", {"mode": "outline"})
+            opened = presented(app, tmp_path / f"{name}-opened.png")
+            call("palette.close")
+            closed = presented(app, tmp_path / f"{name}-closed.png")
+            for state in (opened, closed):
+                for field in ("first_visible_line", "cursor", "selection", "selected_text"):
+                    assert state[field] == before[field], (name, field)
+
+            # After a preview, advanced puts the view back exactly; classic
+            # brings the cursor, above the view, onto the top row.
+            call("palette.open", {"mode": "outline"})
+            call("palette.step", {"delta": 1})
+            previewed = presented(app, tmp_path / f"{name}-previewed.png")
+            assert previewed["first_visible_line"] != before["first_visible_line"]
+            call("palette.close")
+            restored = presented(app, tmp_path / f"{name}-restored.png")
+            for field in ("cursor", "selection", "selected_text"):
+                assert restored[field] == before[field], (name, field)
+            if engine == "advanced":
+                assert restored["first_visible_line"] == before["first_visible_line"], name
+
+
+def test_outline_of_a_note_without_headings_is_empty(editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-outline-empty")) as app:
+        call = app.client.call
+        call("editor.set", {"text": "plain\n```\n# in code\n```\n"})
+        modal = call("palette.open", {"mode": "outline"})["navigation"]["modal"]
+        assert modal["results"] == [] and modal["active_index"] is None
+        assert call("palette.activate", {})["disposition"] == "blocked"
+        call("palette.close")
+        assert call("editor.get")["cursor"] == {"line": 0, "column": 0}
+
+
+@pytest.mark.native_x11
+def test_native_outline_shortcut_previews_restores_and_jumps(editor_app) -> None:
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    text, headings = outline_note()
+    with editor_app(artifacts_dir=artifact_directory("editor-native-outline")) as app:
+        call = app.client.call
+        call("editor.set", {"text": text})
+        call("editor.cursor", {"line": 10, "column": 2, "selection": None})
+        window = focus_native(app)
+
+        def outline_open() -> bool:
+            modal = call("navigation.get")["modal"]
+            return modal is not None and modal["mode"] == "outline"
+
+        xdo("key", "--window", window, "--clearmodifiers", "alt+shift+o")
+        wait_for(outline_open, description="native outline shortcut")
+        xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", "part 6")
+        wait_for(lambda: call("editor.get")["cursor"]["line"] == headings["Part 6"],
+                 description="the outline previews the match")
+        xdo("key", "--window", window, "--clearmodifiers", "Escape")
+        wait_for(lambda: call("editor.get")["cursor"] == {"line": 10, "column": 2},
+                 description="Escape restores the cursor")
+        assert call("navigation.get")["modal"] is None
+
+        xdo("key", "--window", window, "--clearmodifiers", "alt+shift+o")
+        wait_for(outline_open, description="native outline shortcut again")
+        xdo("key", "--window", window, "--clearmodifiers", "Down")
+        wait_for(lambda: call("editor.get")["cursor"]["line"] == headings["Details 1"],
+                 description="Down previews the next heading")
+        xdo("key", "--window", window, "--clearmodifiers", "Return")
+        wait_for(lambda: call("navigation.get")["modal"] is None, description="Return commits")
+        xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", "X")
+        wait_for(lambda: call("editor.get")["text"].split("\n")[headings["Details 1"]]
+                 == "X### Details 1", description="the editor has the keyboard")
+
+
 def test_theme_and_font_pickers_preview_live_and_restore(engine, editor_app) -> None:
     with editor_app(artifacts_dir=artifact_directory("editor-pickers")) as app:
         call = app.client.call

@@ -432,12 +432,13 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 
 `Mode::Outline` works with or without a session, so it is available in `--editor` mode too.
 
-- **Rows:** headings from `outline.rs`, indented by level. Each row shows its parent chain as the path and is fuzzy-matched. With an empty query, the section containing the cursor is preselected.
-- **Opening:** the app stores `outline_origin` (cursor, selection, and scroll) on `App`.
-- **Moving the highlight** previews the jump. On the owned engine the heading is set near the top of the view (in the last screenful, as near as the scroll allows). On Iced it is placed best-effort.
+- **Rows:** headings from `outline.rs`, indented by level below the note's top heading level, with an `H1`–`H6` tag. Each row shows its parent chain as the path. The title alone is fuzzy-matched (matching the path too would list every child of a matching section); matches rank by score, ties in document order. With an empty query, the section containing the cursor is preselected and marked current. A note without headings shows "No headings in this note."
+- **Placement:** the outline palette is narrower (460 px) and sits beside the text so the preview stays visible: over the browser columns when they are wide enough, otherwise at the right edge.
+- **Opening:** the app stores `outline_origin` (cursor, selection, and scroll) on `App`, with the note's headings, rebuilt only when `edit_revision` changes so a query keystroke just filters them. Opening moves nothing, even with the cursor or selection out of view; the preselected row is shown only by a highlight move or Enter.
+- **Moving the highlight** previews the jump. On the owned engine the heading is set near the top of the view (in the last screenful, as near as the scroll allows). On Iced it is placed best-effort: exact when the view moves down, and on the top row when it moves up, because iced settles a scroll and reveals the cursor in the same update. When no row is highlighted (a query with no matches), the editor shows the origin.
 - **Enter** clears the origin, then commits and focuses the editor.
-- **Closing any other way** restores the origin in `sync_preview`: Escape, ⌘K, a dialog, or a workspace switch.
-- **Rows are keyed** by `(edit_revision, line)`. If the text changes underneath, the palette refreshes.
+- **Closing any other way** restores the origin in `sync_preview`: Escape, ⌘K, a dialog, or a workspace switch. If nothing was previewed (or the highlight came back to no row), the editor already shows the origin and closing moves nothing. The origin is restored only while the same note is open; a workspace switch or a deleted note drops it.
+- **Rows are keyed** by `(edit_revision, line)`. If the text changes underneath, the palette refreshes and keeps the same heading highlighted: matched by title and path, counted among its namesakes (the third `### Example` stays the third) while their number is unchanged, else the nearest by line with that title, else the nearest heading. A previewed heading is followed to its new line; a row never previewed stays unshown. A stale key is refused. If another note opens underneath, the palette closes.
 
 ## 6. Later (P1/P2)
 

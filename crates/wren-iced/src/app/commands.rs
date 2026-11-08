@@ -35,6 +35,7 @@ pub enum CommandId {
     Jump,
     Search,
     Find,
+    Outline,
     Back,
     Forward,
     ColumnLeft,
@@ -204,6 +205,7 @@ definitions![
     (Jump, "navigation.jump", "Jump to note…", "Go", App),
     (Search, "navigation.search", "Search workspace…", "Go", App),
     (Find, "navigation.find", "Find in note", "Go", App),
+    (Outline, "navigation.outline", "Jump to heading…", "Go", App),
     (Back, "navigation.back", "Back", "Go", App),
     (Forward, "navigation.forward", "Forward", "Go", App),
     (
@@ -482,8 +484,9 @@ impl App {
             | RevealGroup | MoveGroup | ReorderGroup => {
                 self.selected_group.is_some() && self.session.is_some()
             }
-            RenameNote | DeleteNote | RevealNote | MoveNote | Find => {
-                self.selected_note.is_some() || (!self.workspace_mode && id == Find)
+            RenameNote | DeleteNote | RevealNote | MoveNote | Find | Outline => {
+                self.selected_note.is_some()
+                    || (!self.workspace_mode && matches!(id, Find | Outline))
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
@@ -683,6 +686,7 @@ impl App {
             }
             Jump => self.open_palette(Mode::Jump),
             Search => self.open_palette(Mode::Search),
+            Outline => self.open_palette(Mode::Outline),
             Find => {
                 self.palette = None;
                 self.editor.break_group();

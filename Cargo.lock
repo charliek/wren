@@ -5052,6 +5052,7 @@ dependencies = [
  "tokio",
  "wren-core",
  "wren-editor",
+ "wren-markdown",
  "wren-sparkle",
 ]
 

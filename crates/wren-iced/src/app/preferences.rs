@@ -292,8 +292,9 @@ impl App {
 
     /// Follow the theme or font picker's highlighted row. Moving onto a row
     /// other than the saved choice previews it; leaving the picker any way
-    /// but choosing a row restores the saved choice.
-    pub(super) fn sync_preview(&mut self) {
+    /// but choosing a row restores the saved choice. The outline previews
+    /// headings the same way (`sync_outline`).
+    pub(super) fn sync_preview(&mut self) -> Task<Message> {
         let highlighted = self.palette.as_ref().and_then(|palette| {
             let row = palette.results.get(palette.active?)?;
             (!row.current).then_some(&row.key)
@@ -313,6 +314,7 @@ impl App {
             self.preview = preview;
             self.apply_shown();
         }
+        self.sync_outline()
     }
 
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
