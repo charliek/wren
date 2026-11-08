@@ -459,6 +459,44 @@ def test_outline_previews_headings_restores_on_escape_and_commits_on_enter(
         assert top <= headings["Details 5"] < top + 12, top
 
 
+def test_outline_leaves_a_view_away_from_the_cursor_in_place(
+        engine, editor_app, tmp_path: Path) -> None:
+    text, _ = outline_note()
+    with editor_app(artifacts_dir=artifact_directory("editor-outline-away")) as app:
+        call = app.client.call
+        call("editor.set", {"text": text})
+        caret = {"line": 2, "column": 0}
+        selection = {"line": 5, "column": 4, "selection": {"line": 5, "column": 0}}
+        for name, origin in (("caret", caret), ("selection", selection)):
+            call("editor.cursor", origin)
+            presented(app, tmp_path / f"{name}-origin.png")
+            call("editor.action", {"kind": "scroll", "lines": 100})
+            before = presented(app, tmp_path / f"{name}-away.png")
+            assert before["first_visible_line"] >= 90, before["first_visible_line"]
+
+            # Opening and closing with nothing previewed moves nothing.
+            call("palette.open", {"mode": "outline"})
+            opened = presented(app, tmp_path / f"{name}-opened.png")
+            call("palette.close")
+            closed = presented(app, tmp_path / f"{name}-closed.png")
+            for state in (opened, closed):
+                for field in ("first_visible_line", "cursor", "selection", "selected_text"):
+                    assert state[field] == before[field], (name, field)
+
+            # After a preview, advanced puts the view back exactly; classic
+            # brings the cursor, above the view, onto the top row.
+            call("palette.open", {"mode": "outline"})
+            call("palette.step", {"delta": 1})
+            previewed = presented(app, tmp_path / f"{name}-previewed.png")
+            assert previewed["first_visible_line"] != before["first_visible_line"]
+            call("palette.close")
+            restored = presented(app, tmp_path / f"{name}-restored.png")
+            for field in ("cursor", "selection", "selected_text"):
+                assert restored[field] == before[field], (name, field)
+            if engine == "advanced":
+                assert restored["first_visible_line"] == before["first_visible_line"], name
+
+
 def test_outline_of_a_note_without_headings_is_empty(editor_app) -> None:
     with editor_app(artifacts_dir=artifact_directory("editor-outline-empty")) as app:
         call = app.client.call

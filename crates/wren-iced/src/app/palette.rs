@@ -178,12 +178,30 @@ pub struct ResultRow {
 pub struct OutlineOrigin {
     viewport: Viewport,
     note: Option<NoteId>,
-    /// The `edit_revision` the rows were built from.
+    /// The `edit_revision` that `headings` were built from.
     revision: u64,
-    /// The highlighted row the editor last followed: `None` while it shows
-    /// the origin. It starts as the row the outline opens on, which only a
-    /// highlight move or Enter shows.
-    previewed: Option<Key>,
+    /// The note's headings, so a query keystroke only filters them.
+    headings: Vec<OutlineHeading>,
+    /// The highlighted row as of the last change the editor acted on. It
+    /// starts as the row the outline opens on, which only a highlight move
+    /// or Enter shows.
+    highlighted: Option<Key>,
+    /// Whether the editor still shows the origin: no row has been previewed,
+    /// or none has been highlighted since.
+    at_origin: bool,
+}
+
+/// One heading of the open note, as the outline lists it.
+struct OutlineHeading {
+    title: String,
+    /// The headings it sits under, outermost first.
+    path: String,
+    level: u8,
+    /// Levels below the note's top heading level.
+    depth: u8,
+    line: usize,
+    /// Whether the outline's origin is in its section.
+    current: bool,
 }
 
 pub struct Palette {
@@ -229,11 +247,7 @@ impl Palette {
                 // heading has a new key.
                 .or_else(|| {
                     (self.mode == Mode::Outline)
-                        .then(|| {
-                            results.iter().position(|row| {
-                                row.title == selected.title && row.path == selected.path
-                            })
-                        })
+                        .then(|| same_heading(&self.results, selected, &results))
                         .flatten()
                 })
         });
@@ -323,11 +337,14 @@ impl App {
             if let Some(origin) = self.outline_origin.take() {
                 self.return_to_origin(origin);
             }
+            let viewport = self.editor.viewport();
             self.outline_origin = Some(OutlineOrigin {
-                viewport: self.editor.viewport(),
+                viewport,
                 note: self.editor_note,
                 revision: self.edit_revision,
-                previewed: None,
+                headings: self.outline_headings(viewport.cursor().position.line),
+                highlighted: None,
+                at_origin: true,
             });
         }
         let mut palette = Palette::new(mode, self.workspace_generation());
@@ -337,7 +354,7 @@ impl App {
         if mode == Mode::Outline {
             let active = self.highlighted_heading();
             if let Some(origin) = &mut self.outline_origin {
-                origin.previewed = active;
+                origin.highlighted = active;
             }
         }
         self.finish_action(
@@ -849,7 +866,8 @@ impl App {
         outcome
     }
 
-    fn outline_rows(&self, query: &str) -> Vec<ResultRow> {
+    /// The open note's headings, with the section holding `line` current.
+    fn outline_headings(&self, line: usize) -> Vec<OutlineHeading> {
         let text = self.editor.text();
         let document = wren_markdown::Document::new(&text);
         let outline = wren_markdown::outline::Outline::new(&document);
@@ -859,40 +877,58 @@ impl App {
             .map(|heading| heading.level)
             .min()
             .unwrap_or(1);
-        let line = self.outline_origin.as_ref().map_or_else(
-            || self.editor.cursor().position.line,
-            |origin| origin.viewport.cursor().position.line,
-        );
         let current = outline.section_at(line);
-        let mut ranked: Vec<_> = headings
+        headings
             .iter()
             .enumerate()
-            .filter_map(|(index, heading)| {
-                fuzzy_score(query, &heading.text).map(|score| (score, index, heading))
-            })
-            .collect();
-        // Stable: equal scores (an empty query) keep the document order.
-        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-        ranked
-            .into_iter()
-            .map(|(_, index, heading)| {
+            .map(|(index, heading)| {
                 let mut path: Vec<&str> = outline
                     .ancestors(index)
                     .map(|parent| parent.text.as_str())
                     .collect();
                 path.reverse();
+                OutlineHeading {
+                    title: heading.text.clone(),
+                    path: path.join(" › "),
+                    level: heading.level,
+                    depth: heading.level - top,
+                    line: heading.line,
+                    current: current == Some(index),
+                }
+            })
+            .collect()
+    }
+
+    fn outline_rows(&self, query: &str) -> Vec<ResultRow> {
+        let fresh;
+        let headings = match &self.outline_origin {
+            Some(origin) => &origin.headings,
+            None => {
+                fresh = self.outline_headings(self.editor.cursor().position.line);
+                &fresh
+            }
+        };
+        let mut ranked: Vec<_> = headings
+            .iter()
+            .filter_map(|heading| fuzzy_score(query, &heading.title).map(|score| (score, heading)))
+            .collect();
+        // Stable: equal scores (an empty query) keep the document order.
+        ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        ranked
+            .into_iter()
+            .map(|(_, heading)| {
                 let (revision, line) = (self.edit_revision, heading.line);
                 let mut row = action_row(
                     Key::Heading { revision, line },
-                    heading.text.clone(),
-                    path.join(" › "),
+                    heading.title.clone(),
+                    heading.path.clone(),
                     true,
                     Action::Heading { revision, line },
                 );
-                row.current = current == Some(index);
+                row.current = heading.current;
                 row.heading = Some(HeadingRow {
                     level: heading.level,
-                    depth: heading.level - top,
+                    depth: heading.depth,
                 });
                 row
             })
@@ -920,7 +956,7 @@ impl App {
     fn return_to_origin(&mut self, origin: OutlineOrigin) {
         // A different note (a workspace switch, a deleted note) has no use
         // for the old note's cursor.
-        if origin.note == self.editor_note {
+        if !origin.at_origin && origin.note == self.editor_note {
             self.editor.restore_viewport(origin.viewport);
         }
     }
@@ -959,22 +995,36 @@ impl App {
             self.palette = None;
             return self.column_focus();
         }
-        if origin.revision != self.edit_revision {
+        let revised = origin.revision != self.edit_revision;
+        if revised {
+            let headings = self.outline_headings(origin.viewport.cursor().position.line);
+            let origin = self.outline_origin.as_mut().expect("outline origin");
+            origin.revision = self.edit_revision;
+            origin.headings = headings;
             self.refresh_palette(false);
         }
         let highlighted = self.highlighted_heading();
         let origin = self.outline_origin.as_mut().expect("outline origin");
-        origin.revision = self.edit_revision;
-        if highlighted == origin.previewed {
+        if highlighted == origin.highlighted {
             return Task::none();
         }
-        origin.previewed = highlighted.clone();
+        origin.highlighted = highlighted.clone();
+        // New text renames every row; a row the editor never followed stays
+        // unshown, and a followed one is followed to where it moved.
+        if revised && origin.at_origin {
+            return Task::none();
+        }
         match highlighted {
-            Some(Key::Heading { line, .. }) => self.show_heading(line),
-            _ => {
+            Some(Key::Heading { line, .. }) => {
+                origin.at_origin = false;
+                self.show_heading(line);
+            }
+            _ if !origin.at_origin => {
+                origin.at_origin = true;
                 let viewport = origin.viewport;
                 self.editor.restore_viewport(viewport);
             }
+            _ => {}
         }
         Task::none()
     }
@@ -1319,6 +1369,35 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
     iced::advanced::widget::Id::from(format!("palette-row-{generation}-{key}"))
 }
 
+/// The row in `results` for the heading `selected` highlighted among `old`,
+/// after the text changed: the same title and path, counted among its
+/// namesakes when their number is unchanged, else the nearest by line.
+fn same_heading(old: &[ResultRow], selected: &ResultRow, results: &[ResultRow]) -> Option<usize> {
+    let line_of = |row: &ResultRow| match row.key {
+        Key::Heading { line, .. } => Some(line),
+        _ => None,
+    };
+    let from = line_of(selected)?;
+    let namesake = |row: &ResultRow| row.title == selected.title && row.path == selected.path;
+    let before: Vec<_> = old.iter().filter(|row| namesake(row)).collect();
+    let after: Vec<_> = (0..results.len())
+        .filter(|&index| namesake(&results[index]))
+        .collect();
+    let nearest = |candidates: &mut dyn Iterator<Item = usize>| {
+        candidates.min_by_key(|&index| line_of(&results[index]).map(|line| line.abs_diff(from)))
+    };
+    if before.len() == after.len() {
+        if let Some(occurrence) = before.iter().position(|row| row.key == selected.key) {
+            return Some(after[occurrence]);
+        }
+    }
+    nearest(&mut after.iter().copied())
+        .or_else(|| {
+            nearest(&mut (0..results.len()).filter(|&index| results[index].title == selected.title))
+        })
+        .or_else(|| nearest(&mut (0..results.len())))
+}
+
 fn action_row(key: Key, title: String, path: String, enabled: bool, action: Action) -> ResultRow {
     ResultRow {
         key,
@@ -1571,6 +1650,60 @@ mod tests {
         let outcome = app.activate_palette_key(generation, stale);
         assert_eq!(outcome.processed.disposition, Disposition::Blocked);
         assert!(app.palette.is_some());
+    }
+
+    #[test]
+    fn a_text_change_before_any_highlight_move_moves_nothing() {
+        let mut app = outline_app(NOTE);
+        app.editor.move_cursor(caret(14, 2));
+        open_outline(&mut app);
+        assert_eq!(active_title(&app), "Usage");
+        app.editor
+            .replace_text(&format!("{NOTE}\n## Added\n"), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        assert_eq!(active_title(&app), "Usage");
+        assert_eq!(app.editor.cursor(), caret(14, 2));
+        // The rebased row is still unshown: moving off it and back shows it.
+        key(&mut app, crate::keys::Nav::Up);
+        assert_eq!(app.editor.cursor(), caret(8, 0));
+        key(&mut app, crate::keys::Nav::Down);
+        assert_eq!(app.editor.cursor(), caret(12, 0));
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.editor.cursor(), caret(14, 2));
+    }
+
+    #[test]
+    fn a_highlighted_heading_keeps_its_place_among_namesakes_and_renamed_parents() {
+        let text = "# A\n\n## Example\n\none\n\n## Example\n\ntwo\n\n## Example\n\nthree\n";
+        let mut app = outline_app(text);
+        open_outline(&mut app);
+        for _ in 0..3 {
+            key(&mut app, crate::keys::Nav::Down);
+        }
+        assert_eq!(app.editor.cursor(), caret(10, 0));
+        app.editor.replace_text(&format!("\n{text}"), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.palette.as_ref().unwrap().active, Some(3));
+        assert_eq!(app.editor.cursor(), caret(11, 0));
+
+        // Renaming the parent changes every path; the nearest namesake wins.
+        app.editor
+            .replace_text(&format!("\n{}", text.replacen("# A", "# B", 1)), true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        let palette = app.palette.as_ref().unwrap();
+        assert_eq!(palette.active, Some(3));
+        assert_eq!(palette.results[3].path, "B");
+        assert_eq!(app.editor.cursor(), caret(11, 0));
+
+        // A removed heading hands the highlight to the nearest one.
+        app.editor.replace_text("\n# B\n\none\n\n## Usage\n", true);
+        app.edit_revision += 1;
+        let _ = app.update(Message::Tick);
+        assert_eq!(active_title(&app), "Usage");
+        assert_eq!(app.editor.cursor(), caret(5, 0));
     }
 
     #[test]
