@@ -241,9 +241,9 @@ Enter **always** returns a plan; it never falls back to iced's stock Enter, whic
 | `> quote\|` | `> quote⏎> \|` | Also `> - a\|` → `> - a⏎> - \|`. |
 | `··- sub\|` | `··- sub⏎··- \|` | Keeps the indent. |
 | `- a\|⏎··- b` | `- a⏎··- \|⏎··- b` | An item with children gets a first child. |
-| `- \|item` | `- ⏎- \|item` | Inserts an empty item above; the cursor stays with the text. Directly after a paragraph line it inserts a blank line instead: `Para⏎- \|x` → `Para⏎⏎- \|x`. |
+| `- \|item` | `-⏎- \|item` | Inserts an empty item above (trimmed, like any markup-only line); the cursor stays with the text. Where an empty item would not read as one, directly after a paragraph line, it inserts a blank line instead: `Para⏎- \|x` → `Para⏎⏎- \|x`. |
 | `-\| item`, `- [\| ] x` | as if at `text_start` | The cursor sits inside the markup. |
-| `··\|- a` | `··⏎··\|- a` | The cursor sits in the indentation: plain newline with carry-over. |
+| `··\|- a` | `⏎··\|- a` | The cursor sits in the indentation: plain newline with carry-over. The line left behind is trimmed. |
 | `- a⏎⏎- b\|` | `- a⏎⏎- b⏎⏎- \|` | A loose list stays loose. |
 | `- foo··\|` | `- foo··⏎- \|` | A hard line break is kept. Only lines that become whitespace-only or markup-only are trimmed. |
 | `····text\|` | `····text⏎····\|` | Carry-over copies only the whitespace left of the cursor. |
@@ -261,7 +261,9 @@ Enter **always** returns a plan; it never falls back to iced's stock Enter, whic
 
 The outdented item takes the marker that Enter at the end of its parent would produce: the parent's bullet, or the parent's number + 1 with its delimiter, plus `[ ] ` if the parent is a task.
 
-At the outermost level the marker is removed **and a blank line is left**, so the next text is not a lazy continuation:
+A marker alone right under a paragraph line in the same container (`- a⏎··- |`) is paragraph text or a setext underline to CommonMark, since an empty item cannot interrupt a paragraph. Enter reads it as the empty item the writer meant.
+
+At the outermost level the marker is removed. **After a paragraph line a blank line is left**, so the next text is not a lazy continuation:
 
 | Before | After |
 |---|---|

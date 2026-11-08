@@ -12,7 +12,10 @@
 use std::ops::Range;
 
 pub mod block;
+pub mod edit;
 pub mod outline;
+
+pub use edit::plan;
 
 /// Random access to a document's lines.
 ///
