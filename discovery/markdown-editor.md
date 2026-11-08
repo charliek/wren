@@ -432,7 +432,25 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
   | `code_block` | `current_line` |
   | `gutter_current` | `body` |
 
+  Round 2 adds three more fields:
+
+  | Editor field | Mapped from | Use |
+  |---|---|---|
+  | `heading2` | `heading` | H2 text. H1 stays `heading`; H3–H6 use plain text color. |
+  | `completed` | `faint` | Text of done tasks and `~~strike~~`, readable at ≥ 4.5:1 contrast. Strike quads and markers stay `faint`. |
+  | `text_selection` | `selected` | The editor selection fill. |
+
 - **Notify wren-26** whenever `editor_colors`, `Palette`, `Style`, or the highlight test in `test_editor.py` changes.
+
+**Design-review defaults** for the P1 visual items:
+
+| Item | Default |
+|---|---|
+| Heading scale | H1 1.35 em, H2 1.18 em, H3 1.05 em, H4–H6 1.0 em. All bold. `#` markers keep the line's base size, in faint. |
+| Max text width | `editor-max-width = 760 \| none`, default 760 px, matching focus mode. |
+| Line height | `editor-line-height`, a ratio. Default 1.7 (24 px at 14 pt); accepted range 1.2–2.2. |
+| Gutter | The current line number uses `gutter_current`; other line numbers stay `faint`. |
+| Hanging indent | List items and quotes, aligned to the content column. |
 
 **P2:**
 - Folding; expand and shrink the selection.
