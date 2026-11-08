@@ -10,6 +10,7 @@ and Ctrl+A keep working in the editor and in every text field.
 | Jump to note | ⌘P | Alt+P | `navigation.jump` |
 | Search workspace | ⇧⌘F | Alt+Shift+F | `navigation.search` |
 | Find in note | ⌘F | Alt+F or Ctrl+F | `navigation.find` |
+| Jump to heading | ⇧⌘O | Alt+Shift+O | `navigation.outline` |
 | New note | ⌘N | Alt+N | `note.new` |
 | New dated note | ⇧⌘N | Alt+Shift+N | `note.new_dated` |
 | Back / Forward | ⌘[ / ⌘] | Alt+[ / Alt+] | `navigation.back` / `navigation.forward` |
@@ -27,6 +28,22 @@ Inside the editor: undo is ⌘Z / Ctrl+Z, and redo is ⇧⌘Z / Ctrl+Shift+Z
 the highlighted row, and Esc to close. While the palette or a dialog is
 open, other shortcuts are ignored, except the palette shortcut itself
 (which closes the palette) and Quit.
+
+## Jumping to a heading
+
+**Jump to heading** (⇧⌘O / Alt+Shift+O) opens the open note's outline: its
+headings in order, indented by level, each with the headings it sits under.
+Headings inside code blocks and front matter are left out. Type to filter
+the list, as in the other palettes. It opens on the section the cursor is
+in.
+
+Moving the highlight shows that heading in the editor, scrolled near the
+top. ↵ keeps it and returns the keyboard to the editor; Esc, or closing the
+palette any other way, puts the cursor, the selection, and the scroll back
+where they were. The `classic` [editor engine](../reference/configuration.md)
+places the heading and returns the scroll as nearly as it can; `advanced`
+does both exactly. The outline also works in the in-memory editor
+(`wren --editor`).
 
 ## Moving between columns
 
@@ -104,7 +121,7 @@ note.new  note.new_dated  note.rename  note.delete  note.reveal  note.move
 note.open_conflict  group.new  group.rename  group.delete  group.reveal
 group.move  group.reorder  section.new  section.rename  section.delete
 section.reveal  section.reorder  navigation.jump  navigation.search
-navigation.find  navigation.back  navigation.forward
+navigation.find  navigation.outline  navigation.back  navigation.forward
 navigation.column_left  navigation.column_right  view.focus
 view.reset_widths  notes.sort_modified  notes.sort_title  theme.choose
 font.choose  font.increase  font.decrease  font.reset  workspace.switch

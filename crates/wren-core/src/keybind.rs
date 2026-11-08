@@ -218,6 +218,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{p}+p"), "navigation.jump"),
         (format!("{p}+shift+f"), "navigation.search"),
         (format!("{p}+f"), "navigation.find"),
+        (format!("{p}+shift+o"), "navigation.outline"),
         (format!("{p}+n"), "note.new"),
         (format!("{p}+shift+n"), "note.new_dated"),
         (format!("{p}+bracketleft"), "navigation.back"),

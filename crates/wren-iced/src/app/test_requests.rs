@@ -330,6 +330,7 @@ impl App {
                     "workspaces" => Mode::Workspaces,
                     "themes" => Mode::Themes,
                     "fonts" => Mode::Fonts,
+                    "outline" => Mode::Outline,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -599,7 +600,7 @@ impl App {
         json!({
             "text":self.editor.text(),"cursor":position(cursor.position),
             "selection":cursor.selection.map(position),"selected_text":self.editor.selected_text(),
-            "line_count":self.editor.line_count(),"words":self.words,"revision":self.edit_revision,
+            "line_count":self.editor.line_count(),"first_visible_line":self.editor.first_visible_line(),"words":self.words,"revision":self.edit_revision,
             "can_undo":self.editor.can_undo(),"can_redo":self.editor.can_redo(),
             "find_open":self.find_open,"find_query":self.find_query,"find_count":self.editor.find_count(),
             "find_current":self.editor.find_current(),"edit_micros":self.edit_micros,
@@ -657,6 +658,15 @@ fn result_key(value: &Value) -> Result<Key, String> {
     if object.contains_key("workspace") {
         return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
     }
+    if let Some(heading) = object.get("heading") {
+        if heading.as_object().is_none_or(|object| object.len() != 2) {
+            return Err("heading requires revision and line".into());
+        }
+        return Ok(Key::Heading {
+            revision: id(heading, "revision")?,
+            line: usize::try_from(id(heading, "line")?).map_err(|_| "line must be usize")?,
+        });
+    }
     if let Some(action) = object.get("item_action") {
         let object = action
             .as_object()
@@ -695,6 +705,7 @@ fn key_json(key: &Key) -> Value {
         Key::Workspace(path) => json!({"workspace":path}),
         Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),
         Key::Font(family) => json!({"font":family}),
+        Key::Heading { revision, line } => json!({"heading":{"revision":revision,"line":line}}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }
@@ -998,6 +1009,10 @@ mod tests {
             Key::Note(NoteId(3)),
             Key::Destination(Parent::Group(GroupId(2))),
             Key::Workspace("/tmp/workspace".into()),
+            Key::Heading {
+                revision: 7,
+                line: 12,
+            },
             Key::ItemAction {
                 target: ItemTarget {
                     generation: 4,
@@ -1034,6 +1049,8 @@ mod tests {
             json!({"note":-1}),
             json!({"destination":{"note":1}}),
             json!({"command":"save"}),
+            json!({"heading":{"line":3}}),
+            json!({"heading":{"revision":1,"line":3,"title":"x"}}),
             json!({"reorder":{"source":{"generation":1,"item":{"group":2},"parent":{"section":1}}}}),
             json!({"item_action":{"target":{"generation":1,"item":{"note":2},"parent":{"section":1}},"command":"note.rename","extra":true}}),
             json!({"item_action":{"target":{"generation":1,"item":{"note":2},"parent":{"section":1},"path":"external"},"command":"note.rename"}}),
