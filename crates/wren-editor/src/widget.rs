@@ -361,12 +361,14 @@ impl<'a> TextEditor<'a> {
         let bounds = layout.bounds();
         let text_bounds = bounds.shrink(self.padding(bounds.width));
         let translation = text_bounds.position() - Point::ORIGIN;
-        let Some(cursor) = self.content.0.borrow().ime_position() else {
+        let editor = self.content.0.borrow();
+        let Some(cursor) = editor.ime_position() else {
             return InputMethod::Disabled;
         };
+        let height = row_height_at(editor.buffer(), cursor.y).unwrap_or(self.metrics.line);
 
         InputMethod::Enabled {
-            cursor: Rectangle::new(cursor + translation, Size::new(1.0, self.metrics.line)),
+            cursor: Rectangle::new(cursor + translation, Size::new(1.0, height)),
             purpose: input_method::Purpose::Normal,
             preedit: state.preedit.as_ref().map(input_method::Preedit::as_ref),
         }
@@ -747,7 +749,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                             content: (row.line + 1).to_string(),
                             bounds: Size::new(
                                 self.metrics.gutter - GUTTER_PADDING_RIGHT,
-                                row.height,
+                                self.metrics.line,
                             ),
                             size: Pixels(self.metrics.text),
                             line_height: self.metrics.line_height(),
@@ -757,7 +759,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                             shaping: text::Shaping::Basic,
                             wrapping: Wrapping::None,
                         },
-                        Point::new(right, text_bounds.y + row.top),
+                        Point::new(right, text_bounds.y + row.number_top),
                         color,
                         rows_clip,
                     );
@@ -820,13 +822,17 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 
             if let Some((focus, Selection::Caret(position))) = &selection {
                 if focus.is_cursor_visible() {
+                    let row =
+                        row_height_at(editor.buffer(), position.y).unwrap_or(self.metrics.line);
+                    // A heading's taller row gets a caret as much taller.
+                    let height = (self.metrics.caret * row / self.metrics.line)
+                        .round()
+                        .min(row);
                     let caret = Rectangle {
                         x: position.x + translation.x,
-                        y: position.y
-                            + translation.y
-                            + (self.metrics.line - self.metrics.caret) / 2.0,
+                        y: position.y + translation.y + ((row - height) / 2.0).round(),
                         width: CARET_WIDTH,
-                        height: self.metrics.caret,
+                        height,
                     };
                     if let Some(caret) = caret.intersection(&rows_clip) {
                         renderer.fill_quad(
@@ -1064,6 +1070,9 @@ struct VisualRow {
     top: f32,
     height: f32,
     baseline: f32,
+    /// Where a body-row-tall box for the line number goes, so the number's
+    /// baseline meets the row's; on a body row that is `top`.
+    number_top: f32,
     /// Whether this is the first visual row of its logical line.
     starts_line: bool,
     /// Whether this is the last visual row of its logical line, which may
@@ -1082,6 +1091,7 @@ struct VisualRow {
 /// Collects the visible rows of `buffer` (already scrolled by the editor),
 /// with the decoration `highlighter` left for each line.
 fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) -> Vec<VisualRow> {
+    let body = buffer.metrics();
     buffer
         .layout_runs()
         .map(|run| {
@@ -1100,11 +1110,23 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
                     })
                     .collect()
             };
+            let largest = run
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.font_size)
+                .fold(body.font_size, f32::max);
             VisualRow {
                 line: run.line_i,
                 top: run.line_top,
                 height: run.line_height,
                 baseline: run.line_y,
+                number_top: number_top(
+                    run.line_top,
+                    run.line_height,
+                    run.line_y,
+                    largest / body.font_size,
+                    body.line_height,
+                ),
                 width: run.line_w,
                 starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
                 ends_line: buffer.lines[run.line_i]
@@ -1119,6 +1141,26 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
             }
         })
         .collect()
+}
+
+/// The top of a `body_height` box whose body-sized text shares its baseline
+/// with a row at `top`, `height` tall, with its baseline at `baseline`, whose
+/// largest glyphs are `scale` times the body size. cosmic-text centres a
+/// row's glyph box in it, so the baseline sits `(ascent - descent) / 2` below
+/// the row's middle; for body glyphs that offset is the row's divided by
+/// `scale`.
+fn number_top(top: f32, height: f32, baseline: f32, scale: f32, body_height: f32) -> f32 {
+    let offset = baseline - (top + height / 2.0);
+    baseline - body_height / 2.0 - offset / scale
+}
+
+/// The height of the visual row at `y` (relative to the text origin), the
+/// top of which a caret or selection rectangle shares.
+fn row_height_at(buffer: &cosmic_text::Buffer, y: f32) -> Option<f32> {
+    buffer
+        .layout_runs()
+        .find(|run| y + 0.5 >= run.line_top && y < run.line_top + run.line_height)
+        .map(|run| run.line_height)
 }
 
 /// A cell `advance` wide after each selected line break, at the end of its
@@ -1343,6 +1385,62 @@ mod tests {
             assert!(rows.iter().filter(|row| row.line == 1).count() > 1);
             for pair in rows.windows(2) {
                 assert_eq!(pair[1].top, pair[0].top + LINE_HEIGHT);
+            }
+        }
+    }
+
+    #[test]
+    fn headings_get_taller_rows_on_the_owned_engine_only() {
+        let text = "# A long first-level heading that wraps\nbody\n## Two\n### Three\n#### Four\n#";
+        let heights = |kind| -> Vec<(usize, f32)> {
+            laid_out(kind, text, 300.0)
+                .iter()
+                .map(|row| (row.line, row.height))
+                .collect()
+        };
+        let classic = heights(BackendKind::Iced);
+        assert!(classic.iter().all(|&(_, height)| height == LINE_HEIGHT));
+        let owned = heights(BackendKind::Owned);
+        // round(24 × 1.35), round(24 × 1.18), round(24 × 1.05).
+        assert_eq!(
+            owned,
+            [
+                (0, 32.0),
+                (0, 32.0),
+                (1, 24.0),
+                (2, 28.0),
+                (3, 25.0),
+                (4, 24.0),
+                (5, 32.0)
+            ]
+        );
+        let rows = laid_out(BackendKind::Owned, text, 300.0);
+        for pair in rows.windows(2) {
+            assert_eq!(pair[1].top, pair[0].top + pair[0].height);
+        }
+    }
+
+    #[test]
+    fn line_numbers_share_the_baseline_of_their_row() {
+        let rows = laid_out(BackendKind::Owned, "# Title\nbody\n## Two\n\n#", 600.0);
+        let body = &rows[1];
+        assert_eq!(body.number_top, body.top);
+        // A body-sized number set at `number_top` puts its baseline where a
+        // body row puts its own.
+        let body_baseline = body.baseline - body.top;
+        for row in [&rows[0], &rows[2], &rows[4]] {
+            assert!(row.height > LINE_HEIGHT);
+            assert!(
+                (row.number_top + body_baseline - row.baseline).abs() < 0.01,
+                "{row:?}"
+            );
+        }
+        // An empty row centres it.
+        let empty = &rows[3];
+        assert!((empty.number_top - empty.top).abs() < 0.01);
+        for kind in BackendKind::ALL {
+            for row in laid_out(kind, "plain\n- [x] done", 600.0) {
+                assert!((row.number_top - row.top).abs() < 0.01, "{kind:?}");
             }
         }
     }

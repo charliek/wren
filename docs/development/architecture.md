@@ -67,6 +67,31 @@ break in the line ending of the line it splits. After any change,
 the edit revision; the footer's word count follows on the next tick, at most
 250 ms later.
 
+## Editor layout
+
+The editor's metrics are the text size and a row height, the text size times
+`editor-line-height` rounded to whole pixels; the caret and gutter scale from
+the text size. The column of gutter and text grows to `editor-max-width` and
+is centred past it: the widget fills its pane and pads the column in, so
+clicks and the wheel beside it still reach the editor. Focus mode uses the
+same column, at 760 px when the setting is `none`.
+
+The highlighter gives every span a `Scale` as well as a colour and a font:
+the text size and the row height, as multiples of the body's. H1 is 1.35 em,
+H2 1.18 em, and H3 1.05 em; their `#` markers keep the body size in the
+heading's row. Only the advanced engine applies it, as cosmic-text span
+metrics (`Attrs::metrics`), because iced's highlighter `Format` carries only
+a colour and a font; classic draws every row at the body size. In
+cosmic-text a visual row is as tall as the tallest span metrics on it, and
+spans without metrics do not count, so a heading's markers carry its row
+height. Everything the widget draws comes from the layout runs, each with
+its own top and height: the current-line and code bands, selection
+rectangles and selected line breaks, strikes, the caret (as much taller as
+its row), and the IME rectangle. A line number is set at the body size so
+its baseline meets its row's. Clicks hit-test through cosmic-text against
+the same runs, and the owned engine counts PageUp and PageDown by row
+heights rather than body rows.
+
 ## Storage safety
 
 - Storage walks validated workspace-relative paths through no-follow
