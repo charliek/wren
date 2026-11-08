@@ -96,7 +96,8 @@ Row heights exist only once a line is highlighted, and highlighting runs
 after the engine's update has already scrolled. So the owned
 engine highlights a page past both the view and the cursor, which lets a
 page motion or a short scroll measure real heights. When highlighting
-resizes rows, it places the view again: at a pending `scroll_to_line`
+changes a line's style or hanging indent, which can change its row heights
+or its wrapping, it places the view again: at a pending `scroll_to_line`
 target, then as far as needed to show a cursor that moved since the last
 draw. A jump to the end of the note, a far Find match, and an outline jump
 forward all land where they would on a fully highlighted note.
