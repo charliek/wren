@@ -51,13 +51,17 @@ shortcuts only act on notes.
    | ⌘P | Jump to section | Jump to group (current section first) | Jump to note | Jump to note |
    | ⌘N | New section | New group | New note | New note |
    | ⌘F | Filter sections | Filter groups | Search titles and text | Find in note |
+   | ⌘R | Rename section | Rename group | Rename note | Rename note |
 
    Pressing ⌘P again in a scoped jump widens it to every note, so the usual
    note jump is always one press away. Picking a section or group in the
-   jump selects it and moves right, like ↵.
+   jump selects it and moves right, like ↵. Scoping applies to the
+   shortcuts only; a palette row always does what its label says.
 10. **Drop the Outline layout.** At Notes depth, Columns with the breadcrumb
     uses about 280 px of browser, against 540 px for Outline, so Outline's
     reason to exist goes away.
+11. **Rename is ⌘R (Alt+R on Linux)**, matching tab rename in Roost, because
+    double-click now moves right. The three Rename palette commands stay.
 
 ## What changes in the code
 
@@ -115,8 +119,8 @@ shortcuts only act on notes.
   sets `Editor`.
 - **Double-click on a row means rename today** (`drag.rs` /
   `drag_view.rs` own the double-click detection). It becomes "select and
-  move right", so rename needs a new home; see the open questions. This is
-  the one existing behavior that changes; call it out in the changelog.
+  move right", and rename moves to ⌘R / Alt+R (decision 11). This is the
+  one existing behavior that changes; call it out in the changelog.
 
 ### 3. Column commands
 
@@ -149,9 +153,15 @@ shortcuts only act on notes.
   the fuzzy name matcher from the column filters and show a scope chip in
   the input, as Switch workspace does. ⌘P inside a scoped mode switches to
   note jump.
-- `run_command`: `Jump`, `NewNote`, and `Find` check `self.column` and
-  dispatch to the scoped variant. Keep the existing command keys; the
-  palette rows for New section and New group already exist.
+- `run_shortcut`: when `Jump`, `NewNote`, `Find`, or `RenameNote` arrive
+  from a key binding, check `self.column` and dispatch to the scoped
+  variant (`section.rename` / `group.rename` for ⌘R). Palette rows are not
+  scoped: "Rename note…" always renames the note. Keep the existing command
+  keys; the palette rows for New section, New group, and the three Rename
+  commands already exist.
+- `wren_core::keybind`: add `{p}+r` → `note.rename` to the defaults (⌘R on
+  macOS, Alt+R on Linux; neither is bound today). Add it to the macOS menu
+  next to the other item actions.
 
 ### 6. Test protocol and scenes
 
@@ -175,10 +185,6 @@ shortcuts only act on notes.
 6. Docs: keybindings page, first-run page, changelog.
 
 ## Open questions
-
-- Where does rename go once double-click means "move right"? Proposed: the
-  palette's Rename commands plus F2 (bindable alone, since it is a function
-  key), scoped to the active column like ⌘N.
 
 - Should the fold state survive a relaunch? The default is no: the app
   starts with every column open and the editor active.
