@@ -370,7 +370,9 @@ impl Scanner {
         }
 
         let (mut pos, mut col) = (start, 0);
-        let blank = skip_ws(b, pos, col).0 == b.len();
+        // Blank after the markers matched so far: `>` alone is a blank line
+        // inside its quote.
+        let blank_from = |pos| skip_ws(b, pos, 0).0 == b.len();
         let mut base = 0;
         let mut matched = 0;
         while matched < self.stack.len() {
@@ -389,7 +391,7 @@ impl Scanner {
                     base = content;
                 }
                 Container::Item(item) => {
-                    if blank {
+                    if blank_from(pos) {
                         if empty_item == Some(matched) {
                             break;
                         }
@@ -416,7 +418,7 @@ impl Scanner {
                     return self.info(kind, None, b, pos, skip_ws(b, pos, col).0, false);
                 }
                 Leaf::Html(end) => {
-                    let kind = if blank && end == HtmlEnd::Blank {
+                    let kind = if blank_from(pos) && end == HtmlEnd::Blank {
                         self.leaf = Leaf::None;
                         Kind::Blank
                     } else {
@@ -1296,6 +1298,11 @@ mod tests {
             ("> # h", &["1>H1"]),
             ("> a\n# h", &["1>P", "H1"]),
             ("> a\n- b", &["1>P", "1-P"]),
+            // A bare `>` is a blank line inside the quote, which a list item
+            // in the quote continues over.
+            ("> - a\n>\n>   b", &["2>-P", "2>B", "2>P"]),
+            ("> - a\n>\n> b", &["2>-P", "2>B", "1>P"]),
+            ("> -\n>\n>   a", &["2>-B", "1>B", "1>P"]),
         ]);
     }
 
@@ -1440,6 +1447,7 @@ mod tests {
             ("<", &["P"]),
             ("a\n<div>\nb", &["P", "HT", "HT"]),
             ("> <div>\n> # a\n# b", &["1>HT", "1>HT", "H1"]),
+            ("> <div>\n>\n> # a", &["1>HT", "1>B", "1>H1"]),
             ("    <div>", &["IC"]),
         ]);
     }
