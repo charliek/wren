@@ -328,6 +328,12 @@ impl EditorView {
                 .flatten();
             plain.unwrap_or_else(|| wren_markdown::plan(&lines, selection, intent, &PLAN_OPTIONS))
         });
+        if plan.edits.is_empty() {
+            // A motion, or a key with nothing to do: no text to snapshot.
+            self.history.break_group();
+            self.select(iced_cursor(plan.selection));
+            return false;
+        }
         let edits: Vec<Replace> = plan.edits.into_iter().map(Replace::from).collect();
         self.apply(&edits, iced_cursor(plan.selection))
     }
