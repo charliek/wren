@@ -13,6 +13,7 @@ use wren_core::theme::{self as definitions, Theme};
 pub use crate::cli::Options;
 use crate::{fonts, theme};
 
+mod columns;
 mod workspace;
 mod workspace_view;
 
@@ -74,6 +75,7 @@ pub struct App {
     last_processed: Option<Processed>,
     palette: Option<Palette>,
     widths: Widths,
+    column: columns::Column,
     focus: bool,
     filters: Filters,
     viewport: iced::Size,
@@ -257,6 +259,7 @@ impl App {
             last_processed: None,
             palette: None,
             widths: Widths::default(),
+            column: columns::Column::Editor,
             focus: false,
             filters: Filters::default(),
             viewport: iced::Size::new(1280.0, 800.0),
@@ -427,10 +430,13 @@ impl App {
             }
             Message::Escape => {
                 self.cancel_gestures();
-                if self.palette.take().is_none() && self.dialog.take().is_none() {
-                    self.find_open = false;
+                // Esc closes the topmost overlay and keeps the active column;
+                // with none open, it returns the keyboard to the editor.
+                if self.palette.take().is_some() || self.dialog.take().is_some() {
+                    return self.column_focus();
                 }
-                return focus_editor();
+                self.find_open = false;
+                return self.return_to_editor();
             }
             Message::Window(id, event) => match event {
                 iced::window::Event::Opened { size, .. } => {
@@ -511,7 +517,14 @@ impl App {
         }
         let started = Instant::now();
         let changed = match message {
-            editor_view::Message::Action(action) => self.editor.perform(action),
+            editor_view::Message::Action(action) => {
+                // Scrolling reaches an unfocused editor; anything else means
+                // the editor has the keyboard.
+                if !matches!(action, iced::widget::text_editor::Action::Scroll { .. }) {
+                    self.column = columns::Column::Editor;
+                }
+                self.editor.perform(action)
+            }
             editor_view::Message::Undo => self.editor.undo(),
             editor_view::Message::Redo => self.editor.redo(),
             editor_view::Message::Find => {
@@ -687,8 +700,10 @@ impl App {
         let mut subscriptions = vec![
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::window::events().map(|(id, event)| Message::Window(id, event)),
-            iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Keyboard(event) => crate::keys::input(&event).map(Message::Key),
+            iced::event::listen_with(|event, status, _| match event {
+                iced::Event::Keyboard(event) => crate::keys::input(&event)
+                    .filter(|input| crate::keys::reaches_app(input, status))
+                    .map(Message::Key),
                 _ => None,
             }),
         ];

@@ -444,6 +444,9 @@ impl App {
         } else {
             false
         };
+        if matches!(created, Some(ItemRef::Note(_))) {
+            self.column = super::columns::Column::Editor;
+        }
         let focus = if created.is_some()
             || (committed
                 && matches!(
@@ -454,7 +457,7 @@ impl App {
                         | Op::Back
                         | Op::Forward
                 )) {
-            focus_editor()
+            self.column_focus()
         } else {
             Task::none()
         };
@@ -947,7 +950,7 @@ impl App {
         if outcome.processed.disposition.committed() {
             self.dialog = None;
             self.reveal_selection();
-            outcome.task.chain(focus_editor())
+            outcome.task.chain(self.column_focus())
         } else {
             if let Some(dialog) = &mut self.dialog {
                 dialog.error = outcome.processed.warning;

@@ -13,6 +13,8 @@ pub enum Nav {
     Escape,
     Up,
     Down,
+    Left,
+    Right,
     Enter,
 }
 
@@ -45,11 +47,23 @@ pub fn input(event: &keyboard::Event) -> Option<Input> {
             Key::Named(Named::Escape) => Some(Input::Nav(Nav::Escape)),
             Key::Named(Named::ArrowUp) => Some(Input::Nav(Nav::Up)),
             Key::Named(Named::ArrowDown) => Some(Input::Nav(Nav::Down)),
+            Key::Named(Named::ArrowLeft) => Some(Input::Nav(Nav::Left)),
+            Key::Named(Named::ArrowRight) => Some(Input::Nav(Nav::Right)),
             Key::Named(Named::Enter) => Some(Input::Nav(Nav::Enter)),
             _ => None,
         };
     }
     accel(key, *physical_key, *modifiers).map(Input::Accel)
+}
+
+/// Whether the app acts on a key press a widget may already have handled.
+/// Arrows and Enter that the editor, a text field, or a resize grip captured
+/// belong to that widget; Escape and shortcuts always reach the app.
+pub fn reaches_app(input: &Input, status: iced::event::Status) -> bool {
+    match input {
+        Input::Nav(Nav::Escape) | Input::Accel(_) => true,
+        Input::Nav(_) => status == iced::event::Status::Ignored,
+    }
 }
 
 /// The trigger for a key press, using the physical key's Latin equivalent so
@@ -58,6 +72,19 @@ pub fn input(event: &keyboard::Event) -> Option<Input> {
 pub fn accel(key: &Key, physical: keyboard::key::Physical, modifiers: Modifiers) -> Option<Accel> {
     let name = match key.as_ref() {
         Key::Named(named) => named_key(named)?.to_string(),
+        // Shift turns `[` into `{` on US layouts; bindings name the key, so
+        // `shift+bracketleft` must match. Letters stay as typed.
+        Key::Character(character)
+            if modifiers.shift() && !character.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            match unshifted(physical) {
+                Some(base) => base.to_string(),
+                None if character.is_ascii() => character.to_lowercase(),
+                None => Key::Character("\u{3042}".into())
+                    .to_latin(physical)?
+                    .to_string(),
+            }
+        }
         Key::Character(character) if character.is_ascii() => character.to_lowercase(),
         // Option compositions (`¡`, `å`) and non-Latin layouts: use the
         // physical key. iced's `to_latin` keeps Latin-1 characters, so ask it
@@ -75,6 +102,38 @@ pub fn accel(key: &Key, physical: keyboard::key::Physical, modifiers: Modifiers)
             logo: modifiers.logo(),
         },
         key: canonical_key(&name)?,
+    })
+}
+
+/// The unshifted US character on a physical punctuation or digit key.
+fn unshifted(physical: keyboard::key::Physical) -> Option<char> {
+    use keyboard::key::{Code, Physical};
+    let Physical::Code(code) = physical else {
+        return None;
+    };
+    Some(match code {
+        Code::BracketLeft => '[',
+        Code::BracketRight => ']',
+        Code::Minus => '-',
+        Code::Equal => '=',
+        Code::Comma => ',',
+        Code::Period => '.',
+        Code::Slash => '/',
+        Code::Backslash => '\\',
+        Code::Semicolon => ';',
+        Code::Quote => '\'',
+        Code::Backquote => '`',
+        Code::Digit0 => '0',
+        Code::Digit1 => '1',
+        Code::Digit2 => '2',
+        Code::Digit3 => '3',
+        Code::Digit4 => '4',
+        Code::Digit5 => '5',
+        Code::Digit6 => '6',
+        Code::Digit7 => '7',
+        Code::Digit8 => '8',
+        Code::Digit9 => '9',
+        _ => return None,
     })
 }
 
@@ -377,6 +436,48 @@ mod tests {
             input(&function),
             Some(Input::Accel(parse_trigger("shift+f13").unwrap()))
         );
+    }
+
+    #[test]
+    fn arrows_are_navigation_and_shift_brackets_name_the_physical_key() {
+        for (named, code, nav) in [
+            (Named::ArrowLeft, Code::ArrowLeft, Nav::Left),
+            (Named::ArrowRight, Code::ArrowRight, Nav::Right),
+            (Named::ArrowUp, Code::ArrowUp, Nav::Up),
+            (Named::ArrowDown, Code::ArrowDown, Nav::Down),
+            (Named::Enter, Code::Enter, Nav::Enter),
+        ] {
+            let event = press(Key::Named(named), code, Modifiers::empty(), None);
+            assert_eq!(input(&event), Some(Input::Nav(nav)));
+        }
+        // Shift+[ reports `{` on US layouts; bindings name the physical key.
+        for (character, code, trigger) in [
+            ("{", Code::BracketLeft, "alt+shift+bracketleft"),
+            ("}", Code::BracketRight, "alt+shift+bracketright"),
+        ] {
+            let event = press(
+                Key::Character(character.into()),
+                code,
+                Modifiers::ALT | Modifiers::SHIFT,
+                None,
+            );
+            assert_eq!(
+                input(&event),
+                Some(Input::Accel(parse_trigger(trigger).unwrap()))
+            );
+        }
+    }
+
+    #[test]
+    fn captured_arrows_and_enter_stay_with_their_widget() {
+        use iced::event::Status;
+        for nav in [Nav::Up, Nav::Down, Nav::Left, Nav::Right, Nav::Enter] {
+            assert!(reaches_app(&Input::Nav(nav), Status::Ignored));
+            assert!(!reaches_app(&Input::Nav(nav), Status::Captured));
+        }
+        assert!(reaches_app(&Input::Nav(Nav::Escape), Status::Captured));
+        let accel = Input::Accel(parse_trigger("alt+shift+bracketleft").unwrap());
+        assert!(reaches_app(&accel, Status::Captured));
     }
 
     #[test]

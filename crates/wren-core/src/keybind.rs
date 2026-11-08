@@ -222,6 +222,9 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{p}+shift+n"), "note.new_dated"),
         (format!("{p}+bracketleft"), "navigation.back"),
         (format!("{p}+bracketright"), "navigation.forward"),
+        (format!("{p}+shift+bracketleft"), "navigation.column_left"),
+        (format!("{p}+shift+bracketright"), "navigation.column_right"),
+        (format!("{p}+r"), "note.rename"),
         (format!("{p}+y"), "view.focus"),
         // `+` is Shift+`=` on US layouts, and most people press it unshifted.
         // Toolkits report the shifted press as either key, so bind both.

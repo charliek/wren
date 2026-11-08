@@ -29,7 +29,7 @@ COMMANDS = {
     "note.move", "group.new", "section.new", "group.rename", "group.delete",
     "group.reveal", "group.move", "section.rename", "section.delete", "section.reveal",
     "navigation.jump", "navigation.search", "navigation.find", "navigation.back",
-    "navigation.forward", "view.focus",
+    "navigation.forward", "navigation.column_left", "navigation.column_right", "view.focus",
     "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
     "font.choose", "font.increase", "font.decrease", "font.reset",
     "workspace.switch", "workspace.add", "workspace.remove",

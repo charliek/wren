@@ -341,19 +341,23 @@ def test_native_move_picker_restores_typing_focus_on_the_moved_document(native_w
 
 
 @pytest.mark.native_x11
-def test_native_row_double_click_renames_without_replacing_the_document(native_workspace):
+def test_native_double_click_opens_and_alt_r_renames_without_replacing_the_document(native_workspace):
     app, root, window = native_workspace
     source = gestures.item(app, "notes", gestures.ORIGIN)
     original = (root / gestures.ORIGIN).read_bytes()
     point = gestures.point_in(gestures.visible_row(app, {"note": source["id"]})["visible"])
     gestures.move(window, point)
     gestures.xdo("click", "--repeat", "2", "--delay", "80", "1")
-    wait_for(lambda: gestures.navigation(app)["dialog"] is not None, description="native double-click naming dialog")
+    wait_for(lambda: gestures.navigation(app)["column"] == "editor",
+             description="native double-click moves into the editor")
+    assert gestures.navigation(app)["dialog"] is None
+    gestures.keys(window, "alt+r")
+    wait_for(lambda: gestures.navigation(app)["dialog"] is not None, description="Alt+R naming dialog")
     gestures.keys(window, "ctrl+a")
-    gestures.type_text(window, "Renamed by double click")
+    gestures.type_text(window, "Renamed by shortcut")
     gestures.keys(window, "Return")
-    destination = root / gestures.SOURCE / "Renamed by double click.md"
-    wait_for(destination.is_file, description="native double-click rename commits")
+    destination = root / gestures.SOURCE / "Renamed by shortcut.md"
+    wait_for(destination.is_file, description="native Alt+R rename commits")
     assert not (root / gestures.ORIGIN).exists()
     assert destination.read_bytes() == original
     assert gestures.session(app)["document"]["note"] == source["id"]

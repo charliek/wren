@@ -13,6 +13,8 @@ and Ctrl+A keep working in the editor and in every text field.
 | New note | ⌘N | Alt+N | `note.new` |
 | New dated note | ⇧⌘N | Alt+Shift+N | `note.new_dated` |
 | Back / Forward | ⌘[ / ⌘] | Alt+[ / Alt+] | `navigation.back` / `navigation.forward` |
+| Column left / right | ⇧⌘[ / ⇧⌘] | Alt+Shift+[ / Alt+Shift+] | `navigation.column_left` / `navigation.column_right` |
+| Rename note | ⌘R | Alt+R | `note.rename` |
 | Toggle focus mode | ⌘Y | Alt+Y | `view.focus` |
 | Increase text size | ⌘+ or ⌘= | Alt++ or Alt+= | `font.increase` |
 | Decrease text size | ⌘- | Alt+- | `font.decrease` |
@@ -25,6 +27,24 @@ Inside the editor: undo is ⌘Z / Ctrl+Z, and redo is ⇧⌘Z / Ctrl+Shift+Z
 the highlighted row, and Esc to close. While the palette or a dialog is
 open, other shortcuts are ignored, except the palette shortcut itself
 (which closes the palette) and Quit.
+
+## Moving between columns
+
+One of Sections, Groups, Notes, or the editor has the keyboard at a time.
+Its header turns to the accent color with a small dot, and its selected
+row gets an accent border.
+
+| Key | In Sections, Groups, or Notes |
+|---|---|
+| ↑ / ↓ | Select the previous or next row. Selection is live: the next column, and the note, follow right away. |
+| ↵ or → | Move one column right. From Notes, this moves into the editor. Needs a selected row. |
+| ← | Move one column left. |
+| Esc | Return to the editor without changing the selection. |
+
+Column left and right work everywhere, including from the editor, where
+the arrow keys and ↵ keep their usual editing jobs. A single click on a row
+selects it, the same as the arrow keys; a double-click selects it and moves
+one column right.
 
 ## Custom keybindings
 
@@ -61,7 +81,8 @@ note.new  note.new_dated  note.rename  note.delete  note.reveal  note.move
 note.open_conflict  group.new  group.rename  group.delete  group.reveal
 group.move  group.reorder  section.new  section.rename  section.delete
 section.reveal  section.reorder  navigation.jump  navigation.search
-navigation.find  navigation.back  navigation.forward  view.focus
+navigation.find  navigation.back  navigation.forward
+navigation.column_left  navigation.column_right  view.focus
 view.reset_widths  notes.sort_modified  notes.sort_title  theme.choose
 font.choose  font.increase  font.decrease  font.reset  workspace.switch
 workspace.add  workspace.remove  settings.open  settings.reload  app.quit

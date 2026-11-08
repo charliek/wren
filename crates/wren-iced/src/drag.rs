@@ -346,7 +346,8 @@ pub enum DragEvent {
         generation: u64,
         row: RowKind,
     },
-    Rename {
+    /// A double-click: select the row and move one column right.
+    Open {
         generation: u64,
         row: RowKind,
     },
@@ -676,7 +677,7 @@ impl Drag {
                     && click.position.distance(gesture.origin) < THRESHOLD
                     && click.position.distance(position) < THRESHOLD
             }) {
-                DragEvent::Rename {
+                DragEvent::Open {
                     generation: gesture.generation,
                     row: gesture.source,
                 }
@@ -1473,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn double_click_rename_uses_the_owned_release_and_exact_stable_row() {
+    fn double_click_open_uses_the_owned_release_and_exact_stable_row() {
         for kind in [
             RowKind::Note(NoteId(100)),
             RowKind::Group(GroupId(10)),
@@ -1489,7 +1490,7 @@ mod tests {
                 matches!(click(&mut drag, kind, at, Duration::ZERO, 7, &catalog(), &geometry).as_slice(), [DragEvent::Activate { row, .. }] if *row == kind)
             );
             assert!(
-                matches!(click(&mut drag, kind, Point::new(33.9,10.0), DOUBLE_CLICK_DELAY, 7, &catalog(), &geometry).as_slice(), [DragEvent::Rename { generation: 7, row }] if *row == kind)
+                matches!(click(&mut drag, kind, Point::new(33.9,10.0), DOUBLE_CLICK_DELAY, 7, &catalog(), &geometry).as_slice(), [DragEvent::Open { generation: 7, row }] if *row == kind)
             );
             assert!(!drag.is_pressed());
             assert!(matches!(
@@ -1509,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn click_timeout_or_four_pixel_separation_never_renames() {
+    fn click_timeout_or_four_pixel_separation_never_opens() {
         let kind = RowKind::Note(NoteId(100));
         for (at, delay) in [
             (Point::new(34.0, 10.0), Duration::from_millis(100)),
@@ -1536,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn second_press_crossing_the_drag_threshold_never_becomes_a_rename() {
+    fn second_press_crossing_the_drag_threshold_never_becomes_an_open() {
         let kind = RowKind::Note(NoteId(100));
         let at = Point::new(30.0, 10.0);
         let mut drag = Drag::default();
@@ -1566,7 +1567,7 @@ mod tests {
         );
         assert!(!events
             .iter()
-            .any(|event| matches!(event, DragEvent::Rename { .. } | DragEvent::Activate { .. })));
+            .any(|event| matches!(event, DragEvent::Open { .. } | DragEvent::Activate { .. })));
         assert!(matches!(
             click(
                 &mut drag,

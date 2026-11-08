@@ -1209,3 +1209,234 @@ fn destructive_command_needs_explicit_target_and_return_is_never_confirmation() 
     assert!(app.dialog.is_some());
     assert!(directory.path().join("Alpha/Inbox/First.md").exists());
 }
+
+mod columns {
+    use super::*;
+    use crate::app::columns::Column;
+    use crate::drag::{DragEvent, RowKind};
+    use crate::keys::{Input, Nav};
+
+    fn key(app: &mut App, nav: Nav) {
+        let _ = app.update(Message::Key(Input::Nav(nav)));
+    }
+
+    fn run(app: &mut App, id: CommandId) -> Disposition {
+        app.dispatch(Command::Run(id)).processed.disposition
+    }
+
+    fn section(app: &App, name: &str) -> wren_core::model::SectionId {
+        app.model()
+            .unwrap()
+            .sections
+            .iter()
+            .find(|section| section.name == name)
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn keyboard_walks_columns_and_selection_is_live_with_flushes() {
+        let (directory, mut app) = fixture();
+        assert_eq!(app.column, Column::Editor);
+        append(&mut app, " edited");
+        for expected in [Column::Notes, Column::Groups, Column::Sections] {
+            assert_eq!(run(&mut app, CommandId::ColumnLeft), Disposition::Completed);
+            assert_eq!(app.column, expected);
+        }
+        assert_eq!(run(&mut app, CommandId::ColumnLeft), Disposition::Blocked);
+        assert_eq!(app.column, Column::Sections);
+
+        // ↓ in Sections selects Beta; its group and last note follow, and the
+        // outgoing draft is flushed first.
+        key(&mut app, Nav::Down);
+        assert_eq!(app.selected_section, Some(section(&app, "Beta")));
+        assert_eq!(app.selected_note, Some(note(&app, "Third")));
+        assert_eq!(app.editor.text(), "third body");
+        assert_eq!(app.column, Column::Sections);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("Alpha/Inbox/First.md")).unwrap(),
+            "first body edited"
+        );
+        key(&mut app, Nav::Down);
+        assert_eq!(app.selected_section, Some(section(&app, "Beta")), "clamped");
+        // A section opens on its first group.
+        key(&mut app, Nav::Up);
+        assert_eq!(app.selected_group, Some(group(&app, "Group")));
+        assert_eq!(app.selected_note, Some(note(&app, "Second")));
+
+        key(&mut app, Nav::Enter);
+        assert_eq!(app.column, Column::Groups);
+        key(&mut app, Nav::Down);
+        assert_eq!(app.selected_group, Some(group(&app, "Inbox")));
+        assert_eq!(app.selected_note, Some(note(&app, "First")));
+        assert_eq!(app.editor.text(), "first body edited");
+        key(&mut app, Nav::Up);
+        assert_eq!(app.selected_group, Some(group(&app, "Group")));
+        assert_eq!(app.column, Column::Groups);
+
+        key(&mut app, Nav::Right);
+        assert_eq!(app.column, Column::Notes);
+        key(&mut app, Nav::Left);
+        assert_eq!(app.column, Column::Groups);
+        assert_eq!(
+            run(&mut app, CommandId::ColumnRight),
+            Disposition::Completed
+        );
+        assert_eq!(
+            run(&mut app, CommandId::ColumnRight),
+            Disposition::Completed
+        );
+        assert_eq!(app.column, Column::Editor);
+        assert_eq!(app.selected_note, Some(note(&app, "Second")));
+        assert_eq!(run(&mut app, CommandId::ColumnRight), Disposition::Blocked);
+    }
+
+    #[test]
+    fn arrows_belong_to_the_editor_and_escape_returns_to_it() {
+        let (_directory, mut app) = fixture();
+        let selected = app.selected_note;
+        for nav in [Nav::Down, Nav::Up, Nav::Left, Nav::Right, Nav::Enter] {
+            key(&mut app, nav);
+        }
+        assert_eq!(app.column, Column::Editor);
+        assert_eq!(app.selected_note, selected);
+
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        assert_eq!(app.column, Column::Groups);
+        let group = app.selected_group;
+        key(&mut app, Nav::Escape);
+        assert_eq!(app.column, Column::Editor);
+        assert_eq!(app.selected_group, group);
+        assert_eq!(app.selected_note, selected);
+    }
+
+    #[test]
+    fn escape_closing_an_overlay_keeps_the_active_column() {
+        let (_directory, mut app) = fixture();
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        let _ = app.open_palette(Mode::Commands);
+        key(&mut app, Nav::Down);
+        assert_eq!(
+            app.column,
+            Column::Notes,
+            "arrows move the palette, not the column"
+        );
+        key(&mut app, Nav::Escape);
+        assert!(app.palette.is_none());
+        assert_eq!(app.column, Column::Notes);
+    }
+
+    #[test]
+    fn a_click_selects_like_an_arrow_and_a_double_click_moves_right() {
+        let (_directory, mut app) = fixture();
+        let generation = app.gesture_generation;
+        let destination = group(&app, "Destination");
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Activate {
+                generation,
+                row: RowKind::Section(section(&app, "Beta")),
+            },
+        );
+        assert_eq!(app.column, Column::Sections);
+        assert_eq!(app.selected_group, Some(destination));
+        let second = note(&app, "Second");
+        let _ = app.dispatch(Command::SelectParent(Parent::Group(group(&app, "Group"))));
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Activate {
+                generation,
+                row: RowKind::Note(second),
+            },
+        );
+        assert_eq!(
+            app.column,
+            Column::Notes,
+            "a note click keeps the keyboard in Notes"
+        );
+        assert_eq!(app.selected_note, Some(second));
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Open {
+                generation,
+                row: RowKind::Group(destination),
+            },
+        );
+        assert_eq!(app.selected_group, Some(destination));
+        assert_eq!(app.column, Column::Notes);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn moving_right_needs_a_selection_and_an_empty_group_stays_put() {
+        let (directory, mut app) = fixture();
+        std::fs::create_dir(directory.path().join("Alpha/Empty")).unwrap();
+        let _ = app.process_core(Op::Reconcile);
+        let empty = group(&app, "Empty");
+        let generation = app.gesture_generation;
+        let _ = app.drag_event(
+            generation,
+            DragEvent::Activate {
+                generation,
+                row: RowKind::Group(empty),
+            },
+        );
+        assert_eq!(app.column, Column::Groups);
+        assert_eq!(app.selected_note, None);
+        assert_eq!(
+            run(&mut app, CommandId::ColumnRight),
+            Disposition::Completed
+        );
+        assert_eq!(app.column, Column::Notes);
+        let blocked = app.dispatch(Command::Run(CommandId::ColumnRight));
+        assert_eq!(blocked.processed.disposition, Disposition::Blocked);
+        assert_eq!(app.column, Column::Notes);
+        key(&mut app, Nav::Down);
+        assert_eq!(app.selected_note, None);
+    }
+
+    #[test]
+    fn a_palette_jump_and_history_land_in_the_editor() {
+        let (_directory, mut app) = fixture();
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        let _ = app.open_palette(Mode::Jump);
+        let _ = app.palette_query("Third".into());
+        let _ = app.activate_palette(None);
+        assert_eq!(app.selected_note, Some(note(&app, "Third")));
+        assert_eq!(app.column, Column::Editor);
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_eq!(app.column, Column::Editor);
+        assert_eq!(app.selected_note, Some(note(&app, "First")));
+    }
+
+    #[test]
+    fn a_filter_hides_rows_from_the_arrows() {
+        let (_directory, mut app) = fixture();
+        let _ = app.dispatch(Command::Filter {
+            pane: "sections".into(),
+            query: "Beta".into(),
+        });
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        // Alpha is selected but filtered out; ↓ lands on the first visible row.
+        key(&mut app, Nav::Down);
+        assert_eq!(app.selected_section, Some(section(&app, "Beta")));
+    }
+
+    #[test]
+    fn rename_and_column_moves_have_default_shortcuts() {
+        let (_directory, mut app) = fixture();
+        let _ = app.update(super::super::preferences::shortcut(CommandId::ColumnLeft));
+        assert_eq!(app.column, Column::Notes);
+        let _ = app.update(super::super::preferences::shortcut(CommandId::ColumnRight));
+        assert_eq!(app.column, Column::Editor);
+        let _ = app.update(super::super::preferences::shortcut(CommandId::RenameNote));
+        assert!(matches!(
+            app.dialog.as_ref().unwrap().kind,
+            DialogKind::Rename(ItemRef::Note(_))
+        ));
+    }
+}

@@ -7,6 +7,7 @@ use wren_core::model::{GroupId, Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
 
+use super::columns::Column;
 use super::commands::{Command, CommandId};
 use super::navigation::matches_name;
 use super::palette::Mode;
@@ -259,13 +260,38 @@ impl App {
             .into()
     }
 
-    fn pane_header<'a>(&'a self, label: String, command: CommandId) -> Element<'a, Message> {
+    fn pane_header<'a>(
+        &'a self,
+        label: String,
+        command: CommandId,
+        column: Column,
+    ) -> Element<'a, Message> {
         let colors = self.definition.colors;
+        let active = self.column == column;
+        // The active column's header turns accent with a leading dot, so the
+        // keyboard's place reads at a glance.
+        let title = chrome::label(
+            label.to_uppercase(),
+            11,
+            if active { colors.accent } else { colors.muted },
+        )
+        .font(fonts::SEMIBOLD);
+        let title: Element<'a, Message> = if active {
+            let dot = container(iced::widget::space())
+                .width(6)
+                .height(6)
+                .style(move |_| chrome::surface(self.definition, colors.accent, 3.0, false));
+            row![dot, title]
+                .spacing(6)
+                .align_y(iced::Center)
+                .width(Fill)
+                .into()
+        } else {
+            title.width(Fill).into()
+        };
         container(
             row![
-                chrome::label(label.to_uppercase(), 11, colors.muted)
-                    .font(fonts::SEMIBOLD)
-                    .width(Fill),
+                title,
                 button(chrome::icon(Icon::Plus, 14.0, colors.muted))
                     .width(26)
                     .height(26)
@@ -391,7 +417,7 @@ impl App {
         }
         self.pane_shell(
             column![
-                self.pane_header("Sections".into(), CommandId::NewSection),
+                self.pane_header("Sections".into(), CommandId::NewSection, Column::Sections),
                 self.pane_filter("sections", "Filter sections", &self.filters.sections),
                 self.pane_scroll(items, "sections-list")
             ]
@@ -436,7 +462,7 @@ impl App {
             );
         self.pane_shell(
             column![
-                self.pane_header(heading, CommandId::NewGroup),
+                self.pane_header(heading, CommandId::NewGroup, Column::Groups),
                 self.pane_filter("groups", "Filter groups", &self.filters.groups),
                 self.pane_scroll(items, "groups-list")
             ]
@@ -494,7 +520,7 @@ impl App {
                         .height(if note.subtitle.is_some() { 70 } else { 54 })
                         .padding([8, 10])
                         .clip(true)
-                        .style(move |_| self.row_style(selected)),
+                        .style(move |_| self.row_style(selected, Column::Notes)),
                 );
             }
         }
@@ -560,7 +586,7 @@ impl App {
         );
         self.pane_shell(
             column![
-                self.pane_header(heading, CommandId::NewNote),
+                self.pane_header(heading, CommandId::NewNote, Column::Notes),
                 self.pane_filter("notes", "Search titles and text", &self.filters.notes),
                 self.pane_scroll(items, "notes-list"),
                 footer
@@ -580,6 +606,11 @@ impl App {
         selected: bool,
     ) -> Element<'a, Message> {
         let colors = self.definition.colors;
+        let column = match kind {
+            RowKind::Section(_) => Column::Sections,
+            RowKind::Group(_) => Column::Groups,
+            RowKind::Note(_) => Column::Notes,
+        };
         let content = row![
             ellipsis(name, 13.0, theme::color(colors.text)),
             chrome::label(count.to_string(), 11, colors.muted)
@@ -594,19 +625,23 @@ impl App {
             .align_y(iced::Center)
             .padding([0, 10])
             .clip(true)
-            .style(move |_| self.row_style(selected))
+            .style(move |_| self.row_style(selected, column))
             .into()
     }
 
-    fn row_style(&self, selected: bool) -> container::Style {
+    /// The selected row in the active column gets an accent border; selected
+    /// rows elsewhere keep the quieter selection border.
+    fn row_style(&self, selected: bool, column: Column) -> container::Style {
         let colors = self.definition.colors;
         container::Style {
             background: selected.then(|| theme::color(colors.selected).into()),
             border: Border {
-                color: if selected {
-                    theme::color(colors.selected_border)
-                } else {
+                color: if !selected {
                     iced::Color::TRANSPARENT
+                } else if self.column == column {
+                    theme::color(colors.accent)
+                } else {
+                    theme::color(colors.selected_border)
                 },
                 width: 1.0,
                 radius: 6.0.into(),

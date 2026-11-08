@@ -2,8 +2,8 @@ use iced::Task;
 use wren_core::model::Parent;
 use wren_core::ops::Op;
 
+use super::columns::Column;
 use super::commands::Command;
-use super::palette::SearchTarget;
 use super::{App, Message};
 use crate::drag::{DragEvent, RowKind};
 use crate::panes::{self, ResizeEvent};
@@ -68,30 +68,17 @@ impl App {
                 generation: tag,
                 row,
             } if tag == generation => {
-                let command = match row {
-                    RowKind::Section(section) => Command::SelectSection(section),
-                    RowKind::Group(group) => Command::SelectParent(Parent::Group(group)),
-                    RowKind::Note(note) => {
-                        let hit = self.note_hits().into_iter().find(|hit| hit.note == note);
-                        Command::OpenNote(SearchTarget {
-                            generation: self.workspace_generation(),
-                            index_revision: self
-                                .session
-                                .as_ref()
-                                .map_or(0, |session| session.index().revision()),
-                            note,
-                            query: self.filters.notes.clone(),
-                            content_match: hit.and_then(|hit| hit.content_match),
-                        })
-                    }
-                };
-                return self.dispatch(command).task;
+                return self.click_row(row).task;
             }
-            DragEvent::Rename {
+            DragEvent::Open {
                 generation: tag,
                 row,
             } if tag == generation => {
-                return self.dispatch(Command::Rename(row.item())).task;
+                let selected = self.click_row(row);
+                if !selected.processed.disposition.committed() {
+                    return selected.task;
+                }
+                return Task::batch([selected.task, self.column_right().task]);
             }
             DragEvent::Context {
                 generation: tag,
@@ -112,6 +99,27 @@ impl App {
             _ => {}
         }
         Task::none()
+    }
+
+    /// A single click selects the row and makes its column active, the same
+    /// as reaching it with the arrow keys; the layout never moves under the pointer.
+    fn click_row(&mut self, row: RowKind) -> super::commands::Gateway {
+        let (column, command) = match row {
+            RowKind::Section(section) => (Column::Sections, Command::SelectSection(section)),
+            RowKind::Group(group) => (Column::Groups, Command::SelectParent(Parent::Group(group))),
+            RowKind::Note(note) => (Column::Notes, Command::OpenNote(self.note_target(note))),
+        };
+        self.column = column;
+        let outcome = self.dispatch(command);
+        if outcome.processed.disposition.committed() {
+            return outcome;
+        }
+        // Re-selecting the current row commits nothing but still takes the keyboard.
+        let focus = self.column_focus();
+        super::commands::Gateway {
+            task: Task::batch([outcome.task, focus]),
+            ..outcome
+        }
     }
 
     pub(super) fn resize_event(&mut self, generation: u64, event: ResizeEvent) -> Task<Message> {

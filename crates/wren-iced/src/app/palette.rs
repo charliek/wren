@@ -13,7 +13,7 @@ use super::commands::{
     item_commands, Command, CommandId, Disposition, Gateway, ItemTarget, ReorderTarget,
     DEFINITIONS, GROUPS,
 };
-use super::{focus_editor, App, Message};
+use super::{App, Message};
 use crate::ellipsis::ellipsis;
 use crate::{chrome, fonts, palette_scroll, theme};
 use wren_core::theme as definitions;
@@ -297,7 +297,8 @@ impl App {
     pub(super) fn close_palette(&mut self) -> Gateway {
         self.palette = None;
         // A late native folder completion is unrelated to a dismissed overlay.
-        self.finish_action(Disposition::Completed, None, focus_editor())
+        let task = self.column_focus();
+        self.finish_action(Disposition::Completed, None, task)
     }
 
     pub(super) fn refresh_palette(&mut self, reset: bool) {
@@ -642,7 +643,10 @@ impl App {
         let moving = matches!(result.action, Action::Destination(_) | Action::Reorder(_));
         let mut outcome = match result.action {
             Action::Command(id) => self.dispatch(Command::Run(id)),
-            Action::Note(target) => self.dispatch(Command::OpenNote(target)),
+            Action::Note(target) => {
+                self.column = super::columns::Column::Editor;
+                self.dispatch(Command::OpenNote(target))
+            }
             Action::ItemCommand { target, id } => self.dispatch(Command::ItemAction { target, id }),
             Action::Reorder(target) => self.dispatch(Command::Reorder(target)),
             Action::Theme(id) => self.choose_theme(id),

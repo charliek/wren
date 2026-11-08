@@ -10,7 +10,7 @@ use wren_core::theme::{self as definitions, Appearance, Theme};
 
 use super::commands::{Command, CommandId, Disposition, Gateway};
 use super::palette::{Key, Mode};
-use super::{focus_editor, workspace, App, Message};
+use super::{workspace, App, Message};
 use crate::fonts;
 use crate::keys::{Input, Nav};
 
@@ -268,7 +268,8 @@ impl App {
         self.preview = Preview::default();
         self.apply_shown();
         let warning = self.save_setting("theme", &choice.value());
-        self.saved(warning, focus_editor())
+        let task = self.column_focus();
+        self.saved(warning, task)
     }
 
     /// Persist an editor font family from the picker.
@@ -278,7 +279,8 @@ impl App {
         self.preview = Preview::default();
         self.apply_shown();
         let warning = self.save_setting("editor-font-family", &format!("\"{family}\""));
-        self.saved(warning, focus_editor())
+        let task = self.column_focus();
+        self.saved(warning, task)
     }
 
     /// Step the editor text size by `delta` points, or back to the default
@@ -288,10 +290,10 @@ impl App {
         let size = delta.map_or(settings::DEFAULT_FONT_SIZE, |delta| {
             (current + delta).clamp(settings::MIN_FONT_SIZE, settings::MAX_FONT_SIZE)
         });
-        // Leaving the palette returns focus to the note; a shortcut leaves
-        // focus where it was (a filter field, say).
+        // Leaving the palette returns focus to the active column; a shortcut
+        // leaves focus where it was (a filter field, say).
         let task = if self.palette.take().is_some() {
-            focus_editor()
+            self.column_focus()
         } else {
             Task::none()
         };
@@ -375,12 +377,24 @@ impl App {
         let accel = match input {
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),
             Input::Nav(nav) => {
-                return match (&self.palette, nav) {
-                    (Some(_), Nav::Up) => self.palette_step(-1).task,
-                    (Some(_), Nav::Down) => self.palette_step(1).task,
-                    (Some(_), Nav::Enter) => self.activate_palette(None).task,
-                    _ => Task::none(),
+                if self.palette.is_some() {
+                    return match nav {
+                        Nav::Up => self.palette_step(-1).task,
+                        Nav::Down => self.palette_step(1).task,
+                        Nav::Enter => self.activate_palette(None).task,
+                        _ => Task::none(),
+                    };
                 }
+                if self.dialog.is_some() || !self.column.is_browser() {
+                    return Task::none();
+                }
+                return match nav {
+                    Nav::Up => self.step_column(-1).task,
+                    Nav::Down => self.step_column(1).task,
+                    Nav::Enter | Nav::Right => self.column_right().task,
+                    Nav::Left => self.column_left().task,
+                    Nav::Escape => Task::none(),
+                };
             }
             Input::Accel(accel) => accel,
         };

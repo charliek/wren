@@ -78,6 +78,9 @@ pub fn install(keymap: &Keymap) {
             &PredefinedMenuItem::separator(),
             &item("navigation.back", "Back"),
             &item("navigation.forward", "Forward"),
+            &PredefinedMenuItem::separator(),
+            &item("navigation.column_left", "Column Left"),
+            &item("navigation.column_right", "Column Right"),
         ],
     );
     let view_menu = Submenu::with_items(

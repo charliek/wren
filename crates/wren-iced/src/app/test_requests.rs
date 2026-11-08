@@ -57,6 +57,33 @@ impl App {
                 request.respond(Ok(json!({"correlation":outcome.processed.correlation,"disposition":outcome.processed.disposition.key(),"warning":outcome.processed.warning,"navigation":self.navigation_snapshot()})));
                 return Ok(outcome.task);
             }
+            "key.nav" => {
+                // An uncaptured navigation key, as if no text widget had it.
+                let nav = match string(params, "key")? {
+                    "up" => crate::keys::Nav::Up,
+                    "down" => crate::keys::Nav::Down,
+                    "left" => crate::keys::Nav::Left,
+                    "right" => crate::keys::Nav::Right,
+                    "enter" => crate::keys::Nav::Enter,
+                    "escape" => crate::keys::Nav::Escape,
+                    _ => return Err("key must be up, down, left, right, enter, or escape".into()),
+                };
+                let task = self.update(Message::Key(crate::keys::Input::Nav(nav)));
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
+            "row.click" => {
+                let row = row_param(params)?;
+                let generation = self.gesture_generation;
+                let event = if params.get("double").and_then(Value::as_bool).unwrap_or(false) {
+                    crate::drag::DragEvent::Open { generation, row }
+                } else {
+                    crate::drag::DragEvent::Activate { generation, row }
+                };
+                let task = self.drag_event(generation, event);
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
             "dialog.name" => { let task = self.update(Message::DialogName(string(params, "name")?.into())); request.respond(Ok(self.navigation_snapshot())); return Ok(task); }
             "dialog.submit" | "dialog.confirm_trash" | "dialog.close" => {
                 let task = self.update(match request.op.as_str() { "dialog.submit" => Message::SubmitDialog, "dialog.confirm_trash" => Message::ConfirmTrash, _ => Message::CancelDialog });
@@ -480,7 +507,7 @@ impl App {
         let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
         let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
         json!({
-            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"focus":self.focus,"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
+            "root":self.model().map(|model|&model.root),"loading":self.loading.is_some(),"modal":modal,"dialog":dialog,"focus":self.focus,"column":self.column.key(),"selected_section":self.selected_section.map(|id|id.0),"selected_group":self.selected_group.map(|id|id.0),"selected_note":self.selected_note.map(|id|id.0),
             "filters":{"sections":self.filters.sections,"groups":self.filters.groups,"notes":self.filters.notes},
             "preferred_widths":preferred,"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
             "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>()},
@@ -670,6 +697,20 @@ fn item_target_json(target: ItemTarget) -> Value {
         ItemRef::Note(id) => json!({"note":id.0}),
     };
     json!({"generation":target.generation,"item":item,"parent":target.parent.map(parent_json)})
+}
+
+fn row_param(params: &Value) -> Result<crate::drag::RowKind, String> {
+    let row = params.get("row").ok_or("row is required")?;
+    let field = |name: &str| row.get(name).and_then(Value::as_u64);
+    if let Some(section) = field("section") {
+        Ok(crate::drag::RowKind::Section(SectionId(section)))
+    } else if let Some(group) = field("group") {
+        Ok(crate::drag::RowKind::Group(GroupId(group)))
+    } else if let Some(note) = field("note") {
+        Ok(crate::drag::RowKind::Note(NoteId(note)))
+    } else {
+        Err("row must name a section, group, or note id".into())
+    }
 }
 
 fn row_json(row: crate::drag::RowKind) -> Value {

@@ -1928,7 +1928,7 @@ mod tests {
     }
 
     #[test]
-    fn real_root_owns_both_click_releases_and_emits_rename_for_the_second() {
+    fn real_root_owns_both_click_releases_and_emits_open_for_the_second() {
         let mut widget = make_area(true, true);
         let mut tree = Tree::new(&widget);
         let node = layout_widget(&mut widget, &mut tree);
@@ -1945,7 +1945,7 @@ mod tests {
         assert_eq!(status, iced::event::Status::Captured);
         assert!(matches!(
             messages.as_slice(),
-            [Message::Drag(DragEvent::Rename {
+            [Message::Drag(DragEvent::Open {
                 generation: 7,
                 row: RowKind::Note(NoteId(100))
             })]
@@ -2026,13 +2026,13 @@ mod tests {
             let (messages, _, _) = send(&mut widget, &mut tree, &node, &right, Some(at));
             assert!(!messages.iter().any(|message| matches!(
                 message,
-                Message::Drag(DragEvent::Context { .. } | DragEvent::Rename { .. })
+                Message::Drag(DragEvent::Context { .. } | DragEvent::Open { .. })
             )));
         }
     }
 
     #[test]
-    fn hiding_the_clicked_row_before_it_reappears_cannot_trigger_a_double_click_rename() {
+    fn hiding_the_clicked_row_before_it_reappears_cannot_trigger_a_double_click_open() {
         let mut widget = make_area(true, true);
         let mut tree = Tree::new(&widget);
         let node = layout_widget(&mut widget, &mut tree);

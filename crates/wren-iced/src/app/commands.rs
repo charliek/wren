@@ -37,6 +37,8 @@ pub enum CommandId {
     Find,
     Back,
     Forward,
+    ColumnLeft,
+    ColumnRight,
     Focus,
     ResetWidths,
     SortModified,
@@ -134,6 +136,8 @@ definitions![
     (Find, "navigation.find", "Find in note", "Go"),
     (Back, "navigation.back", "Back", "Go"),
     (Forward, "navigation.forward", "Forward", "Go"),
+    (ColumnLeft, "navigation.column_left", "Column left", "Go"),
+    (ColumnRight, "navigation.column_right", "Column right", "Go"),
     (Focus, "view.focus", "Toggle focus mode", "View"),
     (
         ResetWidths,
@@ -302,7 +306,9 @@ impl App {
                 .config
                 .as_ref()
                 .is_some_and(|config| config.writable() && !config.workspaces().is_empty()),
-            NewSection | Focus | ResetWidths | Jump | Search => self.session.is_some(),
+            NewSection | Focus | ResetWidths | Jump | Search | ColumnLeft | ColumnRight => {
+                self.session.is_some()
+            }
             NewGroup | RenameSection | DeleteSection | RevealSection | ReorderSection => {
                 self.selected_section.is_some() && self.session.is_some()
             }
@@ -377,6 +383,7 @@ impl App {
                 }
                 self.cancel_gestures();
                 self.focus = enabled.unwrap_or(!self.focus);
+                self.column = super::columns::Column::Editor;
                 self.finish_action(Disposition::Completed, None, focus_editor())
             }
             Command::Width { pane, width } => {
@@ -511,7 +518,16 @@ impl App {
                     iced::widget::operation::focus("find-query"),
                 )
             }
+            ColumnLeft | ColumnRight => {
+                self.palette = None;
+                if id == ColumnLeft {
+                    self.column_left()
+                } else {
+                    self.column_right()
+                }
+            }
             Back | Forward => {
+                self.column = super::columns::Column::Editor;
                 let outcome = self.process_core(if id == Back { Op::Back } else { Op::Forward });
                 if outcome.processed.disposition.committed() {
                     self.palette = None;
@@ -664,7 +680,7 @@ impl App {
         if outcome.processed.disposition.committed() {
             self.palette = None;
             if self.dialog.is_none() {
-                outcome.task = outcome.task.chain(focus_editor());
+                outcome.task = outcome.task.chain(self.column_focus());
             }
         }
         outcome
@@ -899,6 +915,8 @@ mod tests {
             "navigation.find",
             "navigation.back",
             "navigation.forward",
+            "navigation.column_left",
+            "navigation.column_right",
             "view.focus",
             "view.reset_widths",
             "notes.sort_modified",
@@ -1048,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn native_context_and_double_click_route_to_the_explicit_row_with_generation_guards() {
+    fn native_context_and_double_click_open_the_explicit_row_with_generation_guards() {
         use crate::drag::{DragEvent, RowKind};
         let (_directory, mut app) = fixture();
         append(&mut app, " draft");
@@ -1071,38 +1089,40 @@ mod tests {
         let _ = app.close_palette();
         let _ = app.drag_event(
             generation,
-            DragEvent::Rename {
+            DragEvent::Open {
                 generation,
                 row: RowKind::Note(peer),
             },
         );
-        assert!(
-            app.dialog.is_none(),
+        assert_eq!(
+            app.selected_note, selected,
             "opening a context palette retired the old gesture generation"
         );
         let generation = app.gesture_generation;
         let _ = app.drag_event(
             generation,
-            DragEvent::Rename {
+            DragEvent::Open {
                 generation: generation + 1,
                 row: RowKind::Note(peer),
             },
         );
-        assert!(
-            app.dialog.is_none(),
+        assert_eq!(
+            app.selected_note, selected,
             "a mismatched gesture generation is ignored"
         );
         let _ = app.drag_event(
             generation,
-            DragEvent::Rename {
+            DragEvent::Open {
                 generation,
                 row: RowKind::Note(peer),
             },
         );
         assert!(
-            matches!(app.dialog.as_ref().unwrap().kind, DialogKind::Rename(ItemRef::Note(note)) if note == peer)
+            app.dialog.is_none(),
+            "double-click opens; rename is Cmd/Alt+R"
         );
-        assert_eq!(app.selected_note, selected);
+        assert_eq!(app.selected_note, Some(peer));
+        assert_eq!(app.column, super::super::columns::Column::Editor);
     }
 
     #[test]

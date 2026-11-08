@@ -31,7 +31,7 @@ header does the same.
 | Command palette | ⇧⌘P or ⌘K | Alt+Shift+P or Alt+K |
 
 New section, New group, Rename, Delete, Move, and Reveal are in the command
-palette. Rename is also a double-click on a row, and moves also work by drag
+palette. Rename note is also ⌘R (Alt+R on Linux), and moves also work by drag
 and drop: a note onto a group, a group onto a section, and sections or
 groups reordered within their column. Delete moves items to the OS trash and
 asks first when a section or group still holds notes.

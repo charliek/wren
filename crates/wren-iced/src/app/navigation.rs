@@ -32,6 +32,7 @@ impl App {
         };
         self.widths = Widths::from_state(session.state());
         self.focus = false;
+        self.column = super::columns::Column::Editor;
         self.filters = Filters::default();
         self.spring_section = None;
         self.palette = None;

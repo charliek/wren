@@ -15,6 +15,15 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Added
 
+- **Keyboard navigation between columns.** One of Sections, Groups, Notes,
+  or the editor has the keyboard, shown by an accent header and an accent
+  border on its selected row. ↑ / ↓ select rows live, ↵ or → moves right, ←
+  moves left, and Esc returns to the editor. ⇧⌘[ / ⇧⌘] (Alt+Shift+[ /
+  Alt+Shift+] on Linux) move a column left or right from anywhere, including
+  the editor. Arrow keys typed in the editor or a filter box keep their usual
+  jobs.
+- **⌘R (Alt+R on Linux) renames the open note.**
+
 - **Four more dark themes:** Tokyo Night (`tokyo-night`), Dracula
   (`dracula`), Catppuccin Mocha (`catppuccin-mocha`) and Catppuccin Macchiato
   (`catppuccin-macchiato`), each meeting the same 4.5:1 text contrast as the
@@ -32,6 +41,11 @@ version's section as its notes, and publishes to the apt repo. See
   that theme or font right away. Enter keeps it; Esc puts the saved one back.
 
 ### Changed
+
+- **Double-clicking a row selects it and moves one column right**, the same
+  as ↵. It used to rename the row; rename is now ⌘R / Alt+R or the palette.
+- **A single click on a note keeps the keyboard in the Notes column**, so ↑ /
+  ↓ keep moving through notes. Click into the editor, or press ↵, to type.
 
 - **Focus mode toggles with ⌘Y on macOS and Alt+Y on Linux**, replacing ⌘\ /
   Alt+\. A `keybind` line in `config.conf` can still bind it elsewhere.
