@@ -1,6 +1,6 @@
 # Markdown editor: discovery and plan
 
-Status: **in progress** (branch `markdown-editor`, started 2026-11-08).
+Status: **final review done; not yet merged** (branch `markdown-editor`, started 2026-11-08). The final review found one blocker (a per-frame preview scan), now fixed with a regression check; what still stands between the branch and `main` is a green CI run and a Mac console check (§10).
 
 The goal is to make Wren's editor a capable Markdown editor:
 
@@ -627,7 +627,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
    - the `editor.command` RPC and `native_x11` cases.
 7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs (done on `md-keys`). The commands sit in a "Markdown" palette group. With assist off they are disabled in the palette, and their keys stay the editor's and do nothing. The `shortcut` test request runs an Editor command the widget's way: the bound key through the policy, only while the editor is focused.
 8. **The outline palette.** Done (merged in `821b1c6`).
-9. **Harness work:** settings support, engine parametrization, and the scenes. Then review. Done, except the tiny-skia mid-row scroll scene (§7). The final review is recorded under *Final review* below.
+9. **Harness work:** settings support, engine parametrization, and the scenes. Then review. Done, except the tiny-skia mid-row scroll scene (§7). The final review is recorded in §10.
 10. **Follow-ups** (done on `md-follow`): the group word deletes (§5.5), the two settings commands (§5.7) with `palette-assist` and `palette-engine` scenes, and the IME reveal and edge anchor (§9). A review round then fixed the anchor and the reveal on a wrapped first line, made word deletes take a run of CJK whole, and added functional word-delete cases with undo and the real Ctrl+⌫ and Alt+⌫ keys.
 
 **Promotion bar for `editor-engine = advanced` as the default:**
@@ -647,4 +647,42 @@ There is **no iced upgrade while two backends exist.**
 - **macOS ⌘E** is the system's "Use Selection for Find". We take it for inline code; revisit if it bothers people.
 - **A Mac console check is needed** for ⌘+letter and IME. ssh cannot send synthetic keys.
 - **IME anchor off screen (decided).** When a composition starts, which is the first non-empty preedit, the editor scrolls the caret into view. TextEdit, VS Code and Zed all reveal the insertion point when typing begins, so the candidate window always has a real anchor. If the caret is still off screen in the frame before that scroll, the anchor is the caret's column, clamped to the nearest view edge, never the corner. Disabling the IME is never an option. Landed on `md-follow`: `Backend::ime_position` clamps every anchor with `clamp_ime_anchor` (the owned engine takes the off-screen caret's x from its line layout, which `update` always shapes), and the widget's `State::set_preedit` reports the first non-empty preedit, on which `Backend::reveal_cursor` scrolls the owned engine at once and makes iced scroll on the layout the widget invalidates. After review, the owned engine picks the edge by visual row when the caret is on the scroll line (a wrapped row there can sit above the view), and iced's reveal steps to the line's end and back when the cursor is at the start of a one-line note, where there is no line 1 to step to.
-- **Mixed endings, known edge case:** a CR line followed by an emptied LF line (`a\r` then `\n`) serializes as one CRLF break, so the editor shows one more line than a reload of the saved text. Rewriting the empty line's ending to CR after such an edit would close it; not done in this milestone.
+- **Mixed endings (closed in the final review).** A lone CR followed directly by an LF, or an LF by a CR, reads back as one break, so the editor could show a line that a reload lost: a break inserted at column 0 under a CR line, or a line emptied between a CR line and an LF break. An inserted break now takes the first ending that keeps every break apart (`edit::break_ending`, trying the line above's first), and an edit that leaves such an empty line rewrites its ending in the same undo step (`EditorView::keep_lines_apart`).
+
+## 10. Final review and ship readiness
+
+The final review read the branch through four lenses (data safety, the spec, architecture, and performance and readiness) and found 15 issues: one blocker, two majors, and twelve minors.
+
+After the fixes, `make check`, `ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced make smoke-x11` (241 passed, 1 skipped), `WRENTEST_ENGINE=classic,advanced make smoke-wayland` (185 passed, 1 skipped), and the strict docs build all pass locally.
+
+**Fixed:**
+- **Blocker: a preview scan on every frame.** `index.rs`'s `body_line` had become a `Document::new` over the whole note, and `App::view` runs it for every note in the open group on every frame (the notes column calls `Index::query`, whose preview snippet called it twice). The 25 ms tick redraws about 40 times a second, so the cost was paid at idle, on either engine. Idle view time per frame went from 0.18–0.23 ms to 1.6–3.4 ms in release on three large notes, and from 0.35 to 8.9 ms on a 100-note group; in debug, from 2.7 to 95 ms, about 9 fps. The scan now reads lines lazily (`wren_markdown::line_ranges`) and stops at the first body line, reading front matter only to its closing delimiter, and a query reuses the preview `set_content` cached. A unit test counts the lines read, and a functional case (`perf.view`, below) measured 10.4 ms before the fix and 0.11 ms after.
+- **Major: `wren-editor`'s dependencies.** It took the workspace's iced and so forced the app's whole feature set on a host, including the unused `highlighter` that pulls in syntect and two-face. It now names a minimal iced of its own, and the workspace drops `highlighter`. The extraction blockers that remain are recorded in §4.
+- **Mixed line endings** (minor): see §9.
+- **Quote exit** (minor): an exit from a quote with text on the next line now leaves the same gap below as an item's exit (§5.2).
+- **Plain Tab after a BOM** (minor): `plain.rs` now uses `wren_markdown::block`'s column rules, so a byte-order mark takes no column with assist off too.
+- **Notices** (minor): the bundle ships iced's MIT text (`third_party/iced/LICENSE`), since crates.io's iced_widget and iced_graphics carry none, and names the modified cosmic-text.
+- **Changelog and README** (minor): `[Unreleased]` lists the editor's features and settings.
+- **Stale docs** (minor): CLAUDE.md's layout, the architecture page's palette rule, the spike page's undo limitation, and this note's milestones and naming. CI's Rust job now runs `check-patches`.
+- **Performance test gap** (minor): a smoke-test-only `perf.view` request returns recent `App::view` build times, and `test_markdown_keys.py` holds the median under 5 ms in a group of three 5,000-line notes, idle and after smart keys.
+
+**Not fixed, by choice:**
+- **Major: CI has never run on the branch.** It has no upstream, so `ci-success` (Rust on Linux and macOS-15, and the four Linux display/renderer lanes with both engines) has no evidence, and nothing has built the macOS-only code: the ⌘ insert guard, the menu change, and the vendored cosmic-text on Metal. Pushing is the maintainer's step.
+- **The outline palette with 2,000 headings** stalls about 250 ms on open and on each filter keystroke in release, because every heading becomes a button with unkeyed ellipsis widgets. Rows of mixed heights and the scroll-to-active logic make a virtualized list more than a final-review change; notes under 200 headings stay under 25 ms.
+- **Whole-note planner scans** (Tab, Shift+Tab, Toggle task, Move line) take 0.3–1.7 ms in release but up to 19 ms in debug at the end of a 5,000-line list. The checkpoint cache in §4 (*Planner cost*) would bound them; no release user would notice.
+- **The 40 Hz tick** (pre-existing on `main`) rebuilds, lays out, and presents the whole window every 25 ms at idle, 20–50% of a core on software rendering. Gate it on pending work before a dogfooding period.
+
+**Ship readiness** (the performance review). Measured on Linux under Xvfb with tiny-skia, with release and debug smoke-test builds of `9968a5d` and of `main`, each with the same frame-timing probe in `vendor/iced_winit`, on both engines. The fixtures were three 5,000-line notes, prose (894 KB, 417 headings), lists (430 KB), and headings (299 KB, 2,000 headings), plus a 100-note group.
+
+1. **Markdown assist stays on by default.** The smart keys cost about 1–2 ms over a plain keystroke in release on a 5,000-line list, the worst whole-note plans (Tab, Move line) 0.3–1.7 ms, and assist on or off made no measurable difference to frames, since planning runs only on a key. The caveat is not performance: on macOS, assist brings the new ⌘B, ⌘I, and ⌘E bindings (⌘E is the system's "Use Selection for Find") and the ⌘ insert guard to every user, on the classic engine too. So the §9 Mac console check of ⌘+letter and IME is needed before a release, not only before the engine promotion.
+2. **The advanced engine is not ready to be the default.**
+   - *Evidence so far:* the shared suite passes on both engines on X11 and Wayland with tiny-skia. On wgpu only the editor, Markdown-keys, and viewport subsets ran (X11 101 passed, Wayland 75). tiny-skia draw and present time on advanced is within noise of classic (present p50 3.7–8.1 ms on both; widget draw 0.03–0.06 ms on advanced against 0.04–0.15 ms on classic), and key and engine-switch latency are equal or better. So the §8 draw-time bar is met on this data, but §8 never fixed the margin. Proposed: advanced idle present p50 at most 1.1× classic, and first-frame work after a key at most classic + 1 ms, on both renderers.
+   - *Evidence still missing:* a CI run (no macOS build, no full wgpu lanes); draw times on wgpu and Metal; the Mac console check of IME (candidate window anchor, a live composition through Enter and Tab, the off-screen reveal, dead keys) and of the ⌘ keys (⌘+letter never typing, ⌘⌫, ⌘↑/↓, ⌥⌫) on both engines; any dogfooding, so "no draft-loss bugs" has no evidence yet (it needs weeks of daily use on advanced, with autosave and undo-scroll checks); and HiDPI and proportional-font spot checks.
+3. **Before merging to `main`:** the per-frame preview fix and its regression check (done in this review), and a green `ci-success`, including the macOS Rust job and all four lanes with both engines. The outline palette stall and the whole-note planner scans are follow-ups, not merge blockers.
+4. **Rollout:**
+   1. Fix the preview scan, add the regression check (both done), push, and get CI green.
+   2. On the Mac console, check classic with assist on (⌘ keys, IME, ⌘E). Then merge with `markdown-assist = on` and `editor-engine = classic` as the defaults, and release.
+   3. Dogfood advanced through the setting and the palette toggle for a few weeks of daily maintainer use. Meanwhile, cap or virtualize the outline rows and consider gating the 40 Hz tick, which doubles idle CPU on software rendering.
+   4. Run the macOS IME and ⌘ matrix on advanced, measure Metal and wgpu draw times against the agreed margin, and confirm no draft loss.
+   5. Make advanced the default in a release, with classic still selectable as the fallback for one release.
+   6. Retire classic, keeping the key accepted and ignored for one release (§4). Only then allow the iced upgrade.
