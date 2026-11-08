@@ -221,6 +221,7 @@ impl App {
             String::new()
         };
         let words = contents.split_whitespace().count();
+        let engine = preferences::backend_kind(preferences.settings.editor_engine);
         let mut app = Self {
             definition,
             toolkit_theme: theme::from_definition(definition),
@@ -228,7 +229,7 @@ impl App {
             theme_override,
             preview: preferences::Preview::default(),
             preferences,
-            editor: EditorView::new(&contents),
+            editor: EditorView::with_backend(engine, &contents),
             find_open: false,
             find_query: String::new(),
             words,
@@ -479,9 +480,12 @@ impl App {
                     let _ = self.window_unfocused();
                 }
                 iced::window::Event::Focused => {
-                    let _ = self.reload_settings(false);
+                    let reloaded = self.reload_settings(false);
                     #[cfg(target_os = "macos")]
                     crate::macos_menu::sync_updates();
+                    if reloaded.editor_rebuilt {
+                        return self.column_focus();
+                    }
                 }
                 _ => {}
             },

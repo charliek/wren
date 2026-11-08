@@ -587,7 +587,7 @@ impl App {
             OpenSettings => self.open_settings(),
             ReloadSettings => {
                 self.palette = None;
-                let warning = self.reload_settings(true);
+                let warning = self.reload_settings(true).warning;
                 self.finish_action(
                     if warning.is_some() {
                         Disposition::CommittedWarning

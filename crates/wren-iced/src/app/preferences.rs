@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
 use wren_core::keybind::{self, Keymap, Platform};
-use wren_core::settings::{self, Settings, ThemeChoice};
+use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
+use wren_editor::BackendKind;
 
 use super::commands::{CommandId, Disposition, Gateway};
 use super::palette::{Key, Mode};
@@ -32,6 +33,21 @@ pub struct Preferences {
     /// The warning last shown for these settings, so a clean reload can
     /// retract it.
     shown_warning: Option<String>,
+}
+
+/// What a settings reload changed.
+pub(super) struct Reloaded {
+    pub warning: Option<String>,
+    /// The editor moved to another engine, so focus should be restored.
+    pub editor_rebuilt: bool,
+}
+
+/// The editor engine a setting names.
+pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
+    match engine {
+        EditorEngine::Classic => BackendKind::Iced,
+        EditorEngine::Cosmic => BackendKind::Cosmic,
+    }
 }
 
 /// The theme for a picker row: `None` follows the system.
@@ -183,14 +199,18 @@ impl App {
         }
     }
 
-    /// Re-read `config.conf` and apply it. Returns any settings warning.
-    pub(super) fn reload_settings(&mut self, force: bool) -> Option<String> {
+    /// Re-read `config.conf` and apply it. Reports any settings warning and
+    /// whether the editor was rebuilt.
+    pub(super) fn reload_settings(&mut self, force: bool) -> Reloaded {
         #[cfg(target_os = "macos")]
         let keymap = self.preferences.keymap.clone();
         if !self.preferences.reload(force) {
-            return None;
+            return Reloaded {
+                warning: None,
+                editor_rebuilt: false,
+            };
         }
-        self.apply_preferences();
+        let editor_rebuilt = self.apply_preferences();
         #[cfg(target_os = "macos")]
         if self.window.is_some() && self.preferences.keymap != keymap {
             crate::macos_menu::install(&self.preferences.keymap);
@@ -207,14 +227,37 @@ impl App {
             None => {}
         }
         self.preferences.shown_warning = warning.clone();
-        warning
+        Reloaded {
+            warning,
+            editor_rebuilt,
+        }
     }
 
-    pub(super) fn apply_preferences(&mut self) {
+    /// Apply the settings to the theme and editor. Returns whether the editor
+    /// moved to another engine.
+    pub(super) fn apply_preferences(&mut self) -> bool {
         self.apply_shown();
         let settings = &self.preferences.settings;
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
+        self.apply_editor_engine()
+    }
+
+    /// Rebuild the editor on the configured engine from the session draft,
+    /// or from the editor's own text when no note is open (the `--editor`
+    /// spike). The cursor, find query, font, size, and gutter carry over;
+    /// undo history does not.
+    fn apply_editor_engine(&mut self) -> bool {
+        let kind = backend_kind(self.preferences.settings.editor_engine);
+        if kind == self.editor.backend() {
+            return false;
+        }
+        let text = self
+            .session
+            .as_ref()
+            .and_then(|session| session.document())
+            .map_or_else(|| self.editor.text(), |document| document.text.clone());
+        self.editor.set_backend(kind, &text)
     }
 
     /// Show the theme and editor font: the saved ones, or the picker row
@@ -312,7 +355,7 @@ impl App {
     fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
         let path = self.preferences.path.clone()?;
         match settings::write_value(&path, key, value) {
-            Ok(()) => self.reload_settings(true),
+            Ok(()) => self.reload_settings(true).warning,
             Err(error) => {
                 let warning = format!("Could not save {key} to {}: {error}", path.display());
                 self.banner = Some(warning.clone());
@@ -522,7 +565,7 @@ mod tests {
         let (mut app, _) = App::with_config(options, None, Some(path.clone()));
         assert!(app.banner.as_deref().unwrap().contains("mystery"));
         std::fs::write(&path, "theme = nord\n").unwrap();
-        assert!(app.reload_settings(false).is_none());
+        assert!(app.reload_settings(false).warning.is_none());
         assert!(app.banner.is_none());
         assert_eq!(app.definition, definitions::NORD);
         // Choosing a theme re-reads the merged file, picking up outside edits.
@@ -532,6 +575,101 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn the_editor_engine_applies_at_startup_and_switches_live_keeping_the_document() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "editor-engine = cosmic\n").unwrap();
+        let options = || super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+
+        std::fs::write(&path, "editor-font-size = 18\nline-numbers = off\n").unwrap();
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Insert(
+            '!',
+        ))));
+        app.editor.set_find_query("the");
+        let text = app.editor.text();
+        let cursor = app.editor.cursor();
+        let finds = app.editor.find_count();
+        let revision = app.edit_revision;
+        assert!(app.editor.can_undo());
+
+        std::fs::write(
+            &path,
+            "editor-font-size = 18\nline-numbers = off\neditor-engine = cosmic\n",
+        )
+        .unwrap();
+        let reloaded = app.reload_settings(false);
+        assert!(reloaded.editor_rebuilt);
+        assert_eq!(reloaded.warning, None);
+        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+        assert_eq!(app.editor.text(), text);
+        assert_eq!(app.editor.cursor(), cursor);
+        assert_eq!(app.editor.find_count(), finds);
+        assert_eq!(app.editor.font_size(), 18.0);
+        assert_eq!(app.edit_revision, revision);
+        assert!(!app.editor.can_undo());
+
+        // An unrelated change leaves the editor alone; switching back rebuilds it.
+        std::fs::write(&path, "editor-font-size = 18\neditor-engine = cosmic\n").unwrap();
+        assert!(!app.reload_settings(false).editor_rebuilt);
+        std::fs::write(&path, "editor-engine = classic\n").unwrap();
+        assert!(app.reload_settings(false).editor_rebuilt);
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        assert_eq!(app.editor.text(), text);
+    }
+
+    #[test]
+    fn an_engine_switch_rebuilds_from_the_session_draft() {
+        use wren_core::ops::{Op, Session};
+
+        let workspace = crate::test_support::tempdir();
+        std::fs::create_dir_all(workspace.path().join("Alpha/Inbox")).unwrap();
+        std::fs::write(workspace.path().join("Alpha/Inbox/First.md"), "first body").unwrap();
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        app.workspace_mode = true;
+        app.session = Some(Session::open(workspace.path()).unwrap());
+        app.sync_editor(true);
+        let first = app.model().unwrap().notes[0].id;
+        let _ = app.process_core(Op::OpenNote { note: Some(first) });
+        assert_eq!(app.editor.text(), "first body");
+        // The session's draft is the document of record.
+        let _ = app.process_core(Op::EditDraft {
+            note: first,
+            contents: "first body, drafted".into(),
+        });
+        assert_eq!(
+            app.session.as_ref().unwrap().document().unwrap().text,
+            "first body, drafted"
+        );
+        // Diverge the widget from the session to show which copy the
+        // rebuild reads.
+        app.editor.replace_text("stale widget copy", true);
+
+        std::fs::write(&path, "editor-engine = cosmic\n").unwrap();
+        assert!(app.reload_settings(false).editor_rebuilt);
+        assert_eq!(app.editor.backend(), BackendKind::Cosmic);
+        assert_eq!(app.editor.text(), "first body, drafted");
     }
 
     #[test]

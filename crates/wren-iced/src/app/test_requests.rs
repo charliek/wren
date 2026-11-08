@@ -604,6 +604,10 @@ impl App {
             "find_open":self.find_open,"find_query":self.find_query,"find_count":self.editor.find_count(),
             "find_current":self.editor.find_current(),"edit_micros":self.edit_micros,
             "soft_wrap":true,"theme":self.definition.id,
+            "engine":match self.editor.backend() {
+                wren_editor::BackendKind::Iced => "classic",
+                wren_editor::BackendKind::Cosmic => "cosmic",
+            },
             "font_size":self.editor.font_size(),
             "font_family":match self.editor.font().family {
                 iced::font::Family::Name(name) => name,
