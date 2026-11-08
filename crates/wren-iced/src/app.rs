@@ -480,12 +480,9 @@ impl App {
                     let _ = self.window_unfocused();
                 }
                 iced::window::Event::Focused => {
-                    let reloaded = self.reload_settings(false);
+                    let _ = self.reload_settings(false);
                     #[cfg(target_os = "macos")]
                     crate::macos_menu::sync_updates();
-                    if reloaded.editor_rebuilt {
-                        return self.column_focus();
-                    }
                 }
                 _ => {}
             },

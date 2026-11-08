@@ -276,6 +276,39 @@ def test_native_return_keeps_a_crlf_note_crlf(editor_app) -> None:
 
 
 @pytest.mark.native_x11
+def test_native_engine_switch_on_focus_keeps_keyboard_focus(engine, editor_app) -> None:
+    """A focus reload that moves the editor to the other engine leaves the
+    keyboard where it was: in the find field, or in the editor."""
+    other = next(name for name in ENGINES if name != engine)
+    with editor_app(artifacts_dir=artifact_directory("editor-engine-focus")) as app:
+        call = app.client.call
+        config = app.settings_path
+        call("editor.set", {"text": "café"})
+        window = focus_native(app)
+
+        def switch_on_refocus(to: str) -> None:
+            xdo("windowfocus", "--sync", "0")
+            config.write_text(f"editor-engine = {to}\n")
+            xdo("windowfocus", "--sync", window)
+            wait_for(lambda: call("editor.get")["engine"] == to, description=f"switch to {to}")
+
+        xdo("key", "--window", window, "--clearmodifiers", "ctrl+f")
+        wait_for(lambda: call("editor.get")["find_open"], description="native find shortcut")
+        switch_on_refocus(other)
+        xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", "caf")
+        wait_for(lambda: call("editor.get")["find_query"] == "caf", description="find keeps focus")
+        assert call("editor.get")["text"] == "café"
+
+        xdo("key", "--window", window, "--clearmodifiers", "Escape")
+        wait_for(lambda: not call("editor.get")["find_open"], description="native find close")
+        call("editor.focus")
+        call("editor.action", {"kind": "move", "motion": "end"})
+        switch_on_refocus(engine)
+        xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", "!")
+        wait_for(lambda: call("editor.get")["text"] == "café!", description="editor keeps focus")
+
+
+@pytest.mark.native_x11
 @pytest.mark.parametrize("clicks,selected,edited", [(2, "hello", "X world"), (3, "hello world", "X")])
 def test_native_word_and_line_selection_survive_undo(clicks, selected, edited, editor_app) -> None:
     with editor_app(artifacts_dir=artifact_directory("editor-native-selection")) as app:
