@@ -1066,6 +1066,33 @@ mod tests {
     }
 
     #[test]
+    fn an_intent_reaches_the_core_draft_and_takes_the_editor_column() {
+        let (directory, mut app) = fixture();
+        append(&mut app, "\n- item");
+        app.column = super::super::columns::Column::Notes;
+        let revision = app.edit_revision;
+        let _ = app.update(Message::Editor(wren_editor::Message::Intent(
+            wren_editor::Intent::Enter,
+        )));
+        assert_eq!(app.column, super::super::columns::Column::Editor);
+        assert_eq!(app.edit_revision, revision + 1);
+        assert_eq!(
+            app.session.as_ref().unwrap().document().unwrap().text,
+            "first\nsecond\n- item\n- "
+        );
+        // A motion changes no text, so nothing is drafted.
+        let _ = app.update(Message::Editor(wren_editor::Message::Intent(
+            wren_editor::Intent::Home { extend: false },
+        )));
+        assert_eq!(app.edit_revision, revision + 1);
+        let _ = app.apply_core(Op::Flush).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("Inbox/General/Note.md")).unwrap(),
+            "first\nsecond\n- item\n- "
+        );
+    }
+
+    #[test]
     fn editor_actions_undo_and_redo_update_the_active_core_draft() {
         let (directory, mut app) = fixture();
         append(&mut app, " café");

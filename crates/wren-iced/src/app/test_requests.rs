@@ -191,6 +191,15 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
             }
+            "editor.command" => {
+                // An editing key as the editor widget sends it, through the
+                // same App::edit path.
+                self.ensure_editor_ready()?;
+                let intent = intent(string(params, "intent")?)?;
+                let task = self.edit(wren_editor::Message::Intent(intent));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task.chain(focus_editor()));
+            }
             "editor.cursor" => {
                 self.ensure_editor_ready()?;
                 let cursor_position = position(params)?;
@@ -603,7 +612,7 @@ impl App {
             "can_undo":self.editor.can_undo(),"can_redo":self.editor.can_redo(),
             "find_open":self.find_open,"find_query":self.find_query,"find_count":self.editor.find_count(),
             "find_current":self.editor.find_current(),"edit_micros":self.edit_micros,
-            "soft_wrap":true,"theme":self.definition.id,
+            "soft_wrap":true,"theme":self.definition.id,"markdown_assist":self.editor.markdown_assist(),
             "engine":match self.editor.backend() {
                 wren_editor::BackendKind::Iced => "classic",
                 wren_editor::BackendKind::Owned => "advanced",
@@ -615,6 +624,34 @@ impl App {
             },
         })
     }
+}
+
+fn intent(name: &str) -> Result<wren_editor::Intent, String> {
+    use wren_editor::Intent;
+    Ok(match name {
+        "enter" => Intent::Enter,
+        "shift_enter" => Intent::ShiftEnter,
+        "tab" => Intent::Tab,
+        "shift_tab" => Intent::ShiftTab,
+        "backspace" => Intent::Backspace,
+        "delete" => Intent::Delete,
+        "delete_word_back" => Intent::DeleteWordBackward,
+        "delete_word_forward" => Intent::DeleteWordForward,
+        "delete_to_line_start" => Intent::DeleteToTextStart,
+        "home" => Intent::Home { extend: false },
+        "select_home" => Intent::Home { extend: true },
+        "document_start" => Intent::DocumentStart { extend: false },
+        "select_document_start" => Intent::DocumentStart { extend: true },
+        "document_end" => Intent::DocumentEnd { extend: false },
+        "select_document_end" => Intent::DocumentEnd { extend: true },
+        "toggle_task" => Intent::ToggleTask,
+        "bold" => Intent::Bold,
+        "italic" => Intent::Italic,
+        "code" => Intent::Code,
+        "move_line_up" => Intent::MoveLineUp,
+        "move_line_down" => Intent::MoveLineDown,
+        _ => return Err(format!("unknown editor intent {name:?}")),
+    })
 }
 
 fn result_key(value: &Value) -> Result<Key, String> {
