@@ -3,7 +3,9 @@
 use iced::advanced::graphics::text::Editor as RawEditor;
 use iced::advanced::text::editor::Editor as _;
 use iced::advanced::text::Renderer as _;
-use iced::widget::text_editor::{Cursor, Position};
+use std::sync::Arc;
+
+use iced::widget::text_editor::{Action, Cursor, Edit, Position};
 use iced::{Color, Point, Rectangle, Renderer};
 
 /// After a font change iced reshapes only the scrolled-to lines, and the
@@ -25,6 +27,15 @@ pub(super) fn reshape_to_cursor(editor: &mut RawEditor) {
         });
         editor.move_to(cursor);
     }
+}
+
+/// iced has no range edit, so select the range and paste over it.
+pub(super) fn replace_range(editor: &mut RawEditor, start: Position, end: Position, text: &str) {
+    editor.move_to(Cursor {
+        position: end,
+        selection: Some(start),
+    });
+    editor.perform(Action::Edit(Edit::Paste(Arc::new(text.to_owned()))));
 }
 
 pub(super) fn draw(

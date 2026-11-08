@@ -107,6 +107,33 @@ impl Engine {
         self.mark_changed(0);
     }
 
+    /// Replace the text between `start` and `end` with `text`, taken
+    /// literally, and put the cursor after it.
+    pub fn replace_range(&mut self, start: Position, end: Position, text: &str) {
+        self.debug_assert_unshared();
+        let start = to_cursor(start);
+        self.editor.set_selection(cosmic_text::Selection::None);
+        self.editor.delete_range(start, to_cursor(end));
+        let after = self.editor.insert_at(start, text, None);
+        self.editor.set_cursor(after);
+        self.mark_changed(start.line);
+    }
+
+    /// Put the cursor at `cursor` and the view at `scroll`, then scroll only
+    /// as far as needed to show the cursor.
+    pub fn restore_view(&mut self, cursor: Cursor, scroll: cosmic_text::Scroll) {
+        self.move_to(cursor);
+        let cursor = self.editor.cursor();
+        let laid_out = self.bounds != Size::ZERO;
+        let mut font_system = font_system();
+        let buffer = buffer_mut(&mut self.editor);
+        buffer.set_scroll(scroll);
+        // Before the first layout there is no view to keep the cursor in.
+        if laid_out {
+            buffer.shape_until_cursor(font_system.raw(), cursor, false);
+        }
+    }
+
     pub fn buffer(&self) -> &cosmic_text::Buffer {
         buffer(&self.editor)
     }
@@ -256,19 +283,11 @@ impl Engine {
 
     pub fn move_to(&mut self, cursor: Cursor) {
         self.debug_assert_unshared();
-        self.editor.set_cursor(cosmic_text::Cursor {
-            line: cursor.position.line,
-            index: cursor.position.column,
-            affinity: cosmic_text::Affinity::Before,
-        });
+        self.editor.set_cursor(to_cursor(cursor.position));
         // Like iced, `None` leaves an existing selection in place.
         if let Some(selection) = cursor.selection {
             self.editor
-                .set_selection(cosmic_text::Selection::Normal(cosmic_text::Cursor {
-                    line: selection.line,
-                    index: selection.column,
-                    affinity: cosmic_text::Affinity::Before,
-                }));
+                .set_selection(cosmic_text::Selection::Normal(to_cursor(selection)));
         }
     }
 
@@ -634,6 +653,14 @@ fn row_span(
             .map(|glyph| glyph.w)
             .sum();
         (x, width)
+    }
+}
+
+fn to_cursor(position: Position) -> cosmic_text::Cursor {
+    cosmic_text::Cursor {
+        line: position.line,
+        index: position.column,
+        affinity: cosmic_text::Affinity::Before,
     }
 }
 

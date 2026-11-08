@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::ops::{DerefMut, Range};
 use std::sync::Arc;
 
-use iced::advanced::graphics::text::cosmic_text;
+use iced::advanced::graphics::text::cosmic_text::{self, Scroll};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
 use iced::advanced::renderer::{self, Renderer as _};
@@ -45,7 +45,7 @@ use iced::advanced::{clipboard, input_method, Clipboard, InputMethod, Shell};
 use iced::keyboard;
 use iced::time::{Duration, Instant};
 use iced::widget::text_editor::{
-    Action, Binding, Cursor, Edit, KeyPress, LineEnding, Selection, Status,
+    Action, Binding, Cursor, Edit, KeyPress, LineEnding, Position, Selection, Status,
 };
 use iced::{
     alignment, window, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer, Size,
@@ -143,6 +143,21 @@ impl Content {
         self.0.get_mut().move_to(cursor);
     }
 
+    /// See [`Backend::replace_range`].
+    pub fn replace_range(&mut self, start: Position, end: Position, text: &str) {
+        self.0.get_mut().replace_range(start, end, text);
+    }
+
+    /// See [`Backend::restore_view`].
+    pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
+        self.0.get_mut().restore_view(cursor, scroll);
+    }
+
+    /// Where the view is scrolled.
+    pub fn scroll(&self) -> Scroll {
+        self.0.borrow().scroll()
+    }
+
     /// Returns the current cursor position of the [`Content`].
     pub fn cursor(&self) -> Cursor {
         self.0.borrow().cursor()
@@ -180,6 +195,38 @@ impl Content {
     /// Returns the selected text of the [`Content`].
     pub fn selection(&self) -> Option<String> {
         self.0.borrow().copy()
+    }
+
+    /// Lays the text out in `size` the way the widget does, with the test font.
+    #[cfg(test)]
+    pub fn lay_out(&mut self, size: Size) {
+        crate::fixtures::load_font();
+        let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
+            palette: crate::fixtures::DARK,
+            font: crate::fixtures::FONT,
+        });
+        let backend = self.0.get_mut();
+        backend.update(
+            size,
+            crate::fixtures::FONT,
+            Pixels(TEXT_SIZE),
+            line_height(),
+            Wrapping::WordOrGlyph,
+            &mut highlighter,
+        );
+        backend.highlight(crate::fixtures::FONT, &mut highlighter);
+    }
+
+    /// Whether `line` still has its layout from the last update.
+    #[cfg(test)]
+    pub fn is_laid_out(&self, line: usize) -> bool {
+        self.0.borrow().buffer().lines[line].layout_opt().is_some()
+    }
+
+    /// The caret or selection rectangles; see [`Backend::selection`].
+    #[cfg(test)]
+    pub fn selection_geometry(&self) -> Option<Selection> {
+        self.0.borrow().selection()
     }
 }
 

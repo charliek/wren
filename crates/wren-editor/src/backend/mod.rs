@@ -8,11 +8,11 @@ mod iced;
 
 use std::borrow::Cow;
 
-use ::iced::advanced::graphics::text::cosmic_text;
+use ::iced::advanced::graphics::text::cosmic_text::{self, Scroll};
 use ::iced::advanced::graphics::text::Editor as RawEditor;
 use ::iced::advanced::text::editor::Editor as _;
 use ::iced::advanced::text::{LineHeight, Wrapping};
-use ::iced::widget::text_editor::{Action, Cursor, Line, LineEnding, Selection};
+use ::iced::widget::text_editor::{Action, Cursor, Line, LineEnding, Position, Selection};
 use ::iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size};
 
 use crate::highlighter::MarkdownHighlighter;
@@ -58,6 +58,31 @@ impl Backend {
         match self {
             Self::Iced(editor) => *editor = RawEditor::with_text(text),
             Self::Cosmic(engine) => engine.replace_text(text),
+        }
+    }
+
+    /// Replace the text between `start` and `end` with `text`, taken
+    /// literally (its line endings included), and put the cursor after it.
+    pub fn replace_range(&mut self, start: Position, end: Position, text: &str) {
+        match self {
+            Self::Iced(editor) => iced::replace_range(editor, start, end, text),
+            Self::Cosmic(engine) => engine.replace_range(start, end, text),
+        }
+    }
+
+    /// Where the view is scrolled.
+    pub fn scroll(&self) -> Scroll {
+        self.buffer().scroll()
+    }
+
+    /// Put the cursor at `cursor` and the view where a snapshot left it.
+    /// Cosmic restores `scroll` exactly, then scrolls only as far as needed
+    /// to show the cursor; iced keeps its scroll and reveals the cursor on
+    /// its next update.
+    pub fn restore_view(&mut self, cursor: Cursor, scroll: Scroll) {
+        match self {
+            Self::Iced(editor) => editor.move_to(cursor),
+            Self::Cosmic(engine) => engine.restore_view(cursor, scroll),
         }
     }
 

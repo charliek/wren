@@ -1,8 +1,8 @@
 //! Markdown editor with grouped undo/redo and Unicode-lowercase literal find.
 //!
-//! Cursor columns and find ranges use UTF-8 byte offsets. Ordinary interactions
-//! retain the Content; snapshot restoration replaces it, so undo/redo does not
-//! restore the scroll position yet.
+//! Cursor columns and find ranges use UTF-8 byte offsets. Undo and redo edit
+//! only the bytes that changed, so the rest of the document keeps its layout;
+//! on the Cosmic engine they also return the view to its exact scroll.
 //!
 //! The text runs on one of two engines ([`BackendKind`]): iced's own
 //! `text::Editor`, or a cosmic-text editor this crate owns, which allows range
@@ -34,7 +34,7 @@ use find::{
     byte_offset_to_position, exact_byte_offset_to_position, find_all_matches, first_content_match,
 };
 use highlighter::Settings as HighlighterSettings;
-use history::{EditKind, History};
+use history::{EditKind, History, Snapshot};
 use widget::{Content, TextEditor};
 
 // ---------------------------------------------------------------------------
@@ -198,15 +198,13 @@ impl EditorView {
         if action.is_edit() {
             let kind = edit_kind(&action);
             let now = Instant::now();
-            let before_text = self.content.text();
-            let before_cursor = self.snapshot_cursor();
+            let before = self.snapshot();
             self.content.perform(action);
-            if self.content.text() == before_text {
+            if self.content.text() == before.text {
                 self.history.break_group();
                 return false;
             }
-            self.history
-                .before_edit(before_text, before_cursor, kind, now);
+            self.history.before_edit(before, kind, now);
             self.recompute_find();
             true
         } else {
@@ -218,20 +216,19 @@ impl EditorView {
 
     /// Undo the last edit unit.
     ///
-    /// Returns `true` if something was restored.  After undo, the content is
-    /// replaced with the saved snapshot; scroll position is not restored (stock
-    /// iced does not expose an absolute viewport offset).
+    /// Returns `true` if something was restored: the text, the cursor and
+    /// selection, and on the Cosmic engine the scroll position.
     pub fn undo(&mut self) -> bool {
         if !self.history.can_undo() {
             return false;
         }
-        let current_text = self.content.text();
-        let current_cursor = self.snapshot_cursor();
-        if let Some((text, cursor)) = self.history.undo(current_text, current_cursor) {
-            self.load_snapshot(text, cursor);
-            true
-        } else {
-            false
+        let current = self.snapshot();
+        match self.history.undo(current) {
+            Some(snapshot) => {
+                self.restore(snapshot);
+                true
+            }
+            None => false,
         }
     }
 
@@ -242,13 +239,13 @@ impl EditorView {
         if !self.history.can_redo() {
             return false;
         }
-        let current_text = self.content.text();
-        let current_cursor = self.snapshot_cursor();
-        if let Some((text, cursor)) = self.history.redo(current_text, current_cursor) {
-            self.load_snapshot(text, cursor);
-            true
-        } else {
-            false
+        let current = self.snapshot();
+        match self.history.redo(current) {
+            Some(snapshot) => {
+                self.restore(snapshot);
+                true
+            }
+            None => false,
         }
     }
 
@@ -497,11 +494,37 @@ impl EditorView {
         cursor
     }
 
-    /// Replace content with a history snapshot and restore cursor.
-    fn load_snapshot(&mut self, text: String, cursor: Cursor) {
-        self.content = Content::new(self.content.kind(), &text);
-        let clamped = self.clamped(cursor);
-        self.content.move_to(clamped);
+    fn snapshot(&mut self) -> Snapshot {
+        let cursor = self.snapshot_cursor();
+        Snapshot {
+            text: self.content.text(),
+            cursor,
+            scroll: self.content.scroll(),
+        }
+    }
+
+    /// Return to a history snapshot by replacing only the bytes that differ.
+    fn restore(&mut self, snapshot: Snapshot) {
+        let current = self.content.text();
+        let change = history::diff(&current, &snapshot.text);
+        let (start, end, text) = self
+            .content
+            .with_lines(|lines| {
+                Some((
+                    exact_byte_offset_to_position(lines, change.start)?,
+                    exact_byte_offset_to_position(lines, change.from_end)?,
+                    &snapshot.text[change.start..change.to_end],
+                ))
+            })
+            .unwrap_or_else(|| {
+                let end = self
+                    .content
+                    .with_lines(|lines| byte_offset_to_position(lines, current.len()));
+                (Position { line: 0, column: 0 }, end, &snapshot.text[..])
+            });
+        self.content.replace_range(start, end, text);
+        let cursor = self.clamped(snapshot.cursor);
+        self.content.restore_view(cursor, snapshot.scroll);
         self.find_current = None;
         self.recompute_find();
     }
@@ -584,6 +607,7 @@ fn edit_kind(action: &Action) -> EditKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use widget::Content;
 
     // ── Paste action type ────────────────────────────────────────────────────
 
@@ -655,6 +679,102 @@ mod tests {
         assert!(ev.set_backend(BackendKind::Cosmic, "short\né"));
         assert_eq!(ev.text(), "short\né");
         assert_eq!(ev.cursor().position, Position { line: 0, column: 5 });
+    }
+
+    fn numbered_lines(count: usize) -> String {
+        (0..count)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn at(line: usize, column: usize) -> Cursor {
+        Cursor {
+            position: Position { line, column },
+            selection: None,
+        }
+    }
+
+    fn parsed(content: &Content) -> Vec<(String, text_editor::LineEnding)> {
+        content.with_lines(|lines| {
+            lines
+                .iter()
+                .map(|line| (line.text.into_owned(), line.ending))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn restoring_a_snapshot_leaves_the_lines_a_fresh_load_would() {
+        let mut texts = vec![String::new()];
+        let mut longest = vec![String::new()];
+        for _ in 0..3 {
+            longest = longest
+                .iter()
+                .flat_map(|text| ["a", "é", "\r", "\n"].map(|c| format!("{text}{c}")))
+                .collect();
+            texts.extend(longest.iter().cloned());
+        }
+        for kind in BackendKind::ALL {
+            for from in &texts {
+                for to in &texts {
+                    let mut ev = EditorView::with_backend(kind, from);
+                    ev.restore(Snapshot {
+                        text: to.clone(),
+                        cursor: at(9, 9),
+                        scroll: Default::default(),
+                    });
+                    assert_eq!(ev.text(), *to, "{kind:?}: {from:?} -> {to:?}");
+                    assert_eq!(
+                        parsed(&ev.content),
+                        parsed(&Content::new(kind, to)),
+                        "{kind:?}: {from:?} -> {to:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cosmic_undo_and_redo_return_to_the_exact_scroll() {
+        let size = iced::Size::new(300.0, 120.0);
+        let mut ev = EditorView::with_backend(BackendKind::Cosmic, &numbered_lines(200));
+        ev.content.lay_out(size);
+        ev.move_cursor(at(100, 0));
+        ev.content.lay_out(size);
+        // The cursor mid-view, which revealing it alone would not produce.
+        ev.perform(Action::Scroll { lines: 2 });
+        ev.content.lay_out(size);
+        let typed_at = ev.content.scroll();
+        assert!(ev.perform(Action::Edit(Edit::Insert('x'))));
+        ev.content.lay_out(size);
+        ev.perform(Action::Scroll { lines: 50 });
+        ev.content.lay_out(size);
+        let undone_at = ev.content.scroll();
+        assert_ne!(undone_at, typed_at);
+
+        assert!(ev.undo());
+        assert_eq!(ev.content.scroll(), typed_at);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll(), typed_at);
+        assert_eq!(ev.cursor(), at(100, 0));
+        assert!(matches!(
+            ev.content.selection_geometry(),
+            Some(text_editor::Selection::Caret(_))
+        ));
+
+        // Redo returns to where undo was pressed, then shows the cursor.
+        assert!(ev.redo());
+        ev.content.lay_out(size);
+        assert_eq!(ev.cursor(), at(100, 1));
+        assert!(matches!(
+            ev.content.selection_geometry(),
+            Some(text_editor::Selection::Caret(_))
+        ));
+        assert_eq!(
+            ev.text(),
+            numbered_lines(200).replace("line 100", "xline 100")
+        );
     }
 
     /// Instantiates the tests once per engine, as `on_iced` and `on_cosmic`.
@@ -1647,6 +1767,53 @@ mod tests {
             assert_eq!(ev.find_current(), None);
             assert_eq!(ev.find_count(), 0);
             assert!(!ev.find_previous());
+        }
+
+        #[test]
+        fn undo_and_redo_keep_the_view_and_its_shaping() {
+            let size = iced::Size::new(300.0, 120.0);
+            let mut ev = editor(&super::numbered_lines(200));
+            ev.content.lay_out(size);
+            ev.move_cursor(super::at(100, 0));
+            ev.content.lay_out(size);
+            ev.perform(Action::Scroll { lines: 2 });
+            ev.content.lay_out(size);
+            let scroll = ev.content.scroll();
+            let shaped = |ev: &EditorView, line| ev.content.is_laid_out(line);
+            assert!(shaped(&ev, 99));
+            assert!(ev.perform(Action::Edit(Edit::Insert('x'))));
+            ev.content.lay_out(size);
+            assert!(ev.undo());
+            // The lines around the edit keep their layout.
+            assert!(shaped(&ev, 99));
+            assert!(shaped(&ev, 101));
+            ev.content.lay_out(size);
+            assert_eq!(ev.content.scroll(), scroll);
+            assert!(ev.redo());
+            ev.content.lay_out(size);
+            assert_eq!(ev.content.scroll(), scroll);
+            assert_eq!(ev.cursor(), super::at(100, 1));
+        }
+
+        #[test]
+        fn undo_restores_each_line_ending_and_a_crlf_selection() {
+            for ending in ["\n", "\r\n", "\r", "\n\r"] {
+                let original = format!("one{ending}two{ending}three");
+                let mut ev = editor(&original);
+                ev.move_cursor(Cursor {
+                    position: Position { line: 2, column: 2 },
+                    selection: Some(Position { line: 0, column: 1 }),
+                });
+                assert!(ev.perform(Action::Edit(Edit::Backspace)));
+                assert_eq!(ev.text(), "oree");
+                assert!(ev.undo());
+                assert_eq!(ev.text(), original, "{ending:?}");
+                assert_eq!(ev.line_count(), 3);
+                assert_eq!(ev.selected_text().as_deref(), Some("ne\ntwo\nth"));
+                assert!(ev.redo());
+                assert_eq!(ev.text(), "oree");
+                assert_eq!(ev.cursor(), super::at(0, 1));
+            }
         }
 
         #[test]
