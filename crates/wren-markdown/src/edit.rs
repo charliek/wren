@@ -1773,4 +1773,274 @@ mod tests {
             "6,000 lines: Enter on an item {item:?}, Enter renumbering 999 items {renumber:?}"
         );
     }
+
+    mod codemirror {
+        // The Enter cases of CodeMirror's Markdown command tests, ported to
+        // Rust. Where Wren's spec decides differently, the case asserts Wren's
+        // behavior and is listed in `discovery/markdown-editor.md` §7.1.
+        //
+        // Ported from `test/test-commands.ts` (the `insertNewlineContinueMarkup`
+        // suite) of `@codemirror/lang-markdown`,
+        // <https://github.com/codemirror/lang-markdown>, at commit
+        // f90daf6e56a72f1cf8bbe10b07867f535d0ad2e4, under the MIT license.
+        // Modified by Wren: converted to Rust table tests, with expectations
+        // changed where noted. The multiple-cursor case is dropped, because
+        // Wren's editor has one cursor.
+        //
+        // MIT License
+        //
+        // Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin>
+        // and others
+        //
+        // Permission is hereby granted, free of charge, to any person obtaining
+        // a copy of this software and associated documentation files (the
+        // "Software"), to deal in the Software without restriction, including
+        // without limitation the rights to use, copy, modify, merge, publish,
+        // distribute, sublicense, and/or sell copies of the Software, and to
+        // permit persons to whom the Software is furnished to do so, subject to
+        // the following conditions:
+        //
+        // The above copyright notice and this permission notice shall be
+        // included in all copies or substantial portions of the Software.
+        //
+        // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+        // EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+        // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+        // NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+        // LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+        // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+        // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+        use super::*;
+
+        fn enter(cases: &[(&str, &str)]) {
+            check(Intent::Enter, cases);
+        }
+
+        #[test]
+        fn doesnt_continue_anything_at_the_top_level() {
+            // Divergence: CodeMirror declines; Wren plans the plain break.
+            enter(&[("one|", "one\n|")]);
+        }
+
+        #[test]
+        fn doesnt_do_anything_in_non_markdown_content() {
+            // Divergence: an HTML block in an item keeps the item's indent.
+            enter(&[("- <div|>", "- <div\n  |>")]);
+        }
+
+        #[test]
+        fn can_continue_blockquotes() {
+            enter(&[("> one|", "> one\n> |")]);
+        }
+
+        #[test]
+        fn will_end_blockquotes_after_two_empty_lines() {
+            // Divergence: one Enter on an empty quote line ends the quote.
+            enter(&[("> one\n>\n> |", "> one\n>\n|")]);
+        }
+
+        #[test]
+        fn will_end_nested_blockquotes_after_two_empty_lines() {
+            // Divergence: as above, one level at a time.
+            enter(&[("> > one\n> >\n> > |", "> > one\n> >\n> |")]);
+        }
+
+        #[test]
+        fn can_continue_nested_blockquotes() {
+            enter(&[("> > one|", "> > one\n> > |")]);
+        }
+
+        #[test]
+        fn preserves_the_absence_of_a_blockquote_space() {
+            enter(&[(">>one|", ">>one\n>>|")]);
+        }
+
+        #[test]
+        fn can_continue_bullet_lists_with_dashes() {
+            enter(&[(" - one|", " - one\n - |")]);
+        }
+
+        #[test]
+        fn can_continue_bullet_lists_with_asterisks() {
+            enter(&[(" *  one|", " *  one\n *  |")]);
+        }
+
+        #[test]
+        fn can_continue_bullet_lists_with_plus_signs() {
+            enter(&[("+ one|", "+ one\n+ |")]);
+        }
+
+        #[test]
+        fn can_continue_ordered_lists_with_dots() {
+            enter(&[(" 1. one|", " 1. one\n 2. |")]);
+        }
+
+        #[test]
+        fn can_continue_ordered_lists_with_parens() {
+            enter(&[("2)  one|", "2)  one\n3)  |")]);
+        }
+
+        #[test]
+        fn can_continue_lists_inside_blockquotes() {
+            enter(&[("> - one|", "> - one\n> - |")]);
+        }
+
+        #[test]
+        fn can_continue_nested_lists() {
+            enter(&[(" - one\n    1. two|", " - one\n    1. two\n    2. |")]);
+        }
+
+        #[test]
+        fn will_leave_space_before_nested_blockquotes() {
+            enter(&[(" - one\n   > quoted|", " - one\n   > quoted\n   > |")]);
+        }
+
+        #[test]
+        fn can_drop_trailing_space_when_pressing_enter_in_a_blockquote() {
+            // Divergence: an empty quote line is an exit, even on line 0.
+            enter(&[(">  |", "|")]);
+        }
+
+        #[test]
+        fn can_move_list_markup_when_pressing_enter_directly_after_it() {
+            // Divergence: Enter on an empty item exits the list, leaving a
+            // blank line, instead of making the list loose.
+            enter(&[(" - one\n - |", " - one\n\n|")]);
+        }
+
+        #[test]
+        fn will_preserve_non_tight_list_after_second_item() {
+            enter(&[(" - one\n\n - two|", " - one\n\n - two\n\n - |")]);
+        }
+
+        #[test]
+        fn will_preserve_tight_list_after_second_item() {
+            enter(&[(" - one\n - two|", " - one\n - two\n - |")]);
+        }
+
+        #[test]
+        fn exits_tight_list_after_second_item() {
+            // Divergence: the exit leaves a blank line after the paragraph.
+            enter(&[(" - one\n - two\n - |", " - one\n - two\n\n|")]);
+        }
+
+        #[test]
+        fn can_drop_list_markup_after_an_empty_line() {
+            enter(&[(" - one\n\n - |", " - one\n\n|")]);
+        }
+
+        #[test]
+        fn deletes_the_first_list_marker() {
+            enter(&[(" - |", "|")]);
+        }
+
+        #[test]
+        fn will_keep_the_current_ordered_list_number_when_moving_a_marker() {
+            // Divergence: an exit, as for bullets.
+            enter(&[(" 1. one\n 2. |", " 1. one\n\n|")]);
+        }
+
+        #[test]
+        fn can_move_list_markup_inside_a_blockquote() {
+            // Divergence: an exit that keeps the quote.
+            enter(&[("> 1. one\n> 2. |", "> 1. one\n>\n> |")]);
+        }
+
+        #[test]
+        fn can_preserve_list_tightness_inside_a_blockquote() {
+            enter(&[("> 1. one\n>\n> 2. two|", "> 1. one\n>\n> 2. two\n>\n> 3. |")]);
+        }
+
+        #[test]
+        fn renumbers_following_ordered_list_items() {
+            enter(&[("1. one|\n2. two", "1. one\n2. |\n3. two")]);
+        }
+
+        #[test]
+        fn renumbers_after_removed_markers() {
+            enter(&[("1. one\n\n2. |\n\n3. three", "1. one\n\n|\n\n2. three")]);
+        }
+
+        #[test]
+        fn stops_renumbering_on_discontinuities() {
+            enter(&[(
+                "1. one|\n2. two\n3. three\n1. four",
+                "1. one\n2. |\n3. two\n4. three\n1. four",
+            )]);
+        }
+
+        #[test]
+        fn doesnt_fire_when_the_cursor_is_before_the_markup_depth() {
+            // Divergence: CodeMirror declines; Wren plans the plain break.
+            enter(&[("- a\n|bc", "- a\n\n|bc")]);
+        }
+
+        #[test]
+        fn doesnt_fire_in_lazily_continued_paragraphs() {
+            // Divergence: CodeMirror declines; Wren plans the plain break.
+            enter(&[("1. a\nb c|", "1. a\nb c\n|")]);
+        }
+
+        #[test]
+        fn continues_list_items() {
+            enter(&[("- a\n  b|", "- a\n  b\n  |")]);
+        }
+
+        #[test]
+        fn continues_dedented_list_items() {
+            enter(&[("- hello\nhello|", "- hello\nhello\n|")]);
+        }
+
+        #[test]
+        fn can_lift_out_of_one_list_level() {
+            enter(&[("1. a\n\n   1. b\n\n   2. |", "1. a\n\n   1. b\n\n2. |")]);
+        }
+
+        #[test]
+        fn can_lift_out_of_one_list_level_and_renumber() {
+            enter(&[(
+                "1. a\n\n   1. b\n\n   2. |\n\n2. d",
+                "1. a\n\n   1. b\n\n2. |\n\n3. d",
+            )]);
+        }
+
+        #[test]
+        fn doesnt_treat_lines_with_content_after_the_cursor_as_empty() {
+            enter(&[
+                ("1. |x\n2. y", "1.\n2. |x\n3. y"),
+                ("1. x\n2. |y", "1. x\n2.\n3. |y"),
+            ]);
+        }
+
+        #[test]
+        fn doesnt_take_effect_in_fenced_code() {
+            // Divergence: code keeps its container's prefix.
+            enter(&[
+                ("- ```foo|", "- ```foo\n  |"),
+                ("> - ```foo|", "> - ```foo\n>   |"),
+            ]);
+        }
+
+        #[test]
+        fn continues_nested_task_lists_at_the_right_level() {
+            enter(&[(
+                "- [ ] item 1\n  - [ ] item 1.1|",
+                "- [ ] item 1\n  - [ ] item 1.1\n  - [ ] |",
+            )]);
+        }
+
+        #[test]
+        fn properly_indents_task_lists_nested_2_deep() {
+            enter(&[(
+                "- [ ] item 1\n  - [ ] item 1.1\n    - [ ] item 1.1.1|",
+                "- [ ] item 1\n  - [ ] item 1.1\n    - [ ] item 1.1.1\n    - [ ] |",
+            )]);
+        }
+
+        #[test]
+        fn handles_tab_indentation() {
+            enter(&[(" - one\n\t- two|", " - one\n\t- two\n\t- |")]);
+        }
+    }
 }

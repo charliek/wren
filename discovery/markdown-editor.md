@@ -457,6 +457,28 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 
 **Visual:** `capture_scenes.py` gets a list-heavy note scene, an outline palette scene, and a tiny-skia mid-row scroll scene, in both themes.
 
+### 7.1 CodeMirror divergences
+
+`crates/wren-markdown/src/edit.rs` ports 39 of the 40 Enter cases of CodeMirror's `insertNewlineContinueMarkup` suite (`test/test-commands.ts` at `f90daf6e`). The cases below assert §5 instead of CodeMirror. "Declines" means CodeMirror's command returns false and the host's plain newline runs; Wren's Enter always plans (§5.2).
+
+| CodeMirror case | Before | CodeMirror | Wren |
+|---|---|---|---|
+| doesn't continue anything at the top level | `one\|` | declines | `one⏎\|` |
+| doesn't do anything in non-Markdown content | `- <div\|>` | declines | `- <div⏎··\|>`: HTML is code-like, and the item's indent continues. |
+| will end blockquotes after two empty lines | `> one⏎>⏎> \|` | `> one⏎⏎\|` | `> one⏎>⏎\|`: one Enter on an empty quote line ends the quote (§9). |
+| will end nested blockquotes after two empty lines | `> > one⏎> >⏎> > \|` | `> > one⏎> ⏎> \|` | `> > one⏎> >⏎> \|` |
+| can drop trailing space when pressing enter in a blockquote | `>··\|` | `>⏎> \|` | `\|`: an empty quote line exits. |
+| can move list markup when pressing enter directly after it | ` - one⏎ - \|` | ` - one⏎⏎ - \|` | ` - one⏎⏎\|`: Enter on an empty item exits instead of loosening the list. |
+| exits tight list after second item | ` - one⏎ - two⏎ - \|` | ` - one⏎ - two⏎\|` | ` - one⏎ - two⏎⏎\|`: the blank line keeps the next text out of the paragraph. |
+| will keep the current ordered list number when moving a marker | ` 1. one⏎ 2. \|` | ` 1. one⏎⏎ 2. \|` | ` 1. one⏎⏎\|` |
+| can move list markup inside a blockquote | `> 1. one⏎> 2. \|` | `> 1. one⏎>⏎> 2. \|` | `> 1. one⏎>⏎> \|` |
+| doesn't fire when the cursor is before the markup depth | `- a⏎\|bc` | declines | `- a⏎⏎\|bc`, the plain newline. |
+| doesn't fire in lazily continued paragraphs | `1. a⏎b c\|` | declines | `1. a⏎b c⏎\|`, the plain newline. |
+| doesn't take effect in fenced code | `- ```foo\|`, `> - ```foo\|` | declines | `- ```foo⏎··\|`, `> - ```foo⏎>···\|`: code keeps its container prefix. |
+| can continue markup for multiple cursors | | | Dropped: Wren has one cursor. |
+
+`- |x` at the start of the text agrees with CodeMirror (`1. |x⏎2. y` → `1.⏎2. |x⏎3. y`). §5.2 only differs right after a paragraph line, which the corpus does not cover. The `deleteMarkupBackward` cases port with the Backspace planner.
+
 ## 8. Milestones and commit order
 
 Each commit builds and passes `make check`. The work is done in parallel worktrees and merged onto `markdown-editor`.
