@@ -208,6 +208,10 @@ impl highlighter::Highlighter for MarkdownHighlighter {
     }
 
     fn change_line(&mut self, line: usize) {
+        // Nothing highlighted so far is at or below `line`.
+        if line >= self.scanner.line_index() {
+            return;
+        }
         let index = (line / CHECKPOINT_INTERVAL).min(self.checkpoints.len() - 1);
         self.checkpoints.truncate(index + 1);
         self.scanner = self.checkpoints[index].clone();
@@ -1589,9 +1593,12 @@ mod tests {
             );
             assert!(h.decor(CHECKPOINT_INTERVAL).is_some_and(|decor| decor.code));
         }
-        // Past the last checkpoint, it resumes at the last one.
-        h.change_line(10 * CHECKPOINT_INTERVAL);
-        assert_eq!(h.current_line(), CHECKPOINT_INTERVAL);
+        // A change at or past the next line to highlight keeps every line.
+        for line in [CHECKPOINT_INTERVAL + 1, 10 * CHECKPOINT_INTERVAL] {
+            h.change_line(line);
+            assert_eq!(h.current_line(), CHECKPOINT_INTERVAL + 1);
+            assert_eq!(h.decor.len(), CHECKPOINT_INTERVAL + 1);
+        }
         h.change_line(3);
         assert_eq!(h.current_line(), 0);
         assert!(h.decor(0).is_none());
