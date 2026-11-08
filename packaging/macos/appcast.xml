@@ -12,5 +12,12 @@
       <sparkle:shortVersionString>0.0.1</sparkle:shortVersionString>
       <enclosure url="https://github.com/charliek/wren/releases/download/v0.0.1/Wren-0.0.1.dmg" type="application/octet-stream" sparkle:edSignature="UMPD/cps6pUBM99JoIxS0qjV4rll/23nyf9vEw4+pN+cJldRVp3Oc+fvJbqtgcwJpEFqsIflRmSBfjKruFpdDw==" length="11145173" />
     </item>
+    <item>
+      <title>Wren 0.0.2</title>
+      <pubDate>Sun, 08 Nov 2026 00:05:35 +0000</pubDate>
+      <sparkle:version>0.0.2</sparkle:version>
+      <sparkle:shortVersionString>0.0.2</sparkle:shortVersionString>
+      <enclosure url="https://github.com/charliek/wren/releases/download/v0.0.2/Wren-0.0.2.dmg" type="application/octet-stream" sparkle:edSignature="rcF+h/OXF/0FJNiCZaordCCjvqyu/KkuHG6MUQXrWkAW8v/iBi9jr+HeMqzwZ/DNC6vYS+/1JM/Z0I1MWbsxBQ==" length="11192076" />
+    </item>
   </channel>
 </rss>
