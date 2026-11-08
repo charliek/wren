@@ -453,9 +453,9 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - Find and replace.
 - A current-heading breadcrumb in the footer.
 - The **hanging indent** cosmic-text patch spike (gpui's Apache `IndentAdjustment` and writ's MIT wrap are references).
-- Larger heading sizes on the owned engine (`Attrs.metrics_opt`).
+- Larger heading sizes on the owned engine (`Attrs.metrics_opt`). Landed on `md-visual`; see the design-review defaults below.
 - Exact selection bounds after a double- or triple-click.
-- A maximum text width outside focus mode (centered column) and an `editor-line-height` setting. Both work on either backend; asked for by the design review.
+- A maximum text width outside focus mode (centered column) and an `editor-line-height` setting. Both work on either backend; asked for by the design review. Landed on `md-visual`.
 - A brighter current-line number in the gutter (`Style::gutter_current`).
 
 **Coordination with the theme work** (`design/theme-polish`, session wren-26). The editor rebuild merges first.
@@ -501,6 +501,12 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 | Line height | `editor-line-height`, a ratio. Default 1.7 (24 px at 14 pt); accepted range 1.2–2.2. |
 | Gutter | The current line number uses `gutter_current`; other line numbers stay `faint`. |
 | Hanging indent | List items and quotes, aligned to the content column. |
+
+**Landed on `md-visual`** (the max width, line height, and heading scale):
+- **`editor-max-width = <px> | none`** (400–4000, default 760). The column is the gutter, the text, and their insets together, the same 760 px focus mode always used, so text wraps at 692 px at the defaults. The widget does the capping: it fills its pane and pads the column in, centred with whole-pixel margins, so clicks beside the column land on that row (start or end) and the wheel scrolls there. The current-line and code bands span the column, not the pane. Focus mode lost its own 760 px container and passes the same width to the widget: the setting's, or 760 when it is `none`, so focus mode always centres a column. `App::editor_max_width` is the one place that decides.
+- **`editor-line-height = <ratio>`** (1.2–2.2, default 1.7). `Metrics::new(text, ratio)` makes rows `round(text × ratio)`; the caret and gutter still scale from the text size, and the caret is clamped to the row (17 px at 14 pt × 1.2). A text size change keeps the ratio. Every drawing path already read the row height from the metrics or the layout runs, so both engines follow it.
+- **Heading scale (advanced only).** The highlighter's `Highlight` carries a `Scale { text, row }`; the owned engine maps a non-body scale to `Attrs::metrics(size × text, round(row height × row))`. A heading's markers get `{ text: 1, row: em }`, because cosmic-text 0.15 sets a visual row's height to the largest `line_height` among glyphs that *have* span metrics (glyphs without them do not count) and centres the glyph box in it: so an empty `#` line is already a heading-tall row, and a quote's `>` stays body sized without lowering the row. The ratio applies to the heading size as CSS line-height would (H1 at 1.7 is a 32 px row), rather than keeping the body's leading in pixels, so a heading keeps the body's proportions and a little air above and below. Classic cannot carry a size through iced's `Format`, so it stays uniform; the docs call this an engine difference. Setext headings stay body sized (the highlighter does not style their text either). A metrics change marks line 0 changed so the spans are rebuilt from the new body metrics.
+- **Per-run geometry.** Bands, selection rectangles, selected line breaks, strikes, and chips already came from layout runs. Line numbers are set in a body-row box placed so their baseline meets the row's: from a run's baseline offset and its largest glyph size, `number_top = baseline − line/2 − (baseline − row middle) × body/largest`, which is the row top on a body row and centred on an empty one. The caret and IME rectangle take the height of the run at their y (the caret scaled by row/body and clamped). Hit testing is cosmic-text's `Buffer::hit`, already per run. PageUp and PageDown on the owned engine count rows by their own heights (cosmic-text divides the page by the body row height, which over-shoots past headings). `goal_x` needs nothing: cosmic-text keeps the goal as a glyph index, not a pixel x, so a column survives moving between heading and body rows. `scroll_to_line` places by pixels and cosmic-text's scroll shaping sums per-run heights.
 
 **P2:**
 - Folding; expand and shrink the selection.
