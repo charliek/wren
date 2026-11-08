@@ -109,12 +109,18 @@ fn covered(sel: &Selection) -> (usize, usize) {
 
 /// A request to renumber the ordered items that follow line `after` in
 /// the list at stack slot `slot`, starting from `next`.
+///
+/// `expect` is the number the first of those items has if the list was in
+/// sequence before the edit. When it has another number, the numbering is
+/// deliberate (a gap, or counting down) and nothing is renumbered. `None`
+/// renumbers unconditionally, for items that start a new list.
 #[derive(Clone, Copy, Debug)]
 struct Renumber {
     after: usize,
     slot: usize,
     delimiter: char,
     next: u32,
+    expect: Option<u32>,
 }
 
 /// Break line `pos.line` at `pos.col` (§5.2 and §5.3). Returns the caret
@@ -338,6 +344,7 @@ fn empty_item(
                 slot,
                 delimiter,
                 next,
+                expect: Some(number + 1),
             });
         }
     }
@@ -377,6 +384,7 @@ fn outdent(
                 slot: slot - 1,
                 delimiter,
                 next: number + 1,
+                expect: Some(number),
             });
         }
     }
@@ -393,6 +401,7 @@ fn outdent(
                     slot,
                     delimiter,
                     next: 1,
+                    expect: None,
                 });
             }
         }
@@ -438,6 +447,7 @@ fn insert_above(
                 slot,
                 delimiter,
                 next: number + 1,
+                expect: Some(number),
             });
         }
     }
@@ -484,6 +494,7 @@ fn continue_item(
                 slot,
                 delimiter,
                 next: number + 1,
+                expect: Some(number),
             });
         }
     }
@@ -531,6 +542,7 @@ fn first_child(
                 slot: slot + 1,
                 delimiter,
                 next: number + 1,
+                expect: Some(number),
             });
         }
     }
@@ -608,7 +620,8 @@ fn same_list(a: &ListItem, b: &ListItem) -> bool {
 }
 
 /// Renumber the items that follow `req.after` while their numbers are
-/// sequential (§5.6), moving each renumbered item's content by the change
+/// sequential, starting with the first only if it was in sequence (§5.6),
+/// moving each renumbered item's content by the change
 /// in its marker's width. `an` describes the draft's structure; its lines
 /// must line up with the draft's.
 fn renumber(d: &mut Draft, an: &Analysis, req: Renumber, marks: &mut Selection) {
@@ -624,8 +637,11 @@ fn renumber(d: &mut Draft, an: &Analysis, req: Renumber, marks: &mut Selection) 
         else {
             break;
         };
-        if delimiter != req.delimiter || previous.is_some_and(|p| p + 1 != number) || number == next
-        {
+        let in_sequence = match previous {
+            Some(p) => p.checked_add(1) == Some(number),
+            None => req.expect.is_none_or(|e| e == number),
+        };
+        if delimiter != req.delimiter || !in_sequence || number == next {
             break;
         }
         let digits = digits(next, number, width);
@@ -1843,7 +1859,11 @@ mod tests {
                     "- x\n  1. a\n  2. |\n  3. b\n- y\n  3. c",
                 ),
                 ("1. a|\n3. b\n4. c", "1. a\n2. |\n3. b\n4. c"),
-                ("1. a|\n5. b\n9. c", "1. a\n2. |\n3. b\n9. c"),
+                ("1. a|\n5. b\n9. c", "1. a\n2. |\n5. b\n9. c"),
+                ("1. a|\n5. b", "1. a\n2. |\n5. b"),
+                ("3. a|\n1. b", "3. a\n4. |\n1. b"),
+                ("1. a|\n2. b\n7. c", "1. a\n2. |\n3. b\n7. c"),
+                ("1. a\n   1. x|\n   5. y", "1. a\n   1. x\n   2. |\n   5. y"),
                 ("1. a\n2. |\n3. b", "1. a\n\n|\n2. b"),
                 ("1. |\n2. b", "|\n1. b"),
                 ("1. a\n   1. b\n   2. |\n2. c", "1. a\n   1. b\n2. |\n3. c"),

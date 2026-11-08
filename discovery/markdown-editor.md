@@ -365,7 +365,7 @@ The **sibling run** is the ordered items with the same container, quote depth, i
 - It ends at a less-indented non-blank line, a heading, a fence, a thematic break, or a different delimiter or bullet.
 
 **When it runs:**
-- **After Enter, Backspace, or exit,** renumber the rest of the run only while the existing numbers are sequential.
+- **After Enter, Backspace, or exit,** renumber the rest of the run only while the existing numbers are sequential. That includes the first item after the change: it is renumbered only if it was in sequence with the item it followed before the edit, so a deliberate gap or a countdown is left alone (`1. a|⏎5. b` Enter → `1. a⏎2. |⏎5. b`; `3. a|⏎1. b` → `3. a⏎4. |⏎1. b`; Backspace `1. a⏎2. |b⏎5. c` → `1. a⏎···|b⏎5. c`). CodeMirror always renumbers the first one. Items that become children of an outdented item start a new list and are always numbered from 1.
 - **All-same numbering:** if a neighbouring sibling has the same number as the current item (`1.`, `1.`), keep that number and renumber nothing.
 - **After Tab, Shift+Tab, or a line move,** renumber both affected runs from their start numbers.
 

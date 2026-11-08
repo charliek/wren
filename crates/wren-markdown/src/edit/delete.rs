@@ -141,6 +141,7 @@ fn markup(
                 slot,
                 delimiter,
                 next: number,
+                expect: Some(number + 1),
             });
         }
     }
@@ -344,6 +345,8 @@ mod tests {
                 ("- a\n- |", "- a\n  |"),
                 ("1. a\n2. |b\n3. c", "1. a\n   |b\n2. c"),
                 ("1. a\n1. |b\n1. c", "1. a\n   |b\n1. c"),
+                ("1. a\n2. |b\n5. c", "1. a\n   |b\n5. c"),
+                ("1. a\n2. |b\n3. c\n7. d", "1. a\n   |b\n2. c\n7. d"),
                 ("- a\n\n- |b", "- a\n\n  |b"),
                 ("10. a\n11. |b", "10. a\n    |b"),
             ],
