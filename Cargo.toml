@@ -19,7 +19,6 @@ wren-markdown = { path = "crates/wren-markdown" }
 iced = { version = "=0.14.0", default-features = false, features = [
     "advanced",
     "crisp",
-    "highlighter",
     "linux-theme-detection",
     "svg",
     "tiny-skia",

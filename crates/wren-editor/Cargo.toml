@@ -15,8 +15,15 @@ workspace = true
 test-support = []
 
 [dependencies]
-# The workspace's iced: iced always pulls in winit, which needs a windowing
-# feature on Linux, and the widget draws through the concrete iced::Renderer.
-iced.workspace = true
+# The least iced the widget builds with, so a host chooses the rest: the
+# widget draws through the concrete iced::Renderer, which needs a renderer;
+# iced always pulls in winit, which needs a windowing feature on Linux; and
+# iced needs an executor (a host's tokio takes precedence over the pool).
+iced = { version = "=0.14.0", default-features = false, features = [
+    "advanced",
+    "thread-pool",
+    "tiny-skia",
+    "x11",
+] }
 unicode-segmentation.workspace = true
 wren-markdown.workspace = true

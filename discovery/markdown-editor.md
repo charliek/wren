@@ -145,7 +145,7 @@ crates/wren-editor/     the iced 0.14 editor component; deps: iced, wren-markdow
   lib.rs              EditorView (moved from wren-iced), Message, Style, Palette
   widget.rs           the forked text_editor widget (moved), backend-neutral
   backend/iced.rs     Backend::Iced: today's iced_graphics::text::Editor
-  backend/cosmic.rs   Backend::Cosmic: an owned cosmic_text::Editor, ported from
+  backend/owned.rs    Backend::Owned: an owned cosmic_text::Editor, ported from
                       iced_graphics' editor glue (MIT notice), drawn via fill_raw
   highlighter.rs      MarkdownHighlighter (moved), classifying with wren-markdown::block;
                       its Settings carry front_matter_end (§5.1)
@@ -164,6 +164,12 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 - The host also passes in a `KeyPolicy` (§5.8) that says, for each accelerator, "host command" or "editor command". This replaces any keymap dependency.
 - Test-only accessors live behind a `test-support` feature, which `wren-iced/smoke-test` enables.
 - Crate names stay `wren-*` until extraction, when they can be renamed.
+
+**Extraction blockers.** `wren-editor` names no Wren crate, but it does not yet build or publish on its own:
+- The advanced engine's hanging indent calls `BufferLine::set_hanging_indent`, which exists only in Wren's patched cosmic-text (`vendor/cosmic-text`, wired through `[patch.crates-io]`). Against crates.io cosmic-text 0.15.0 the crate does not compile. Extraction needs that patch upstream, or the call behind a cargo feature.
+- Crate metadata: `publish = false` comes from the workspace, and the path dependency on `wren-markdown` carries no version.
+- `widget.rs` hard-codes JetBrains Mono metrics (`X_HEIGHT_EM`, `ADVANCE_EM`); they should come from the font, or from the host.
+- The iced dependency is already its own and minimal (`advanced`, a renderer, a windowing feature, an executor), so a host's iced features are its own choice.
 
 **Backends.** `widget::Content` wraps `enum Backend { Iced(RawEditor), Owned(owned::Engine) }`. The owned engine is Wren's own code driving cosmic-text (MIT/Apache, the text library iced already uses); it shares nothing with the GPL cosmic-edit app. Users see it as `editor-engine = advanced`.
 - There is one `TextEditor` widget and one `EditorView`, and both backends share one test suite.
