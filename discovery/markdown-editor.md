@@ -414,6 +414,25 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - The **hanging indent** cosmic-text patch spike (gpui's Apache `IndentAdjustment` and writ's MIT wrap are references).
 - Larger heading sizes on Cosmic (`Attrs.metrics_opt`).
 - Exact selection bounds after a double- or triple-click.
+- A maximum text width outside focus mode (centered column) and an `editor-line-height` setting. Both work on either backend; asked for by the design review.
+- A brighter current-line number in the gutter (`Style::gutter_current`).
+
+**Coordination with the theme work** (`design/theme-polish`, session wren-26). The editor rebuild merges first.
+- **`theme.rs` stays untouched.** This work does not edit `wren-core/src/theme.rs`.
+- **wren-26's highlighter changes come across.** Their commit `df7a6c1` (syntax tokens, the emphasis-marker font fix, links, and the `code_block` band) is folded into `wren-editor`'s highlighter in milestone 5.
+- **New color fields.** `wren_editor::Palette` gains `heading`, `link`, `code`, and `quote`. `Style` gains `code_block` and `gutter_current`.
+- **Interim mapping.** Until the new tokens land, `editor_colors` maps them as follows:
+
+  | Editor field | Mapped from |
+  |---|---|
+  | `heading` | `accent` |
+  | `link` | `accent` |
+  | `code` | `success` |
+  | `quote` | `muted` |
+  | `code_block` | `current_line` |
+  | `gutter_current` | `body` |
+
+- **Notify wren-26** whenever `editor_colors`, `Palette`, `Style`, or the highlight test in `test_editor.py` changes.
 
 **P2:**
 - Folding; expand and shrink the selection.
