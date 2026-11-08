@@ -33,6 +33,30 @@ The functional harness launches its own `wren` built with
 never attaches to or kills a normal instance. Cases marked `native_x11` use
 real OS keyboard and pointer input and run only in the X11 lanes.
 
+`WrenApp(settings="…")` writes that text to the sandbox's `config.conf`
+before the first launch, so a case can start Wren with any setting. Restarts
+keep whatever the app has written there since, and `app.settings_path` names
+the file.
+
+### Editor engines
+
+The editor cases in `tools/wrentest/test_editor.py` run on each text engine
+that `WRENTEST_ENGINE` names: `classic` (the default), `cosmic`, or both,
+comma-separated. Each case starts Wren with `editor-engine` set to its engine,
+checks that `editor.get` reports that engine, and gets the engine in its test
+id:
+
+```bash
+cargo build --features smoke-test
+ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,cosmic \
+  uv run --locked --group test python tools/run_display.py x11 -- \
+  uv run --locked --group test pytest tools/wrentest/test_editor.py
+```
+
+The `make smoke-*` targets pass the variable through, so
+`WRENTEST_ENGINE=cosmic make smoke-x11` runs the whole suite with the editor
+cases on Cosmic.
+
 ## Looking at real screens
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`

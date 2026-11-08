@@ -1,7 +1,13 @@
-"""Real editor regression tests; native X11 cases exercise OS input separately."""
+"""Real editor regression tests; native X11 cases exercise OS input separately.
+
+Every case runs on the text engines that ``WRENTEST_ENGINE`` names, a
+comma-separated list of ``classic`` and ``cosmic`` (default ``classic``).
+"""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -15,9 +21,37 @@ from tools.wrentest import png
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, wait_for
 
+ENGINES = ("classic", "cosmic")
 
-def test_unicode_selection_history_and_find() -> None:
-    with WrenApp(artifacts_dir=artifact_directory("editor-history")) as app:
+
+def selected_engines() -> list[str]:
+    names = [name.strip() for name in os.environ.get("WRENTEST_ENGINE", "classic").split(",")]
+    unknown = [name for name in names if name not in ENGINES]
+    if unknown:
+        raise pytest.UsageError(f"WRENTEST_ENGINE must name {' or '.join(ENGINES)}, got {unknown}")
+    return list(dict.fromkeys(names))
+
+
+@pytest.fixture(params=selected_engines())
+def engine(request: pytest.FixtureRequest) -> str:
+    return request.param
+
+
+@pytest.fixture
+def editor_app(engine: str):
+    """Launch WrenApps on the engine under test; each must report it."""
+
+    @contextmanager
+    def launch(**kwargs) -> Iterator[WrenApp]:
+        with WrenApp(settings=f"editor-engine = {engine}\n", **kwargs) as app:
+            assert app.client.call("editor.get")["engine"] == engine
+            yield app
+
+    return launch
+
+
+def test_unicode_selection_history_and_find(editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-history")) as app:
         call = app.client.call
         original = "# Café 🐦\n\nOne café, two CAFÉ.\n"
         call("editor.set", {"text": original})
@@ -36,8 +70,8 @@ def test_unicode_selection_history_and_find() -> None:
 
 
 @pytest.mark.parametrize("ending", ["\n", "\r\n", "\r", "\n\r"])
-def test_find_and_edit_with_supported_line_endings(ending) -> None:
-    with WrenApp(artifacts_dir=artifact_directory("editor-line-endings")) as app:
+def test_find_and_edit_with_supported_line_endings(ending, editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-line-endings")) as app:
         call = app.client.call
         original = ending.join(("aa", "bb", "cc"))
         call("editor.set", {"text": original})
@@ -49,8 +83,25 @@ def test_find_and_edit_with_supported_line_endings(ending) -> None:
         assert call("editor.get")["selected_text"] == "bb"
 
 
-def test_theme_changes_preserve_editor_state_and_noop_edits() -> None:
-    with WrenApp(artifacts_dir=artifact_directory("editor-themes")) as app:
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r", "\n\r"])
+def test_enter_and_paste_keep_the_notes_line_endings(ending, editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-enter-endings")) as app:
+        call = app.client.call
+        original = ending.join(("- a", "- b"))
+        call("editor.set", {"text": original})
+        call("editor.cursor", {"line": 0, "column": 3, "selection": None})
+        assert call("editor.action", {"kind": "enter"})["text"] == ending.join(("- a", "", "- b"))
+        pasted = call("editor.insert", {"text": "x\ny\r\nz"})["text"]
+        assert pasted == ending.join(("- a", "x", "y", "z", "- b"))
+        call("editor.action", {"kind": "move", "motion": "end"})
+        assert call("editor.action", {"kind": "enter"})["text"] == pasted + ending
+        call("editor.undo")
+        call("editor.undo")
+        assert call("editor.undo")["text"] == original
+
+
+def test_theme_changes_preserve_editor_state_and_noop_edits(editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-themes")) as app:
         call = app.client.call
         call("editor.set", {"text": "first\nemoji 🐦 and café\nlast"})
         call("editor.cursor", {"line": 1, "column": 10,
@@ -88,9 +139,9 @@ def capture(app: WrenApp, path: Path) -> png.PNG:
     ("dark", (0xF0, 0xB4, 0x5A), (0x7F, 0xD1, 0xA0)),
     ("light", (0x9A, 0x58, 0x00), (0x19, 0x73, 0x42)),
 ])
-def test_editor_highlighting_renders_in_both_themes(theme, accent, code) -> None:
+def test_editor_highlighting_renders_in_both_themes(theme, accent, code, editor_app) -> None:
     artifacts = artifact_directory(f"editor-highlight-{theme}")
-    with WrenApp(artifacts_dir=artifacts) as app:
+    with editor_app(artifacts_dir=artifacts) as app:
         app.client.call("theme.set", {"id": theme})
         app.client.call("editor.set", {"text": "# Heading\nplain text\n`inline code`\n**bold** and *italic*"})
         image = capture(app, artifacts / "highlighting.png")
@@ -100,9 +151,9 @@ def test_editor_highlighting_renders_in_both_themes(theme, accent, code) -> None
                        for pixel in colors) >= 15, f"Missing rendered syntax color {expected}"
 
 
-def test_soft_wrap_renders_multiple_rows() -> None:
+def test_soft_wrap_renders_multiple_rows(editor_app) -> None:
     artifacts = artifact_directory("editor-wrap")
-    with WrenApp(artifacts_dir=artifacts) as app:
+    with editor_app(artifacts_dir=artifacts) as app:
         app.client.call("theme.set", {"id": "dark"})
         state = app.client.call("editor.set", {"text": "wrapped words " * 80})
         assert state["line_count"] == 1
@@ -118,9 +169,9 @@ def test_soft_wrap_renders_multiple_rows() -> None:
         assert state["soft_wrap"] is True
 
 
-def test_scroll_survives_theme_roundtrip() -> None:
+def test_scroll_survives_theme_roundtrip(editor_app) -> None:
     artifacts = artifact_directory("editor-scroll")
-    with WrenApp(artifacts_dir=artifacts) as app:
+    with editor_app(artifacts_dir=artifacts) as app:
         call = app.client.call
         call("theme.set", {"id": "dark"})
         call("editor.set", {"text": "\n".join(f"line {n:04d}: scrolling evidence" for n in range(300))})
@@ -137,9 +188,9 @@ def test_scroll_survives_theme_roundtrip() -> None:
         assert sum(before.pixel(x, y) != after.pixel(x, y) for x, y in region) < 30
 
 
-def test_five_thousand_line_edit_measurements() -> None:
+def test_five_thousand_line_edit_measurements(editor_app) -> None:
     artifacts = artifact_directory("editor-5000")
-    with WrenApp(artifacts_dir=artifacts, extra_args=("--editor-spike",)) as app:
+    with editor_app(artifacts_dir=artifacts, extra_args=("--editor-spike",)) as app:
         call = app.client.call
         initial = call("editor.get")
         assert initial["line_count"] == 5000
@@ -186,9 +237,9 @@ def focus_native(app: WrenApp) -> str:
 
 
 @pytest.mark.native_x11
-def test_native_typing_shortcuts_selection_and_clipboard() -> None:
+def test_native_typing_shortcuts_selection_and_clipboard(editor_app) -> None:
     assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
-    with WrenApp(artifacts_dir=artifact_directory("editor-native")) as app:
+    with editor_app(artifacts_dir=artifact_directory("editor-native")) as app:
         call = app.client.call
         call("editor.set", {"text": ""})
         window = focus_native(app)
@@ -213,9 +264,21 @@ def test_native_typing_shortcuts_selection_and_clipboard() -> None:
 
 
 @pytest.mark.native_x11
+def test_native_return_keeps_a_crlf_note_crlf(editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-native-crlf")) as app:
+        call = app.client.call
+        call("editor.set", {"text": "one\r\ntwo"})
+        window = focus_native(app)
+        xdo("key", "--window", window, "--clearmodifiers", "ctrl+End", "Return")
+        xdo("type", "--window", window, "--clearmodifiers", "--delay", "12", "three")
+        wait_for(lambda: call("editor.get")["text"] == "one\r\ntwo\r\nthree",
+                 description="native Return in a CRLF note")
+
+
+@pytest.mark.native_x11
 @pytest.mark.parametrize("clicks,selected,edited", [(2, "hello", "X world"), (3, "hello world", "X")])
-def test_native_word_and_line_selection_survive_undo(clicks, selected, edited) -> None:
-    with WrenApp(artifacts_dir=artifact_directory("editor-native-selection")) as app:
+def test_native_word_and_line_selection_survive_undo(clicks, selected, edited, editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-native-selection")) as app:
         call = app.client.call
         call("editor.set", {"text": "hello world"})
         window = focus_native(app)
@@ -238,9 +301,9 @@ def test_native_word_and_line_selection_survive_undo(clicks, selected, edited) -
 
 
 @pytest.mark.native_x11
-def test_native_large_document_typing() -> None:
+def test_native_large_document_typing(editor_app) -> None:
     artifacts = artifact_directory("editor-native-5000")
-    with WrenApp(artifacts_dir=artifacts, extra_args=("--editor-spike",)) as app:
+    with editor_app(artifacts_dir=artifacts, extra_args=("--editor-spike",)) as app:
         call = app.client.call
         initial = call("editor.get")["text"]
         window = focus_native(app)
@@ -259,11 +322,11 @@ def test_native_large_document_typing() -> None:
 
 
 @pytest.mark.native_x11
-def test_native_text_size_shortcuts_resize_and_save() -> None:
+def test_native_text_size_shortcuts_resize_and_save(editor_app) -> None:
     assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
-    with WrenApp(artifacts_dir=artifact_directory("editor-text-size")) as app:
+    with editor_app(artifacts_dir=artifact_directory("editor-text-size")) as app:
         call = app.client.call
-        config = app.sandbox / "home_root" / "config" / "wren" / "config.conf"
+        config = app.settings_path
         call("editor.set", {"text": ""})
         window = focus_native(app)
         assert call("editor.get")["font_size"] == 14
@@ -280,10 +343,10 @@ def test_native_text_size_shortcuts_resize_and_save() -> None:
         assert call("editor.get")["text"] == ""
 
 
-def test_theme_and_font_pickers_preview_live_and_restore() -> None:
-    with WrenApp(artifacts_dir=artifact_directory("editor-pickers")) as app:
+def test_theme_and_font_pickers_preview_live_and_restore(engine, editor_app) -> None:
+    with editor_app(artifacts_dir=artifact_directory("editor-pickers")) as app:
         call = app.client.call
-        config = app.sandbox / "home_root" / "config" / "wren" / "config.conf"
+        config = app.settings_path
         shown = call("editor.get")["theme"]
 
         modal = call("palette.open", {"mode": "themes"})["navigation"]["modal"]
@@ -292,7 +355,8 @@ def test_theme_and_font_pickers_preview_live_and_restore() -> None:
         assert call("editor.get")["theme"] == "nord"
         call("palette.close")
         assert call("editor.get")["theme"] == shown
-        assert not config.exists()
+        # Previews never write the settings file.
+        assert config.read_text() == f"editor-engine = {engine}\n"
 
         modal = call("palette.open", {"mode": "fonts"})["navigation"]["modal"]
         assert modal["active_key"] == {"font": "JetBrains Mono"}
@@ -310,10 +374,10 @@ def test_theme_and_font_pickers_preview_live_and_restore() -> None:
             assert f'editor-font-family = "{others[0]}"\n' in config.read_text()
 
 
-def test_every_listed_font_previews_without_crashing(tmp_path: Path) -> None:
+def test_every_listed_font_previews_without_crashing(tmp_path: Path, editor_app) -> None:
     """Each installed font the picker lists is laid out and drawn. A screenshot
     waits for a presented frame, so every font's glyphs are rasterized."""
-    with WrenApp(artifacts_dir=artifact_directory("editor-every-font")) as app:
+    with editor_app(artifacts_dir=artifact_directory("editor-every-font")) as app:
         call = app.client.call
         text = "# Heading\n\nSome **bold** and *italic* text, `code`, 12345.\n- [ ] a task\n"
         call("editor.set", {"text": text})
@@ -329,10 +393,10 @@ def test_every_listed_font_previews_without_crashing(tmp_path: Path) -> None:
         assert call("editor.get")["text"] == text
 
 
-def test_font_changes_with_the_cursor_off_screen_keep_the_editor_alive() -> None:
+def test_font_changes_with_the_cursor_off_screen_keep_the_editor_alive(editor_app) -> None:
     """A font change reshapes only the visible lines; the caret's line must
     still be laid out when it is off-screen."""
-    with WrenApp(artifacts_dir=artifact_directory("editor-font-offscreen")) as app:
+    with editor_app(artifacts_dir=artifact_directory("editor-font-offscreen")) as app:
         call = app.client.call
         text = "\n".join(f"Line {number} of a long note" for number in range(1, 200))
         call("editor.set", {"text": text})
