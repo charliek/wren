@@ -9,22 +9,29 @@
 //!
 //! Supported constructs:
 //!   - Front matter: muted, with faint delimiters.
-//!   - Fenced and indented code: muted body, faint fences.
-//!   - ATX headings (`#`–`######`): faint markers, bold accent H1/primary H2–H6.
-//!   - Block-quote markers: muted.
+//!   - Fenced and indented code: muted body, faint fences; fenced blocks get
+//!     the widget's code band.
+//!   - ATX headings (`#`–`######`): faint markers, bold `heading` H1,
+//!     `heading2` H2, and primary H3–H6.
+//!   - Block quotes: faint markers, italic `quote` text.
 //!   - List markers and open task boxes: accent colour.
-//!   - Completed tasks: faint text; the editor widget draws the strike.
+//!   - Completed tasks: faint markers and `completed` text, struck through.
 //!   - Thematic breaks, setext underlines, and HTML blocks: faint.
-//!   - Inline code spans (`` `...` ``): success colour.
-//!   - Bold (`**...**`, `__...__`): bold font weight.
-//!   - Italic (`*...*`, `_..._`): italic font style.
-//!   - Strikethrough (`~~...~~`): danger colour.
+//!   - Inline code spans (`` `...` ``): `code` colour.
+//!   - Bold (`**...**`, `__...__`) and italic (`*...*`, `_..._`): the font's
+//!     bold and italic faces, markers included in faint.
+//!   - Strikethrough (`~~...~~`): faint tildes, `completed` text, struck.
+//!   - Links (`[text](url)`, `[text][ref]`, bare `http(s)://` URLs): `link`
+//!     text, faint brackets and destination.
 //!   - Inline HTML comments (`<!--...-->`): faint colour.
+//!
+//! The syntax colours, the emphasis-marker fonts, links, and the code band
+//! follow the design/theme-polish branch (commits df7a6c1 and e17c877).
 //!
 //! The scanner state is checkpointed every [`CHECKPOINT_INTERVAL`] lines so
 //! that `change_line` can resync cheaply without replaying the document.
 //! Alongside the spans, each highlighted line leaves a [`LineDecor`] for the
-//! widget to draw: the strike through completed tasks and the code band.
+//! widget to draw: strike-throughs and the code band.
 //!
 //! All byte ranges returned are valid UTF-8 boundaries.
 
@@ -131,8 +138,12 @@ struct Ink {
     muted: Color,
     faint: Color,
     accent: Color,
-    danger: Color,
-    success: Color,
+    heading: Color,
+    heading2: Color,
+    link: Color,
+    code: Color,
+    quote: Color,
+    completed: Color,
     font: Font,
 }
 
@@ -143,16 +154,24 @@ impl Ink {
             muted,
             faint,
             accent,
-            danger,
-            success,
+            heading,
+            heading2,
+            link,
+            code,
+            quote,
+            completed,
         } = palette;
         Self {
             text,
             muted,
             faint,
             accent,
-            danger,
-            success,
+            heading,
+            heading2,
+            link,
+            code,
+            quote,
+            completed,
             font,
         }
     }
@@ -303,7 +322,7 @@ fn line_highlights(
             continue;
         };
         let color = match container {
-            Container::Quote { .. } => ink.muted,
+            Container::Quote { .. } => ink.faint,
             Container::Item(_) if done => ink.faint,
             Container::Item(_) => ink.accent,
         };
@@ -321,7 +340,11 @@ fn line_highlights(
             if text.is_empty() {
                 spans.push(body, faint);
             } else {
-                let color = if *level == 1 { ink.accent } else { ink.text };
+                let color = match level {
+                    1 => ink.heading,
+                    2 => ink.heading2,
+                    _ => ink.text,
+                };
                 spans.push(info.prefix_end..text.start, faint);
                 spans.push(text.clone(), Highlight::bold(color, ink.font));
                 spans.push(text.end..line.len(), faint);
@@ -341,11 +364,33 @@ fn line_highlights(
         Kind::IndentedCode => spans.push(body, Highlight::colored(ink.muted)),
         Kind::Prose if done => {
             let text = info.text_start..info.text_start + line[info.text_start..].trim_end().len();
-            spans.push(info.text_start..line.len(), Highlight::colored(ink.faint));
+            spans.push(text.clone(), Highlight::colored(ink.completed));
+            spans.push(text.end..line.len(), Highlight::colored(ink.faint));
             decor.strikes.push(text);
         }
         Kind::Prose => {
-            spans.extend_at(info.text_start, scan_inline(&line[info.text_start..], ink));
+            let start = info.text_start;
+            let inline = scan_inline(&line[start..], ink);
+            decor.strikes.extend(
+                inline
+                    .strikes
+                    .iter()
+                    .map(|r| r.start + start..r.end + start),
+            );
+            if info.quote_depth == 0 {
+                spans.extend_at(start, inline.spans);
+            } else {
+                // Quoted text between the inline spans is italic.
+                let quote = Highlight::italic(ink.quote, ink.font);
+                let mut covered = start;
+                for (range, highlight) in inline.spans {
+                    let range = range.start + start..range.end + start;
+                    spans.push(covered..range.start, quote);
+                    covered = range.end;
+                    spans.push(range, highlight);
+                }
+                spans.push(covered..line.len(), quote);
+            }
         }
     }
     (spans.0, decor)
@@ -355,11 +400,16 @@ fn line_highlights(
 // Inline element scanner
 // ---------------------------------------------------------------------------
 
-/// Returns `(byte_range_within_line, Highlight)` pairs for inline Markdown.
-///
-/// Handles: inline code (highest priority), HTML comments, bold+italic, bold,
-/// italic, strikethrough.  Ranges do not overlap.
-fn scan_inline(line: &str, palette: &Ink) -> Vec<(Range<usize>, Highlight)> {
+/// The inline Markdown of a line: sorted, non-overlapping spans, and the
+/// struck ranges, all relative to the scanned text.
+struct Inline {
+    spans: Vec<(Range<usize>, Highlight)>,
+    strikes: Vec<Range<usize>>,
+}
+
+/// Scans inline Markdown: inline code (highest priority), HTML comments,
+/// bold+italic, bold, italic, strikethrough, then links.
+fn scan_inline(line: &str, palette: &Ink) -> Inline {
     // We build a priority-ordered list of non-overlapping spans.
     // First collect code spans (they cannot contain other markup).
     let chars: Vec<(usize, char)> = line.char_indices().collect();
@@ -436,21 +486,15 @@ fn scan_inline(line: &str, palette: &Ink) -> Vec<(Range<usize>, Highlight)> {
     );
 
     // ── 6. Strikethrough (~~) ────────────────────────────────────────────────
-    extract_between(
-        line,
-        "~~",
-        "~~",
-        Highlight::colored(palette.danger),
-        &mut spans,
-        &mut occupied,
-    );
+    let strikes = extract_strikethrough(line, palette, &mut spans, &mut occupied);
 
-    // ── 7. Inline links: [text](url) ─────────────────────────────────────────
+    // ── 7. Links: [text](url), [text][ref], and bare URLs ──────────────────────
     extract_links(line, palette, &mut spans, &mut occupied);
+    extract_bare_urls(line, palette, &mut spans, &mut occupied);
 
     // Sort by start position for deterministic output.
     spans.sort_by_key(|(r, _)| r.start);
-    spans
+    Inline { spans, strikes }
 }
 
 /// Extract all backtick-delimited code spans, respecting multi-backtick fences.
@@ -492,7 +536,7 @@ fn extract_backtick_spans(
                     let byte_end = last.0 + last.1.len_utf8();
                     if !any_occupied(occupied, byte_start..byte_end) {
                         mark_occupied(occupied, byte_start..byte_end);
-                        spans.push((byte_start..byte_end, Highlight::colored(palette.success)));
+                        spans.push((byte_start..byte_end, Highlight::colored(palette.code)));
                     }
                     i = m;
                     break;
@@ -533,7 +577,14 @@ fn extract_emphasis(
             break;
         };
         let end = closing + marker.len();
-        spans.push((opening..content, Highlight::colored(faint)));
+        // cosmic-text shapes a word in the font of its first character, so a
+        // regular-weight `**` would leave `**Alice` regular. The markers
+        // carry the span's font and differ only in colour.
+        let marker_highlight = Highlight {
+            color: Some(faint),
+            font: highlight.font,
+        };
+        spans.push((opening..content, marker_highlight));
         let mut run = None;
         for (relative, character) in line[content..closing].char_indices() {
             let byte = content + relative;
@@ -548,10 +599,34 @@ fn extract_emphasis(
         if let Some(start) = run {
             spans.push((start..closing, highlight));
         }
-        spans.push((closing..end, Highlight::colored(faint)));
+        spans.push((closing..end, marker_highlight));
         mark_occupied(occupied, opening..end);
         search = end;
     }
+}
+
+/// `~~struck~~`: faint tildes around `completed` text. Returns the struck
+/// text ranges.
+fn extract_strikethrough(
+    line: &str,
+    palette: &Ink,
+    spans: &mut Vec<(Range<usize>, Highlight)>,
+    occupied: &mut [bool],
+) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let faint = Highlight::colored(palette.faint);
+    extract_between(line, "~~", "~~", faint, &mut found, occupied);
+    let mut strikes = Vec::new();
+    for (range, _) in found {
+        let inner = range.start + 2..range.end - 2;
+        spans.push((range.start..inner.start, faint));
+        if !inner.is_empty() {
+            spans.push((inner.clone(), Highlight::colored(palette.completed)));
+            strikes.push(inner.clone());
+        }
+        spans.push((inner.end..range.end, faint));
+    }
+    strikes
 }
 
 /// Extract spans delimited by a fixed `open` and `close` marker string,
@@ -639,12 +714,48 @@ fn extract_links(
         if let Some(end) = span_end {
             if !any_occupied(occupied, open_bracket..end) && line.is_char_boundary(end) {
                 mark_occupied(occupied, open_bracket..end);
-                spans.push((open_bracket..end, Highlight::colored(palette.accent)));
+                let faint = Highlight::colored(palette.faint);
+                spans.push((open_bracket..open_bracket + 1, faint));
+                if open_bracket + 1 < close_bracket {
+                    spans.push((
+                        open_bracket + 1..close_bracket,
+                        Highlight::colored(palette.link),
+                    ));
+                }
+                spans.push((close_bracket..end, faint));
             }
             search_from = end;
         } else {
             search_from = close_bracket + 1;
         }
+    }
+}
+
+/// Color bare `http://` and `https://` URLs as links. A URL ends at
+/// whitespace, and trailing sentence punctuation stays outside it.
+fn extract_bare_urls(
+    line: &str,
+    palette: &Ink,
+    spans: &mut Vec<(Range<usize>, Highlight)>,
+    occupied: &mut [bool],
+) {
+    let mut search = 0;
+    while let Some(start) = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| line[search..].find(scheme))
+        .min()
+        .map(|relative| search + relative)
+    {
+        let rest = &line[start..];
+        let length = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let url =
+            rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', '"', '\'']);
+        let end = start + url.len();
+        if !any_occupied(occupied, start..end) && url.len() > "https://".len() {
+            mark_occupied(occupied, start..end);
+            spans.push((start..end, Highlight::colored(palette.link)));
+        }
+        search = start + length.max(1);
     }
 }
 
@@ -740,7 +851,7 @@ mod tests {
     // ── Headings ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn heading_markers_are_faint_and_only_h1_text_is_accent_in_both_palettes() {
+    fn heading_markers_are_faint_and_h1_h2_use_their_heading_colors_in_both_palettes() {
         for palette in [fixtures::DARK, fixtures::LIGHT] {
             let p = Ink::new(palette, fixtures::FONT);
             for (level, prefix) in ["# ", "## ", "### ", "#### ", "##### ", "###### "]
@@ -756,7 +867,11 @@ mod tests {
                 assert_eq!(spans[1].0, prefix.len()..line.len());
                 assert_eq!(
                     spans[1].1.color,
-                    Some(if level == 0 { p.accent } else { p.text })
+                    Some(match level {
+                        0 => p.heading,
+                        1 => p.heading2,
+                        _ => p.text,
+                    })
                 );
                 assert!(spans[1]
                     .1
@@ -774,9 +889,8 @@ mod tests {
         assert_eq!(
             colored(line, &spans),
             [
-                ("> ", Some(p.muted)),
-                ("## ", Some(p.faint)),
-                ("Title", Some(p.text)),
+                ("> ## ", Some(p.faint)),
+                ("Title", Some(p.heading2)),
                 (" ##", Some(p.faint)),
             ]
         );
@@ -794,7 +908,7 @@ mod tests {
     // ── Lists and tasks ──────────────────────────────────────────────────────
 
     #[test]
-    fn list_and_open_task_markers_use_accent_but_done_tasks_are_faint() {
+    fn list_and_open_task_markers_use_accent_and_done_tasks_recede() {
         for palette in [fixtures::DARK, fixtures::LIGHT] {
             let p = Ink::new(palette, fixtures::FONT);
             for (line, end) in [
@@ -809,12 +923,18 @@ mod tests {
                 assert_eq!(spans[0].0, 0..end, "{line}");
                 assert_eq!(spans[0].1.color, Some(p.accent));
             }
-            for (line, start) in [("- [x] completed", 0), ("  - [X] **completed**", 2)] {
+            for (line, marker, text) in [
+                ("- [x] completed", "- [x] ", "completed"),
+                ("  - [X] **completed**  ", "- [X] ", "**completed**"),
+            ] {
                 let spans = highlight_text(palette, line).remove(0).0;
-                assert_eq!(spans.len(), 1);
-                assert_eq!(spans[0].0, start..line.len());
-                assert_eq!(spans[0].1.color, Some(p.faint));
-                assert_eq!(spans[0].1.font, None);
+                let colored = colored(line, &spans);
+                assert_eq!(colored[0], (marker, Some(p.faint)), "{line}");
+                assert_eq!(colored[1], (text, Some(p.completed)), "{line}");
+                assert!(colored[2..]
+                    .iter()
+                    .all(|(_, color)| *color == Some(p.faint)));
+                assert!(spans.iter().all(|(_, highlight)| highlight.font.is_none()));
             }
         }
     }
@@ -888,8 +1008,10 @@ mod tests {
             }
         }
         let spans = highlights_for("**bold `code` text**");
-        assert!(spans.iter().any(|(range, highlight)| *range == (7..13)
-            && highlight.color == Some(dark_palette().success)));
+        assert!(spans
+            .iter()
+            .any(|(range, highlight)| *range == (7..13)
+                && highlight.color == Some(dark_palette().code)));
         let bold: Vec<_> = spans
             .iter()
             .filter(|(_, highlight)| {
@@ -899,7 +1021,7 @@ mod tests {
             })
             .map(|(range, _)| range.clone())
             .collect();
-        assert_eq!(bold, [2..7, 13..18]);
+        assert_eq!(bold, [0..2, 2..7, 13..18, 18..20]);
         assert_eq!(span_color_at(&spans, 0), Some(dark_palette().faint));
         assert_eq!(span_color_at(&spans, 18), Some(dark_palette().faint));
     }
@@ -934,7 +1056,7 @@ mod tests {
         let highlighted = highlight_text(fixtures::DARK, text);
         assert_eq!(
             colored(lines[1], &highlighted[1].0),
-            [("> code", Some(p.muted))]
+            [("> ", Some(p.faint)), ("code", Some(p.muted))]
         );
         assert_eq!(
             colored(lines[6], &highlighted[6].0),
@@ -966,11 +1088,11 @@ mod tests {
         assert_eq!(lines[1], [(0..12, Highlight::colored(p.muted))]);
         assert_eq!(lines[2], [(0..9, Highlight::colored(p.muted))]);
         assert_eq!(lines[3], [(0..3, Highlight::colored(p.faint))]);
-        assert_eq!(lines[4][1].1.color, Some(p.accent));
+        assert_eq!(lines[4][1].1.color, Some(p.heading));
         // Unclosed, line 0 is a thematic break and the rest is Markdown.
         let lines = spans_of("---\ntitle: Notes\n# Heading");
         assert!(lines[1].is_empty());
-        assert_eq!(lines[2][1].1.color, Some(p.accent));
+        assert_eq!(lines[2][1].1.color, Some(p.heading));
     }
 
     #[test]
@@ -992,13 +1114,37 @@ mod tests {
     // ── Blockquote ───────────────────────────────────────────────────────────
 
     #[test]
-    fn blockquote_markers_are_muted_at_every_depth() {
+    fn blockquote_markers_are_faint_and_their_text_is_italic_quote() {
         let p = dark_palette();
-        let line = "> > quoted **text**";
+        let line = "> quoted **bold** text";
         let spans = highlights_for(line);
-        assert_eq!(colored(line, &spans)[0], ("> > ", Some(p.muted)));
+        assert_eq!(span_color_at(&spans, 0), Some(p.faint));
+        let quoted = spans.iter().find(|(range, _)| range.start == 2).unwrap();
+        assert_eq!(&line[quoted.0.clone()], "quoted ");
+        assert_eq!(quoted.1.color, Some(p.quote));
+        assert!(quoted
+            .1
+            .font
+            .is_some_and(|font| font.style == font::Style::Italic));
+        let bold = spans
+            .iter()
+            .find(|(range, _)| &line[range.clone()] == "bold")
+            .unwrap();
+        assert!(bold
+            .1
+            .font
+            .is_some_and(|font| font.weight == font::Weight::Bold));
+        assert_eq!(spans.last().unwrap().0.end, line.len());
+
+        let nested = "> > deep";
+        let spans = highlights_for(nested);
+        assert_eq!(
+            colored(nested, &spans),
+            [("> > ", Some(p.faint)), ("deep", Some(p.quote))]
+        );
+        // A lazy line continues the quoted paragraph.
         let lazy = spans_of("> quote\nlazy");
-        assert!(lazy[1].is_empty());
+        assert_eq!(lazy[1], [(0..4, Highlight::italic(p.quote, p.font))]);
     }
 
     // ── Inline code ──────────────────────────────────────────────────────────
@@ -1027,7 +1173,7 @@ mod tests {
     // ── Bold and italic ───────────────────────────────────────────────────────
 
     #[test]
-    fn bold_text_is_strong_while_its_markers_are_faint() {
+    fn bold_text_is_strong_while_its_markers_are_faint_and_bold() {
         for palette in [fixtures::DARK, fixtures::LIGHT] {
             let p = Ink::new(palette, fixtures::FONT);
             let spans = highlight_text(palette, "This is **bold** text.")
@@ -1035,7 +1181,10 @@ mod tests {
                 .0;
             let marker = spans.iter().find(|(range, _)| *range == (8..10)).unwrap();
             assert_eq!(marker.1.color, Some(p.faint));
-            assert_eq!(marker.1.font, None);
+            assert!(marker
+                .1
+                .font
+                .is_some_and(|font| font.weight == font::Weight::Bold));
             let inner = spans.iter().find(|(range, _)| *range == (10..14)).unwrap();
             assert_eq!(inner.1.color, Some(p.text));
             assert!(inner
@@ -1047,10 +1196,13 @@ mod tests {
     }
 
     #[test]
-    fn italic_text_preserves_style_without_emphasizing_its_markers() {
+    fn italic_text_and_its_faint_markers_share_the_italic_face() {
         let spans = highlights_for("This is *italic* text.");
         let marker = spans.iter().find(|(range, _)| *range == (8..9)).unwrap();
-        assert_eq!(marker.1.font, None);
+        assert!(marker
+            .1
+            .font
+            .is_some_and(|font| font.style == font::Style::Italic));
         assert_eq!(marker.1.color, Some(dark_palette().faint));
         let inner = spans.iter().find(|(range, _)| *range == (9..15)).unwrap();
         assert!(inner
@@ -1058,6 +1210,26 @@ mod tests {
             .font
             .is_some_and(|font| font.style == font::Style::Italic));
         assert_eq!(span_color_at(&spans, 15), Some(dark_palette().faint));
+    }
+
+    #[test]
+    fn emphasis_markers_share_the_span_font_so_whole_words_shape_styled() {
+        // cosmic-text shapes a word in its first glyph's font, so a regular
+        // `**` once left `**Alice Chen**` bold only on its last word.
+        for (line, weight, style) in [
+            ("**Alice Chen**", font::Weight::Bold, font::Style::Normal),
+            ("*Bob*", font::Weight::Normal, font::Style::Italic),
+            ("***hard***", font::Weight::Bold, font::Style::Italic),
+        ] {
+            let spans = highlights_for(line);
+            assert_eq!(spans.len(), 3, "{line}");
+            for (_, highlight) in &spans {
+                let font = highlight.font.expect("styled span");
+                assert_eq!((font.weight, font.style), (weight, style), "{line}");
+            }
+            assert_eq!(spans[0].1.color, Some(dark_palette().faint));
+            assert_eq!(spans[2].1.color, Some(dark_palette().faint));
+        }
     }
 
     #[test]
@@ -1093,30 +1265,74 @@ mod tests {
     // ── Strikethrough ─────────────────────────────────────────────────────────
 
     #[test]
-    fn strikethrough_coloured_with_danger() {
+    fn strikethrough_text_is_completed_between_faint_tildes_and_struck() {
         let p = dark_palette();
-        let spans = highlights_for("This is ~~deleted~~ text.");
-        let st = spans.iter().find(|(r, _)| r.start == 8);
-        assert!(st.is_some(), "no strikethrough span");
-        assert_eq!(st.unwrap().1.color, Some(p.danger));
+        let line = "This is ~~deleted~~ text.";
+        let (spans, decor) = highlight_text(fixtures::DARK, line).remove(0);
+        assert_eq!(
+            colored(line, &spans),
+            [
+                ("~~", Some(p.faint)),
+                ("deleted", Some(p.completed)),
+                ("~~", Some(p.faint)),
+            ]
+        );
+        assert_eq!(decor.strikes, vec![(10..17)]);
+        let item = "- a ~~b~~";
+        let (_, decor) = highlight_text(fixtures::DARK, item).remove(0);
+        assert_eq!(decor.strikes, vec![(6..7)]);
     }
 
     // ── Links ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn inline_link_produces_accent_coloured_span() {
+    fn inline_link_text_uses_the_link_color_and_its_destination_recedes() {
         let p = dark_palette();
-        let spans = highlights_for("See [the docs](https://example.com) for more.");
-        let link = spans.iter().find(|(r, _)| r.start == 4);
-        assert!(link.is_some(), "no link span: {spans:?}");
-        assert_eq!(link.unwrap().1.color, Some(p.accent));
+        let line = "See [the docs](https://example.com) for more.";
+        assert_eq!(
+            colored(line, &highlights_for(line)),
+            [
+                ("[", Some(p.faint)),
+                ("the docs", Some(p.link)),
+                ("](https://example.com)", Some(p.faint)),
+            ]
+        );
     }
 
     #[test]
-    fn reference_link_produces_accent_coloured_span() {
-        let spans = highlights_for("Read [the guide][guide-ref] now.");
-        let link = spans.iter().find(|(r, _)| r.start == 5);
-        assert!(link.is_some(), "no ref link span: {spans:?}");
+    fn reference_link_text_uses_the_link_color() {
+        let p = dark_palette();
+        let line = "Read [the guide][guide-ref] now.";
+        assert_eq!(
+            colored(line, &highlights_for(line)),
+            [
+                ("[", Some(p.faint)),
+                ("the guide", Some(p.link)),
+                ("][guide-ref]", Some(p.faint)),
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_urls_are_links_without_trailing_punctuation() {
+        let p = dark_palette();
+        for (line, url) in [
+            (
+                "See https://example.com/a?b=1.",
+                "https://example.com/a?b=1",
+            ),
+            ("(http://wren.dev), then", "http://wren.dev"),
+            ("https://x.io", "https://x.io"),
+        ] {
+            let spans = highlights_for(line);
+            let link: Vec<_> = spans
+                .iter()
+                .filter(|(_, highlight)| highlight.color == Some(p.link))
+                .map(|(range, _)| &line[range.clone()])
+                .collect();
+            assert_eq!(link, [url], "{line}");
+        }
+        assert!(highlights_for("https:// alone").is_empty());
     }
 
     // ── Unicode safety ────────────────────────────────────────────────────────
@@ -1212,7 +1428,7 @@ mod tests {
         let spans: Vec<_> = h.highlight_line("# Heading").collect();
         assert!(!spans.is_empty());
         assert_eq!(spans[0].1.color, Some(fixtures::LIGHT.faint));
-        assert_eq!(spans[1].1.color, Some(fixtures::LIGHT.accent));
+        assert_eq!(spans[1].1.color, Some(fixtures::LIGHT.heading));
         let bold = spans[1].1.font.unwrap();
         assert_eq!(bold.family, font::Family::Name("Fira Code"));
         assert_eq!(bold.weight, font::Weight::Bold);

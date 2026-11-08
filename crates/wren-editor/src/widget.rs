@@ -61,6 +61,8 @@ const TEXT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 24.0;
 /// Horizontal inset of each mockup row (`editorWrap` padding).
 const ROW_INSET: f32 = 8.0;
+/// How far a code band reaches left of the text, into the gutter padding.
+const CODE_BAND_OUTSET: f32 = 8.0;
 const GUTTER_WIDTH: f32 = 52.0;
 const GUTTER_PADDING_RIGHT: f32 = 18.0;
 /// Text inset after the row inset when the gutter is hidden.
@@ -581,6 +583,26 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         let rows = visual_rows(editor.buffer(), &state.highlighter.borrow());
         let cursor_line = editor.cursor().position.line;
 
+        // Code bands start just left of the text so the gutter stays clear.
+        let code_left = text_bounds.x - CODE_BAND_OUTSET;
+        for row in rows.iter().filter(|row| row.code) {
+            let band = Rectangle {
+                x: code_left,
+                y: text_bounds.y + row.top,
+                width: (bounds.x + bounds.width - ROW_INSET - code_left).max(0.0),
+                height: row.height,
+            };
+            if let Some(band) = band.intersection(&rows_clip) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: band,
+                        ..renderer::Quad::default()
+                    },
+                    style.code_block,
+                );
+            }
+        }
+
         for row in rows.iter().filter(|row| row.line == cursor_line) {
             let band = Rectangle {
                 x: bounds.x + ROW_INSET,
@@ -642,7 +664,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                         bounds: range,
                         ..renderer::Quad::default()
                     },
-                    style.selection,
+                    style.text_selection,
                 );
             }
         }
@@ -922,6 +944,8 @@ struct VisualRow {
     starts_line: bool,
     /// Horizontal `(start, end)` of each strike-through on the row.
     strikes: Vec<(f32, f32)>,
+    /// Whether the row belongs to a fenced code block.
+    code: bool,
 }
 
 /// Collects the visible rows of `buffer` (already scrolled by the editor),
@@ -937,6 +961,7 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
                 height: run.line_height,
                 baseline: run.line_y,
                 starts_line: starts_line(run.glyphs.iter().map(|glyph| glyph.start)),
+                code: decor.is_some_and(|decor| decor.code),
                 strikes: decor
                     .into_iter()
                     .flat_map(|decor| &decor.strikes)

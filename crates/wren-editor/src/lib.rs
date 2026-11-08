@@ -51,31 +51,42 @@ pub struct Style {
     pub background: Color,
     /// Unhighlighted text.
     pub value: Color,
-    pub selection: Color,
+    /// The fill behind selected text.
+    pub text_selection: Color,
     /// Line numbers.
     pub gutter: Color,
     /// The band behind the cursor's line.
     pub current_line: Color,
+    /// The band behind fenced code blocks.
+    pub code_block: Color,
     pub caret: Color,
-    /// The line through a completed task.
+    /// The line through completed tasks and struck text.
     pub strike: Color,
 }
 
 /// Colours of the Markdown syntax highlighting.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
-    /// Heading and emphasis text.
+    /// H3–H6 and emphasis text.
     pub text: Color,
-    /// Code and blockquotes.
+    /// Code blocks and front matter.
     pub muted: Color,
-    /// Markup characters, fences, comments, and completed tasks.
+    /// Markup characters, fences, comments, and link destinations.
     pub faint: Color,
-    /// The first-level heading, list markers, and links.
+    /// List markers and open task boxes.
     pub accent: Color,
-    /// Strikethrough.
-    pub danger: Color,
+    /// H1 text.
+    pub heading: Color,
+    /// H2 text.
+    pub heading2: Color,
+    /// Link text and bare URLs.
+    pub link: Color,
     /// Inline code.
-    pub success: Color,
+    pub code: Color,
+    /// Block quote text.
+    pub quote: Color,
+    /// The text of completed tasks and `~~struck~~` text.
+    pub completed: Color,
 }
 
 // ---------------------------------------------------------------------------
