@@ -47,7 +47,6 @@ SAMPLE = {
 }
 
 
-
 def runbook() -> str:
     """A note long enough that the outline scrolls the editor."""
     parts = [
