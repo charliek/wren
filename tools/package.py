@@ -72,6 +72,12 @@ NOTICES = (
     "explicit text-coverage gaps are in DEPENDENCY_NOTICES.txt. That inventory\n"
     "also includes build/dev and other-target packages, not just linked code.\n"
     "Text collection is not a legal-completeness assurance.\n"
+    "\nWren's editor (crates/wren-editor) contains source copied and modified\n"
+    "from these MIT-licensed projects, whose notices are kept in the files:\n"
+    "  iced_widget 0.14.2 src/text_editor.rs (Copyright 2019 Héctor Ramón, Iced contributors)\n"
+    "  iced_graphics 0.14.0 src/text/editor.rs (Copyright 2019 Héctor Ramón, Iced contributors)\n"
+    "  cosmic-text 0.15.0 src/edit/editor.rs, caret placement (Copyright 2022 System76)\n"
+    "Their license texts are also in DEPENDENCY_NOTICES.txt.\n"
     "\nWren itself is released under the MIT License; see LICENSE.\n"
 )
 PROJECT_LICENSE = Path("LICENSE")

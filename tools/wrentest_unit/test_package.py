@@ -177,6 +177,8 @@ class PackageTests(unittest.TestCase):
         for name in ("Inter", "JetBrains Mono", "SIL Open Font License", *map(str, package.FONT_NOTICES)):
             self.assertIn(name, text)
         self.assertIn("DEPENDENCY_NOTICES.txt", text)
+        for copied in ("iced_widget 0.14.2", "iced_graphics 0.14.0", "cosmic-text 0.15.0"):
+            self.assertIn(copied, text)
         self.assertIn("MIT License", text)
         self.assertEqual((directory / "DEPENDENCY_NOTICES.txt").read_bytes(), self.dependency_text)
         self.assertIn("fixture-dependency", self.dependency_text.decode("utf-8"))

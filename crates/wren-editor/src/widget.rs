@@ -1,7 +1,8 @@
 //! Wren's Markdown text-editor widget.
 //!
 //! Forked from `iced_widget` 0.14.2, `src/text_editor.rs`
-//! (<https://github.com/iced-rs/iced>), used under the MIT License:
+//! (<https://github.com/iced-rs/iced>, commit
+//! 54abf81d13fec06d4d9ac754b03ce2c3313e8a1f), used under the MIT License:
 //!
 //! > Copyright 2019 Héctor Ramón, Iced contributors
 //! >

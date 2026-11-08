@@ -1,7 +1,8 @@
 //! `Backend::Cosmic`: a cosmic-text editor that Wren owns.
 //!
 //! Ported from `iced_graphics` 0.14.0, `src/text/editor.rs`
-//! (<https://github.com/iced-rs/iced>), used under the MIT License:
+//! (<https://github.com/iced-rs/iced>, commit
+//! 3997291f318a8bc06fa522f5579836fb3feb94df), used under the MIT License:
 //!
 //! > Copyright 2019 Héctor Ramón, Iced contributors
 //! >
@@ -26,7 +27,8 @@
 //!
 //! The caret's offset within a glyph cluster follows `cursor_glyph_opt` and
 //! `cursor_position` in cosmic-text 0.15.0, `src/edit/editor.rs`
-//! (<https://github.com/pop-os/cosmic-text>, Copyright 2022 System76), used
+//! (<https://github.com/pop-os/cosmic-text>, commit
+//! c82ee1c5b5b8032e91eaff1cb34294b538727a7d, Copyright 2022 System76), used
 //! under the MIT License, which cosmic-text offers alongside Apache-2.0.
 //!
 //! Modified by Wren: the editor is owned rather than hidden behind iced's
