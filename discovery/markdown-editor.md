@@ -200,7 +200,7 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 - **Scroll:** `replace_text` saves and restores scroll. For the outline jump, set the scroll before the cursor.
 - **Acceptance:** measure draw time on tiny-skia, which repaints the whole text area on every caret blink because `Raw` is never equal.
 
-**Every text change goes through `App::edit`.** Smart keys arrive as `Message::Intent`. Commands send the same message through `self.edit(...)`. `App::edit`'s post-change half becomes one helper that issues `EditDraft`, the revision bump, and the word count, so autosave sees every edit. The word count leaves the keystroke path: it is debounced on the existing tick.
+**Every text change goes through `App::edit`.** Smart keys arrive as `Message::Intent`. Commands send the same message through `self.edit(...)`. `App::edit`'s post-change half becomes one helper (`App::text_changed`) that issues `EditDraft` and the revision bump, so autosave sees every edit. The word count leaves the keystroke path: the existing tick recounts it at most 250 ms after the first edit since the last count. That is a throttle rather than a strict debounce, so steady typing still updates the footer; the tick also runs without a session (the `--editor` spike) while a recount is due.
 
 ## 5. Behavior spec (P0)
 
@@ -406,7 +406,8 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - An accelerator bound to an **App** command → `None`. The editor doesn't also handle it.
 - On macOS, a key with ⌘ held never becomes an `Insert`, so an unbound ⌘B types nothing.
 - While an IME preedit is non-empty, Enter, Tab, Backspace, and Delete go to the IME untouched.
-- With assist on, Enter, Shift+Enter, Tab, Shift+Tab, Backspace, Delete, the word and line deletes, Home, and Shift+Home map to `Message::Intent`.
+- Backspace, Delete, the word and line deletes, Tab, Shift+Tab, and ⌘↑ / ⌘↓ always map to `Message::Intent`; Enter, Shift+Enter, Home, and Shift+Home do only with assist on. The keys are read by post-processing `Binding::from_key_press`, so iced's platform mappings (⌘← and ⌃A as Home, ⌃H as Backspace) carry over. Word deletes take ⌥ on macOS, and Ctrl or Alt on Linux.
+- **With assist off** the editor edits plain text, keeping the fixes that are not about Markdown: Enter, Shift+Enter, and Home are iced's own; Backspace deletes a grapheme cluster (at column 0, the line break); Tab inserts spaces to the next multiple of 4, replacing a selection as typing does; ⌘⌫ deletes to column 0; Shift+Tab and the §5.7 commands do nothing. Delete, the word deletes, and the document motions are the planner's either way, since they know nothing of Markdown.
 - Editor commands stay out of the macOS menu bar in P0.
 
 ### 5.9 Outline palette
@@ -564,7 +565,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
 3. **`wren-markdown`:** the `edit` planner for §5.2–5.7, the CodeMirror corpus, and the divergence table.
 4. **`wren-editor`:** the `Backend` seam with Iced only. Then the owned engine behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.*
 5. **Point the highlighter, `done_task_ranges`, and `index.rs` at `wren-markdown::block`.**
-6. **Intents:**
+6. **Intents** (done on `md-keys`):
    - the `Message::Intent` / `EditorView::apply` path;
    - the `App::edit` helper and the debounced word count;
    - the `markdown-assist` setting;
