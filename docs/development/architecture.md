@@ -80,8 +80,10 @@ positions; the engine's caret and selection read them too, and its ↑ and ↓
 aim at the caret's x rather than cosmic-text's glyph index. The offset is the
 end of the line's container prefix, which the highlighter's block scanner
 records with each line it styles, so an edit that changes a marker re-hangs
-the lines from there down. The `classic` engine's buffer belongs to iced, so
-it wraps every row at the left edge.
+the lines from there down. The widget highlights while laying out, not only
+before drawing, because a key or click can arrive before the next frame and
+moves over the layout it finds. The `classic` engine's buffer belongs to
+iced, so it wraps every row at the left edge.
 
 `[patch.crates-io]` stops applying silently once a dependency needs a newer
 version, so `make check` (`check-patches`) fails unless the vendored `swash`

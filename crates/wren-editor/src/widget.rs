@@ -237,7 +237,6 @@ impl Content {
             Wrapping::WordOrGlyph,
             &mut highlighter,
         );
-        backend.highlight(crate::fixtures::FONT, &mut highlighter);
     }
 
     /// Whether `line` still has its layout from the last update.
@@ -1255,7 +1254,6 @@ mod tests {
             Wrapping::WordOrGlyph,
             &mut highlighter,
         );
-        editor.highlight(fixtures::FONT, &mut highlighter);
         visual_rows(editor.buffer(), &highlighter)
     }
 
