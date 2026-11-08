@@ -491,6 +491,8 @@ mod tests {
             Intent::Tab,
             &[
                 ("- x\n\t- a\n\t- b|", "- x\n\t- a\n\t\t- b|"),
+                // At the top level a leading tab makes indented code.
+                ("\t- a\n\t- b|", "\t- a\n\t- b\t|"),
                 ("- a\n- b|\n\t  c", "- a\n  - b|\n\t    c"),
             ],
         );

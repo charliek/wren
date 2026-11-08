@@ -22,6 +22,35 @@ pub use edit::plan;
 /// `line(i)` is the text of line `i` without its line ending. A document
 /// always has at least one line, and a trailing line ending is followed by
 /// an empty last line, matching how editors present text.
+///
+/// An editor whose buffer type comes from another crate implements this on
+/// a newtype that borrows the buffer, so planning copies no text:
+///
+/// ```
+/// use wren_markdown::{plan, Intent, Lines, Options, Pos, Selection};
+///
+/// // Stands in for a foreign buffer type, such as `cosmic_text::Buffer`.
+/// struct Buffer {
+///     lines: Vec<String>,
+/// }
+///
+/// struct BufferLines<'a>(&'a Buffer);
+///
+/// impl Lines for BufferLines<'_> {
+///     fn line_count(&self) -> usize {
+///         self.0.lines.len()
+///     }
+///
+///     fn line(&self, i: usize) -> &str {
+///         &self.0.lines[i]
+///     }
+/// }
+///
+/// let buffer = Buffer { lines: vec!["- item".into()] };
+/// let caret = Selection::caret(Pos::new(0, 6));
+/// let enter = plan(&BufferLines(&buffer), caret, Intent::Enter, &Options::default());
+/// assert_eq!(enter.selection, Selection::caret(Pos::new(1, 2)));
+/// ```
 pub trait Lines {
     fn line_count(&self) -> usize;
     fn line(&self, i: usize) -> &str;

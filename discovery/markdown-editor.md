@@ -168,7 +168,7 @@ wren-iced   depends on wren-editor; maps wren_core::theme to wren_editor::Style;
 **Backends.** `widget::Content` wraps `enum Backend { Iced(RawEditor), Cosmic(cosmic::Engine) }`.
 - There is one `TextEditor` widget and one `EditorView`, and both backends share one test suite.
 - The widget branches only on drawing (`fill_editor` or `fill_raw`) and on the few engine calls: `perform`, `move_to`, `cursor`, `selection`, `line`, `line_count`, `bounds`, `update`, `highlight`, `buffer`.
-- Planning runs inside a borrow: `content.with_lines(|lines| plan(lines, sel, intent, &opts))`. `Lines` is implemented over `&cosmic_text::Buffer`, so no line is copied.
+- Planning runs inside a borrow: `content.with_lines(|lines| plan(lines, sel, intent, &opts))`. Both backends expose a `&cosmic_text::Buffer` (iced's `Editor::buffer()`, and the owned engine's buffer), and `wren-editor` wraps it in a newtype that implements `Lines` with `buffer.lines[i].text()`, so no line is copied. A newtype is needed because the orphan rule forbids implementing `wren_markdown::Lines` for `cosmic_text::Buffer` in `wren-editor`, and `wren-markdown` must not depend on cosmic-text. `Editor::line()` cannot back `Lines`: it returns a `Cow`, not a borrowed `&str`.
 
 **Undo.** Keep the snapshot `History` (200 entries, 32 MiB, 1 s typing coalesce) for both backends.
 - Snapshots also record the scroll position.
@@ -313,7 +313,7 @@ In a code-like context, Shift+Enter is the same as Enter.
   - `1. a⏎2. b|` → `1. a⏎···1. b|`
   - `1. a⏎···1. x⏎2. b|` → `1. a⏎···1. x⏎···2. b|`
   - `> - a⏎> - b|` → `> - a⏎> ··- b|`
-- Indentation characters: keep the existing leading bytes, and append `\t` if the line's indent starts with a tab, otherwise spaces. Appended tabs reach the next tab stop at or past the target, which still nests the item (`\t- a⏎\t- b|` → `\t- a⏎\t\t- b|`). The subtree moves by exactly the same number of columns, gaining tabs only where its indentation is all tabs.
+- Indentation characters: keep the existing leading bytes, and append `\t` if the line's indent starts with a tab, otherwise spaces. Appended tabs reach the next tab stop at or past the target, which still nests the item (`- x⏎\t- a⏎\t- b|` → `- x⏎\t- a⏎\t\t- b|`). At the top level a leading tab is 4 columns, which makes the line indented code, so there Tab is the code Tab (`\t- a⏎\t- b|` → `\t- a⏎\t- b\t|`). The subtree moves by exactly the same number of columns, gaining tabs only where its indentation is all tabs.
 
 **Shift+Tab on a list line:**
 - The item and its subtree move to the parent's indent, taking the parent level's marker style and numbering. Its own task state is kept: `1. a⏎···- [x] b|` → `1. a⏎2. [x] b|`.
@@ -362,7 +362,7 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
 **Delete** removes one grapheme cluster, or at the end of a line the line break after it.
 
 **Word deletes:**
-- ⌥⌫ / Ctrl+⌫ deletes back to the previous word boundary (Unicode word segmentation), and ⌥⌦ / Ctrl+⌦ forward to the next one. Whitespace next to the cursor goes with the word: `foo bar··|` → `foo |`. Each punctuation character is its own segment. At either end of a line, the line break goes.
+- ⌥⌫ / Ctrl+⌫ deletes back to the previous word boundary (Unicode word segmentation), and ⌥⌦ / Ctrl+⌦ forward to the next one. Whitespace next to the cursor goes with the word: `foo bar··|` → `foo |`. Segments are UAX #29 word segments: punctuation that joins letters or digits stays in the word (`a.b|`, `3.14|`, and `can't|` each go whole), and any other punctuation character is a segment of its own (`foo!!|` → `foo!|`, `- [ ] |` → `- [ |`). Runs of markup are not grouped. At either end of a line, the line break goes.
 - ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`. A cursor inside the markup also deletes to column 0, and at column 0 the line break goes.
 
 **Home and Shift+Home** (also ⌘← and ⌃A on macOS; ⌃A becomes the smart toggle on purpose):
