@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.0.3 — 2026-11-08
+
 ### Added
 
 - **Keyboard navigation between columns.** One of Sections, Groups, Notes,
@@ -33,7 +35,6 @@ version's section as its notes, and publishes to the apt repo. See
   too. Palette commands are unchanged.
 - **⌘R (Alt+R on Linux) renames** the open note, or the selected section or
   group in their columns.
-
 - **Four more dark themes:** Tokyo Night (`tokyo-night`), Dracula
   (`dracula`), Catppuccin Mocha (`catppuccin-mocha`) and Catppuccin Macchiato
   (`catppuccin-macchiato`), each meeting the same 4.5:1 text contrast as the
@@ -56,9 +57,15 @@ version's section as its notes, and publishes to the apt repo. See
   as ↵. It used to rename the row; rename is now ⌘R / Alt+R or the palette.
 - **A single click on a note keeps the keyboard in the Notes column**, so ↑ /
   ↓ keep moving through notes. Click into the editor, or press ↵, to type.
-
 - **Focus mode toggles with ⌘Y on macOS and Alt+Y on Linux**, replacing ⌘\ /
   Alt+\. A `keybind` line in `config.conf` can still bind it elsewhere.
+- **Notes live only in groups.** A section holds groups, and the "(No group)"
+  row is gone. `.md` files placed directly in a section folder are ignored
+  with a warning; move them into a group folder to see them. In an empty
+  workspace the editor area walks you through New section…, New group…, and
+  New note…, and selecting a section opens its first group.
+- **Documentation moved to a site** at https://charliek.github.io/wren/,
+  replacing `SPEC.md`, `PLAN.md`, and `MOCKUP.md`.
 
 ### Removed
 
