@@ -362,7 +362,20 @@ A byte order mark on the first line is never deleted. With a selection, Backspac
 **Delete** removes one grapheme cluster, or at the end of a line the line break after it.
 
 **Word deletes:**
-- ⌥⌫ / Ctrl+⌫ deletes back to the previous word boundary (Unicode word segmentation), and ⌥⌦ / Ctrl+⌦ forward to the next one. Whitespace next to the cursor goes with the word: `foo bar··|` → `foo |`. Segments are UAX #29 word segments: punctuation that joins letters or digits stays in the word (`a.b|`, `3.14|`, and `can't|` each go whole), and any other punctuation character is a segment of its own (`foo!!|` → `foo!|`, `- [ ] |` → `- [ |`). Runs of markup are not grouped. At either end of a line, the line break goes.
+- ⌥⌫ / Ctrl+⌫ deletes back one **group**, and ⌥⌦ / Ctrl+⌦ deletes forward one group. This is the convention of CodeMirror's `deleteGroupBackward`, VS Code's `deleteWordLeft`, Zed and Sublime.
+  - Whitespace next to the cursor goes first. Then one run of a single character class goes with it.
+  - There are two classes: **word** (UAX #29 word segments, so `a.b`, `3.14` and `can't` stay whole) and **punctuation**. Consecutive punctuation is one run.
+  - Examples:
+
+    | Before | After |
+    |---|---|
+    | `foo bar··\|` | `foo \|` |
+    | `foo!!\|` | `foo\|` |
+    | `**bold**\|` | `**bold\|` |
+    | `- [ ] \|` | `- [ \|` |
+
+  - Markup separated by spaces is not grouped further. Clearing a marker is the job of smart Backspace and ⌘⌫.
+  - At either end of a line, the line break goes.
 - ⌘⌫ (macOS) deletes back to `text_start`; from `text_start` it deletes to column 0: `- [ ] foo|` → `- [ ] |`. A cursor inside the markup also deletes to column 0, and at column 0 the line break goes.
 
 **Home and Shift+Home** (also ⌘← and ⌃A on macOS; ⌃A becomes the smart toggle on purpose):
@@ -389,6 +402,8 @@ The **sibling run** is the ordered items with the same container, quote depth, i
 **Marker width changes:** when renumbering changes an item's marker width by Δ, shift its continuation and child lines by Δ in the same change: `8. a|⏎9. b⏎···- c` Enter → `8. a⏎9. |⏎10. b⏎····- c`.
 
 ### 5.7 Commands
+
+Two palette commands also flip the rollout settings and save them to `config.conf`, just as the theme picker saves its choice: `editor.toggle_markdown_assist` ("Toggle Markdown assist") and `editor.toggle_engine` ("Switch editor engine (classic / advanced)"). Both are App scope and have no default binding.
 
 | Command key | macOS | Linux | Behavior |
 |---|---|---|---|
@@ -590,5 +605,5 @@ There is **no iced upgrade while two backends exist.**
 - **Blockquote exit:** one Enter with a blank line left, chosen over CodeMirror's two empty lines.
 - **macOS ⌘E** is the system's "Use Selection for Find". We take it for inline code; revisit if it bothers people.
 - **A Mac console check is needed** for ⌘+letter and IME. ssh cannot send synthetic keys.
-- **IME anchor off screen (needs sign-off):** §4 says no rectangle falls back to `ORIGIN`. The owned engine's caret and selection rectangles are `None` off screen, but the IME anchor goes to the view edge nearest the cursor (the top-left corner when the cursor is above the view) rather than disabling the IME, which would drop an in-progress composition when the user scrolls away. Keep, or anchor at the cursor's column?
+- **IME anchor off screen (decided).** When a composition starts, which is the first non-empty preedit, the editor scrolls the caret into view. TextEdit, VS Code and Zed all reveal the insertion point when typing begins, so the candidate window always has a real anchor. If the caret is still off screen in the frame before that scroll, the anchor is the caret's column, clamped to the nearest view edge, never the corner. Disabling the IME is never an option.
 - **Mixed endings, known edge case:** a CR line followed by an emptied LF line (`a\r` then `\n`) serializes as one CRLF break, so the editor shows one more line than a reload of the saved text. Rewriting the empty line's ending to CR after such an edit would close it; not done in this milestone.
