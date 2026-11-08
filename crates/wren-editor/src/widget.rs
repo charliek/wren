@@ -154,6 +154,11 @@ impl Content {
         self.0.get_mut().restore_view(cursor, scroll);
     }
 
+    /// See [`Backend::return_to`].
+    pub fn return_to(&mut self, cursor: Cursor, scroll: Scroll) {
+        self.0.get_mut().return_to(cursor, scroll);
+    }
+
     /// See [`Backend::scroll_to_line`].
     pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
         self.0.get_mut().scroll_to_line(line, placement);

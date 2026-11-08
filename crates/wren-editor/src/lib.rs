@@ -27,6 +27,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
+use iced::advanced::graphics::text::cosmic_text::Scroll;
 use iced::widget::text_editor::{self, Action, Cursor, Edit, Motion, Position};
 use iced::{Color, Element, Font};
 
@@ -98,6 +99,20 @@ pub enum Message {
 // ---------------------------------------------------------------------------
 // EditorView
 // ---------------------------------------------------------------------------
+
+/// Where the cursor, the selection, and the view were; see
+/// [`EditorView::viewport`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    cursor: Cursor,
+    scroll: Scroll,
+}
+
+impl Viewport {
+    pub fn cursor(&self) -> Cursor {
+        self.cursor
+    }
+}
 
 /// A self-contained Markdown editor backed by a fork of iced's text editor
 /// that adds the mockup's line-number gutter, current-line band, and caret.
@@ -374,6 +389,35 @@ impl EditorView {
     pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
         self.history.break_group();
         self.content.scroll_to_line(line, placement);
+    }
+
+    /// The first line in view, at least partly.
+    pub fn first_visible_line(&self) -> usize {
+        self.content.scroll().line
+    }
+
+    /// The cursor, selection, and scroll, to come back to with
+    /// [`EditorView::restore_viewport`].
+    pub fn viewport(&mut self) -> Viewport {
+        Viewport {
+            cursor: self.snapshot_cursor(),
+            scroll: self.content.scroll(),
+        }
+    }
+
+    /// Return to `viewport`: the cursor and selection exactly (clamped into
+    /// the text), and the scroll exactly on the owned engine. iced is
+    /// best-effort: it scrolls by whole rows, and when the view has to move
+    /// up past the cursor its next update brings the cursor's line to the
+    /// top instead.
+    pub fn restore_viewport(&mut self, viewport: Viewport) {
+        self.history.break_group();
+        let cursor = self.clamped(viewport.cursor);
+        if cursor.selection.is_none() && self.content.cursor().selection.is_some() {
+            // iced's move_to leaves the old selection intact when passed None.
+            self.content.perform(Action::Move(Motion::Left));
+        }
+        self.content.return_to(cursor, viewport.scroll);
     }
 
     // -----------------------------------------------------------------------
@@ -2215,6 +2259,55 @@ mod tests {
             ev.scroll_to_line(1, Placement::NearTop);
             ev.content.lay_out(size);
             assert_eq!(top(&ev), (0, 0.0));
+        }
+
+        #[test]
+        fn restore_viewport_returns_the_cursor_selection_and_scroll() {
+            let size = iced::Size::new(300.0, 240.0);
+            let mut ev = editor(&super::numbered_lines(200));
+            ev.content.lay_out(size);
+            ev.scroll_to_line(60, Placement::Top);
+            ev.content.lay_out(size);
+            let selected = Cursor {
+                position: Position {
+                    line: 63,
+                    column: 2,
+                },
+                selection: Some(Position {
+                    line: 62,
+                    column: 1,
+                }),
+            };
+            ev.move_cursor(selected);
+            ev.content.lay_out(size);
+            let origin = ev.viewport();
+            assert_eq!(origin.cursor(), selected);
+            assert_eq!(ev.first_visible_line(), 60);
+
+            for line in [150, 5] {
+                ev.scroll_to_line(line, Placement::NearTop);
+                ev.move_cursor(super::at(line, 0));
+                ev.content.lay_out(size);
+                assert_ne!(ev.first_visible_line(), 60);
+                ev.restore_viewport(origin);
+                ev.content.lay_out(size);
+                assert_eq!(ev.cursor(), selected);
+                assert_eq!(ev.selected_text().as_deref(), Some("ine 62\nli"));
+                let top = match (KIND, line) {
+                    // iced settles a scroll and reveals the cursor in one
+                    // update, which puts a cursor above the view on top.
+                    (BackendKind::Iced, 150) => 63,
+                    _ => 60,
+                };
+                assert_eq!(ev.first_visible_line(), top, "back from line {line}");
+            }
+            // A caret origin drops the selection made since.
+            ev.move_cursor(super::at(70, 0));
+            let caret = ev.viewport();
+            ev.move_cursor(selected);
+            ev.restore_viewport(caret);
+            assert_eq!(ev.cursor(), super::at(70, 0));
+            assert_eq!(ev.selected_text(), None);
         }
 
         #[test]

@@ -97,6 +97,21 @@ impl Backend {
         }
     }
 
+    /// Like [`Backend::restore_view`], but iced also scrolls back, by whole
+    /// rows, until `scroll.line` is where it was, before moving the cursor.
+    /// iced settles that scroll in the same update that reveals the cursor,
+    /// so a cursor above the current view still ends up on the top row.
+    pub fn return_to(&mut self, cursor: Cursor, scroll: Scroll) {
+        match self {
+            Self::Iced(editor) => {
+                let line = scroll.line.min(editor.line_count().saturating_sub(1));
+                iced::scroll_to(editor, line, -scroll.vertical);
+                editor.move_to(cursor);
+            }
+            Self::Owned(engine) => engine.restore_view(cursor, scroll),
+        }
+    }
+
     /// Scroll so `line` sits at `placement`. Near the end of the text the
     /// view stops at the last line rather than scroll past it. The cursor
     /// does not move; moving it onto `line` afterwards needs no more scroll.
