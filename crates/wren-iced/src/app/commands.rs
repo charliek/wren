@@ -52,6 +52,22 @@ pub enum CommandId {
     ReloadSettings,
     CommandPalette,
     Quit,
+    ToggleTask,
+    Bold,
+    Italic,
+    Code,
+    MoveLineUp,
+    MoveLineDown,
+}
+
+/// Who runs a command from its shortcut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The app, wherever the keyboard is.
+    App,
+    /// The focused editor, through its key policy. The app ignores the
+    /// shortcut, so it acts only while the editor has the keyboard.
+    Editor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,12 +76,13 @@ pub struct Definition {
     pub key: &'static str,
     pub label: &'static str,
     pub group: &'static str,
+    pub scope: Scope,
 }
 
 macro_rules! definitions {
-    ($(($id:ident, $key:literal, $label:expr, $group:literal)),* $(,)?) => {
+    ($(($id:ident, $key:literal, $label:expr, $group:literal, $scope:ident)),* $(,)?) => {
         pub const DEFINITIONS: &[Definition] = &[$(Definition {
-            id: CommandId::$id, key: $key, label: $label, group: $group,
+            id: CommandId::$id, key: $key, label: $label, group: $group, scope: Scope::$scope,
         }),*];
     };
 }
@@ -84,110 +101,243 @@ const REVEAL_GROUP: &str = "Reveal group in Files";
 const REVEAL_SECTION: &str = "Reveal section in Files";
 
 /// Palette section order; `Hidden` commands are bindable but not listed.
-pub const GROUPS: [&str; 5] = ["This note", "Go", "View", "Workspace", "App"];
+pub const GROUPS: [&str; 6] = ["This note", "Markdown", "Go", "View", "Workspace", "App"];
 
 // These keys are the stable production/test protocol, independent of labels.
 definitions![
-    (NewNote, "note.new", "New note…", "This note"),
+    (NewNote, "note.new", "New note…", "This note", App),
     (
         NewDatedNote,
         "note.new_dated",
         "New dated note",
-        "This note"
+        "This note",
+        App
     ),
-    (RenameNote, "note.rename", "Rename note…", "This note"),
-    (DeleteNote, "note.delete", "Delete note…", "This note"),
-    (RevealNote, "note.reveal", REVEAL_NOTE, "This note"),
-    (MoveNote, "note.move", "Move note to…", "This note"),
+    (RenameNote, "note.rename", "Rename note…", "This note", App),
+    (DeleteNote, "note.delete", "Delete note…", "This note", App),
+    (RevealNote, "note.reveal", REVEAL_NOTE, "This note", App),
+    (MoveNote, "note.move", "Move note to…", "This note", App),
     (
         OpenConflictCopy,
         "note.open_conflict",
         "Open conflict copy",
-        "This note"
+        "This note",
+        App
     ),
-    (NewGroup, "group.new", "New group…", "Workspace"),
-    (NewSection, "section.new", "New section…", "Workspace"),
-    (RenameGroup, "group.rename", "Rename group…", "Workspace"),
-    (DeleteGroup, "group.delete", "Delete group…", "Workspace"),
-    (RevealGroup, "group.reveal", REVEAL_GROUP, "Workspace"),
-    (MoveGroup, "group.move", "Move group to…", "Workspace"),
-    (ReorderGroup, "group.reorder", "Reorder group…", "Workspace"),
+    (
+        ToggleTask,
+        "markdown.toggle_task",
+        "Toggle task",
+        "Markdown",
+        Editor
+    ),
+    (Bold, "markdown.bold", "Bold", "Markdown", Editor),
+    (Italic, "markdown.italic", "Italic", "Markdown", Editor),
+    (Code, "markdown.code", "Inline code", "Markdown", Editor),
+    (
+        MoveLineUp,
+        "edit.move_line_up",
+        "Move line up",
+        "Markdown",
+        Editor
+    ),
+    (
+        MoveLineDown,
+        "edit.move_line_down",
+        "Move line down",
+        "Markdown",
+        Editor
+    ),
+    (NewGroup, "group.new", "New group…", "Workspace", App),
+    (NewSection, "section.new", "New section…", "Workspace", App),
+    (
+        RenameGroup,
+        "group.rename",
+        "Rename group…",
+        "Workspace",
+        App
+    ),
+    (
+        DeleteGroup,
+        "group.delete",
+        "Delete group…",
+        "Workspace",
+        App
+    ),
+    (RevealGroup, "group.reveal", REVEAL_GROUP, "Workspace", App),
+    (MoveGroup, "group.move", "Move group to…", "Workspace", App),
+    (
+        ReorderGroup,
+        "group.reorder",
+        "Reorder group…",
+        "Workspace",
+        App
+    ),
     (
         ReorderSection,
         "section.reorder",
         "Reorder section…",
-        "Workspace"
+        "Workspace",
+        App
     ),
     (
         RenameSection,
         "section.rename",
         "Rename section…",
-        "Workspace"
+        "Workspace",
+        App
     ),
     (
         DeleteSection,
         "section.delete",
         "Delete section…",
-        "Workspace"
+        "Workspace",
+        App
     ),
-    (RevealSection, "section.reveal", REVEAL_SECTION, "Workspace"),
-    (Jump, "navigation.jump", "Jump to note…", "Go"),
-    (Search, "navigation.search", "Search workspace…", "Go"),
-    (Find, "navigation.find", "Find in note", "Go"),
-    (Back, "navigation.back", "Back", "Go"),
-    (Forward, "navigation.forward", "Forward", "Go"),
-    (ColumnLeft, "navigation.column_left", "Column left", "Go"),
-    (ColumnRight, "navigation.column_right", "Column right", "Go"),
-    (Focus, "view.focus", "Toggle focus mode", "View"),
+    (
+        RevealSection,
+        "section.reveal",
+        REVEAL_SECTION,
+        "Workspace",
+        App
+    ),
+    (Jump, "navigation.jump", "Jump to note…", "Go", App),
+    (Search, "navigation.search", "Search workspace…", "Go", App),
+    (Find, "navigation.find", "Find in note", "Go", App),
+    (Back, "navigation.back", "Back", "Go", App),
+    (Forward, "navigation.forward", "Forward", "Go", App),
+    (
+        ColumnLeft,
+        "navigation.column_left",
+        "Column left",
+        "Go",
+        App
+    ),
+    (
+        ColumnRight,
+        "navigation.column_right",
+        "Column right",
+        "Go",
+        App
+    ),
+    (Focus, "view.focus", "Toggle focus mode", "View", App),
     (
         ResetWidths,
         "view.reset_widths",
         "Reset column widths",
-        "View"
+        "View",
+        App
     ),
     (
         SortModified,
         "notes.sort_modified",
         "Sort notes: modified",
-        "View"
+        "View",
+        App
     ),
-    (SortTitle, "notes.sort_title", "Sort notes: title", "View"),
-    (ChooseTheme, "theme.choose", "Change theme…", "View"),
-    (ChooseFont, "font.choose", "Change editor font…", "View"),
-    (TextBigger, "font.increase", "Increase text size", "View"),
-    (TextSmaller, "font.decrease", "Decrease text size", "View"),
-    (TextReset, "font.reset", "Reset text size", "View"),
+    (
+        SortTitle,
+        "notes.sort_title",
+        "Sort notes: title",
+        "View",
+        App
+    ),
+    (ChooseTheme, "theme.choose", "Change theme…", "View", App),
+    (
+        ChooseFont,
+        "font.choose",
+        "Change editor font…",
+        "View",
+        App
+    ),
+    (
+        TextBigger,
+        "font.increase",
+        "Increase text size",
+        "View",
+        App
+    ),
+    (
+        TextSmaller,
+        "font.decrease",
+        "Decrease text size",
+        "View",
+        App
+    ),
+    (TextReset, "font.reset", "Reset text size", "View", App),
     (
         SwitchWorkspace,
         "workspace.switch",
         "Switch workspace…",
-        "Workspace"
+        "Workspace",
+        App
     ),
-    (AddWorkspace, "workspace.add", "Add workspace…", "Workspace"),
+    (
+        AddWorkspace,
+        "workspace.add",
+        "Add workspace…",
+        "Workspace",
+        App
+    ),
     (
         RemoveWorkspace,
         "workspace.remove",
         "Remove workspace from list",
-        "Workspace"
+        "Workspace",
+        App
     ),
-    (OpenSettings, "settings.open", "Open settings file", "App"),
-    (ReloadSettings, "settings.reload", "Reload settings", "App"),
-    (Quit, "app.quit", "Quit Wren", "App"),
+    (
+        OpenSettings,
+        "settings.open",
+        "Open settings file",
+        "App",
+        App
+    ),
+    (
+        ReloadSettings,
+        "settings.reload",
+        "Reload settings",
+        "App",
+        App
+    ),
+    (Quit, "app.quit", "Quit Wren", "App", App),
     (
         CommandPalette,
         "palette.commands",
         "Show all commands",
-        "Hidden"
+        "Hidden",
+        App
     ),
 ];
 
 impl CommandId {
-    pub fn key(self) -> &'static str {
+    fn definition(self) -> &'static Definition {
         DEFINITIONS
             .iter()
             .find(|definition| definition.id == self)
             .expect("complete command table")
-            .key
+    }
+
+    pub fn key(self) -> &'static str {
+        self.definition().key
+    }
+
+    pub fn scope(self) -> Scope {
+        self.definition().scope
+    }
+
+    /// What an Editor-scoped command asks the editor to do.
+    pub fn intent(self) -> Option<wren_editor::Intent> {
+        use wren_editor::Intent;
+        Some(match self {
+            Self::ToggleTask => Intent::ToggleTask,
+            Self::Bold => Intent::Bold,
+            Self::Italic => Intent::Italic,
+            Self::Code => Intent::Code,
+            Self::MoveLineUp => Intent::MoveLineUp,
+            Self::MoveLineDown => Intent::MoveLineDown,
+            _ => return None,
+        })
     }
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -336,6 +486,9 @@ impl App {
                 self.selected_note.is_some() || (!self.workspace_mode && id == Find)
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
+            ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
+                self.ensure_editor_ready().is_ok() && self.editor.markdown_assist()
+            }
             Back => self
                 .session
                 .as_ref()
@@ -597,6 +750,15 @@ impl App {
                     warning,
                     focus_editor(),
                 )
+            }
+            ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
+                // From the palette: act at the editor's cursor, as the
+                // shortcut does in the editor, then give it the keyboard.
+                self.palette = None;
+                let focus = self.return_to_editor();
+                let intent = id.intent().expect("an editor command");
+                let task = self.edit(wren_editor::Message::Intent(intent));
+                self.finish_action(Disposition::Completed, None, task.chain(focus))
             }
             Quit => {
                 self.palette = None;
@@ -947,6 +1109,12 @@ mod tests {
             "settings.reload",
             "app.quit",
             "palette.commands",
+            "markdown.toggle_task",
+            "markdown.bold",
+            "markdown.italic",
+            "markdown.code",
+            "edit.move_line_up",
+            "edit.move_line_down",
         ] {
             assert!(CommandId::parse(key).is_some(), "{key}");
         }
@@ -954,6 +1122,94 @@ mod tests {
         for key in ["section.reorder", "group.reorder", "note.open_conflict"] {
             assert!(CommandId::parse(key).is_some(), "{key}");
         }
+    }
+
+    #[test]
+    fn editor_scoped_commands_are_exactly_the_editor_intents() {
+        for definition in DEFINITIONS {
+            assert_eq!(
+                definition.scope == Scope::Editor,
+                definition.id.intent().is_some(),
+                "{}",
+                definition.key
+            );
+            assert!(
+                definition.group == "Hidden" || GROUPS.contains(&definition.group),
+                "{}",
+                definition.key
+            );
+        }
+    }
+
+    #[test]
+    fn an_editor_command_edits_at_the_cursor_and_reaches_the_session_draft() {
+        let (_directory, mut app) = fixture();
+        let _ = app.edit(wren_editor::Message::Action(EditorAction::Move(
+            Motion::DocumentEnd,
+        )));
+        let revision = app.edit_revision;
+        app.column = crate::app::columns::Column::Notes;
+        let _ = app.open_palette(Mode::Commands);
+        let _ = app.palette_query("Toggle task".into());
+        assert!(choose(&mut app, "Toggle task")
+            .processed
+            .disposition
+            .committed());
+        assert!(app.palette.is_none());
+        assert_eq!(app.column, crate::app::columns::Column::Editor);
+        assert_eq!(app.editor.text(), "- [ ] first body");
+        let document = app.session.as_ref().unwrap().document().unwrap();
+        assert_eq!(document.text, "- [ ] first body");
+        assert!(document.dirty());
+        assert_eq!(app.edit_revision, revision + 1);
+
+        // The cursor kept its place in the text, so the word is still there.
+        assert!(app
+            .dispatch(Command::Run(CommandId::Bold))
+            .processed
+            .disposition
+            .committed());
+        assert_eq!(app.editor.text(), "- [ ] first **body**");
+        assert_eq!(app.edit_revision, revision + 2);
+        let _ = app.dispatch(Command::Run(CommandId::ToggleTask));
+        assert_eq!(
+            app.session.as_ref().unwrap().document().unwrap().text,
+            "- [x] first **body**"
+        );
+    }
+
+    #[test]
+    fn editor_commands_are_disabled_without_markdown_assist_or_a_note() {
+        let (_directory, mut app) = fixture();
+        for id in [CommandId::ToggleTask, CommandId::MoveLineUp] {
+            assert!(app.command_enabled(id));
+        }
+        app.editor.set_markdown_assist(false);
+        let outcome = app.dispatch(Command::Run(CommandId::ToggleTask));
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        assert_eq!(app.editor.text(), "first body");
+        app.editor.set_markdown_assist(true);
+        let _ = app.process_core(Op::OpenNote { note: None });
+        assert!(!app.command_enabled(CommandId::Bold));
+    }
+
+    #[test]
+    fn the_app_leaves_editor_command_keys_to_the_editor() {
+        use crate::app::preferences::shortcut;
+        let (_directory, mut app) = fixture();
+        let revision = app.edit_revision;
+        for id in [
+            CommandId::ToggleTask,
+            CommandId::Bold,
+            CommandId::MoveLineDown,
+        ] {
+            let _ = app.update(shortcut(id));
+        }
+        assert_eq!(app.editor.text(), "first body");
+        assert_eq!(app.edit_revision, revision);
+        // An app command's key still runs, once.
+        let _ = app.update(shortcut(CommandId::Find));
+        assert!(app.find_open);
     }
 
     #[test]

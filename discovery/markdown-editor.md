@@ -401,9 +401,10 @@ The `markdown.*` and `edit.*` commands have **Editor scope** (§5.8). In the pal
 
 ### 5.8 Key routing
 
-Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the widget a `KeyPolicy` built from the keymap, and `key_binding` consults it **first**:
-- An accelerator bound to an **Editor** command → `Binding::Custom(Message::Command(id))`. `App::key_input` ignores Editor-scoped commands, so they fire only while the editor is focused.
-- An accelerator bound to an **App** command → `None`. The editor doesn't also handle it.
+Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the widget a `KeyPolicy` (`Arc<dyn Fn(&Key, Physical, Modifiers) -> KeyRoute>`) built from the keymap, reading keys through the same `keys::shortcut` as the app's own shortcuts, and `key_binding` consults it **first**, right after the focus check and before Undo, Redo, and Find:
+- An accelerator bound to an **Editor** command → `KeyRoute::Intent(intent)` → `Binding::Custom(Message::Intent(intent))`, the command's planner intent, so the widget needs no host command ids. `App::key_input` ignores Editor-scoped commands, so they fire only while the editor is focused.
+- An accelerator bound to an **App** command → `KeyRoute::Host` → `None`. The editor doesn't also handle it: Ctrl+F on Linux opens find once, through the app, and a user binding of `ctrl+z` takes it from Undo.
+- Anything else → `KeyRoute::Pass`, the editor's own handling below.
 - On macOS, a key with ⌘ held never becomes an `Insert`, so an unbound ⌘B types nothing.
 - While an IME preedit is non-empty, Enter, Tab, Backspace, and Delete go to the IME untouched.
 - Backspace, Delete, the word and line deletes, Tab, Shift+Tab, and ⌘↑ / ⌘↓ always map to `Message::Intent`; Enter, Shift+Enter, Home, and Shift+Home do only with assist on. The keys are read by post-processing `Binding::from_key_press`, so iced's platform mappings (⌘← and ⌃A as Home, ⌃H as Backspace) carry over. Word deletes take ⌥ on macOS, and Ctrl or Alt on Linux.
@@ -571,7 +572,7 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
    - the `markdown-assist` setting;
    - key mapping and the IME guard;
    - the `editor.command` RPC and `native_x11` cases.
-7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs.
+7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs (done on `md-keys`). The commands sit in a "Markdown" palette group. With assist off they are disabled in the palette, and their keys stay the editor's and do nothing. The `shortcut` test request runs an Editor command the widget's way: the bound key through the policy, only while the editor is focused.
 8. **The outline palette.**
 9. **Harness work:** settings support, engine parametrization, and the scenes. Then review.
 

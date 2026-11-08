@@ -235,6 +235,20 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{p}+minus"), "font.decrease"),
         (format!("{p}+0"), "font.reset"),
     ];
+    // Editor commands take the platform's text-formatting modifier, which is
+    // Ctrl on Linux, where Alt belongs to the app.
+    let e = match platform {
+        Platform::Mac => "super",
+        Platform::Linux => "ctrl",
+    };
+    bindings.extend([
+        (format!("{e}+enter"), "markdown.toggle_task"),
+        (format!("{e}+b"), "markdown.bold"),
+        (format!("{e}+i"), "markdown.italic"),
+        (format!("{e}+e"), "markdown.code"),
+        ("alt+up".to_string(), "edit.move_line_up"),
+        ("alt+down".to_string(), "edit.move_line_down"),
+    ]);
     match platform {
         Platform::Mac => bindings.extend([
             ("super+comma".to_string(), "settings.open"),
@@ -380,6 +394,29 @@ mod tests {
             assert!(warnings.is_empty());
             assert_eq!(keymap.action(&accel(trigger)), Some("palette.commands"));
             assert_eq!(keymap.accel("palette.commands"), Some(&accel(trigger)));
+        }
+    }
+
+    #[test]
+    fn editor_commands_use_command_on_mac_and_ctrl_on_linux() {
+        for (platform, modifier) in [(Platform::Mac, "super"), (Platform::Linux, "ctrl")] {
+            let (keymap, _) = Keymap::build(default_bindings(platform), &[], |_| true);
+            for (key, action) in [
+                ("enter", "markdown.toggle_task"),
+                ("b", "markdown.bold"),
+                ("i", "markdown.italic"),
+                ("e", "markdown.code"),
+            ] {
+                assert_eq!(
+                    keymap.action(&accel(&format!("{modifier}+{key}"))),
+                    Some(action)
+                );
+            }
+            assert_eq!(keymap.action(&accel("alt+up")), Some("edit.move_line_up"));
+            assert_eq!(
+                keymap.action(&accel("alt+down")),
+                Some("edit.move_line_down")
+            );
         }
     }
 

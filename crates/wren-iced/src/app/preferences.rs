@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
-use wren_core::keybind::{self, Keymap, Platform};
+use wren_core::keybind::{self, Accel, Keymap, Platform};
 use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
-use wren_editor::BackendKind;
+use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
 
-use super::commands::{CommandId, Disposition, Gateway};
+use super::commands::{CommandId, Disposition, Gateway, Scope};
 use super::palette::{Key, Mode};
 use super::{workspace, App, Message};
 use crate::fonts;
@@ -40,6 +40,25 @@ pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
     match engine {
         EditorEngine::Classic => BackendKind::Iced,
         EditorEngine::Advanced => BackendKind::Owned,
+    }
+}
+
+/// The editor's say over its keys, from the keymap and key reading the app's
+/// own shortcuts use: a host command's key is the app's, and an editor
+/// command's key is the editor's intent.
+fn key_policy(keymap: &Keymap) -> KeyPolicy {
+    let keymap = keymap.clone();
+    std::sync::Arc::new(move |key, physical, modifiers| {
+        crate::keys::shortcut(key, physical, modifiers)
+            .map_or(KeyRoute::Pass, |trigger| key_route(&keymap, &trigger))
+    })
+}
+
+/// Where the editor sends a press of `trigger`.
+pub(super) fn key_route(keymap: &Keymap, trigger: &Accel) -> KeyRoute {
+    match keymap.action(trigger).and_then(CommandId::parse) {
+        None => KeyRoute::Pass,
+        Some(id) => id.intent().map_or(KeyRoute::Host, KeyRoute::Intent),
     }
 }
 
@@ -229,6 +248,8 @@ impl App {
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
         self.editor.set_markdown_assist(settings.markdown_assist);
+        self.editor
+            .set_key_policy(key_policy(&self.preferences.keymap));
         self.apply_editor_engine();
     }
 
@@ -447,6 +468,11 @@ impl App {
         else {
             return Task::none();
         };
+        // The focused editor's key policy runs these; the same press
+        // reaches here too, and must not act twice or outside the editor.
+        if id.scope() == Scope::Editor {
+            return Task::none();
+        }
         self.run_shortcut(id)
     }
 
@@ -625,6 +651,79 @@ mod tests {
         assert_eq!(app.editor.backend(), BackendKind::Iced);
         assert_eq!(app.editor.text(), text);
         assert!(!app.editor.can_undo());
+    }
+
+    #[test]
+    fn the_editor_key_policy_follows_the_keymap() {
+        use iced::keyboard::key::{Code, Physical};
+        use iced::keyboard::{key::Named, Key, Modifiers};
+        use wren_editor::Intent;
+
+        let user = [("alt+t".to_string(), "markdown.italic".to_string())];
+        let (keymap, warnings) = Keymap::build(
+            keybind::default_bindings(Platform::current()),
+            &user,
+            |action| CommandId::parse(action).is_some(),
+        );
+        assert!(warnings.is_empty());
+        let policy = key_policy(&keymap);
+        let (editing, app) = match Platform::current() {
+            Platform::Mac => (Modifiers::LOGO, Modifiers::LOGO),
+            Platform::Linux => (Modifiers::CTRL, Modifiers::ALT),
+        };
+        let letter = |letter: &str, code, modifiers| {
+            policy(
+                &Key::Character(letter.into()),
+                Physical::Code(code),
+                modifiers,
+            )
+        };
+        assert_eq!(
+            policy(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                editing
+            ),
+            KeyRoute::Intent(Intent::ToggleTask)
+        );
+        assert_eq!(
+            letter("b", Code::KeyB, editing),
+            KeyRoute::Intent(Intent::Bold)
+        );
+        assert_eq!(
+            letter("e", Code::KeyE, editing),
+            KeyRoute::Intent(Intent::Code)
+        );
+        assert_eq!(
+            policy(
+                &Key::Named(Named::ArrowDown),
+                Physical::Code(Code::ArrowDown),
+                Modifiers::ALT
+            ),
+            KeyRoute::Intent(Intent::MoveLineDown)
+        );
+        // A user binding of an editor command is the editor's too.
+        assert_eq!(
+            letter("t", Code::KeyT, Modifiers::ALT),
+            KeyRoute::Intent(Intent::Italic)
+        );
+        // App shortcuts are the app's alone, Find included.
+        assert_eq!(letter("p", Code::KeyP, app), KeyRoute::Host);
+        assert_eq!(letter("f", Code::KeyF, app), KeyRoute::Host);
+        if Platform::current() == Platform::Linux {
+            assert_eq!(letter("f", Code::KeyF, Modifiers::CTRL), KeyRoute::Host);
+        }
+        // Unbound keys and typing stay with the editor.
+        assert_eq!(letter("z", Code::KeyZ, editing), KeyRoute::Pass);
+        assert_eq!(letter("b", Code::KeyB, Modifiers::empty()), KeyRoute::Pass);
+        assert_eq!(
+            policy(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                Modifiers::empty()
+            ),
+            KeyRoute::Pass
+        );
     }
 
     #[test]

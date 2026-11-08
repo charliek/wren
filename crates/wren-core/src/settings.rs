@@ -380,6 +380,7 @@ pub const TEMPLATE: &str = "\
 
 # Markdown assist: Enter continues lists and quotes, Tab nests list items,
 # Backspace removes markup, and Home stops at the text after the markup.
+# Off, the Markdown commands (toggle task, bold, move line, ...) are disabled.
 # markdown-assist = on
 
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`

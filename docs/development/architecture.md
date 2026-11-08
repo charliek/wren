@@ -35,12 +35,23 @@ an action runs.
 ## Commands and keybindings
 
 A command has a `CommandId`, a stable key (`note.new`, `navigation.jump`), a
-palette label, and a group. To add one, add a `CommandId`, a `definitions!`
-row in `app/commands.rs`, and a case in `run_command`. Default shortcuts live
-in `wren_core::keybind::default_bindings`; users override them with
-`keybind` lines. macOS uses Command as the app modifier and Linux uses Alt,
-leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
+palette label, a group, and a scope. To add one, add a `CommandId`, a
+`definitions!` row in `app/commands.rs`, and a case in `run_command`. Default
+shortcuts live in `wren_core::keybind::default_bindings`; users override them
+with `keybind` lines. macOS uses Command as the app modifier and Linux uses
+Alt, leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
 presses on Linux so shortcuts never type their letter.
+
+The scope says who runs a command from its key. An **App** command runs
+wherever the keyboard is. An **Editor** command (`markdown.*`, `edit.*`)
+runs only in the focused editor: `App::key_input` ignores its key, and the
+editor widget turns it into an intent instead. The editor learns which key
+is which from a `wren_editor::KeyPolicy` that the app builds from the
+keymap, reading keys through the same `keys::shortcut` as its own
+shortcuts. The widget asks the policy before handling any key: an App
+command's key is ignored, so a shortcut never also edits the text, and an
+Editor command's key becomes its `Message::Intent`. From the palette, an
+Editor command always runs, through `App::edit` at the editor's cursor.
 
 ## Editing keys
 

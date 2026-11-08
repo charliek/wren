@@ -75,6 +75,35 @@ deletes and note motions work as above.
 While an input method is composing text, Enter, Tab, Backspace, and Delete
 belong to it.
 
+### Markdown commands
+
+| Action | macOS | Linux | Action name |
+|---|---|---|---|
+| Toggle a task | ⌘↵ | Ctrl+Enter | `markdown.toggle_task` |
+| Bold | ⌘B | Ctrl+B | `markdown.bold` |
+| Italic | ⌘I | Ctrl+I | `markdown.italic` |
+| Inline code | ⌘E | Ctrl+E | `markdown.code` |
+| Move line up / down | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | `edit.move_line_up` / `edit.move_line_down` |
+
+- **Toggle a task** checks `- [ ] a` as `- [x] a` and back. A list item
+  or a plain line becomes an open task (`- a` and `a` both become
+  `- [ ] a`), and a numbered item keeps its number (`1. [ ] a`). Over a
+  selection, every task is checked if any is open, otherwise all are
+  reopened.
+- **Bold, Italic, and Inline code** wrap the selection, or the word at the
+  cursor, in `**`, `*`, or `` ` ``; with no word there, they insert an empty
+  pair around the cursor. Pressing the key again on wrapped text unwraps it.
+  A selection over several lines wraps each line.
+- **Move line** moves the lines the selection covers past the line above or
+  below, keeping the selection, and renumbers a numbered list on both sides.
+
+These keys belong to the editor: they work only while it has the keyboard,
+so in the find bar, a filter box, or a browser column they do nothing. The
+palette lists them under **Markdown**; run from there, they act at the
+editor's cursor and give it the keyboard. They are unavailable while
+`markdown-assist = off`. On macOS, ⌘ with a letter never types the letter,
+even when nothing is bound to it.
+
 ## Moving between columns
 
 One of Sections, Groups, Notes, or the editor has the keyboard at a time.
@@ -127,7 +156,9 @@ keybind = <trigger> = <action>
 Lines apply in order on top of the defaults. A later line for the same
 trigger replaces the earlier one, and the action `unbind` removes a
 binding. A user binding also becomes the shortcut shown in the palette and
-title bar for that action.
+title bar for that action. A key bound to any command other than the
+Markdown commands above is the app's even inside the editor, so binding
+`ctrl+z` to something else takes it from Undo.
 
 ```conf
 keybind = ctrl+shift+p = palette.commands   # add a second palette shortcut
@@ -156,7 +187,8 @@ navigation.column_left  navigation.column_right  view.focus
 view.reset_widths  notes.sort_modified  notes.sort_title  theme.choose
 font.choose  font.increase  font.decrease  font.reset  workspace.switch
 workspace.add  workspace.remove  settings.open  settings.reload  app.quit
-palette.commands
+palette.commands  markdown.toggle_task  markdown.bold  markdown.italic
+markdown.code  edit.move_line_up  edit.move_line_down
 ```
 
 An unknown action or an invalid trigger is skipped, and the line is named
