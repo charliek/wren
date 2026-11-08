@@ -27,6 +27,11 @@ when one lands, move what users need into `docs/` and trim the note.
     current line, and caret), `panes.rs` (resize), `drag*.rs` (drag and
     drop), `ellipsis.rs`, and `keys.rs`.
   - `macos_menu.rs` is the native menu bar.
+- `crates/wren-markdown/`: Markdown structure and editing rules, with no
+  iced or Wren dependency (only `unicode-segmentation`), so it can be
+  extracted later. `block.rs` is the line classifier and container scanner,
+  `outline.rs` the heading outline, and `edit.rs` plus `edit/` plan each
+  editing `Intent` as an `EditPlan` of replacements. Nothing uses it yet.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it
