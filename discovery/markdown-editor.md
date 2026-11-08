@@ -147,7 +147,8 @@ crates/wren-editor/     the iced 0.14 editor component; deps: iced, wren-markdow
   backend/iced.rs     Backend::Iced: today's iced_graphics::text::Editor
   backend/cosmic.rs   Backend::Cosmic: an owned cosmic_text::Editor, ported from
                       iced_graphics' editor glue (MIT notice), drawn via fill_raw
-  highlighter.rs      MarkdownHighlighter (moved), classifying with wren-markdown::block
+  highlighter.rs      MarkdownHighlighter (moved), classifying with wren-markdown::block;
+                      its Settings carry front_matter_end (§5.1)
   history.rs          snapshot undo (moved) plus a scroll field and diff-apply
   find.rs             literal find (moved out of editor_view.rs)
   keys.rs             key_binding: intents, the IME guard, KeyPolicy
@@ -208,6 +209,11 @@ Notation: `|` is the cursor, `«…»` is a selection, `⏎` is a line break, `�
 ### 5.1 Structure (`block.rs`)
 
 A forward scanner keeps a **container stack**: blockquote `>` levels and list items, each with an indent, a content column, and a quote depth. The scanner state is `Clone`, so the highlighter can checkpoint it every 50 lines.
+
+Front matter is the one rule that needs lookahead: line 0's `---` opens front matter only if a closing delimiter comes later. A highlighter sees one line at a time, so it cannot find out itself. Instead:
+- The highlighter's `Settings` carry `front_matter_end: Option<usize>`, and it builds its scanner with `Scanner::with_front_matter(end)`. Fed that way, line by line, the scanner gives exactly what `scan()` gives.
+- `EditorView` recomputes `block::front_matter_end` after every change (including undo and `replace_text`) and passes it in the settings. It is cheap: it reads past line 0 only when line 0 is `---`, and stops at the closing delimiter.
+- When the value changes, iced calls `Highlighter::update`, which drops every checkpoint and restarts from line 0, because each checkpoint embeds the old value (`Scanner::front_matter_end` reports it). Edits that leave the value unchanged keep the usual `change_line` resync.
 
 Each line is classified as one of:
 

@@ -29,6 +29,16 @@
 //! The scanner state is `Clone`, so a highlighter can checkpoint it and
 //! resume scanning from any line.
 //!
+//! **Front matter is the one rule that looks ahead.** Whether line 0's `---`
+//! opens front matter depends on a closing delimiter further down, so a
+//! scanner fed one line at a time must be told before it starts: build it
+//! with [`Scanner::with_front_matter`] and the [`front_matter_end`] of the
+//! whole document. A highlighter, which only ever sees one line, carries
+//! that value in its settings. The host recomputes it after every edit, and
+//! when it changes the highlighter starts again from line 0 and drops its
+//! checkpoints, since each one was taken with the old value. Fed that way, a
+//! scanner gives exactly what [`scan`] gives.
+//!
 //! Columns count Unicode scalars with tabs expanded to stops of [`TAB_STOP`];
 //! only ASCII space and tab are indentation. Byte offsets in [`LineInfo`] are
 //! into the line text.
@@ -310,6 +320,10 @@ impl LineInfo {
 /// whitespace are allowed), a later `---` or `...` line, and a first
 /// non-blank line in between that looks like YAML: `key:` followed by
 /// whitespace or the line end, or a `#` comment.
+///
+/// It reads past line 0 only when line 0 is `---`, and then only as far as
+/// the closing delimiter (to the end while the front matter is unclosed),
+/// so an editor can call it after every edit.
 pub fn front_matter_end<L: Lines + ?Sized>(lines: &L) -> Option<usize> {
     let first = lines.line(0);
     let first = first.strip_prefix('\u{feff}').unwrap_or(first);
@@ -388,7 +402,9 @@ impl Default for Scanner {
 }
 
 impl Scanner {
-    /// A scanner for a document without front matter.
+    /// A scanner for text without front matter: a `---` on line 0 is a
+    /// thematic break even if front matter follows. For a whole document,
+    /// use [`Scanner::with_front_matter`].
     pub fn new() -> Self {
         Self::with_front_matter(None)
     }
@@ -409,6 +425,12 @@ impl Scanner {
     /// The index of the next line to scan.
     pub fn line_index(&self) -> usize {
         self.line
+    }
+
+    /// The front matter end this scanner was built with. A checkpoint is
+    /// only good for a document whose [`front_matter_end`] still matches.
+    pub fn front_matter_end(&self) -> Option<usize> {
+        self.front_matter_end
     }
 
     /// The containers open after the last scanned line, outermost first.
@@ -1556,6 +1578,39 @@ mod tests {
         assert_eq!(info.item.unwrap().marker_start, 3);
         assert_eq!(info.text_start, 5);
         assert_eq!(codes("a\n\u{feff}# b"), ["P", "P"]);
+    }
+
+    #[test]
+    fn a_scanner_fed_line_by_line_matches_scan_given_the_front_matter_end() {
+        let docs = [
+            "---\ntitle: x\n---\n# H",
+            "\u{feff}---\n# comment\nk: v\n...\n- a\n---",
+            "---\ntitle: x\nmore: y",
+            "---\nnot yaml\n---\n# H",
+            "# H\n---\ntitle: x\n---",
+        ];
+        for text in docs {
+            let lines: Vec<&str> = text.split('\n').collect();
+            let full = scan(&lines[..]);
+            let end = front_matter_end(&lines[..]);
+            let mut scanner = Scanner::with_front_matter(end);
+            for (i, line) in lines.iter().enumerate() {
+                assert_eq!(scanner.next_line(line), full[i], "{text:?} line {i}");
+                let mut resumed = scanner.clone();
+                assert_eq!(resumed.front_matter_end(), end);
+                let rest: Vec<LineInfo> = lines[i + 1..]
+                    .iter()
+                    .map(|line| resumed.next_line(line))
+                    .collect();
+                assert_eq!(rest, full[i + 1..], "{text:?} resumed after {i}");
+            }
+        }
+        // Without the end, line 0 cannot know a closing `---` follows: the
+        // front matter reads as a break, prose, and a setext heading.
+        let lines = ["---", "title: x", "---", "# H"];
+        let mut blind = Scanner::new();
+        let kinds: Vec<String> = lines.iter().map(|l| code(&blind.next_line(l))).collect();
+        assert_eq!(kinds, ["TB", "P", "S2@1", "H1"]);
     }
 
     #[test]
