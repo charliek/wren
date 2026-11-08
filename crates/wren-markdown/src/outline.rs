@@ -575,4 +575,57 @@ mod tests {
             assert_eq!(plain_text(input), *expected, "{input:?}");
         }
     }
+
+    /// A generated note with headings, prose, lists, quotes, and fences.
+    fn generated(lines: usize) -> String {
+        let mut text = String::new();
+        let mut i = 0;
+        while i < lines {
+            let line = match i % 33 {
+                0 => "# Section heading".to_string(),
+                1 | 12 | 24 => String::new(),
+                5 => "## Subsection with *emphasis*".into(),
+                6..=9 => format!("- item {i} with [a link](http://example.com)"),
+                10 => "  - [ ] nested task".into(),
+                11 => "  - [x] done task".into(),
+                13 => "```rust".into(),
+                14..=17 => "    let x = 1; // # not a heading".into(),
+                18 => "```".into(),
+                19..=21 => "> quoted text that goes on for a while".into(),
+                22 => "1. ordered".into(),
+                23 => "2. second".into(),
+                _ => "Some paragraph text with `code` and **bold** words in it.".into(),
+            };
+            text.push_str(&line);
+            text.push('\n');
+            i += 1;
+        }
+        text
+    }
+
+    #[test]
+    #[ignore = "micro benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_scan_and_outline_5000_lines() {
+        let text = generated(5_000);
+        let doc = Document::new(&text);
+        let rounds = 200;
+        let start = std::time::Instant::now();
+        let mut kinds = 0;
+        for _ in 0..rounds {
+            kinds += block::scan(&doc).len();
+        }
+        let scan = start.elapsed() / rounds;
+        let start = std::time::Instant::now();
+        let mut headings = 0;
+        for _ in 0..rounds {
+            headings += Outline::new(&doc).headings().len();
+        }
+        let outline = start.elapsed() / rounds;
+        println!(
+            "5,000 lines: scan {scan:?}, outline {outline:?} ({} lines, {} headings)",
+            kinds / rounds as usize,
+            headings / rounds as usize
+        );
+        assert_eq!(kinds / rounds as usize, doc.line_count());
+    }
 }
