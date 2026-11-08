@@ -397,19 +397,28 @@ impl EditorView {
     }
 
     /// The cursor, selection, and scroll, to come back to with
-    /// [`EditorView::restore_viewport`].
+    /// [`EditorView::restore_viewport`]. Taking it moves nothing, except that
+    /// classic scrolls a word or line selection (a double or triple click)
+    /// into view.
     pub fn viewport(&mut self) -> Viewport {
-        Viewport {
-            cursor: self.snapshot_cursor(),
-            scroll: self.content.scroll(),
-        }
+        let scroll = self.content.scroll();
+        let raw = self.content.cursor();
+        let cursor = if self.spans_its_selection(raw) {
+            raw
+        } else {
+            let cursor = self.snapshot_cursor();
+            // The snapshot moves the cursor, which scrolls to it.
+            self.content.return_to(cursor, scroll);
+            cursor
+        };
+        Viewport { cursor, scroll }
     }
 
     /// Return to `viewport`: the cursor and selection exactly (clamped into
-    /// the text), and the scroll exactly on the owned engine. iced is
-    /// best-effort: it scrolls by whole rows, and when the view has to move
-    /// up past the cursor its next update brings the cursor's line to the
-    /// top instead.
+    /// the text), and the scroll exactly on the owned engine, even with the
+    /// cursor out of view. iced is best-effort: it scrolls by whole rows, and
+    /// once the cursor has moved its next update scrolls to it, so a view
+    /// that has to move up past the cursor puts the cursor's line on top.
     pub fn restore_viewport(&mut self, viewport: Viewport) {
         self.history.break_group();
         let cursor = self.clamped(viewport.cursor);
@@ -583,6 +592,46 @@ impl EditorView {
         });
         self.content.move_to(cursor);
         cursor
+    }
+
+    /// Whether `raw`'s two ends bound the selected text, as they do for a
+    /// plain selection; a word or line selection extends past them.
+    fn spans_its_selection(&self, raw: Cursor) -> bool {
+        let Some(anchor) = raw.selection else {
+            return true;
+        };
+        let Some(selected) = self.content.selection() else {
+            return true;
+        };
+        let (start, end) =
+            if (anchor.line, anchor.column) <= (raw.position.line, raw.position.column) {
+                (anchor, raw.position)
+            } else {
+                (raw.position, anchor)
+            };
+        self.content.with_lines(|lines| {
+            let mut spanned = String::new();
+            for line in start.line..=end.line {
+                let Some(line_text) = lines.get(line).map(|line| line.text) else {
+                    return false;
+                };
+                let from = if line == start.line { start.column } else { 0 };
+                let to = if line == end.line {
+                    end.column
+                } else {
+                    line_text.len()
+                };
+                let Some(part) = line_text.get(from..to) else {
+                    return false;
+                };
+                if line > start.line {
+                    // cosmic-text copies every line ending as LF.
+                    spanned.push('\n');
+                }
+                spanned.push_str(part);
+            }
+            spanned == selected
+        })
     }
 
     /// Move the cursor to `cursor`, clamped, dropping any old selection.
@@ -2308,6 +2357,63 @@ mod tests {
             ev.restore_viewport(caret);
             assert_eq!(ev.cursor(), super::at(70, 0));
             assert_eq!(ev.selected_text(), None);
+        }
+
+        #[test]
+        fn a_viewport_away_from_the_cursor_is_taken_and_restored_in_place() {
+            let size = iced::Size::new(300.0, 240.0);
+            let selected = Cursor {
+                position: Position { line: 5, column: 4 },
+                selection: Some(Position { line: 5, column: 0 }),
+            };
+            for origin_cursor in [super::at(2, 0), selected] {
+                let mut ev = editor(&super::numbered_lines(300));
+                ev.content.lay_out(size);
+                ev.move_cursor(origin_cursor);
+                ev.content.lay_out(size);
+                ev.perform(Action::Scroll { lines: 100 });
+                ev.content.lay_out(size);
+                let top = ev.first_visible_line();
+                assert!(top > 50, "scrolled to {top}");
+
+                let origin = ev.viewport();
+                ev.content.lay_out(size);
+                assert_eq!(origin.cursor(), origin_cursor);
+                assert_eq!(ev.first_visible_line(), top, "taking {origin_cursor:?}");
+                ev.restore_viewport(origin);
+                ev.content.lay_out(size);
+                assert_eq!(ev.first_visible_line(), top, "restoring {origin_cursor:?}");
+                assert_eq!(ev.cursor(), origin_cursor);
+            }
+        }
+
+        #[test]
+        fn a_word_selection_viewport_is_its_bounds() {
+            let size = iced::Size::new(300.0, 240.0);
+            let mut ev = editor(&super::numbered_lines(300));
+            ev.content.lay_out(size);
+            ev.move_cursor(super::at(5, 2));
+            ev.content.perform(Action::SelectWord);
+            ev.content.lay_out(size);
+            ev.perform(Action::Scroll { lines: 100 });
+            ev.content.lay_out(size);
+            let top = ev.first_visible_line();
+
+            let origin = ev.viewport();
+            ev.content.lay_out(size);
+            let word = Cursor {
+                position: Position { line: 5, column: 4 },
+                selection: Some(Position { line: 5, column: 0 }),
+            };
+            assert_eq!(origin.cursor(), word);
+            // Normalizing the selection moves the cursor, which iced reveals.
+            if KIND == BackendKind::Owned {
+                assert_eq!(ev.first_visible_line(), top);
+            }
+            ev.restore_viewport(origin);
+            ev.content.lay_out(size);
+            assert_eq!(ev.cursor(), word);
+            assert_eq!(ev.selected_text().as_deref(), Some("line"));
         }
 
         #[test]

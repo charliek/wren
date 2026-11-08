@@ -97,10 +97,11 @@ impl Backend {
         }
     }
 
-    /// Like [`Backend::restore_view`], but iced also scrolls back, by whole
-    /// rows, until `scroll.line` is where it was, before moving the cursor.
-    /// iced settles that scroll in the same update that reveals the cursor,
-    /// so a cursor above the current view still ends up on the top row.
+    /// Put the cursor at `cursor` and the view back at `scroll`. Owned keeps
+    /// `scroll` exactly, even when the cursor is out of view. iced scrolls
+    /// back by whole rows until `scroll.line` is where it was, then moves the
+    /// cursor; it settles that scroll in the same update that reveals a moved
+    /// cursor, so a cursor above the view still ends up on the top row.
     pub fn return_to(&mut self, cursor: Cursor, scroll: Scroll) {
         match self {
             Self::Iced(editor) => {
@@ -108,7 +109,7 @@ impl Backend {
                 iced::scroll_to(editor, line, -scroll.vertical);
                 editor.move_to(cursor);
             }
-            Self::Owned(engine) => engine.restore_view(cursor, scroll),
+            Self::Owned(engine) => engine.return_to(cursor, scroll),
         }
     }
 
