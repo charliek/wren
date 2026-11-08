@@ -55,6 +55,7 @@ use iced::{
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{self, MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::keys::KeyPolicy;
 use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
@@ -249,6 +250,7 @@ pub struct TextEditor<'a> {
     line_numbers: bool,
     metrics: Metrics,
     markdown_assist: bool,
+    key_policy: Option<&'a KeyPolicy>,
     last_status: Option<Status>,
 }
 
@@ -270,8 +272,15 @@ impl<'a> TextEditor<'a> {
             line_numbers,
             metrics,
             markdown_assist,
+            key_policy: None,
             last_status: None,
         }
+    }
+
+    /// Ask `policy` about each key press first (see [`KeyPolicy`]).
+    pub fn key_policy(mut self, policy: Option<&'a KeyPolicy>) -> Self {
+        self.key_policy = policy;
+        self
     }
 
     fn padding(&self) -> Padding {
@@ -475,7 +484,11 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             layout.bounds(),
             self.padding(),
             cursor,
-            self.markdown_assist,
+            crate::keys::Context {
+                markdown_assist: self.markdown_assist,
+                composing: state.is_composing(),
+                policy: self.key_policy,
+            },
         ) {
             match update {
                 Update::Click(click) => {
@@ -836,7 +849,7 @@ impl Update {
         bounds: Rectangle,
         padding: Padding,
         cursor: mouse::Cursor,
-        markdown_assist: bool,
+        keys: crate::keys::Context<'_>,
     ) -> Option<Self> {
         match event {
             Event::Mouse(event) => match event {
@@ -918,10 +931,7 @@ impl Update {
                         text: text.clone(),
                         status,
                     },
-                    crate::keys::Context {
-                        markdown_assist,
-                        composing: state.is_composing(),
-                    },
+                    keys,
                 )
                 .map(Update::Binding)
             }

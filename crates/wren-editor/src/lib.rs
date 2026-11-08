@@ -9,7 +9,8 @@
 //! edits and absolute scrolling. Both pass the same test suite.
 //!
 //! The crate knows nothing about its host: colours arrive as a [`Style`] and a
-//! [`Palette`], and the font through [`EditorView::set_font`].
+//! [`Palette`], the font through [`EditorView::set_font`], and which keys are
+//! the host's shortcuts or bound editor commands through a [`KeyPolicy`].
 
 mod backend;
 mod edit;
@@ -33,6 +34,7 @@ use iced::{Color, Element, Font};
 
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
+pub use keys::{KeyPolicy, KeyRoute};
 pub use wren_markdown::Intent;
 
 use backend::Lines;
@@ -123,6 +125,7 @@ pub struct EditorView {
     metrics: widget::Metrics,
     font: Font,
     markdown_assist: bool,
+    key_policy: Option<KeyPolicy>,
 }
 
 /// How the planner indents and renumbers.
@@ -149,7 +152,14 @@ impl EditorView {
             metrics: widget::Metrics::default(),
             font: Font::MONOSPACE,
             markdown_assist: true,
+            key_policy: None,
         }
+    }
+
+    /// Let the host route key presses before the editor handles them; see
+    /// [`KeyPolicy`]. Without one, every key is the editor's.
+    pub fn set_key_policy(&mut self, policy: KeyPolicy) {
+        self.key_policy = Some(policy);
     }
 
     /// Turn the Markdown-aware keys on or off (on by default). Off, Enter
@@ -212,6 +222,7 @@ impl EditorView {
             self.metrics,
             self.markdown_assist,
         )
+        .key_policy(self.key_policy.as_ref())
         .into()
     }
 

@@ -1,21 +1,44 @@
 //! The editor's own shortcuts, checked before iced's stock key bindings.
 
-use iced::keyboard::key::Named;
+use std::sync::Arc;
+
+use iced::keyboard::key::{self, Named};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text_editor::{self, Binding, KeyPress, Motion};
 
 use crate::{Intent, Message};
 
+/// Where the host sends a key press that reaches the focused editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRoute {
+    /// A host shortcut. The editor ignores the key, so a shortcut never also
+    /// edits the text.
+    Host,
+    /// A host-bound editor command, carried out as [`Message::Intent`].
+    Intent(Intent),
+    /// Not the host's: the editor handles the key itself.
+    Pass,
+}
+
+/// The host's say over each key press, asked before any key of the editor's
+/// own, with the unmodified key, its physical key, and the modifiers.
+///
+/// A host builds it from its keymap, so a key bound to a host command
+/// reaches only the host. See [`crate::EditorView::set_key_policy`].
+pub type KeyPolicy = Arc<dyn Fn(&Key, key::Physical, Modifiers) -> KeyRoute + Send + Sync>;
+
 /// What key routing needs to know beyond the key press itself.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Context {
+#[derive(Clone, Copy)]
+pub(crate) struct Context<'a> {
     pub markdown_assist: bool,
     /// An input method has preedit text, so the keys that edit it are its own.
     pub composing: bool,
+    pub policy: Option<&'a KeyPolicy>,
 }
 
-/// Custom key-binding handler.  Intercepts Undo, Redo, and Find shortcuts,
-/// then turns the editing keys into [`Message::Intent`]s.
+/// Custom key-binding handler.  Asks the host's [`KeyPolicy`] first, then
+/// intercepts Undo, Redo, and Find shortcuts, and turns the editing keys into
+/// [`Message::Intent`]s.
 ///
 /// Shortcuts handled:
 /// - `Ctrl/Cmd+Z` → [`Message::Undo`]
@@ -27,7 +50,8 @@ pub(crate) struct Context {
 /// (macOS ⌘← and ⌃A as Home, ⌃H as Backspace) carry over. Backspace,
 /// Delete, the word and line deletes, Tab, Shift+Tab, and ⌘↑/⌘↓ are always
 /// intents; Enter, Shift+Enter, Home, and Shift+Home only with Markdown
-/// assist on, and iced's stock handling otherwise.
+/// assist on, and iced's stock handling otherwise. On macOS a key with ⌘
+/// held never types, so an unbound ⌘B inserts nothing.
 pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Binding<Message>> {
     if !matches!(key_press.status, text_editor::Status::Focused { .. }) {
         return None;
@@ -35,6 +59,15 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
     let m = key_press.modifiers;
     let key = &key_press.key;
     let physical = key_press.physical_key;
+
+    match context
+        .policy
+        .map_or(KeyRoute::Pass, |policy| policy(key, physical, m))
+    {
+        KeyRoute::Host => return None,
+        KeyRoute::Intent(wanted) => return Some(intent(wanted)),
+        KeyRoute::Pass => {}
+    }
 
     // Undo: Ctrl/Cmd + Z (without Shift)
     if m.command() && !m.shift() && key.to_latin(physical) == Some('z') {
@@ -83,7 +116,15 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         });
     }
 
-    Binding::from_key_press(key_press).map(|binding| editing(binding, m, context.markdown_assist))
+    Binding::from_key_press(key_press)
+        .filter(|binding| types_with(binding, m, cfg!(target_os = "macos")))
+        .map(|binding| editing(binding, m, context.markdown_assist))
+}
+
+/// Whether `binding` may run with `m` held: on macOS (`macos`), ⌘ is for
+/// shortcuts, and an insert under it would type the shortcut's letter.
+fn types_with(binding: &Binding<Message>, m: Modifiers, macos: bool) -> bool {
+    !(macos && m.logo() && matches!(binding, Binding::Insert(_)))
 }
 
 /// `binding` as an intent when it is one of the editing keys.
@@ -126,14 +167,17 @@ mod tests {
     const ASSIST: Context = Context {
         markdown_assist: true,
         composing: false,
+        policy: None,
     };
     const PLAIN: Context = Context {
         markdown_assist: false,
         composing: false,
+        policy: None,
     };
     const COMPOSING: Context = Context {
         markdown_assist: true,
         composing: true,
+        policy: None,
     };
 
     /// The binding for a focused press of `key` with `modifiers`, typing
@@ -277,6 +321,95 @@ mod tests {
         ));
     }
 
+    /// A host that binds Ctrl+Enter and Ctrl+B to editor commands, and
+    /// Ctrl+F and Ctrl+Z to its own.
+    fn host_policy() -> KeyPolicy {
+        Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if !modifiers.control() {
+                return KeyRoute::Pass;
+            }
+            match key.as_ref() {
+                Key::Named(Named::Enter) => KeyRoute::Intent(Intent::ToggleTask),
+                Key::Character("b") => KeyRoute::Intent(Intent::Bold),
+                Key::Character("f" | "z") => KeyRoute::Host,
+                _ => KeyRoute::Pass,
+            }
+        })
+    }
+
+    #[test]
+    fn the_host_policy_routes_keys_before_the_editor_s_own() {
+        let policy = host_policy();
+        let context = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        let ctrl = Modifiers::CTRL;
+        assert_eq!(named(Named::Enter, ctrl, context), Some(Intent::ToggleTask));
+        let letter =
+            |letter: &str, context| press(Key::Character(letter.into()), ctrl, None, context);
+        assert!(matches!(
+            letter("b", context),
+            Some(Binding::Custom(Message::Intent(Intent::Bold)))
+        ));
+        // A host shortcut is the host's alone, even over the editor's own
+        // Find and Undo.
+        assert!(letter("f", context).is_none());
+        assert!(letter("z", context).is_none());
+        assert!(matches!(
+            letter("f", ASSIST),
+            Some(Binding::Custom(Message::Find))
+        ));
+        // Everything else is the editor's, as without a policy.
+        assert_eq!(
+            named(Named::Enter, Modifiers::empty(), context),
+            Some(Intent::Enter)
+        );
+        assert!(matches!(
+            press(
+                Key::Character("a".into()),
+                Modifiers::empty(),
+                Some("a"),
+                context
+            ),
+            Some(Binding::Insert('a'))
+        ));
+        // An unfocused editor never asks.
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&asked);
+        let spy: KeyPolicy = Arc::new(move |_: &Key, _, _| {
+            seen.store(true, std::sync::atomic::Ordering::Relaxed);
+            KeyRoute::Host
+        });
+        let unfocused = key_binding(
+            KeyPress {
+                key: Key::Named(Named::Enter),
+                modified_key: Key::Named(Named::Enter),
+                physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                modifiers: ctrl,
+                text: None,
+                status: text_editor::Status::Active,
+            },
+            Context {
+                policy: Some(&spy),
+                ..ASSIST
+            },
+        );
+        assert!(unfocused.is_none());
+        assert!(!asked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn command_never_types_on_macos() {
+        let insert = Binding::Insert('b');
+        assert!(!types_with(&insert, Modifiers::LOGO, true));
+        assert!(!types_with(&insert, Modifiers::LOGO | Modifiers::ALT, true));
+        assert!(types_with(&insert, Modifiers::ALT, true));
+        assert!(types_with(&insert, Modifiers::SHIFT, true));
+        assert!(types_with(&Binding::Paste, Modifiers::LOGO, true));
+        assert!(types_with(&insert, Modifiers::LOGO, false));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_command_keys_reach_the_line_and_document_ends() {
@@ -313,6 +446,18 @@ mod tests {
         };
         assert_eq!(ctrl("a"), Some(Intent::Home { extend: false }));
         assert_eq!(ctrl("h"), Some(Intent::Backspace));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unbound_command_letter_types_nothing() {
+        assert!(press(
+            Key::Character("b".into()),
+            Modifiers::LOGO,
+            Some("b"),
+            ASSIST
+        )
+        .is_none());
     }
 
     #[test]
