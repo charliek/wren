@@ -164,6 +164,13 @@ pub enum Message {
         std::sync::Arc<crate::test_ipc::Request>,
         Result<serde_json::Value, String>,
     ),
+    /// An editor command's shortcut, as the editor widget publishes it:
+    /// `Some` only while the editor has the keyboard.
+    #[cfg(feature = "smoke-test")]
+    EditorShortcut(
+        std::sync::Arc<crate::test_ipc::Request>,
+        Option<wren_editor::Intent>,
+    ),
 }
 
 /// How long the footer's word count may lag the text. Counting reads the
@@ -342,6 +349,14 @@ impl App {
             }
             #[cfg(feature = "smoke-test")]
             Message::Reply(request, result) => request.respond(result),
+            #[cfg(feature = "smoke-test")]
+            Message::EditorShortcut(request, intent) => {
+                let task = intent.map_or_else(Task::none, |intent| {
+                    self.update(Message::Editor(wren_editor::Message::Intent(intent)))
+                });
+                request.respond(Ok(self.navigation_snapshot()));
+                return task;
+            }
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
                 self.apply_theme();

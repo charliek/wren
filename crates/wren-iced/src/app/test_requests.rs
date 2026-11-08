@@ -5,7 +5,7 @@ use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 use iced::Task;
 use serde_json::{json, Value};
 
-use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
+use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget, Scope};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
 use crate::panes::{Pane, PANES};
@@ -74,6 +74,23 @@ impl App {
             "shortcut" => {
                 // A key binding firing, with its active-column scoping.
                 let id = CommandId::parse(string(params, "id")?).ok_or("Unknown command ID")?;
+                if id.scope() == Scope::Editor {
+                    // The editor's key policy routes the bound key, and only
+                    // a focused editor sees it.
+                    let keymap = &self.preferences.keymap;
+                    let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
+                    let wren_editor::KeyRoute::Intent(intent) =
+                        super::preferences::key_route(keymap, trigger)
+                    else {
+                        return Err("The editor does not route this command's key".into());
+                    };
+                    let request = Arc::clone(request);
+                    return Ok(iced::widget::operation::is_focused("note-editor").map(
+                        move |focused| {
+                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(intent))
+                        },
+                    ));
+                }
                 let task = self.run_shortcut(id);
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);

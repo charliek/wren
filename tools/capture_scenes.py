@@ -133,6 +133,11 @@ def main() -> int:
                     client.call("palette.query", {"query": query})
                 shot_here(f"palette-{mode}")
                 client.call("palette.close")
+            # The editor's commands, highlighted down in their own group.
+            client.call("palette.open", {"mode": "commands"})
+            client.call("palette.step", {"delta": 12})
+            shot_here("palette-markdown")
+            client.call("palette.close")
             for _ in range(4):
                 client.call("command.run", {"id": "font.increase"})
             shot_here("text-larger")
@@ -151,6 +156,27 @@ def main() -> int:
                 else:
                     client.call("editor.insert", {"text": step})
             shot_here("editor-smart-keys")
+
+            # Markdown commands at the cursor: check a task, format three
+            # words, and move a line up.
+            def at_word(word: str) -> None:
+                lines = client.call("editor.get")["text"].split("\n")
+                line = next(index for index, text in enumerate(lines) if word in text)
+                client.call("editor.cursor", {
+                    "line": line, "column": len(lines[line].split(word)[0].encode()) + 1,
+                    "selection": None,
+                })
+
+            for word, command in [
+                ("Review promo", "markdown.toggle_task"),
+                ("cutover.", "markdown.bold"),
+                ("promo timeline", "markdown.italic"),
+                ("timeline", "markdown.code"),
+                ("She asked", "edit.move_line_up"),
+            ]:
+                at_word(word)
+                client.call("command.run", {"id": command})
+            shot_here("editor-markdown-commands")
             archive = next(
                 row for row in client.call("session.get")["sections"]
                 if row["path"] == EMPTY_SECTION

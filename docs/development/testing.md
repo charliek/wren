@@ -60,6 +60,11 @@ ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced \
 `delete_word_forward`, `delete_to_line_start`, `home`, `select_home`, …). It
 reaches the app's edit path the same way the editor widget's keys do and
 returns the editor snapshot; its `native_x11` case presses the real keys.
+The Markdown commands run two ways: `command.run` (`{"id": "markdown.bold"}`)
+runs one as the palette does, at the editor's cursor whatever has the
+keyboard, and `shortcut` runs one as its key does, routing the bound key
+through the editor's key policy and acting only while the editor is
+focused.
 
 The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor

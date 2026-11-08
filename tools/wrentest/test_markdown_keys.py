@@ -266,3 +266,159 @@ def test_native_smart_keys(keys_app) -> None:
         native_text(app, "- a\n- ", "BackSpace deletes a selection")
         key("BackSpace")
         native_text(app, "- a\n  ", "BackSpace turns the marker into indentation")
+
+
+def run(app: WrenApp, command: str) -> str:
+    """Run *command* as the palette does, returning its disposition."""
+    return app.client.call("command.run", {"id": command})["disposition"]
+
+
+def test_markdown_commands_act_at_the_cursor_from_the_palette(keys_app) -> None:
+    with keys_app("keys-commands") as app:
+        editor = Editor(app)
+        get = lambda: editor.call("editor.get")  # noqa: E731
+
+        editor.load("- [ ] a", 0, 7)
+        assert run(app, "markdown.toggle_task") == "completed"
+        assert (get()["text"], cursor(get())) == ("- [x] a", (0, 7))
+        run(app, "markdown.toggle_task")
+        assert get()["text"] == "- [ ] a"
+        editor.load("plain", 0, 2)
+        run(app, "markdown.toggle_task")
+        assert (get()["text"], cursor(get())) == ("- [ ] plain", (0, 8))
+
+        for command, wrapped in [
+            ("markdown.bold", "**hello** world"),
+            ("markdown.italic", "*hello* world"),
+            ("markdown.code", "`hello` world"),
+        ]:
+            editor.load("hello world", 0, 2)
+            run(app, command)
+            assert get()["text"] == wrapped, command
+            # Again on the wrapped word unwraps it, as one more undo step.
+            run(app, command)
+            assert get()["text"] == "hello world", command
+            assert editor.call("editor.undo")["text"] == wrapped, command
+
+        editor.load("1. a\n2. b", 1, 4)
+        run(app, "edit.move_line_up")
+        assert (get()["text"], cursor(get())) == ("1. b\n2. a", (0, 4))
+        run(app, "edit.move_line_down")
+        assert (get()["text"], cursor(get())) == ("1. a\n2. b", (1, 4))
+        # At the top, moving up does nothing.
+        editor.load("a\nb", 0, 1)
+        run(app, "edit.move_line_up")
+        assert get()["text"] == "a\nb"
+
+
+def test_markdown_commands_are_unavailable_without_assist(keys_app) -> None:
+    with keys_app("keys-commands-off", settings="markdown-assist = off\n") as app:
+        editor = Editor(app)
+        editor.load("- [ ] a\nb", 0, 7)
+        for command in ["markdown.toggle_task", "markdown.bold", "edit.move_line_down"]:
+            assert run(app, command) == "blocked", command
+        assert editor.call("editor.get")["text"] == "- [ ] a\nb"
+
+
+def test_markdown_shortcuts_act_only_in_the_focused_editor(keys_app) -> None:
+    with keys_app("keys-shortcuts") as app:
+        call = app.client.call
+        editor = Editor(app)
+        editor.load("hello world", 0, 2)
+        call("editor.focus")
+
+        def shortcut(command: str) -> None:
+            call("shortcut", {"id": command})
+
+        shortcut("markdown.bold")
+        assert call("editor.get")["text"] == "**hello** world"
+        shortcut("markdown.toggle_task")
+        assert call("editor.get")["text"] == "- [ ] **hello** world"
+        # With the find bar holding the keyboard, the keys do nothing.
+        shortcut("navigation.find")
+        wait_for(lambda: call("focus.get")["named"] == ["find-query"],
+                 description="find bar focus")
+        for command in ["markdown.bold", "markdown.toggle_task", "edit.move_line_up"]:
+            shortcut(command)
+        assert call("editor.get")["text"] == "- [ ] **hello** world"
+
+
+def test_markdown_shortcuts_skip_a_browser_column(tmp_path: Path, keys_app) -> None:
+    note = workspace(tmp_path / "notes", b"1. a\n2. b")
+    with keys_app("keys-shortcuts-column", workspace=tmp_path / "notes") as app:
+        call = app.client.call
+        open_note(app)
+        assert call("column.open", {"column": "notes"})["disposition"] == "completed"
+        wait_for(lambda: call("focus.get")["named"] == [], description="the editor lets go")
+        call("shortcut", {"id": "edit.move_line_up"})
+        state = call("editor.get")
+        assert state["text"] == "1. a\n2. b"
+        assert call("navigation.get")["column"] == "notes"
+        assert not call("session.get")["document"]["dirty"]
+        assert note.read_bytes() == b"1. a\n2. b"
+
+
+@pytest.mark.native_x11
+def test_native_markdown_command_keys(keys_app) -> None:
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    with keys_app("keys-native-commands") as app:
+        call = app.client.call
+        call("editor.set", {"text": "# Title\nhello world"})
+        window = focus_native(app)
+
+        def key(*names: str) -> None:
+            xdo("key", "--window", window, "--clearmodifiers", *names)
+
+        def typed(text: str) -> None:
+            xdo("type", "--window", window, "--clearmodifiers", "--delay", "12", text)
+
+        key("ctrl+End", "ctrl+Return")
+        native_text(app, "# Title\n- [ ] hello world", "ctrl+Return makes a task")
+        key("ctrl+Return")
+        native_text(app, "# Title\n- [x] hello world", "ctrl+Return checks it")
+        key("ctrl+b")
+        native_text(app, "# Title\n- [x] hello **world**", "ctrl+b bolds the word")
+        key("ctrl+i")
+        native_text(app, "# Title\n- [x] hello ***world***", "ctrl+i adds italics")
+        key("alt+Up")
+        native_text(app, "- [x] hello ***world***\n# Title", "alt+Up moves the line")
+        key("alt+Down")
+        native_text(app, "# Title\n- [x] hello ***world***", "alt+Down moves it back")
+        key("ctrl+z")
+        native_text(app, "- [x] hello ***world***\n# Title", "one undo per command")
+
+        # In the find bar the keys neither format the note nor type.
+        key("ctrl+f")
+        wait_for(lambda: call("editor.get")["find_open"], description="ctrl+f opens find")
+        typed("wor")
+        key("ctrl+b", "ctrl+Return", "alt+Up")
+        typed("l")
+        wait_for(lambda: call("editor.get")["find_query"] == "worl", description="find typing")
+        assert call("editor.get")["text"] == "- [x] hello ***world***\n# Title"
+
+
+@pytest.mark.native_x11
+def test_native_alt_up_in_the_notes_column_leaves_the_text(tmp_path: Path, keys_app) -> None:
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    note = workspace(tmp_path / "notes", b"1. a\n2. b")
+    with keys_app("keys-native-column", workspace=tmp_path / "notes") as app:
+        call = app.client.call
+        open_note(app)
+        window = focus_native(app)
+        call("column.open", {"column": "notes"})
+
+        def key(*names: str) -> None:
+            xdo("key", "--window", window, "--clearmodifiers", *names)
+
+        key("alt+Up", "alt+Down")
+        # Column right is an app shortcut: once it lands, so have the keys
+        # before it.
+        key("alt+shift+bracketright")
+        wait_for(lambda: call("navigation.get")["column"] == "editor",
+                 description="back in the editor")
+        assert call("editor.get")["text"] == "1. a\n2. b"
+        assert not call("session.get")["document"]["dirty"]
+        # In the editor the same key moves the line.
+        key("alt+Up")
+        native_text(app, "1. b\n2. a", "alt+Up in the editor")
+        saved(app, note, b"1. b\n2. a")
