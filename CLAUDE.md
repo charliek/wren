@@ -24,7 +24,9 @@ when one lands, move what users need into `docs/` and trim the note.
   text editor with the gutter, current line, and caret; `backend/` holds
   the two text engines behind `Content` (`iced.rs`, iced's own editor, and
   `owned.rs`, an owned cosmic-text editor drawn with `fill_raw`), and the
-  editor tests run on both; plus `highlighter.rs` (spans and per-line
+  editor tests run on both; plus `edit.rs` (range edits and the line
+  endings their breaks take), `plain.rs` (the keys' plain plans while
+  Markdown assist is off), `highlighter.rs` (spans and per-line
   decorations from `wren_markdown::block`), `history.rs` (snapshot
   undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
   accessors sit behind its `test-support` feature, which
@@ -49,6 +51,11 @@ when one lands, move what users need into `docs/` and trim the note.
   it.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
+- `vendor/`: patched copies of crates.io crates (`cosmic-text`, `iced_winit`,
+  `swash`), wired in by the root `[patch.crates-io]`; `make check-patches`
+  asserts they are the ones built. `cosmic-text` and `swash` each have a
+  `WREN.md` describing the change; `wren-editor`'s hanging indent needs the
+  cosmic-text one.
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it
   in step with behavior changes: keybindings, settings, and on-disk rules.
 - `discovery/`: working design notes, deliberately outside `docs/` because

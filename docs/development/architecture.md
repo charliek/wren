@@ -51,7 +51,9 @@ keymap, reading keys through the same `keys::shortcut` as its own
 shortcuts. The widget asks the policy before handling any key: an App
 command's key is ignored, so a shortcut never also edits the text, and an
 Editor command's key becomes its `Message::Intent`. From the palette, an
-Editor command always runs, through `App::edit` at the editor's cursor.
+enabled Editor command runs wherever the keyboard is, through `App::edit`
+at the editor's cursor; the Markdown commands are disabled while
+`markdown-assist` is off.
 
 ## Editing keys
 

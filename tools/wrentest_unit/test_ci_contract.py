@@ -44,7 +44,7 @@ class WorkflowContractTests(unittest.TestCase):
     def test_jobs_use_existing_shared_make_targets_and_tests(self):
         source = WORKFLOW.read_text()
         jobs = job_blocks(source)
-        self.assertIn("run: make build fmt-check clippy test", jobs["rust"])
+        self.assertIn("run: make build fmt-check clippy test check-patches", jobs["rust"])
         self.assertIn("run: make test-python", jobs["harness-unit"])
         self.assertIn('run: make setup "smoke-${DISPLAY_BACKEND}"', jobs["linux-smoke"])
         makefile = (ROOT / "Makefile").read_text()

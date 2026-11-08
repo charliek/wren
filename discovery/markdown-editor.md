@@ -14,9 +14,11 @@ It should ship as a pluggable component that can sit behind a setting until it h
 
 This note records what we learned, the options we weighed, the decision, the behavior spec, and the milestone plan. The raw research reports are summarized here, not kept.
 
-## 1. Where the editor is today
+## 1. Where the editor was (before this branch)
 
-`crates/wren-iced/src/editor_view/` is a fork of iced 0.14.2's `text_editor`. It adds a gutter, a current-line band, a caret, and task strike-through. Underneath is `iced_graphics::text::Editor`, which wraps a private `cosmic_text::Editor`.
+This is the starting point, kept in the present tense it was written in; the rest of the note says what changed.
+
+`crates/wren-iced/src/editor_view/` (since moved to `crates/wren-editor`) was a fork of iced 0.14.2's `text_editor`. It adds a gutter, a current-line band, a caret, and task strike-through. Underneath is `iced_graphics::text::Editor`, which wraps a private `cosmic_text::Editor`.
 
 - **Edits** can only go through iced's coarse `Action` enum (`Insert`, `Paste`, `Enter`, `Backspace`, `Delete`, `Indent`, `Unindent`, motions). There is no range replace, no transactions and no absolute scroll. cosmic-text's own `auto_indent`, `insert_at`/`delete_range`, `Change` tracking and `set_scroll` are all unreachable behind iced's wrapper.
 - **Undo** is full-text snapshots (`editor_history.rs`). Undo reloads the whole `Content`, which loses the scroll position.
@@ -464,7 +466,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - Larger heading sizes on the owned engine (`Attrs.metrics_opt`). Landed on `md-visual`; see the design-review defaults below.
 - Exact selection bounds after a double- or triple-click.
 - A maximum text width outside focus mode (centered column) and an `editor-line-height` setting. Both work on either backend; asked for by the design review. Landed on `md-visual`.
-- A brighter current-line number in the gutter (`Style::gutter_current`).
+- A brighter current-line number in the gutter (`Style::gutter_current`). Landed.
 
 **Coordination with the theme work** (`design/theme-polish`, session wren-26). The editor rebuild merges first.
 - **`theme.rs` stays untouched.** This work does not edit `wren-core/src/theme.rs`.
@@ -572,7 +574,7 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 - `native_x11` cases cover Return, shift+Return, Tab, shift+Tab, BackSpace, Home, ctrl+Return, and alt+Up.
 - One case checks that Alt+↑ with the Notes column active leaves the text alone.
 
-**Visual:** `capture_scenes.py` gets a list-heavy note scene, an outline palette scene, and a tiny-skia mid-row scroll scene, in both themes.
+**Visual:** `capture_scenes.py` gets a list-heavy note scene, an outline palette scene, and a tiny-skia mid-row scroll scene, in both themes. The list-heavy and outline scenes landed (`--engine advanced` captures them on the owned engine); the mid-row scroll scene is still outstanding.
 
 ### 7.1 CodeMirror divergences
 
@@ -612,10 +614,10 @@ Each `definitions!` row gains a scope, `App` or `Editor`. The host gives the wid
 
 Each commit builds and passes `make check`. The work is done in parallel worktrees and merged onto `markdown-editor`.
 
-1. **Extract the editor into `crates/wren-editor`** with no behavior change: `Style`/`Palette` instead of `wren_core::theme`, a `test-support` feature, and a CLAUDE.md layout update.
-2. **`wren-markdown`:** `block` and `outline` with tests. *Parallel with 1.*
-3. **`wren-markdown`:** the `edit` planner for §5.2–5.7, the CodeMirror corpus, and the divergence table.
-4. **`wren-editor`:** the `Backend` seam with Iced only. Then the owned engine behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.*
+1. **Extract the editor into `crates/wren-editor`** with no behavior change: `Style`/`Palette` instead of `wren_core::theme`, a `test-support` feature, and a CLAUDE.md layout update. Done.
+2. **`wren-markdown`:** `block` and `outline` with tests. *Parallel with 1.* Done.
+3. **`wren-markdown`:** the `edit` planner for §5.2–5.7, the CodeMirror corpus, and the divergence table. Done.
+4. **`wren-editor`:** the `Backend` seam with Iced only. Then the owned engine behind `editor-engine`. Then the snapshot scroll field, diff-apply, `goal_x`, and line-ending normalization. *Parallel with 3.* Done.
 5. **Point the highlighter, `done_task_ranges`, and `index.rs` at `wren-markdown::block`.** Done. The strike ranges come from the highlighter's per-line decorations rather than a separate scan. A note's search preview is its first paragraph line outside front matter and headings (setext ones included), so a note whose only body is code or an empty item has no preview.
 6. **Intents** (done on `md-keys`):
    - the `Message::Intent` / `EditorView::apply` path;
@@ -624,8 +626,8 @@ Each commit builds and passes `make check`. The work is done in parallel worktre
    - key mapping and the IME guard;
    - the `editor.command` RPC and `native_x11` cases.
 7. **Command scope and `KeyPolicy`,** the ⌘ insert guard, and the §5.7 commands with docs (done on `md-keys`). The commands sit in a "Markdown" palette group. With assist off they are disabled in the palette, and their keys stay the editor's and do nothing. The `shortcut` test request runs an Editor command the widget's way: the bound key through the policy, only while the editor is focused.
-8. **The outline palette.**
-9. **Harness work:** settings support, engine parametrization, and the scenes. Then review.
+8. **The outline palette.** Done (merged in `821b1c6`).
+9. **Harness work:** settings support, engine parametrization, and the scenes. Then review. Done, except the tiny-skia mid-row scroll scene (§7). The final review is recorded under *Final review* below.
 10. **Follow-ups** (done on `md-follow`): the group word deletes (§5.5), the two settings commands (§5.7) with `palette-assist` and `palette-engine` scenes, and the IME reveal and edge anchor (§9). A review round then fixed the anchor and the reveal on a wrapped first line, made word deletes take a run of CJK whole, and added functional word-delete cases with undo and the real Ctrl+⌫ and Alt+⌫ keys.
 
 **Promotion bar for `editor-engine = advanced` as the default:**

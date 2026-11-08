@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       # macOS covers compilation and unit tests, not native GUI integration.
-      - run: make build fmt-check clippy test
+      - run: make build fmt-check clippy test check-patches
       - uses: astral-sh/setup-uv@v7
         with:
           version: "0.13.5"

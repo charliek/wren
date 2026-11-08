@@ -18,7 +18,7 @@ iced has no built-in undo stack here, so `EditorView` provides snapshot history.
 
 Find is literal, Unicode-lowercase matching with lowercase expansions mapped back to original UTF-8 byte ranges. It is not Unicode normalization or full case folding. Cursor columns in the diagnostic interface are UTF-8 byte offsets, not grapheme columns.
 
-**Known viewport limitation:** stock iced does not expose an absolute editor scroll offset. Ordinary theme changes retain the viewport (verified with pixels), but undo/redo snapshot restoration does not restore an exact historical scroll offset. Cursor and selection are restored and clamped to valid UTF-8 boundaries. Future note move/rename handlers must retain the current Content rather than reload it.
+**Known viewport limitation:** stock iced does not expose an absolute editor scroll offset. Ordinary theme changes retain the viewport (verified with pixels), but undo/redo snapshot restoration does not restore an exact historical scroll offset. Cursor and selection are restored and clamped to valid UTF-8 boundaries. (Since lifted: undo and redo now apply a diff instead of reloading the content, which keeps the view on both engines, and the advanced engine restores the exact scroll.) Future note move/rename handlers must retain the current Content rather than reload it.
 
 ## Reproduction and results
 
@@ -75,6 +75,6 @@ A CodeRabbit review was attempted but failed session/Git-provider authentication
 - Native macOS Japanese IME composition, candidate selection, cancellation, and committed text.
 - Native macOS Cmd shortcuts, clipboard ownership, and input behavior.
 - Broader Linux IME/accessibility and desktop integration checks beyond the tested X11 keyboard/clipboard path.
-- Exact historical viewport restoration across undo/redo is not supported by the stock editor API.
+- Exact historical viewport restoration across undo/redo is not supported by the stock editor API. (Since lifted by diff-applied undo, with the exact scroll on the advanced engine.)
 
 Initial repository CI separately passed Linux/macOS compilation and unit checks on the tooling baseline. That does not establish native macOS integration or validate later unpushed changes.
