@@ -1184,10 +1184,10 @@ def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
             rect = (row["x"] + 4, y + 4, row["x"] + row["width"] - 4, y + row["height"] - 4)
             assert color_count(image, viewport, rect, selected) > 400
             assert color_count(image, viewport, rect, text) > 30, "Selected palette result labels are blank"
-            # palette_view centers 620/720px panels, with a 32px horizontal margin.
-            width = min(720 if mode == "search" else 620, max(viewport["width"] - 32, 120))
+            # palette_view centers one 680px panel, with a 32px horizontal margin.
+            width = min(680, max(viewport["width"] - 32, 120))
             left = (viewport["width"] - width) / 2
-            top = min(72 if mode == "search" else 96, max(viewport["height"] * 0.16, 8))
+            top = min(80, max(viewport["height"] * 0.16, 8))
             assert color_count(image, viewport, (left + 8, top + 8, left + width - 8, top + 45), raised) > 100
             if mode == "search":
                 assert modal["results"][modal["active_index"]]["highlight"] is not None

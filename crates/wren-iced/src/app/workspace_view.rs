@@ -656,18 +656,21 @@ impl App {
         .style(move |_, status| chrome::control(self.definition, status, false, true));
         let footer = chrome::top_rule(
             container(
-                row![
-                    sort,
-                    iced::widget::space::horizontal(),
-                    chrome::label(
+                row![sort, iced::widget::space::horizontal()]
+                    .push(
                         self.shortcut_label(CommandId::NewDatedNote.key())
-                            .map_or_else(String::new, |shortcut| format!("{shortcut} dated")),
-                        11,
-                        colors.muted
+                            .map(|shortcut| {
+                                row![
+                                    chrome::label("Dated", 11, colors.muted),
+                                    chrome::keycap_owned(shortcut, self.definition)
+                                ]
+                                .spacing(6)
+                                .align_y(iced::Center)
+                            }),
                     )
-                ]
-                .spacing(6)
-                .clip(true),
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .clip(true),
             )
             .padding([8, 14]),
             self.definition,

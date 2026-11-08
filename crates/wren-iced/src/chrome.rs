@@ -60,7 +60,7 @@ pub fn surface(definition: Theme, background: Rgb, radius: f32, border: bool) ->
 /// the window recedes instead of turning gray.
 pub fn scrim(definition: Theme) -> container::Style {
     let alpha = match definition.appearance {
-        wren_core::theme::Appearance::Dark => 0.70,
+        wren_core::theme::Appearance::Dark => 0.65,
         wren_core::theme::Appearance::Light => 0.32,
     };
     container::Style {

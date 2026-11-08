@@ -1079,13 +1079,9 @@ impl App {
         let colors = self.definition.colors;
         let search = palette.mode == Mode::Search;
         let outline = palette.mode == Mode::Outline;
-        let width = if search {
-            720.0
-        } else if outline {
-            460.0
-        } else {
-            620.0
-        };
+        // Every mode shares one frame except the outline, which is narrow so
+        // it can sit beside the text it previews.
+        let width = if outline { 460.0 } else { PALETTE_WIDTH };
         // The outline previews headings in the editor, so it sits beside the
         // text: over the browser columns when they are wide enough, else at
         // the right, away from where lines start.
@@ -1096,8 +1092,7 @@ impl App {
         } else {
             iced::alignment::Horizontal::Right
         };
-        let top =
-            (if search { 72.0_f32 } else { 96.0_f32 }).min((self.viewport.height * 0.16).max(8.0));
+        let top = PALETTE_TOP.min((self.viewport.height * 0.16).max(8.0));
         let mut list_height =
             (self.viewport.height - top - 134.0).clamp(40.0, if search { 460.0 } else { 400.0 });
         if search {
@@ -1228,7 +1223,7 @@ impl App {
                 contents = contents.push(chrome::label(
                     if result.content_hit { "text" } else { "title" },
                     11,
-                    colors.faint,
+                    colors.muted,
                 ));
             }
             if result.current {
@@ -1365,6 +1360,9 @@ impl App {
     }
 }
 
+/// Every palette mode shares one frame, so switching modes never jumps.
+const PALETTE_WIDTH: f32 = 680.0;
+const PALETTE_TOP: f32 = 80.0;
 const RESULT_SPACING: f32 = 2.0;
 const RESULT_PADDING: f32 = 6.0;
 const GROUP_HEADER_SIZE: f32 = 11.0;
