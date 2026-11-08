@@ -34,6 +34,7 @@ only that one line.
 | `editor-font-family` | an installed font family, quoted | `"JetBrains Mono"` (bundled) | The editor font. **Change editor font…** lists the monospace ones; any installed family works here. An unknown family warns and uses JetBrains Mono. |
 | `line-numbers` | `true` / `false` | `true` | Show the editor's line-number gutter. |
 | `editor-engine` | `classic` / `advanced` | `classic` | The editor engine. `classic` is the current editor; `advanced` is Wren's new editor engine, which is still being evaluated. It keeps the exact scroll position through undo and places outline jumps precisely. A change applies on reload: the open note moves to the new engine with its text and cursor, but its undo history is cleared. |
+| `markdown-assist` | `on` / `off` | `on` | The Markdown-aware editing keys: Enter continues lists and quotes, Tab and Shift+Tab nest list items, Backspace removes markup, and Home stops after the markup. Off, Enter and Home are plain; Tab still inserts spaces and Backspace still deletes a whole character. See [Inside the editor](../getting-started/keybindings.md#inside-the-editor). Applies on reload. |
 | `keybind` | `<trigger> = <action>` | see [Keybindings](../getting-started/keybindings.md) | Add, replace, or remove a shortcut. Repeatable; later lines win. |
 
 ## Themes

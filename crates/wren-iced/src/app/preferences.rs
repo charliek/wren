@@ -228,6 +228,7 @@ impl App {
         let settings = &self.preferences.settings;
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
+        self.editor.set_markdown_assist(settings.markdown_assist);
         self.apply_editor_engine();
     }
 
@@ -624,6 +625,36 @@ mod tests {
         assert_eq!(app.editor.backend(), BackendKind::Iced);
         assert_eq!(app.editor.text(), text);
         assert!(!app.editor.can_undo());
+    }
+
+    #[test]
+    fn markdown_assist_applies_live_to_the_keys() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+        use wren_editor::Intent;
+
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        assert!(app.editor.markdown_assist());
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
+            std::sync::Arc::new("\nplain\n- item".into()),
+        ))));
+        let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
+        assert!(app.editor.text().ends_with("\n- item\n- "));
+
+        std::fs::write(&path, "markdown-assist = off\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert!(!app.editor.markdown_assist());
+        let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
+        assert!(app.editor.text().ends_with("\n- item\n- \n"));
     }
 
     #[test]

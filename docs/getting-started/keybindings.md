@@ -22,11 +22,58 @@ and Ctrl+A keep working in the editor and in every text field.
 | Open settings file | ⌘, | — | `settings.open` |
 | Quit (saves first) | ⌘Q | Ctrl+Q | `app.quit` |
 
-Inside the editor: undo is ⌘Z / Ctrl+Z, and redo is ⇧⌘Z / Ctrl+Shift+Z
-(Ctrl+Y also works on Linux). In the palette, use ↑ and ↓ to move, ↵ to run
-the highlighted row, and Esc to close. While the palette or a dialog is
-open, other shortcuts are ignored, except the palette shortcut itself
-(which closes the palette) and Quit.
+In the palette, use ↑ and ↓ to move, ↵ to run the highlighted row, and Esc
+to close. While the palette or a dialog is open, other shortcuts are
+ignored, except the palette shortcut itself (which closes the palette) and
+Quit.
+
+## Inside the editor
+
+| Action | macOS | Linux |
+|---|---|---|
+| Undo | ⌘Z | Ctrl+Z |
+| Redo | ⇧⌘Z | Ctrl+Shift+Z or Ctrl+Y |
+| Delete the previous word | ⌥⌫ | Ctrl+Backspace or Alt+Backspace |
+| Delete the next word | ⌥⌦ | Ctrl+Delete or Alt+Delete |
+| Delete to the start of the line | ⌘⌫ | — |
+| Start or end of the note | ⌘↑ / ⌘↓ | Ctrl+Home / Ctrl+End |
+| Start of the line (smart, below) | Home, ⌘←, or ⌃A | Home |
+
+Add Shift to Home and the motions to select as you go. Word deletes take
+the spaces next to the cursor with the word, and stop at punctuation that
+is not part of a word, so `foo!!` loses one `!`. Backspace and Delete
+always remove a whole character, so an emoji or an accented letter goes in
+one press. Tab never moves the keyboard out of the editor.
+
+### Markdown assist
+
+With `markdown-assist = on`, the default, the editing keys follow the
+Markdown around the cursor. `‸` marks the cursor:
+
+| Key | Before | After |
+|---|---|---|
+| Enter | `- item‸` | `- item`, then `- ‸` on a new line. Quotes (`> `), numbered lists (`9.` then `10.`), and task boxes (a new `- [ ] `) continue the same way. |
+| Enter on an empty item | `- ‸` | A nested item moves out one level. At the top level the marker goes, and a blank line separates the list from what you type next. |
+| Shift+Enter | `- [ ] a‸` | A new line inside the item, indented under its text, with no marker. |
+| Tab | `- a`, `- b‸` | `- b` becomes a child of `- a`, with its own children. A numbered item restarts at 1, and both lists are renumbered. On other lines Tab inserts spaces to the next multiple of 4. |
+| Shift+Tab | a nested item | The item moves out one level and takes that level's marker. |
+| Backspace | `- [ ] ‸` | `- ‸`, then `‸`: the task box goes first, then the marker. A nested marker moves out a level instead, and `> > ‸` loses one `>`. In indentation, Backspace goes back to the previous indent stop. |
+| Home | `- [ ] task‸` | `- [ ] ‸task`, then `‸- [ ] task`, then back. On a long line that wraps, the first press goes to the start of the wrapped row. |
+| ⌘⌫ | `- [ ] foo‸` | `- [ ] ‸`, then `‸`. |
+
+Enter in a numbered list renumbers the items after it while they count up
+in order; a deliberate gap or a countdown is left alone. Inside code
+blocks, front matter, and HTML, Enter only keeps the indentation and any
+quote or list prefix, and Tab inserts a tab or spaces like the line above.
+
+With `markdown-assist = off` in [`config.conf`](../reference/configuration.md),
+Enter, Shift+Enter, and Home are plain again. Backspace still deletes a
+whole character, Tab still inserts spaces to the next multiple of 4,
+Shift+Tab does nothing, ⌘⌫ deletes to the start of the line, and the word
+deletes and note motions work as above.
+
+While an input method is composing text, Enter, Tab, Backspace, and Delete
+belong to it.
 
 ## Moving between columns
 
