@@ -1,9 +1,11 @@
 //! `markdown.toggle_task` (§5.7).
 
+use std::collections::HashSet;
+
 use super::*;
 
 /// What toggling does to one line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Target {
     /// A task box whose mark is at byte `at` of line `line`.
     Task { line: usize, at: usize, done: bool },
@@ -37,7 +39,9 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     } else {
         covered(&sel)
     };
+    let setext = setext_text(&an);
     let mut targets: Vec<Target> = Vec::new();
+    let mut seen = HashSet::new();
     for j in first..=last {
         let info = &an.recs[j].info;
         if info.kind.is_code_like() {
@@ -67,10 +71,11 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
                     },
                 }
             }
-            _ if matches!(
-                info.kind,
-                Kind::Heading { .. } | Kind::ThematicBreak | Kind::SetextUnderline { .. }
-            ) =>
+            _ if setext.get(j) == Some(&true)
+                || matches!(
+                    info.kind,
+                    Kind::Heading { .. } | Kind::ThematicBreak | Kind::SetextUnderline { .. }
+                ) =>
             {
                 continue;
             }
@@ -79,7 +84,7 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
                 at: info.text_start.max(bom_len(j, base.line(j))),
             },
         };
-        if !targets.contains(&target) {
+        if seen.insert(target) {
             targets.push(target);
         }
     }
@@ -113,10 +118,70 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     finish(base, &d, marks)
 }
 
+/// Which lines are the text of a setext heading: the lines from each
+/// underline's `start` up to the underline.
+fn setext_text(an: &Analysis) -> Vec<bool> {
+    let mut text = vec![false; an.recs.len()];
+    for (u, rec) in an.recs.iter().enumerate() {
+        if let Kind::SetextUnderline { start, .. } = rec.info.kind {
+            text[start..u].fill(true);
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::edit::tests::check;
-    use crate::Intent;
+    use crate::edit::tests::{apply, check};
+    use crate::{plan, Document, Intent, Lines, Options, Pos, Selection};
+
+    fn items(n: usize) -> String {
+        (0..n).map(|i| format!("- item {i}\n  more\n")).collect()
+    }
+
+    fn select_all(doc: &Document) -> Selection {
+        let last = doc.line_count() - 1;
+        Selection::new(Pos::new(0, 0), Pos::new(last, doc.line(last).len()))
+    }
+
+    #[test]
+    fn toggle_task_over_many_items_boxes_each_once() {
+        let text = items(2_000);
+        let doc = Document::new(&text);
+        let boxed = plan(
+            &doc,
+            select_all(&doc),
+            Intent::ToggleTask,
+            &Options::default(),
+        );
+        let after = apply(&doc, &boxed);
+        assert_eq!(after, text.replace("- item", "- [ ] item"));
+        let again = Document::new(&after);
+        let done = plan(
+            &again,
+            select_all(&again),
+            Intent::ToggleTask,
+            &Options::default(),
+        );
+        assert_eq!(apply(&again, &done), text.replace("- item", "- [x] item"));
+    }
+
+    #[test]
+    #[ignore = "micro benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_toggle_task_over_a_whole_document() {
+        for n in [2_500, 5_000, 10_000, 20_000] {
+            let text = items(n / 2);
+            let doc = Document::new(&text);
+            let start = std::time::Instant::now();
+            plan(
+                &doc,
+                select_all(&doc),
+                Intent::ToggleTask,
+                &Options::default(),
+            );
+            println!("{n} lines: {:?}", start.elapsed());
+        }
+    }
 
     #[test]
     fn toggle_task_flips_a_box_or_adds_one() {
@@ -157,6 +222,9 @@ mod tests {
                 ("    code|", "    code|"),
                 ("# T|", "# T|"),
                 ("---|", "---|"),
+                ("Foo|\n===", "Foo|\n==="),
+                ("Foo\nbar|\n---", "Foo\nbar|\n---"),
+                ("> Foo|\n> ===", "> Foo|\n> ==="),
             ],
         );
     }
@@ -176,6 +244,7 @@ mod tests {
                 ("«- a\n  b»", "«- [ ] a\n  b»"),
                 ("«a\n»b", "- [ ] «a\n»b"),
                 ("«```\nx»", "«```\nx»"),
+                ("«Foo\n===\nbar»", "«Foo\n===\n- [ ] bar»"),
             ],
         );
     }
