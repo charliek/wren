@@ -14,6 +14,7 @@ use std::ops::Range;
 use crate::block::{self, Container, Kind, LineInfo, ListItem, Marker, Scanner, Segment};
 use crate::{EditPlan, Intent, Lines, Options, Pos, Replace, Selection};
 
+mod delete;
 mod tab;
 
 /// Plan `intent` at `sel`.
@@ -35,6 +36,11 @@ pub fn plan(
         Intent::ShiftEnter => enter(lines, sel, true, opts),
         Intent::Tab => tab::indent(lines, sel, true, opts),
         Intent::ShiftTab => tab::indent(lines, sel, false, opts),
+        Intent::Backspace => delete::backspace(lines, sel, opts),
+        Intent::Delete => delete::forward(lines, sel),
+        Intent::DeleteWordBackward => delete::word_backward(lines, sel),
+        Intent::DeleteWordForward => delete::word_forward(lines, sel),
+        Intent::DeleteToTextStart => delete::to_text_start(lines, sel),
         _ => unchanged(clamp_selection(lines, sel)),
     }
 }
