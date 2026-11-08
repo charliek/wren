@@ -115,7 +115,7 @@ class PackageTests(unittest.TestCase):
         self.source = self.base / "source with spaces"
         self.source.mkdir()
         for relative in (*ICON_ASSETS, "assets/wren.desktop", package.PROJECT_LICENSE,
-                         *package.FONT_NOTICES):
+                         *package.LICENSE_NOTICES):
             target = self.source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
@@ -171,14 +171,17 @@ class PackageTests(unittest.TestCase):
 
     def assert_notices(self, directory: Path):
         self.assertEqual((directory / "LICENSE").read_bytes(), (ROOT / "LICENSE").read_bytes())
-        for notice in package.FONT_NOTICES:
+        for notice in package.LICENSE_NOTICES:
             self.assertEqual((directory / notice).read_bytes(), (ROOT / notice).read_bytes())
         text = (directory / "THIRD_PARTY_NOTICES.txt").read_text()
-        for name in ("Inter", "JetBrains Mono", "SIL Open Font License", *map(str, package.FONT_NOTICES)):
+        for name in ("Inter", "JetBrains Mono", "SIL Open Font License", *map(str, package.LICENSE_NOTICES)):
             self.assertIn(name, text)
         self.assertIn("DEPENDENCY_NOTICES.txt", text)
         for copied in ("iced_widget 0.14.2", "iced_graphics 0.14.0", "cosmic-text 0.15.0"):
             self.assertIn(copied, text)
+        self.assertIn("Copyright 2019 Héctor Ramón, Iced contributors",
+                      (directory / "third_party/iced/LICENSE").read_text())
+        self.assertIn("modified cosmic-text 0.15.0", text)
         self.assertIn("MIT License", text)
         self.assertEqual((directory / "DEPENDENCY_NOTICES.txt").read_bytes(), self.dependency_text)
         self.assertIn("fixture-dependency", self.dependency_text.decode("utf-8"))
@@ -448,7 +451,7 @@ class PackageTests(unittest.TestCase):
 
     def test_source_ancestor_replaced_after_checked_path_cannot_redirect_reads(self):
         real_checked = package.checked_path
-        for index, source in enumerate((self.binary, self.source / package.FONT_NOTICES[0])):
+        for index, source in enumerate((self.binary, self.source / package.LICENSE_NOTICES[0])):
             with self.subTest(source=source):
                 foreign = self.base / f"foreign-source-{index}"
                 foreign.mkdir()
@@ -479,7 +482,7 @@ class PackageTests(unittest.TestCase):
 
     def test_source_parent_renamed_after_pinning_reads_original_not_replacement(self):
         real_open = os.open
-        for index, source in enumerate((self.binary, self.source / package.FONT_NOTICES[0])):
+        for index, source in enumerate((self.binary, self.source / package.LICENSE_NOTICES[0])):
             with self.subTest(source=source):
                 expected = source.read_bytes()
                 foreign = self.base / f"foreign-pinned-source-{index}"
@@ -507,9 +510,9 @@ class PackageTests(unittest.TestCase):
         self.assert_source_unchanged()
 
     def test_symlink_notice_is_not_followed_and_stage_is_cleaned(self):
-        notice = self.source / package.FONT_NOTICES[0]
+        notice = self.source / package.LICENSE_NOTICES[0]
         notice.unlink()
-        notice.symlink_to(ROOT / package.FONT_NOTICES[0])
+        notice.symlink_to(ROOT / package.LICENSE_NOTICES[0])
         parent = self.base / "bundle with spaces"
         with self.assertRaisesRegex(package.PackageError, "symlinks"):
             self.assemble()
@@ -698,7 +701,7 @@ class PackageTests(unittest.TestCase):
         self.assertTrue((unrelated / "artifact").is_file())
 
     def test_missing_notice_cleans_partial_bundle_and_preserves_binary(self):
-        (self.source / package.FONT_NOTICES[1]).unlink()
+        (self.source / package.LICENSE_NOTICES[1]).unlink()
         before = snapshot(self.source)
         with self.assertRaises(FileNotFoundError):
             self.assemble()
