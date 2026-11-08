@@ -103,6 +103,10 @@ pub struct App {
     endpoint: Option<crate::test_ipc::Endpoint>,
     #[cfg(feature = "smoke-test")]
     capture_pending: bool,
+    /// A test holds the session's timer, so autosave cannot write a draft
+    /// before the test has armed a storage fault.
+    #[cfg(feature = "smoke-test")]
+    timer_held: bool,
     #[cfg(feature = "smoke-test")]
     frames: crate::test_capture::Frames,
     /// How long each recent `view` took to build, for the harness's idle
@@ -311,6 +315,8 @@ impl App {
             #[cfg(feature = "smoke-test")]
             capture_pending: false,
             #[cfg(feature = "smoke-test")]
+            timer_held: false,
+            #[cfg(feature = "smoke-test")]
             frames: crate::test_capture::Frames::default(),
             #[cfg(feature = "smoke-test")]
             view_micros: Default::default(),
@@ -417,6 +423,10 @@ impl App {
             Message::MenuCommand(key) => return self.menu_command(&key),
             Message::Tick => {
                 self.count_words(Instant::now());
+                #[cfg(feature = "smoke-test")]
+                if self.timer_held {
+                    return Task::none();
+                }
                 if self.session.is_some() {
                     let task = self.process_core(Op::Tick).task;
                     return self.spawn_reconcile(task);

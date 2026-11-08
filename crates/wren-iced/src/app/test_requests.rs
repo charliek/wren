@@ -127,6 +127,13 @@ impl App {
                 self.workspace_reply = Some(Arc::clone(request));
                 return Ok(task);
             }
+            "test.timer.hold" => {
+                if self.endpoint.is_none() || self.test_sandbox.is_none() {
+                    return Err("Holding the timer requires the private test IPC endpoint".into());
+                }
+                self.timer_held = params.get("held").and_then(Value::as_bool).ok_or("held must be a boolean")?;
+                request.respond(Ok(Value::Null));
+            }
             "test.fail_next" => {
                 if self.endpoint.is_none() || self.test_sandbox.is_none() {
                     return Err("Fault injection requires the private test IPC endpoint".into());

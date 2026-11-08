@@ -770,6 +770,9 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
         before = session(app)
         source = vault / before["document"]["path"]
         original = source.read_bytes()
+        # Opening and querying a palette can outlast autosave's idle delay, and
+        # autosave must not write the draft before the fault is armed.
+        app.client.call("test.timer.hold", {"held": True})
         expected = append(app, f"retained draft for {transition}\n")
         app.client.call("editor.cursor", {"line": 0, "column": 10,
                                          "selection": {"line": 0, "column": 6}})
@@ -804,6 +807,7 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
             blocked = response["navigation"]["processed"]
             assert "injected storage failure" in blocked["warning"]
         assert blocked["correlation"] > nav_before["processed"]["correlation"]
+        app.client.call("test.timer.hold", {"held": False})
         # Freeze only subsequent timer retries, after the injected write was reached.
         with unwritable(source.parent):
             after = session(app)
