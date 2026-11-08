@@ -55,7 +55,8 @@ ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,cosmic \
 
 The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=cosmic make smoke-x11` runs the whole suite with the editor
-cases on Cosmic.
+cases on Cosmic. CI sets `WRENTEST_ENGINE=classic,cosmic` on all four Linux
+smoke lanes.
 
 ## Looking at real screens
 

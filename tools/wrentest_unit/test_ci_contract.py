@@ -88,6 +88,8 @@ class WorkflowContractTests(unittest.TestCase):
         smoke = job_blocks(source)["linux-smoke"]
         self.assertIn("ICED_BACKEND: ${{ matrix.renderer }}", smoke)
         self.assertIn("WGPU_BACKEND: vulkan", smoke)
+        # Every display and renderer lane runs the editor suite on both engines.
+        self.assertIn("WRENTEST_ENGINE: classic,cosmic", smoke)
         self.assertRegex(smoke, r"if: always\(\)\n +uses: actions/upload-artifact@")
         self.assertIn("name: wrentest-${{ matrix.display }}-${{ matrix.renderer }}", smoke)
         self.assertIn("path: target/wrentest/", smoke)
