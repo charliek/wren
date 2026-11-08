@@ -277,6 +277,33 @@ def test_native_smart_keys(keys_app) -> None:
         native_text(app, "- a\n  ", "BackSpace turns the marker into indentation")
 
 
+@pytest.mark.native_x11
+def test_native_keys_with_assist_off(keys_app) -> None:
+    """Without assist, Tab indents selected lines, and the Markdown commands'
+    keys do what they did before there were commands."""
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    with keys_app("keys-native-plain", settings="markdown-assist = off\n") as app:
+        call = app.client.call
+        call("editor.set", {"text": "one\ntwo\nthree"})
+        window = focus_native(app)
+
+        def key(*names: str) -> None:
+            xdo("key", "--window", window, "--clearmodifiers", *names)
+
+        key("ctrl+Home", "shift+Down", "shift+Down", "shift+End", "Tab")
+        native_text(app, "    one\n    two\n    three", "Tab indents the selected lines")
+        key("shift+Tab")
+        native_text(app, "one\ntwo\nthree", "Shift+Tab outdents them")
+        call("editor.set", {"text": "ab\ncd"})
+        call("editor.cursor", {"line": 1, "column": 2, "selection": None})
+        key("alt+Up")
+        wait_for(lambda: call("editor.get")["cursor"] == {"line": 0, "column": 2},
+                 description="alt+Up moves the cursor up")
+        assert call("editor.get")["text"] == "ab\ncd"
+        key("ctrl+Return")
+        native_text(app, "ab\n\ncd", "ctrl+Return breaks the line")
+
+
 def run(app: WrenApp, command: str) -> str:
     """Run *command* as the palette does, returning its disposition."""
     return app.client.call("command.run", {"id": command})["disposition"]

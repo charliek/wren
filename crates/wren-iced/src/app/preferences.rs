@@ -46,19 +46,26 @@ pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
 /// The editor's say over its keys, from the keymap and key reading the app's
 /// own shortcuts use: a host command's key is the app's, and an editor
 /// command's key is the editor's intent.
-fn key_policy(keymap: &Keymap) -> KeyPolicy {
+fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
     let keymap = keymap.clone();
     std::sync::Arc::new(move |key, physical, modifiers| {
-        crate::keys::shortcut(key, physical, modifiers)
-            .map_or(KeyRoute::Pass, |trigger| key_route(&keymap, &trigger))
+        crate::keys::shortcut(key, physical, modifiers).map_or(KeyRoute::Pass, |trigger| {
+            key_route(&keymap, &trigger, markdown_assist)
+        })
     })
 }
 
-/// Where the editor sends a press of `trigger`.
-pub(super) fn key_route(keymap: &Keymap, trigger: &Accel) -> KeyRoute {
+/// Where the editor sends a press of `trigger`. Without Markdown assist the
+/// editor commands are off, so their keys keep the editor's own meaning:
+/// Ctrl+Enter breaks the line and Alt+↑ moves up.
+pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool) -> KeyRoute {
     match keymap.action(trigger).and_then(CommandId::parse) {
         None => KeyRoute::Pass,
-        Some(id) => id.intent().map_or(KeyRoute::Host, KeyRoute::Intent),
+        Some(id) => match id.intent() {
+            None => KeyRoute::Host,
+            Some(intent) if markdown_assist => KeyRoute::Intent(intent),
+            Some(_) => KeyRoute::Pass,
+        },
     }
 }
 
@@ -248,8 +255,10 @@ impl App {
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
         self.editor.set_markdown_assist(settings.markdown_assist);
-        self.editor
-            .set_key_policy(key_policy(&self.preferences.keymap));
+        self.editor.set_key_policy(key_policy(
+            &self.preferences.keymap,
+            settings.markdown_assist,
+        ));
         self.apply_editor_engine();
     }
 
@@ -666,7 +675,7 @@ mod tests {
             |action| CommandId::parse(action).is_some(),
         );
         assert!(warnings.is_empty());
-        let policy = key_policy(&keymap);
+        let policy = key_policy(&keymap, true);
         let (editing, app) = match Platform::current() {
             Platform::Mac => (Modifiers::LOGO, Modifiers::LOGO),
             Platform::Linux => (Modifiers::CTRL, Modifiers::ALT),
@@ -723,6 +732,29 @@ mod tests {
                 Modifiers::empty()
             ),
             KeyRoute::Pass
+        );
+        // Without assist the editor commands' keys are the editor's own
+        // again, and the app's stay the app's.
+        let plain = key_policy(&keymap, false);
+        assert_eq!(
+            plain(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                editing
+            ),
+            KeyRoute::Pass
+        );
+        assert_eq!(
+            plain(
+                &Key::Named(Named::ArrowUp),
+                Physical::Code(Code::ArrowUp),
+                Modifiers::ALT
+            ),
+            KeyRoute::Pass
+        );
+        assert_eq!(
+            plain(&Key::Character("p".into()), Physical::Code(Code::KeyP), app),
+            KeyRoute::Host
         );
     }
 

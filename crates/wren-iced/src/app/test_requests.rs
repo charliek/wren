@@ -80,7 +80,11 @@ impl App {
                     let keymap = &self.preferences.keymap;
                     let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
                     let wren_editor::KeyRoute::Intent(intent) =
-                        super::preferences::key_route(keymap, trigger)
+                        super::preferences::key_route(
+                            keymap,
+                            trigger,
+                            self.editor.markdown_assist(),
+                        )
                     else {
                         return Err("The editor does not route this command's key".into());
                     };

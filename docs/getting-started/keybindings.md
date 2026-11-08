@@ -104,8 +104,10 @@ These keys belong to the editor: they work only while it has the keyboard,
 so in the find bar, a filter box, or a browser column they do nothing. The
 palette lists them under **Markdown**; run from there, they act at the
 editor's cursor and give it the keyboard. They are unavailable while
-`markdown-assist = off`. On macOS, ⌘ with a letter never types the letter,
-even when nothing is bound to it.
+`markdown-assist = off`, and their keys then do what they do in any text:
+⌘↵ (Ctrl+Enter) starts a new line, and ⌥↑ / ⌥↓ (Alt+↑ / Alt+↓) move the
+cursor. On macOS, ⌘ with a letter never types the letter, even when
+nothing is bound to it.
 
 ## Moving between columns
 
