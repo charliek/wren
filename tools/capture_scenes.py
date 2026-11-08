@@ -45,6 +45,8 @@ tags: [demo]
 Selection crosses
 
 blank lines and ~~struck~~ text.
+
+**[Bold](https://x.io/a_b)** and https://x.io/Foo_(bar).
 ```sh
 cargo test
 ```
@@ -54,7 +56,8 @@ tilde fence
     indented code
 See https://example.com for more.
 """
-# The selection runs from "crosses" (line 15) into line 17.
+# The selection runs from "crosses" (line 15) into line 17, leaving prose
+# between the cursor's line and the first fence so the code band shows apart.
 MARKDOWN_SELECTION = ({"line": 15, "column": 10}, {"line": 17, "column": 5})
 
 
