@@ -22,9 +22,10 @@ version's section as its notes, and publishes to the apt repo. See
   characters, and Home stops after the markup first. The `markdown-assist`
   setting (default `on`) and the palette's **Toggle Markdown assist** turn
   it off; Tab still inserts spaces to the next multiple of 4 when it is.
-- **Markdown commands:** Toggle task (⌘↵, Ctrl+Enter on Linux), Bold (⌘B),
-  Italic (⌘I), Inline code (⌘E), and Move line up / down (⌥↑ / ⌥↓), also
-  in the palette under **Markdown**.
+- **Markdown commands:** Toggle task (⌘↵), Bold (⌘B), Italic (⌘I), Inline
+  code (⌘E), and Move line up / down (⌥↑ / ⌥↓), also in the palette under
+  **Markdown**. On Linux the first four take Ctrl (Ctrl+Enter, Ctrl+B,
+  Ctrl+I, Ctrl+E).
 - **Jump to heading** (⇧⌘O, Alt+Shift+O on Linux) lists the open note's
   headings. Moving the highlight shows each one; ↵ keeps it and Esc puts
   the cursor and scroll back.
