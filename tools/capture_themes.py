@@ -84,9 +84,18 @@ kubectl rollout undo deploy/gateway-read --to-revision=41
 }
 
 
+# Marks a workspace this script built, so a rerun may replace it; any other
+# nonempty directory is left alone.
+MARKER = ".wren-capture"
+
+
 def build_workspace(root: Path) -> None:
     if root.exists():
+        if not (root / MARKER).is_file() and any(root.iterdir()):
+            raise SystemExit(f"{root} is not empty and was not built by this script")
         shutil.rmtree(root)
+    root.mkdir(parents=True)
+    (root / MARKER).write_text("", encoding="utf-8")
     for relative, text in SAMPLE.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)

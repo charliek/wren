@@ -1096,13 +1096,12 @@ impl App {
         let mut list_height =
             (self.viewport.height - top - 134.0).clamp(40.0, if search { 460.0 } else { 400.0 });
         if search {
-            // Search hugs its results (76 px rows, 2 px gaps, 6 px padding)
-            // instead of framing a mostly empty panel.
+            // Search hugs its results instead of framing a mostly empty panel.
             let rows = palette.results.len() as f32;
             let content = if rows == 0.0 {
                 48.0
             } else {
-                rows * 76.0 + (rows - 1.0) * 2.0 + 12.0
+                rows * SEARCH_ROW_HEIGHT + (rows - 1.0) * RESULT_SPACING + 2.0 * RESULT_PADDING
             };
             list_height = list_height.min(content.max(160.0));
         } else {
@@ -1370,9 +1369,11 @@ const GROUP_HEADER_PADDING: f32 = 8.0;
 /// The header label at iced's default 1.3 line height, plus its padding.
 const GROUP_HEADER_HEIGHT: f32 = GROUP_HEADER_SIZE * 1.3 + 2.0 * GROUP_HEADER_PADDING;
 
+const SEARCH_ROW_HEIGHT: f32 = 76.0;
+
 fn row_height(search: bool, result: &ResultRow) -> f32 {
     if search {
-        76.0
+        SEARCH_ROW_HEIGHT
     } else if result.path.is_empty() {
         44.0
     } else {

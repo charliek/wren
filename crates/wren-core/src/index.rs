@@ -677,9 +677,12 @@ fn snippet(text: &str, hit: Range<usize>) -> Snippet {
     // Start and end on word boundaries so the context never opens or closes
     // on half a word or half a link.
     let start = text[start..hit.start]
-        .find(char::is_whitespace)
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace())
         .filter(|_| start != 0)
-        .map_or(start, |relative| start + relative + 1);
+        .map_or(start, |(relative, space)| {
+            start + relative + space.len_utf8()
+        });
     let end = text[hit.end..end]
         .rfind(char::is_whitespace)
         .filter(|_| end != text.len())
@@ -895,9 +898,8 @@ fn only_block_markers(line: &str) -> bool {
 /// a word, so `2*3` and `snake_case` keep theirs.
 fn drop_inline_markup(line: &str, dropped: &mut [bool]) {
     let bytes = line.as_bytes();
-    let blank = |index: Option<usize>| {
-        index
-            .and_then(|index| line[index..].chars().next())
+    let blank = |character: Option<char>| {
+        character
             .is_none_or(|character| character.is_whitespace() || character.is_ascii_punctuation())
     };
     let mut index = 0;
@@ -916,8 +918,8 @@ fn drop_inline_markup(line: &str, dropped: &mut [bool]) {
                     .iter()
                     .take_while(|byte| **byte == marker)
                     .count();
-                let before = index.checked_sub(1);
-                let after = Some(index + run).filter(|after| *after < bytes.len());
+                let before = line[..index].chars().next_back();
+                let after = line[index + run..].chars().next();
                 let opens = !blank(after) && blank(before);
                 let closes = !blank(before) && blank(after);
                 if run <= 3 && (opens || closes) {
@@ -1373,6 +1375,30 @@ mod tests {
             result.text
         );
         assert_eq!(&result.text[result.highlight.unwrap()], "rollback");
+    }
+
+    #[test]
+    fn markup_and_word_boundaries_after_multi_byte_characters_stay_on_char_boundaries() {
+        for text in [
+            "café*bold*",
+            "naïve_name",
+            "日本語_x_ and **é**",
+            "é_",
+            "»*«",
+        ] {
+            plain_markdown(text, true);
+            Preview::new(text);
+        }
+        assert_eq!(
+            plain_markdown("café *latte* naïve_name", true).0,
+            "café latte naïve_name"
+        );
+        // The leading context's first whitespace is a three-byte ideographic space.
+        let text = format!("{}\u{3000}abc needle", "語".repeat(100));
+        let hit = text.find("needle").unwrap();
+        let result = snippet(&text, hit..hit + 6);
+        assert_eq!(result.text, "…abc needle");
+        assert_eq!(&result.text[result.highlight.unwrap()], "needle");
     }
 
     #[test]
