@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
+use wren_markdown::block::{self, Kind, Scanner};
 
 use crate::fs_store::{DiskFile, FsStore, RelPath};
 use crate::model::{GroupId, Note, NoteId, SectionId, Workspace};
@@ -70,7 +71,7 @@ struct Content {
     // Shared with background reconciliation snapshots, which compare exact bytes.
     text: Arc<str>,
     folded: Box<str>,
-    preview: Range<usize>,
+    preview: Preview,
 }
 
 impl Content {
@@ -141,7 +142,7 @@ impl Index {
 
     pub fn preview(&self, note: NoteId) -> Option<&str> {
         let content = self.entries.get(&note)?.content.as_ref()?;
-        Some(&content.text[content.preview.clone()])
+        Some(&content.text[content.preview.range.clone()])
     }
 
     pub fn content(&self, note: NoteId) -> Option<&str> {
@@ -225,7 +226,10 @@ impl Index {
                     ))
                 });
                 let snippet = match &entry.content {
-                    Some(content) => snippet(&content.text, content_match.clone()),
+                    Some(content) => match &content_match {
+                        Some(hit) => snippet(&content.text, hit.clone()),
+                        None => content.preview.snippet(&content.text),
+                    },
                     None => Snippet {
                         text: String::new(),
                         highlight: None,
@@ -433,7 +437,7 @@ impl Index {
         let content = Content {
             text: text.into(),
             folded: folded.into_boxed_str(),
-            preview: clipped_preview(text),
+            preview: Preview::new(text),
         };
         self.retained_bytes += content.bytes();
         self.entries
@@ -543,87 +547,94 @@ fn lowercase(text: &str) -> String {
     }
 }
 
+/// The first body line's words: the first paragraph line that is not
+/// heading text, with its block markers (`>`, list markers, task boxes) and
+/// surrounding whitespace dropped. Classified by `wren_markdown::block`, so
+/// front matter, setext headings, and fences read as the editor reads them.
 fn body_line(text: &str) -> Range<usize> {
-    let mut offset = 0;
-    let mut after_cr = false;
-    let mut lines = text
-        .split_inclusive(['\r', '\n'])
-        .filter_map(|raw| {
-            let continuation = after_cr && raw == "\n";
-            after_cr = raw.ends_with('\r');
-            let start = offset + raw.len() - raw.trim_start().len();
-            offset += raw.len();
-            let line = raw.trim();
-            (!continuation).then_some(start..start + line.len())
-        })
-        .peekable();
-    let underline = |line: &str| {
-        !line.is_empty()
-            && (line.bytes().all(|byte| byte == b'=') || line.bytes().all(|byte| byte == b'-'))
+    body_line_in(text, wren_markdown::line_ranges(text).map(|(line, _)| line))
+}
+
+/// [`body_line`] over `text`'s lines, read lazily: it stops at the first
+/// body line, so a long note costs only the lines before it.
+fn body_line_in(text: &str, mut lines: impl Iterator<Item = Range<usize>>) -> Range<usize> {
+    let Some(first) = lines.next() else {
+        return 0..0;
     };
-    while let Some(range) = lines.next() {
-        let line = &text[range.clone()];
-        if line.is_empty() {
-            continue;
-        }
-        let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
-        let heading = (1..=6).contains(&hashes)
-            && (hashes == line.len() || line[hashes..].starts_with(char::is_whitespace));
-        if heading
-            || underline(line)
-            || lines
-                .peek()
-                .is_some_and(|next| underline(&text[next.clone()]))
-        {
-            continue;
-        }
-        let skipped = line.len() - strip_block_markers(line).len();
-        return range.start + skipped..range.end;
-    }
-    0..0
-}
-
-/// Drop leading Markdown block markers (`>`, `-`/`*`/`+`, `1.`, `[ ]`/`[x]`)
-/// so previews show the line's words.
-fn strip_block_markers(mut line: &str) -> &str {
-    loop {
-        let trimmed = line.trim_start();
-        let rest = if let Some(rest) = trimmed.strip_prefix('>') {
-            rest
-        } else if let Some(rest) = ["- ", "* ", "+ "]
-            .iter()
-            .find_map(|marker| trimmed.strip_prefix(marker))
-        {
-            rest
-        } else if let Some(rest) = ["[ ] ", "[x] ", "[X] "]
-            .iter()
-            .find_map(|marker| trimmed.strip_prefix(marker))
-        {
-            rest
-        } else {
-            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
-            match trimmed[digits..]
-                .strip_prefix(". ")
-                .or_else(|| trimmed[digits..].strip_prefix(") "))
-            {
-                Some(rest) if digits > 0 => rest,
-                _ => return trimmed,
+    // Front matter is read only when line 0 opens it, and then only to the
+    // first `---` or `...` line: `front_matter_end` decides by that line.
+    let delimiter = |line: &Range<usize>| text[line.clone()].trim_end_matches([' ', '\t']);
+    let mut head = vec![first];
+    let first = delimiter(&head[0]);
+    if first.strip_prefix('\u{feff}').unwrap_or(first) == "---" {
+        for line in lines.by_ref() {
+            let closes = matches!(delimiter(&line), "---" | "...");
+            head.push(line);
+            if closes {
+                break;
             }
-        };
-        if rest.trim().is_empty() {
-            return trimmed;
         }
-        line = rest;
     }
+    let head_lines: Vec<&str> = head.iter().map(|line| &text[line.clone()]).collect();
+    let mut scanner = Scanner::with_front_matter(block::front_matter_end(&head_lines[..]));
+    let mut candidate: Option<(usize, Range<usize>)> = None;
+    for (index, range) in head.into_iter().chain(lines).enumerate() {
+        let line = &text[range.clone()];
+        let info = scanner.next_line(line);
+        match info.kind {
+            Kind::Prose => {
+                if candidate.is_none() {
+                    let start = range.start + info.text_start;
+                    let words = line[info.text_start..].trim_end();
+                    candidate = Some((index, start..start + words.len()));
+                }
+            }
+            // Paragraph lines from `start` on were heading text.
+            Kind::SetextUnderline { start, .. } => match candidate {
+                Some((line, _)) if line >= start => candidate = None,
+                Some((_, range)) => return range,
+                None => {}
+            },
+            _ => {
+                if let Some((_, range)) = candidate {
+                    return range;
+                }
+            }
+        }
+    }
+    candidate.map_or(0..0, |(_, range)| range)
 }
 
-fn clipped_preview(text: &str) -> Range<usize> {
-    let line = body_line(text);
-    let end = text[line.clone()]
-        .char_indices()
-        .nth(PREVIEW_CHARS)
-        .map_or(line.end, |(byte, _)| line.start + byte);
-    line.start..end
+/// A note's preview: the first body line, clipped to [`PREVIEW_CHARS`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Preview {
+    range: Range<usize>,
+    truncated: bool,
+}
+
+impl Preview {
+    fn new(text: &str) -> Self {
+        let line = body_line(text);
+        let end = text[line.clone()]
+            .char_indices()
+            .nth(PREVIEW_CHARS)
+            .map_or(line.end, |(byte, _)| line.start + byte);
+        Self {
+            truncated: end < line.end,
+            range: line.start..end,
+        }
+    }
+
+    fn snippet(&self, text: &str) -> Snippet {
+        let mut preview = text[self.range.clone()].to_owned();
+        if self.truncated {
+            preview.push('…');
+        }
+        Snippet {
+            text: preview,
+            highlight: None,
+        }
+    }
 }
 
 fn original_range(text: &str, folded: Range<usize>) -> Range<usize> {
@@ -644,34 +655,17 @@ fn original_range(text: &str, folded: Range<usize>) -> Range<usize> {
     start.unwrap_or(text.len())..text.len()
 }
 
-fn snippet(text: &str, hit: Option<Range<usize>>) -> Snippet {
-    if hit.is_none() {
-        let preview = clipped_preview(text);
-        let truncated = preview.end < body_line(text).end;
-        let mut text = text[preview].to_owned();
-        if truncated {
-            text.push('…');
-        }
-        return Snippet {
-            text,
-            highlight: None,
-        };
-    }
-    let (start, end) = match &hit {
-        Some(hit) => {
-            let start = text[..hit.start]
-                .char_indices()
-                .rev()
-                .nth(CONTEXT_CHARS - 1)
-                .map_or(0, |(byte, _)| byte);
-            let end = text[hit.end..]
-                .char_indices()
-                .nth(CONTEXT_CHARS)
-                .map_or(text.len(), |(byte, _)| hit.end + byte);
-            (start, end)
-        }
-        None => unreachable!("preview returned above"),
-    };
+/// A search hit's context: the hit with up to [`CONTEXT_CHARS`] on each side.
+fn snippet(text: &str, hit: Range<usize>) -> Snippet {
+    let start = text[..hit.start]
+        .char_indices()
+        .rev()
+        .nth(CONTEXT_CHARS - 1)
+        .map_or(0, |(byte, _)| byte);
+    let end = text[hit.end..]
+        .char_indices()
+        .nth(CONTEXT_CHARS)
+        .map_or(text.len(), |(byte, _)| hit.end + byte);
     let mut result = String::new();
     if start != 0 {
         result.push('…');
@@ -683,7 +677,7 @@ fn snippet(text: &str, hit: Option<Range<usize>>) -> Snippet {
     }
     Snippet {
         text: result,
-        highlight: hit.map(|hit| prefix + hit.start - start..prefix + hit.end - start),
+        highlight: Some(prefix + hit.start - start..prefix + hit.end - start),
     }
 }
 
@@ -959,16 +953,16 @@ mod tests {
     #[test]
     fn snippets_are_utf8_safe_near_both_ends_and_in_long_content() {
         for text in ["é日本", "", "a"] {
-            let result = snippet(text, None);
+            let result = Preview::new(text).snippet(text);
             assert_eq!(result.text, text);
             assert!(result.highlight.is_none());
         }
         let text = format!("{}Needle{}", "界".repeat(200), "é".repeat(200));
-        let result = snippet(&text, Some(600..606));
+        let result = snippet(&text, 600..606);
         assert!(result.text.starts_with('…') && result.text.ends_with('…'));
         assert_eq!(&result.text[result.highlight.unwrap()], "Needle");
         for hit in [0..3, text.len() - 2..text.len()] {
-            let result = snippet(&text, Some(hit.clone()));
+            let result = snippet(&text, hit.clone());
             assert_eq!(&result.text[result.highlight.unwrap()], &text[hit]);
         }
     }
@@ -1079,15 +1073,94 @@ mod tests {
             ("> - quoted item", "quoted item"),
             ("12. Numbered", "Numbered"),
             ("3) Paren", "Paren"),
-            ("-", "-"),
-            ("- [ ]", "[ ]"),
+            ("-", ""),
+            ("- [ ]", ""),
             ("Plain *emphasis*", "Plain *emphasis*"),
             ("2026-11-04 notes", "2026-11-04 notes"),
         ] {
-            assert_eq!(strip_block_markers(line), expected, "{line:?}");
+            assert_eq!(&line[body_line(line)], expected, "{line:?}");
         }
         let text = "# Title\n\n- First item\n";
         assert_eq!(&text[body_line(text)], "First item");
+    }
+
+    #[test]
+    fn previews_skip_front_matter_code_fences_and_multi_line_setext_headings() {
+        for (text, expected) in [
+            ("---\ntitle: Notes\n---\nBody", "Body"),
+            ("Two line\nheading\n---\nBody", "Body"),
+            ("```\n\n```\nAfter", "After"),
+            ("~~~\ncode\n~~~\nAfter", "After"),
+            ("Para\n\n---\n", "Para"),
+        ] {
+            assert_eq!(&text[body_line(text)], expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn previews_read_only_the_lines_before_the_first_body_line() {
+        // A paragraph is read to its end, since a setext underline below it
+        // would make the whole paragraph a heading; nothing past it is read.
+        let text = format!("# Title\nFirst words\n\n{}", "more prose\n".repeat(100_000));
+        let touched = std::cell::Cell::new(0);
+        let lines = wren_markdown::line_ranges(&text).map(|(line, _)| {
+            touched.set(touched.get() + 1);
+            line
+        });
+        assert_eq!(&text[body_line_in(&text, lines)], "First words");
+        assert!(touched.get() <= 4, "read {} lines", touched.get());
+    }
+
+    #[test]
+    fn lazy_previews_read_front_matter_like_the_whole_document_scan() {
+        fn whole(text: &str) -> Range<usize> {
+            use wren_markdown::{Document, Lines as _};
+            let document = Document::new(text);
+            let mut scanner = Scanner::with_front_matter(block::front_matter_end(&document));
+            let mut candidate: Option<(usize, Range<usize>)> = None;
+            for index in 0..document.line_count() {
+                let line = document.line(index);
+                let info = scanner.next_line(line);
+                match info.kind {
+                    Kind::Prose => {
+                        if candidate.is_none() {
+                            let start = document.line_range(index).start + info.text_start;
+                            let words = line[info.text_start..].trim_end();
+                            candidate = Some((index, start..start + words.len()));
+                        }
+                    }
+                    Kind::SetextUnderline { start, .. } => match candidate {
+                        Some((line, _)) if line >= start => candidate = None,
+                        Some((_, range)) => return range,
+                        None => {}
+                    },
+                    _ => {
+                        if let Some((_, range)) = candidate {
+                            return range;
+                        }
+                    }
+                }
+            }
+            candidate.map_or(0..0, |(_, range)| range)
+        }
+        for text in [
+            "",
+            "---",
+            "---\n",
+            "---\n---\nBody",
+            "---\n\n---\nBody",
+            "---\nkey: v\n---\nBody",
+            "---\r\nkey: v\r\n...\r\nBody",
+            "\u{feff}---  \nkey: v\n---\t\nBody",
+            "---\n\n\ntitle: x\n\n---\nBody",
+            "---\nnot yaml\n---\nBody",
+            "---\nkey: v\nBody never closed",
+            "---\n# comment\n...\n\nBody",
+            "---\nkey: v\n--- \u{a0}\nstill front\n---\nBody",
+            "Para\n---\nBody",
+        ] {
+            assert_eq!(body_line(text), whole(text), "{text:?}");
+        }
     }
 
     #[test]
@@ -1132,7 +1205,7 @@ mod tests {
             index.preview(NoteId(4)).unwrap().chars().count(),
             PREVIEW_CHARS
         );
-        let snippet = snippet(&text, None);
+        let snippet = Preview::new(&text).snippet(&text);
         assert!(snippet.text.ends_with('…'));
         assert_eq!(snippet.text.chars().count(), PREVIEW_CHARS + 1);
     }

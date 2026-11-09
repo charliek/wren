@@ -72,7 +72,8 @@ fi
 
 # 4. Verify every workspace member's lock entry moved; a member that overrides
 #    the inherited version would be left behind.
-for member in wren-core wren-iced; do
+for manifest in crates/*/Cargo.toml; do
+  member="$(basename "$(dirname "$manifest")")"
   locked="$(awk -v name="$member" '
     $0 == "name = \"" name "\"" { found = 1; next }
     found && /^version = / { gsub(/^version = "|"$/, ""); print; exit }

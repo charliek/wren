@@ -39,23 +39,37 @@ pub fn input(event: &keyboard::Event) -> Option<Input> {
     else {
         return None;
     };
-    if !(modifiers.control() || modifiers.alt() || modifiers.logo()) {
-        if let Some(function) = accel(key, *physical_key, *modifiers)
-            .filter(|accel| wren_core::keybind::is_function_key(&accel.key))
-        {
-            return Some(Input::Accel(function));
-        }
-        return match key {
-            Key::Named(Named::Escape) => Some(Input::Nav(Nav::Escape)),
-            Key::Named(Named::ArrowUp) => Some(Input::Nav(Nav::Up)),
-            Key::Named(Named::ArrowDown) => Some(Input::Nav(Nav::Down)),
-            Key::Named(Named::ArrowLeft) => Some(Input::Nav(Nav::Left)),
-            Key::Named(Named::ArrowRight) => Some(Input::Nav(Nav::Right)),
-            Key::Named(Named::Enter) => Some(Input::Nav(Nav::Enter)),
-            _ => None,
-        };
+    if let Some(trigger) = shortcut(key, *physical_key, *modifiers) {
+        return Some(Input::Accel(trigger));
     }
-    accel(key, *physical_key, *modifiers).map(Input::Accel)
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key {
+        Key::Named(Named::Escape) => Some(Input::Nav(Nav::Escape)),
+        Key::Named(Named::ArrowUp) => Some(Input::Nav(Nav::Up)),
+        Key::Named(Named::ArrowDown) => Some(Input::Nav(Nav::Down)),
+        Key::Named(Named::ArrowLeft) => Some(Input::Nav(Nav::Left)),
+        Key::Named(Named::ArrowRight) => Some(Input::Nav(Nav::Right)),
+        Key::Named(Named::Enter) => Some(Input::Nav(Nav::Enter)),
+        _ => None,
+    }
+}
+
+/// The keymap trigger a key press is, if it can be one: anything with Ctrl,
+/// Alt, or Super, and any function key. The app's shortcuts and the editor's
+/// key policy both read keys through here, so they never disagree.
+pub fn shortcut(
+    key: &Key,
+    physical: keyboard::key::Physical,
+    modifiers: Modifiers,
+) -> Option<Accel> {
+    accel(key, physical, modifiers).filter(|accel| {
+        modifiers.control()
+            || modifiers.alt()
+            || modifiers.logo()
+            || wren_core::keybind::is_function_key(&accel.key)
+    })
 }
 
 /// Whether the app acts on a key press a widget may already have handled.

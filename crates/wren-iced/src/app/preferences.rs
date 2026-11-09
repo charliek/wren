@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
-use wren_core::keybind::{self, Keymap, Platform};
-use wren_core::settings::{self, Settings, ThemeChoice};
+use wren_core::keybind::{self, Accel, Keymap, Platform};
+use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
+use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
 
-use super::commands::{CommandId, Disposition, Gateway};
+use super::commands::{CommandId, Disposition, Gateway, Scope};
 use super::palette::{Key, Mode};
 use super::{workspace, App, Message};
 use crate::fonts;
@@ -32,6 +33,40 @@ pub struct Preferences {
     /// The warning last shown for these settings, so a clean reload can
     /// retract it.
     shown_warning: Option<String>,
+}
+
+/// The editor engine a setting names.
+pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
+    match engine {
+        EditorEngine::Classic => BackendKind::Iced,
+        EditorEngine::Advanced => BackendKind::Owned,
+    }
+}
+
+/// The editor's say over its keys, from the keymap and key reading the app's
+/// own shortcuts use: a host command's key is the app's, and an editor
+/// command's key is the editor's intent.
+fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
+    let keymap = keymap.clone();
+    std::sync::Arc::new(move |key, physical, modifiers| {
+        crate::keys::shortcut(key, physical, modifiers).map_or(KeyRoute::Pass, |trigger| {
+            key_route(&keymap, &trigger, markdown_assist)
+        })
+    })
+}
+
+/// Where the editor sends a press of `trigger`. Without Markdown assist the
+/// editor commands are off, so their keys keep the editor's own meaning:
+/// Ctrl+Enter breaks the line and Alt+↑ moves up.
+pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool) -> KeyRoute {
+    match keymap.action(trigger).and_then(CommandId::parse) {
+        None => KeyRoute::Pass,
+        Some(id) => match id.intent() {
+            None => KeyRoute::Host,
+            Some(intent) if markdown_assist => KeyRoute::Intent(intent),
+            Some(_) => KeyRoute::Pass,
+        },
+    }
 }
 
 /// The theme for a picker row: `None` follows the system.
@@ -163,6 +198,17 @@ impl Preferences {
 }
 
 impl App {
+    /// The widest the editor's column grows: the setting, except that focus
+    /// mode always centres one.
+    pub(super) fn editor_max_width(&self) -> Option<f32> {
+        let width = self.preferences.settings.editor_max_width;
+        if self.focus {
+            Some(width.unwrap_or(settings::DEFAULT_MAX_WIDTH))
+        } else {
+            width
+        }
+    }
+
     /// The displayed shortcut for a command key, in platform notation.
     pub(super) fn shortcut_label(&self, action: &str) -> Option<String> {
         self.preferences.keymap.label(action, Platform::current())
@@ -184,6 +230,9 @@ impl App {
     }
 
     /// Re-read `config.conf` and apply it. Returns any settings warning.
+    ///
+    /// An engine switch keeps the editor widget's tree state, and with it
+    /// keyboard focus, so nothing is refocused here.
     pub(super) fn reload_settings(&mut self, force: bool) -> Option<String> {
         #[cfg(target_os = "macos")]
         let keymap = self.preferences.keymap.clone();
@@ -210,11 +259,36 @@ impl App {
         warning
     }
 
+    /// Apply the settings to the theme and editor.
     pub(super) fn apply_preferences(&mut self) {
         self.apply_shown();
         let settings = &self.preferences.settings;
+        self.editor.set_line_height(settings.editor_line_height);
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
+        self.editor.set_markdown_assist(settings.markdown_assist);
+        self.editor.set_key_policy(key_policy(
+            &self.preferences.keymap,
+            settings.markdown_assist,
+        ));
+        self.apply_editor_engine();
+    }
+
+    /// Rebuild the editor on the configured engine from the session draft,
+    /// or from the editor's own text when no note is open (the `--editor`
+    /// spike). The cursor, find query, font, size, and gutter carry over;
+    /// undo history does not.
+    fn apply_editor_engine(&mut self) {
+        let kind = backend_kind(self.preferences.settings.editor_engine);
+        if kind == self.editor.backend() {
+            return;
+        }
+        let text = self
+            .session
+            .as_ref()
+            .and_then(|session| session.document())
+            .map_or_else(|| self.editor.text(), |document| document.text.clone());
+        self.editor.set_backend(kind, &text);
     }
 
     /// Show the theme and editor font: the saved ones, or the picker row
@@ -230,8 +304,9 @@ impl App {
 
     /// Follow the theme or font picker's highlighted row. Moving onto a row
     /// other than the saved choice previews it; leaving the picker any way
-    /// but choosing a row restores the saved choice.
-    pub(super) fn sync_preview(&mut self) {
+    /// but choosing a row restores the saved choice. The outline previews
+    /// headings the same way (`sync_outline`).
+    pub(super) fn sync_preview(&mut self) -> Task<Message> {
         let highlighted = self.palette.as_ref().and_then(|palette| {
             let row = palette.results.get(palette.active?)?;
             (!row.current).then_some(&row.key)
@@ -251,6 +326,7 @@ impl App {
             self.preview = preview;
             self.apply_shown();
         }
+        self.sync_outline()
     }
 
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
@@ -304,6 +380,51 @@ impl App {
         self.editor.set_font_size(size);
         let warning = self.save_setting("editor-font-size", &size.to_string());
         self.saved(warning, task)
+    }
+
+    /// Flip `markdown-assist`, apply it, and save it.
+    pub(super) fn toggle_markdown_assist(&mut self) -> Gateway {
+        let enabled = !self.preferences.settings.markdown_assist;
+        self.preferences.settings.markdown_assist = enabled;
+        self.save_toggle("markdown-assist", if enabled { "on" } else { "off" })
+    }
+
+    /// Move the editor to the other engine, keeping its text and cursor
+    /// (undo history is dropped), and save the choice.
+    pub(super) fn toggle_editor_engine(&mut self) -> Gateway {
+        let engine = match self.preferences.settings.editor_engine {
+            EditorEngine::Classic => EditorEngine::Advanced,
+            EditorEngine::Advanced => EditorEngine::Classic,
+        };
+        self.preferences.settings.editor_engine = engine;
+        self.save_toggle("editor-engine", engine.value())
+    }
+
+    /// Apply a flipped setting before saving it, so it takes effect even
+    /// with nowhere to save or when the save fails.
+    fn save_toggle(&mut self, key: &str, value: &str) -> Gateway {
+        self.apply_preferences();
+        let task = if self.palette.take().is_some() {
+            self.column_focus()
+        } else {
+            Task::none()
+        };
+        let warning = self.save_setting(key, value);
+        self.saved(warning, task)
+    }
+
+    /// The current value a settings command flips, for its palette row.
+    pub(super) fn command_state(&self, id: CommandId) -> Option<&'static str> {
+        let settings = &self.preferences.settings;
+        match id {
+            CommandId::ToggleMarkdownAssist => Some(if settings.markdown_assist {
+                "on"
+            } else {
+                "off"
+            }),
+            CommandId::SwitchEngine => Some(settings.editor_engine.value()),
+            _ => None,
+        }
     }
 
     /// Write one setting to `config.conf`, then re-read the merged file so
@@ -415,6 +536,11 @@ impl App {
         else {
             return Task::none();
         };
+        // The focused editor's key policy runs these; the same press
+        // reaches here too, and must not act twice or outside the editor.
+        if id.scope() == Scope::Editor {
+            return Task::none();
+        }
         self.run_shortcut(id)
     }
 
@@ -532,6 +658,389 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn focus_mode_always_centres_a_column_and_otherwise_follows_the_setting() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let options = || super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor_max_width(), Some(760.0));
+        app.focus = true;
+        assert_eq!(app.editor_max_width(), Some(760.0));
+        std::fs::write(&path, "editor-max-width = none\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor_max_width(), Some(760.0));
+        app.focus = false;
+        assert_eq!(app.editor_max_width(), None);
+        std::fs::write(&path, "editor-max-width = 1000\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor_max_width(), Some(1000.0));
+        app.focus = true;
+        assert_eq!(app.editor_max_width(), Some(1000.0));
+    }
+
+    #[test]
+    fn the_line_height_applies_on_reload_and_survives_text_size_steps() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "editor-line-height = 2\n").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        assert_eq!(app.editor.row_height(), 28.0);
+        let _ = app.step_text_size(Some(1.0));
+        assert_eq!(app.editor.row_height(), 30.0);
+        std::fs::write(&path, "editor-font-size = 15\neditor-line-height = 3\n").unwrap();
+        assert!(app
+            .reload_settings(false)
+            .unwrap()
+            .contains("editor-line-height"));
+        assert_eq!(app.editor.row_height(), 26.0);
+    }
+
+    #[test]
+    fn the_editor_engine_applies_at_startup_and_switches_live_keeping_the_document() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "editor-engine = advanced\n").unwrap();
+        let options = || super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+
+        std::fs::write(&path, "editor-font-size = 18\nline-numbers = off\n").unwrap();
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Insert(
+            '!',
+        ))));
+        app.editor.set_find_query("the");
+        let text = app.editor.text();
+        let cursor = app.editor.cursor();
+        let finds = app.editor.find_count();
+        let revision = app.edit_revision;
+        assert!(app.editor.can_undo());
+
+        std::fs::write(
+            &path,
+            "editor-font-size = 18\nline-numbers = off\neditor-engine = advanced\n",
+        )
+        .unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert_eq!(app.editor.text(), text);
+        assert_eq!(app.editor.cursor(), cursor);
+        assert_eq!(app.editor.find_count(), finds);
+        assert_eq!(app.editor.font_size(), 18.0);
+        assert_eq!(app.edit_revision, revision);
+        assert!(!app.editor.can_undo());
+
+        // An unrelated change leaves the editor, and its history, alone;
+        // switching back rebuilds it.
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Insert(
+            '?',
+        ))));
+        let text = app.editor.text();
+        std::fs::write(&path, "editor-font-size = 18\neditor-engine = advanced\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert!(app.editor.can_undo());
+        std::fs::write(&path, "editor-engine = classic\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        assert_eq!(app.editor.text(), text);
+        assert!(!app.editor.can_undo());
+    }
+
+    #[test]
+    fn the_editor_key_policy_follows_the_keymap() {
+        use iced::keyboard::key::{Code, Physical};
+        use iced::keyboard::{key::Named, Key, Modifiers};
+        use wren_editor::Intent;
+
+        let user = [("alt+t".to_string(), "markdown.italic".to_string())];
+        let (keymap, warnings) = Keymap::build(
+            keybind::default_bindings(Platform::current()),
+            &user,
+            |action| CommandId::parse(action).is_some(),
+        );
+        assert!(warnings.is_empty());
+        let policy = key_policy(&keymap, true);
+        let (editing, app) = match Platform::current() {
+            Platform::Mac => (Modifiers::LOGO, Modifiers::LOGO),
+            Platform::Linux => (Modifiers::CTRL, Modifiers::ALT),
+        };
+        let letter = |letter: &str, code, modifiers| {
+            policy(
+                &Key::Character(letter.into()),
+                Physical::Code(code),
+                modifiers,
+            )
+        };
+        assert_eq!(
+            policy(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                editing
+            ),
+            KeyRoute::Intent(Intent::ToggleTask)
+        );
+        assert_eq!(
+            letter("b", Code::KeyB, editing),
+            KeyRoute::Intent(Intent::Bold)
+        );
+        assert_eq!(
+            letter("e", Code::KeyE, editing),
+            KeyRoute::Intent(Intent::Code)
+        );
+        assert_eq!(
+            policy(
+                &Key::Named(Named::ArrowDown),
+                Physical::Code(Code::ArrowDown),
+                Modifiers::ALT
+            ),
+            KeyRoute::Intent(Intent::MoveLineDown)
+        );
+        // A user binding of an editor command is the editor's too.
+        assert_eq!(
+            letter("t", Code::KeyT, Modifiers::ALT),
+            KeyRoute::Intent(Intent::Italic)
+        );
+        // App shortcuts are the app's alone, Find included.
+        assert_eq!(letter("p", Code::KeyP, app), KeyRoute::Host);
+        assert_eq!(letter("f", Code::KeyF, app), KeyRoute::Host);
+        if Platform::current() == Platform::Linux {
+            assert_eq!(letter("f", Code::KeyF, Modifiers::CTRL), KeyRoute::Host);
+        }
+        // Unbound keys and typing stay with the editor.
+        assert_eq!(letter("z", Code::KeyZ, editing), KeyRoute::Pass);
+        assert_eq!(letter("b", Code::KeyB, Modifiers::empty()), KeyRoute::Pass);
+        assert_eq!(
+            policy(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                Modifiers::empty()
+            ),
+            KeyRoute::Pass
+        );
+        // Without assist the editor commands' keys are the editor's own
+        // again, and the app's stay the app's.
+        let plain = key_policy(&keymap, false);
+        assert_eq!(
+            plain(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                editing
+            ),
+            KeyRoute::Pass
+        );
+        assert_eq!(
+            plain(
+                &Key::Named(Named::ArrowUp),
+                Physical::Code(Code::ArrowUp),
+                Modifiers::ALT
+            ),
+            KeyRoute::Pass
+        );
+        assert_eq!(
+            plain(&Key::Character("p".into()), Physical::Code(Code::KeyP), app),
+            KeyRoute::Host
+        );
+    }
+
+    #[test]
+    fn markdown_assist_applies_live_to_the_keys() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+        use wren_editor::Intent;
+
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        assert!(app.editor.markdown_assist());
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
+            std::sync::Arc::new("\nplain\n- item".into()),
+        ))));
+        let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
+        assert!(app.editor.text().ends_with("\n- item\n- "));
+
+        std::fs::write(&path, "markdown-assist = off\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert!(!app.editor.markdown_assist());
+        let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
+        assert!(app.editor.text().ends_with("\n- item\n- \n"));
+    }
+
+    #[test]
+    fn the_markdown_assist_command_flips_saves_and_applies_the_setting() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+        use wren_editor::Intent;
+
+        let (mut app, path, _directory) = app_with_settings("# mine\ntheme = nord\n");
+        let run = |app: &mut App| {
+            let _ = app.update(Message::Command(Command::Run(
+                CommandId::ToggleMarkdownAssist,
+            )));
+            assert_eq!(app.last_processed.as_ref().unwrap().warning, None);
+        };
+        assert_eq!(
+            app.command_state(CommandId::ToggleMarkdownAssist),
+            Some("on")
+        );
+        run(&mut app);
+        assert!(!app.editor.markdown_assist());
+        assert_eq!(
+            app.command_state(CommandId::ToggleMarkdownAssist),
+            Some("off")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\ntheme = nord\nmarkdown-assist = off\n"
+        );
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
+            std::sync::Arc::new("\n- item".into()),
+        ))));
+        let _ = app.edit(wren_editor::Message::Intent(Intent::Enter));
+        assert!(app.editor.text().ends_with("\n- item\n"));
+        // The Markdown commands follow it.
+        assert!(!app.command_enabled(CommandId::Bold));
+
+        run(&mut app);
+        assert!(app.editor.markdown_assist());
+        assert!(app.command_enabled(CommandId::Bold));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\ntheme = nord\nmarkdown-assist = on\n"
+        );
+    }
+
+    #[test]
+    fn the_engine_command_switches_live_and_saves_keeping_text_and_cursor() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+
+        let (mut app, path, _directory) = app_with_settings("");
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        let _ = app.edit(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        )));
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Insert(
+            '!',
+        ))));
+        let text = app.editor.text();
+        let cursor = app.editor.cursor();
+        assert!(app.editor.can_undo());
+
+        // From the palette, which the command closes.
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        let row = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .find(|row| row.key == Key::Command(CommandId::SwitchEngine))
+            .unwrap();
+        assert!(row.enabled);
+        assert_eq!(app.command_state(CommandId::SwitchEngine), Some("classic"));
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        assert!(app.palette.is_none());
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert_eq!(app.editor.text(), text);
+        assert_eq!(app.editor.cursor(), cursor);
+        assert!(!app.editor.can_undo());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "editor-engine = advanced\n"
+        );
+        assert_eq!(app.command_state(CommandId::SwitchEngine), Some("advanced"));
+
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
+        assert_eq!(app.editor.text(), text);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "editor-engine = classic\n"
+        );
+    }
+
+    #[test]
+    fn the_settings_commands_apply_with_nowhere_to_save() {
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, None);
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        let _ = app.update(Message::Command(Command::Run(
+            CommandId::ToggleMarkdownAssist,
+        )));
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert!(!app.editor.markdown_assist());
+        assert!(app.last_processed.as_ref().unwrap().disposition.committed());
+    }
+
+    #[test]
+    fn an_engine_switch_rebuilds_from_the_session_draft() {
+        use wren_core::ops::{Op, Session};
+
+        let workspace = crate::test_support::tempdir();
+        std::fs::create_dir_all(workspace.path().join("Alpha/Inbox")).unwrap();
+        std::fs::write(workspace.path().join("Alpha/Inbox/First.md"), "first body").unwrap();
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        std::fs::write(&path, "").unwrap();
+        let options = super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(path.clone()));
+        app.workspace_mode = true;
+        app.session = Some(Session::open(workspace.path()).unwrap());
+        app.sync_editor(true);
+        let first = app.model().unwrap().notes[0].id;
+        let _ = app.process_core(Op::OpenNote { note: Some(first) });
+        assert_eq!(app.editor.text(), "first body");
+        // The session's draft is the document of record.
+        let _ = app.process_core(Op::EditDraft {
+            note: first,
+            contents: "first body, drafted".into(),
+        });
+        assert_eq!(
+            app.session.as_ref().unwrap().document().unwrap().text,
+            "first body, drafted"
+        );
+        // Diverge the widget from the session to show which copy the
+        // rebuild reads.
+        app.editor.replace_text("stale widget copy", true);
+
+        std::fs::write(&path, "editor-engine = advanced\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert_eq!(app.editor.text(), "first body, drafted");
     }
 
     #[test]

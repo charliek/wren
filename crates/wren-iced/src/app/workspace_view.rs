@@ -20,6 +20,16 @@ use crate::panes::{self, Pane};
 use crate::{fonts, theme};
 
 impl App {
+    /// The width of the browser columns left of the editor; 0 when hidden.
+    pub(super) fn browser_width(&self) -> f32 {
+        if !self.workspace_mode || self.focus || self.model().is_none() {
+            return 0.0;
+        }
+        self.widths
+            .effective(self.visible_panes(), self.viewport.width)
+            .browser()
+    }
+
     pub(super) fn workspace_view(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
         let enabled = self.session.is_some()
@@ -53,11 +63,7 @@ impl App {
                 ));
             }
         }
-        let browser_width = if !browser_visible {
-            0.0
-        } else {
-            effective.browser()
-        };
+        let browser_width = self.browser_width();
         // Reset browser-owned capture/scroll state only on a committed workspace
         // replacement. The editor remains the same sibling throughout.
         let browser = iced::widget::keyed_column([(self.workspace_generation(), browser.into())])
@@ -879,11 +885,11 @@ impl App {
         .padding([6, 16])
         .height(if self.find_open { 44 } else { 0 })
         .clip(true);
-        let editor = container(self.editor.view(self.definition).map(Message::Editor))
-            .width(Fill)
-            .max_width(if self.focus { 760.0 } else { f32::MAX })
-            .height(Fill);
-        let editor: Element<'_, Message> = container(editor).center_x(Fill).height(Fill).into();
+        let (style, palette) = theme::editor_colors(self.definition);
+        let editor: Element<'_, Message> = self
+            .editor
+            .view(style, palette, self.editor_max_width())
+            .map(Message::Editor);
         let mut empty = column![].spacing(14).align_x(iced::Center);
         let (prompt, action, command) = if self.selected_section.is_none() {
             (

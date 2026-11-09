@@ -2,13 +2,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::editor_view::{self, EditorView};
 use iced::theme::Mode;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
 use wren_core::model::{GroupId, NoteId, SectionId};
 use wren_core::ops::{Op, Session};
 use wren_core::theme::{self as definitions, Theme};
+use wren_editor::EditorView;
 
 pub use crate::cli::Options;
 use crate::{fonts, theme};
@@ -46,6 +46,8 @@ pub struct App {
     find_open: bool,
     find_query: String,
     words: usize,
+    /// When `words` is next recounted, after an edit.
+    words_due: Option<Instant>,
     edit_revision: u64,
     edit_micros: Vec<u64>,
     window: Option<iced::window::Id>,
@@ -74,6 +76,8 @@ pub struct App {
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
+    /// Where the outline palette opened; see `sync_outline`.
+    outline_origin: Option<palette::OutlineOrigin>,
     widths: Widths,
     column: columns::Column,
     /// Browser panes folded from the left (0–2) by keyboard moves.
@@ -99,15 +103,23 @@ pub struct App {
     endpoint: Option<crate::test_ipc::Endpoint>,
     #[cfg(feature = "smoke-test")]
     capture_pending: bool,
+    /// A test holds the session's timer, so autosave cannot write a draft
+    /// before the test has armed a storage fault.
+    #[cfg(feature = "smoke-test")]
+    timer_held: bool,
     #[cfg(feature = "smoke-test")]
     frames: crate::test_capture::Frames,
+    /// How long each recent `view` took to build, for the harness's idle
+    /// and per-key ceilings. `view` takes `&self`, hence the cell.
+    #[cfg(feature = "smoke-test")]
+    view_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
-    Editor(editor_view::Message),
+    Editor(wren_editor::Message),
     Core(Op),
     Command(Command),
     PaletteOpen(palette::Mode),
@@ -162,7 +174,18 @@ pub enum Message {
         std::sync::Arc<crate::test_ipc::Request>,
         Result<serde_json::Value, String>,
     ),
+    /// An editor command's shortcut, as the editor widget publishes it:
+    /// `Some` only while the editor has the keyboard.
+    #[cfg(feature = "smoke-test")]
+    EditorShortcut(
+        std::sync::Arc<crate::test_ipc::Request>,
+        Option<wren_editor::Intent>,
+    ),
 }
+
+/// How long the footer's word count may lag the text. Counting reads the
+/// whole note, too slow in a debug build to repeat on every keystroke.
+const WORD_COUNT_DELAY: Duration = Duration::from_millis(250);
 
 pub fn spike_text(large: bool) -> String {
     if large {
@@ -221,6 +244,7 @@ impl App {
             String::new()
         };
         let words = contents.split_whitespace().count();
+        let engine = preferences::backend_kind(preferences.settings.editor_engine);
         let mut app = Self {
             definition,
             toolkit_theme: theme::from_definition(definition),
@@ -228,10 +252,11 @@ impl App {
             theme_override,
             preview: preferences::Preview::default(),
             preferences,
-            editor: EditorView::new(&contents),
+            editor: EditorView::with_backend(engine, &contents),
             find_open: false,
             find_query: String::new(),
             words,
+            words_due: None,
             edit_revision: 0,
             edit_micros: Vec::new(),
             window: None,
@@ -260,6 +285,7 @@ impl App {
             action_serial: 0,
             last_processed: None,
             palette: None,
+            outline_origin: None,
             widths: Widths::default(),
             column: columns::Column::Editor,
             fold: 0,
@@ -289,7 +315,11 @@ impl App {
             #[cfg(feature = "smoke-test")]
             capture_pending: false,
             #[cfg(feature = "smoke-test")]
+            timer_held: false,
+            #[cfg(feature = "smoke-test")]
             frames: crate::test_capture::Frames::default(),
+            #[cfg(feature = "smoke-test")]
+            view_micros: Default::default(),
         };
         app.apply_preferences();
         if let Some(warning) = app.startup_settings_warning() {
@@ -312,8 +342,8 @@ impl App {
         let task = self.handle(message);
         // Every way a picker row gets highlighted, or the picker closes,
         // arrives as a message, so the preview follows from here.
-        self.sync_preview();
-        task
+        let preview = self.sync_preview();
+        Task::batch([task, preview])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -334,6 +364,14 @@ impl App {
             }
             #[cfg(feature = "smoke-test")]
             Message::Reply(request, result) => request.respond(result),
+            #[cfg(feature = "smoke-test")]
+            Message::EditorShortcut(request, intent) => {
+                let task = intent.map_or_else(Task::none, |intent| {
+                    self.update(Message::Editor(wren_editor::Message::Intent(intent)))
+                });
+                request.respond(Ok(self.navigation_snapshot()));
+                return task;
+            }
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
                 self.apply_theme();
@@ -384,6 +422,11 @@ impl App {
             #[cfg(target_os = "macos")]
             Message::MenuCommand(key) => return self.menu_command(&key),
             Message::Tick => {
+                self.count_words(Instant::now());
+                #[cfg(feature = "smoke-test")]
+                if self.timer_held {
+                    return Task::none();
+                }
                 if self.session.is_some() {
                     let task = self.process_core(Op::Tick).task;
                     return self.spawn_reconcile(task);
@@ -514,13 +557,13 @@ impl App {
         Task::none()
     }
 
-    fn edit(&mut self, message: editor_view::Message) -> Task<Message> {
+    fn edit(&mut self, message: wren_editor::Message) -> Task<Message> {
         if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
         }
         let started = Instant::now();
         let changed = match message {
-            editor_view::Message::Action(action) => {
+            wren_editor::Message::Action(action) => {
                 // Scrolling reaches an unfocused editor; anything else means
                 // the editor has the keyboard.
                 if !matches!(action, iced::widget::text_editor::Action::Scroll { .. }) {
@@ -528,30 +571,53 @@ impl App {
                 }
                 self.editor.perform(action)
             }
-            editor_view::Message::Undo => self.editor.undo(),
-            editor_view::Message::Redo => self.editor.redo(),
-            editor_view::Message::Find => {
+            wren_editor::Message::Intent(intent) => {
+                self.column = columns::Column::Editor;
+                self.editor.intent(intent)
+            }
+            wren_editor::Message::Undo => self.editor.undo(),
+            wren_editor::Message::Redo => self.editor.redo(),
+            wren_editor::Message::Find => {
                 self.editor.break_group();
                 self.find_open = true;
                 return iced::widget::operation::focus("find-query");
             }
         };
         if changed {
-            if let Some(note) = self.selected_note {
-                let _ = self.apply_core(Op::EditDraft {
-                    note,
-                    contents: self.editor.text(),
-                });
-            }
-            self.edit_revision += 1;
-            self.words = self.editor.text().split_whitespace().count();
-            if self.edit_micros.len() == 256 {
-                self.edit_micros.remove(0);
-            }
-            self.edit_micros
-                .push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+            self.text_changed(started);
         }
         Task::none()
+    }
+
+    /// What follows every change to the editor's text: the session draft,
+    /// which autosave saves, the edit revision, and a word recount on a
+    /// later tick.
+    fn text_changed(&mut self, started: Instant) {
+        if let Some(note) = self.selected_note {
+            let _ = self.apply_core(Op::EditDraft {
+                note,
+                contents: self.editor.text(),
+            });
+        }
+        self.edit_revision += 1;
+        self.words_due.get_or_insert(started + WORD_COUNT_DELAY);
+        if self.edit_micros.len() == 256 {
+            self.edit_micros.remove(0);
+        }
+        self.edit_micros
+            .push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+    }
+
+    /// Recount the words once an edit's delay has passed.
+    fn count_words(&mut self, now: Instant) {
+        if self.words_due.is_some_and(|due| now >= due) {
+            self.set_words(&self.editor.text());
+        }
+    }
+
+    fn set_words(&mut self, text: &str) {
+        self.words = text.split_whitespace().count();
+        self.words_due = None;
     }
 
     #[cfg(feature = "smoke-test")]
@@ -576,7 +642,18 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        crate::keys::alt_filter(self.contents()).into()
+        #[cfg(feature = "smoke-test")]
+        let started = Instant::now();
+        let view = crate::keys::alt_filter(self.contents()).into();
+        #[cfg(feature = "smoke-test")]
+        {
+            let mut times = self.view_micros.borrow_mut();
+            if times.len() == 256 {
+                times.pop_front();
+            }
+            times.push_back(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+        }
+        view
     }
 
     fn contents(&self) -> Element<'_, Message> {
@@ -642,7 +719,12 @@ impl App {
                 .padding([8, 16]),
             );
         }
-        body = body.push(self.editor.view(self.definition).map(Message::Editor));
+        let (style, palette) = theme::editor_colors(self.definition);
+        body = body.push(
+            self.editor
+                .view(style, palette, self.editor_max_width())
+                .map(Message::Editor),
+        );
         let cursor = self.editor.cursor();
         body = body.push(
             container(
@@ -710,7 +792,7 @@ impl App {
                 _ => None,
             }),
         ];
-        if self.session.is_some() {
+        if self.session.is_some() || self.words_due.is_some() {
             subscriptions.push(iced::time::every(Duration::from_millis(25)).map(|_| Message::Tick));
         }
         #[cfg(target_os = "macos")]
@@ -752,6 +834,37 @@ mod tests {
         assert_eq!(app.definition, definitions::DARK);
         let _ = app.update(Message::ChooseTheme(None));
         assert_eq!(app.definition, definitions::LIGHT);
+    }
+
+    #[test]
+    fn the_word_count_follows_edits_on_a_later_tick() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        let words = app.words;
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        ))));
+        assert_eq!(app.words_due, None);
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+            Edit::Paste(Arc::new(" two words".into())),
+        ))));
+        let due = app.words_due.expect("a recount is due");
+        assert_eq!(app.words, words);
+        // Later edits keep the first deadline, so typing cannot starve it.
+        let _ = app.update(Message::Editor(wren_editor::Message::Intent(
+            wren_editor::Intent::Enter,
+        )));
+        assert_eq!(app.words_due, Some(due));
+        app.count_words(due - Duration::from_millis(1));
+        assert_eq!(app.words, words);
+        app.count_words(due);
+        assert_eq!(app.words, words + 2);
+        assert_eq!(app.words_due, None);
+        assert_eq!(app.edit_revision, 2);
     }
 
     #[test]

@@ -16,6 +16,15 @@ const MAX_BYTES: u64 = 1024 * 1024;
 pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// Row height as a multiple of the text size: 24 px rows at 14 pt.
+pub const DEFAULT_LINE_HEIGHT: f32 = 1.7;
+pub const MIN_LINE_HEIGHT: f32 = 1.2;
+pub const MAX_LINE_HEIGHT: f32 = 2.2;
+/// The editor column's default width, gutter included; focus mode uses it
+/// when `editor-max-width` is `none`.
+pub const DEFAULT_MAX_WIDTH: f32 = 760.0;
+pub const MIN_MAX_WIDTH: f32 = 400.0;
+pub const MAX_MAX_WIDTH: f32 = 4000.0;
 
 /// Which theme to show: a fixed theme, or one per system appearance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,13 +88,49 @@ impl ThemeChoice {
     }
 }
 
+/// The editor's text engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EditorEngine {
+    /// iced's own text editor.
+    #[default]
+    Classic,
+    /// Wren's own cosmic-text editor.
+    Advanced,
+}
+
+impl EditorEngine {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "advanced" => Some(Self::Advanced),
+            _ => None,
+        }
+    }
+
+    /// The config-file spelling.
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Advanced => "advanced",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: ThemeChoice,
     pub editor_font_size: f32,
     /// A font family name; `None` uses the bundled JetBrains Mono.
     pub editor_font_family: Option<String>,
+    /// Row height as a multiple of the text size.
+    pub editor_line_height: f32,
+    /// The widest the editor's column of gutter and text grows outside
+    /// focus mode; `None` fills the pane.
+    pub editor_max_width: Option<f32>,
     pub line_numbers: bool,
+    pub editor_engine: EditorEngine,
+    /// The Markdown-aware Enter, Tab, Backspace, and Home.
+    pub markdown_assist: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -97,7 +142,11 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             editor_font_size: DEFAULT_FONT_SIZE,
             editor_font_family: None,
+            editor_line_height: DEFAULT_LINE_HEIGHT,
+            editor_max_width: Some(DEFAULT_MAX_WIDTH),
             line_numbers: true,
+            editor_engine: EditorEngine::default(),
+            markdown_assist: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -165,8 +214,31 @@ impl Settings {
                     "" => invalid(),
                     family => settings.editor_font_family = Some(family.into()),
                 },
+                "editor-line-height" => match value.parse::<f32>() {
+                    Ok(ratio) if (MIN_LINE_HEIGHT..=MAX_LINE_HEIGHT).contains(&ratio) => {
+                        settings.editor_line_height = ratio
+                    }
+                    _ => invalid(),
+                },
+                "editor-max-width" => match value.trim().to_ascii_lowercase().as_str() {
+                    "none" => settings.editor_max_width = None,
+                    number => match number.parse::<f32>() {
+                        Ok(width) if (MIN_MAX_WIDTH..=MAX_MAX_WIDTH).contains(&width) => {
+                            settings.editor_max_width = Some(width)
+                        }
+                        _ => invalid(),
+                    },
+                },
                 "line-numbers" => match parse_bool(value) {
                     Some(enabled) => settings.line_numbers = enabled,
+                    None => invalid(),
+                },
+                "editor-engine" => match EditorEngine::parse(value) {
+                    Some(engine) => settings.editor_engine = engine,
+                    None => invalid(),
+                },
+                "markdown-assist" => match parse_bool(value) {
+                    Some(enabled) => settings.markdown_assist = enabled,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -330,8 +402,25 @@ pub const TEMPLATE: &str = "\
 # monospace ones.
 # editor-font-family = \"JetBrains Mono\"
 
+# Editor row height as a multiple of the text size (1.2–2.2).
+# editor-line-height = 1.7
+
+# The widest the editor's column of line numbers and text grows, in pixels
+# (400–4000), centred in a wider pane; none fills the pane. Focus mode
+# always centres a column: this one, or 760 px when this is none.
+# editor-max-width = 760
+
 # Show the line-number gutter.
 # line-numbers = true
+
+# Editor engine: classic (the current editor) or advanced (Wren's new
+# editor engine, under evaluation).
+# editor-engine = classic
+
+# Markdown assist: Enter continues lists and quotes, Tab nests list items,
+# Backspace removes markup, and Home stops at the text after the markup.
+# Off, the Markdown commands (toggle task, bold, move line, ...) are disabled.
+# markdown-assist = on
 
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
@@ -390,6 +479,81 @@ mod tests {
         assert!(settings.warnings[1].contains("mystery"));
         assert!(settings.warnings[2].contains("line 10"));
         assert!(settings.warnings[3].contains("editor-font-family"));
+    }
+
+    #[test]
+    fn editor_engine_parses_either_engine_and_warns_on_others() {
+        assert_eq!(Settings::default().editor_engine, EditorEngine::Classic);
+        let settings = Settings::parse("editor-engine = advanced\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Advanced);
+        assert!(settings.warnings.is_empty());
+        let settings = Settings::parse("editor-engine = Advanced\neditor-engine = \"classic\"\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Classic);
+        let settings = Settings::parse("editor-engine = advanced\neditor-engine = gpui\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Advanced);
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("editor-engine"));
+        for engine in [EditorEngine::Classic, EditorEngine::Advanced] {
+            assert_eq!(EditorEngine::parse(engine.value()), Some(engine));
+        }
+    }
+
+    #[test]
+    fn editor_line_height_accepts_ratios_in_range_and_warns_otherwise() {
+        assert_eq!(Settings::default().editor_line_height, DEFAULT_LINE_HEIGHT);
+        for (value, ratio) in [("1.2", 1.2), ("2.2", 2.2), ("1.45", 1.45), ("2", 2.0)] {
+            let settings = Settings::parse(&format!("editor-line-height = {value}\n"));
+            assert_eq!(settings.editor_line_height, ratio, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        for value in ["1.19", "2.3", "24px", "", "NaN"] {
+            let settings = Settings::parse(&format!(
+                "editor-line-height = 1.5\neditor-line-height = {value}\n"
+            ));
+            assert_eq!(settings.editor_line_height, 1.5, "{value}");
+            assert_eq!(settings.warnings.len(), 1, "{value}");
+            assert!(settings.warnings[0].contains("editor-line-height"));
+        }
+    }
+
+    #[test]
+    fn editor_max_width_takes_pixels_in_range_or_none() {
+        assert_eq!(
+            Settings::default().editor_max_width,
+            Some(DEFAULT_MAX_WIDTH)
+        );
+        for (value, width) in [("900", Some(900.0)), ("none", None), ("None", None)] {
+            let settings = Settings::parse(&format!("editor-max-width = {value}\n"));
+            assert_eq!(settings.editor_max_width, width, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        for value in ["399", "4001", "760px", "", "-1"] {
+            let settings = Settings::parse(&format!(
+                "editor-max-width = none\neditor-max-width = {value}\n"
+            ));
+            assert_eq!(settings.editor_max_width, None, "{value}");
+            assert_eq!(settings.warnings.len(), 1, "{value}");
+            assert!(settings.warnings[0].contains("editor-max-width"));
+        }
+    }
+
+    #[test]
+    fn markdown_assist_defaults_on_and_parses_booleans() {
+        assert!(Settings::default().markdown_assist);
+        for (value, enabled) in [
+            ("off", false),
+            ("on", true),
+            ("false", false),
+            ("YES", true),
+        ] {
+            let settings = Settings::parse(&format!("markdown-assist = {value}\n"));
+            assert_eq!(settings.markdown_assist, enabled, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        let settings = Settings::parse("markdown-assist = off\nmarkdown-assist = sometimes\n");
+        assert!(!settings.markdown_assist);
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("markdown-assist"));
     }
 
     #[test]

@@ -75,6 +75,7 @@ pub fn install(keymap: &Keymap) {
             &item("palette.commands", "Command Palette…"),
             &item("navigation.jump", "Jump to Note…"),
             &item("navigation.search", "Search Workspace…"),
+            &item("navigation.outline", "Jump to Heading…"),
             &PredefinedMenuItem::separator(),
             &item("navigation.back", "Back"),
             &item("navigation.forward", "Forward"),

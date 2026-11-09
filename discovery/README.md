@@ -8,3 +8,4 @@ what users need into `docs/` and delete or trim the note here.
 | Note | Status |
 |---|---|
 | [Keyboard drill-down navigation](keyboard-drill-down.md) | Implemented 2026-11-08 |
+| [Markdown editor](markdown-editor.md) | In progress (branch `markdown-editor`) |

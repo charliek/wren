@@ -20,7 +20,7 @@ import pytest
 
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture
-from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory
+from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
 from tools.wrentest.ui import WrenApp, wait_for
 
 
@@ -28,13 +28,17 @@ COMMANDS = {
     "note.new", "note.new_dated", "note.rename", "note.delete", "note.reveal",
     "note.move", "group.new", "section.new", "group.rename", "group.delete",
     "group.reveal", "group.move", "section.rename", "section.delete", "section.reveal",
-    "navigation.jump", "navigation.search", "navigation.find", "navigation.back",
+    "navigation.jump", "navigation.search", "navigation.find", "navigation.outline",
+    "navigation.back",
     "navigation.forward", "navigation.column_left", "navigation.column_right", "view.focus",
     "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
     "font.choose", "font.increase", "font.decrease", "font.reset",
     "workspace.switch", "workspace.add", "workspace.remove",
     "section.reorder", "group.reorder", "note.open_conflict",
     "settings.open", "settings.reload", "app.quit",
+    "markdown.toggle_task", "markdown.bold", "markdown.italic", "markdown.code",
+    "edit.move_line_up", "edit.move_line_down",
+    "editor.toggle_markdown_assist", "editor.toggle_engine",
 }
 DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
 FIRST = "Atlas/Research/Note 1.md"
@@ -246,8 +250,11 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         by_id = {row["key"]["command"]: row for row in rows}
         assert set(by_id) == COMMANDS
         assert len(rows) == len(COMMANDS)
-        assert {row["group"] for row in rows} == {"This note", "Go", "View", "Workspace", "App"}
+        assert {row["group"] for row in rows} == {"This note", "Markdown", "Go", "View", "Workspace",
+                                                   "App"}
         assert all(row["title"] for row in rows)
+        assert {key: row["state"] for key, row in by_id.items() if row["state"]} == {
+            "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic"}
         for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict"}:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
@@ -262,14 +269,42 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
         for key in ("note.rename", "note.delete", "note.reveal", "note.move", "navigation.find",
-                    "group.rename", "group.delete", "group.reveal", "group.move",
-                    "note.new", "note.new_dated", "notes.sort_title"):
+                    "navigation.outline", "group.rename", "group.delete", "group.reveal", "group.move",
+                    "note.new", "note.new_dated", "notes.sort_title",
+                    "markdown.toggle_task", "markdown.bold", "edit.move_line_up"):
             assert by_id[key]["enabled"] is False, key
         for key in ("group.new", "section.rename"):
             assert by_id[key]["enabled"] is True, key
         activate(app, {"command": "note.rename"}, disposition="blocked")
         assert navigation(app)["dialog"] is None
         assert session(app)["document"] is None
+
+
+def test_outline_jumps_within_the_open_note_and_closes_when_it_changes(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("navigation-outline")) as app:
+        call = app.client.call
+        jump(app, SECOND)
+        call("editor.cursor", {"line": 3, "column": 2, "selection": None})
+        before = call("editor.get")
+        modal = palette(app, "outline")
+        assert [row["title"] for row in modal["results"]] == ["Observations"]
+        assert modal["results"][0]["current"] is True
+        gateway(app, "palette.close")
+        assert call("editor.get")["cursor"] == {"line": 3, "column": 2}
+
+        palette(app, "outline")
+        activate(app, {"heading": {"revision": before["revision"], "line": 0}})
+        after = call("editor.get")
+        assert after["cursor"] == {"line": 0, "column": 0}
+        assert (after["text"], after["revision"]) == (before["text"], before["revision"])
+        assert navigation(app)["column"] == "editor"
+        assert navigation(app)["modal"] is None
+
+        # Another note opening underneath closes the outline.
+        palette(app, "outline")
+        core(app, "open_note", note=item(app, "notes", FIRST)["id"])
+        assert session(app)["document"]["path"] == FIRST
+        assert navigation(app)["modal"] is None
 
 
 @pytest.mark.parametrize("command_id,query,name,path,collection", [
@@ -735,6 +770,9 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
         before = session(app)
         source = vault / before["document"]["path"]
         original = source.read_bytes()
+        # Opening and querying a palette can outlast autosave's idle delay, and
+        # autosave must not write the draft before the fault is armed.
+        app.client.call("test.timer.hold", {"held": True})
         expected = append(app, f"retained draft for {transition}\n")
         app.client.call("editor.cursor", {"line": 0, "column": 10,
                                          "selection": {"line": 0, "column": 6}})
@@ -769,6 +807,7 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
             blocked = response["navigation"]["processed"]
             assert "injected storage failure" in blocked["warning"]
         assert blocked["correlation"] > nav_before["processed"]["correlation"]
+        app.client.call("test.timer.hold", {"held": False})
         # Freeze only subsequent timer retries, after the injected write was reached.
         with unwritable(source.parent):
             after = session(app)
@@ -907,6 +946,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
             "workspace.add", "workspace.switch", "theme.choose",
             "font.choose", "font.increase", "font.decrease", "font.reset",
             "settings.open", "settings.reload", "app.quit",
+            "editor.toggle_markdown_assist", "editor.toggle_engine",
         }
         gateway(app, "palette.close")
         command(app, "note.new", disposition="blocked")
@@ -1154,8 +1194,7 @@ def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
         image = capture(app, artifacts / "focus.png")
         viewport = navigation(app)["viewport"]
         assert image.pixel(image.width - 5, image.height // 2)[:3] == BACKGROUNDS[theme]
-        # saved_editor_view centers its 760px maximum editor; TextEditor pads 16px.
-        left = max(0, (viewport["width"] - 760) / 2)
+        left = editor_column(navigation(app))[0]
         assert color_count(image, viewport, (left + 16, 115, left + 500, 220), body) > 70
         assert session(app)["document"]["text"] == (vault / FIRST).read_text(encoding="utf-8")
         gateway(app, "view.focus", enabled=False)

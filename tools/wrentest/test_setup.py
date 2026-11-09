@@ -14,6 +14,17 @@ from tools.wrentest import png
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKGROUNDS = {"dark": (0x14, 0x16, 0x1B), "light": (0xF7, 0xF8, 0xFA)}
+# editor-max-width's default: the editor centres a column this wide, gutter
+# included, in a wider pane, as focus mode always does.
+EDITOR_COLUMN = 760
+
+
+def editor_column(navigation: dict, root_x: float = 0) -> tuple[float, float]:
+    """The left edge and width of the editor's column of gutter and text."""
+    browser = 0 if navigation["focus"] else sum(navigation["effective_widths"].values())
+    pane = navigation["viewport"]["width"] - browser
+    width = min(pane, EDITOR_COLUMN)
+    return root_x + browser + (pane - width) // 2, width
 
 
 def binary_path() -> Path:

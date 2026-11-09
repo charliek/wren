@@ -17,18 +17,45 @@ when one lands, move what users need into `docs/` and trim the note.
   registry, `config.toml`), `settings.rs` (the user-owned `config.conf`),
   `keybind.rs` (triggers and platform default bindings), and `theme.rs`
   (built-in palettes).
+- `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
+  types so it can be extracted later. It must not depend on `wren-core` or
+  know app messages; the host passes in a `Style`, a `Palette`, and the font.
+  `lib.rs` holds `EditorView` and `Message`; `widget.rs` is a fork of iced's
+  text editor with the gutter, current line, and caret; `backend/` holds
+  the two text engines behind `Content` (`iced.rs`, iced's own editor, and
+  `owned.rs`, an owned cosmic-text editor drawn with `fill_raw`), and the
+  editor tests run on both; plus `edit.rs` (range edits and the line
+  endings their breaks take), `plain.rs` (the keys' plain plans while
+  Markdown assist is off), `highlighter.rs` (spans and per-line
+  decorations from `wren_markdown::block`), `history.rs` (snapshot
+  undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
+  accessors sit behind its `test-support` feature, which
+  `wren-iced/smoke-test` enables.
 - `crates/wren-iced/`: the desktop app (binary `wren`).
   - `app.rs` holds `App`, `Message`, `update`, `view`, and `subscription`;
     its submodules live in `app/`: `commands.rs` (the command table and
     gateway), `palette.rs`, `preferences.rs` (settings, keymap, and theme),
     `workspace.rs` (loading and core events), `workspace_view.rs`, and
     `navigation.rs`.
-  - Widgets: `editor_view/` (a fork of iced's text editor with the gutter,
-    current line, and caret), `panes.rs` (resize), `drag*.rs` (drag and
-    drop), `ellipsis.rs`, and `keys.rs`.
+  - `theme.rs` maps a `wren_core` theme to iced's and to the editor's
+    `Style` and `Palette`.
+  - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
+    `ellipsis.rs`, and `keys.rs`.
   - `macos_menu.rs` is the native menu bar.
+- `crates/wren-markdown/`: Markdown structure and editing rules, with no
+  iced or Wren dependency (only `unicode-segmentation`), so it can be
+  extracted later. `block.rs` is the line classifier and container scanner,
+  `outline.rs` the heading outline, and `edit.rs` plus `edit/` plan each
+  editing `Intent` as an `EditPlan` of replacements. `block` is Wren's one
+  classifier: the editor's highlighter and the search index's previews use
+  it.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
+- `vendor/`: patched copies of crates.io crates (`cosmic-text`, `iced_winit`,
+  `swash`), wired in by the root `[patch.crates-io]`; `make check-patches`
+  asserts they are the ones built. `cosmic-text` and `swash` each have a
+  `WREN.md` describing the change; `wren-editor`'s hanging indent needs the
+  cosmic-text one.
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it
   in step with behavior changes: keybindings, settings, and on-disk rules.
 - `discovery/`: working design notes, deliberately outside `docs/` because
@@ -49,7 +76,9 @@ when one lands, move what users need into `docs/` and trim the note.
   lines. Command keys (`note.new`, `palette.commands`, …) are the stable
   names for config, the palette, menus, and the test protocol. To add a
   command, add a `CommandId` and a `definitions!` row, and handle it in
-  `run_command`.
+  `run_command`. A row's scope is `App`, or `Editor` for a command whose key
+  only the focused editor runs (through the `KeyPolicy` built from the
+  keymap); `App::key_input` ignores Editor keys.
 - macOS uses Command as the app modifier; Linux uses Alt, leaving Ctrl to
   text editing. `keys::alt_filter` drops the text of Alt presses on Linux
   so shortcuts never type their letter.
@@ -83,7 +112,8 @@ uv run --locked --group docs zensical build --strict  # docs site; run for chang
   launch in that run fails with "unsupported or duplicate option".
 - To look at the real screens, build with `--features smoke-test`, then run
   `tools/capture_scenes.py` (under `tools/run_display.py x11 -- …` on
-  Linux). It writes one PNG per scene to `target/scenes/<theme>/`.
+  Linux). It writes one PNG per scene to `target/scenes/<theme>/`
+  (`--engine advanced` writes to `target/scenes/advanced/<theme>/`).
 - macOS over ssh: rsync the tree (excluding `target/`, `.venv/`,
   `.claude/`) to a Mac and build there. `capture_scenes.py` works over ssh
   against a real Metal window when a user is logged in at the console.

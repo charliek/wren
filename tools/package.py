@@ -59,9 +59,13 @@ ICON_ICNS = Path("assets/icon/AppIcon.icns")
 ICON_CATALOG = Path("assets/icon/AppIcon.icon")
 # Rust's own default for aarch64-apple-darwin; actool needs some target.
 MACOS_ICON_DEPLOYMENT_TARGET = "11.0"
-FONT_NOTICES = (
+# License texts shipped beside the binary: the embedded fonts', and iced's
+# for the source copied into crates/wren-editor (crates.io's iced_widget and
+# iced_graphics packages carry none, so DEPENDENCY_NOTICES.txt cannot).
+LICENSE_NOTICES = (
     Path("third_party/inter/LICENSE.txt"),
     Path("third_party/jetbrains-mono/OFL.txt"),
+    Path("third_party/iced/LICENSE"),
 )
 NOTICES = (
     "Wren embeds Inter and JetBrains Mono fonts in its executable.\n"
@@ -72,6 +76,16 @@ NOTICES = (
     "explicit text-coverage gaps are in DEPENDENCY_NOTICES.txt. That inventory\n"
     "also includes build/dev and other-target packages, not just linked code.\n"
     "Text collection is not a legal-completeness assurance.\n"
+    "\nWren's editor (crates/wren-editor) contains source copied and modified\n"
+    "from these MIT-licensed projects:\n"
+    "  iced_widget 0.14.2 src/text_editor.rs (Copyright 2019 Héctor Ramón, Iced contributors)\n"
+    "  iced_graphics 0.14.0 src/text/editor.rs (Copyright 2019 Héctor Ramón, Iced contributors)\n"
+    "  cosmic-text 0.15.0 src/edit/editor.rs, caret placement (Copyright 2022 System76)\n"
+    "The iced license text accompanies this bundle:\n"
+    "  third_party/iced/LICENSE\n"
+    "\nWren builds with a modified cosmic-text 0.15.0 (a hanging indent for\n"
+    "wrapped rows), used under its MIT license option. cosmic-text's MIT and\n"
+    "Apache-2.0 texts are in DEPENDENCY_NOTICES.txt, under cosmic-text.\n"
     "\nWren itself is released under the MIT License; see LICENSE.\n"
 )
 PROJECT_LICENSE = Path("LICENSE")
@@ -579,7 +593,7 @@ def assemble_bundle(binary: Path, destination: Path, platform: str, *,
             write_file(resources / "AppIcon.icns", icns, dir_fd=stage.fd)
             notices = resources
         write_file(notices / "LICENSE", read_source(root / PROJECT_LICENSE), dir_fd=stage.fd)
-        for notice in FONT_NOTICES:
+        for notice in LICENSE_NOTICES:
             write_file(notices / notice, read_source(root / notice), dir_fd=stage.fd)
         write_file(notices / "DEPENDENCY_NOTICES.txt", dependency_notices, dir_fd=stage.fd)
         write_file(notices / "THIRD_PARTY_NOTICES.txt", NOTICES.encode("utf-8"), dir_fd=stage.fd)

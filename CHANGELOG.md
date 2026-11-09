@@ -13,6 +13,52 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **Markdown assist.** Enter continues lists, numbered lists (renumbering
+  the items after), tasks, and quotes, and on an empty item moves it out a
+  level or ends the list. Shift+Enter breaks a line inside an item. Tab and
+  Shift+Tab nest and un-nest list items, Backspace removes markup before
+  characters, and Home stops after the markup first. The `markdown-assist`
+  setting (default `on`) and the palette's **Toggle Markdown assist** turn
+  it off; Tab still inserts spaces to the next multiple of 4 when it is.
+- **Markdown commands:** Toggle task (⌘↵), Bold (⌘B), Italic (⌘I), Inline
+  code (⌘E), and Move line up / down (⌥↑ / ⌥↓), also in the palette under
+  **Markdown**. On Linux the first four take Ctrl (Ctrl+Enter, Ctrl+B,
+  Ctrl+I, Ctrl+E).
+- **Jump to heading** (⇧⌘O, Alt+Shift+O on Linux) lists the open note's
+  headings. Moving the highlight shows each one; ↵ keeps it and Esc puts
+  the cursor and scroll back.
+- **Word deletes and note motions.** ⌥⌫ / ⌥⌦ (Ctrl or Alt with Backspace
+  / Delete on Linux) delete a word, ⌘⌫ deletes to the start of the line,
+  and ⌘↑ / ⌘↓ (Ctrl+Home / Ctrl+End) go to the start or end of the note.
+  Backspace and Delete remove a whole character, emoji and accents
+  included.
+- **An advanced editor engine**, `editor-engine = advanced` or the
+  palette's **Switch editor engine**, still being evaluated (`classic` stays
+  the default). It sets H1–H3 headings larger, wraps a list item's or a
+  quote's long lines under its text, keeps the exact scroll through undo,
+  and places outline jumps precisely.
+- **`editor-line-height`** (default `1.7`) sets the row height as a
+  multiple of the text size.
+- **`editor-max-width`** (default `760`) caps the editor column's width and
+  centres it in a wider pane; `none` lets it fill the pane.
+
+### Changed
+
+- **Search previews** show a note's first paragraph line outside front
+  matter, headings, and code, with list, task, and quote markers dropped.
+
+### Fixed
+
+- **⌃A, ⌃E, ⌃B, and ⌃F move the cursor on macOS** (start and end of the
+  line, back and forward a character), as in other Mac text views.
+- **Line breaks keep the note's line endings.** Enter, paste, and input
+  method commits in a CRLF (or CR) note insert that ending instead of LF.
+- **Undo and redo keep the view.** They change only the text that differs,
+  so the editor no longer reloads the note and jumps to the cursor's edge of
+  the window.
+
 ## v0.0.3 — 2026-11-08
 
 ### Added

@@ -22,7 +22,10 @@ only a `.wren/` directory).
 - Sections, Groups, and Notes columns with resizable, persistent widths,
   plus a **focus mode** that shows only the editor.
 - A Markdown editor with highlighting, a line-number gutter, soft wrap,
-  undo/redo, and find-in-note.
+  undo/redo, and find-in-note. Enter continues lists, tasks, and quotes,
+  Tab nests list items, and commands toggle tasks, bold, italic, and code
+  and move lines. **Jump to heading** (⇧⌘O, Alt+Shift+O on Linux) lists
+  the note's outline.
 - Autosave 750 ms after you stop typing, and on every switch, move, focus
   loss, and quit. External edits reload cleanly, and conflicts keep both
   versions.

@@ -3,7 +3,7 @@
 ## Gates
 
 ```bash
-make check                              # fmt, clippy (normal + smoke-test), Rust tests, Python units
+make check                              # fmt, clippy (normal, smoke-test, wren-editor alone), Rust tests, Python units
 ICED_BACKEND=tiny-skia make smoke-x11   # real-window functional suite under Xvfb
 make smoke-wayland                      # same suite on headless Weston, minus X11-native cases
 uv run --locked --group docs zensical build --strict # the docs site, for changes under docs/
@@ -33,11 +33,77 @@ The functional harness launches its own `wren` built with
 never attaches to or kills a normal instance. Cases marked `native_x11` use
 real OS keyboard and pointer input and run only in the X11 lanes.
 
+`WrenApp(settings="…")` writes that text to the sandbox's `config.conf`
+before the first launch, so a case can start Wren with any setting. Restarts
+keep whatever the app has written there since, and `app.settings_path` names
+the file.
+
+### Editor engines
+
+The editor cases in `tools/wrentest/test_editor.py` and
+`tools/wrentest/test_markdown_keys.py` run on each text engine
+that `WRENTEST_ENGINE` names: `classic` (the default), `advanced`, or both,
+comma-separated. Each case starts Wren with `editor-engine` set to its engine,
+checks that `editor.get` reports that engine, and gets the engine in its test
+id:
+
+```bash
+cargo build --features smoke-test
+ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced \
+  uv run --locked --group test python tools/run_display.py x11 -- \
+  uv run --locked --group test pytest tools/wrentest/test_editor.py
+```
+
+`test_markdown_keys.py` drives the Markdown-aware keys with the
+`editor.command` request, `{"intent": "enter"}` and the like (`shift_enter`,
+`tab`, `shift_tab`, `backspace`, `delete`, `delete_word_back`,
+`delete_word_forward`, `delete_to_line_start`, `home`, `select_home`, …). It
+reaches the app's edit path the same way the editor widget's keys do and
+returns the editor snapshot; its `native_x11` case presses the real keys.
+The Markdown commands run two ways: `command.run` (`{"id": "markdown.bold"}`)
+runs one as the palette does, at the editor's cursor whatever has the
+keyboard, and `shortcut` runs one as its key does, routing the bound key
+through the editor's key policy and acting only while the editor is
+focused. The settings commands `editor.toggle_engine` and
+`editor.toggle_markdown_assist` run through `command.run` too, and each
+palette row reports the value such a command flips as its `state`.
+
+`perf.view` returns how long each recent `App::view` took to build
+(`view_micros`, the last 256, in microseconds; `{"clear": true}` empties the
+list after reading it). `test_markdown_keys.py` opens a group of three
+5,000-line notes and holds the median view build under 5 ms at idle and
+after smart keys, and each smart key's handler under 400 ms, both generous
+ceilings for a debug build on CI. Work done on every frame, such as
+re-reading every note's preview, shows up there first.
+
+The `make smoke-*` targets pass the variable through, so
+`WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor
+cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four Linux
+smoke lanes.
+
 ## Looking at real screens
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`
 (under `tools/run_display.py x11 -- …` on Linux). It writes one PNG per scene
-to `target/scenes/<theme>/`.
+to `target/scenes/<theme>/`, or with `--engine advanced` to
+`target/scenes/advanced/<theme>/`. The `markdown` scene shows a note with
+every construct the editor highlights and a selection across blank lines;
+the `headings` scenes show every heading level, one wrapping, with the caret
+and then a selection on it; and each has a `-wide` twin with the browser
+columns folded, where the editor's column is centred. The `hanging-indent`
+scene shows long wrapped list items, nested and ordered items, tasks,
+quotes, and a heading inside a list item, with a selection across wrapped
+rows; only the advanced engine hangs them. Check them on both engines in
+both themes after changing the highlighter or the editor's drawing.
+`--setting key=value` (repeatable) starts Wren with more settings and
+`--label` files the PNGs under a directory of their own; `--only markdown`
+shoots just these editor scenes:
+
+```bash
+ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
+  python3 tools/capture_scenes.py --engine advanced --theme light \
+  --setting editor-line-height=2 --label tall --only markdown
+```
 
 ## macOS
 

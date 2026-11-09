@@ -5,10 +5,9 @@ use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 use iced::Task;
 use serde_json::{json, Value};
 
-use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget};
+use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget, Scope};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
-use crate::editor_view;
 use crate::panes::{Pane, PANES};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
@@ -75,6 +74,27 @@ impl App {
             "shortcut" => {
                 // A key binding firing, with its active-column scoping.
                 let id = CommandId::parse(string(params, "id")?).ok_or("Unknown command ID")?;
+                if id.scope() == Scope::Editor {
+                    // The editor's key policy routes the bound key, and only
+                    // a focused editor sees it.
+                    let keymap = &self.preferences.keymap;
+                    let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
+                    let wren_editor::KeyRoute::Intent(intent) =
+                        super::preferences::key_route(
+                            keymap,
+                            trigger,
+                            self.editor.markdown_assist(),
+                        )
+                    else {
+                        return Err("The editor does not route this command's key".into());
+                    };
+                    let request = Arc::clone(request);
+                    return Ok(iced::widget::operation::is_focused("note-editor").map(
+                        move |focused| {
+                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(intent))
+                        },
+                    ));
+                }
                 let task = self.run_shortcut(id);
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
@@ -107,6 +127,13 @@ impl App {
                 self.workspace_reply = Some(Arc::clone(request));
                 return Ok(task);
             }
+            "test.timer.hold" => {
+                if self.endpoint.is_none() || self.test_sandbox.is_none() {
+                    return Err("Holding the timer requires the private test IPC endpoint".into());
+                }
+                self.timer_held = params.get("held").and_then(Value::as_bool).ok_or("held must be a boolean")?;
+                request.respond(Ok(Value::Null));
+            }
             "test.fail_next" => {
                 if self.endpoint.is_none() || self.test_sandbox.is_none() {
                     return Err("Fault injection requires the private test IPC endpoint".into());
@@ -127,13 +154,21 @@ impl App {
                 request.respond(Ok(self.session_snapshot()));
             }
             "editor.get" => request.respond(Ok(self.editor_snapshot())),
+            "perf.view" => {
+                let mut times = self.view_micros.borrow_mut();
+                let recent: Vec<u64> = times.iter().copied().collect();
+                if params.get("clear").and_then(Value::as_bool).unwrap_or(false) {
+                    times.clear();
+                }
+                request.respond(Ok(serde_json::json!({ "view_micros": recent })));
+            }
             "editor.set" => {
                 if self.workspace_mode || self.session.is_some() || self.loading.is_some() {
                     return Err("editor.set is only available for the in-memory spike; edit saved notes through the editor".into());
                 }
                 let contents = string(params, "text")?;
                 self.editor.replace_text(contents, false);
-                self.words = contents.split_whitespace().count();
+                self.set_words(contents);
                 self.edit_revision += 1;
                 self.edit_micros.clear();
                 self.find_query.clear();
@@ -144,11 +179,11 @@ impl App {
             "editor.insert" | "editor.undo" | "editor.redo" => {
                 self.ensure_editor_ready()?;
                 let message = match request.op.as_str() {
-                    "editor.insert" => editor_view::Message::Action(Action::Edit(Edit::Paste(
+                    "editor.insert" => wren_editor::Message::Action(Action::Edit(Edit::Paste(
                         Arc::new(string(params, "text")?.into()),
                     ))),
-                    "editor.undo" => editor_view::Message::Undo,
-                    _ => editor_view::Message::Redo,
+                    "editor.undo" => wren_editor::Message::Undo,
+                    _ => wren_editor::Message::Redo,
                 };
                 let task = self.edit(message);
                 request.respond(Ok(self.editor_snapshot()));
@@ -188,7 +223,16 @@ impl App {
                     }
                     _ => return Err("unknown editor action".into()),
                 };
-                let task = self.edit(editor_view::Message::Action(action));
+                let task = self.edit(wren_editor::Message::Action(action));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task.chain(focus_editor()));
+            }
+            "editor.command" => {
+                // An editing key as the editor widget sends it, through the
+                // same App::edit path.
+                self.ensure_editor_ready()?;
+                let intent = intent(string(params, "intent")?)?;
+                let task = self.edit(wren_editor::Message::Intent(intent));
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
             }
@@ -331,6 +375,7 @@ impl App {
                     "workspaces" => Mode::Workspaces,
                     "themes" => Mode::Themes,
                     "fonts" => Mode::Fonts,
+                    "outline" => Mode::Outline,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -520,7 +565,7 @@ impl App {
                 )
             })
             .collect::<serde_json::Map<_, _>>();
-        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut})).collect::<Vec<_>>()}));
+        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut,"state":match row.key { Key::Command(id) => self.command_state(id), _ => None }})).collect::<Vec<_>>()}));
         let dialog = self.dialog.as_ref().map(|dialog| json!({"kind":format!("{:?}",dialog.kind),"name":dialog.name,"error":dialog.error}));
         let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
         let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
@@ -600,11 +645,15 @@ impl App {
         json!({
             "text":self.editor.text(),"cursor":position(cursor.position),
             "selection":cursor.selection.map(position),"selected_text":self.editor.selected_text(),
-            "line_count":self.editor.line_count(),"words":self.words,"revision":self.edit_revision,
+            "line_count":self.editor.line_count(),"first_visible_line":self.editor.first_visible_line(),"words":self.words,"revision":self.edit_revision,
             "can_undo":self.editor.can_undo(),"can_redo":self.editor.can_redo(),
             "find_open":self.find_open,"find_query":self.find_query,"find_count":self.editor.find_count(),
             "find_current":self.editor.find_current(),"edit_micros":self.edit_micros,
-            "soft_wrap":true,"theme":self.definition.id,
+            "soft_wrap":true,"theme":self.definition.id,"markdown_assist":self.editor.markdown_assist(),
+            "engine":match self.editor.backend() {
+                wren_editor::BackendKind::Iced => "classic",
+                wren_editor::BackendKind::Owned => "advanced",
+            },
             "font_size":self.editor.font_size(),
             "font_family":match self.editor.font().family {
                 iced::font::Family::Name(name) => name,
@@ -612,6 +661,34 @@ impl App {
             },
         })
     }
+}
+
+fn intent(name: &str) -> Result<wren_editor::Intent, String> {
+    use wren_editor::Intent;
+    Ok(match name {
+        "enter" => Intent::Enter,
+        "shift_enter" => Intent::ShiftEnter,
+        "tab" => Intent::Tab,
+        "shift_tab" => Intent::ShiftTab,
+        "backspace" => Intent::Backspace,
+        "delete" => Intent::Delete,
+        "delete_word_back" => Intent::DeleteWordBackward,
+        "delete_word_forward" => Intent::DeleteWordForward,
+        "delete_to_line_start" => Intent::DeleteToTextStart,
+        "home" => Intent::Home { extend: false },
+        "select_home" => Intent::Home { extend: true },
+        "document_start" => Intent::DocumentStart { extend: false },
+        "select_document_start" => Intent::DocumentStart { extend: true },
+        "document_end" => Intent::DocumentEnd { extend: false },
+        "select_document_end" => Intent::DocumentEnd { extend: true },
+        "toggle_task" => Intent::ToggleTask,
+        "bold" => Intent::Bold,
+        "italic" => Intent::Italic,
+        "code" => Intent::Code,
+        "move_line_up" => Intent::MoveLineUp,
+        "move_line_down" => Intent::MoveLineDown,
+        _ => return Err(format!("unknown editor intent {name:?}")),
+    })
 }
 
 fn result_key(value: &Value) -> Result<Key, String> {
@@ -654,6 +731,15 @@ fn result_key(value: &Value) -> Result<Key, String> {
     if object.contains_key("workspace") {
         return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
     }
+    if let Some(heading) = object.get("heading") {
+        if heading.as_object().is_none_or(|object| object.len() != 2) {
+            return Err("heading requires revision and line".into());
+        }
+        return Ok(Key::Heading {
+            revision: id(heading, "revision")?,
+            line: usize::try_from(id(heading, "line")?).map_err(|_| "line must be usize")?,
+        });
+    }
     if let Some(action) = object.get("item_action") {
         let object = action
             .as_object()
@@ -692,6 +778,7 @@ fn key_json(key: &Key) -> Value {
         Key::Workspace(path) => json!({"workspace":path}),
         Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),
         Key::Font(family) => json!({"font":family}),
+        Key::Heading { revision, line } => json!({"heading":{"revision":revision,"line":line}}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }
@@ -995,6 +1082,10 @@ mod tests {
             Key::Note(NoteId(3)),
             Key::Destination(Parent::Group(GroupId(2))),
             Key::Workspace("/tmp/workspace".into()),
+            Key::Heading {
+                revision: 7,
+                line: 12,
+            },
             Key::ItemAction {
                 target: ItemTarget {
                     generation: 4,
@@ -1031,6 +1122,8 @@ mod tests {
             json!({"note":-1}),
             json!({"destination":{"note":1}}),
             json!({"command":"save"}),
+            json!({"heading":{"line":3}}),
+            json!({"heading":{"revision":1,"line":3,"title":"x"}}),
             json!({"reorder":{"source":{"generation":1,"item":{"group":2},"parent":{"section":1}}}}),
             json!({"item_action":{"target":{"generation":1,"item":{"note":2},"parent":{"section":1}},"command":"note.rename","extra":true}}),
             json!({"item_action":{"target":{"generation":1,"item":{"note":2},"parent":{"section":1},"path":"external"},"command":"note.rename"}}),
@@ -1084,7 +1177,7 @@ mod tests {
     #[test]
     fn navigation_adapters_share_the_failed_flush_barrier_and_return_correlated_disposition() {
         let (directory, mut app) = navigation_fixture();
-        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
             Arc::new("dirty ".into()),
         ))));
         let _ = app
@@ -1157,7 +1250,7 @@ mod tests {
     #[test]
     fn fake_picker_adapter_uses_tagged_production_completion_and_cancel_keeps_draft() {
         let (_directory, mut app) = navigation_fixture();
-        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
             Arc::new("draft ".into()),
         ))));
         let pending = app
@@ -1304,7 +1397,7 @@ mod tests {
         app.session = Some(Session::open(directory.path()).unwrap());
         let note = app.session.as_ref().unwrap().model().notes[0].id;
         let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
-        let _ = app.edit(editor_view::Message::Action(Action::Edit(Edit::Paste(
+        let _ = app.edit(wren_editor::Message::Action(Action::Edit(Edit::Paste(
             Arc::new("draft ".into()),
         ))));
         let snapshot = app.session_snapshot();
