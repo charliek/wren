@@ -48,7 +48,8 @@ pub(crate) struct Context<'a> {
 /// - `Ctrl/Cmd+F` → [`Message::Find`]
 ///
 /// The editing keys are read from iced's own bindings, so platform mappings
-/// (macOS ⌘← and ⌃A as Home, ⌃H as Backspace) carry over. Backspace,
+/// (macOS ⌘← as Home, ⌃H as Backspace) carry over; macOS's ⌃A, ⌃E, ⌃B, and
+/// ⌃F motions are mapped here, as iced drops them. Backspace,
 /// Delete, the word and line deletes, Tab, Shift+Tab, and ⌘↑/⌘↓ are always
 /// intents; Enter, Shift+Enter, Home, and Shift+Home only with Markdown
 /// assist on, and iced's stock handling otherwise. On macOS a key with ⌘
@@ -119,9 +120,29 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         });
     }
 
-    Binding::from_key_press(key_press)
-        .filter(|binding| types_with(binding, m, cfg!(target_os = "macos")))
+    let macos = cfg!(target_os = "macos");
+    macos
+        .then(|| ctrl_motion(key, m))
+        .flatten()
+        .or_else(|| Binding::from_key_press(key_press))
+        .filter(|binding| types_with(binding, m, macos))
         .map(|binding| editing(binding, m, context.markdown_assist))
+}
+
+/// macOS's ⌃A, ⌃E, ⌃B, and ⌃F. iced 0.14 converts them to Home, End, Left,
+/// and Right, then reads the unconverted key, so it never moves for them.
+fn ctrl_motion(key: &Key, m: Modifiers) -> Option<Binding<Message>> {
+    if m != Modifiers::CTRL {
+        return None;
+    }
+    let motion = match key.as_ref() {
+        Key::Character("a") => Motion::Home,
+        Key::Character("e") => Motion::End,
+        Key::Character("b") => Motion::Left,
+        Key::Character("f") => Motion::Right,
+        _ => return None,
+    };
+    Some(Binding::Move(motion))
 }
 
 /// Whether `binding` may run with `m` held: on macOS (`macos`), ⌘ is for
@@ -324,11 +345,11 @@ mod tests {
         ));
     }
 
-    /// A host that binds Ctrl+Enter and Ctrl+B to editor commands, and
-    /// Ctrl+F and Ctrl+Z to its own.
+    /// A host that binds Cmd/Ctrl+Enter and Cmd/Ctrl+B to editor commands,
+    /// and Cmd/Ctrl+F and Cmd/Ctrl+Z to its own.
     fn host_policy() -> KeyPolicy {
         Arc::new(|key: &Key, _, modifiers: Modifiers| {
-            if !modifiers.control() {
+            if !modifiers.command() {
                 return KeyRoute::Pass;
             }
             match key.as_ref() {
@@ -347,10 +368,13 @@ mod tests {
             policy: Some(&policy),
             ..ASSIST
         };
-        let ctrl = Modifiers::CTRL;
-        assert_eq!(named(Named::Enter, ctrl, context), Some(Intent::ToggleTask));
+        let command = Modifiers::COMMAND;
+        assert_eq!(
+            named(Named::Enter, command, context),
+            Some(Intent::ToggleTask)
+        );
         let letter =
-            |letter: &str, context| press(Key::Character(letter.into()), ctrl, None, context);
+            |letter: &str, context| press(Key::Character(letter.into()), command, None, context);
         assert!(matches!(
             letter("b", context),
             Some(Binding::Custom(Message::Intent(Intent::Bold)))
@@ -389,7 +413,7 @@ mod tests {
                 key: Key::Named(Named::Enter),
                 modified_key: Key::Named(Named::Enter),
                 physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
-                modifiers: ctrl,
+                modifiers: command,
                 text: None,
                 status: text_editor::Status::Active,
             },
@@ -409,17 +433,17 @@ mod tests {
             policy: Some(&policy),
             ..COMPOSING
         };
-        let ctrl = Modifiers::CTRL;
-        assert!(press(Key::Named(Named::Enter), ctrl, None, composing).is_none());
+        let command = Modifiers::COMMAND;
+        assert!(press(Key::Named(Named::Enter), command, None, composing).is_none());
         for key in [Named::Tab, Named::Backspace, Named::Delete] {
             assert!(
-                press(Key::Named(key), ctrl, None, composing).is_none(),
+                press(Key::Named(key), command, None, composing).is_none(),
                 "{key:?}"
             );
         }
-        assert!(press(Key::Character("b".into()), ctrl, None, composing).is_none());
+        assert!(press(Key::Character("b".into()), command, None, composing).is_none());
         // Host shortcuts and the editor's own keys are unchanged.
-        assert!(press(Key::Character("f".into()), ctrl, None, composing).is_none());
+        assert!(press(Key::Character("f".into()), command, None, composing).is_none());
         assert!(matches!(
             press(
                 Key::Character("a".into()),
@@ -428,6 +452,26 @@ mod tests {
                 composing
             ),
             Some(Binding::Insert('a'))
+        ));
+    }
+
+    #[test]
+    fn macos_ctrl_letters_move_and_others_do_not() {
+        let ctrl = |letter: &str, m| ctrl_motion(&Key::Character(letter.into()), m);
+        let moved = |letter| match ctrl(letter, Modifiers::CTRL) {
+            Some(Binding::Move(motion)) => Some(motion),
+            _ => None,
+        };
+        assert_eq!(moved("a"), Some(Motion::Home));
+        assert_eq!(moved("e"), Some(Motion::End));
+        assert_eq!(moved("b"), Some(Motion::Left));
+        assert_eq!(moved("f"), Some(Motion::Right));
+        assert!(ctrl("k", Modifiers::CTRL).is_none());
+        assert!(ctrl("a", Modifiers::CTRL | Modifiers::SHIFT).is_none());
+        assert!(ctrl("a", Modifiers::LOGO).is_none());
+        assert!(matches!(
+            editing(Binding::Move(Motion::Home), Modifiers::CTRL, true),
+            Binding::Custom(Message::Intent(Intent::Home { extend: false }))
         ));
     }
 

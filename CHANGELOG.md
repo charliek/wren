@@ -50,6 +50,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Fixed
 
+- **⌃A, ⌃E, ⌃B, and ⌃F move the cursor on macOS** (start and end of the
+  line, back and forward a character), as in other Mac text views.
 - **Line breaks keep the note's line endings.** Enter, paste, and input
   method commits in a CRLF (or CR) note insert that ending instead of LF.
 - **Undo and redo keep the view.** They change only the text that differs,

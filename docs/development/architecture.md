@@ -59,8 +59,9 @@ at the editor's cursor; the Markdown commands are disabled while
 
 The editor widget turns its editing keys (Enter, Tab, Backspace, Delete,
 the word deletes, Home, …) into `wren_editor::Message::Intent`. It reads
-them from iced's own key bindings, so the platform mappings (⌘← and ⌃A as
-Home on macOS) carry over. Like every other edit, an intent reaches
+them from iced's own key bindings, so its platform mappings (⌘← as Home
+on macOS) carry over. macOS's ⌃A, ⌃E, ⌃B, and ⌃F motions are mapped in
+`wren_editor::keys`, because iced 0.14 drops them. Like every other edit, an intent reaches
 `App::edit`, which hands it to `EditorView::intent`. That plans it with
 `wren_markdown::plan` over the editor's lines in place, without copying the
 text, and applies the plan as one undo unit, writing each inserted line
