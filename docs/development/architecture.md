@@ -130,6 +130,45 @@ iced, so it wraps every row at the left edge.
 version, so `make check` (`check-patches`) fails unless the vendored `swash`
 and `cosmic-text` are the ones in the build.
 
+## Themes
+
+A theme is a `wren_core::theme::Colors` value: plain RGB tokens with no
+toolkit types. `crates/wren-iced/src/theme.rs` turns it into iced's palette
+(`from_definition`) and into the editor's `Style` and `Palette`
+(`editor_colors`), mapping each token one to one, and the app chrome reads
+the tokens directly.
+
+| Tokens | Used for |
+|---|---|
+| `editor`, `pane`, `notes`, `titlebar`, `input`, `control`, `raised` | Surfaces, from the editor out to dialogs. |
+| `text`, `body`, `muted`, `faint` | The text ramp: titles, note text, secondary labels, and decorative markers. |
+| `accent` | The caret, the focused column's selected row edge, and selected controls' text. |
+| `divider`, `control_border`, `dialog_border`, `selected_border` | Lines: between panes, around controls and dialogs, and around selected controls and active scrollbars. |
+| `selected`, `selected_inactive` | List rows selected in the focused column, and in the others. |
+| `current_line`, `text_selection`, `code_block` | Editor bands: the cursor's line, the selection, and fenced code. |
+| `heading`, `heading2` | H1 and H2 text. H3 to H6 use `text`. |
+| `link`, `code`, `quote`, `completed` | Link text, inline code, quote text, and done tasks and struck words. |
+| `success`, `warning`, `danger` | Status only: saved, warnings, and errors. |
+
+Markdown markers (`#`, `**`, `>`, link destinations, strike lines) use
+`faint`, so the words stay the loudest thing on a line. The tests in
+`theme.rs` hold every built-in theme to the same rules:
+
+- Reading text reaches 4.5:1 on its surfaces, `faint` 3:1, and the ramp
+  steps down from `text` to `faint`.
+- `quote` and `completed` are no louder than `body`.
+- Inside a text selection, body text stays at 4.5:1, syntax colours at
+  3.5:1, and `faint` at 3:1.
+- Surfaces step apart by measured CIE L*, enough to see but not to shout:
+  panes from the editor, the current line, the code band, and the
+  selection from both, and focused selected rows from unfocused ones.
+- Colours that sit next to each other stay apart in hue: `heading2` from
+  `link` and `text`, `code` from `success`, and the status colours from
+  each other and from `accent`.
+
+To add a theme, add a `Theme` to `BUILT_INS` and run the tests; they name
+each rule a palette breaks.
+
 ## Storage safety
 
 - Storage walks validated workspace-relative paths through no-follow

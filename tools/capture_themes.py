@@ -97,9 +97,10 @@ def build_workspace(root: Path) -> None:
         os.utime(root / relative, (mtime, mtime))
 
 
-def capture(theme: str, workspace: Path, out: Path) -> None:
+def capture(theme: str, workspace: Path, out: Path, engine: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    with WrenApp(workspace=workspace, evaluation=False) as app:
+    settings = f"editor-engine = {engine}\n"
+    with WrenApp(workspace=workspace, evaluation=False, settings=settings) as app:
         client = app.client
 
         def shot(name: str) -> None:
@@ -146,13 +147,14 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path("target/theme-scenes"))
     parser.add_argument("--workspace", type=Path, default=Path("/tmp/wren-design-workspace"))
     parser.add_argument("--themes", default="")
+    parser.add_argument("--engine", choices=["classic", "advanced"], default="classic")
     args = parser.parse_args()
 
     workspace = args.workspace.resolve()
     build_workspace(workspace)
     themes = [t for t in args.themes.split(",") if t] or theme_ids()
     for theme in themes:
-        capture(theme, workspace, (args.out / theme).resolve())
+        capture(theme, workspace, (args.out / theme).resolve(), args.engine)
     return 0
 
 

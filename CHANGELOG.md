@@ -47,7 +47,27 @@ version's section as its notes, and publishes to the apt repo. See
 ### Changed
 
 - **Search previews** show a note's first paragraph line outside front
-  matter, headings, and code, with list, task, and quote markers dropped.
+  matter, headings, and code, as plain words: list, task, and quote
+  markers, emphasis and code marks, and link destinations are dropped.
+  Search snippets start and end on whole words and separate blocks with
+  " · ".
+- **Retuned themes.** All eleven built-in themes keep their upstream hues
+  and are tuned against one set of tested rules for contrast, surface
+  steps, and distinct colours. In the editor, H1 and H2 headings, links,
+  inline code, and quotes each have their own colour, fenced code blocks
+  sit on a band, done tasks and struck words are quieter but still
+  readable, and the selection has its own fill. Markdown markers recede to
+  the faintest colour. Inline code no longer shares the "Saved" green.
+- **The focused column stands out.** Columns without keyboard focus show
+  their selected row in a quieter fill, without the accent edge.
+- **Note rows** show a note's age at the end of its title row, leaving the
+  second row to the preview.
+- **Change theme…** shows a small preview of each theme. The palettes
+  share one 680 px width (Jump to heading keeps its narrower one), and the
+  search list fits its results.
+- **Narrower default columns** (176, 192, and 256 px), so the editor gets
+  more room. **Reset column widths** returns to them.
+- **Dialogs** dim the window more in dark themes and less in light ones.
 
 ### Fixed
 

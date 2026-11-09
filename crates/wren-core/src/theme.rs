@@ -36,7 +36,7 @@ pub struct Colors {
     pub heading2: Rgb,
     /// Link text in the editor; the URL itself stays `faint`.
     pub link: Rgb,
-    /// Inline code spans and fenced code-block text.
+    /// Inline code spans. Fenced block text stays `muted` on `code_block`.
     pub code: Rgb,
     /// The band behind fenced code blocks.
     pub code_block: Rgb,
