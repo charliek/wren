@@ -5,7 +5,7 @@ exclude = ["vendor/cosmic-text", "vendor/iced_winit", "vendor/swash"]
 default-members = ["crates/wren-iced"]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 publish = false

@@ -4835,7 +4835,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wren-core"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "directories",
@@ -4850,7 +4850,7 @@ dependencies = [
 
 [[package]]
 name = "wren-editor"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
  "iced",
  "unicode-segmentation",
@@ -4859,7 +4859,7 @@ dependencies = [
 
 [[package]]
 name = "wren-iced"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
  "iced",
  "muda",
@@ -4878,14 +4878,14 @@ dependencies = [
 
 [[package]]
 name = "wren-markdown"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
  "unicode-segmentation",
 ]
 
 [[package]]
 name = "wren-sparkle"
-version = "0.0.3"
+version = "0.1.0"
 dependencies = [
  "libc",
  "objc2 0.6.5",
