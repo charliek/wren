@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.1.0 — 2026-11-08
+
 ### Added
 
 - **Markdown assist.** Enter continues lists, numbered lists (renumbering
@@ -71,6 +73,10 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Fixed
 
+- **Bold and italic across several words.** `**Alice Chen**` was bold
+  only on its last word and `*Bob*` was not italic, because each word took
+  the font of the marker in front of it. Markers now share their span's
+  font.
 - **⌃A, ⌃E, ⌃B, and ⌃F move the cursor on macOS** (start and end of the
   line, back and forward a character), as in other Mac text views.
 - **Line breaks keep the note's line endings.** Enter, paste, and input
