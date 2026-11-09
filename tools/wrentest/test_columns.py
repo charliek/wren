@@ -25,7 +25,7 @@ from tools.wrentest.ui import WrenApp, wait_for
 
 native_workspace = native.native_workspace
 
-ACCENT = {"dark": (0xF0, 0xB4, 0x5A), "light": (0x9A, 0x58, 0x00)}
+ACCENT = {"dark": (0xF0, 0xB4, 0x5A), "light": (0xA1, 0x48, 0x08)}
 
 
 def nav(app: WrenApp, key: str) -> dict:

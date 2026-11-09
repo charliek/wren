@@ -40,7 +40,7 @@ COMMANDS = {
     "edit.move_line_up", "edit.move_line_down",
     "editor.toggle_markdown_assist", "editor.toggle_engine",
 }
-DEFAULT_WIDTHS = {"sections": 200, "groups": 220, "notes": 280}
+DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
 TENTH = "Atlas/Research/Note 10.md"
@@ -1131,12 +1131,17 @@ def color_count(image, viewport: dict, rectangle: tuple[float, float, float, flo
                for y in ys for x in xs)
 
 
-@pytest.mark.parametrize("theme,selected,text,body,raised,accent", [
-    ("dark", (0x2A, 0x31, 0x40), (0xE6, 0xE8, 0xEC), (0xD5, 0xD9, 0xE0), (0x1C, 0x1F, 0x26), (0xF0, 0xB4, 0x5A)),
-    ("light", (0xE1, 0xE7, 0xF0), (0x20, 0x24, 0x2D), (0x31, 0x38, 0x44), (0xFF, 0xFF, 0xFF), (0x9A, 0x58, 0x00)),
+# The note row is selected while the editor has the keyboard, so it shows the
+# quieter inactive fill; the palette's active result shows the full selection.
+@pytest.mark.parametrize("theme,inactive,selected,text,body,raised,accent", [
+    ("dark", (0x20, 0x24, 0x2C), (0x2A, 0x31, 0x40), (0xE6, 0xE8, 0xEC), (0xD5, 0xD9, 0xE0),
+     (0x1C, 0x1F, 0x26), (0xF0, 0xB4, 0x5A)),
+    ("light", (0xE4, 0xE8, 0xEE), (0xD2, 0xDD, 0xEC), (0x20, 0x24, 0x2D), (0x31, 0x38, 0x44),
+     (0xFF, 0xFF, 0xFF), (0xA1, 0x48, 0x08)),
 ])
 def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
-    vault: Path, theme: str, selected: tuple, text: tuple, body: tuple, raised: tuple, accent: tuple,
+    vault: Path, theme: str, inactive: tuple, selected: tuple, text: tuple, body: tuple,
+    raised: tuple, accent: tuple,
 ) -> None:
     artifacts = artifact_directory(f"navigation-render-{theme}")
     with WrenApp(workspace=vault, artifacts_dir=artifacts) as app:
@@ -1154,7 +1159,7 @@ def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
         viewport = navigation(app)["viewport"]
         rect = (bounds["x"] + 4, bounds["y"] + 4,
                 bounds["x"] + bounds["width"] - 4, bounds["y"] + bounds["height"] - 4)
-        assert color_count(image, viewport, rect, selected) > 250
+        assert color_count(image, viewport, rect, inactive) > 250
         assert color_count(image, viewport, rect, text) > 15, "The selected note title did not paint glyphs"
         for mode, query in (("commands", "New note"), ("search", "needle amber")):
             modal = palette(app, mode, query)
@@ -1179,10 +1184,10 @@ def test_palette_search_columns_and_focus_render_real_selection_and_glyphs(
             rect = (row["x"] + 4, y + 4, row["x"] + row["width"] - 4, y + row["height"] - 4)
             assert color_count(image, viewport, rect, selected) > 400
             assert color_count(image, viewport, rect, text) > 30, "Selected palette result labels are blank"
-            # palette_view centers 620/720px panels, with a 32px horizontal margin.
-            width = min(720 if mode == "search" else 620, max(viewport["width"] - 32, 120))
+            # palette_view centers one 680px panel, with a 32px horizontal margin.
+            width = min(680, max(viewport["width"] - 32, 120))
             left = (viewport["width"] - width) / 2
-            top = min(72 if mode == "search" else 96, max(viewport["height"] * 0.16, 8))
+            top = min(80, max(viewport["height"] * 0.16, 8))
             assert color_count(image, viewport, (left + 8, top + 8, left + width - 8, top + 45), raised) > 100
             if mode == "search":
                 assert modal["results"][modal["active_index"]]["highlight"] is not None

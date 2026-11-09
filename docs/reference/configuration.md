@@ -55,7 +55,8 @@ only that one line.
 | `catppuccin-mocha` | Catppuccin Mocha | dark |
 | `catppuccin-macchiato` | Catppuccin Macchiato | dark |
 
-**Change theme…** in the command palette picks one and saves it as
+**Change theme…** in the command palette shows a small preview of each
+theme, previews the highlighted one live, and saves your pick as
 `theme = <id>`. To follow the OS appearance with your own pair:
 
 ```conf

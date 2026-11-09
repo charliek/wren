@@ -1164,7 +1164,7 @@ fn resize_updates_live_preference_but_persists_only_at_end() {
     assert_eq!(app.widths.get(Pane::Groups), 320.0);
     assert_eq!(
         app.session.as_ref().unwrap().state().width("groups"),
-        Some(220)
+        Some(192)
     );
     let _ = app.resize_event(
         generation,
@@ -1564,10 +1564,10 @@ mod columns {
         key(&mut app, Nav::Escape);
         let folded = app.widths.effective(app.visible_panes(), 1280.0);
         assert_eq!(folded.get(Pane::Sections) + folded.get(Pane::Groups), 0.0);
-        assert_eq!(folded.editor, open.editor + 420.0);
+        assert_eq!(folded.editor, open.editor + 368.0);
         assert_eq!(
             app.widths.get(Pane::Sections),
-            200.0,
+            176.0,
             "preferences are untouched"
         );
     }

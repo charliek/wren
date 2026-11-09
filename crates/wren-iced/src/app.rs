@@ -309,7 +309,7 @@ impl App {
             #[cfg(feature = "smoke-test")]
             ready: false,
             #[cfg(feature = "smoke-test")]
-            smoke: options.smoke,
+            smoke: options.smoke.map(|request| *request),
             #[cfg(feature = "smoke-test")]
             endpoint: options.endpoint,
             #[cfg(feature = "smoke-test")]

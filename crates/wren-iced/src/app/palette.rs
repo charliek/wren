@@ -1079,13 +1079,9 @@ impl App {
         let colors = self.definition.colors;
         let search = palette.mode == Mode::Search;
         let outline = palette.mode == Mode::Outline;
-        let width = if search {
-            720.0
-        } else if outline {
-            460.0
-        } else {
-            620.0
-        };
+        // Every mode shares one frame except the outline, which is narrow so
+        // it can sit beside the text it previews.
+        let width = if outline { 460.0 } else { PALETTE_WIDTH };
         // The outline previews headings in the editor, so it sits beside the
         // text: over the browser columns when they are wide enough, else at
         // the right, away from where lines start.
@@ -1096,10 +1092,21 @@ impl App {
         } else {
             iced::alignment::Horizontal::Right
         };
-        let top =
-            (if search { 72.0_f32 } else { 96.0_f32 }).min((self.viewport.height * 0.16).max(8.0));
-        let list_height =
+        let top = PALETTE_TOP.min((self.viewport.height * 0.16).max(8.0));
+        let mut list_height =
             (self.viewport.height - top - 134.0).clamp(40.0, if search { 460.0 } else { 400.0 });
+        if search {
+            // Search hugs its results instead of framing a mostly empty panel.
+            let rows = palette.results.len() as f32;
+            let content = if rows == 0.0 {
+                48.0
+            } else {
+                rows * SEARCH_ROW_HEIGHT + (rows - 1.0) * RESULT_SPACING + 2.0 * RESULT_PADDING
+            };
+            list_height = list_height.min(content.max(160.0));
+        } else {
+            list_height = snapped_list_height(&palette.results, list_height);
+        }
         let mut input = row![].spacing(8).align_y(iced::Center);
         if search {
             input = input.push(chrome::icon(chrome::Icon::Search, 16.0, colors.muted));
@@ -1146,18 +1153,18 @@ impl App {
         } else {
             input.push(chrome::keycap("esc", self.definition))
         };
-        let mut results = column![].spacing(2).padding(6);
+        let mut results = column![].spacing(RESULT_SPACING).padding(RESULT_PADDING);
         let mut last_group = "";
         for (index, result) in palette.results.iter().enumerate() {
             if result.group != last_group && !result.group.is_empty() {
                 results = results.push(
                     container(
                         text(result.group.to_uppercase())
-                            .size(11)
+                            .size(GROUP_HEADER_SIZE)
                             .font(fonts::SEMIBOLD)
                             .color(theme::color(colors.muted)),
                     )
-                    .padding([8, 10]),
+                    .padding([GROUP_HEADER_PADDING, 10.0]),
                 );
                 last_group = result.group;
             }
@@ -1199,20 +1206,23 @@ impl App {
             let indent = result
                 .heading
                 .map_or(0.0, |heading| f32::from(heading.depth) * 16.0);
-            let mut contents = row![container(label)
-                .padding(iced::Padding {
-                    left: indent,
-                    ..iced::Padding::ZERO
-                })
-                .width(Fill)]
-            .spacing(12)
-            .align_y(iced::Center)
-            .clip(true);
+            let mut contents = row![].spacing(12).align_y(iced::Center).clip(true);
+            if let Key::Theme(id) = &result.key {
+                contents = contents.push(theme_swatch(*id));
+            }
+            contents = contents.push(
+                container(label)
+                    .padding(iced::Padding {
+                        left: indent,
+                        ..iced::Padding::ZERO
+                    })
+                    .width(Fill),
+            );
             if search {
                 contents = contents.push(chrome::label(
                     if result.content_hit { "text" } else { "title" },
                     11,
-                    colors.faint,
+                    colors.muted,
                 ));
             }
             if result.current {
@@ -1237,13 +1247,7 @@ impl App {
             }
             let active = palette.active == Some(index);
             let row = button(container(contents).center_y(Fill))
-                .height(if search {
-                    76
-                } else if result.path.is_empty() {
-                    44
-                } else {
-                    54
-                })
+                .height(row_height(search, result))
                 .on_press_maybe((result.enabled && self.loading.is_none()).then_some(
                     Message::PaletteChoose(palette.generation, result.key.clone()),
                 ))
@@ -1334,10 +1338,7 @@ impl App {
             container(iced::widget::space())
                 .width(Fill)
                 .height(Fill)
-                .style(move |_| container::Style {
-                    background: Some(iced::Color::from_rgba(0.025, 0.028, 0.04, 0.60).into()),
-                    ..Default::default()
-                }),
+                .style(move |_| chrome::scrim(self.definition)),
         )
         .on_press(Message::PaletteClose);
         stack![
@@ -1356,6 +1357,48 @@ impl App {
         ]
         .into()
     }
+}
+
+/// Every palette mode shares one frame, so switching modes never jumps.
+const PALETTE_WIDTH: f32 = 680.0;
+const PALETTE_TOP: f32 = 80.0;
+const RESULT_SPACING: f32 = 2.0;
+const RESULT_PADDING: f32 = 6.0;
+const GROUP_HEADER_SIZE: f32 = 11.0;
+const GROUP_HEADER_PADDING: f32 = 8.0;
+/// The header label at iced's default 1.3 line height, plus its padding.
+const GROUP_HEADER_HEIGHT: f32 = GROUP_HEADER_SIZE * 1.3 + 2.0 * GROUP_HEADER_PADDING;
+
+const SEARCH_ROW_HEIGHT: f32 = 76.0;
+
+fn row_height(search: bool, result: &ResultRow) -> f32 {
+    if search {
+        SEARCH_ROW_HEIGHT
+    } else if result.path.is_empty() {
+        44.0
+    } else {
+        54.0
+    }
+}
+
+/// Shortens an overflowing non-search list to the end of its last whole
+/// result, so the visible list never ends on a group header or a cut row.
+fn snapped_list_height(results: &[ResultRow], available: f32) -> f32 {
+    let mut end = RESULT_PADDING - RESULT_SPACING;
+    let mut last_group = "";
+    let mut fitted = None;
+    for result in results {
+        if result.group != last_group && !result.group.is_empty() {
+            end += RESULT_SPACING + GROUP_HEADER_HEIGHT;
+            last_group = result.group;
+        }
+        end += RESULT_SPACING + row_height(false, result);
+        if end > available {
+            return fitted.unwrap_or(available);
+        }
+        fitted = Some(end);
+    }
+    available
 }
 
 pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::Id {
@@ -1473,6 +1516,62 @@ pub(super) fn highlighted_text<'a>(
         }
     }
     chrome::label(snippet, 12, definition.colors.muted).into()
+}
+
+/// A miniature of a theme for its picker row: the editor surface with a
+/// heading stroke and a body stroke. The System row shows its light and dark
+/// pair side by side.
+fn theme_swatch<'a>(id: Option<&'static str>) -> Element<'a, Message> {
+    fn half<'a>(
+        definition: definitions::Theme,
+        width: f32,
+        radius: iced::border::Radius,
+    ) -> Element<'a, Message> {
+        let colors = definition.colors;
+        let stroke = |color, length| {
+            container(iced::widget::space())
+                .width(length)
+                .height(3)
+                .style(move |_| container::Style {
+                    background: Some(theme::color(color).into()),
+                    border: iced::Border {
+                        radius: 1.5.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+        };
+        container(
+            column![
+                stroke(colors.heading, width * 0.45),
+                stroke(colors.body, width * 0.7),
+                stroke(colors.link, width * 0.35),
+            ]
+            .spacing(3),
+        )
+        .padding([6, 6])
+        .width(width)
+        .height(28)
+        .style(move |_| container::Style {
+            background: Some(theme::color(colors.editor).into()),
+            border: iced::Border {
+                color: theme::color(colors.control_border),
+                width: 1.0,
+                radius,
+            },
+            ..Default::default()
+        })
+        .into()
+    }
+    let radius = iced::border::Radius::new(6.0);
+    match id.and_then(definitions::builtin) {
+        Some(definition) => half(definition, 44.0, radius),
+        None => row![
+            half(definitions::LIGHT, 22.0, radius.right(0.0)),
+            half(definitions::DARK, 22.0, radius.left(0.0)),
+        ]
+        .into(),
+    }
 }
 
 #[cfg(test)]
@@ -1732,6 +1831,58 @@ mod tests {
         assert_eq!(outcome.processed.disposition, Disposition::Blocked);
         assert!(app.palette.is_none());
         assert!(app.outline_origin.is_none());
+    }
+
+    fn grouped(note: u64, group: &'static str, path: &str) -> ResultRow {
+        ResultRow {
+            group,
+            path: path.into(),
+            ..row(note)
+        }
+    }
+
+    #[test]
+    fn overflowing_lists_end_on_a_whole_row_and_never_on_a_header() {
+        let header = GROUP_HEADER_HEIGHT;
+        let results = [
+            grouped(1, "Note", ""),
+            grouped(2, "Note", ""),
+            grouped(3, "Note", ""),
+            grouped(4, "Go", ""),
+            grouped(5, "Go", "a/b"),
+        ];
+        let third = 6.0 + header + 3.0 * (2.0 + 44.0);
+        let go_header = third + 2.0 + header;
+        let fourth = go_header + 2.0 + 44.0;
+        let fifth = fourth + 2.0 + 54.0;
+        let close = |available: f32, expected: f32| {
+            let snapped = snapped_list_height(&results, available);
+            assert!(
+                (snapped - expected).abs() < 0.01,
+                "{available}: {snapped} != {expected}"
+            );
+        };
+        close(go_header + 10.0, third);
+        close(fourth + 0.01, fourth);
+        close(fifth - 1.0, fourth);
+        assert_eq!(
+            snapped_list_height(&results, fifth + 6.0),
+            fifth + 6.0,
+            "a list that fits keeps its height"
+        );
+        assert_eq!(
+            snapped_list_height(&results, 40.0),
+            40.0,
+            "a window too short for one row keeps the minimum"
+        );
+    }
+
+    #[test]
+    fn ungrouped_rows_snap_without_headers() {
+        let results: Vec<_> = (0..20).map(row).collect();
+        let snapped = snapped_list_height(&results, 400.0);
+        assert_eq!(snapped, 6.0 + 8.0 * 46.0 - 2.0);
+        assert_eq!(snapped_list_height(&[], 400.0), 400.0);
     }
 
     #[test]

@@ -135,11 +135,9 @@ def capture(app: WrenApp, path: Path) -> png.PNG:
     return image
 
 
-# Interim mapping (discovery/markdown-editor.md §6): headings and links use
-# the accent, inline code the success colour, and code bands current_line.
 @pytest.mark.parametrize("theme,heading,code", [
     ("dark", (0xF0, 0xB4, 0x5A), (0x7F, 0xD1, 0xA0)),
-    ("light", (0x9A, 0x58, 0x00), (0x19, 0x73, 0x42)),
+    ("light", (0xA1, 0x48, 0x08), (0x19, 0x73, 0x42)),
 ])
 def test_editor_highlighting_renders_in_both_themes(theme, heading, code, editor_app) -> None:
     artifacts = artifact_directory(f"editor-highlight-{theme}")
@@ -156,8 +154,8 @@ def test_editor_highlighting_renders_in_both_themes(theme, heading, code, editor
 
 
 @pytest.mark.parametrize("theme,code_block,link", [
-    ("dark", (0x19, 0x1D, 0x25), (0xF0, 0xB4, 0x5A)),
-    ("light", (0xED, 0xF0, 0xF5), (0x9A, 0x58, 0x00)),
+    ("dark", (0x18, 0x1B, 0x21), (0x7F, 0xB0, 0xE6)),
+    ("light", (0xEF, 0xF1, 0xF5), (0x1F, 0x5F, 0xBF)),
 ])
 def test_code_blocks_get_a_band_and_links_their_color(theme, code_block, link, editor_app) -> None:
     artifacts = artifact_directory(f"editor-blocks-{theme}")
@@ -169,11 +167,12 @@ def test_code_blocks_get_a_band_and_links_their_color(theme, code_block, link, e
             return sum(all(abs(a - b) <= 2 for a, b in zip(image.pixel(x, y)[:3], color))
                        for y in range(0, image.height, step) for x in range(0, image.width, step))
 
-        # Long link text, so the accent caret alone cannot pass.
+        # The link color is its own token (not the caret's accent), so a few
+        # dozen glyph pixels prove it; the classic engine antialiases more.
         call("editor.set", {"text": "plain\n\nSee [documentation for every link](https://x.io) now"})
         call("editor.cursor", {"line": 0, "column": 0, "selection": None})
         plain = capture(app, artifacts / "no-code.png")
-        assert count(plain, link, step=1) >= 150, "Link text did not use the link color"
+        assert count(plain, link, step=1) >= 60, "Link text did not use the link color"
 
         for fence in ("```", "~~~"):
             call("editor.set", {"text": f"plain\n{fence}sh\nrun it\nand more\n{fence}\nafter"})

@@ -98,10 +98,7 @@ impl App {
                 container(iced::widget::space())
                     .width(Fill)
                     .height(Fill)
-                    .style(|_| container::Style {
-                        background: Some(iced::Color::from_rgba(0.025, 0.028, 0.04, 0.60).into()),
-                        ..Default::default()
-                    }),
+                    .style(move |_| chrome::scrim(self.definition)),
             )
             .on_press(Message::CancelDialog);
             stack![
@@ -574,27 +571,28 @@ impl App {
                     &hit.snippet.text
                 };
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
-                let sub = format!("{} · {}", modified_label(note), preview);
-                let mut label = column![
-                    ellipsis(&note.title, 13.0, theme::color(colors.text)).font(fonts::MEDIUM)
+                // The age sits at the end of the title row, so the second
+                // row is all preview.
+                let title = row![
+                    ellipsis(&note.title, 13.0, theme::color(colors.text))
+                        .font(fonts::MEDIUM)
+                        .width(Fill),
+                    chrome::label(modified_label(note), 11, colors.muted)
                 ]
-                .spacing(3)
-                .clip(true);
-                if self.filters.notes.trim().is_empty() {
-                    label = label.push(ellipsis(sub, 12.0, theme::color(colors.muted)));
-                } else {
+                .spacing(8)
+                .align_y(iced::Center);
+                let mut label = column![title].spacing(3).clip(true);
+                if !self.filters.notes.trim().is_empty() {
                     label = label.push(
-                        row![
-                            chrome::label(format!("{} ·", modified_label(note)), 12, colors.muted),
-                            super::palette::highlighted_text(
-                                hit.snippet.text.clone(),
-                                hit.snippet.highlight.clone(),
-                                self.definition
-                            )
-                        ]
-                        .spacing(4)
+                        container(super::palette::highlighted_text(
+                            hit.snippet.text.clone(),
+                            hit.snippet.highlight.clone(),
+                            self.definition,
+                        ))
                         .clip(true),
                     );
+                } else if !preview.is_empty() {
+                    label = label.push(ellipsis(preview, 12.0, theme::color(colors.muted)));
                 }
                 if let Some(path) = &note.subtitle {
                     label = label.push(chrome::label(path, 11, colors.faint).font(fonts::EDITOR));
@@ -655,18 +653,21 @@ impl App {
         .style(move |_, status| chrome::control(self.definition, status, false, true));
         let footer = chrome::top_rule(
             container(
-                row![
-                    sort,
-                    iced::widget::space::horizontal(),
-                    chrome::label(
+                row![sort, iced::widget::space::horizontal()]
+                    .push(
                         self.shortcut_label(CommandId::NewDatedNote.key())
-                            .map_or_else(String::new, |shortcut| format!("{shortcut} dated")),
-                        11,
-                        colors.muted
+                            .map(|shortcut| {
+                                row![
+                                    chrome::label("Dated", 11, colors.muted),
+                                    chrome::keycap_owned(shortcut, self.definition)
+                                ]
+                                .spacing(6)
+                                .align_y(iced::Center)
+                            }),
                     )
-                ]
-                .spacing(6)
-                .clip(true),
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .clip(true),
             )
             .padding([8, 14]),
             self.definition,
@@ -716,19 +717,26 @@ impl App {
             .into()
     }
 
-    /// The selected row in the active column gets an accent border; selected
-    /// rows elsewhere keep the quieter selection border.
+    /// The selected row in the active column gets the selection fill and an
+    /// accent border; selected rows elsewhere mark the path with a quieter
+    /// fill and no border.
     fn row_style(&self, selected: bool, column: Column) -> container::Style {
         let colors = self.definition.colors;
+        let active = selected && self.column == column;
         container::Style {
-            background: selected.then(|| theme::color(colors.selected).into()),
+            background: selected.then(|| {
+                theme::color(if active {
+                    colors.selected
+                } else {
+                    colors.selected_inactive
+                })
+                .into()
+            }),
             border: Border {
-                color: if !selected {
-                    iced::Color::TRANSPARENT
-                } else if self.column == column {
+                color: if active {
                     theme::color(colors.accent)
                 } else {
-                    theme::color(colors.selected_border)
+                    iced::Color::TRANSPARENT
                 },
                 width: 1.0,
                 radius: 6.0.into(),

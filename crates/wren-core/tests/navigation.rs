@@ -929,7 +929,7 @@ fn width_reset_and_sort_are_metadata_only_and_persist_with_unknown_values() {
         "view preferences must not flush"
     );
     run(&mut reopened, Op::ResetWidths);
-    for (pane, width) in [("sections", 200), ("groups", 220), ("notes", 280)] {
+    for (pane, width) in [("sections", 176), ("groups", 192), ("notes", 256)] {
         assert_eq!(reopened.state().width(pane), Some(width));
     }
     let metadata: toml::Table = fs::read_to_string(root.path().join(".wren/workspace.toml"))
@@ -1049,7 +1049,7 @@ fn invalid_preference_and_selection_requests_leave_views_selection_and_drafts_un
         },
     ] {
         assert!(session.apply_at(op, Duration::ZERO).is_err());
-        assert_eq!(session.state().width("notes"), Some(280));
+        assert_eq!(session.state().width("notes"), Some(256));
         assert_eq!(session.state().selection(), selection);
         assert_eq!(session.selected_parent(), Some(parent));
         assert_eq!(session.document().unwrap().text, "dirty truth");

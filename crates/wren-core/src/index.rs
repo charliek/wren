@@ -31,6 +31,9 @@ pub fn validate_query(query: &str) -> Result<(), &'static str> {
 }
 const PREVIEW_CHARS: usize = 160;
 const CONTEXT_CHARS: usize = 48;
+/// Joins blocks (list items, tasks, quotes, headings, paragraphs) that a
+/// preview or snippet puts on one line.
+const BLOCK_SEPARATOR: &str = " · ";
 const MAX_QUEUED_WARNINGS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +145,7 @@ impl Index {
 
     pub fn preview(&self, note: NoteId) -> Option<&str> {
         let content = self.entries.get(&note)?.content.as_ref()?;
-        Some(&content.text[content.preview.range.clone()])
+        Some(&content.preview.text)
     }
 
     pub fn content(&self, note: NoteId) -> Option<&str> {
@@ -228,7 +231,7 @@ impl Index {
                 let snippet = match &entry.content {
                     Some(content) => match &content_match {
                         Some(hit) => snippet(&content.text, hit.clone()),
-                        None => content.preview.snippet(&content.text),
+                        None => content.preview.snippet(),
                     },
                     None => Snippet {
                         text: String::new(),
@@ -605,10 +608,12 @@ fn body_line_in(text: &str, mut lines: impl Iterator<Item = Range<usize>>) -> Ra
     candidate.map_or(0..0, |(_, range)| range)
 }
 
-/// A note's preview: the first body line, clipped to [`PREVIEW_CHARS`].
+/// A note's preview: the first body line, clipped to [`PREVIEW_CHARS`], as
+/// plain words. Built once per content change, since the notes column asks
+/// for every visible note's preview on each frame.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Preview {
-    range: Range<usize>,
+    text: Box<str>,
     truncated: bool,
 }
 
@@ -620,18 +625,20 @@ impl Preview {
             .nth(PREVIEW_CHARS)
             .map_or(line.end, |(byte, _)| line.start + byte);
         Self {
+            text: plain_markdown(&text[line.start..end], true)
+                .0
+                .into_boxed_str(),
             truncated: end < line.end,
-            range: line.start..end,
         }
     }
 
-    fn snippet(&self, text: &str) -> Snippet {
-        let mut preview = text[self.range.clone()].to_owned();
+    fn snippet(&self) -> Snippet {
+        let mut text = String::from(&*self.text);
         if self.truncated {
-            preview.push('…');
+            text.push('…');
         }
         Snippet {
-            text: preview,
+            text,
             highlight: None,
         }
     }
@@ -655,7 +662,8 @@ fn original_range(text: &str, folded: Range<usize>) -> Range<usize> {
     start.unwrap_or(text.len())..text.len()
 }
 
-/// A search hit's context: the hit with up to [`CONTEXT_CHARS`] on each side.
+/// A search hit's context: the hit with up to [`CONTEXT_CHARS`] on each side,
+/// started and ended on word boundaries and reduced to plain words.
 fn snippet(text: &str, hit: Range<usize>) -> Snippet {
     let start = text[..hit.start]
         .char_indices()
@@ -666,18 +674,290 @@ fn snippet(text: &str, hit: Range<usize>) -> Snippet {
         .char_indices()
         .nth(CONTEXT_CHARS)
         .map_or(text.len(), |(byte, _)| hit.end + byte);
+    // Start and end on word boundaries so the context never opens or closes
+    // on half a word or half a link.
+    let start = text[start..hit.start]
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace())
+        .filter(|_| start != 0)
+        .map_or(start, |(relative, space)| {
+            start + relative + space.len_utf8()
+        });
+    let end = text[hit.end..end]
+        .rfind(char::is_whitespace)
+        .filter(|_| end != text.len())
+        .map_or(end, |relative| hit.end + relative);
     let mut result = String::new();
     if start != 0 {
         result.push('…');
     }
     let prefix = result.len();
-    result.push_str(&text[start..end]);
+    let at_line_start = start == 0 || text[..start].ends_with(['\n', '\r']);
+    let (plain, map) = plain_markdown(&text[start..end], at_line_start);
+    result.push_str(&plain);
     if end != text.len() {
         result.push('…');
     }
+    let highlight = Some(prefix + map[hit.start - start]..prefix + map[hit.end - start])
+        .filter(|range| !range.is_empty());
     Snippet {
         text: result,
-        highlight: Some(prefix + hit.start - start..prefix + hit.end - start),
+        highlight,
+    }
+}
+
+/// Drop leading Markdown block markers (`>`, `-`/`*`/`+`, `1.`, `[ ]`/`[x]`)
+/// so previews show the line's words.
+fn strip_block_markers(mut line: &str) -> &str {
+    loop {
+        let trimmed = line.trim_start();
+        let rest = if let Some(rest) = trimmed.strip_prefix('>') {
+            rest
+        } else if let Some(rest) = ["- ", "* ", "+ "]
+            .iter()
+            .find_map(|marker| trimmed.strip_prefix(marker))
+        {
+            rest
+        } else if let Some(rest) = ["[ ] ", "[x] ", "[X] "]
+            .iter()
+            .find_map(|marker| trimmed.strip_prefix(marker))
+        {
+            rest
+        } else {
+            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            match trimmed[digits..]
+                .strip_prefix(". ")
+                .or_else(|| trimmed[digits..].strip_prefix(") "))
+            {
+                Some(rest) if digits > 0 => rest,
+                _ => return trimmed,
+            }
+        };
+        if rest.trim().is_empty() {
+            return trimmed;
+        }
+        line = rest;
+    }
+}
+
+/// Markdown source reduced to its words for previews and snippets: block
+/// markers (headings, lists, tasks, quotes), emphasis and code delimiters,
+/// and link destinations are dropped. A line break inside a paragraph
+/// becomes a single space; a break between blocks (before a list item,
+/// task, quote, or heading, after a heading, or across a blank or
+/// marker-only line) becomes [`BLOCK_SEPARATOR`]. `at_line_start` says
+/// whether `text` begins a line, so its first line's block markers are
+/// markers rather than mid-line text.
+///
+/// Returns the text and, for each source byte offset `0..=text.len()`, the
+/// matching offset in the result.
+fn plain_markdown(text: &str, at_line_start: bool) -> (String, Vec<usize>) {
+    let mut dropped = vec![false; text.len()];
+    let mut block_break = vec![false; text.len()];
+    let mut line_start = 0;
+    let mut first = true;
+    let mut previous_break = None;
+    let mut after_heading = false;
+    // A `>` line that follows quoted words continues their paragraph.
+    let mut after_quote = false;
+    while line_start <= text.len() {
+        let line_end = text[line_start..]
+            .find(['\n', '\r'])
+            .map_or(text.len(), |relative| line_start + relative);
+        let line = &text[line_start..line_end];
+        let mut body = line_start;
+        let mut heading = false;
+        let mut quote = false;
+        if !first || at_line_start {
+            let block = if only_block_markers(line) {
+                dropped[line_start..line_end].fill(true);
+                body = line_end;
+                true
+            } else {
+                let indent = line.len() - line.trim_start().len();
+                let hashes = line[indent..]
+                    .bytes()
+                    .take_while(|byte| *byte == b'#')
+                    .count();
+                heading = (1..=6).contains(&hashes) && line[indent + hashes..].starts_with(' ');
+                let prefix = if heading {
+                    indent + hashes + 1
+                } else {
+                    line.len() - strip_block_markers(line).len()
+                };
+                dropped[line_start..line_start + prefix].fill(true);
+                body = line_start + prefix;
+                quote = prefix > indent
+                    && line[indent..prefix]
+                        .chars()
+                        .all(|character| character == '>' || character.is_whitespace());
+                heading || (prefix > indent && !(quote && after_quote))
+            };
+            if let Some(index) = previous_break.filter(|_| block || after_heading) {
+                block_break[index] = true;
+            }
+        }
+        drop_inline_markup(&text[body..line_end], &mut dropped[body..line_end]);
+        first = false;
+        after_heading = heading;
+        after_quote = quote;
+        previous_break = Some(line_end);
+        line_start = line_end
+            + if text[line_end..].starts_with("\r\n") {
+                2
+            } else {
+                1
+            };
+    }
+
+    let mut plain = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(text.len() + 1);
+    // Bytes of separator at the end of `plain`, dropped if no word follows.
+    let mut gap = 0;
+    for (index, character) in text.char_indices() {
+        map.resize(index, plain.len());
+        map.push(plain.len());
+        if dropped[index] {
+            continue;
+        }
+        if !character.is_whitespace() {
+            plain.push(character);
+            gap = 0;
+        } else if plain.is_empty() {
+            continue;
+        } else if gap == 0 {
+            let separator = if block_break[index] {
+                BLOCK_SEPARATOR
+            } else {
+                " "
+            };
+            plain.push_str(separator);
+            gap = separator.len();
+        } else if gap == 1 && block_break[index] {
+            // Widen the space already pushed rather than replacing it, so
+            // offsets mapped to just after it stay on a character boundary.
+            plain.push_str(&BLOCK_SEPARATOR[1..]);
+            gap = BLOCK_SEPARATOR.len();
+        }
+    }
+    map.resize(text.len(), plain.len());
+    plain.truncate(plain.len() - gap);
+    map.push(plain.len());
+    for offset in &mut map {
+        *offset = (*offset).min(plain.len());
+    }
+    (plain, map)
+}
+
+/// Whether `line` is blank or holds only block markers (an empty heading,
+/// list item, task, or quote), so it has no words to show.
+fn only_block_markers(line: &str) -> bool {
+    // Trailing blanks stay, so `3. ` is an empty item but `3.` is a word.
+    let mut rest = line.trim_start();
+    if rest.trim_end().is_empty() {
+        return true;
+    }
+    let mut listed = false;
+    let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&hashes) && hashes == rest.trim_end().len() {
+        return true;
+    }
+    while !rest.is_empty() {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let ordered = digits > 0 && rest[digits..].starts_with(['.', ')']);
+        let marker = if rest.starts_with(['>', '-', '*', '+']) {
+            1
+        } else if listed
+            && ["[ ]", "[x]", "[X]"]
+                .iter()
+                .any(|task| rest.starts_with(task))
+        {
+            3
+        } else if ordered {
+            digits + 1
+        } else {
+            return false;
+        };
+        let after = &rest[marker..];
+        let quote = rest.starts_with('>');
+        // A bare number needs the space that makes it a list item.
+        if ordered && after.is_empty() {
+            return false;
+        }
+        if !quote && !after.is_empty() && !after.starts_with(char::is_whitespace) {
+            return false;
+        }
+        listed = !quote;
+        rest = after.trim_start();
+    }
+    true
+}
+
+/// Mark the delimiters of code spans, emphasis, strikethrough, and links in
+/// one line. A `*` or `_` run counts as emphasis only when it opens or closes
+/// a word, so `2*3` and `snake_case` keep theirs.
+fn drop_inline_markup(line: &str, dropped: &mut [bool]) {
+    let bytes = line.as_bytes();
+    let blank = |character: Option<char>| {
+        character
+            .is_none_or(|character| character.is_whitespace() || character.is_ascii_punctuation())
+    };
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'`' => {
+                dropped[index] = true;
+                index += 1;
+            }
+            b'~' if bytes.get(index + 1) == Some(&b'~') => {
+                dropped[index..index + 2].fill(true);
+                index += 2;
+            }
+            marker @ (b'*' | b'_') => {
+                let run = bytes[index..]
+                    .iter()
+                    .take_while(|byte| **byte == marker)
+                    .count();
+                let before = line[..index].chars().next_back();
+                let after = line[index + run..].chars().next();
+                let opens = !blank(after) && blank(before);
+                let closes = !blank(before) && blank(after);
+                if run <= 3 && (opens || closes) {
+                    dropped[index..index + run].fill(true);
+                }
+                index += run;
+            }
+            b'[' => {
+                let Some(close) = line[index + 1..]
+                    .find(']')
+                    .map(|relative| index + 1 + relative)
+                else {
+                    index += 1;
+                    continue;
+                };
+                let destination = match bytes.get(close + 1) {
+                    Some(b'(') => line[close + 2..]
+                        .find(')')
+                        .map(|relative| close + 2 + relative),
+                    Some(b'[') => line[close + 2..]
+                        .find(']')
+                        .map(|relative| close + 2 + relative),
+                    _ => None,
+                };
+                let Some(end) = destination else {
+                    index += 1;
+                    continue;
+                };
+                if index > 0 && bytes[index - 1] == b'!' {
+                    dropped[index - 1] = true;
+                }
+                dropped[index] = true;
+                dropped[close..=end].fill(true);
+                drop_inline_markup(&line[index + 1..close], &mut dropped[index + 1..close]);
+                index = end + 1;
+            }
+            _ => index += 1,
+        }
     }
 }
 
@@ -951,9 +1231,180 @@ mod tests {
     }
 
     #[test]
+    fn plain_markdown_keeps_words_and_drops_markup() {
+        for (source, plain) in [
+            (
+                "Owner: **Alice Chen** · *Bob*, _Priya_",
+                "Owner: Alice Chen · Bob, Priya",
+            ),
+            (
+                "Status: `in review` and ~~old~~ new",
+                "Status: in review and old new",
+            ),
+            (
+                "See [the docs](https://x.io) and ![logo](a.png)",
+                "See the docs and logo",
+            ),
+            ("Read [the guide][ref] now", "Read the guide now"),
+            (
+                "## Agenda\n- [ ] Review **promo**\n> quoted",
+                "Agenda · Review promo · quoted",
+            ),
+            (
+                "2*3 = 6 and snake_case_name stay",
+                "2*3 = 6 and snake_case_name stay",
+            ),
+            ("a * b and [unclosed link", "a * b and [unclosed link"),
+            ("***both*** café", "both café"),
+        ] {
+            assert_eq!(plain_markdown(source, true).0, plain, "{source:?}");
+        }
+        // Mid-line text keeps a leading `#` or `-`; it is not a block marker.
+        assert_eq!(plain_markdown("- item # one", false).0, "- item # one");
+    }
+
+    #[test]
+    fn plain_markdown_separates_blocks_and_joins_wrapped_prose() {
+        for (source, plain) in [
+            (
+                "- [ ] Review promo\n- [x] Share Q4",
+                "Review promo · Share Q4",
+            ),
+            ("## Agenda\n- API migration", "Agenda · API migration"),
+            ("## Agenda\nPlain paragraph", "Agenda · Plain paragraph"),
+            (
+                "first line of prose\ncontinues here",
+                "first line of prose continues here",
+            ),
+            ("Intro\n1. One\n2) Two", "Intro · One · Two"),
+            ("Said:\n> quoted\n+ plus", "Said: · quoted · plus"),
+            ("- item\n  wrapped item", "item wrapped item"),
+            ("One para\n\n\nTwo para", "One para · Two para"),
+            ("One para  \r\n\r\nTwo para", "One para · Two para"),
+            ("prose\r\nwraps", "prose wraps"),
+            ("\n\n- Lead\n\n", "Lead"),
+            ("- [x]\nNext", "Next"),
+            ("Owner: Alice · Bob", "Owner: Alice · Bob"),
+            // A quote wrapped over `>` lines is one paragraph; an empty `>`
+            // line between them splits it.
+            ("> quoted line\n> wraps on", "quoted line wraps on"),
+            ("> one\n>\n> two", "one · two"),
+            ("Said:\n> quoted\n> more", "Said: · quoted more"),
+            // A bare number or `[x]` with no list marker is just text.
+            ("The answer is\n42.", "The answer is 42."),
+            ("draft\n[x]", "draft [x]"),
+        ] {
+            assert_eq!(plain_markdown(source, true).0, plain, "{source:?}");
+        }
+        // Lines with no words after their markers add nothing, not even a
+        // separator, at either end or between blocks.
+        for (source, plain) in [
+            (
+                "Review promo packet draft\n- [x]",
+                "Review promo packet draft",
+            ),
+            ("draft\n- [ ]\n- [x] Share", "draft · Share"),
+            ("draft\n> \n-\n## \n#\n3. ", "draft"),
+        ] {
+            assert_eq!(plain_markdown(source, false).0, plain, "{source:?}");
+        }
+        assert!(only_block_markers("> - [ ]"));
+        assert!(!only_block_markers("---"));
+        assert!(!only_block_markers("-x"));
+        assert!(!only_block_markers("[ ]x"));
+        assert!(!only_block_markers("2026-11-04"));
+        assert!(!only_block_markers("42."));
+        assert!(!only_block_markers("[x]"));
+        assert!(only_block_markers("1. [x] "));
+    }
+
+    #[test]
+    fn snippet_highlights_map_through_block_separators() {
+        let text = "Intro words here\n- [ ] Review promo\n- [x] Share Q4 deck\n- [x]";
+        for needle in ["promo\n- [x] Share", "Share", "Review"] {
+            let hit = text.find(needle).unwrap();
+            let result = snippet(text, hit..hit + needle.len());
+            assert_eq!(
+                result.text,
+                "Intro words here · Review promo · Share Q4 deck"
+            );
+            let shown = needle.replace("\n- [x] ", " · ");
+            assert_eq!(&result.text[result.highlight.unwrap()], shown);
+        }
+        // A window that closes just after a task marker drops the marker.
+        let text = format!(
+            "Review promo packet draft\n- [x] {}",
+            "z".repeat(CONTEXT_CHARS)
+        );
+        let hit = text.find("packet").unwrap();
+        let result = snippet(&text, hit..hit + 6);
+        assert_eq!(result.text, "Review promo packet draft…");
+        assert_eq!(&result.text[result.highlight.unwrap()], "packet");
+    }
+
+    #[test]
+    fn snippet_highlights_follow_the_match_through_dropped_markup() {
+        let text = "## Agenda\n- API migration: cutover and **rollback** window\n";
+        let hit = text.find("rollback").unwrap();
+        let result = snippet(text, hit..hit + "rollback".len());
+        assert_eq!(
+            result.text,
+            "Agenda · API migration: cutover and rollback window"
+        );
+        assert_eq!(&result.text[result.highlight.unwrap()], "rollback");
+        let marker = text.find("**").unwrap();
+        assert_eq!(snippet(text, marker..marker + 2).highlight, None);
+
+        // Context trimmed mid-word or mid-link snaps to the next word.
+        let text = format!(
+            "{} [diff dashboard](https://grafana.internal/d/api-diff)\n- [ ] Ramp with a rollback gate and more words after the match {}",
+            "lead ".repeat(20),
+            "tail ".repeat(20)
+        );
+        let hit = text.find("rollback").unwrap();
+        let result = snippet(&text, hit..hit + 8);
+        assert!(
+            result.text.starts_with("…Ramp") || result.text.starts_with("…diff"),
+            "{}",
+            result.text
+        );
+        assert!(!result.text.contains("f)"), "{}", result.text);
+        assert!(
+            result.text.ends_with(" …") || result.text.ends_with("tail…"),
+            "{}",
+            result.text
+        );
+        assert_eq!(&result.text[result.highlight.unwrap()], "rollback");
+    }
+
+    #[test]
+    fn markup_and_word_boundaries_after_multi_byte_characters_stay_on_char_boundaries() {
+        for text in [
+            "café*bold*",
+            "naïve_name",
+            "日本語_x_ and **é**",
+            "é_",
+            "»*«",
+        ] {
+            plain_markdown(text, true);
+            Preview::new(text);
+        }
+        assert_eq!(
+            plain_markdown("café *latte* naïve_name", true).0,
+            "café latte naïve_name"
+        );
+        // The leading context's first whitespace is a three-byte ideographic space.
+        let text = format!("{}\u{3000}abc needle", "語".repeat(100));
+        let hit = text.find("needle").unwrap();
+        let result = snippet(&text, hit..hit + 6);
+        assert_eq!(result.text, "…abc needle");
+        assert_eq!(&result.text[result.highlight.unwrap()], "needle");
+    }
+
+    #[test]
     fn snippets_are_utf8_safe_near_both_ends_and_in_long_content() {
         for text in ["é日本", "", "a"] {
-            let result = Preview::new(text).snippet(text);
+            let result = Preview::new(text).snippet();
             assert_eq!(result.text, text);
             assert!(result.highlight.is_none());
         }
@@ -1040,6 +1491,11 @@ mod tests {
                 "next\rtail\n終",
                 Some("Next\rTail\n終"),
             ),
+            (
+                "前\r\nİS\r\n- Next\n終",
+                "i\u{307}s\r\n- next",
+                Some("İS\r\n- Next"),
+            ),
         ] {
             index.set_content(NoteId(6), text, false);
             let hits = index.query(query, scope, QueryKind::Search, 10);
@@ -1052,9 +1508,15 @@ mod tests {
                 assert_eq!(hits.len(), 1, "{query:?}");
                 let hit = &hits[0];
                 assert_eq!(&text[hit.content_match.clone().unwrap()], matched);
+                // Snippets join wrapped prose with a space and blocks with
+                // the block separator.
+                let shown = matched
+                    .replace("\r\n- ", BLOCK_SEPARATOR)
+                    .replace("\r\n", " ")
+                    .replace(['\r', '\n'], " ");
                 assert_eq!(
                     &hit.snippet.text[hit.snippet.highlight.clone().unwrap()],
-                    matched
+                    shown
                 );
                 assert!(text.is_char_boundary(hit.content_match.as_ref().unwrap().start));
                 assert!(text.is_char_boundary(hit.content_match.as_ref().unwrap().end));
@@ -1082,6 +1544,8 @@ mod tests {
         }
         let text = "# Title\n\n- First item\n";
         assert_eq!(&text[body_line(text)], "First item");
+        let text = "# Title\n- [ ]\n>\n- [x] Shipped\n";
+        assert_eq!(&text[body_line(text)], "Shipped");
     }
 
     #[test]
@@ -1205,7 +1669,7 @@ mod tests {
             index.preview(NoteId(4)).unwrap().chars().count(),
             PREVIEW_CHARS
         );
-        let snippet = Preview::new(&text).snippet(&text);
+        let snippet = Preview::new(&text).snippet();
         assert!(snippet.text.ends_with('…'));
         assert_eq!(snippet.text.chars().count(), PREVIEW_CHARS + 1);
     }

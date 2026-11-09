@@ -6,8 +6,10 @@ pub struct Options {
     pub editor: bool,
     pub large_spike: bool,
     pub workspace: Option<PathBuf>,
+    /// Boxed: a request carries a whole theme, which would dwarf the other
+    /// `Command` variants.
     #[cfg(feature = "smoke-test")]
-    pub smoke: Option<crate::smoke::Request>,
+    pub smoke: Option<Box<crate::smoke::Request>>,
     #[cfg(feature = "smoke-test")]
     pub test_socket: Option<PathBuf>,
     #[cfg(feature = "smoke-test")]
@@ -31,7 +33,7 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
     #[cfg(feature = "smoke-test")]
     if args.first().is_some_and(|arg| arg == "--smoke-test") {
         return Ok(Command::Run(Options {
-            smoke: crate::smoke::Request::parse(args, _test_mode)?,
+            smoke: crate::smoke::Request::parse(args, _test_mode)?.map(Box::new),
             ..Options::default()
         }));
     }
