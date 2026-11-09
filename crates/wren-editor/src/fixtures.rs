@@ -1,6 +1,7 @@
 //! Colours and a font for the crate's own tests.
 
 use std::borrow::Cow;
+use std::sync::Once;
 
 use iced::advanced::graphics::text::font_system;
 use iced::{Color, Font};
@@ -54,13 +55,20 @@ pub const LIGHT: Palette = Palette {
     completed: Color::from_rgb8(0x50, 0x5a, 0x68),
 };
 
-/// Registers [`FONT`] so layout tests measure real glyphs rather than a
-/// system fallback.
+/// Registers every face of [`FONT`] so layout tests measure real glyphs
+/// rather than a system fallback; headings are bold.
 pub fn load_font() {
-    font_system()
-        .write()
-        .expect("font system")
-        .load_font(Cow::Borrowed(include_bytes!(
-            "../../../third_party/jetbrains-mono/JetBrainsMono-Regular.ttf"
-        )));
+    static LOADED: Once = Once::new();
+    LOADED.call_once(|| {
+        let mut fonts = font_system().write().expect("font system");
+        for bytes in [
+            include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Regular.ttf")
+                .as_slice(),
+            include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Bold.ttf"),
+            include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Italic.ttf"),
+            include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-BoldItalic.ttf"),
+        ] {
+            fonts.load_font(Cow::Borrowed(bytes));
+        }
+    });
 }
