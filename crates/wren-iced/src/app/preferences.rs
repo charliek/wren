@@ -198,14 +198,18 @@ impl Preferences {
 }
 
 impl App {
-    /// The widest the editor's column grows: the setting, except that focus
-    /// mode always centres one.
-    pub(super) fn editor_max_width(&self) -> Option<f32> {
-        let width = self.preferences.settings.editor_max_width;
-        if self.focus {
-            Some(width.unwrap_or(settings::DEFAULT_MAX_WIDTH))
-        } else {
-            width
+    /// Where the editor's text wraps and sits: from the left at the
+    /// setting's column, or centred in focus mode, which always wraps at a
+    /// column.
+    pub(super) fn editor_measure(&self) -> wren_editor::Measure {
+        let column = self.preferences.settings.editor_wrap_column;
+        wren_editor::Measure {
+            wrap_column: if self.focus {
+                Some(column.unwrap_or(settings::DEFAULT_WRAP_COLUMN))
+            } else {
+                column
+            },
+            centred: self.focus,
         }
     }
 
@@ -661,27 +665,32 @@ mod tests {
     }
 
     #[test]
-    fn focus_mode_always_centres_a_column_and_otherwise_follows_the_setting() {
+    fn focus_mode_centres_a_wrapped_column_and_otherwise_follows_the_setting() {
+        use wren_editor::Measure;
         let directory = crate::test_support::tempdir();
         let path = directory.path().join("config.conf");
         let options = || super::super::Options {
             editor: true,
             ..Default::default()
         };
+        let measure = |wrap_column, centred| Measure {
+            wrap_column,
+            centred,
+        };
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
-        assert_eq!(app.editor_max_width(), Some(760.0));
+        assert_eq!(app.editor_measure(), measure(Some(100), false));
         app.focus = true;
-        assert_eq!(app.editor_max_width(), Some(760.0));
-        std::fs::write(&path, "editor-max-width = none\n").unwrap();
+        assert_eq!(app.editor_measure(), measure(Some(100), true));
+        std::fs::write(&path, "editor-wrap-column = none\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
-        assert_eq!(app.editor_max_width(), Some(760.0));
+        assert_eq!(app.editor_measure(), measure(Some(100), true));
         app.focus = false;
-        assert_eq!(app.editor_max_width(), None);
-        std::fs::write(&path, "editor-max-width = 1000\n").unwrap();
+        assert_eq!(app.editor_measure(), measure(None, false));
+        std::fs::write(&path, "editor-wrap-column = 72\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
-        assert_eq!(app.editor_max_width(), Some(1000.0));
+        assert_eq!(app.editor_measure(), measure(Some(72), false));
         app.focus = true;
-        assert_eq!(app.editor_max_width(), Some(1000.0));
+        assert_eq!(app.editor_measure(), measure(Some(72), true));
     }
 
     #[test]

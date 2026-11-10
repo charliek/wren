@@ -20,11 +20,11 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_LINE_HEIGHT: f32 = 1.7;
 pub const MIN_LINE_HEIGHT: f32 = 1.2;
 pub const MAX_LINE_HEIGHT: f32 = 2.2;
-/// The editor column's default width, gutter included; focus mode uses it
-/// when `editor-max-width` is `none`.
-pub const DEFAULT_MAX_WIDTH: f32 = 760.0;
-pub const MIN_MAX_WIDTH: f32 = 400.0;
-pub const MAX_MAX_WIDTH: f32 = 4000.0;
+/// Characters of text before a line wraps; focus mode uses it when
+/// `editor-wrap-column` is `none`.
+pub const DEFAULT_WRAP_COLUMN: u16 = 100;
+pub const MIN_WRAP_COLUMN: u16 = 20;
+pub const MAX_WRAP_COLUMN: u16 = 400;
 
 /// Which theme to show: a fixed theme, or one per system appearance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,9 +124,9 @@ pub struct Settings {
     pub editor_font_family: Option<String>,
     /// Row height as a multiple of the text size.
     pub editor_line_height: f32,
-    /// The widest the editor's column of gutter and text grows outside
-    /// focus mode; `None` fills the pane.
-    pub editor_max_width: Option<f32>,
+    /// Characters of text before a line wraps; `None` wraps at the pane's
+    /// edge outside focus mode.
+    pub editor_wrap_column: Option<u16>,
     pub line_numbers: bool,
     pub editor_engine: EditorEngine,
     /// The Markdown-aware Enter, Tab, Backspace, and Home.
@@ -143,7 +143,7 @@ impl Default for Settings {
             editor_font_size: DEFAULT_FONT_SIZE,
             editor_font_family: None,
             editor_line_height: DEFAULT_LINE_HEIGHT,
-            editor_max_width: Some(DEFAULT_MAX_WIDTH),
+            editor_wrap_column: Some(DEFAULT_WRAP_COLUMN),
             line_numbers: true,
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
@@ -220,11 +220,11 @@ impl Settings {
                     }
                     _ => invalid(),
                 },
-                "editor-max-width" => match value.trim().to_ascii_lowercase().as_str() {
-                    "none" => settings.editor_max_width = None,
-                    number => match number.parse::<f32>() {
-                        Ok(width) if (MIN_MAX_WIDTH..=MAX_MAX_WIDTH).contains(&width) => {
-                            settings.editor_max_width = Some(width)
+                "editor-wrap-column" => match value.trim().to_ascii_lowercase().as_str() {
+                    "none" => settings.editor_wrap_column = None,
+                    number => match number.parse::<u16>() {
+                        Ok(column) if (MIN_WRAP_COLUMN..=MAX_WRAP_COLUMN).contains(&column) => {
+                            settings.editor_wrap_column = Some(column)
                         }
                         _ => invalid(),
                     },
@@ -405,10 +405,10 @@ pub const TEMPLATE: &str = "\
 # Editor row height as a multiple of the text size (1.2–2.2).
 # editor-line-height = 1.7
 
-# The widest the editor's column of line numbers and text grows, in pixels
-# (400–4000), centred in a wider pane; none fills the pane. Focus mode
-# always centres a column: this one, or 760 px when this is none.
-# editor-max-width = 760
+# Characters of text before a line wraps (20–400), measured in the width of
+# the font's \"0\"; none wraps at the pane's edge. The text starts at the left
+# of the pane; focus mode centres it, at 100 characters when this is none.
+# editor-wrap-column = 100
 
 # Show the line-number gutter.
 # line-numbers = true
@@ -517,23 +517,29 @@ mod tests {
     }
 
     #[test]
-    fn editor_max_width_takes_pixels_in_range_or_none() {
+    fn editor_wrap_column_takes_characters_in_range_or_none() {
         assert_eq!(
-            Settings::default().editor_max_width,
-            Some(DEFAULT_MAX_WIDTH)
+            Settings::default().editor_wrap_column,
+            Some(DEFAULT_WRAP_COLUMN)
         );
-        for (value, width) in [("900", Some(900.0)), ("none", None), ("None", None)] {
-            let settings = Settings::parse(&format!("editor-max-width = {value}\n"));
-            assert_eq!(settings.editor_max_width, width, "{value}");
+        for (value, column) in [
+            ("80", Some(80)),
+            ("20", Some(20)),
+            ("400", Some(400)),
+            ("none", None),
+            ("None", None),
+        ] {
+            let settings = Settings::parse(&format!("editor-wrap-column = {value}\n"));
+            assert_eq!(settings.editor_wrap_column, column, "{value}");
             assert!(settings.warnings.is_empty());
         }
-        for value in ["399", "4001", "760px", "", "-1"] {
+        for value in ["19", "401", "80ch", "80.5", "", "-1"] {
             let settings = Settings::parse(&format!(
-                "editor-max-width = none\neditor-max-width = {value}\n"
+                "editor-wrap-column = none\neditor-wrap-column = {value}\n"
             ));
-            assert_eq!(settings.editor_max_width, None, "{value}");
+            assert_eq!(settings.editor_wrap_column, None, "{value}");
             assert_eq!(settings.warnings.len(), 1, "{value}");
-            assert!(settings.warnings[0].contains("editor-max-width"));
+            assert!(settings.warnings[0].contains("editor-wrap-column"));
         }
     }
 

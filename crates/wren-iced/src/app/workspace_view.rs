@@ -896,7 +896,7 @@ impl App {
         let (style, palette) = theme::editor_colors(self.definition);
         let editor: Element<'_, Message> = self
             .editor
-            .view(style, palette, self.editor_max_width())
+            .view(style, palette, self.editor_measure())
             .map(Message::Editor);
         let mut empty = column![].spacing(14).align_x(iced::Center);
         let (prompt, action, command) = if self.selected_section.is_none() {

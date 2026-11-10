@@ -40,7 +40,7 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::highlighter::Highlighter as _;
-use iced::advanced::text::{self, LineHeight, Renderer as _, Text, Wrapping};
+use iced::advanced::text::{self, LineHeight, Paragraph as _, Renderer as _, Text, Wrapping};
 use iced::advanced::widget::{self, operation, tree, Widget};
 use iced::advanced::{clipboard, input_method, Clipboard, InputMethod, Shell};
 use iced::keyboard;
@@ -49,8 +49,8 @@ use iced::widget::text_editor::{
     Action, Binding, Cursor, Edit, KeyPress, LineEnding, Position, Selection, Status,
 };
 use iced::{
-    alignment, window, Border, Element, Event, Length, Padding, Pixels, Point, Rectangle, Renderer,
-    Size, Theme, Vector,
+    alignment, window, Border, Element, Event, Font, Length, Padding, Pixels, Point, Rectangle,
+    Renderer, Size, Theme, Vector,
 };
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
@@ -69,16 +69,19 @@ const CODE_BAND_OUTSET: f32 = 8.0;
 const GUTTER_WIDTH: f32 = 52.0;
 const GUTTER_PADDING_RIGHT: f32 = 18.0;
 /// Text inset after the row inset when the gutter is hidden.
-const BARE_TEXT_INSET: f32 = 8.0;
+const BARE_TEXT_INSET: f32 = 16.0;
 const VERTICAL_PADDING: f32 = 24.0;
+/// The least space right of left-placed text.
+const RIGHT_INSET: f32 = 24.0;
+/// The least space either side of centred text: the larger of a fixed
+/// width and a share of the widget's.
+const CENTRED_MARGIN: f32 = 48.0;
+const CENTRED_MARGIN_SHARE: f32 = 0.06;
 const CARET_WIDTH: f32 = 2.0;
 const CARET_HEIGHT: f32 = 18.0;
 /// JetBrains Mono OS/2 `sxHeight` (550) over its 1000 units per em; other
 /// monospace fonts sit close enough for the strike-through.
 const X_HEIGHT_EM: f32 = 0.55;
-/// JetBrains Mono's advance (600 units per 1000-unit em): the width of the
-/// cell that shows a selected line break.
-const ADVANCE_EM: f32 = 0.6;
 /// An inline code chip's height, in ems: the glyph box plus about 2 px a
 /// side at the default size.
 const CHIP_HEIGHT_EM: f32 = 1.3;
@@ -266,6 +269,26 @@ impl Content {
 // Widget
 // ---------------------------------------------------------------------------
 
+/// How wide the text runs and where it sits in the widget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Measure {
+    /// Characters before a line wraps, in widths of the font's `0`; `None`
+    /// wraps at the widget's edge.
+    pub wrap_column: Option<u16>,
+    /// Centre the text, with the gutter in its left margin, rather than
+    /// start it at the widget's left.
+    pub centred: bool,
+}
+
+/// The horizontal layout of a widget's column, in pixels from its left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Columns {
+    /// The span the current-line and code bands, and the gutter, sit in.
+    band: (f32, f32),
+    /// The text's left edge and width.
+    text: (f32, f32),
+}
+
 /// A multi-line Markdown editor with a line-number gutter.
 pub struct TextEditor<'a> {
     id: widget::Id,
@@ -274,9 +297,7 @@ pub struct TextEditor<'a> {
     style: Style,
     line_numbers: bool,
     metrics: Metrics,
-    /// The widest the column of gutter and text grows; past it the column
-    /// is centred.
-    max_width: Option<f32>,
+    measure: Measure,
     markdown_assist: bool,
     key_policy: Option<&'a KeyPolicy>,
     last_status: Option<Status>,
@@ -299,17 +320,17 @@ impl<'a> TextEditor<'a> {
             style,
             line_numbers,
             metrics,
-            max_width: None,
+            measure: Measure::default(),
             markdown_assist,
             key_policy: None,
             last_status: None,
         }
     }
 
-    /// Cap the column of gutter and text at `max_width`, centred in the
-    /// widget; `None` lets it fill the widget.
-    pub fn max_width(mut self, max_width: Option<f32>) -> Self {
-        self.max_width = max_width;
+    /// Set how wide the text runs and where it sits; by default it fills
+    /// the widget from the left.
+    pub fn measure(mut self, measure: Measure) -> Self {
+        self.measure = measure;
         self
     }
 
@@ -319,32 +340,68 @@ impl<'a> TextEditor<'a> {
         self
     }
 
-    /// The space on either side of the column in a widget `width` wide,
-    /// in whole pixels so the text stays on the pixel grid.
-    fn margin(&self, width: f32) -> f32 {
-        self.max_width
-            .map_or(0.0, |max| ((width - max) / 2.0).max(0.0).floor())
+    /// The space left of the text: the gutter and its inset, or a bare
+    /// inset without line numbers.
+    fn lead(&self) -> f32 {
+        ROW_INSET
+            + if self.line_numbers {
+                self.metrics.gutter
+            } else {
+                BARE_TEXT_INSET
+            }
     }
 
-    /// The column's horizontal extent in `bounds`.
-    fn column(&self, bounds: Rectangle) -> (f32, f32) {
-        let margin = self.margin(bounds.width);
-        (bounds.x + margin, bounds.width - 2.0 * margin)
+    /// The column in a widget `width` wide, for a font whose `0` is
+    /// `advance` wide. Left-placed text starts after the gutter and wraps at
+    /// the wrap column or `RIGHT_INSET` from the edge, and the bands span
+    /// the widget. Centred text keeps equal margins of at least the gutter,
+    /// and the bands span the gutter and the text. Edges are whole pixels,
+    /// so the text stays on the pixel grid.
+    fn columns(&self, width: f32, advance: f32) -> Columns {
+        let lead = self.lead();
+        // Rounded, then a pixel of slack: a run of `n` glyphs can sum a hair
+        // past `n` advances and must not wrap its last one, and rounding
+        // keeps float noise in the advance from moving the edge.
+        let wrap = self
+            .measure
+            .wrap_column
+            .map(|column| (f32::from(column) * advance).round() + 1.0);
+        if self.measure.centred {
+            let margin = lead
+                .max(CENTRED_MARGIN)
+                .max((width * CENTRED_MARGIN_SHARE).floor());
+            let available = (width - 2.0 * margin).max(0.0).floor();
+            let text_width = wrap.map_or(available, |wrap| wrap.min(available));
+            // Never left of the gutter, even in a widget too narrow for
+            // two margins.
+            let text_left = ((width - text_width) / 2.0).floor().max(lead);
+            Columns {
+                band: (text_left - lead, text_left + text_width + ROW_INSET),
+                text: (text_left, text_width),
+            }
+        } else {
+            let available = (width - lead - RIGHT_INSET).max(0.0).floor();
+            Columns {
+                band: (0.0, width),
+                text: (lead, wrap.map_or(available, |wrap| wrap.min(available))),
+            }
+        }
+    }
+
+    /// The bands' horizontal extent in `bounds`.
+    fn band(&self, bounds: Rectangle, advance: f32) -> (f32, f32) {
+        let (left, right) = self.columns(bounds.width, advance).band;
+        (bounds.x + left, right - left)
     }
 
     /// The space around the text in a widget `width` wide.
-    fn padding(&self, width: f32) -> Padding {
-        let margin = self.margin(width);
-        let left = if self.line_numbers {
-            ROW_INSET + self.metrics.gutter
-        } else {
-            ROW_INSET + BARE_TEXT_INSET
-        };
+    fn padding(&self, width: f32, advance: f32) -> Padding {
+        let (left, text_width) = self.columns(width, advance).text;
         Padding {
             top: VERTICAL_PADDING,
-            right: margin + ROW_INSET,
+            right: (width - left - text_width).max(0.0),
             bottom: VERTICAL_PADDING,
-            left: margin + left,
+            left,
         }
     }
 
@@ -358,7 +415,7 @@ impl<'a> TextEditor<'a> {
         };
 
         let bounds = layout.bounds();
-        let text_bounds = bounds.shrink(self.padding(bounds.width));
+        let text_bounds = bounds.shrink(self.padding(bounds.width, state.advance.width));
         let translation = text_bounds.position() - Point::ORIGIN;
         let editor = self.content.0.borrow();
         let Some(cursor) = editor.ime_position() else {
@@ -382,6 +439,37 @@ struct State {
     partial_scroll: f32,
     highlighter: RefCell<MarkdownHighlighter>,
     highlighter_settings: HighlighterSettings,
+    advance: Advance,
+}
+
+/// The width of the font's `0` at a text size: the unit of the wrap column.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Advance {
+    font: Font,
+    size: f32,
+    width: f32,
+}
+
+impl Advance {
+    /// Shape a `0` in `font` at `size`.
+    fn measure(font: Font, size: f32) -> Self {
+        let paragraph = <Renderer as text::Renderer>::Paragraph::with_text(Text {
+            content: "0",
+            bounds: Size::INFINITE,
+            size: Pixels(size),
+            line_height: LineHeight::default(),
+            font,
+            align_x: text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: text::Shaping::Advanced,
+            wrapping: Wrapping::None,
+        });
+        Self {
+            font,
+            size,
+            width: paragraph.min_width(),
+        }
+    }
 }
 
 impl State {
@@ -393,6 +481,8 @@ impl State {
             drag_click: None,
             partial_scroll: 0.0,
             highlighter: RefCell::new(MarkdownHighlighter::new(&highlighter_settings)),
+            // Layout measures again when the text size differs.
+            advance: Advance::measure(highlighter_settings.font, TEXT_SIZE),
             highlighter_settings,
         }
     }
@@ -503,10 +593,16 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                 .update(&self.highlighter_settings);
             state.highlighter_settings = self.highlighter_settings;
         }
+        let (font, size) = (self.highlighter_settings.font, self.metrics.text);
+        if (state.advance.font, state.advance.size) != (font, size) {
+            state.advance = Advance::measure(font, size);
+        }
 
         let limits = limits.width(Length::Fill).height(Length::Fill);
         editor.update(
-            limits.shrink(self.padding(limits.max().width)).max(),
+            limits
+                .shrink(self.padding(limits.max().width, state.advance.width))
+                .max(),
             self.highlighter_settings.font,
             Pixels(self.metrics.text),
             self.metrics.line_height(),
@@ -562,7 +658,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             event,
             state,
             layout.bounds(),
-            self.padding(layout.bounds().width),
+            self.padding(layout.bounds().width, state.advance.width),
             cursor,
             crate::keys::Context {
                 markdown_assist: self.markdown_assist,
@@ -685,8 +781,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             style.background,
         );
 
-        let text_bounds = bounds.shrink(self.padding(bounds.width));
-        let (column_x, column_width) = self.column(bounds);
+        let text_bounds = bounds.shrink(self.padding(bounds.width, state.advance.width));
+        let (column_x, column_width) = self.band(bounds, state.advance.width);
         // Rows span the full width, but scroll out under the vertical padding.
         let rows_clip = Rectangle {
             x: bounds.x,
@@ -797,7 +893,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             .and_then(|focus| Some((focus, editor.selection()?)));
 
         if let Some((_, Selection::Range(ranges))) = &selection {
-            let breaks = selected_breaks(&rows, cursor, self.metrics.text * ADVANCE_EM);
+            let breaks = selected_breaks(&rows, cursor, state.advance.width);
             for range in ranges
                 .iter()
                 .copied()
@@ -1436,50 +1532,123 @@ mod tests {
         assert_eq!(glyph_span(line, blank_row.into_iter(), 6..16), None);
     }
 
-    #[test]
-    fn padding_reserves_the_gutter_only_when_shown() {
-        let content = Content::new(BackendKind::Iced, "");
-        let editor = |line_numbers| {
-            TextEditor::new(
-                &content,
-                "e",
-                fixtures::SETTINGS,
-                fixtures::STYLE,
-                line_numbers,
-                Metrics::default(),
-                true,
-            )
-        };
-        let shown = editor(true).padding(600.0);
-        let hidden = editor(false).padding(600.0);
-        assert_eq!((shown.left, shown.top, shown.bottom), (60.0, 24.0, 24.0));
-        assert_eq!(hidden.left, 16.0);
-    }
+    /// JetBrains Mono's `0` at 14 px: 600 units of a 1000-unit em.
+    const ADVANCE: f32 = 8.4;
 
-    #[test]
-    fn a_maximum_width_centres_the_column_once_the_widget_is_wider() {
-        let content = Content::new(BackendKind::Iced, "");
-        let editor = TextEditor::new(
-            &content,
+    fn editor_with(content: &Content, line_numbers: bool, measure: Measure) -> TextEditor<'_> {
+        TextEditor::new(
+            content,
             "e",
             fixtures::SETTINGS,
             fixtures::STYLE,
-            true,
+            line_numbers,
             Metrics::default(),
             true,
         )
-        .max_width(Some(760.0));
-        let narrow = editor.padding(600.0);
-        assert_eq!((narrow.left, narrow.right), (60.0, 8.0));
-        let wide = editor.padding(1001.0);
-        assert_eq!((wide.left, wide.right), (60.0 + 120.0, 8.0 + 120.0));
-        let bounds = Rectangle::new(Point::new(280.0, 98.0), Size::new(1000.0, 600.0));
-        assert_eq!(editor.column(bounds), (400.0, 760.0));
-        let text = bounds.shrink(editor.padding(bounds.width));
-        // The text column is the 760 px column less the gutter and insets.
-        assert_eq!((text.x, text.width), (460.0, 692.0));
-        let uncapped = editor.max_width(None);
-        assert_eq!(uncapped.column(bounds), (280.0, 1000.0));
+        .measure(measure)
+    }
+
+    #[test]
+    fn padding_reserves_the_gutter_only_when_shown() {
+        let content = Content::new(BackendKind::Iced, "");
+        let shown = editor_with(&content, true, Measure::default()).padding(600.0, ADVANCE);
+        let hidden = editor_with(&content, false, Measure::default()).padding(600.0, ADVANCE);
+        assert_eq!(
+            (shown.left, shown.right, shown.top, shown.bottom),
+            (60.0, 24.0, 24.0, 24.0)
+        );
+        assert_eq!((hidden.left, hidden.right), (24.0, 24.0));
+    }
+
+    #[test]
+    fn left_placed_text_wraps_at_the_column_or_short_of_the_edge() {
+        let content = Content::new(BackendKind::Iced, "");
+        let editor = editor_with(
+            &content,
+            true,
+            Measure {
+                wrap_column: Some(100),
+                centred: false,
+            },
+        );
+        // 100 advances of 8.4 px, rounded, and a pixel of slack.
+        let wide = editor.columns(1200.0, ADVANCE);
+        assert_eq!(wide.text, (60.0, 841.0));
+        assert_eq!(wide.band, (0.0, 1200.0));
+        let padding = editor.padding(1200.0, ADVANCE);
+        assert_eq!((padding.left, padding.right), (60.0, 299.0));
+        // Narrower than the column, the text stops RIGHT_INSET short.
+        assert_eq!(editor.columns(600.0, ADVANCE).text, (60.0, 516.0));
+        // The wrap column follows the font's advance.
+        assert_eq!(editor.columns(1200.0, 10.8).text, (60.0, 1081.0));
+        let bounds = Rectangle::new(Point::new(280.0, 98.0), Size::new(1200.0, 600.0));
+        assert_eq!(editor.band(bounds, ADVANCE), (280.0, 1200.0));
+    }
+
+    #[test]
+    fn centred_text_keeps_equal_margins_with_the_gutter_in_the_left_one() {
+        let content = Content::new(BackendKind::Iced, "");
+        let editor = editor_with(
+            &content,
+            true,
+            Measure {
+                wrap_column: Some(100),
+                centred: true,
+            },
+        );
+        let wide = editor.columns(1600.0, ADVANCE);
+        assert_eq!(wide.text, (379.0, 841.0));
+        // The bands start at the gutter and end at the text's inset.
+        assert_eq!(wide.band, (319.0, 1228.0));
+        // Narrow, the margins shrink to the gutter's width, never below.
+        assert_eq!(editor.columns(800.0, ADVANCE).text, (60.0, 680.0));
+        // The larger of 48 px and 6% of the width.
+        let wider = editor.columns(2000.0, 20.0).text;
+        assert_eq!(wider, (120.0, 1760.0));
+        let bare = editor_with(
+            &content,
+            false,
+            Measure {
+                wrap_column: None,
+                centred: true,
+            },
+        );
+        assert_eq!(bare.columns(600.0, ADVANCE).text, (48.0, 504.0));
+    }
+
+    #[test]
+    fn the_wrap_column_holds_exactly_that_many_characters() {
+        fixtures::load_font();
+        let advance = Advance::measure(fixtures::FONT, TEXT_SIZE).width;
+        assert!((advance - ADVANCE).abs() < 0.01, "{advance}");
+        let content = Content::new(BackendKind::Iced, "");
+        for column in [20, 80, 100, 120] {
+            let editor = editor_with(
+                &content,
+                true,
+                Measure {
+                    wrap_column: Some(column),
+                    centred: false,
+                },
+            );
+            let width = editor.columns(4000.0, advance).text.1;
+            for kind in BackendKind::ALL {
+                for glyph in ["0", "m", "i"] {
+                    let line = glyph.repeat(usize::from(column));
+                    assert_eq!(
+                        laid_out(kind, &line, width).len(),
+                        1,
+                        "{kind:?} {column} {glyph}"
+                    );
+                    let over = format!("{line}{glyph}");
+                    assert_eq!(
+                        laid_out(kind, &over, width).len(),
+                        2,
+                        "{kind:?} {column} {glyph}"
+                    );
+                }
+            }
+        }
     }
 
     fn laid_out(kind: BackendKind, text: &str, width: f32) -> Vec<VisualRow> {
