@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.1.1 — 2026-11-10
+
 ### Changed
 
 - **The editor's text starts at the left of its pane** and wraps at
@@ -21,6 +23,8 @@ version's section as its notes, and publishes to the apt repo. See
   Focus mode centres the text, with the line numbers in its left margin.
   `editor-wrap-column` replaces `editor-max-width`, which was in pixels.
   Without line numbers the text sits a little further from the pane's edge.
+  An `editor-max-width` line left in `config.conf` now reports an unknown
+  setting; delete it.
 
 ## v0.1.0 — 2026-11-08
 
