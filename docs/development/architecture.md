@@ -76,10 +76,15 @@ the edit revision; the footer's word count follows on the next tick, at most
 
 The editor's metrics are the text size and a row height, the text size times
 `editor-line-height` rounded to whole pixels; the caret and gutter scale from
-the text size. The column of gutter and text grows to `editor-max-width` and
-is centred past it: the widget fills its pane and pads the column in, so
-clicks and the wheel beside it still reach the editor. Focus mode uses the
-same column, at 760 px when the setting is `none`.
+the text size. The host passes a `wren_editor::Measure`: a wrap column in
+characters and whether to centre. The widget measures the font's `0` once
+per font and size, and lays the text out as padding inside the pane it
+fills, so clicks and the wheel beside the text still reach the editor.
+Left-placed text starts after the gutter and wraps at the column or 24 px
+short of the edge; centred text keeps equal margins of at least the gutter,
+with the gutter in the left one. `App::editor_measure` is the one place that
+decides: focus mode centres, at 100 characters when `editor-wrap-column` is
+`none`.
 
 The highlighter gives every span a `Scale` as well as a colour and a font:
 the text size and the row height, as multiples of the body's. H1 is 1.35 em,

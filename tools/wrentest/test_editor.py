@@ -18,7 +18,7 @@ import time
 import pytest
 
 from tools.wrentest import png
-from tools.wrentest.test_setup import EDITOR_COLUMN, artifact_directory
+from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, wait_for
 
 ENGINES = ("classic", "advanced")
@@ -145,9 +145,8 @@ def test_editor_highlighting_renders_in_both_themes(theme, heading, code, editor
         app.client.call("theme.set", {"id": theme})
         app.client.call("editor.set", {"text": "# Heading\nplain text\n`inline code`\n**bold** and *italic*"})
         image = capture(app, artifacts / "highlighting.png")
-        # The editor fills the window and centres its column in it.
-        left = max(0, (image.width - EDITOR_COLUMN) // 2)
-        colors = [image.pixel(x, y)[:3] for y in range(100, 215) for x in range(left + 20, left + 300)]
+        # The editor fills the window; its text starts after the 60 px gutter.
+        colors = [image.pixel(x, y)[:3] for y in range(100, 215) for x in range(60, 340)]
         for expected in (heading, code):
             assert sum(all(abs(a - b) <= 3 for a, b in zip(pixel, expected))
                        for pixel in colors) >= 15, f"Missing rendered syntax color {expected}"

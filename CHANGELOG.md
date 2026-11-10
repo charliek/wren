@@ -13,6 +13,15 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Changed
+
+- **The editor's text starts at the left of its pane** and wraps at
+  `editor-wrap-column` characters (default `100`), measured in the font's
+  `0`, so the same text fits at any size; `none` wraps at the pane's edge.
+  Focus mode centres the text, with the line numbers in its left margin.
+  `editor-wrap-column` replaces `editor-max-width`, which was in pixels.
+  Without line numbers the text sits a little further from the pane's edge.
+
 ## v0.1.0 — 2026-11-08
 
 ### Added

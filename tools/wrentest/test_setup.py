@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
@@ -14,17 +15,32 @@ from tools.wrentest import png
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKGROUNDS = {"dark": (0x14, 0x16, 0x1B), "light": (0xF7, 0xF8, 0xFA)}
-# editor-max-width's default: the editor centres a column this wide, gutter
-# included, in a wider pane, as focus mode always does.
-EDITOR_COLUMN = 760
+# The editor's text at the defaults: JetBrains Mono's 8.4 px "0" at 14 px,
+# 100 of them (rounded, plus a pixel of slack), after an 8 px row inset and
+# the 52 px gutter. Left-placed text stops 24 px short of a narrower pane;
+# focus mode centres it between margins of at least the gutter, 48 px, and
+# 6% of the pane.
+WRAP_WIDTH = 841
+TEXT_LEAD = 8 + 52
+
+
+def editor_text(navigation: dict, root_x: float = 0) -> tuple[float, float]:
+    """The left edge and width of the editor's text."""
+    browser = 0 if navigation["focus"] else sum(navigation["effective_widths"].values())
+    pane = navigation["viewport"]["width"] - browser
+    if navigation["focus"]:
+        margin = max(TEXT_LEAD, 48, math.floor(pane * 0.06))
+        width = min(WRAP_WIDTH, max(math.floor(pane - 2 * margin), 0))
+        return root_x + browser + (pane - width) // 2, width
+    return root_x + browser + TEXT_LEAD, min(WRAP_WIDTH, max(math.floor(pane - TEXT_LEAD - 24), 0))
 
 
 def editor_column(navigation: dict, root_x: float = 0) -> tuple[float, float]:
-    """The left edge and width of the editor's column of gutter and text."""
-    browser = 0 if navigation["focus"] else sum(navigation["effective_widths"].values())
-    pane = navigation["viewport"]["width"] - browser
-    width = min(pane, EDITOR_COLUMN)
-    return root_x + browser + (pane - width) // 2, width
+    """The left edge and width of the gutter and the text, through the
+    text's 8 px right inset. Outside focus mode the current-line and code
+    bands run on to the pane's edge."""
+    left, width = editor_text(navigation, root_x)
+    return left - TEXT_LEAD, TEXT_LEAD + width + 8
 
 
 def binary_path() -> Path:

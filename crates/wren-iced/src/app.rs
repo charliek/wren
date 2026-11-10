@@ -722,7 +722,7 @@ impl App {
         let (style, palette) = theme::editor_colors(self.definition);
         body = body.push(
             self.editor
-                .view(style, palette, self.editor_max_width())
+                .view(style, palette, self.editor_measure())
                 .map(Message::Editor),
         );
         let cursor = self.editor.cursor();

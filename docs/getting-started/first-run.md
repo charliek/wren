@@ -47,8 +47,9 @@ asks first when a section or group still holds notes.
 | **Jump to heading** (⇧⌘O / Alt+Shift+O) | The open note's outline. |
 | **Back / Forward** (⌘[ / ⌘], Alt on Linux) | Notes you visited. |
 
-**Focus mode** (⌘Y / Alt+Y) hides the browser columns so only the editor
-shows, in a centred 760 px column; press it again to bring them back. The
-editor keeps to the same column width outside focus mode too, centred once
-its pane is wider; `editor-max-width` in
-[Configuration](../reference/configuration.md) changes it.
+**Focus mode** (⌘Y / Alt+Y) hides the browser columns and centres the
+text in the window; press it again to bring them back. Outside focus mode
+the text starts at the left of the editor pane. Either way long lines wrap
+at 100 characters, or at the pane's edge when it is narrower;
+`editor-wrap-column` in [Configuration](../reference/configuration.md)
+changes it.
