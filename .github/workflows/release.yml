@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       # Exact match, prerelease included: `/release-workflows:release
@@ -121,7 +121,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Create (or reuse) the draft GitHub Release
@@ -175,7 +175,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -266,7 +266,7 @@ jobs:
       # the app/DMG steps only when this is true.
       CAN_NOTARIZE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.WREN_DEVELOPER_ID_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -515,7 +515,7 @@ jobs:
       contents: write
     steps:
       # For tools/release_assets.py only; the rest talks to the API.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           sparse-checkout: tools
