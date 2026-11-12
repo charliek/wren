@@ -19,7 +19,7 @@
 //! - [`check`] lists what is wrong but still loads (dangling ends, parent
 //!   cycles, missing kinds and stacking keys); [`access`] says whether this
 //!   build may edit the board; [`placements`] resolves the parent tree.
-//! - [`write`] writes the canonical form: deterministic, one field per
+//! - [`write()`] writes the canonical form: deterministic, one field per
 //!   line, so one edit changes one line, and `write(parse(write(m)))` is
 //!   `write(m)`.
 //! - [`scene::build`] lays a board out for drawing, with [`shape`] for
