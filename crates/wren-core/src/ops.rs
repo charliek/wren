@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::autosave::Autosave;
-use crate::fs_store::{DiskFile, Expected, Fault, FsStore, RelPath, WriteReceipt};
+use crate::fs_store::{DiskFile, Expected, Fault, FsStore, Leaf, RelPath, WriteReceipt};
 use crate::index::Index;
+use crate::kind::NoteKind;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
@@ -25,6 +26,7 @@ pub enum Op {
     CreateNote {
         group: GroupId,
         title: String,
+        kind: NoteKind,
     },
     Rename {
         target: ItemRef,
@@ -201,6 +203,24 @@ impl Document {
 
 const MAX_NAVIGATION_ENTRIES: usize = 100;
 
+/// How a Session lists a workspace, fixed for its life and inherited by a
+/// Session that `Op::OpenWorkspace` opens from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// Whether board notes are scanned, listed, indexed and opened.
+    pub boards: bool,
+}
+
+impl SessionOptions {
+    fn kinds(self) -> scan::Kinds {
+        if self.boards {
+            scan::Kinds::ALL
+        } else {
+            scan::Kinds::MARKDOWN
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Navigation {
     Visit,
@@ -224,6 +244,7 @@ pub struct Session {
     history_index: Option<usize>,
     recent: Vec<NoteId>,
     last_save_micros: u128,
+    options: SessionOptions,
     background_reconcile: bool,
     reconcile_requested: bool,
     reconcile_in_flight: Option<u64>,
@@ -251,26 +272,45 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
+    /// Opens a Markdown-only Session, as every release before boards did.
     pub fn open(path: &Path) -> Result<Self, OpError> {
         Self::with_trash(path, Box::new(SystemTrash))
     }
 
+    pub fn open_with(path: &Path, options: SessionOptions) -> Result<Self, OpError> {
+        Self::with_options(path, Box::new(SystemTrash), options)
+    }
+
     pub fn with_trash(path: &Path, trash: Box<dyn Trash>) -> Result<Self, OpError> {
-        Self::load(path, trash, 1).map_err(|message| OpError {
+        Self::with_options(path, trash, SessionOptions::default())
+    }
+
+    pub fn with_options(
+        path: &Path,
+        trash: Box<dyn Trash>,
+        options: SessionOptions,
+    ) -> Result<Self, OpError> {
+        Self::load(path, trash, 1, options).map_err(|message| OpError {
             message,
             events: Vec::new(),
         })
     }
 
-    fn load(path: &Path, trash: Box<dyn Trash>, generation: u64) -> Result<Self, String> {
+    fn load(
+        path: &Path,
+        trash: Box<dyn Trash>,
+        generation: u64,
+        options: SessionOptions,
+    ) -> Result<Self, String> {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
         let mut index = Index::default();
-        let mut model = scan::scan_with_contents(store.reader(), None, |note, contents| {
-            index.ingest(note, contents);
-        })
-        .map_err(|error| error.to_string())?;
+        let mut model =
+            scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
+                index.ingest(note, contents);
+            })
+            .map_err(|error| error.to_string())?;
         let watcher = match watch {
             Ok(watcher) => Some(watcher),
             Err(error) => {
@@ -336,6 +376,7 @@ impl Session {
             history_index,
             recent: Vec::new(),
             last_save_micros: 0,
+            options,
             background_reconcile: false,
             reconcile_requested: false,
             reconcile_in_flight: None,
@@ -349,10 +390,16 @@ impl Session {
             .selection()
             .and_then(|path| session.resolve_selection(&path))
             .or_else(|| {
-                session
-                    .state
-                    .last_open_note()
-                    .and_then(|path| session.resolve_selection(&path))
+                // The Markdown fallback is what released Wren reopens, which
+                // matters when the last open note is a kind this Session does
+                // not list.
+                [
+                    session.state.last_open_note(),
+                    session.state.markdown_last_open_note(),
+                ]
+                .into_iter()
+                .flatten()
+                .find_map(|path| session.resolve_selection(&path))
             });
         if let Some((parent, note)) = selected {
             session.selected_parent = Some(parent);
@@ -431,6 +478,9 @@ impl Session {
     }
     pub fn last_save_micros(&self) -> u128 {
         self.last_save_micros
+    }
+    pub fn options(&self) -> SessionOptions {
+        self.options
     }
     pub fn pending_durability(&self) -> bool {
         self.store.pending_durability()
@@ -558,17 +608,21 @@ impl Session {
                 self.state.reorder(&path, None, &siblings)?;
                 self.finish_structure(events)
             }
-            Op::CreateNote { group, title } => {
+            Op::CreateNote { group, title, kind } => {
+                if !self.options.kinds().lists(kind) {
+                    return Err("Boards are turned off; set `boards = on` to create one".into());
+                }
                 let path = self.parent_path(Parent::Group(group))?;
                 let receipt = self
                     .store
-                    .create_file(&path, &title, b"")
+                    .create_file(&path, &title, kind, kind.template().as_bytes())
                     .map_err(|error| error.to_string())?;
                 let id = NoteId(self.model.allocate_id());
                 self.model.notes.push(Note {
                     id,
                     group,
-                    title: model::note_title(receipt.path.file_name()),
+                    title: kind.title(receipt.path.file_name()),
+                    kind,
                     path: receipt.path,
                     subtitle: None,
                     modified: receipt.file.modified,
@@ -742,6 +796,7 @@ impl Session {
                     &path,
                     Box::new(SystemTrash),
                     self.generation.wrapping_add(1),
+                    self.options,
                 )?;
                 std::mem::swap(&mut replacement.trash, &mut self.trash);
                 replacement.background_reconcile = self.background_reconcile;
@@ -929,7 +984,13 @@ impl Session {
                     .find(|section| section.path == *path)
                     .map(|section| self.section_parent(section.id))
             })?;
-        let last = self.state.last_open_note().and_then(|path| {
+        let last = [
+            self.state.last_open_note(),
+            self.state.markdown_last_open_note(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|path| {
             self.model
                 .notes
                 .iter()
@@ -1058,12 +1119,12 @@ impl Session {
                 match self.store.write(copy, bytes, Expected::Bytes(baseline)) {
                     Ok(receipt) => receipt,
                     Err(error) if error.is_conflict() || error.is_not_found() => {
-                        self.create_conflict(path, &parent, bytes)?
+                        self.create_conflict(path, &parent, document.entry.kind, bytes)?
                     }
                     Err(error) => return Err(error.to_string()),
                 }
             }
-            _ => self.create_conflict(path, &parent, bytes)?,
+            _ => self.create_conflict(path, &parent, document.entry.kind, bytes)?,
         };
         document.recovery = Some((receipt.path.clone(), receipt.file.bytes.clone()));
         if let Some(error) = receipt.durability_error {
@@ -1139,17 +1200,18 @@ impl Session {
         &mut self,
         path: &RelPath,
         parent: &RelPath,
+        kind: NoteKind,
         bytes: &[u8],
     ) -> Result<WriteReceipt, String> {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H%M");
-        let title = model::note_title(path.file_name());
+        let title = kind.title(path.file_name());
         let mut end = title.len().min(180);
         while !title.is_char_boundary(end) {
             end -= 1;
         }
         let title = format!("{} (conflict {stamp})", &title[..end]);
         self.store
-            .create_file(parent, &title, bytes)
+            .create_file(parent, &title, kind, bytes)
             .map_err(|error| error.to_string())
     }
 
@@ -1215,6 +1277,7 @@ impl Session {
                 tree_revision: self.tree_revision,
             },
             reader,
+            self.options.kinds(),
             self.model.scan_baseline(),
             self.index.content_snapshot(),
         ));
@@ -1389,9 +1452,16 @@ impl Session {
             .filter(|note| note.path.as_path().starts_with(from.as_path()))
             .map(|note| note.id)
             .collect();
+        let leaf = match target {
+            ItemRef::Note(_) => Leaf::Note(
+                NoteKind::from_name(from.file_name())
+                    .ok_or("The note's file name has no note kind")?,
+            ),
+            ItemRef::Section(_) | ItemRef::Group(_) => Leaf::Directory,
+        };
         let receipt = self
             .store
-            .relocate(from, parent, name, matches!(target, ItemRef::Note(_)))
+            .relocate(from, parent, name, leaf)
             .map_err(|error| error.to_string())?;
         self.model.remap_paths(from, &receipt.path);
         let mut moved_group_section = None;
@@ -1494,8 +1564,11 @@ impl Session {
             self.index.set_content(document.note, &document.text, true);
             (document.note, document.entry.path.clone())
         });
-        let scanned =
-            scan::scan_with_contents(self.store.reader(), Some(&self.model), |note, contents| {
+        let scanned = scan::scan_with_contents(
+            self.store.reader(),
+            Some(&self.model),
+            self.options.kinds(),
+            |note, contents| {
                 // A scan is not a document transition. In particular, a replacement
                 // at the active path must not insert a new ID or replace its draft.
                 if !active
@@ -1504,7 +1577,8 @@ impl Session {
                 {
                     self.index.ingest(note, contents);
                 }
-            });
+            },
+        );
         let scanned = match scanned {
             Ok(scanned) => scanned,
             Err(error) => {
@@ -1642,9 +1716,8 @@ impl Session {
             .iter()
             .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
             .collect::<Vec<_>>();
-        self.state.set_history(&history);
-        self.state.set_history_position(self.history_index);
-        self.state.set_recent(&recent);
+        self.state
+            .set_navigation(&history, self.history_index, &recent);
     }
 
     fn persist_metadata(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
@@ -1877,6 +1950,40 @@ mod tests {
         session.apply_at(Op::FinishReconcile(result), secs(seconds))
     }
 
+    #[test]
+    fn unchanged_boards_are_never_extracted_or_sent_again() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("S/G")).unwrap();
+        for number in 0..200 {
+            fs::write(
+                root.path().join(format!("S/G/Board {number}.wren-board")),
+                format!("schema = 1\n\n[node.n{number}]\ntext = \"Label {number}\"\n"),
+            )
+            .unwrap();
+        }
+        fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        assert_eq!(session.model.notes.len(), 201);
+        assert_eq!(session.index.extractions, 200);
+        let revision = session.index.revision();
+
+        for tick in 1..=40 {
+            session.apply_at(Op::Tick, secs(tick)).unwrap();
+        }
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(session.index.revision(), revision);
+
+        session.set_background_reconcile(true);
+        for tick in 41..=80 {
+            let result = begin(&mut session, tick).run();
+            assert_eq!(result.sent_contents(), Some(0));
+            finish(&mut session, result, tick).unwrap();
+        }
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(session.index.revision(), revision);
+    }
+
     fn id_at(session: &Session, path: &str) -> NoteId {
         session
             .model
@@ -2026,6 +2133,7 @@ mod tests {
                     Op::CreateNote {
                         group,
                         title: "created".into(),
+                        kind: NoteKind::Markdown,
                     },
                     secs(1),
                 )

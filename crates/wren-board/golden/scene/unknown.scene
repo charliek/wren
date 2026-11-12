@@ -1,0 +1,14 @@
+bounds -0.75,-0.75 321.5x61.5
+node a path in -0.75,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,0 L 120,0 L 120,60 L 0,60 Z
+node a text in 11,20 98x20 Regular 14 #202428
+  11,20 w 98 "Unknown values"
+node b path in 199.25,-0.75 121.5x61.5 stroke #808890 1.5 dash 6,4: M 200,0 L 320,0 L 320,60 L 200,60 Z
+node b text in 204,4 36x16 Regular 12 #808890
+  204,4 w 36 "sticky"
+node b text in 218,20 84x20 Regular 14 #202428
+  218,20 w 84 "Unknown kind"
+edge e path in 129.25,29.25 61.5x1.5 stroke #202428 1.5: M 130,30 L 190,30
+edge e path in 120,26 80x8 fill #202428: M 120,30 L 130,26 L 130,34 Z M 200,30 L 190,34 L 190,26 Z
+edge e path in 138,20 44x20 fill #ffffff: M 138,20 L 182,20 L 182,40 L 138,40 Z
+edge e text in 142,22 36x16 Regular 12 #202428
+  142,22 w 36 "styled"
