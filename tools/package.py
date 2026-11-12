@@ -61,11 +61,14 @@ ICON_CATALOG = Path("assets/icon/AppIcon.icon")
 MACOS_ICON_DEPLOYMENT_TARGET = "11.0"
 # License texts shipped beside the binary: the embedded fonts', and iced's
 # for the source copied into crates/wren-editor (crates.io's iced_widget and
-# iced_graphics packages carry none, so DEPENDENCY_NOTICES.txt cannot).
+# iced_graphics packages carry none, so DEPENDENCY_NOTICES.txt cannot), and
+# lyon's for the same reason: its five crates.io packages ship no license file.
 LICENSE_NOTICES = (
     Path("third_party/inter/LICENSE.txt"),
     Path("third_party/jetbrains-mono/OFL.txt"),
     Path("third_party/iced/LICENSE"),
+    Path("third_party/lyon/LICENSE-MIT"),
+    Path("third_party/lyon/LICENSE-APACHE"),
 )
 NOTICES = (
     "Wren embeds Inter and JetBrains Mono fonts in its executable.\n"
@@ -86,6 +89,12 @@ NOTICES = (
     "\nWren builds with a modified cosmic-text 0.15.0 (a hanging indent for\n"
     "wrapped rows), used under its MIT license option. cosmic-text's MIT and\n"
     "Apache-2.0 texts are in DEPENDENCY_NOTICES.txt, under cosmic-text.\n"
+    "\nWren links lyon 1.0.19, lyon_algorithms 1.0.22, lyon_geom 1.0.20,\n"
+    "lyon_path 1.0.19 and lyon_tessellation 1.0.23 (Copyright 2013 Nicolas\n"
+    "Silva), used under their MIT license option. Their crates.io packages\n"
+    "carry no license file, so the upstream texts accompany this bundle:\n"
+    "  third_party/lyon/LICENSE-MIT\n"
+    "  third_party/lyon/LICENSE-APACHE\n"
     "\nWren itself is released under the MIT License; see LICENSE.\n"
 )
 PROJECT_LICENSE = Path("LICENSE")

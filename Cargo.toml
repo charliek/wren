@@ -18,6 +18,7 @@ wren-sparkle = { path = "crates/wren-sparkle" }
 wren-markdown = { path = "crates/wren-markdown" }
 iced = { version = "=0.14.0", default-features = false, features = [
     "advanced",
+    "canvas",
     "crisp",
     "linux-theme-detection",
     "svg",
