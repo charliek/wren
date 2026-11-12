@@ -45,32 +45,45 @@ pub(super) fn wrap(
             emit(hard);
             continue;
         }
-        let mut line = String::new();
-        for word in words(hard) {
-            if !line.trim_end().is_empty() {
-                let joined = format!("{line}{word}");
-                if fits(&joined) {
-                    line = joined;
-                    continue;
-                }
-                emit(&line);
-            }
-            line.clear();
-            // On an empty line: a word wider than the box is broken
-            // between graphemes, each line holding at least one.
-            let rest = if fits(word) {
-                word
-            } else {
+        // Each line is the longest run of whole words from `start` that
+        // fits, found as `split_word` finds a run of graphemes, so a long
+        // line costs a few measurements rather than one per word.
+        let ends: Vec<usize> = words(hard)
+            .scan(0, |end, word| {
+                *end += word.len();
+                Some(*end)
+            })
+            .collect();
+        let (mut start, mut first) = (0, 0);
+        while let Some(&word_end) = ends.get(first) {
+            let mut word = hard.get(start..word_end).unwrap_or_default();
+            if !fits(word) {
+                // A word wider than the box alone is broken between
+                // graphemes, each line holding at least one; its last
+                // part starts the next line.
                 let mut parts = split_word(word, &fits);
                 let last = parts.pop().unwrap_or(word);
                 for part in parts {
                     emit(part);
                 }
-                last
-            };
-            line.push_str(rest);
+                word = last;
+                start = word_end - last.len();
+            }
+            if word.trim_end().is_empty() {
+                // White space left at the start of a wrapped line starts
+                // no line.
+                start = word_end;
+                first += 1;
+                continue;
+            }
+            let count = longest(ends.len() - first, |count| {
+                hard.get(start..ends[first + count - 1]).is_some_and(&fits)
+            });
+            let end = ends[first + count - 1];
+            emit(hard.get(start..end).unwrap_or_default());
+            start = end;
+            first += count;
         }
-        emit(&line);
     }
     lines
 }
@@ -107,10 +120,9 @@ fn breaks_after(c: char) -> bool {
 
 /// A word too wide for one line, cut between graphemes into lines that
 /// fit, each holding at least one grapheme; the last part may be short.
-/// Each line is found by doubling its grapheme count until it no longer
-/// fits and then bisecting, so a line of `k` graphemes costs about
-/// `2 log k` measurements of at most `2k` graphemes, and an enormous word
-/// costs no more than its length times a logarithm.
+/// Each line is found by [`longest`], so a line of `k` graphemes costs
+/// about `2 log k` measurements of at most `2k` graphemes, and an enormous
+/// word costs no more than its length times a logarithm.
 fn split_word<'a>(word: &'a str, fits: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
     let ends: Vec<usize> = word
         .grapheme_indices(true)
@@ -119,36 +131,44 @@ fn split_word<'a>(word: &'a str, fits: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
     let mut parts = Vec::new();
     let (mut start, mut first) = (0, 0);
     while first < ends.len() {
-        let remaining = ends.len() - first;
-        let part = |count: usize| &word[start..ends[first + count - 1]];
-        // `good` graphemes are known to fit (0: none known), `bad` not.
-        let (mut good, mut bad) = (0, None);
-        let mut probe = 1;
-        while good < remaining {
-            if fits(part(probe)) {
-                good = probe;
-                probe = (probe * 2).min(remaining);
-            } else {
-                bad = Some(probe);
-                break;
-            }
-        }
-        if let Some(mut hi) = bad {
-            while hi - good > 1 {
-                let mid = good + (hi - good) / 2;
-                if fits(part(mid)) {
-                    good = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-        }
-        let count = good.max(1);
-        parts.push(part(count));
+        let count = longest(ends.len() - first, |count| {
+            fits(&word[start..ends[first + count - 1]])
+        });
+        parts.push(&word[start..ends[first + count - 1]]);
         start = ends[first + count - 1];
         first += count;
     }
     parts
+}
+
+/// The largest `count` from 1 to `max` for which `fits` holds, or 1 when
+/// none does, for a `fits` that holds for every count below one that holds.
+/// Doubling until it fails and then bisecting takes about `2 log count`
+/// calls.
+fn longest(max: usize, fits: impl Fn(usize) -> bool) -> usize {
+    // `good` is known to fit (0: none known), `bad` not.
+    let (mut good, mut bad) = (0, None);
+    let mut probe = 1;
+    while good < max {
+        if fits(probe) {
+            good = probe;
+            probe = (probe * 2).min(max);
+        } else {
+            bad = Some(probe);
+            break;
+        }
+    }
+    if let Some(mut hi) = bad {
+        while hi - good > 1 {
+            let mid = good + (hi - good) / 2;
+            if fits(mid) {
+                good = mid;
+            } else {
+                hi = mid;
+            }
+        }
+    }
+    good.max(1)
 }
 
 #[cfg(test)]
@@ -243,19 +263,23 @@ mod tests {
         }
     }
 
+    use std::cell::Cell;
+
+    /// The fixed measurer, counting its measurements.
+    struct Counting(Cell<usize>);
+
+    impl Measure for Counting {
+        fn width(&self, text: &str, face: Face, size: f32) -> f32 {
+            self.0.set(self.0.get() + 1);
+            FixedMeasure.width(text, face, size)
+        }
+        fn line_height(&self, face: Face, size: f32) -> f32 {
+            FixedMeasure.line_height(face, size)
+        }
+    }
+
     #[test]
     fn an_enormous_word_breaks_in_few_measurements() {
-        use std::cell::Cell;
-        struct Counting(Cell<usize>);
-        impl Measure for Counting {
-            fn width(&self, text: &str, face: Face, size: f32) -> f32 {
-                self.0.set(self.0.get() + 1);
-                FixedMeasure.width(text, face, size)
-            }
-            fn line_height(&self, face: Face, size: f32) -> f32 {
-                FixedMeasure.line_height(face, size)
-            }
-        }
         let word = "x".repeat(16_384);
         let counting = Counting(Cell::new(0));
         let got = wrap(&word, Some(7.0 * 1000.0), Face::Regular, 14.0, &counting);
@@ -275,5 +299,83 @@ mod tests {
             "{} measurements",
             counting.0.get()
         );
+    }
+
+    /// Joining words one at a time re-measured the whole line for each
+    /// word, so a line of `k` words cost `k` measurements of up to `k`
+    /// words: seconds for a large label in a wide box.
+    #[test]
+    fn a_line_of_many_words_takes_few_measurements() {
+        let label = "a ".repeat(8_000);
+        let counting = Counting(Cell::new(0));
+        // 4,000 words to a line, so four lines.
+        let got = wrap(&label, Some(28_000.0), Face::Regular, 14.0, &counting);
+        assert_eq!(got.len(), 4);
+        assert!(
+            counting.0.get() < 4 * 30,
+            "{} measurements",
+            counting.0.get()
+        );
+    }
+
+    /// The lines are the ones the plain greedy rule gives: take words while
+    /// the line fits, and break a word only when it is alone and too wide.
+    #[test]
+    fn wrapping_matches_word_by_word_greedy_wrapping() {
+        fn greedy(text: &str, width: f32) -> Vec<String> {
+            let fits = |candidate: &str| {
+                let candidate = candidate.trim_end();
+                candidate.is_empty()
+                    || FixedMeasure.width(candidate, Face::Regular, 14.0) <= width + SLACK
+            };
+            let mut lines = Vec::new();
+            for hard in text.split('\n') {
+                if fits(hard) {
+                    lines.push(hard.trim_end().to_owned());
+                    continue;
+                }
+                let mut line = String::new();
+                for word in words(hard) {
+                    if !line.trim_end().is_empty() {
+                        if fits(&format!("{line}{word}")) {
+                            line.push_str(word);
+                            continue;
+                        }
+                        lines.push(line.trim_end().to_owned());
+                    }
+                    line.clear();
+                    let mut parts = split_word(word, &fits);
+                    let last = parts.pop().unwrap_or(word);
+                    lines.extend(parts.iter().map(|part| part.trim_end().to_owned()));
+                    line.push_str(last);
+                }
+                if !line.trim_end().is_empty() {
+                    lines.push(line.trim_end().to_owned());
+                }
+            }
+            lines
+        }
+        let pieces = [
+            "a",
+            "bb",
+            "ccccc",
+            "dddddddddddd",
+            " ",
+            "  ",
+            "\n",
+            "\u{a0}",
+            "é",
+            "漢字",
+        ];
+        let mut rng = crate::fixtures::Rng(7);
+        for _ in 0..2_000 {
+            let text: String = (0..rng.below(24)).map(|_| *rng.pick(&pieces)).collect();
+            let width = *rng.pick(&[0.0, 7.0, 13.0, 21.0, 35.0, 70.0, 100.0, 1_000.0]);
+            assert_eq!(
+                lines(&text, width),
+                greedy(&text, width),
+                "{text:?} at {width}"
+            );
+        }
     }
 }

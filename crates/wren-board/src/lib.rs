@@ -602,5 +602,20 @@ mod tests {
                 assert!(scene_ms <= 5.0, "scene of {nodes} shapes: {scene_ms:.2} ms");
             }
         }
+        // Many words to a line: 50 boxes 28,000 wide, each label 8,000
+        // words (0.8 MB). Joining a word at a time took 6.9 s here.
+        let label = "a ".repeat(8_000);
+        let mut text = String::from("schema = 1\n");
+        for i in 0..50 {
+            text += &format!(
+                "\n[node.n{i}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [0, {}]\n\
+                 size = [28000, 60]\nz = \"V\"\n",
+                i * 100
+            );
+        }
+        let board = parse(&text).unwrap();
+        let wide_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+        println!("50 wide labels of 8,000 words: scene {wide_ms:.2} ms");
+        assert!(wide_ms <= 250.0, "scene of wide labels: {wide_ms:.2} ms");
     }
 }
