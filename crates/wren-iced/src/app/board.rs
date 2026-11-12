@@ -13,6 +13,7 @@ use std::time::Instant;
 use iced::Task;
 use wren_board::{svg, Access, Palette, ParseError};
 use wren_canvas::{BoardView, Input, Viewport};
+use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
 
 use super::columns::Column;
@@ -132,6 +133,41 @@ pub(super) fn svg_document(view: &BoardView) -> String {
     )
 }
 
+/// Why an export may not be written to `path`, if it may not, with the
+/// open workspace at `workspace`. An export never replaces a note, here or
+/// in another workspace, and inside the open workspace it is only ever an
+/// SVG file, so the state Wren keeps there is never replaced either. Those
+/// files are written through the Session, which keeps a copy of what a
+/// write replaces; an export does not.
+pub(super) fn export_refusal(path: &Path, workspace: Option<&Path>) -> Option<String> {
+    let name = path.file_name()?;
+    if NoteKind::from_name(name).is_some() {
+        return Some(format!(
+            "Did not export the board over {}: it is a note. Choose a name ending in .svg",
+            path.display()
+        ));
+    }
+    let svg = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+    let inside = || {
+        let (Some(parent), Some(root)) = (path.parent(), workspace) else {
+            return false;
+        };
+        let (Ok(parent), Ok(root)) = (parent.canonicalize(), root.canonicalize()) else {
+            // A folder that does not exist yet fails the write.
+            return false;
+        };
+        parent.starts_with(root)
+    };
+    (!svg && inside()).then(|| {
+        format!(
+            "Did not export the board to {}: inside the workspace an export is an .svg file",
+            path.display()
+        )
+    })
+}
+
 /// Write `contents` to `path` whole or not at all: into a new file beside
 /// it, renamed over it once written. Returns the bytes written.
 pub(super) fn write_export(path: &Path, contents: &str) -> std::io::Result<u64> {
@@ -212,11 +248,9 @@ impl App {
         };
         let mut outcome = match path {
             None => self.finish_action(Disposition::Completed, None, Task::none()),
-            Some(path) => match write_export(&path, &export.svg) {
+            Some(path) => match self.export_to(&path, &export.svg) {
                 Ok(_) => self.finish_action(Disposition::Completed, None, Task::none()),
-                Err(error) => {
-                    let warning =
-                        format!("Could not export the board to {}: {error}", path.display());
+                Err(warning) => {
                     self.banner = Some(warning.clone());
                     self.banner_kind = WarningKind::General;
                     self.blocked(warning)
@@ -228,6 +262,17 @@ impl App {
         outcome
     }
 
+    /// Write an export's `svg` to `path`, unless [`export_refusal`] says
+    /// no. Returns the bytes written, or the warning to show.
+    fn export_to(&self, path: &Path, svg: &str) -> Result<u64, String> {
+        let workspace = self.model().map(|model| model.root.as_path());
+        if let Some(refusal) = export_refusal(path, workspace) {
+            return Err(refusal);
+        }
+        write_export(path, svg)
+            .map_err(|error| format!("Could not export the board to {}: {error}", path.display()))
+    }
+
     /// Write the open board's SVG to `path` as the command does once its
     /// dialog closes, for the test harness, which has no dialog.
     #[cfg(feature = "smoke-test")]
@@ -236,8 +281,7 @@ impl App {
             .board
             .as_ref()
             .ok_or("The open note is not shown as a board")?;
-        write_export(path, &svg_document(view))
-            .map_err(|error| format!("Could not export the board to {}: {error}", path.display()))
+        self.export_to(path, &svg_document(view))
     }
 }
 
@@ -1603,6 +1647,75 @@ z = "c"
             std::fs::read_to_string(file(&directory, "Flow.wren-board")).unwrap(),
             FLOW
         );
+    }
+
+    #[test]
+    fn an_export_never_replaces_a_note_or_a_file_of_the_workspace() {
+        let (directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        let state = directory.path().join(".wren").join("workspace.toml");
+        let elsewhere = crate::test_support::tempdir();
+        let other_note = elsewhere.path().join("Plan.MD");
+        std::fs::write(&other_note, "# Plan\n").unwrap();
+        let other_board = elsewhere.path().join("Other.wren-board");
+        let targets = [
+            // The open board itself, another board and a Markdown note.
+            file(&directory, "Flow.wren-board"),
+            file(&directory, "Other.wren-board"),
+            file(&directory, "Note.md"),
+            // A note of another workspace, and one not there yet.
+            other_note.clone(),
+            other_board.clone(),
+            // What Wren keeps in the workspace, and a new file beside a note.
+            state.clone(),
+            file(&directory, "Flow"),
+        ];
+        for target in &targets {
+            let before = std::fs::read(target)
+                .ok()
+                .map(|bytes| (bytes, modified(target)));
+            let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
+            let tag = app.board_export.as_ref().unwrap().tag;
+            let outcome = app.board_export_chosen(tag, Some(target.clone()));
+            assert_eq!(
+                outcome.processed.disposition,
+                Disposition::Blocked,
+                "{target:?}"
+            );
+            let banner = app.banner.clone().unwrap();
+            assert!(banner.starts_with("Did not export the board"), "{banner}");
+            assert_eq!(
+                std::fs::read(target)
+                    .ok()
+                    .map(|bytes| (bytes, modified(target))),
+                before,
+                "{target:?}"
+            );
+        }
+        assert!(!other_board.exists());
+        assert_eq!(files_in(elsewhere.path()), ["Plan.MD"]);
+        assert_eq!(
+            files_in(&directory.path().join(GROUP)),
+            [
+                "Broken.wren-board",
+                "Flow.wren-board",
+                "Note.md",
+                "Other.wren-board"
+            ]
+        );
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+
+        // An SVG file is written, in the workspace or out of it.
+        for target in [file(&directory, "Flow.SVG"), elsewhere.path().join("Flow")] {
+            app.banner = None;
+            let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
+            let tag = app.board_export.as_ref().unwrap().tag;
+            let outcome = app.board_export_chosen(tag, Some(target.clone()));
+            assert_eq!(outcome.processed.disposition, Disposition::Completed);
+            assert!(app.banner.is_none(), "{target:?}");
+            assert!(std::fs::read_to_string(&target).unwrap().contains("<svg"));
+        }
     }
 
     /// §6.8 Phase 1 item 8.

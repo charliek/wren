@@ -614,6 +614,16 @@ def test_export_svg_writes_the_shown_board_as_xml(samples: Path, tmp_path: Path)
             app.client.call("board.export", {
                 "format": "svg", "path": str(tmp_path / "missing" / "x.svg"),
             })
+
+        # Never over a note: the open board's own file, or a Markdown note.
+        open_note(app, FLOW)
+        notes = samples / NOTES
+        kept = stamp(notes)
+        for target in (flow, notes):
+            with pytest.raises(RemoteError, match="Did not export the board over .*: it is a note"):
+                app.client.call("board.export", {"format": "svg", "path": str(target)})
+        assert stamp(notes) == kept
+        assert board(app)["surface"] == "board"
         assert app.client.call("session.get")["document"]["dirty"] is False
     assert stamp(flow) == before
 
