@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="685.5" height="541.5" viewBox="-0.75 -0.75 685.5 541.5">
+<path d="M0 0L120 0L120 60L0 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="28.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rectangle</text>
+<path d="M168 0L272 0C276.41827 0 280 3.5817218 280 8L280 52C280 56.418278 276.41827 60 272 60L168 60C163.58173 60 160 56.418278 160 52L160 8C160 3.5817218 163.58173 0 168 0Z" fill="#e6ecf9" stroke="#3060d0" stroke-width="1.5"/>
+<text x="195.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rounded</text>
+<path d="M350 0L410 0C426.56854 0 440 13.4314575 440 30C440 46.568542 426.56854 60 410 60L350 60C333.43146 60 320 46.568542 320 30C320 13.4314575 333.43146 0 350 0Z" fill="#e6f2e8" stroke="#309040" stroke-width="1.5"/>
+<text x="366" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Pill</text>
+<path d="M540 0C573.1371 0 600 13.4314575 600 30C600 46.568542 573.1371 60 540 60C506.8629 60 480 46.568542 480 30C480 13.4314575 506.8629 0 540 0Z" fill="#f0e8f6" stroke="#8040b0" stroke-width="1.5"/>
+<text x="515.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Ellipse</text>
+<path d="M70 120L140 160L70 200L0 160Z" fill="#fdf9e8" stroke="#f0d040" stroke-width="1.5"/>
+<text x="45.5" y="165.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Diamond</text>
+<path d="M200 120L340 120L320 180L180 180Z" fill="#f9eee2" stroke="#d07010" stroke-width="1.5"/>
+<text x="214.5" y="155.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Parallelogram</text>
+<path d="M380 132C380 125.37258 406.8629 120 440 120C473.1371 120 500 125.37258 500 132L500 188C500 194.62741 473.1371 200 440 200C406.8629 200 380 194.62741 380 188Z" fill="#e4f2f4" stroke="#2090a0" stroke-width="1.5"/>
+<path d="M380 132C380 138.62741 406.8629 144 440 144C473.1371 144 500 138.62741 500 132" fill="none" stroke="#2090a0" stroke-width="1.5"/>
+<text x="412" y="175.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Cylinder</text>
+<path d="M540 120L660 120L660 192Q630 176 600 192Q570 208 540 192Z" fill="#c03030" stroke="#c03030" stroke-width="1.5"/>
+<text x="572" y="159.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">Document</text>
+<text x="0" y="275.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Free text has no outline</text>
+<text x="0" y="295.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">and sits top left.</text>
+<path d="M280 260L440 260L440 320L280 320Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="314.5" y="295.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Unknown shape</text>
+<path d="M0 360L400 360L400 540L0 540Z" fill="none" stroke="#808890" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="4" y="376.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#808890" xml:space="preserve">frame</text>
+<text x="67" y="455.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Frame, a kind this build does not know</text>
+<path d="M40 440L200 440L200 500L40 500Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="57" y="475.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Child of the frame</text>
+<path d="M120 30L150 30" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M160 30L150 34L150 26Z" fill="#202428"/>
+<path d="M440 30L470 30" fill="none" stroke="#202428" stroke-width="1.5" stroke-dasharray="6 4"/>
+<path d="M480 30L470 34L470 26Z" fill="#202428"/>
+<path d="M120 440L120 380L360 380L360 330" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M360 320L364 330L356 330Z" fill="#202428"/>
+<path d="M221 370L259 370L259 390L221 390Z" fill="#ffffff"/>
+<text x="225" y="384.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">elbow</text>
+<path d="M660 160L684 160M684 164L684 156" fill="none" stroke="#d02020" stroke-width="1.5"/>
+<path d="M659.25 152.25C660.90686 152.25 662.25 153.59314 662.25 155.25C662.25 156.90686 660.90686 158.25 659.25 158.25C657.59314 158.25 656.25 156.90686 656.25 155.25C656.25 153.59314 657.59314 152.25 659.25 152.25Z" fill="#d02020"/>
+</svg>

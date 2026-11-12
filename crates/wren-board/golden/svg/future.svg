@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="721.5" height="201.5" viewBox="-0.75 -0.75 721.5 201.5">
+<path d="M0 0L440 0L440 200L0 200Z" fill="none" stroke="#808890" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="4" y="16.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#808890" xml:space="preserve">frame</text>
+<text x="178" y="105.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Release plan</text>
+<path d="M40 80L160 80L160 140L40 140Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="79" y="115.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Design</text>
+<path d="M280 80L400 80L400 140L280 140Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="322.5" y="115.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Build</text>
+<path d="M520 40L720 40L720 160L520 160Z" fill="none" stroke="#808890" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="524" y="56.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#808890" xml:space="preserve">note</text>
+<text x="602.5" y="105.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Notes</text>
+<path d="M160 110L270 110" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M280 110L270 114L270 106Z" fill="#202428"/>
+</svg>

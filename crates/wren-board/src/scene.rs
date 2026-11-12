@@ -821,6 +821,7 @@ pub(crate) mod tests {
             scene_golden!("shapes-and-ends", fixture("shapes-and-ends.out")),
             scene_golden!("fields", fixture("fields.out")),
             scene_golden!("unknown", fixture("unknown.out")),
+            scene_golden!("escapes", fixture("escapes.out")),
         ]
     }
 

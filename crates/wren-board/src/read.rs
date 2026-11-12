@@ -1369,7 +1369,8 @@ mod tests {
                     }));
                     let _ = (crate::access(&board), crate::placements(&board));
                     let palette = crate::style::tests::LIGHT;
-                    crate::scene::build(&board, &palette, &crate::scene::FixedMeasure);
+                    let scene = crate::scene::build(&board, &palette, &crate::scene::FixedMeasure);
+                    crate::svg::write(&scene, &crate::svg::Options::default());
                     let written = crate::write(&board);
                     let again = parse(&written).unwrap_or_else(|e| panic!("{e}\n{written}"));
                     assert_eq!(crate::write(&again), written, "{source}");

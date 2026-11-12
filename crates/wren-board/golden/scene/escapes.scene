@@ -1,0 +1,22 @@
+bounds -0.75,-0.75 441.5x61.5
+node escapes path in -0.75,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,0 L 120,0 L 120,60 L 0,60 Z
+node escapes text in 18,0 84x60 Regular 14 #202428
+  25,0 w 70 "back\\slash"
+  18,20 w 84 "\"quoted\"\ttab"
+  32,40 w 56 "new line"
+node controls path in 159.25,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 160,0 L 280,0 L 280,60 L 160,60 Z
+node controls text in 171,0 98x60 Regular 14 #202428
+  188.5,0 w 63 "\0\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}"
+  171,20 w 98 "\u{b}\u{c}\u{e}\u{f}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}\u{18}\u{19}"
+  195.5,40 w 49 "\u{1a}\u{1b}\u{1c}\u{1d}\u{1e}\u{1f}\u{7f}"
+node raw path in 319.25,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 320,0 L 440,0 L 440,60 L 320,60 Z
+node raw text in 331,0 98x60 Regular 14 #202428
+  348.5,0 w 63 "é, e\u{301}, 漢字,"
+  331,20 w 98 "عربى, 🚀, \u{200b} and"
+  352,40 w 56 "stay raw"
+edge label path in 119.25,29.25 31.5x1.5 stroke #202428 1.5: M 120,30 L 150,30
+edge label path in 150,26 10x8 fill #202428: M 160,30 L 150,34 L 150,26 Z
+edge label path in 103,12 74x36 fill #ffffff: M 103,12 L 177,12 L 177,48 L 103,48 Z
+edge label text in 107,14 66x32 Regular 12 #202428
+  131,14 w 18 "two"
+  107,30 w 66 "lines \\ \"q\""
