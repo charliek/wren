@@ -37,5 +37,8 @@ wren-sparkle.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Already in the tree through iced's svg feature: a test renders the board
+# SVG export's text to compare it with what the canvas measured.
+resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
 # The app's unit tests read the editor's test accessors too.
 wren-editor = { workspace = true, features = ["test-support"] }

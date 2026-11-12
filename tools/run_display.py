@@ -101,7 +101,8 @@ def run_display(mode: str, command: list[str]) -> int:
         bus_command = session_bus_command(Path(runtime), command)
         if mode == "x11":
             return run_owned([
-                "xvfb-run", "-a", "--server-args=-screen 0 1920x1200x24",
+                "xvfb-run", "-a",
+                f"--server-args=-screen 0 {env.get('WREN_XVFB_SCREEN', '1920x1200')}x24",
                 f"--error-file={artifacts / f'xvfb-{token}.log'}", *bus_command,
             ], env)
 

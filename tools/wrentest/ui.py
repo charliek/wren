@@ -40,7 +40,7 @@ _FINAL_REAP_TIMEOUT: float = 5.0
 _PRESERVE_VARS = frozenset({
     "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
     "XAUTHORITY", "LIBGL_ALWAYS_SOFTWARE", "MESA_LOADER_DRIVER_OVERRIDE",
-    "WGPU_BACKEND", "ICED_BACKEND",
+    "WGPU_BACKEND", "ICED_BACKEND", "ICED_PRESENT_MODE", "WINIT_X11_SCALE_FACTOR",
     "DBUS_SESSION_BUS_ADDRESS",
     "GIO_USE_VFS", "GSETTINGS_BACKEND",
     "PATH", "LANG",
@@ -392,7 +392,8 @@ class WrenApp:
         if self._workspace is not None:
             cmd.extend(["--workspace", str(self._workspace)])
         elif self._evaluation and not any(
-            flag in self._extra_args for flag in ("--workspace", "--editor", "--editor-spike")
+            flag in self._extra_args
+            for flag in ("--workspace", "--editor", "--editor-spike", "--board-spike")
         ):
             cmd.append("--editor")
         cmd.extend(self._extra_args)

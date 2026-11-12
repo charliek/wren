@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub struct Options {
     pub editor: bool,
     pub large_spike: bool,
+    /// The in-memory board spike, with this many shapes.
+    pub board_spike: Option<usize>,
     pub workspace: Option<PathBuf>,
     /// Boxed: a request carries a whole theme, which would dwarf the other
     /// `Command` variants.
@@ -22,6 +24,8 @@ pub enum Command {
     Help,
     FontLicenses,
 }
+
+const MAX_SPIKE_SHAPES: usize = 100_000;
 
 pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, String> {
     if args == [OsString::from("--help")] || args == [OsString::from("-h")] {
@@ -46,6 +50,17 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
             Some("--editor-spike") if !options.editor && !options.large_spike => {
                 options.editor = true;
                 options.large_spike = true;
+            }
+            Some("--board-spike") if !options.editor => {
+                index += 1;
+                let count = args
+                    .get(index)
+                    .and_then(|count| count.to_str())
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .filter(|count| (1..=MAX_SPIKE_SHAPES).contains(count))
+                    .ok_or("--board-spike requires a shape count from 1 to 100000")?;
+                options.editor = true;
+                options.board_spike = Some(count);
             }
             Some("--workspace") if options.workspace.is_none() => {
                 index += 1;
@@ -75,7 +90,8 @@ pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, S
     }
     if options.workspace.is_some() && options.editor {
         return Err(
-            "--workspace and the in-memory --editor/--editor-spike cannot be combined".into(),
+            "--workspace and the in-memory --editor/--editor-spike/--board-spike cannot be combined"
+                .into(),
         );
     }
     Ok(Command::Run(options))
@@ -109,6 +125,28 @@ mod tests {
         };
         assert!(options.large_spike);
         assert!(parse(&args(&["--editor-spike", "--editor-spike"]), None).is_err());
+    }
+
+    #[test]
+    fn the_board_spike_takes_a_shape_count_and_stands_alone() {
+        let Command::Run(options) = parse(&args(&["--board-spike", "1000"]), None).unwrap() else {
+            panic!("expected run");
+        };
+        assert_eq!(options.board_spike, Some(1000));
+        assert!(options.editor, "an in-memory mode, with no workspace");
+        assert!(!options.large_spike);
+        for values in [
+            vec!["--board-spike"],
+            vec!["--board-spike", "0"],
+            vec!["--board-spike", "many"],
+            vec!["--board-spike", "100001"],
+            vec!["--board-spike", "10", "--board-spike", "10"],
+            vec!["--board-spike", "10", "--editor"],
+            vec!["--editor-spike", "--board-spike", "10"],
+            vec!["--workspace", "/tmp/notes", "--board-spike", "10"],
+        ] {
+            assert!(parse(&args(&values), None).is_err(), "{values:?}");
+        }
     }
 
     #[test]

@@ -163,6 +163,12 @@ impl App {
                 }
                 request.respond(Ok(serde_json::json!({ "view_micros": recent })));
             }
+            "perf.board" => return self.perf_board(request),
+            "spike.board" => {
+                request.respond(Ok(self.spike_board(params)?));
+                // A board shown afresh is timed until it is painted.
+                return Ok(self.time_board_open());
+            }
             "editor.set" => {
                 if self.workspace_mode || self.session.is_some() || self.loading.is_some() {
                     return Err("editor.set is only available for the in-memory spike; edit saved notes through the editor".into());
