@@ -1349,6 +1349,14 @@ Mandatory at the end of every phase (decision 11), beside the in-house lenses an
 
 Step 0 and the phase ends are written serially on `boards` and get their subsections when they happen.
 
+#### Step 0
+Items 1 to 4, in run 1a.
+- *Preflight* (Linux): `xvfb-run`, `xdotool`, `weston`, `dbus-run-session`, the `aarch64-apple-darwin` target and the Codex login are present. Software Vulkan is lavapipe (`mesa-vulkan-drivers` 26.1.6); a wgpu capture under Xvfb drew all 33 scenes, each different from its tiny-skia twin, and repeated byte for byte. `vulkaninfo` is not installed and nothing needs it. The Mac is the orchestrator's check.
+- *Worktree*: `boards` forks `main` at `393ae14`; the worktree was on `boards` and clean.
+- *Capture determinism* (deviation: the fixed path was not enough). Three more clocks made scenes differ between captures of one build: the footer caught the 750 ms autosave either side of the shot, carets blink on wall-clock time from their last focus, and the first sample note, dated "now", read "just now" or "1 min ago" by run length. `capture_scenes.py` now rebuilds `target/scene-workspace/`, waits before each shot for a clean, durable document, restarts the caret with a new smoke-test request, `test.caret.restart` (it focuses the focused widget again, which also moves a palette input's caret to its end), and dates the sample notes half an hour clear of an hour boundary. Result: three consecutive captures of 132 tiny-skia scenes (dark and light, classic and advanced) are byte-identical, and `--only markdown` matches the full run's files. The header draws the workspace path, so scenes compare only within one worktree: a detached lens worktree must shoot its own baseline from the step 0 commit.
+- *Baseline for exit criterion 3(d)*: the 132 scenes at `24abca9` (the main code plus the two capture commits, since `main` itself cannot capture repeatably) are kept in the boards worktree at `target/scenes-baseline/main/`, with `SOURCE` and `SHA256SUMS`.
+- *The `canvas` feature* (`9ce239a`, revertible alone): it adds exactly the six packages of §3.1. Inert: `make check` passes (2,277 Rust tests, 283 Python units), the X11 tiny-skia suite passes on both engines (241 passed, 1 skipped, the classic-engine hanging-indent case), all 132 scenes are byte-identical to the baseline, and `make package-debug` assembles with `third_party/lyon/` in the bundle. `tools/dependency_notices.py` before: 485 packages, 768 local texts, 65 requiring review; after: 491, 769, 70, the five added being the lyon crates, which carry no licence file. Their upstream MIT and Apache texts (identical at both source commits of the locked versions) are in `third_party/lyon/`, named in `LICENSE_NOTICES` and `NOTICES`, and a package test keeps the notice's lyon versions equal to `Cargo.lock`'s.
+
 #### boards-p1-core
 Nothing yet.
 #### boards-p1-model
