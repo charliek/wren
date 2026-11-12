@@ -283,6 +283,12 @@ impl App {
                 request.respond(Ok(Value::Null));
                 return Ok(focus_editor());
             }
+            "test.caret.restart" => {
+                let request = Arc::clone(request);
+                return Ok(iced::advanced::widget::operate(RestartCaret).map(move |()| {
+                    Message::Reply(Arc::clone(&request), Ok(Value::Null))
+                }));
+            }
             "theme.set" => {
                 let definition =
                     wren_core::theme::builtin(string(params, "id")?).ok_or("unknown theme")?;
@@ -1013,6 +1019,36 @@ impl iced::advanced::widget::Operation<Focused> for Focused {
 
     fn finish(&self) -> iced::advanced::widget::operation::Outcome<Focused> {
         iced::advanced::widget::operation::Outcome::Some(self.clone())
+    }
+}
+
+/// Focuses the focused widget again. A caret blinks on wall-clock time from
+/// its last focus or edit, so a scene capture restarts it and shoots inside
+/// the first, visible half-second.
+#[derive(Debug, Clone, Copy)]
+struct RestartCaret;
+
+impl iced::advanced::widget::Operation<()> for RestartCaret {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+    ) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+    ) {
+        if state.is_focused() {
+            state.focus();
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<()> {
+        iced::advanced::widget::operation::Outcome::Some(())
     }
 }
 

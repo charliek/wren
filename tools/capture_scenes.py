@@ -177,10 +177,12 @@ def build_workspace(root: Path) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    # Stagger modification times so "modified" order matches the mockup.
+    # Stagger modification times so "modified" order matches the mockup. Each
+    # sits half an hour from an hour boundary, so its "h ago" label holds for
+    # the whole capture.
     now = time.time()
     for offset, relative in enumerate(SAMPLE):
-        mtime = now - offset * 3600
+        mtime = now - (offset + 1.5) * 3600
         os.utime(root / relative, (mtime, mtime))
 
 
@@ -246,10 +248,19 @@ def main() -> int:
         settings += f"{key.strip()} = {value.strip()}\n"
     out.mkdir(parents=True, exist_ok=True)
 
+    def settled(client) -> bool:
+        session = client.call("session.get")
+        document = session["document"]
+        return not session["pending_durability"] and not (document and document["dirty"])
+
     def shot(client, name: str) -> None:
+        # Autosave and the caret blink run on wall-clock time; each scene
+        # waits for the save and shoots with the caret freshly shown.
         path = out / f"{name}.png"
         path.unlink(missing_ok=True)
         time.sleep(0.3)
+        wait_for(lambda: settled(client), timeout=10, description="autosave")
+        client.call("test.caret.restart")
         client.call("app.screenshot", {"path": str(path)})
         print(path)
 
