@@ -1418,6 +1418,11 @@ Item C5, session 3.
       - after a reopen, the note named in `selection` is the open document
     - Byte identity. `tests/fixtures/main-state.toml` holds what `main` (`393ae14`) writes for a scripted run of 17 ops. To record it, the same script ran against an export of `main` (`git archive`) with its own target folder. The same script must give those bytes with boards off and a board on disk, and with boards on and no board on disk.
   - The Board run of the op-by-kind table, `op_by_kind_table_board`. All three runs of the table now check the file with the frozen validator after every op.
+
+Review (§8.1), at `1248f85`.
+- *Counts:* 0 blockers, 0 majors, 2 minors. The reviewer re-ran the gates (`make check`, the X11 tiny-skia suite on both engines with 241 passed and 1 skipped, the aarch64 clippy check) and re-recorded `main-state.toml` from `git archive 393ae14`, byte-identical.
+- *Fixed:* `c1d772c`, the fixture's doc comments named a `record_main_bytes` that does not exist; they now give the recording recipe. A comment fix, so no regression test.
+- *Not fixed:* the `CLAUDE.md` Layout map lacks `kind.rs` (and, already on `main`, `workspace_state.rs`). §7.1 item 5 forbids a Stage A chain to edit `CLAUDE.md`; it is carried to `boards-p3-docs` (D1), which owns `CLAUDE.md`.
 #### boards-p1-model
 Nothing yet.
 #### boards-p1-canvas
