@@ -642,4 +642,362 @@ to = { node = "pack" }
         }
         assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
     }
+
+    use std::time::{Duration, Instant, SystemTime};
+
+    use super::super::commands::{Command, CommandId, Disposition};
+    use super::super::palette::SearchTarget;
+
+    fn modified(path: &Path) -> SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    /// Forty ticks that take the Session's clock to `seconds`, past the
+    /// autosave delay, so a dirty draft would be on disk afterwards.
+    fn tick_to(app: &mut App, seconds: u64) {
+        for tick in 1..=40 {
+            let _ = app.update(Message::Tick);
+            let at = Duration::from_millis(seconds * 1000 * tick / 40);
+            let session = app.session.as_mut().unwrap();
+            session.apply_at(Op::Tick, at).unwrap();
+        }
+        app.sync_editor(false);
+    }
+
+    fn paste(text: &str) -> Message {
+        Message::Editor(wren_editor::Message::Action(Action::Edit(Edit::Paste(
+            Arc::new(text.into()),
+        ))))
+    }
+
+    const EDITOR_COMMANDS: [CommandId; 6] = [
+        CommandId::ToggleTask,
+        CommandId::Bold,
+        CommandId::Italic,
+        CommandId::Code,
+        CommandId::MoveLineUp,
+        CommandId::MoveLineDown,
+    ];
+
+    #[test]
+    fn the_editor_behind_a_board_never_writes_it() {
+        let (directory, mut app) = fixture();
+        let path = file(&directory, "Flow.wren-board");
+        let saved = modified(&path);
+        open_board(&mut app, "Flow");
+        let untouched = |app: &App| {
+            assert_in_step(app, Surface::Board);
+            assert_eq!(session_text(app), FLOW);
+            assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW);
+            assert_eq!(modified(&path), saved);
+        };
+
+        // The editor is not ready, which every harness `editor.*` write asks
+        // before it acts.
+        assert!(app.ensure_editor_ready().is_err());
+
+        // Editor commands, from the palette or a menu.
+        for id in EDITOR_COMMANDS {
+            assert!(!app.command_enabled(id), "{id:?}");
+            let outcome = app.dispatch(Command::Run(id));
+            assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+            untouched(&app);
+        }
+
+        // Editor messages, as `editor.insert`, a key or a stale widget
+        // would send them.
+        let revision = app.edit_revision;
+        for message in [
+            paste("bypass"),
+            Message::Editor(wren_editor::Message::Intent(wren_editor::Intent::Bold)),
+            Message::Editor(wren_editor::Message::Intent(wren_editor::Intent::Enter)),
+            Message::Editor(wren_editor::Message::Action(Action::Edit(Edit::Enter))),
+            Message::Editor(wren_editor::Message::Undo),
+            Message::Editor(wren_editor::Message::Redo),
+            Message::Editor(wren_editor::Message::Find),
+        ] {
+            let _ = app.update(message);
+            untouched(&app);
+        }
+        assert!(!app.find_open);
+        assert_eq!(app.edit_revision, revision);
+
+        // Even text that reached the hidden editor is not the board's draft.
+        app.editor.replace_text("smuggled", false);
+        app.text_changed(Instant::now());
+        assert_eq!(session_text(&app), FLOW);
+        assert_eq!(app.edit_revision, revision);
+        app.editor.replace_text("", false);
+        untouched(&app);
+
+        // An engine switch rebuilds the editor from nothing, not from the
+        // board's text; switching back does too.
+        let engine = app.editor.backend();
+        for _ in 0..2 {
+            let outcome = app.dispatch(Command::Run(CommandId::SwitchEngine));
+            assert!(outcome.processed.disposition.committed());
+            untouched(&app);
+        }
+        assert_eq!(app.editor.backend(), engine);
+        let _ = app.dispatch(Command::Run(CommandId::SwitchEngine));
+        assert_ne!(app.editor.backend(), engine);
+        let _ = app.dispatch(Command::Run(CommandId::ToggleMarkdownAssist));
+        untouched(&app);
+
+        // Losing the window's focus flushes; there is nothing to flush.
+        app.window_unfocused().unwrap();
+        tick_to(&mut app, 1);
+        untouched(&app);
+        tick_to(&mut app, 5);
+        untouched(&app);
+
+        // The same clock does save a Markdown draft, so the ticks above
+        // would have written a board draft had there been one.
+        let note = file(&directory, "Note.md");
+        open_markdown(&mut app, "Note");
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        ))));
+        let _ = app.update(paste("more"));
+        assert!(app.session.as_ref().unwrap().document().unwrap().dirty());
+        tick_to(&mut app, 10);
+        assert_eq!(
+            std::fs::read_to_string(&note).unwrap(),
+            "# Note\n\nwords here\nmore"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW);
+        assert_eq!(modified(&path), saved);
+    }
+
+    #[test]
+    fn commands_are_enabled_by_the_surface() {
+        let (_directory, mut app) = fixture();
+        let enabled = |app: &App, id| app.command_enabled(id);
+
+        open_markdown(&mut app, "Note");
+        for id in EDITOR_COMMANDS {
+            assert!(enabled(&app, id), "{id:?}");
+        }
+        assert!(enabled(&app, CommandId::Find));
+        assert!(enabled(&app, CommandId::Outline));
+        assert!(app.editor.markdown_assist());
+
+        open_board(&mut app, "Flow");
+        for id in EDITOR_COMMANDS {
+            assert!(!enabled(&app, id), "{id:?}");
+        }
+        assert!(!enabled(&app, CommandId::Find));
+        assert!(!enabled(&app, CommandId::Outline));
+        assert_eq!(
+            app.open_palette(super::super::palette::Mode::Outline)
+                .processed
+                .disposition,
+            Disposition::Blocked
+        );
+        // What does not touch the text stays available.
+        for id in [
+            CommandId::RenameNote,
+            CommandId::DeleteNote,
+            CommandId::MoveNote,
+            CommandId::TextBigger,
+            CommandId::TextSmaller,
+            CommandId::TextReset,
+            CommandId::SwitchEngine,
+            CommandId::ToggleMarkdownAssist,
+            CommandId::ChooseTheme,
+            CommandId::Jump,
+            CommandId::Search,
+        ] {
+            assert!(enabled(&app, id), "{id:?}");
+        }
+
+        // Raw text is edited as plain text: Find works, and the Markdown
+        // keys and the outline have nothing to act on.
+        open_board(&mut app, "Broken");
+        assert_eq!(app.surface(), Surface::Raw);
+        assert!(app.ensure_editor_ready().is_ok());
+        for id in EDITOR_COMMANDS {
+            assert!(!enabled(&app, id), "{id:?}");
+        }
+        assert!(enabled(&app, CommandId::Find));
+        assert!(!enabled(&app, CommandId::Outline));
+        assert_eq!(
+            app.open_palette(super::super::palette::Mode::Outline)
+                .processed
+                .disposition,
+            Disposition::Blocked
+        );
+        assert!(!app.editor.markdown_assist());
+        assert!(app.preferences.settings.markdown_assist);
+        // Toggling the setting twice leaves the raw editor without it.
+        for _ in 0..2 {
+            let _ = app.dispatch(Command::Run(CommandId::ToggleMarkdownAssist));
+            assert!(!app.editor.markdown_assist());
+        }
+        assert!(app.preferences.settings.markdown_assist);
+        // An engine switch keeps the raw text in the editor.
+        let _ = app.dispatch(Command::Run(CommandId::SwitchEngine));
+        assert_in_step(&app, Surface::Raw);
+        assert_eq!(app.editor.text(), conflicted());
+
+        // Back on Markdown the setting applies again.
+        open_markdown(&mut app, "Note");
+        assert!(app.editor.markdown_assist());
+        assert!(enabled(&app, CommandId::Bold));
+        let _ = app.dispatch(Command::Run(CommandId::ToggleMarkdownAssist));
+        assert!(!app.editor.markdown_assist());
+        open_board(&mut app, "Broken");
+        open_markdown(&mut app, "Note");
+        assert!(!app.editor.markdown_assist());
+    }
+
+    #[test]
+    fn the_text_size_commands_zoom_a_board_and_change_no_setting() {
+        let (directory, _) = fixture();
+        let settings = directory.path().join("config.conf");
+        let written = "boards = on\neditor-font-size = 15\n";
+        std::fs::write(&settings, written).unwrap();
+        let options = Options {
+            editor: true,
+            ..Options::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(settings.clone()));
+        assert!(app.preferences.boards);
+        app.workspace_mode = true;
+        app.session = Some(Session::open_with(directory.path(), app.session_options()).unwrap());
+        app.sync_editor(true);
+        let unchanged = |app: &App| {
+            assert_eq!(app.preferences.settings.editor_font_size, 15.0);
+            assert_eq!(app.editor.font_size(), 15.0);
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), written);
+        };
+        let zoom = |app: &App| app.board.as_ref().unwrap().viewport().zoom;
+        let run = |app: &mut App, id| {
+            let outcome = app.dispatch(Command::Run(id));
+            assert_eq!(outcome.processed.disposition, Disposition::Completed);
+            assert!(outcome.processed.warning.is_none());
+        };
+
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        assert_eq!(zoom(&app), 1.0);
+        let centre = app
+            .board
+            .as_ref()
+            .unwrap()
+            .viewport()
+            .to_board((400.0, 300.0));
+        let mut seen = Vec::new();
+        for id in [
+            CommandId::TextBigger,
+            CommandId::TextBigger,
+            CommandId::TextReset,
+            CommandId::TextSmaller,
+            CommandId::TextSmaller,
+            CommandId::TextSmaller,
+            CommandId::TextReset,
+        ] {
+            run(&mut app, id);
+            seen.push(zoom(&app));
+            unchanged(&app);
+            // The stops zoom about the middle of the board's widget.
+            let now = app
+                .board
+                .as_ref()
+                .unwrap()
+                .viewport()
+                .to_board((400.0, 300.0));
+            assert!((now.0 - centre.0).abs() < 0.01 && (now.1 - centre.1).abs() < 0.01);
+        }
+        assert_eq!(seen, [1.5, 2.0, 1.0, 0.75, 0.5, 0.25, 1.0]);
+        // The limits hold.
+        for _ in 0..12 {
+            run(&mut app, CommandId::TextBigger);
+        }
+        assert_eq!(zoom(&app), 4.0);
+        for _ in 0..12 {
+            run(&mut app, CommandId::TextSmaller);
+        }
+        assert_eq!(zoom(&app), 0.1);
+        unchanged(&app);
+        assert_in_step(&app, Surface::Board);
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+
+        // From the palette too, which closes.
+        let _ = app.open_palette(super::super::palette::Mode::Commands);
+        run(&mut app, CommandId::TextReset);
+        assert!(app.palette.is_none());
+        assert_eq!(zoom(&app), 1.0);
+        unchanged(&app);
+
+        // On a Markdown note, and on a board's raw text, they size the text.
+        open_board(&mut app, "Broken");
+        run(&mut app, CommandId::TextBigger);
+        assert_eq!(app.preferences.settings.editor_font_size, 16.0);
+        open_markdown(&mut app, "Note");
+        run(&mut app, CommandId::TextBigger);
+        assert_eq!(app.editor.font_size(), 17.0);
+        assert_eq!(
+            std::fs::read_to_string(&settings).unwrap(),
+            "boards = on\neditor-font-size = 17\n"
+        );
+        // The board kept its zoom meanwhile.
+        open_board(&mut app, "Flow");
+        assert_eq!(zoom(&app), 1.0);
+
+        // An engine change in the file reaches the hidden editor empty.
+        let engine = app.editor.backend();
+        std::fs::write(
+            &settings,
+            "boards = on\neditor-engine = advanced\neditor-font-size = 17\n",
+        )
+        .unwrap();
+        let _ = app.reload_settings(false);
+        std::fs::write(
+            &settings,
+            "boards = on\neditor-engine = classic\neditor-font-size = 17\n",
+        )
+        .unwrap();
+        let _ = app.reload_settings(false);
+        assert_eq!(
+            engine == wren_editor::BackendKind::Iced,
+            app.editor.backend() == wren_editor::BackendKind::Iced
+        );
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(session_text(&app), FLOW);
+    }
+
+    #[test]
+    fn a_search_hit_in_a_board_opens_it_without_touching_the_editor() {
+        let (_directory, mut app) = fixture();
+        open_markdown(&mut app, "Note");
+        let session = app.session.as_ref().unwrap();
+        let hits = session.index().query(
+            "receive",
+            wren_core::index::Scope::Workspace,
+            wren_core::index::QueryKind::Search,
+            10,
+        );
+        // The label is found in the board, and in the raw text of the one
+        // that does not parse.
+        let flow = note_id(&app, "Flow", NoteKind::Board);
+        let broken = note_id(&app, "Broken", NoteKind::Board);
+        let mut found: Vec<_> = hits.iter().map(|hit| hit.note).collect();
+        found.sort();
+        assert_eq!(found, [flow.min(broken), flow.max(broken)]);
+        let hit = hits.iter().find(|hit| hit.note == flow).unwrap();
+        let target = SearchTarget {
+            generation: app.workspace_generation(),
+            index_revision: session.index().revision(),
+            note: flow,
+            query: "receive".into(),
+            content_match: hit.content_match.clone(),
+        };
+        assert!(target.content_match.is_some());
+        let outcome = app.dispatch(Command::OpenNote(target));
+        assert!(outcome.processed.disposition.committed());
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(app.editor.selected_text(), None);
+    }
 }

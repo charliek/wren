@@ -9,6 +9,7 @@ use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
 
+use super::board::Surface;
 use super::commands::{CommandId, Disposition, Gateway, Scope};
 use super::palette::{Key, Mode};
 use super::{workspace, App, Message};
@@ -291,28 +292,47 @@ impl App {
         self.editor.set_line_height(settings.editor_line_height);
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
-        self.editor.set_markdown_assist(settings.markdown_assist);
-        self.editor.set_key_policy(key_policy(
-            &self.preferences.keymap,
-            settings.markdown_assist,
-        ));
+        let assist = self.markdown_assist();
+        self.editor.set_markdown_assist(assist);
+        self.editor
+            .set_key_policy(key_policy(&self.preferences.keymap, assist));
         self.apply_editor_engine();
+    }
+
+    /// Whether the editor's Markdown keys act: as the setting says, and
+    /// never in a board's raw text, which is not Markdown.
+    fn markdown_assist(&self) -> bool {
+        self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
+    }
+
+    /// Bring the editor's Markdown keys in step with the surface.
+    pub(super) fn apply_markdown_assist(&mut self) {
+        let assist = self.markdown_assist();
+        if assist != self.editor.markdown_assist() {
+            self.editor.set_markdown_assist(assist);
+            self.editor
+                .set_key_policy(key_policy(&self.preferences.keymap, assist));
+        }
     }
 
     /// Rebuild the editor on the configured engine from the session draft,
     /// or from the editor's own text when no note is open (the `--editor`
     /// spike). The cursor, find query, font, size, and gutter carry over;
-    /// undo history does not.
+    /// undo history does not. Behind a board the editor stays empty: the
+    /// board's text is never loaded into it.
     fn apply_editor_engine(&mut self) {
         let kind = backend_kind(self.preferences.settings.editor_engine);
         if kind == self.editor.backend() {
             return;
         }
-        let text = self
-            .session
-            .as_ref()
-            .and_then(|session| session.document())
-            .map_or_else(|| self.editor.text(), |document| document.text.clone());
+        let text = if self.surface() == Surface::Board {
+            String::new()
+        } else {
+            self.session
+                .as_ref()
+                .and_then(|session| session.document())
+                .map_or_else(|| self.editor.text(), |document| document.text.clone())
+        };
         self.editor.set_backend(kind, &text);
     }
 
@@ -386,6 +406,9 @@ impl App {
 
     /// Step the editor text size by `delta` points, or back to the default
     /// for `None`, and save it. At either limit this is a no-op.
+    ///
+    /// On a board the same commands zoom it instead, one stop up or down or
+    /// back to 100 %: a look at the board, which changes no setting.
     pub(super) fn step_text_size(&mut self, delta: Option<f32>) -> Gateway {
         let current = self.preferences.settings.editor_font_size;
         let size = delta.map_or(settings::DEFAULT_FONT_SIZE, |delta| {
@@ -398,6 +421,15 @@ impl App {
         } else {
             Task::none()
         };
+        if let Some(board) = &mut self.board {
+            match delta {
+                Some(delta) if delta > 0.0 => board.zoom_step(1),
+                Some(delta) if delta < 0.0 => board.zoom_step(-1),
+                Some(_) => {}
+                None => board.zoom_reset(),
+            }
+            return self.finish_action(Disposition::Completed, None, task);
+        }
         if size == current {
             return self.finish_action(Disposition::Completed, None, task);
         }

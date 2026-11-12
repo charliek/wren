@@ -853,6 +853,9 @@ impl App {
             self.board_error = error;
             self.edit_revision += 1;
             self.editor_note = note;
+            if self.board.is_some() {
+                self.find_open = false;
+            }
         }
         self.selected_note = note;
         if let Some(entry) = note.and_then(|note| session.model().note(note)) {
@@ -883,6 +886,7 @@ impl App {
                 }),
             };
         }
+        self.apply_markdown_assist();
     }
 
     pub(super) fn model(&self) -> Option<&Workspace> {
@@ -924,6 +928,11 @@ impl App {
         }
         if self.workspace_mode && self.session.as_ref().and_then(Session::document).is_none() {
             return Err("Select a note before editing".into());
+        }
+        // Only the visible surface may write: the editor behind a board is
+        // empty, and its text must never become the board's draft.
+        if self.surface() == Surface::Board {
+            return Err("The open note is a board; the text editor is not showing it".into());
         }
         Ok(())
     }

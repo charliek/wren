@@ -5,6 +5,7 @@ use wren_core::kind::NoteKind;
 use wren_core::model::{ItemRef, Parent};
 use wren_core::ops::Op;
 
+use super::board::Surface;
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
 use super::{focus_editor, App, Message};
@@ -502,13 +503,23 @@ impl App {
             | RevealGroup | MoveGroup | ReorderGroup => {
                 self.selected_group.is_some() && self.session.is_some()
             }
-            RenameNote | DeleteNote | RevealNote | MoveNote | Find | Outline => {
-                self.selected_note.is_some()
-                    || (!self.workspace_mode && matches!(id, Find | Outline))
+            RenameNote | DeleteNote | RevealNote | MoveNote => self.selected_note.is_some(),
+            // The find bar searches the editor's text and the outline reads
+            // its Markdown headings: neither has anything to show for a
+            // board, and a board's raw text has no headings.
+            Find => {
+                (self.selected_note.is_some() || !self.workspace_mode)
+                    && self.surface() != Surface::Board
+            }
+            Outline => {
+                (self.selected_note.is_some() || !self.workspace_mode)
+                    && self.surface() == Surface::Text
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
-                self.ensure_editor_ready().is_ok() && self.editor.markdown_assist()
+                self.surface() == Surface::Text
+                    && self.ensure_editor_ready().is_ok()
+                    && self.editor.markdown_assist()
             }
             Back => self
                 .session

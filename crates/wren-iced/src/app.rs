@@ -650,6 +650,10 @@ impl App {
     /// which autosave saves, the edit revision, and a word recount on a
     /// later tick.
     fn text_changed(&mut self, started: Instant) {
+        // The editor behind a board is not its writer, whatever changed it.
+        if self.surface() == board::Surface::Board {
+            return;
+        }
         if let Some(note) = self.selected_note {
             let _ = self.apply_core(Op::EditDraft {
                 note,

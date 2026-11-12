@@ -1216,6 +1216,50 @@ mod tests {
         }
     }
 
+    /// §6.8 Phase 1 item 6, without a window: every harness request that
+    /// writes through the editor is refused on a board, and the palette's
+    /// Bold is blocked.
+    #[test]
+    fn editor_requests_are_refused_on_a_board() {
+        use super::super::board::tests as boards;
+
+        let (directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        let path = directory.path().join("Boards/Samples/Flow.wren-board");
+        for (op, params) in [
+            ("editor.insert", json!({"text":"bypass"})),
+            ("editor.undo", json!({})),
+            ("editor.redo", json!({})),
+            ("editor.action", json!({"kind":"enter"})),
+            ("editor.action", json!({"kind":"select_all"})),
+            ("editor.command", json!({"intent":"bold"})),
+            ("editor.cursor", json!({"line":0,"column":0})),
+            ("editor.find", json!({"query":"schema"})),
+        ] {
+            let (request, mut reply) = Request::detached(op, params);
+            let _ = app.handle_test(request);
+            let error = reply.try_recv().unwrap().expect_err(op);
+            assert!(error.contains("board"), "{op}: {error}");
+        }
+        let outcome = app
+            .navigation_request("command.run", &json!({"id":"markdown.bold"}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "blocked");
+        let outcome = app
+            .navigation_request("command.run", &json!({"id":"editor.toggle_engine"}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "completed");
+
+        assert_eq!(app.editor.text(), "");
+        assert!(!app.find_open);
+        let document = app.session.as_ref().unwrap().document().unwrap();
+        assert_eq!(document.text, boards::FLOW);
+        assert!(!document.dirty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), boards::FLOW);
+        // The editor snapshot reads the empty editor, never the board's text.
+        assert_eq!(app.editor_snapshot()["text"], "");
+    }
+
     fn navigation_fixture() -> (tempfile::TempDir, App) {
         let directory = crate::test_support::tempdir();
         std::fs::create_dir_all(directory.path().join("Section/Group")).unwrap();
