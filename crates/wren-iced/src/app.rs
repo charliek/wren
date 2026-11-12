@@ -13,6 +13,7 @@ use wren_editor::EditorView;
 pub use crate::cli::Options;
 use crate::{fonts, theme};
 
+mod board_spike;
 mod columns;
 mod workspace;
 mod workspace_view;
@@ -43,6 +44,8 @@ pub struct App {
     preview: preferences::Preview,
     preferences: preferences::Preferences,
     editor: EditorView,
+    /// The generated board of `--board-spike`, shown in place of the editor.
+    board_spike: Option<wren_canvas::spike::View>,
     find_open: bool,
     find_query: String,
     words: usize,
@@ -113,6 +116,11 @@ pub struct App {
     /// and per-key ceilings. `view` takes `&self`, hence the cell.
     #[cfg(feature = "smoke-test")]
     view_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
+    #[cfg(feature = "smoke-test")]
+    board_perf: board_spike::Perf,
+    /// When the app was built, which `perf.board` times a board's opening from.
+    #[cfg(feature = "smoke-test")]
+    launched: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +128,7 @@ pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
     Editor(wren_editor::Message),
+    BoardSpike(wren_canvas::spike::Message),
     Core(Op),
     Command(Command),
     PaletteOpen(palette::Mode),
@@ -155,6 +164,9 @@ pub enum Message {
     Window(iced::window::Id, iced::window::Event),
     #[cfg(feature = "smoke-test")]
     FirstFrame(Result<(), String>),
+    /// A redraw began while `perf.board` was timing the board.
+    #[cfg(feature = "smoke-test")]
+    BoardPulse(Result<(), String>),
     #[cfg(feature = "smoke-test")]
     CaptureFailed(std::sync::Arc<crate::test_ipc::Request>, String),
     #[cfg(feature = "smoke-test")]
@@ -219,6 +231,9 @@ impl App {
         let theme_override = options.smoke.as_ref().map(|request| request.theme);
         #[cfg(not(feature = "smoke-test"))]
         let theme_override: Option<Theme> = None;
+        #[cfg(feature = "smoke-test")]
+        let launched = Instant::now();
+        let board_spike = options.board_spike;
         let preferences = preferences::Preferences::load(settings_path);
         let definition = preferences.theme(Mode::None).0;
         let mut registry_warning = config
@@ -253,6 +268,7 @@ impl App {
             preview: preferences::Preview::default(),
             preferences,
             editor: EditorView::with_backend(engine, &contents),
+            board_spike: None,
             find_open: false,
             find_query: String::new(),
             words,
@@ -320,8 +336,15 @@ impl App {
             frames: crate::test_capture::Frames::default(),
             #[cfg(feature = "smoke-test")]
             view_micros: Default::default(),
+            #[cfg(feature = "smoke-test")]
+            board_perf: Default::default(),
+            #[cfg(feature = "smoke-test")]
+            launched,
         };
         app.apply_preferences();
+        if let Some(count) = board_spike {
+            app.open_board_spike(count);
+        }
         if let Some(warning) = app.startup_settings_warning() {
             app.banner = Some(warning);
         }
@@ -375,12 +398,15 @@ impl App {
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
                 self.apply_theme();
+                self.retheme_board_spike();
             }
             Message::ChooseTheme(definition) => {
                 self.theme_override = definition;
                 self.apply_theme();
+                self.retheme_board_spike();
             }
             Message::Editor(message) => return self.edit(message),
+            Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
             Message::PaletteOpen(mode) => return self.open_palette(mode).task,
@@ -530,9 +556,14 @@ impl App {
             },
             #[cfg(feature = "smoke-test")]
             Message::FirstFrame(result) => match result {
-                Ok(()) => self.ready = true,
+                Ok(()) => {
+                    self.ready = true;
+                    return self.time_board_open();
+                }
                 Err(error) => eprintln!("Wren test readiness: {error}"),
             },
+            #[cfg(feature = "smoke-test")]
+            Message::BoardPulse(pulse) => return self.board_pulse(pulse),
             #[cfg(feature = "smoke-test")]
             Message::CaptureFailed(request, error) => {
                 self.capture_pending = false;
@@ -663,6 +694,9 @@ impl App {
         }
         if self.workspace_mode {
             return self.workspace_view();
+        }
+        if let Some(view) = &self.board_spike {
+            return self.board_spike_view(view);
         }
         let colors = self.definition.colors;
         let header = container(

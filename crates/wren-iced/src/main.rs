@@ -83,7 +83,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref())? {
         cli::Command::Run(options) => options,
         cli::Command::Help => {
-            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike) are never saved to disk.");
+            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --board-spike N        Unsaved generated board of N shapes, to pan and zoom\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike / --board-spike) are never saved to disk.");
             return Ok(());
         }
         cli::Command::FontLicenses => {
@@ -103,7 +103,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "smoke-test")]
     let completion = options.smoke.as_ref().map(|request| request.completion());
 
-    let title = if options.editor {
+    let title = if options.board_spike.is_some() {
+        "Wren — unsaved board evaluation"
+    } else if options.editor {
         "Wren — unsaved editor evaluation"
     } else {
         "Wren"
