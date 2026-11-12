@@ -1,5 +1,6 @@
 //! What the crate's tests share: the label font, loaded from its bundled
-//! bytes; the label corpus; the acceptance script's labels; and a palette.
+//! bytes; the label corpus; the acceptance script's labels; the sample
+//! boards; and a palette.
 
 use std::borrow::Cow;
 use std::sync::Once;
@@ -74,6 +75,23 @@ pub const SCRIPT: [(&str, Shape); 15] = [
     ("Send receipt", Shape::Rect),
     ("End", Shape::Pill),
 ];
+
+macro_rules! sample {
+    ($name:literal) => {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/wrentest/fixtures/boards/workspace/Boards/Samples/",
+            $name,
+            ".wren-board"
+        ))
+    };
+}
+
+/// Boards of the sample workspace the harness and the scenes open.
+pub const CHECKOUT_FLOW: &str = sample!("Checkout flow");
+pub const SHAPES: &str = sample!("Shapes");
+pub const OVERLAP: &str = sample!("Overlap");
+pub const FUTURE: &str = sample!("Future");
 
 pub fn palette() -> Palette {
     Palette {

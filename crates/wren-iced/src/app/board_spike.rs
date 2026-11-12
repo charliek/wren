@@ -1,16 +1,16 @@
-//! `--board-spike N`: a generated board in memory, to pan and zoom. It
-//! measures how a board is best painted before the viewer is built, and is
-//! never saved.
+//! `--board-spike N`: a generated board in memory, shown by the board
+//! viewer with no workspace behind it. It is where the viewer is looked at
+//! and timed until boards open from a workspace, and it is never saved.
 
-use std::time::Instant;
+use std::fmt::Write as _;
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill, Task};
 use wren_board::{Palette, Rgba};
-use wren_canvas::spike::{self, View};
+use wren_canvas::BoardView;
 use wren_core::theme::{Appearance, Rgb, Theme};
 
-use super::{columns, definitions, App, Message};
+use super::{definitions, App, Message};
 use crate::{fonts, theme};
 
 /// The colours a theme gives the spike's board. The hues are stand-ins:
@@ -38,57 +38,82 @@ pub(super) fn palette(definition: Theme) -> Palette {
     }
 }
 
+/// A board of `count` rounded rectangles of 160 by 64 in a grid, each
+/// with a two-line label and an elbow connector to its right and lower
+/// neighbour. Every tenth label has CJK text and an emoji, and one shape
+/// in ten is solid and sits over its left neighbour's label.
+pub(super) fn grid(count: usize) -> String {
+    const COLORS: [&str; 7] = ["red", "orange", "yellow", "green", "cyan", "purple", "blue"];
+    let columns = ((count as f32).sqrt() * 1.25).ceil().max(1.0) as usize;
+    let covers = |index: usize| index % 10 == 9 && !index.is_multiple_of(columns);
+    let mut board = String::from("schema = 1\n");
+    for index in 0..count {
+        let (mut x, mut y) = ((index % columns) * 220, (index / columns) * 120);
+        if covers(index) {
+            x -= 120;
+            y += 32;
+        }
+        let label = if index % 10 == 4 {
+            format!("検証 {index} 🐦\\n二行目のラベル")
+        } else {
+            format!("Step {index}: validate\\nrequest and reply")
+        };
+        let color = COLORS[index % COLORS.len()];
+        let fill = if covers(index) { "solid" } else { "tint" };
+        // Writing to a String cannot fail.
+        let _ = write!(
+            board,
+            "\n[node.n{index}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [{x}, {y}]\n\
+             shape = \"rounded\"\nsize = [160, 64]\nstyle.color = \"{color}\"\n\
+             style.fill = \"{fill}\"\nz = \"{index:06}a\"\n"
+        );
+        let mut connect = |id: char, to: usize, sides: [&str; 2], z: char| {
+            let _ = write!(
+                board,
+                "\n[edge.{id}{index}]\nkind = \"edge\"\n\
+                 from = {{ node = \"n{index}\", side = \"{}\" }}\n\
+                 to = {{ node = \"n{to}\", side = \"{}\" }}\nz = \"{index:06}{z}\"\n",
+                sides[0], sides[1]
+            );
+        };
+        if index + 1 < count && !(index + 1).is_multiple_of(columns) {
+            connect('r', index + 1, ["right", "left"], 'b');
+        }
+        if index + columns < count {
+            connect('d', index + columns, ["bottom", "top"], 'c');
+        }
+    }
+    board
+}
+
 impl App {
-    pub(super) fn open_board_spike(&mut self, count: usize) {
+    pub(super) fn open_board_spike(&mut self, count: usize) -> Result<(), String> {
+        self.show_board_spike(&grid(count))
+    }
+
+    /// Show the board `text` holds in place of the one on screen.
+    fn show_board_spike(&mut self, text: &str) -> Result<(), String> {
+        // Labels are measured when the view opens, before a window exists.
         fonts::load();
-        let started = Instant::now();
-        let view = View::grid(count, palette(self.definition), fonts::UI);
-        #[cfg(feature = "smoke-test")]
-        self.board_perf.built(started);
-        #[cfg(not(feature = "smoke-test"))]
-        let _ = started;
+        let view = BoardView::open(text, palette(self.definition), fonts::UI)
+            .map_err(|error| error.to_string())?;
         self.board_spike = Some(view);
+        Ok(())
     }
 
     /// Repaint the spike's board in the current theme's colours.
     pub(super) fn retheme_board_spike(&mut self) {
         let palette = palette(self.definition);
-        let Some(view) = &self.board_spike else {
-            return;
-        };
-        if *view.palette() == palette {
-            return;
-        }
-        let (count, viewport) = (view.node_count(), view.viewport());
-        let (strategy, labels) = (view.strategy(), view.labels());
-        // The rows of measured labels are set by the harness, in one theme.
-        if count == 0 {
-            return;
-        }
-        self.open_board_spike(count);
         if let Some(view) = &mut self.board_spike {
-            view.set_viewport(viewport, Instant::now());
-            view.set_strategy(strategy);
-            view.set_labels(labels);
+            view.set_palette(palette);
         }
     }
 
-    pub(super) fn board_spike_input(&mut self, message: spike::Message) -> Task<Message> {
-        if self.dialog.is_some() || self.palette.is_some() {
-            return Task::none();
-        }
-        // The wheel reaches an unfocused board; anything else means the
-        // board has the keyboard.
-        if !matches!(message, spike::Message::Wheel { .. }) {
-            self.column = columns::Column::Editor;
-        }
-        if let Some(view) = &mut self.board_spike {
-            view.update(message, Instant::now());
-        }
-        Task::none()
+    pub(super) fn board_spike_input(&mut self, message: wren_canvas::Message) -> Task<Message> {
+        match message {}
     }
 
-    pub(super) fn board_spike_view<'a>(&'a self, view: &'a View) -> Element<'a, Message> {
+    pub(super) fn board_spike_view<'a>(&'a self, view: &'a BoardView) -> Element<'a, Message> {
         let colors = self.definition.colors;
         let viewport = view.viewport();
         let header = container(
@@ -96,7 +121,7 @@ impl App {
                 text("Wren").size(18).color(theme::color(colors.accent)),
                 text(format!(
                     "Board spike · in memory · {} shapes · {:.0}%",
-                    view.node_count(),
+                    view.board().nodes.len(),
                     viewport.zoom * 100.0
                 ))
                 .size(13),
@@ -114,7 +139,16 @@ impl App {
             background: Some(theme::color(colors.titlebar).into()),
             ..Default::default()
         });
-        let body = column![header, view.view("note-editor").map(Message::BoardSpike)];
+        #[cfg(feature = "smoke-test")]
+        let style = wren_canvas::Style {
+            labels: self.board_perf.labels,
+        };
+        #[cfg(not(feature = "smoke-test"))]
+        let style = wren_canvas::Style::default();
+        let body = column![
+            header,
+            view.view("note-editor", style).map(Message::BoardSpike)
+        ];
         self.palette_view(body.width(Fill).height(Fill).into())
     }
 }
@@ -130,22 +164,22 @@ mod harness {
 
     use iced::Task;
     use serde_json::{json, Value};
-    use wren_board::scene::{Draw, Rect};
-    use wren_board::Rgba;
-    use wren_canvas::spike::{Edit, Labels, Probe, Scroll, Strategy, View};
-    use wren_canvas::Viewport;
+    use wren_board::scene::{self, Draw, Rect, Source};
+    use wren_board::{Access, Id, Rgba};
+    use wren_canvas::{BoardView, Labels, Probe, Viewport};
 
     use super::super::{App, Message};
-    use crate::fonts;
     use crate::test_ipc::Request;
 
-    /// The timings `perf.board` reports, and the run in flight.
+    /// The timings `perf.board` reports that the view does not keep, the
+    /// run in flight, and the label rule the harness asked for.
     #[derive(Default)]
     pub struct Perf {
-        scene_micros: VecDeque<u64>,
         frame_micros: VecDeque<u64>,
         open_micros: Option<u64>,
         run: Option<Run>,
+        /// `None` leaves the rule to the widget, which picks by renderer.
+        pub labels: Option<Labels>,
     }
 
     /// A pan or zoom of one step per redraw.
@@ -177,12 +211,6 @@ mod harness {
         );
     }
 
-    impl Perf {
-        pub fn built(&mut self, started: Instant) {
-            push(&mut self.scene_micros, started, Instant::now());
-        }
-    }
-
     fn rect(rect: Rect) -> Value {
         json!({"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height})
     }
@@ -200,8 +228,37 @@ mod harness {
             .ok_or_else(|| format!("{name} must be a number"))
     }
 
+    /// A node's box and the lines of its label, in board units.
+    fn node(view: &BoardView, name: &str) -> Option<Value> {
+        let id = Id::new(name)?;
+        let node = view.board().nodes.get(&id)?;
+        let at = wren_board::placements(view.board()).get(&id)?.at;
+        let source = Source::Node(id);
+        let lines: Vec<Value> = view
+            .scene()
+            .items
+            .iter()
+            .filter(|item| item.source == source)
+            .filter_map(|item| match &item.draw {
+                Draw::Text { lines, .. } => Some(lines),
+                Draw::Path { .. } => None,
+            })
+            .flatten()
+            .map(|line| {
+                json!({
+                    "text": line.text, "x": line.origin.x, "y": line.origin.y, "width": line.width,
+                })
+            })
+            .collect();
+        Some(json!({
+            "id": name,
+            "bounds": {"x": at[0], "y": at[1], "width": node.size[0], "height": node.size[1]},
+            "lines": lines,
+        }))
+    }
+
     impl App {
-        fn spike(&mut self) -> Result<&mut View, String> {
+        fn spike(&mut self) -> Result<&mut BoardView, String> {
             self.board_spike
                 .as_mut()
                 .ok_or_else(|| "the surface is not a board".to_string())
@@ -236,9 +293,9 @@ mod harness {
                 request.respond(Ok(self.perf_board_rings()));
                 if params.get("clear").and_then(Value::as_bool) == Some(true) {
                     self.board_perf.frame_micros.clear();
-                    self.board_perf.scene_micros.clear();
                     if let Some(view) = &self.board_spike {
-                        view.probe.draws.borrow_mut().clear();
+                        view.probe.scene_micros.borrow_mut().clear();
+                        view.probe.draw_micros.borrow_mut().clear();
                     }
                 }
                 return Ok(Task::none());
@@ -312,11 +369,10 @@ mod harness {
             run.last = Some(now);
             if run.pulses < run.steps {
                 let viewport = view.viewport();
-                let stepped = match run.step {
+                view.set_viewport(match run.step {
                     Step::Pan { dx, dy } => viewport.panned(dx, dy),
                     Step::Zoom { factor } => viewport.zoomed(factor, (640.0, 360.0)),
-                };
-                view.set_viewport(stepped, now);
+                });
             }
             run.pulses += 1;
             if run.pulses <= run.steps + 1 {
@@ -330,209 +386,168 @@ mod harness {
 
         fn perf_board_rings(&self) -> Value {
             let ring = |ring: &VecDeque<u64>| ring.iter().copied().collect::<Vec<_>>();
-            let draws = self
+            let (scenes, draws) = self
                 .board_spike
                 .as_ref()
-                .map(|view| ring(&view.probe.draws.borrow()))
+                .map(|view| {
+                    (
+                        ring(&view.probe.scene_micros.borrow()),
+                        ring(&view.probe.draw_micros.borrow()),
+                    )
+                })
                 .unwrap_or_default();
             json!({
-                "scene_micros": ring(&self.board_perf.scene_micros),
+                "scene_micros": scenes,
                 "draw_micros": draws,
                 "frame_micros": ring(&self.board_perf.frame_micros),
                 "open_micros": self.board_perf.open_micros,
             })
         }
 
-        /// `spike.board`: set the spike's knobs, then report its state.
+        /// `spike.board`: change what the spike shows, then report it.
+        /// `scene` replaces the board (`{"grid": N}` or `{"text": "…"}`),
+        /// `labels` sets the label rule (`null` for the renderer's own),
+        /// `cap` the most layers, `viewport` where the view looks, and
+        /// `nodes` names the nodes to report the boxes and labels of.
         pub(in super::super) fn spike_board(&mut self, params: &Value) -> Result<Value, String> {
-            let now = Instant::now();
+            self.spike()?;
             if let Some(scene) = params.get("scene") {
-                self.spike()?;
-                let palette = super::palette(self.definition);
-                fonts::load();
-                let started = Instant::now();
-                let view = if let Some(labels) = scene.get("labels").and_then(Value::as_array) {
-                    let labels: Vec<String> = labels
-                        .iter()
-                        .map(|label| label.as_str().map(str::to_owned))
-                        .collect::<Option<_>>()
-                        .ok_or("labels must be strings")?;
-                    View::rows(&labels, palette, fonts::UI)
+                if let Some(text) = scene.get("text").and_then(Value::as_str) {
+                    self.show_board_spike(text)?;
                 } else {
                     let count = scene
                         .get("grid")
                         .and_then(Value::as_u64)
                         .and_then(|count| usize::try_from(count).ok())
                         .filter(|count| (1..=100_000).contains(count))
-                        .ok_or("scene needs labels or a grid of 1 to 100000 shapes")?;
-                    View::grid(count, palette, fonts::UI)
-                };
-                self.board_perf.built(started);
-                self.board_spike = Some(view);
-            }
-            let view = self.spike()?;
-            if let Some(strategy) = params.get("strategy").and_then(Value::as_str) {
-                view.set_strategy(match strategy {
-                    "transform" => Strategy::Transform,
-                    "rebuild" => Strategy::Rebuild,
-                    "settle" => Strategy::Settle,
-                    _ => return Err("strategy must be transform, rebuild or settle".into()),
-                });
-            }
-            if let Some(layers) = params.get("layers") {
-                let layers = match layers {
-                    Value::Null => None,
-                    value => Some(
-                        value
-                            .as_u64()
-                            .and_then(|layers| usize::try_from(layers).ok())
-                            .filter(|layers| (1..=255).contains(layers))
-                            .ok_or("layers must be null or from 1 to 255")?,
-                    ),
-                };
-                view.force_layers(layers);
+                        .ok_or("scene needs text or a grid of 1 to 100000 shapes")?;
+                    self.open_board_spike(count)?;
+                }
             }
             match params.get("labels") {
                 None => {}
-                // The renderer's own rule.
-                Some(Value::Null) => view.set_labels(None),
+                Some(Value::Null) => self.board_perf.labels = None,
                 Some(labels) => {
-                    let min_px = number(labels, "min_px")?;
-                    let moving_lines = match labels.get("moving_lines") {
-                        None | Some(Value::Null) => usize::MAX,
-                        Some(lines) => lines
-                            .as_u64()
-                            .and_then(|lines| usize::try_from(lines).ok())
-                            .ok_or("moving_lines must be null or a count")?,
-                    };
-                    view.set_labels(Some(Labels {
-                        min_px,
-                        moving_lines,
-                    }));
+                    self.board_perf.labels = Some(Labels {
+                        min_px: number(labels, "min_px")?,
+                        moving: labels
+                            .get("moving")
+                            .and_then(Value::as_bool)
+                            .ok_or("moving must be true or false")?,
+                    });
                 }
             }
+            let labels = self.board_perf.labels;
+            let view = self.spike()?;
             if let Some(cap) = params.get("cap") {
                 let cap = cap
                     .as_u64()
                     .and_then(|cap| usize::try_from(cap).ok())
                     .filter(|cap| (1..=255).contains(cap))
                     .ok_or("cap must be from 1 to 255")?;
-                view.set_cap(cap);
+                view.set_layer_cap(cap);
             }
             if let Some(viewport) = params.get("viewport") {
                 let zoom = number(viewport, "zoom")?;
                 if !(Viewport::MIN_ZOOM..=Viewport::MAX_ZOOM).contains(&zoom) {
                     return Err("zoom must be from 0.1 to 4".into());
                 }
-                view.set_viewport(
-                    Viewport {
-                        x: number(viewport, "x")?,
-                        y: number(viewport, "y")?,
-                        zoom,
-                    },
-                    now,
-                );
-            }
-            if let Some(label) = params.get("label") {
-                let text = |name: &str| label.get(name).and_then(Value::as_str).map(str::to_owned);
-                let edit = if label.get("open").is_some() {
-                    Edit::Open
-                } else if let Some(text) = text("type") {
-                    Edit::Insert(text)
-                } else if let Some(content) = text("preedit") {
-                    let selection = (!content.is_empty()).then_some(0..content.len());
-                    Edit::Preedit { content, selection }
-                } else if let Some(text) = text("commit") {
-                    Edit::Commit(text)
-                } else if label.get("close").is_some() {
-                    Edit::Close
-                } else {
-                    return Err("label needs open, type, preedit, commit or close".into());
-                };
-                view.edit(edit);
+                view.set_viewport(Viewport {
+                    x: number(viewport, "x")?,
+                    y: number(viewport, "y")?,
+                    zoom,
+                });
             }
             let view = &*view;
-            let viewport = view.viewport();
             let nodes: Vec<Value> = params
                 .get("nodes")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|node| usize::try_from(node.as_u64()?).ok())
-                .filter_map(|node| {
-                    Some(json!({
-                        "node": node,
-                        "bounds": rect(view.node_bounds(node)?),
-                        "lines": view.node_lines(node).iter().map(|line| json!({
-                            "text": line.text, "x": line.origin.x, "y": line.origin.y, "width": line.width,
-                        })).collect::<Vec<_>>(),
-                    }))
-                })
+                .filter_map(|name| node(view, name.as_str()?))
                 .collect();
-            let lines: Vec<Value> = if view.node_count() == 0 {
-                view.scene()
-                    .items
-                    .iter()
-                    .filter_map(|item| match &item.draw {
-                        Draw::Text { lines, .. } => lines.first(),
-                        Draw::Path { .. } => None,
-                    })
-                    .map(|line| {
-                        json!({
-                            "text": line.text, "x": line.origin.x, "y": line.origin.y, "width": line.width,
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let palette = view.palette();
+            let (viewport, palette, probe) = (view.viewport(), view.palette(), &view.probe);
             Ok(json!({
-                "count": view.node_count(),
+                "count": view.board().nodes.len(),
+                "edges": view.board().edges.len(),
+                "issues": view.issues().len(),
+                "read_only": *view.access() != Access::Editable,
                 "items": view.scene().items.len(),
-                "layers": view.plan().count,
-                "overflow": view.plan().overflow,
-                "strategy": match view.strategy() {
-                    Strategy::Transform => "transform",
-                    Strategy::Rebuild => "rebuild",
-                    Strategy::Settle => "settle",
-                },
+                "layers": view.layers().count,
+                "overflow": view.layers().overflow,
                 "viewport": {"x": viewport.x, "y": viewport.y, "zoom": viewport.zoom},
-                "labels": view.labels().map(|labels| json!({
-                    "min_px": labels.min_px,
-                    "moving_lines": Some(labels.moving_lines).filter(|lines| *lines != usize::MAX),
+                "labels": labels.map(|labels| json!({
+                    "min_px": labels.min_px, "moving": labels.moving,
                 })),
-                "moving": view.moving(now),
-                "revision": view.revision(),
+                "moving": probe.moving.get(),
                 "scene_bounds": rect(view.scene().bounds),
-                "line_height": view.line_height(wren_board::scene::Face::Regular, 14.0),
-                "overlaps": view.overlaps().iter().map(|overlap| json!({
-                    "region": rect(overlap.region), "fill": rgb(overlap.fill),
-                })).collect::<Vec<_>>(),
+                "line_height": scene::line_height(scene::LABEL_SIZE),
                 "nodes": nodes,
-                "lines": lines,
-                "label": view.label().map(|label| json!({
-                    "node": label.node, "text": label.text, "caret": label.caret,
-                    "preedit": label.preedit.as_ref().map(|preedit| preedit.content.clone()),
-                })),
-                "caret": view.caret().map(rect),
-                "ime": view.probe.ime.get().map(|(cursor, text_size)| json!({
-                    "cursor": {"x":cursor[0],"y":cursor[1],"width":cursor[2],"height":cursor[3]},
-                    "text_size": text_size,
-                })),
-                "wheel": view.probe.wheel.borrow().iter().map(|delta| match delta {
-                    Scroll::Lines { x, y } => json!({"unit":"lines","x":x,"y":y}),
-                    Scroll::Pixels { x, y } => json!({"unit":"pixels","x":x,"y":y}),
-                }).collect::<Vec<_>>(),
-                "arrows": view.probe.arrows.get(),
-                "builds": view.probe.builds.get(),
-                "painted": view.probe.painted.get(),
-                "painted_layers": view.probe.layers.get(),
+                "scenes": probe.scenes.get(),
+                "builds": probe.builds.get(),
+                "painted": probe.painted.get(),
+                "painted_layers": probe.layers.get(),
                 "palette": {
                     "canvas": rgb(palette.canvas), "ink": rgb(palette.ink),
                     "muted": rgb(palette.muted), "accent": rgb(palette.accent),
                 },
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wren_board::scene::{Draw, Source};
+
+    use super::*;
+
+    #[test]
+    fn the_grid_is_a_sound_board_with_every_shape_label_and_connector() {
+        let text = grid(1000);
+        let board = wren_board::parse(&text).expect("the generated board parses");
+        assert_eq!(wren_board::check(&board), []);
+        assert_eq!(board.nodes.len(), 1000);
+        // 25 rows of 40: each shape but the last of a row connects right,
+        // and each but the last row's connects down.
+        assert_eq!(board.edges.len(), (1000 - 25) + (1000 - 40));
+        let labelled = |needle: &str| {
+            board
+                .nodes
+                .values()
+                .filter(|node| node.text.contains(needle))
+                .count()
+        };
+        assert_eq!(labelled("🐦"), 100);
+        assert_eq!(labelled("\n"), 1000);
+        // It is canonical but for the defaults it spells out, so the
+        // writer gives it back with the same elements.
+        let written = wren_board::write(&board);
+        assert_eq!(wren_board::parse(&written).expect("canonical"), board);
+        assert_eq!(
+            wren_board::parse(&grid(1)).expect("one shape").edges.len(),
+            0
+        );
+    }
+
+    #[test]
+    fn one_shape_in_ten_covers_its_neighbours_label_in_two_layers() {
+        fonts::load();
+        let view = BoardView::open(&grid(1000), palette(definitions::DARK), fonts::UI)
+            .expect("the generated board opens");
+        assert_eq!(view.layers().count, 2);
+        assert_eq!(view.layers().overflow, 0);
+        let raised = view
+            .scene()
+            .items
+            .iter()
+            .zip(&view.layers().of)
+            .filter(|(item, layer)| {
+                **layer == 1
+                    && matches!(item.source, Source::Node(_))
+                    && matches!(item.draw, Draw::Text { .. })
+            })
+            .count();
+        assert!((90..=100).contains(&raised), "{raised}");
     }
 }

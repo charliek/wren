@@ -45,7 +45,7 @@ pub struct App {
     preferences: preferences::Preferences,
     editor: EditorView,
     /// The generated board of `--board-spike`, shown in place of the editor.
-    board_spike: Option<wren_canvas::spike::View>,
+    board_spike: Option<wren_canvas::BoardView>,
     find_open: bool,
     find_query: String,
     words: usize,
@@ -128,7 +128,7 @@ pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
     Editor(wren_editor::Message),
-    BoardSpike(wren_canvas::spike::Message),
+    BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
     PaletteOpen(palette::Mode),
@@ -343,7 +343,9 @@ impl App {
         };
         app.apply_preferences();
         if let Some(count) = board_spike {
-            app.open_board_spike(count);
+            if let Err(error) = app.open_board_spike(count) {
+                app.banner = Some(error);
+            }
         }
         if let Some(warning) = app.startup_settings_warning() {
             app.banner = Some(warning);
