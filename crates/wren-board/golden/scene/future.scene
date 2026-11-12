@@ -1,0 +1,19 @@
+bounds -0.75,-0.75 721.5x201.5
+node plan path in -0.75,-0.75 441.5x201.5 stroke #808890 1.5 dash 6,4: M 0,0 L 440,0 L 440,200 L 0,200 Z
+node plan text in 4,4 30x16 Regular 12 #808890
+  4,4 w 30 "frame"
+node plan text in 178,90 84x20 Regular 14 #202428
+  178,90 w 84 "Release plan"
+node design path in 39.25,79.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 40,80 L 160,80 L 160,140 L 40,140 Z
+node design text in 79,100 42x20 Regular 14 #202428
+  79,100 w 42 "Design"
+node build path in 279.25,79.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 280,80 L 400,80 L 400,140 L 280,140 Z
+node build text in 322.5,100 35x20 Regular 14 #202428
+  322.5,100 w 35 "Build"
+node notes path in 519.25,39.25 201.5x121.5 stroke #808890 1.5 dash 6,4: M 520,40 L 720,40 L 720,160 L 520,160 Z
+node notes text in 524,44 24x16 Regular 12 #808890
+  524,44 w 24 "note"
+node notes text in 602.5,90 35x20 Regular 14 #202428
+  602.5,90 w 35 "Notes"
+edge design-build path in 159.25,109.25 111.5x1.5 stroke #202428 1.5: M 160,110 L 270,110
+edge design-build path in 270,106 10x8 fill #202428: M 280,110 L 270,114 L 270,106 Z

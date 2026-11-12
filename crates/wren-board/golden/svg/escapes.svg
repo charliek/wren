@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="441.5" height="61.5" viewBox="-0.75 -0.75 441.5 61.5">
+<path d="M0 0L120 0L120 60L0 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="25" y="15.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">back\slash</text>
+<text x="18" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">&quot;quoted&quot;	tab</text>
+<text x="32" y="55.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">new line</text>
+<path d="M160 0L280 0L280 60L160 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="188.5" y="15.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve"></text>
+<text x="171" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve"></text>
+<text x="195.5" y="55.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve"></text>
+<path d="M320 0L440 0L440 60L320 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="348.5" y="15.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">é, é, 漢字,</text>
+<text x="331" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">عربى, 🚀, ​ and</text>
+<text x="352" y="55.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">stay raw</text>
+<path d="M120 30L150 30" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M160 30L150 34L150 26Z" fill="#202428"/>
+<path d="M103 12L177 12L177 48L103 48Z" fill="#ffffff"/>
+<text x="131" y="26.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">two</text>
+<text x="107" y="42.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">lines \ &quot;q&quot;</text>
+</svg>
