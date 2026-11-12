@@ -431,6 +431,35 @@ fn put(out: &mut String, args: fmt::Arguments<'_>) {
     let _ = out.write_fmt(args);
 }
 
+/// The `toml` crate's nesting limit: a dotted key of at most this many
+/// parts, and at most this many arrays and inline tables open at once.
+pub(crate) const NESTING: usize = 80;
+
+/// Whether unknown content written as a field whose key has `parts` dotted
+/// parts, its own name included, stays within [`NESTING`] as this writer
+/// spells it: a non-empty table as longer dotted keys, anything else inline
+/// after its key. A file can nest deeper than that and still load, because
+/// the crate counts header layouts and inline nesting apart.
+pub(crate) fn field_fits(value: &Value, parts: usize) -> bool {
+    parts <= NESTING
+        && match value {
+            Value::Table(table) if !table.is_empty() => {
+                table.values().all(|value| field_fits(value, parts + 1))
+            }
+            other => inline_fits(other, NESTING),
+        }
+}
+
+/// Whether a value written inline opens at most `room` arrays and inline
+/// tables at once.
+pub(crate) fn inline_fits(value: &Value, room: usize) -> bool {
+    match value {
+        Value::Array(items) => room > 0 && items.iter().all(|item| inline_fits(item, room - 1)),
+        Value::Table(table) => room > 0 && table.values().all(|item| inline_fits(item, room - 1)),
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

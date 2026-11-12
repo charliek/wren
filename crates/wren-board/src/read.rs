@@ -16,6 +16,7 @@ use std::ops::Range;
 use toml::de::{DeTable, DeValue};
 use toml::{Table, Value};
 
+use crate::write::{field_fits, inline_fits, NESTING};
 use crate::{
     Board, Color, Edge, EdgeStyle, End, Head, Id, Label, Named, Node, NodeStyle, Route, Shape,
 };
@@ -45,17 +46,145 @@ impl std::error::Error for ParseError {}
 
 /// Reads a board file. Never panics, whatever the input.
 pub fn parse(source: &str) -> Result<Board, ParseError> {
-    let table = source.parse::<Table>().map_err(|error| {
-        let (line, column) = error
-            .span()
-            .map_or((1, 1), |span| position(source, span.start));
-        ParseError {
+    let table = source
+        .parse::<Table>()
+        .map_err(|error| syntax(source, &error))?;
+    board(table).map_err(|fault| fault.locate(source))
+}
+
+/// A parser error with its position. The one error the pinned crate gives
+/// without a span is a key or table header of more than 80 dotted parts;
+/// its line is found by looking for that key.
+fn syntax(source: &str, error: &toml::de::Error) -> ParseError {
+    let message = error.message().trim_end();
+    if let Some(span) = error.span() {
+        let (line, column) = position(source, span.start);
+        return ParseError {
             line,
             column,
-            message: error.message().trim_end().to_owned(),
+            message: message.to_owned(),
+        };
+    }
+    match long_key(source) {
+        Some(offset) => {
+            let (line, column) = position(source, offset);
+            ParseError {
+                line,
+                column,
+                message: format!(
+                    "a key or table header nests too deeply: it has more than {NESTING} dotted parts"
+                ),
+            }
         }
-    })?;
-    board(table).map_err(|fault| fault.locate(source))
+        None => ParseError {
+            line: 1,
+            column: 1,
+            message: format!("{message} (the parser named no line)"),
+        },
+    }
+}
+
+/// The byte offset of the first dotted key with more than [`NESTING`]
+/// parts, whether in a header, before `=` or inside an inline table. Bare
+/// and quoted parts count; a part's contents, other strings and comments
+/// are skipped, and a line break ends a key.
+fn long_key(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    // The current run: where it starts, its parts, and whether a dot is
+    // waiting for the next part.
+    let mut start = 0;
+    let mut parts = 0usize;
+    let mut dot = false;
+    while let Some(&b) = bytes.get(i) {
+        let part_end = match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => Some(
+                bytes
+                    .get(i..)
+                    .unwrap_or_default()
+                    .iter()
+                    .position(|&c| !(c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
+                    .map_or(bytes.len(), |n| i + n),
+            ),
+            b'"' | b'\'' => Some(string_end(bytes, i)),
+            _ => None,
+        };
+        match part_end {
+            Some(end) => {
+                if dot && parts > 0 {
+                    parts += 1;
+                } else {
+                    start = i;
+                    parts = 1;
+                }
+                dot = false;
+                if parts > NESTING {
+                    return Some(start);
+                }
+                i = end;
+            }
+            None => {
+                match b {
+                    b'.' => dot = true,
+                    b' ' | b'\t' => {}
+                    b'#' => {
+                        parts = 0;
+                        i = bytes
+                            .get(i..)
+                            .unwrap_or_default()
+                            .iter()
+                            .position(|&c| c == b'\n')
+                            .map_or(bytes.len(), |n| i + n);
+                        continue;
+                    }
+                    _ => {
+                        parts = 0;
+                        dot = false;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The offset just past the string that opens at `start`: basic or
+/// literal, single or triple quoted. An unterminated string runs to the end.
+fn string_end(bytes: &[u8], start: usize) -> usize {
+    let Some(&quote) = bytes.get(start) else {
+        return bytes.len();
+    };
+    let triple = [quote; 3];
+    let rest = |at: usize| bytes.get(at..).unwrap_or_default();
+    if rest(start).starts_with(&triple) {
+        let mut i = start + 3;
+        while i < bytes.len() {
+            if quote == b'"' && bytes.get(i) == Some(&b'\\') {
+                i += 2;
+            } else if rest(i).starts_with(&triple) {
+                // Up to two more quotes may close the string's content.
+                let mut end = i + 3;
+                while end < bytes.len() && end < i + 5 && bytes.get(end) == Some(&quote) {
+                    end += 1;
+                }
+                return end;
+            } else {
+                i += 1;
+            }
+        }
+        return bytes.len();
+    }
+    let mut i = start + 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'\\' if quote == b'"' => i += 2,
+            b'\n' => return i,
+            b if b == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
 }
 
 /// One step from the document root to a value.
@@ -216,6 +345,7 @@ fn board(mut top: Table) -> Result<Board, Fault> {
     let requires = take(&mut top, "requires", strings)?.unwrap_or_default();
     let nodes = take(&mut top, "node", |value| records(value, node))?.unwrap_or_default();
     let edges = take(&mut top, "edge", |value| records(value, edge))?.unwrap_or_default();
+    fields_fit(&top, 1)?;
     Ok(Board {
         schema,
         requires,
@@ -253,6 +383,7 @@ fn node(mut fields: Table) -> Result<Node, Fault> {
     let size = take(&mut fields, "size", pair)?;
     let style = take(&mut fields, "style", node_style)?.unwrap_or_default();
     let z = take(&mut fields, "z", string)?;
+    fields_fit(&fields, 1)?;
     Ok(Node {
         text,
         kind,
@@ -269,10 +400,14 @@ fn node(mut fields: Table) -> Result<Node, Fault> {
 fn node_style(value: Value) -> Result<NodeStyle, Fault> {
     let mut fields = table(value)?;
     let defaults = NodeStyle::default();
+    let color = take(&mut fields, "color", string)?.map_or(defaults.color, Color::read);
+    let fill = take(&mut fields, "fill", string)?.map_or(defaults.fill, Named::read);
+    let stroke = take(&mut fields, "stroke", string)?.map_or(defaults.stroke, Named::read);
+    fields_fit(&fields, 2)?;
     Ok(NodeStyle {
-        color: take(&mut fields, "color", string)?.map_or(defaults.color, Color::read),
-        fill: take(&mut fields, "fill", string)?.map_or(defaults.fill, Named::read),
-        stroke: take(&mut fields, "stroke", string)?.map_or(defaults.stroke, Named::read),
+        color,
+        fill,
+        stroke,
         extra: fields,
     })
 }
@@ -286,6 +421,7 @@ fn edge(mut fields: Table) -> Result<Edge, Fault> {
     let route = take(&mut fields, "route", string)?.map_or(Named::Known(Route::Elbow), Named::read);
     let style = take(&mut fields, "style", edge_style)?.unwrap_or_default();
     let z = take(&mut fields, "z", string)?;
+    fields_fit(&fields, 1)?;
     Ok(Edge {
         kind,
         from: from.ok_or_else(|| Fault::new("has no `from`"))?,
@@ -303,7 +439,7 @@ fn edge(mut fields: Table) -> Result<Edge, Fault> {
 /// other key is unknown content, `side` and `anchor` included.
 fn end(value: Value) -> Result<End, Fault> {
     let mut fields = table(value)?;
-    match (fields.contains_key("node"), fields.contains_key("at")) {
+    let end = match (fields.contains_key("node"), fields.contains_key("at")) {
         (true, false) => {
             let node = take(&mut fields, "node", string)?.unwrap_or_default();
             let side = take(&mut fields, "side", string)?.map(Named::read);
@@ -320,7 +456,13 @@ fn end(value: Value) -> Result<End, Fault> {
             Ok(End::Free { at, extra: fields })
         }
         _ => Err(Fault::new("must have exactly one of `node` and `at`")),
-    }
+    }?;
+    let extra = match &end {
+        End::Node { extra, .. } | End::Free { extra, .. } => extra,
+    };
+    // Written as `from = { … }`: one level open before its keys.
+    items_fit(extra, NESTING - 1)?;
+    Ok(end)
 }
 
 fn heads(value: Value) -> Result<[Named<Head>; 2], Fault> {
@@ -350,6 +492,8 @@ fn label(value: Value) -> Result<Label, Fault> {
     let mut fields = table(value)?;
     let text = take(&mut fields, "text", string)?.ok_or_else(|| Fault::new("has no `text`"))?;
     let at = take(&mut fields, "at", int)?.unwrap_or(Label::DEFAULT_AT);
+    // Written as `labels = [ { … } ]`: two levels open before its keys.
+    items_fit(&fields, NESTING - 2)?;
     Ok(Label {
         text: label_text(text),
         at,
@@ -360,11 +504,37 @@ fn label(value: Value) -> Result<Label, Fault> {
 fn edge_style(value: Value) -> Result<EdgeStyle, Fault> {
     let mut fields = table(value)?;
     let defaults = EdgeStyle::default();
+    let color = take(&mut fields, "color", string)?.map_or(defaults.color, Color::read);
+    let stroke = take(&mut fields, "stroke", string)?.map_or(defaults.stroke, Named::read);
+    fields_fit(&fields, 2)?;
     Ok(EdgeStyle {
-        color: take(&mut fields, "color", string)?.map_or(defaults.color, Color::read),
-        stroke: take(&mut fields, "stroke", string)?.map_or(defaults.stroke, Named::read),
+        color,
+        stroke,
         extra: fields,
     })
+}
+
+const TOO_DEEP: &str =
+    "nests too deeply to be saved: written in canonical form it would pass the 80 levels a board file can hold";
+
+/// Unknown content that the canonical writer would spell past the parser's
+/// nesting limit is refused on load, rather than kept and later saved as a
+/// file that will not load. `parts` is the number of dotted parts of each
+/// field's key.
+fn fields_fit(fields: &Table, parts: usize) -> Result<(), Fault> {
+    match fields.iter().find(|(_, value)| !field_fits(value, parts)) {
+        Some((key, _)) => Err(Fault::new(TOO_DEEP).under_key(key)),
+        None => Ok(()),
+    }
+}
+
+/// As [`fields_fit`], for the keys of an inline table written with `room`
+/// levels still free.
+fn items_fit(fields: &Table, room: usize) -> Result<(), Fault> {
+    match fields.iter().find(|(_, value)| !inline_fits(value, room)) {
+        Some((key, _)) => Err(Fault::new(TOO_DEEP).under_key(key)),
+        None => Ok(()),
+    }
 }
 
 /// Removes `key` and reads it, so whatever is left is unknown content.
@@ -1118,6 +1288,195 @@ mod tests {
             " }".repeat(81)
         );
         assert!(parse(&tables).is_err());
+    }
+
+    /// The parser's error for a key of more than 80 parts has no span, so
+    /// the loader finds the key itself.
+    #[test]
+    fn a_key_with_too_many_parts_is_found_by_its_line() {
+        let parts = |n: usize| vec!["a"; n].join(".");
+        let headers: String = (1..=81)
+            .map(|n| format!("[[{}]]\n", vec!["y"; n].join(".")))
+            .collect();
+        let cases = [
+            (format!("schema = 1\n[{}]\n", parts(5000)), 2, 2),
+            (format!("schema = 1\n{headers}"), 82, 3),
+            (
+                format!("schema = 1\n# {}\n{} = 1\n", parts(90), parts(81)),
+                3,
+                1,
+            ),
+            (
+                format!(
+                    "schema = 1\nx = \"\"\"\n{}\n\"\"\"\ny = {{ b . {} = 1 }}\n",
+                    parts(90),
+                    parts(81)
+                ),
+                5,
+                7,
+            ),
+            (
+                format!(
+                    "schema = 1\n[node . \"q.q\" . '{}' . {}]\n",
+                    parts(3),
+                    parts(80)
+                ),
+                2,
+                2,
+            ),
+        ];
+        for (source, line, column) in cases {
+            let error = err(&source);
+            assert!(
+                error.message.contains("more than 80 dotted parts"),
+                "{error}"
+            );
+            assert_eq!((error.line, error.column), (line, column), "{error}");
+        }
+        assert!(parse(&format!("schema = 1\n{} = 1\n", parts(80))).is_ok());
+    }
+
+    /// The parser counts a header layout and a long dotted key apart from
+    /// inline nesting, so some files within its limit would be written in
+    /// canonical form past it. They are refused on load, at the field.
+    #[test]
+    fn content_too_deep_to_write_back_is_an_error() {
+        let node = "\n[node.n]\nat = [0, 0]\nsize = [1, 1]\n";
+        let headers = |prefix: &str, depth: usize| -> String {
+            (1..=depth)
+                .map(|level| format!("[[{prefix}{}]]\n", vec!["y"; level].join(".")))
+                .collect()
+        };
+        let inline = |depth: usize| format!("{}1{}", "{ a = ".repeat(depth), " }".repeat(depth));
+        let cases = [
+            // (a) `[[y]]`, `[[y.y]]`, … written as `y = [{ y = [{ …`.
+            (
+                format!("schema = 1\n{}", headers("", 41)),
+                "`y` nests too deeply",
+                2,
+                3,
+            ),
+            (
+                format!("schema = 1\n{node}{}", headers("node.n.", 41)),
+                "`node.n.y` nests too deeply",
+                6,
+                10,
+            ),
+            // (b) inline tables written as one dotted key of 81 parts.
+            (
+                format!("schema = 1\nx = {}\n", inline(80)),
+                "`x` nests too deeply",
+                2,
+                1,
+            ),
+            (
+                format!("schema = 1\n{node}ext = {}\n", inline(80)),
+                "`node.n.ext` nests too deeply",
+                6,
+                1,
+            ),
+            (
+                format!("schema = 1\n{node}style.x = {}\n", inline(79)),
+                "`node.n.style.x` nests too deeply",
+                6,
+                7,
+            ),
+        ];
+        for (source, fragment, line, column) in cases {
+            let error = err(&source);
+            assert!(
+                error.message.contains(fragment),
+                "{fragment:?} not in {error}"
+            );
+            assert_eq!((error.line, error.column), (line, column), "{error}");
+        }
+        // One level less of each loads and writes back.
+        for source in [
+            format!("schema = 1\n{}", headers("", 40)),
+            format!("schema = 1\n{node}{}", headers("node.n.", 40)),
+            format!("schema = 1\nx = {}\n", inline(79)),
+            format!("schema = 1\n{node}style.x = {}\n", inline(78)),
+        ] {
+            let written = crate::write(&ok(&source));
+            assert_eq!(crate::write(&ok(&written)), written, "{source}");
+        }
+    }
+
+    /// Test 9's "whatever loads also writes", at every depth of every
+    /// layout that nests: a file loads only if its canonical text does.
+    #[test]
+    fn whatever_nests_and_loads_writes_text_that_loads() {
+        fn path(prefix: &str, parts: usize) -> String {
+            format!("{prefix}{}", vec!["y"; parts].join("."))
+        }
+        fn headers(prefix: &str, depth: usize) -> String {
+            (1..=depth)
+                .map(|parts| format!("[[{}]]\n", path(prefix, parts)))
+                .collect()
+        }
+        fn tables(depth: usize) -> String {
+            format!("{}1{}", "{ a = ".repeat(depth), " }".repeat(depth))
+        }
+        fn arrays(depth: usize) -> String {
+            format!("{}{}", "[".repeat(depth), "]".repeat(depth))
+        }
+        // Each layout gives the top-level lines and the lines after the
+        // blocks, which start inside `[edge.e.to]`.
+        type Layout = fn(usize) -> (String, String);
+        let layouts: [(&str, Layout); 10] = [
+            ("top headers", |d| (String::new(), headers("", d))),
+            ("node headers", |d| (String::new(), headers("node.n.", d))),
+            ("table header", |d| {
+                (
+                    String::new(),
+                    format!("[{}]\nk = {}\n", path("", d), arrays(d)),
+                )
+            }),
+            ("inline tables", |d| {
+                (format!("x = {}\n", tables(d)), String::new())
+            }),
+            ("arrays", |d| {
+                (format!("x = {}\n", arrays(d)), String::new())
+            }),
+            ("tables in arrays", |d| {
+                let open = "[{ a = ".repeat(d);
+                (format!("x = {open}1{}\n", " }]".repeat(d)), String::new())
+            }),
+            ("dotted key", |d| {
+                (format!("{} = 1\n", path("", d)), String::new())
+            }),
+            ("style", |d| {
+                (
+                    String::new(),
+                    format!("[node.n.style]\nx = {}\n", tables(d)),
+                )
+            }),
+            ("endpoint", |d| {
+                (String::new(), format!("x = {}\n", arrays(d)))
+            }),
+            ("label", |d| {
+                let label = format!("[[edge.e.labels]]\ntext = \"l\"\nx = {}\n", arrays(d));
+                (String::new(), label)
+            }),
+        ];
+        for (name, layout) in layouts {
+            let mut loaded = 0;
+            for depth in 1..=82 {
+                let (top, tail) = layout(depth);
+                let source = format!(
+                    "schema = 1\n{top}\n[node.n]\nat = [0, 0]\nsize = [1, 1]\n\n[edge.e]\nfrom = {{ node = \"n\" }}\n[edge.e.to]\nat = [0, 0]\n{tail}"
+                );
+                let Ok(board) = parse(&source) else {
+                    continue;
+                };
+                loaded += 1;
+                let written = crate::write(&board);
+                let again = parse(&written)
+                    .unwrap_or_else(|error| panic!("{name} at {depth}: {error}\n{written}"));
+                assert_eq!(crate::write(&again), written, "{name} at {depth}");
+            }
+            assert!(loaded >= 30, "{name}: only {loaded} depths load");
+        }
     }
 
     /// A wrong-typed value in each known field of a valid model, built as
