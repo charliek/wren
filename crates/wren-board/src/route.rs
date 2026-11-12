@@ -1,9 +1,14 @@
 //! Connector routes: the polyline between two ends, the side each end
 //! meets its node on, and the line and arrowheads drawn along it.
 //!
-//! A route is computed from the ends alone and never stored. There is no
-//! obstacle avoidance: an elbow route avoids only the two nodes it joins,
-//! and only where it has to turn back around them.
+//! A route is computed from the board and never stored. An elbow route
+//! avoids the other nodes where a small fixed set of candidate routes
+//! allows it (§3.7 of the plan has the rule): each connector is routed on
+//! its own against a lookup of the node boxes, so a later change can
+//! re-route only the connectors near it. A straight route is one segment
+//! between the ends, whatever lies between them.
+
+use std::collections::HashMap;
 
 use crate::scene::{Point, Rect, Segment};
 use crate::shape;
@@ -19,8 +24,37 @@ pub const ARROW_LENGTH: f32 = 10.0;
 /// The width of an arrowhead's base.
 pub const ARROW_WIDTH: f32 = 8.0;
 /// How far an elbow route runs straight out of a side before it may turn,
-/// when it has to turn back or go around a node.
+/// when it has to turn back or go around a node, and how far a detour
+/// keeps from the boxes it passes.
 pub const ELBOW_MARGIN: f32 = 20.0;
+/// How far a middle segment moves aside, per step, off a line another
+/// connector already runs on.
+pub const NUDGE: f32 = ELBOW_MARGIN / 2.0;
+/// What a turn costs when candidate routes are compared, in board units of
+/// length.
+pub const TURN_COST: f32 = 2.0 * ELBOW_MARGIN;
+/// What a segment on another connector's line or on a node's centre line
+/// costs.
+pub const SHARED_COST: f32 = 10.0 * ELBOW_MARGIN;
+/// What crossing another connector's line costs.
+pub const CROSSING_COST: f32 = 10.0 * ELBOW_MARGIN;
+/// A middle segment on the centre line of a node no further than this
+/// along the line runs where that node's connectors run.
+pub const REACH: f32 = 6.0 * ELBOW_MARGIN;
+/// Parallel segments this close are on one line.
+pub const LINE_TOLERANCE: f32 = 2.0;
+/// Segments on one line that share more than this length are drawn on top
+/// of one another.
+pub const SHARED_LENGTH: f32 = 4.0;
+/// A route this close to a node's box enters it.
+const CLEARANCE: f32 = 1.0;
+/// At most this many channel positions are tried per template, nearest
+/// the template's own first; a two-channel template takes this many of
+/// each.
+const CHANNELS: usize = 6;
+const PAIR_CHANNELS: usize = 4;
+/// How many times a detour is pushed past the boxes it still crosses.
+const PUSHES: usize = 4;
 
 /// How an end attached to a node meets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,36 +153,107 @@ pub struct Drawn {
     pub heads: Vec<Vec<Segment>>,
 }
 
-/// The route of `kind` between two ends. A floating end is always drawn on
-/// its nominal side, so it meets the rule of §5.12 rule 4 for every pair.
+/// The route of `kind` between two ends with nothing else on the board.
 pub fn route(kind: Route, from: &Terminal, to: &Terminal) -> Routed {
-    let (from_box, to_box) = (from.bounds(), to.bounds());
-    let exit = nominal_exit(from_box, to_box);
-    let (a, a_side, a_shown) = end(from, exit);
-    let (b, b_side, b_shown) = end(to, exit.opposite());
-    // Ends that meet, as on touching sides, have nothing to route.
-    let points = if a == b || kind == Route::Straight {
-        vec![a, b]
-    } else {
-        elbow(a, a_side, from_box, b, b_side, to_box)
+    route_among(kind, from, to, &Obstacles::default(), [None, None])
+}
+
+/// The route of `kind` between two ends among the node boxes of
+/// `obstacles`, `ends` naming the index of each end's own node there, so
+/// that the route may leave and enter them.
+///
+/// A floating end is drawn on its nominal side whenever the two boxes
+/// overlap on at most one axis (§5.12 rule 4); when they are apart on both
+/// axes an elbow route may take any side of a floating end. Pinned sides
+/// and anchors are always honoured, and a straight route is one segment
+/// between the nominal ends.
+pub fn route_among(
+    kind: Route,
+    from: &Terminal,
+    to: &Terminal,
+    obstacles: &Obstacles,
+    ends: [Option<usize>; 2],
+) -> Routed {
+    let mut router = Router {
+        obstacles: &obstacles.0,
+        own: ends,
+        lines: None,
+        found: Vec::new(),
     };
-    Routed {
-        points,
-        sides: [a_shown, b_shown],
-        outward: [a_side, b_side],
+    router.route(kind, from, to)
+}
+
+/// One connector of a board, for [`route_all`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Connector {
+    pub kind: Route,
+    pub ends: [Terminal; 2],
+    /// The index of each end's node in the boxes given to [`route_all`].
+    pub nodes: [Option<usize>; 2],
+}
+
+/// The routes of every connector of a board among the boxes of all its
+/// nodes, in the order given, which is also the order in which a middle
+/// segment that would lie on an earlier connector's line moves aside.
+///
+/// Connectors whose sides are fixed (straight ones, pinned and anchored
+/// ends, and floating ends that rule 4 holds to their nominal side) are
+/// routed against the boxes alone. A connector with a free choice of side
+/// is then routed against the boxes and the lines of those fixed
+/// connectors, so that it neither runs along nor needlessly crosses them.
+/// Last, middle segments that still lie on another connector's line move
+/// aside by [`NUDGE`] steps.
+pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
+    let obstacles = Grid::new(boxes.iter().copied());
+    let free: Vec<bool> = connectors
+        .iter()
+        .map(|c| c.kind == Route::Elbow && has_choice(&c.ends[0], &c.ends[1]))
+        .collect();
+    let mut routes: Vec<Option<Routed>> = vec![None; connectors.len()];
+    let mut fixed = Lines::default();
+    for (i, connector) in connectors.iter().enumerate() {
+        if free[i] {
+            continue;
+        }
+        let mut router = Router {
+            obstacles: &obstacles,
+            own: connector.nodes,
+            lines: None,
+            found: Vec::new(),
+        };
+        let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
+        for pair in routed.points.windows(2) {
+            fixed.insert(pair[0], pair[1], i);
+        }
+        routes[i] = Some(routed);
     }
+    for (i, connector) in connectors.iter().enumerate() {
+        if free[i] {
+            let mut router = Router {
+                obstacles: &obstacles,
+                own: connector.nodes,
+                lines: Some(&fixed),
+                found: Vec::new(),
+            };
+            routes[i] = Some(router.route(connector.kind, &connector.ends[0], &connector.ends[1]));
+        }
+    }
+    let mut routes: Vec<Routed> = routes.into_iter().flatten().collect();
+    separate(&obstacles, connectors, &mut routes);
+    routes
 }
 
 /// Where an end meets its node and the side it leaves by, a floating end
 /// and a free point taking `nominal`. A connector whose other end names
 /// no node draws its stub from here.
 pub fn leave(terminal: &Terminal, nominal: Side) -> (Point, Side) {
-    let (point, side, _) = end(terminal, nominal);
+    let (point, side, _) = end(terminal, nominal, nominal);
     (point, side)
 }
 
-/// Where an end is, the side it leaves by, and the side it reports.
-fn end(terminal: &Terminal, nominal: Side) -> (Point, Side, Option<Side>) {
+/// Where an end is, the side it leaves by, and the side it reports: a
+/// floating end on `side`, a free point leaving by `nominal`.
+fn end(terminal: &Terminal, side: Side, nominal: Side) -> (Point, Side, Option<Side>) {
     match *terminal {
         Terminal::Point(p) => (p, nominal, None),
         Terminal::Node {
@@ -157,7 +262,7 @@ fn end(terminal: &Terminal, nominal: Side) -> (Point, Side, Option<Side>) {
             attach,
         } => {
             let (point, side) = match attach {
-                Attach::Floating => (shape::side_point(shape, bounds, nominal), nominal),
+                Attach::Floating => (shape::side_point(shape, bounds, side), side),
                 Attach::Side(side) => (shape::side_point(shape, bounds, side), side),
                 Attach::Anchor(anchor) => (
                     shape::anchor_point(bounds, anchor),
@@ -167,6 +272,48 @@ fn end(terminal: &Terminal, nominal: Side) -> (Point, Side, Option<Side>) {
             (point, side, Some(side))
         }
     }
+}
+
+/// Whether two spans overlap by more than a point.
+fn overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> bool {
+    a0 < b1 && b0 < a1
+}
+
+/// Whether a floating end of this pair may take a side other than its
+/// nominal one: only when the boxes are apart on both axes, so rule 4
+/// holds wherever it applies.
+fn apart_on_both_axes(a: Rect, b: Rect) -> bool {
+    !overlap(a.x, a.right(), b.x, b.right()) && !overlap(a.y, a.bottom(), b.y, b.bottom())
+}
+
+/// Whether an elbow route between these ends has a side to choose.
+fn has_choice(from: &Terminal, to: &Terminal) -> bool {
+    let floating = |t: &Terminal| {
+        matches!(
+            t,
+            Terminal::Node {
+                attach: Attach::Floating,
+                ..
+            }
+        )
+    };
+    (floating(from) || floating(to)) && apart_on_both_axes(from.bounds(), to.bounds())
+}
+
+/// The sides an end may take, `nominal` first.
+fn choices(terminal: &Terminal, nominal: Side, free: bool) -> Vec<Side> {
+    let floating = matches!(
+        terminal,
+        Terminal::Node {
+            attach: Attach::Floating,
+            ..
+        }
+    );
+    let mut sides = vec![nominal];
+    if free && floating {
+        sides.extend(Side::ALL.iter().copied().filter(|&s| s != nominal));
+    }
+    sides
 }
 
 /// The side an anchor faces: the side of the box nearest to it, the
@@ -319,6 +466,857 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
 
 fn distance(a: Point, b: Point) -> f32 {
     (b.x - a.x).hypot(b.y - a.y)
+}
+
+/// The node boxes a route keeps out of, looked up by area.
+#[derive(Clone, Debug, Default)]
+pub struct Obstacles(Grid);
+
+impl Obstacles {
+    /// The boxes, each named by its index in the order given.
+    pub fn new(boxes: impl IntoIterator<Item = Rect>) -> Self {
+        Self(Grid::new(boxes))
+    }
+}
+
+/// Rectangles bucketed into square cells, so a query visits only those
+/// near its area. A rectangle over too many cells is kept in a list every
+/// query checks, and a query over too many cells checks every rectangle,
+/// so neither a huge box nor a huge query costs more than a scan.
+#[derive(Clone, Debug, Default)]
+struct Grid {
+    rects: Vec<Rect>,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+    large: Vec<u32>,
+}
+
+const CELL: f32 = 256.0;
+const MAX_CELLS: i64 = 64;
+
+impl Grid {
+    fn new(rects: impl IntoIterator<Item = Rect>) -> Self {
+        let mut grid = Self::default();
+        for rect in rects {
+            grid.insert(rect);
+        }
+        grid
+    }
+
+    fn cells_of(r: Rect) -> ([i32; 2], [i32; 2], i64) {
+        // A saturating cast: coordinates are clamped far inside i32 anyway.
+        let cell = |v: f32| (v / CELL).floor() as i32;
+        let (x, y) = ([cell(r.x), cell(r.right())], [cell(r.y), cell(r.bottom())]);
+        let count =
+            (i64::from(x[1]) - i64::from(x[0]) + 1) * (i64::from(y[1]) - i64::from(y[0]) + 1);
+        (x, y, count)
+    }
+
+    fn insert(&mut self, rect: Rect) {
+        let index = self.rects.len() as u32;
+        self.rects.push(rect);
+        let (x, y, count) = Self::cells_of(rect);
+        if count > MAX_CELLS {
+            self.large.push(index);
+            return;
+        }
+        for cx in x[0]..=x[1] {
+            for cy in y[0]..=y[1] {
+                self.cells.entry((cx, cy)).or_default().push(index);
+            }
+        }
+    }
+
+    /// The indices of the rectangles touching `area`, ascending.
+    fn query(&self, area: Rect, out: &mut Vec<u32>) {
+        out.clear();
+        let (x, y, count) = Self::cells_of(area);
+        if count > self.rects.len() as i64 {
+            out.extend(0..self.rects.len() as u32);
+        } else {
+            for cx in x[0]..=x[1] {
+                for cy in y[0]..=y[1] {
+                    if let Some(found) = self.cells.get(&(cx, cy)) {
+                        out.extend_from_slice(found);
+                    }
+                }
+            }
+            out.extend_from_slice(&self.large);
+        }
+        out.retain(|&i| touches(self.rects[i as usize], area));
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+fn touches(a: Rect, b: Rect) -> bool {
+    a.x <= b.right() && b.x <= a.right() && a.y <= b.bottom() && b.y <= a.bottom()
+}
+
+fn grow(r: Rect, by: f32) -> Rect {
+    Rect::new(r.x - by, r.y - by, r.width + 2.0 * by, r.height + 2.0 * by)
+}
+
+/// The smallest box holding both.
+fn hull(a: Rect, b: Rect) -> Rect {
+    let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+    Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
+}
+
+fn segment_box(p: Point, q: Point) -> Rect {
+    hull(Rect::new(p.x, p.y, 0.0, 0.0), Rect::new(q.x, q.y, 0.0, 0.0))
+}
+
+/// Whether the segment from `p` to `q` reaches inside `r` grown by
+/// `clearance`. Exact for the axis-aligned segments of an elbow route.
+fn enters(p: Point, q: Point, r: Rect, clearance: f32) -> bool {
+    let s = segment_box(p, q);
+    s.x < r.right() + clearance
+        && s.right() > r.x - clearance
+        && s.y < r.bottom() + clearance
+        && s.bottom() > r.y - clearance
+}
+
+/// Segments already drawn, with the connector each belongs to.
+#[derive(Clone, Debug, Default)]
+struct Lines {
+    segments: Vec<(Point, Point, usize)>,
+    grid: Grid,
+    found: Vec<u32>,
+}
+
+impl Lines {
+    fn insert(&mut self, p: Point, q: Point, owner: usize) {
+        self.segments.push((p, q, owner));
+        self.grid.insert(grow(segment_box(p, q), LINE_TOLERANCE));
+    }
+
+    /// The segments of other connectors near the one from `p` to `q`.
+    fn near(&self, p: Point, q: Point, owner: Option<usize>, found: &mut Vec<u32>) {
+        self.grid.query(segment_box(p, q), found);
+        found.retain(|&i| Some(self.segments[i as usize].2) != owner);
+    }
+
+    /// Whether the segment from `p` to `q` lies on another connector's.
+    fn shares(&mut self, p: Point, q: Point, owner: Option<usize>) -> bool {
+        let mut found = std::mem::take(&mut self.found);
+        self.near(p, q, owner, &mut found);
+        let shared = found.iter().any(|&i| {
+            let (a, b, _) = self.segments[i as usize];
+            collinear_overlap(p, q, a, b) > SHARED_LENGTH
+        });
+        self.found = found;
+        shared
+    }
+
+    /// How many other connectors' segments the route crosses.
+    fn crossings(&mut self, points: &[Point], owner: Option<usize>) -> u32 {
+        let mut found = std::mem::take(&mut self.found);
+        let mut count = 0;
+        for pair in points.windows(2) {
+            self.near(pair[0], pair[1], owner, &mut found);
+            count += found
+                .iter()
+                .filter(|&&i| {
+                    let (a, b, _) = self.segments[i as usize];
+                    crosses(pair[0], pair[1], a, b)
+                })
+                .count() as u32;
+        }
+        self.found = found;
+        count
+    }
+}
+
+/// How long two segments run on one line together; 0 unless both are
+/// horizontal or both vertical, no more than [`LINE_TOLERANCE`] apart.
+fn collinear_overlap(p: Point, q: Point, a: Point, b: Point) -> f32 {
+    let span = |u0: f32, u1: f32, v0: f32, v1: f32| {
+        (u0.max(u1).min(v0.max(v1)) - u0.min(u1).max(v0.min(v1))).max(0.0)
+    };
+    if p.y == q.y && a.y == b.y && (p.y - a.y).abs() <= LINE_TOLERANCE {
+        span(p.x, q.x, a.x, b.x)
+    } else if p.x == q.x && a.x == b.x && (p.x - a.x).abs() <= LINE_TOLERANCE {
+        span(p.y, q.y, a.y, b.y)
+    } else {
+        0.0
+    }
+}
+
+/// Whether the axis-aligned segment from `p` to `q` crosses the segment
+/// from `a` to `b` at a point inside both; meeting at an end is not a
+/// crossing.
+fn crosses(p: Point, q: Point, a: Point, b: Point) -> bool {
+    let inside = |v: f32, s0: f32, s1: f32| s0.min(s1) < v && v < s0.max(s1);
+    if p.y == q.y {
+        let y = p.y;
+        if (a.y - y) * (b.y - y) >= 0.0 {
+            return false;
+        }
+        let x = a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y);
+        inside(x, p.x, q.x)
+    } else if p.x == q.x {
+        let x = p.x;
+        if (a.x - x) * (b.x - x) >= 0.0 {
+            return false;
+        }
+        let y = a.y + (x - a.x) * (b.y - a.y) / (b.x - a.x);
+        inside(y, p.y, q.y)
+    } else {
+        false
+    }
+}
+
+/// How a candidate route compares: fewer node boxes crossed first, then
+/// the lower cost.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Score {
+    crossings: u32,
+    cost: f32,
+}
+
+impl Score {
+    fn beats(self, other: Option<Score>) -> bool {
+        other.is_none_or(|o| {
+            self.crossings < o.crossings || (self.crossings == o.crossings && self.cost < o.cost)
+        })
+    }
+}
+
+/// Coordinates along a side's axis (`u`) and across it (`v`).
+#[derive(Clone, Copy)]
+struct Frame(bool);
+
+impl Frame {
+    fn of(side: Side) -> Self {
+        Self(side.is_horizontal())
+    }
+
+    fn point(self, u: f32, v: f32) -> Point {
+        if self.0 {
+            Point::new(u, v)
+        } else {
+            Point::new(v, u)
+        }
+    }
+
+    fn u(self, p: Point) -> f32 {
+        if self.0 {
+            p.x
+        } else {
+            p.y
+        }
+    }
+
+    fn v(self, p: Point) -> f32 {
+        if self.0 {
+            p.y
+        } else {
+            p.x
+        }
+    }
+
+    fn span_u(self, r: Rect) -> (f32, f32) {
+        if self.0 {
+            (r.x, r.right())
+        } else {
+            (r.y, r.bottom())
+        }
+    }
+
+    fn span_v(self, r: Rect) -> (f32, f32) {
+        Self(!self.0).span_u(r)
+    }
+}
+
+/// +1 when leaving `side` increases the coordinate, else −1.
+fn sign(side: Side) -> f32 {
+    match side {
+        Side::Right | Side::Bottom => 1.0,
+        Side::Top | Side::Left => -1.0,
+    }
+}
+
+/// The middle of the gap between two spans, if they are apart.
+fn gap_middle(a: (f32, f32), b: (f32, f32)) -> Option<f32> {
+    if a.1 <= b.0 {
+        Some((a.1 + b.0) / 2.0)
+    } else if b.1 <= a.0 {
+        Some((b.1 + a.0) / 2.0)
+    } else {
+        None
+    }
+}
+
+/// Channel positions to try: the valid ones of `values`, nearest
+/// `primary` first, at most `cap`.
+fn channels(primary: f32, values: &[f32], ok: impl Fn(f32) -> bool, cap: usize) -> Vec<f32> {
+    let mut out: Vec<f32> = values
+        .iter()
+        .copied()
+        .filter(|&c| c.is_finite() && ok(c))
+        .collect();
+    out.sort_by(|a, b| {
+        (a - primary)
+            .abs()
+            .total_cmp(&(b - primary).abs())
+            .then(a.total_cmp(b))
+    });
+    out.dedup();
+    out.truncate(cap);
+    out
+}
+
+/// Whether a route leaves its first point straight out of `da` and
+/// arrives at its last straight in through `db`.
+fn leaves_and_enters(points: &[Point], da: Side, db: Side) -> bool {
+    let out = |from: Point, to: Point, side: Side| {
+        let level = if side.is_horizontal() {
+            from.y == to.y
+        } else {
+            from.x == to.x
+        };
+        level && ahead(from, to, side) > 0.0
+    };
+    let n = points.len();
+    n >= 2 && out(points[0], points[1], da) && out(points[n - 1], points[n - 2], db)
+}
+
+/// The least cost any route between these sides can have: the distance
+/// between the ends along both axes and the turns the sides need.
+fn fewest(a: Point, da: Side, b: Point, db: Side) -> f32 {
+    let turns = if da.is_horizontal() != db.is_horizontal() {
+        1.0
+    } else if da == db.opposite() && ahead(a, b, da) > 0.0 && (a.x == b.x || a.y == b.y) {
+        0.0
+    } else {
+        2.0
+    };
+    (b.x - a.x).abs() + (b.y - a.y).abs() + TURN_COST * turns
+}
+
+fn length_of(points: &[Point]) -> f32 {
+    points.windows(2).map(|w| distance(w[0], w[1])).sum()
+}
+
+/// Routes one connector among the node boxes and, for a connector with a
+/// side to choose, the lines of the connectors whose sides are fixed.
+struct Router<'a> {
+    obstacles: &'a Grid,
+    /// The index of each end's node among the obstacles.
+    own: [Option<usize>; 2],
+    lines: Option<&'a Lines>,
+    found: Vec<u32>,
+}
+
+impl Router<'_> {
+    fn route(&mut self, kind: Route, from: &Terminal, to: &Terminal) -> Routed {
+        let (ra, rb) = (from.bounds(), to.bounds());
+        let exit = nominal_exit(ra, rb);
+        let entry = exit.opposite();
+        if kind == Route::Straight {
+            let (a, da, a_shown) = end(from, exit, exit);
+            let (b, db, b_shown) = end(to, entry, entry);
+            return Routed {
+                points: vec![a, b],
+                sides: [a_shown, b_shown],
+                outward: [da, db],
+            };
+        }
+        let free = apart_on_both_axes(ra, rb);
+        let from_sides = choices(from, exit, free);
+        let to_sides = choices(to, entry, free);
+        let single = from_sides.len() == 1 && to_sides.len() == 1;
+        let near = self.near(ra, rb);
+        let mut best: Option<(Score, Routed)> = None;
+        let mut hits = Vec::new();
+        let mut candidates: Vec<Vec<Point>> = Vec::new();
+        let mut first = true;
+        for &sa in &from_sides {
+            for &sb in &to_sides {
+                let (a, da, a_shown) = end(from, sa, exit);
+                let (b, db, b_shown) = end(to, sb, entry);
+                let routed = |points| Routed {
+                    points,
+                    sides: [a_shown, b_shown],
+                    outward: [da, db],
+                };
+                // Ends that meet, as on touching sides, have nothing to
+                // route. The plain route of the first pair is always a
+                // candidate, so a degenerate layout still draws one.
+                let plain = if a == b {
+                    Some(vec![a, b])
+                } else if first {
+                    Some(elbow(a, da, ra, b, db, rb))
+                } else {
+                    None
+                };
+                first = false;
+                if let Some(points) = plain {
+                    let base =
+                        length_of(&points) + TURN_COST * points.len().saturating_sub(2) as f32;
+                    if let Some(score) = self.score(&points, best.as_ref().map(|b| b.0), &mut hits)
+                    {
+                        if score.beats(best.as_ref().map(|b| b.0)) {
+                            let clean = score.crossings == 0 && score.cost == base;
+                            best = Some((score, routed(points)));
+                            if single && clean {
+                                // Nothing between the same sides is shorter
+                                // or turns less than the plain route.
+                                break;
+                            }
+                        }
+                    }
+                    if a == b {
+                        continue;
+                    }
+                }
+                let clean = best.as_ref().is_some_and(|b| b.0.crossings == 0);
+                if clean && fewest(a, da, b, db) >= best.as_ref().map_or(f32::MAX, |b| b.0.cost) {
+                    continue;
+                }
+                candidates.clear();
+                self.templates((a, da, ra), (b, db, rb), &near, !clean, &mut candidates);
+                for points in candidates.drain(..) {
+                    let points = simplify(points);
+                    if !leaves_and_enters(&points, da, db) {
+                        continue;
+                    }
+                    let Some(score) = self.score(&points, best.as_ref().map(|b| b.0), &mut hits)
+                    else {
+                        continue;
+                    };
+                    if score.beats(best.as_ref().map(|b| b.0)) {
+                        best = Some((score, routed(points)));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((_, routed)) => routed,
+            None => {
+                // Unreachable: the first pair always scores. Kept total.
+                let (a, da, a_shown) = end(from, exit, exit);
+                let (b, db, b_shown) = end(to, entry, entry);
+                Routed {
+                    points: vec![a, b],
+                    sides: [a_shown, b_shown],
+                    outward: [da, db],
+                }
+            }
+        }
+    }
+
+    /// The boxes near both ends, other than the ends' own, whose edges
+    /// give a detour its channels.
+    fn near(&mut self, ra: Rect, rb: Rect) -> Vec<Rect> {
+        let area = grow(hull(ra, rb), 4.0 * ELBOW_MARGIN);
+        self.obstacles.query(area, &mut self.found);
+        self.found
+            .iter()
+            .filter(|&&i| !self.own.contains(&Some(i as usize)))
+            .map(|&i| self.obstacles.rects[i as usize])
+            .collect()
+    }
+
+    /// The candidate routes between two sides: the plain route's shape with
+    /// its channel moved to each position worth trying (the middle of a
+    /// gap, [`ELBOW_MARGIN`] outside a nearby box, [`NUDGE`] either side of
+    /// the plain one), and detours pushed past the boxes they cross.
+    fn templates(
+        &mut self,
+        (a, da, ra): (Point, Side, Rect),
+        (b, db, rb): (Point, Side, Rect),
+        near: &[Rect],
+        pushes: bool,
+        out: &mut Vec<Vec<Point>>,
+    ) {
+        let m = ELBOW_MARGIN;
+        let f = Frame::of(da);
+        let (au, av, bu, bv) = (f.u(a), f.v(a), f.u(b), f.v(b));
+        let sa = sign(da);
+        let sb = sign(db);
+        let edges = |span: fn(Frame, Rect) -> (f32, f32)| -> Vec<f32> {
+            near.iter()
+                .flat_map(|&r| {
+                    let (lo, hi) = span(f, r);
+                    [lo - m, hi + m]
+                })
+                .collect()
+        };
+        let (edges_u, edges_v) = (edges(Frame::span_u), edges(Frame::span_v));
+        let (ra_u, rb_u) = (f.span_u(ra), f.span_u(rb));
+        let (ra_v, rb_v) = (f.span_v(ra), f.span_v(rb));
+        if da.is_horizontal() == db.is_horizontal() {
+            let (qa, qb) = (au + sa * m, bu + sb * m);
+            let p3 = move |c: f32| vec![a, f.point(c, av), f.point(c, bv), b];
+            let p5 = move |k: f32| {
+                vec![
+                    a,
+                    f.point(qa, av),
+                    f.point(qa, k),
+                    f.point(qb, k),
+                    f.point(qb, bv),
+                    b,
+                ]
+            };
+            let beyond = [ra_v.0.min(rb_v.0) - m, ra_v.1.max(rb_v.1) + m];
+            if sa == -sb && (bu - au) * sa > 0.0 {
+                // Facing sides: a Z with its middle anywhere between the
+                // ends, or out, around and back in.
+                let mid = (au + bu) / 2.0;
+                let mut values = vec![mid, mid - NUDGE, mid + NUDGE, qa, qb];
+                values.extend(&edges_u);
+                let ok = |c: f32| (c - au) * sa > 0.0 && (c - bu) * sb > 0.0;
+                for c in channels(mid, &values, ok, CHANNELS) {
+                    out.push(p3(c));
+                }
+                if (qb - qa) * sa >= 0.0 {
+                    let mut values = beyond.to_vec();
+                    values.extend(&edges_v);
+                    for k in channels(av, &values, |_| true, CHANNELS) {
+                        out.push(p5(k));
+                    }
+                    for dir in [-1.0, 1.0] {
+                        if let Some(k) = pushes
+                            .then(|| self.push_out(&p5, av, dir, Frame::span_v, f))
+                            .flatten()
+                        {
+                            out.push(p5(k));
+                        }
+                    }
+                }
+            } else if sa == -sb {
+                // Sides facing away: out of each, across, and back in.
+                let k0 = gap_middle(ra_v, rb_v).unwrap_or(ra_v.1.max(rb_v.1) + m);
+                let mut values = vec![k0, k0 - NUDGE, k0 + NUDGE];
+                values.extend(beyond);
+                values.extend(&edges_v);
+                for k in channels(k0, &values, |_| true, CHANNELS) {
+                    out.push(p5(k));
+                }
+                for dir in [-1.0, 1.0] {
+                    if let Some(k) = pushes
+                        .then(|| self.push_out(&p5, k0, dir, Frame::span_v, f))
+                        .flatten()
+                    {
+                        out.push(p5(k));
+                    }
+                }
+            } else {
+                // The same side of both: a U beyond the further box, or
+                // beyond the boxes in its way.
+                let edge = if sa > 0.0 {
+                    ra_u.1.max(rb_u.1) + m
+                } else {
+                    ra_u.0.min(rb_u.0) - m
+                };
+                let mut values = vec![edge, edge + sa * NUDGE];
+                values.extend(&edges_u);
+                let ok = |c: f32| (c - edge) * sa >= 0.0;
+                for c in channels(edge, &values, ok, CHANNELS) {
+                    out.push(p3(c));
+                }
+                if let Some(c) = pushes
+                    .then(|| self.push_out(&p3, edge, sa, Frame::span_u, f))
+                    .flatten()
+                {
+                    out.push(p3(c));
+                }
+            }
+        } else {
+            // Perpendicular sides: one turn where the corner allows it,
+            // else out of each side and across between them.
+            out.push(vec![a, f.point(bu, av), b]);
+            let (qa, qb) = (au + sa * m, bv + sb * m);
+            let mut first = vec![qa];
+            first.extend(gap_middle(ra_u, rb_u));
+            first.extend(&edges_u);
+            let mut second = vec![qb];
+            second.extend(gap_middle(ra_v, rb_v));
+            second.extend(&edges_v);
+            let firsts = channels(qa, &first, |c| (c - au) * sa > 0.0, PAIR_CHANNELS);
+            let seconds = channels(qb, &second, |c| (c - bv) * sb > 0.0, PAIR_CHANNELS);
+            for &c1 in &firsts {
+                for &c2 in &seconds {
+                    out.push(vec![
+                        a,
+                        f.point(c1, av),
+                        f.point(c1, c2),
+                        f.point(bu, c2),
+                        b,
+                    ]);
+                }
+            }
+        }
+    }
+
+    /// A channel position for `template` past every box its route crosses,
+    /// moving from `start` in direction `dir` along the coordinate `span`
+    /// reads, at most [`PUSHES`] times; `None` if it is already clear or
+    /// cannot move.
+    fn push_out(
+        &mut self,
+        template: &dyn Fn(f32) -> Vec<Point>,
+        start: f32,
+        dir: f32,
+        span: fn(Frame, Rect) -> (f32, f32),
+        f: Frame,
+    ) -> Option<f32> {
+        let mut c = start;
+        let mut hits = Vec::new();
+        for _ in 0..PUSHES {
+            self.hits(&simplify(template(c)), &mut hits);
+            if hits.is_empty() {
+                return (c != start).then_some(c);
+            }
+            let past = hits
+                .iter()
+                .map(|&i| {
+                    let (lo, hi) = span(f, self.obstacles.rects[i as usize]);
+                    if dir > 0.0 {
+                        hi + ELBOW_MARGIN
+                    } else {
+                        lo - ELBOW_MARGIN
+                    }
+                })
+                .fold(c, |acc, v| if (v - acc) * dir > 0.0 { v } else { acc });
+            if past == c || !past.is_finite() {
+                break;
+            }
+            c = past;
+        }
+        (c != start).then_some(c)
+    }
+
+    /// The node boxes the route enters, ascending: any but its own, and
+    /// its own except by the segment that leaves or arrives at it.
+    fn hits(&mut self, points: &[Point], out: &mut Vec<u32>) {
+        out.clear();
+        let last = points.len().saturating_sub(2);
+        let grid = self.obstacles;
+        for (i, pair) in points.windows(2).enumerate() {
+            let (p, q) = (pair[0], pair[1]);
+            grid.query(grow(segment_box(p, q), CLEARANCE), &mut self.found);
+            for &k in &self.found {
+                let from = self.own[0] == Some(k as usize);
+                let to = self.own[1] == Some(k as usize);
+                if (from && i == 0) || (to && i == last) {
+                    continue;
+                }
+                let clearance = if from || to { 0.0 } else { CLEARANCE };
+                if enters(p, q, grid.rects[k as usize], clearance) {
+                    out.push(k);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// How many middle segments lie on the centre line of a node within
+    /// [`REACH`] along it, and how many segments lie on a fixed
+    /// connector's line; and how many fixed connectors' lines it crosses.
+    fn penalties(&mut self, points: &[Point]) -> (u32, u32) {
+        let mut shared = 0;
+        let n = points.len().saturating_sub(1);
+        let grid = self.obstacles;
+        for (i, pair) in points.windows(2).enumerate() {
+            if i == 0 || i + 1 == n {
+                continue;
+            }
+            let (p, q) = (pair[0], pair[1]);
+            let (horizontal, vertical) = (p.y == q.y, p.x == q.x);
+            if horizontal == vertical {
+                continue;
+            }
+            let s = segment_box(p, q);
+            let area = if horizontal {
+                Rect::new(
+                    s.x - REACH,
+                    s.y - LINE_TOLERANCE,
+                    s.width + 2.0 * REACH,
+                    2.0 * LINE_TOLERANCE,
+                )
+            } else {
+                Rect::new(
+                    s.x - LINE_TOLERANCE,
+                    s.y - REACH,
+                    2.0 * LINE_TOLERANCE,
+                    s.height + 2.0 * REACH,
+                )
+            };
+            grid.query(area, &mut self.found);
+            let on_centre = self.found.iter().any(|&k| {
+                let c = grid.rects[k as usize].center();
+                !self.own.contains(&Some(k as usize))
+                    && if horizontal {
+                        (c.y - p.y).abs() <= LINE_TOLERANCE
+                    } else {
+                        (c.x - p.x).abs() <= LINE_TOLERANCE
+                    }
+            });
+            shared += u32::from(on_centre);
+        }
+        let mut crossed = 0;
+        if let Some(lines) = self.lines {
+            for pair in points.windows(2) {
+                let (p, q) = (pair[0], pair[1]);
+                lines.near(p, q, None, &mut self.found);
+                let mut on_line = false;
+                for &k in &self.found {
+                    let (a, b, _) = lines.segments[k as usize];
+                    if collinear_overlap(p, q, a, b) > SHARED_LENGTH {
+                        on_line = true;
+                    } else if crosses(p, q, a, b) {
+                        crossed += 1;
+                    }
+                }
+                shared += u32::from(on_line);
+            }
+        }
+        (shared, crossed)
+    }
+
+    /// The score of a candidate, or `None` when it cannot beat `best`.
+    fn score(
+        &mut self,
+        points: &[Point],
+        best: Option<Score>,
+        hits: &mut Vec<u32>,
+    ) -> Option<Score> {
+        let turns = points.len().saturating_sub(2) as f32;
+        let mut cost = length_of(points) + TURN_COST * turns;
+        if best.is_some_and(|b| b.crossings == 0 && cost >= b.cost) {
+            return None;
+        }
+        self.hits(points, hits);
+        let crossings = hits.len() as u32;
+        if best.is_some_and(|b| {
+            crossings > b.crossings || (crossings == b.crossings && cost >= b.cost)
+        }) {
+            return None;
+        }
+        let (shared, crossed) = self.penalties(points);
+        cost += SHARED_COST * shared as f32 + CROSSING_COST * crossed as f32;
+        Some(Score { crossings, cost })
+    }
+}
+
+/// Moves aside, in connector order, each middle segment of an elbow route
+/// that lies on a line already drawn: a straight connector's, the first or
+/// last segment of any connector's, or an earlier connector's middle
+/// segment. It moves by [`NUDGE`], twice that or three times, either way,
+/// to the first place that is on no other line, enters no more boxes and
+/// keeps every segment's direction, preferring fewer crossings and then
+/// the longer of its neighbours; where there is none it stays.
+fn separate(obstacles: &Grid, connectors: &[Connector], routes: &mut [Routed]) {
+    let mut placed = Lines::default();
+    for (i, (connector, routed)) in connectors.iter().zip(routes.iter()).enumerate() {
+        let last = routed.points.len().saturating_sub(2);
+        for (j, pair) in routed.points.windows(2).enumerate() {
+            if connector.kind != Route::Elbow || j == 0 || j == last {
+                placed.insert(pair[0], pair[1], i);
+            }
+        }
+    }
+    for (i, connector) in connectors.iter().enumerate() {
+        if connector.kind != Route::Elbow {
+            continue;
+        }
+        let mut router = Router {
+            obstacles,
+            own: connector.nodes,
+            lines: None,
+            found: Vec::new(),
+        };
+        let points = &mut routes[i].points;
+        let mut j = 1;
+        while j + 2 < points.len() {
+            if placed.shares(points[j], points[j + 1], Some(i)) {
+                if let Some(moved) = nudge(&mut router, &mut placed, points, j, i) {
+                    *points = moved;
+                }
+            }
+            j += 1;
+        }
+        for j in 1..points.len().saturating_sub(2) {
+            placed.insert(points[j], points[j + 1], i);
+        }
+    }
+}
+
+/// The route with middle segment `j` moved aside, as [`separate`] says.
+fn nudge(
+    router: &mut Router<'_>,
+    placed: &mut Lines,
+    points: &[Point],
+    j: usize,
+    owner: usize,
+) -> Option<Vec<Point>> {
+    let (p, q) = (points[j], points[j + 1]);
+    let (before, after) = (points[j - 1], points[j + 2]);
+    let horizontal = p.y == q.y;
+    let across = |pt: Point| if horizontal { pt.y } else { pt.x };
+    let level = |a: Point, b: Point| if horizontal { a.x == b.x } else { a.y == b.y };
+    if !(horizontal || p.x == q.x) || !level(before, p) || !level(q, after) {
+        return None;
+    }
+    let mut hits = Vec::new();
+    router.hits(points, &mut hits);
+    let entered = hits.len();
+    let shortest = |index: usize| {
+        if index == 0 || index + 2 == points.len() {
+            ARROW_LENGTH
+        } else {
+            1.0
+        }
+    };
+    let (lead, trail) = (across(p) - across(before), across(after) - across(q));
+    let mut best: Option<((u32, f32, f32), Vec<Point>)> = None;
+    for d in [1.0, -1.0, 2.0, -2.0, 3.0, -3.0].map(|n| n * NUDGE) {
+        let (new_lead, new_trail) = (lead + d, trail - d);
+        if new_lead * lead <= 0.0
+            || new_trail * trail <= 0.0
+            || new_lead.abs() < shortest(j - 1)
+            || new_trail.abs() < shortest(j + 1)
+        {
+            continue;
+        }
+        let mut moved = points.to_vec();
+        for at in [j, j + 1] {
+            if horizontal {
+                moved[at].y += d;
+            } else {
+                moved[at].x += d;
+            }
+        }
+        if placed.shares(moved[j], moved[j + 1], Some(owner))
+            || (placed.shares(moved[j - 1], moved[j], Some(owner))
+                && !placed.shares(points[j - 1], points[j], Some(owner)))
+            || (placed.shares(moved[j + 1], moved[j + 2], Some(owner))
+                && !placed.shares(points[j + 1], points[j + 2], Some(owner)))
+        {
+            continue;
+        }
+        router.hits(&moved, &mut hits);
+        if hits.len() > entered {
+            continue;
+        }
+        let key = (
+            placed.crossings(&moved, Some(owner)),
+            d.abs(),
+            -new_lead.abs().min(new_trail.abs()),
+        );
+        if best.as_ref().is_none_or(|(b, _)| key < *b) {
+            best = Some((key, moved));
+        }
+    }
+    best.map(|(_, moved)| moved)
 }
 
 impl Routed {
@@ -545,10 +1543,450 @@ mod tests {
 
     #[test]
     fn the_routing_table() {
-        // Every pair of ends (floating, the four pinned sides, anchors) on
-        // every layout, every shape, both routes, with a free end too.
+        let none = |_: Rect, _: Rect| Vec::new();
+        assert!(routing_table(none) > 20_000);
+    }
+
+    #[test]
+    fn the_routing_table_among_obstacles() {
+        // The same table with boxes between the two, beside each, across
+        // the gap and around the first, so every detour is exercised.
+        let around = |ra: Rect, rb: Rect| {
+            let (ca, cb) = (ra.center(), rb.center());
+            let mid = Point::new((ca.x + cb.x) / 2.0, (ca.y + cb.y) / 2.0);
+            vec![
+                Rect::new(mid.x - 20.0, mid.y - 20.0, 40.0, 40.0),
+                Rect::new(ra.x - 60.0, ra.y - 60.0, 30.0, 30.0),
+                Rect::new(ra.right() + 25.0, ra.y, 10.0, ra.height),
+                Rect::new(ra.x, ra.bottom() + 25.0, ra.width, 10.0),
+                Rect::new(rb.right() + 5.0, rb.bottom() + 5.0, 50.0, 50.0),
+                Rect::new(mid.x - 400.0, mid.y - 2.0, 800.0, 4.0),
+            ]
+        };
+        assert!(routing_table(around) > 20_000);
+    }
+
+    /// The boxes of `boxes` that a segment of `points` reaches inside.
+    fn entered(points: &[Point], boxes: &[Rect]) -> Vec<usize> {
+        (0..boxes.len())
+            .filter(|&i| points.windows(2).any(|w| enters(w[0], w[1], boxes[i], 0.0)))
+            .collect()
+    }
+
+    /// Elbow routes between two floating nodes with a third box in the way
+    /// or beside them: the route keeps out of it, rule 4 still holds where
+    /// it applies, and a box out of the way changes nothing.
+    #[test]
+    fn obstacles_between_and_beside_the_ends() {
+        use Side::*;
+        struct Case {
+            name: &'static str,
+            a: Rect,
+            b: Rect,
+            obstacle: Rect,
+            /// The sides when rule 4 fixes them.
+            sides: Option<[Side; 2]>,
+            /// Whether the box is out of the way, so the route is the one
+            /// drawn with no box there.
+            aside: bool,
+        }
+        let cases = [
+            Case {
+                name: "between, in a column",
+                a: A,
+                b: Rect::new(0.0, 240.0, 120.0, 60.0),
+                obstacle: Rect::new(0.0, 120.0, 120.0, 60.0),
+                sides: Some([Bottom, Top]),
+                aside: false,
+            },
+            Case {
+                name: "between, in a row",
+                a: A,
+                b: Rect::new(400.0, 0.0, 120.0, 60.0),
+                obstacle: Rect::new(200.0, -10.0, 120.0, 80.0),
+                sides: Some([Right, Left]),
+                aside: false,
+            },
+            Case {
+                name: "wider than both, in a column",
+                a: A,
+                b: Rect::new(20.0, 300.0, 120.0, 60.0),
+                obstacle: Rect::new(-100.0, 140.0, 400.0, 60.0),
+                sides: Some([Bottom, Top]),
+                aside: false,
+            },
+            Case {
+                name: "across the Z of an offset column",
+                a: A,
+                b: Rect::new(80.0, 240.0, 120.0, 60.0),
+                obstacle: Rect::new(40.0, 130.0, 120.0, 40.0),
+                sides: Some([Bottom, Top]),
+                aside: false,
+            },
+            Case {
+                name: "at the corner of a diagonal",
+                a: A,
+                b: Rect::new(300.0, 300.0, 120.0, 60.0),
+                obstacle: Rect::new(320.0, 0.0, 80.0, 60.0),
+                sides: None,
+                aside: false,
+            },
+            Case {
+                name: "on the turn of a diagonal",
+                a: A,
+                b: Rect::new(300.0, 300.0, 120.0, 60.0),
+                obstacle: Rect::new(0.0, 300.0, 200.0, 60.0),
+                sides: None,
+                aside: false,
+            },
+            Case {
+                name: "beside a column",
+                a: A,
+                b: Rect::new(0.0, 240.0, 120.0, 60.0),
+                obstacle: Rect::new(200.0, 120.0, 120.0, 60.0),
+                sides: Some([Bottom, Top]),
+                aside: true,
+            },
+            Case {
+                name: "beside a row",
+                a: A,
+                b: Rect::new(400.0, 0.0, 120.0, 60.0),
+                obstacle: Rect::new(200.0, 200.0, 120.0, 60.0),
+                sides: Some([Right, Left]),
+                aside: true,
+            },
+            Case {
+                name: "beside a diagonal",
+                a: A,
+                b: Rect::new(300.0, 300.0, 120.0, 60.0),
+                obstacle: Rect::new(-300.0, 400.0, 120.0, 60.0),
+                sides: None,
+                aside: true,
+            },
+        ];
+        for case in cases {
+            let name = case.name;
+            let obstacles = Obstacles::new([case.a, case.b, case.obstacle]);
+            for &shape in Shape::ALL {
+                let end = |bounds| Terminal::Node {
+                    bounds,
+                    shape,
+                    attach: Attach::Floating,
+                };
+                let (from, to) = (end(case.a), end(case.b));
+                let routed = route_among(Route::Elbow, &from, &to, &obstacles, [Some(0), Some(1)]);
+                assert_sound(Route::Elbow, &from, &to, &routed, name);
+                let pts = &routed.points;
+                assert!(
+                    entered(pts, &[case.obstacle]).is_empty(),
+                    "{name}, {shape:?}: {pts:?} runs through the box"
+                );
+                if let Some(sides) = case.sides {
+                    assert_eq!(routed.sides, sides.map(Some), "{name}, {shape:?}");
+                }
+                let [da, db] = routed.sides.map(|s| s.unwrap());
+                assert!(leaves_and_enters(pts, da, db), "{name}, {shape:?}: {pts:?}");
+                if case.aside {
+                    assert_eq!(
+                        *pts,
+                        route(Route::Elbow, &from, &to).points,
+                        "{name}, {shape:?}"
+                    );
+                }
+                // A straight route is the same with or without the box.
+                assert_eq!(
+                    route_among(Route::Straight, &from, &to, &obstacles, [Some(0), Some(1)]),
+                    route(Route::Straight, &from, &to),
+                    "{name}, {shape:?}"
+                );
+            }
+        }
+    }
+
+    /// A box closed in on every side by touching boxes: every candidate
+    /// crosses one, and the best is still drawn, sound and the same each
+    /// time.
+    #[test]
+    fn a_route_is_drawn_when_avoidance_is_impossible() {
+        let walls = [
+            Rect::new(-120.0, -60.0, 360.0, 60.0),
+            Rect::new(-120.0, 60.0, 360.0, 60.0),
+            Rect::new(-120.0, 0.0, 120.0, 60.0),
+            Rect::new(120.0, 0.0, 120.0, 60.0),
+        ];
+        let b = Rect::new(600.0, 400.0, 120.0, 60.0);
+        let mut boxes = vec![A, b];
+        boxes.extend(walls);
+        let obstacles = Obstacles::new(boxes.clone());
+        for (fa, fb) in [
+            (Attach::Floating, Attach::Floating),
+            (Attach::Side(Side::Left), Attach::Floating),
+            (Attach::Anchor([500, 500]), Attach::Side(Side::Top)),
+        ] {
+            let (from, to) = (node(A, fa), node(b, fb));
+            let routed = route_among(Route::Elbow, &from, &to, &obstacles, [Some(0), Some(1)]);
+            assert_sound(Route::Elbow, &from, &to, &routed, "walled in");
+            assert!(!entered(&routed.points, &walls).is_empty(), "{routed:?}");
+            assert_eq!(
+                routed,
+                route_among(Route::Elbow, &from, &to, &obstacles, [Some(0), Some(1)])
+            );
+            let all = route_all(
+                &boxes,
+                &[Connector {
+                    kind: Route::Elbow,
+                    ends: [from, to],
+                    nodes: [Some(0), Some(1)],
+                }],
+            );
+            assert_eq!(all, [routed]);
+        }
+    }
+
+    #[test]
+    fn a_middle_segment_moves_off_a_nodes_centre_line() {
+        // A Z down from A to B, offset: its middle would run at y = 150,
+        // the centre line of C beside it, where C's connectors run.
+        let b = Rect::new(60.0, 240.0, 120.0, 60.0);
+        let c = Rect::new(200.0, 120.0, 120.0, 60.0);
+        let alone = route(
+            Route::Elbow,
+            &node(A, Attach::Floating),
+            &node(b, Attach::Floating),
+        );
+        assert_eq!(alone.points[1].y, 150.0);
+        let obstacles = Obstacles::new([A, b, c]);
+        let routed = route_among(
+            Route::Elbow,
+            &node(A, Attach::Floating),
+            &node(b, Attach::Floating),
+            &obstacles,
+            [Some(0), Some(1)],
+        );
+        assert_eq!(
+            routed.points,
+            [
+                p(60.0, 60.0),
+                p(60.0, 140.0),
+                p(120.0, 140.0),
+                p(120.0, 240.0)
+            ]
+        );
+        // Far enough along the line, the node no longer counts.
+        let far = Rect::new(60.0 + 120.0 + REACH + 1.0, 120.0, 120.0, 60.0);
+        let obstacles = Obstacles::new([A, b, far]);
+        let routed = route_among(
+            Route::Elbow,
+            &node(A, Attach::Floating),
+            &node(b, Attach::Floating),
+            &obstacles,
+            [Some(0), Some(1)],
+        );
+        assert_eq!(routed.points, alone.points);
+    }
+
+    #[test]
+    fn connectors_on_one_line_move_apart() {
+        // Two Zs down between two rows that cross over: both middles fall
+        // at y = 130 and overlap from x = 90 to 160. The second moves a
+        // nudge aside; ends and sides stay.
+        let boxes = [
+            A,
+            Rect::new(100.0, 200.0, 120.0, 60.0),
+            Rect::new(130.0, 0.0, 120.0, 60.0),
+            Rect::new(30.0, 200.0, 120.0, 60.0),
+        ];
+        let connector = |i: usize, j: usize| Connector {
+            kind: Route::Elbow,
+            ends: [
+                node(boxes[i], Attach::Floating),
+                node(boxes[j], Attach::Floating),
+            ],
+            nodes: [Some(i), Some(j)],
+        };
+        let routes = route_all(&boxes, &[connector(0, 1), connector(2, 3)]);
+        assert_eq!(
+            routes[0].points,
+            [
+                p(60.0, 60.0),
+                p(60.0, 130.0),
+                p(160.0, 130.0),
+                p(160.0, 200.0)
+            ]
+        );
+        assert_eq!(
+            routes[1].points,
+            [
+                p(190.0, 60.0),
+                p(190.0, 140.0),
+                p(90.0, 140.0),
+                p(90.0, 200.0)
+            ]
+        );
+        for routed in &routes {
+            assert_eq!(routed.sides, [Some(Side::Bottom), Some(Side::Top)]);
+        }
+        // Each alone keeps the middle of the gap.
+        let alone = route_all(&boxes, &[connector(2, 3)]);
+        assert_eq!(alone[0].points[1].y, 130.0);
+    }
+
+    #[test]
+    fn a_free_connector_keeps_off_the_lines_of_fixed_ones() {
+        // C to D runs straight down a column. A to B, apart on both axes,
+        // would otherwise turn into B's top beside that line, cross it, or
+        // share D's top; it takes a route that does none of these.
+        let boxes = [
+            Rect::new(200.0, 0.0, 120.0, 60.0),
+            Rect::new(0.0, 240.0, 120.0, 60.0),
+            Rect::new(0.0, 0.0, 120.0, 60.0),
+            Rect::new(0.0, 120.0, 120.0, 60.0),
+        ];
+        let floating = |i: usize| node(boxes[i], Attach::Floating);
+        let routes = route_all(
+            &boxes,
+            &[
+                Connector {
+                    kind: Route::Elbow,
+                    ends: [floating(2), floating(3)],
+                    nodes: [Some(2), Some(3)],
+                },
+                Connector {
+                    kind: Route::Elbow,
+                    ends: [floating(0), floating(1)],
+                    nodes: [Some(0), Some(1)],
+                },
+            ],
+        );
+        assert_eq!(routes[0].points, [p(60.0, 60.0), p(60.0, 120.0)]);
+        let free = &routes[1].points;
+        assert!(entered(free, &boxes[2..]).is_empty(), "{free:?}");
+        for w in free.windows(2) {
+            assert!(
+                !crosses(w[0], w[1], p(60.0, 60.0), p(60.0, 120.0)),
+                "{free:?}"
+            );
+            assert!(collinear_overlap(w[0], w[1], p(60.0, 60.0), p(60.0, 120.0)) == 0.0);
+        }
+        assert_eq!(routes[1].sides, [Some(Side::Bottom), Some(Side::Right)]);
+    }
+
+    /// Random boxes and connectors of every end form: routing all of them
+    /// is deterministic, finite and sound, honours pinned sides, and keeps
+    /// rule 4 for floating ends.
+    fn routes_hold(count: usize, seed: u64) {
+        let mut rng = Rng(seed);
+        let coordinate = |rng: &mut Rng| match rng.below(8) {
+            0 => *rng.pick(&[0.0, -16_777_216.0, 16_777_215.0, 0.5]),
+            _ => rng.below(1_200) as f32 - 200.0,
+        };
+        for round in 0..count {
+            let boxes: Vec<Rect> = (0..1 + rng.below(14))
+                .map(|_| {
+                    let (x, y) = (coordinate(&mut rng), coordinate(&mut rng));
+                    let wide = if rng.one_in(10) { 4_000 } else { 200 };
+                    let w = 1.0 + rng.below(wide) as f32;
+                    let h = 1.0 + rng.below(200) as f32;
+                    Rect::new(x, y, w, h)
+                })
+                .collect();
+            let connectors: Vec<Connector> = (0..rng.below(12))
+                .map(|_| {
+                    let end = |rng: &mut Rng| {
+                        if rng.one_in(6) {
+                            (
+                                Terminal::Point(Point::new(coordinate(rng), coordinate(rng))),
+                                None,
+                            )
+                        } else {
+                            let i = rng.below(boxes.len());
+                            let attach = match rng.below(4) {
+                                0 => Attach::Side(*rng.pick(Side::ALL)),
+                                1 => Attach::Anchor([
+                                    rng.below(1_200) as i32 - 100,
+                                    rng.below(1_200) as i32 - 100,
+                                ]),
+                                _ => Attach::Floating,
+                            };
+                            let shape = *rng.pick(Shape::ALL);
+                            (
+                                Terminal::Node {
+                                    bounds: boxes[i],
+                                    shape,
+                                    attach,
+                                },
+                                Some(i),
+                            )
+                        }
+                    };
+                    let (from, a) = end(&mut rng);
+                    let (to, b) = end(&mut rng);
+                    let kind = if rng.one_in(4) {
+                        Route::Straight
+                    } else {
+                        Route::Elbow
+                    };
+                    Connector {
+                        kind,
+                        ends: [from, to],
+                        nodes: [a, b],
+                    }
+                })
+                .collect();
+            let routes = route_all(&boxes, &connectors);
+            assert_eq!(routes, route_all(&boxes, &connectors), "{round}");
+            assert_eq!(routes.len(), connectors.len());
+            for (c, routed) in connectors.iter().zip(&routes) {
+                let case = format!("{round}: {c:?}");
+                assert_sound(c.kind, &c.ends[0], &c.ends[1], routed, &case);
+                let (ra, rb) = (c.ends[0].bounds(), c.ends[1].bounds());
+                let held = !apart_on_both_axes(ra, rb);
+                let exit = nominal_exit(ra, rb);
+                for (k, nominal) in [(0, exit), (1, exit.opposite())] {
+                    if let Terminal::Node {
+                        attach: Attach::Floating,
+                        ..
+                    } = c.ends[k]
+                    {
+                        if held || c.kind == Route::Straight {
+                            assert_eq!(routed.sides[k], Some(nominal), "{case}: {routed:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn random_routes_hold() {
+        routes_hold(300, 11);
+    }
+
+    #[test]
+    #[ignore = "full count; run by make fuzz-board"]
+    fn fuzz_random_routes_hold() {
+        routes_hold(20_000, 12);
+    }
+
+    /// Every pair of ends (floating, the four pinned sides, anchors) on
+    /// every layout, every shape, both routes, with a free end too, among
+    /// the boxes `others` places for the pair. Returns the node pairs run.
+    fn routing_table(others: impl Fn(Rect, Rect) -> Vec<Rect>) -> usize {
         let mut cases = 0;
         for (name, ra, rb) in layouts() {
+            let mut boxes = vec![ra, rb];
+            boxes.extend(others(ra, rb));
+            let obstacles = Obstacles::new(boxes);
+            let route = |kind, from: &Terminal, to: &Terminal| {
+                let own = |t: &Terminal, i| matches!(t, Terminal::Node { .. }).then_some(i);
+                let routed = route_among(kind, from, to, &obstacles, [own(from, 0), own(to, 1)]);
+                assert_eq!(
+                    routed,
+                    route_among(kind, from, to, &obstacles, [own(from, 0), own(to, 1)]),
+                    "routing is deterministic"
+                );
+                routed
+            };
             for &shape in Shape::ALL {
                 for &fa in &attaches() {
                     for &fb in &attaches() {
@@ -587,7 +2025,7 @@ mod tests {
                 }
             }
         }
-        assert!(cases > 20_000, "{cases}");
+        cases
     }
 
     #[test]
@@ -930,21 +2368,19 @@ mod tests {
             Attach::of(Some(&Named::Known(Side::Left)), None),
             Attach::Side(Side::Left)
         );
-        // A free end routes as a point and reports no side.
+        // A free end routes as a point, leaves by its nominal side and
+        // reports no side. Apart on both axes, the floating end may take
+        // any side, and one turn into A's right side beats a Z into its
+        // bottom.
         let free = route(
             Route::Elbow,
             &Terminal::Point(p(300.0, 200.0)),
             &node(A, Attach::Floating),
         );
-        assert_eq!(free.sides, [None, Some(Side::Bottom)]);
+        assert_eq!(free.sides, [None, Some(Side::Right)]);
         assert_eq!(
             free.points,
-            [
-                p(300.0, 200.0),
-                p(300.0, 130.0),
-                p(60.0, 130.0),
-                p(60.0, 60.0)
-            ]
+            [p(300.0, 200.0), p(300.0, 30.0), p(120.0, 30.0)]
         );
     }
 

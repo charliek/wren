@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="401.5" height="1341.5" viewBox="-40.75 -40.75 401.5 1341.5">
-<rect x="-40.75" y="-40.75" width="401.5" height="1341.5" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="431.5" height="1341.5" viewBox="-40.75 -40.75 431.5 1341.5">
+<rect x="-40.75" y="-40.75" width="431.5" height="1341.5" fill="#ffffff"/>
 <path d="M30 0L90 0C106.56854 0 120 13.4314575 120 30C120 46.568542 106.56854 60 90 60L30 60C13.4314575 60 0 46.568542 0 30C0 13.4314575 13.4314575 0 30 0Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
 <text x="42.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Start</text>
 <path d="M0 120L120 120L120 180L0 180Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
@@ -38,8 +38,8 @@
 <text x="232" y="645.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">customer</text>
 <path d="M260 540L260 590" fill="none" stroke="#202428" stroke-width="1.5"/>
 <path d="M260 600L256 590L264 590Z" fill="#202428"/>
-<path d="M260 600L260 510L60 510L60 430" fill="none" stroke="#202428" stroke-width="1.5"/>
-<path d="M60 420L64 430L56 430Z" fill="#202428"/>
+<path d="M320 630L340 630L340 390L130 390" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M120 390L130 386L130 394Z" fill="#202428"/>
 <path d="M0 600L120 600L120 660L0 660Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
 <text x="21.5" y="635.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Charge card</text>
 <path d="M60 540L60 590" fill="none" stroke="#202428" stroke-width="1.5"/>
@@ -56,8 +56,8 @@
 <path d="M200 750L190 754L190 746Z" fill="#202428"/>
 <path d="M150 740L170 740L170 760L150 760Z" fill="#ffffff"/>
 <text x="154" y="754.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">No</text>
-<path d="M260 720L260 690L60 690L60 670" fill="none" stroke="#202428" stroke-width="1.5"/>
-<path d="M60 660L64 670L56 670Z" fill="#202428"/>
+<path d="M260 720L260 700L140 700L140 630L130 630" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M120 630L130 626L130 634Z" fill="#202428"/>
 <path d="M0 840L120 840L120 900L0 900Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
 <text x="46" y="875.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Pack</text>
 <path d="M60 780L60 830" fill="none" stroke="#202428" stroke-width="1.5"/>
@@ -76,6 +76,6 @@
 <text x="49.5" y="1235.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">End</text>
 <path d="M60 1140L60 1190" fill="none" stroke="#202428" stroke-width="1.5"/>
 <path d="M60 1200L56 1190L64 1190Z" fill="#202428"/>
-<path d="M260 300L260 750L60 750L60 1190" fill="none" stroke="#202428" stroke-width="1.5"/>
-<path d="M60 1200L56 1190L64 1190Z" fill="#202428"/>
+<path d="M320 270L350 270L350 1230L130 1230" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M120 1230L130 1226L130 1234Z" fill="#202428"/>
 </svg>

@@ -42,10 +42,10 @@ edge rect-rounded path in 119.25,29.25 31.5x1.5 stroke #202428 1.5: M 120,30 L 1
 edge rect-rounded path in 150,26 10x8 fill #202428: M 160,30 L 150,34 L 150,26 Z
 edge pill-ellipse path in 439.25,29.25 31.5x1.5 stroke #202428 1.5 dash 6,4: M 440,30 L 470,30
 edge pill-ellipse path in 470,26 10x8 fill #202428: M 480,30 L 470,34 L 470,26 Z
-edge child-hexagon path in 119.25,329.25 241.5x111.5 stroke #202428 1.5: M 120,440 L 120,380 L 360,380 L 360,330
-edge child-hexagon path in 356,320 8x10 fill #202428: M 360,320 L 364,330 L 356,330 Z
-edge child-hexagon path in 221,370 38x20 fill #ffffff: M 221,370 L 259,370 L 259,390 L 221,390 Z
-edge child-hexagon text in 225,372 30x16 Regular 12 #202428
-  225,372 w 30 "elbow"
+edge child-hexagon path in 199.25,289.25 71.5x181.5 stroke #202428 1.5: M 200,470 L 250,470 L 250,290 L 270,290
+edge child-hexagon path in 270,286 10x8 fill #202428: M 280,290 L 270,294 L 270,286 Z
+edge child-hexagon path in 231,380 38x20 fill #ffffff: M 231,380 L 269,380 L 269,400 L 231,400 Z
+edge child-hexagon text in 235,382 30x16 Regular 12 #202428
+  235,382 w 30 "elbow"
 edge dangling path in 659.25,155.25 25.5x9.5 stroke #d02020 1.5: M 660,160 L 684,160 M 684,164 L 684,156
 edge dangling path in 656.25,152.25 6x6 fill #d02020: M 659.25,152.25 C 660.90686,152.25 662.25,153.59314 662.25,155.25 C 662.25,156.90686 660.90686,158.25 659.25,158.25 C 657.59314,158.25 656.25,156.90686 656.25,155.25 C 656.25,153.59314 657.59314,152.25 659.25,152.25 Z

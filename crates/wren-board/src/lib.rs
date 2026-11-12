@@ -613,6 +613,20 @@ mod tests {
                 i * 100
             );
         }
+        // The grid with every connector made diagonal, to the next row's
+        // right-hand neighbour: each has a side to choose and searches the
+        // whole candidate set among dense boxes. Printed for the record.
+        let diagonal = grid_board(1_000).replace("to = { node = \"n", "to = { node = \"m");
+        let mut diagonal = parse(&diagonal).unwrap();
+        for edge in diagonal.edges.values_mut() {
+            if let End::Node { node, .. } = &mut edge.to {
+                let i: usize = node[1..].parse().unwrap();
+                *node = format!("n{}", (i + 40).min(999));
+            }
+        }
+        let diagonal_ms = median_ms(9, || drop(scene::build(&diagonal, &palette, &measure)));
+        println!("1000 shapes, every connector diagonal: scene {diagonal_ms:.2} ms");
+
         let board = parse(&text).unwrap();
         let wide_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
         println!("50 wide labels of 8,000 words: scene {wide_ms:.2} ms");
