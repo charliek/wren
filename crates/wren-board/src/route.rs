@@ -71,7 +71,8 @@ const SEPARATE_BUDGET: u32 = 2048;
 /// How an end attached to a node meets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attach {
-    /// No `side` or `anchor`: the router picks the nominal side.
+    /// No `side` or `anchor`: the router picks the side, the nominal one
+    /// whenever the two boxes overlap on one axis (§5.12 rule 4).
     Floating,
     /// Pinned to the middle of a side.
     Side(Side),
@@ -148,8 +149,8 @@ pub struct Routed {
     /// points. An elbow route's segments are all horizontal or vertical.
     pub points: Vec<Point>,
     /// The side the route meets each node on, `from` then `to`: the pinned
-    /// side, the side an anchor faces, or the nominal side of a floating
-    /// end. `None` at a free end.
+    /// side, the side an anchor faces, or the side the router chose for a
+    /// floating end. `None` at a free end.
     pub sides: [Option<Side>; 2],
     /// The direction the route leaves each end in, outward, so an end
     /// with no length still has a heading for its arrowhead.
