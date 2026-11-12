@@ -15,6 +15,19 @@ class BoardFixtureTests(unittest.TestCase):
     def test_outputs_are_canonical_and_inputs_are_not(self):
         self.assertEqual(board_fixtures.problems(board_fixtures.committed(board_fixtures.fixtures())), [])
 
+    def test_every_output_is_toml_1_0_that_the_reference_writes_back(self):
+        """The Rust writer reproduces these bytes (wren-board's golden tests); here a stock
+        TOML 1.0 parser reads each, and the reference writer writes the same bytes."""
+        outputs = sorted(board_fixtures.GOLDEN.glob("*.out.wren-board"))
+        samples = [p for p in sorted(board_fixtures.SAMPLES.glob("*.wren-board"))
+                   if p.name != "Hand written.wren-board"]
+        self.assertGreater(len(outputs), 10)
+        for path in outputs + samples:
+            text = path.read_bytes().decode("utf-8")
+            with self.subTest(path.name):
+                tomllib.loads(text)
+                self.assertEqual(board_format.dump(board_format.load(text)), text)
+
     def test_every_input_has_its_output(self):
         names = {p.name for p in board_fixtures.GOLDEN.iterdir()}
         for name in names:

@@ -19,8 +19,10 @@ use std::fmt;
 mod fixtures;
 mod read;
 pub mod scene;
+mod write;
 
 pub use read::{parse, ParseError};
+pub use write::write;
 
 /// The editing grid, in board units. It is never stored, and off-grid
 /// values are valid.
