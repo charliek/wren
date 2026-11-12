@@ -15,12 +15,16 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+mod check;
 #[cfg(test)]
 mod fixtures;
 mod read;
 pub mod scene;
 mod write;
 
+pub use check::{
+    access, check, placements, Access, Issue, IssueKind, Placed, Reason, MAX_DEPTH, SCHEMA,
+};
 pub use read::{parse, ParseError};
 pub use write::write;
 

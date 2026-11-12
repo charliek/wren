@@ -1012,6 +1012,11 @@ mod tests {
         let mut rng = Rng(seed);
         for _ in 0..count {
             let board = random_board(&mut rng);
+            let _ = (
+                crate::check(&board),
+                crate::access(&board),
+                crate::placements(&board),
+            );
             let written = write(&board);
             assert_clean_bytes(&written);
             let again = parse(&written).unwrap_or_else(|error| panic!("{error}\n{written}"));
