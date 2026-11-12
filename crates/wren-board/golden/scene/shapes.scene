@@ -1,0 +1,51 @@
+bounds -0.75,-0.75 685.5x541.5
+node rect path in -0.75,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,0 L 120,0 L 120,60 L 0,60 Z
+node rect text in 28.5,20 63x20 Regular 14 #202428
+  28.5,20 w 63 "Rectangle"
+node rounded path in 159.25,-0.75 121.5x61.5 fill #e6ecf9 stroke #3060d0 1.5: M 168,0 L 272,0 C 276.41827,0 280,3.5817218 280,8 L 280,52 C 280,56.418278 276.41827,60 272,60 L 168,60 C 163.58173,60 160,56.418278 160,52 L 160,8 C 160,3.5817218 163.58173,0 168,0 Z
+node rounded text in 195.5,20 49x20 Regular 14 #202428
+  195.5,20 w 49 "Rounded"
+node pill path in 319.25,-0.75 121.5x61.5 fill #e6f2e8 stroke #309040 1.5: M 350,0 L 410,0 C 426.56854,0 440,13.4314575 440,30 C 440,46.568542 426.56854,60 410,60 L 350,60 C 333.43146,60 320,46.568542 320,30 C 320,13.4314575 333.43146,0 350,0 Z
+node pill text in 366,20 28x20 Regular 14 #202428
+  366,20 w 28 "Pill"
+node ellipse path in 479.25,-0.75 121.5x61.5 fill #f0e8f6 stroke #8040b0 1.5: M 540,0 C 573.1371,0 600,13.4314575 600,30 C 600,46.568542 573.1371,60 540,60 C 506.8629,60 480,46.568542 480,30 C 480,13.4314575 506.8629,0 540,0 Z
+node ellipse text in 515.5,20 49x20 Regular 14 #202428
+  515.5,20 w 49 "Ellipse"
+node diamond path in -0.75,119.25 141.5x81.5 fill #fdf9e8 stroke #f0d040 1.5: M 70,120 L 140,160 L 70,200 L 0,160 Z
+node diamond text in 45.5,150 49x20 Regular 14 #202428
+  45.5,150 w 49 "Diamond"
+node parallelogram path in 179.25,119.25 161.5x61.5 fill #f9eee2 stroke #d07010 1.5: M 200,120 L 340,120 L 320,180 L 180,180 Z
+node parallelogram text in 214.5,140 91x20 Regular 14 #202428
+  214.5,140 w 91 "Parallelogram"
+node cylinder path in 379.25,119.25 121.5x81.5 fill #e4f2f4 stroke #2090a0 1.5: M 380,132 C 380,125.37258 406.8629,120 440,120 C 473.1371,120 500,125.37258 500,132 L 500,188 C 500,194.62741 473.1371,200 440,200 C 406.8629,200 380,194.62741 380,188 Z
+node cylinder path in 379.25,119.25 121.5x81.5 stroke #2090a0 1.5: M 380,132 C 380,138.62741 406.8629,144 440,144 C 473.1371,144 500,138.62741 500,132
+node cylinder text in 412,160 56x20 Regular 14 #202428
+  412,160 w 56 "Cylinder"
+node document path in 539.25,119.25 121.5x81.5 fill #c03030 stroke #c03030 1.5: M 540,120 L 660,120 L 660,192 Q 630,176 600,192 Q 570,208 540,192 Z
+node document text in 572,144 56x20 Regular 14 #ffffff
+  572,144 w 56 "Document"
+node text text in 0,260 168x40 Regular 14 #202428
+  0,260 w 168 "Free text has no outline"
+  0,280 w 126 "and sits top left."
+node hexagon path in 279.25,259.25 161.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 280,260 L 440,260 L 440,320 L 280,320 Z
+node hexagon text in 314.5,280 91x20 Regular 14 #202428
+  314.5,280 w 91 "Unknown shape"
+node frame path in -0.75,359.25 401.5x181.5 stroke #808890 1.5 dash 6,4: M 0,360 L 400,360 L 400,540 L 0,540 Z
+node frame text in 4,364 30x16 Regular 12 #808890
+  4,364 w 30 "frame"
+node frame text in 67,440 266x20 Regular 14 #202428
+  67,440 w 266 "Frame, a kind this build does not know"
+node child path in 39.25,439.25 161.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 40,440 L 200,440 L 200,500 L 40,500 Z
+node child text in 57,460 126x20 Regular 14 #202428
+  57,460 w 126 "Child of the frame"
+edge rect-rounded path in 119.25,29.25 31.5x1.5 stroke #202428 1.5: M 120,30 L 150,30
+edge rect-rounded path in 150,26 10x8 fill #202428: M 160,30 L 150,34 L 150,26 Z
+edge pill-ellipse path in 439.25,29.25 31.5x1.5 stroke #202428 1.5 dash 6,4: M 440,30 L 470,30
+edge pill-ellipse path in 470,26 10x8 fill #202428: M 480,30 L 470,34 L 470,26 Z
+edge child-hexagon path in 119.25,329.25 241.5x111.5 stroke #202428 1.5: M 120,440 L 120,380 L 360,380 L 360,330
+edge child-hexagon path in 356,320 8x10 fill #202428: M 360,320 L 364,330 L 356,330 Z
+edge child-hexagon path in 221,370 38x20 fill #ffffff: M 221,370 L 259,370 L 259,390 L 221,390 Z
+edge child-hexagon text in 225,372 30x16 Regular 12 #202428
+  225,372 w 30 "elbow"
+edge dangling path in 659.25,155.25 25.5x9.5 stroke #d02020 1.5: M 660,160 L 684,160 M 684,164 L 684,156
+edge dangling path in 656.25,152.25 6x6 fill #d02020: M 659.25,152.25 C 660.90686,152.25 662.25,153.59314 662.25,155.25 C 662.25,156.90686 660.90686,158.25 659.25,158.25 C 657.59314,158.25 656.25,156.90686 656.25,155.25 C 656.25,153.59314 657.59314,152.25 659.25,152.25 Z

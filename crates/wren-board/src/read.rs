@@ -1368,6 +1368,8 @@ mod tests {
                         board.nodes.contains_key(issue.id()) || board.edges.contains_key(issue.id())
                     }));
                     let _ = (crate::access(&board), crate::placements(&board));
+                    let palette = crate::style::tests::LIGHT;
+                    crate::scene::build(&board, &palette, &crate::scene::FixedMeasure);
                     let written = crate::write(&board);
                     let again = parse(&written).unwrap_or_else(|e| panic!("{e}\n{written}"));
                     assert_eq!(crate::write(&again), written, "{source}");

@@ -104,11 +104,26 @@ pub fn golden_path(name: &str) -> Option<PathBuf> {
 /// diff.
 #[track_caller]
 pub fn assert_golden(name: &str, expected: &str, actual: &str) {
+    compare(name, golden_path(name), expected, actual);
+}
+
+/// [`assert_golden`] for a file under `golden/` by its relative path, such
+/// as `scene/shapes.scene`; blessing creates it if it is missing.
+#[track_caller]
+pub fn assert_golden_file(relative: &str, expected: &str, actual: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("golden")
+        .join(relative);
+    compare(relative, Some(path), expected, actual);
+}
+
+#[track_caller]
+fn compare(name: &str, path: Option<PathBuf>, expected: &str, actual: &str) {
     if actual == expected {
         return;
     }
     if std::env::var_os("WREN_BLESS").is_some_and(|v| v == "1") {
-        if let Some(path) = golden_path(name) {
+        if let Some(path) = path {
             if let Err(error) = std::fs::write(&path, actual) {
                 panic!("{}: {error}", path.display());
             }
@@ -121,7 +136,7 @@ pub fn assert_golden(name: &str, expected: &str, actual: &str) {
         .position(|(a, b)| a != b)
         .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
     panic!(
-        "{name}: written bytes differ from the golden file, first at line {}\n\
+        "{name}: output differs from the golden file, first at line {}\n\
          --- golden\n{expected}--- written\n{actual}",
         first + 1
     );

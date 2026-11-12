@@ -22,6 +22,7 @@ mod read;
 pub mod route;
 pub mod scene;
 pub mod shape;
+pub mod style;
 mod write;
 
 pub use check::{

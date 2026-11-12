@@ -1,0 +1,14 @@
+bounds -0.75,-0.75 321.5x120.75
+node first path in -0.75,-0.75 121.5x61.5 fill #e6f2e8 stroke #309040 1.5: M 0,0 L 120,0 L 120,60 L 0,60 Z
+node first text in 25,20 70x20 Regular 14 #202428
+  25,20 w 70 "First step"
+node second path in 199.25,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 208,0 L 312,0 C 316.41827,0 320,3.5817218 320,8 L 320,52 C 320,56.418278 316.41827,60 312,60 L 208,60 C 203.58173,60 200,56.418278 200,52 L 200,8 C 200,3.5817218 203.58173,0 208,0 Z
+node second text in 221.5,20 77x20 Regular 14 #202428
+  221.5,20 w 77 "Second step"
+edge flow path in 119.25,29.25 71.5x1.5 stroke #202428 1.5: M 120,30 L 190,30
+edge flow path in 190,26 10x8 fill #202428: M 200,30 L 190,34 L 190,26 Z
+edge flow path in 144,20 32x20 fill #ffffff: M 144,20 L 176,20 L 176,40 L 144,40 Z
+edge flow text in 148,22 24x16 Regular 12 #202428
+  148,22 w 24 "then"
+node caption text in 0,100 238x20 Regular 14 #202428
+  0,100 w 238 "Comments and spacing are not kept."

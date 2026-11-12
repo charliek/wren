@@ -1,0 +1,99 @@
+bounds -0.75,-0.75 321.5x1261.5
+node ahj860xh path in -0.75,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 30,0 L 90,0 C 106.56854,0 120,13.4314575 120,30 C 120,46.568542 106.56854,60 90,60 L 30,60 C 13.4314575,60 0,46.568542 0,30 C 0,13.4314575 13.4314575,0 30,0 Z
+node ahj860xh text in 42.5,20 35x20 Regular 14 #202428
+  42.5,20 w 35 "Start"
+node 12axfsny path in -0.75,119.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,120 L 120,120 L 120,180 L 0,180 Z
+node 12axfsny text in 14.5,140 91x20 Regular 14 #202428
+  14.5,140 w 91 "Receive order"
+edge 4x2tte9d path in 59.25,59.25 1.5x51.5 stroke #202428 1.5: M 60,60 L 60,110
+edge 4x2tte9d path in 56,110 8x10 fill #202428: M 60,120 L 56,110 L 64,110 Z
+node z9hqp66f path in -0.75,239.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 60,240 L 120,270 L 60,300 L 0,270 Z
+node z9hqp66f text in 39,260 42x20 Regular 14 #202428
+  39,260 w 42 "Valid?"
+edge 080b71vw path in 59.25,179.25 1.5x51.5 stroke #202428 1.5: M 60,180 L 60,230
+edge 080b71vw path in 56,230 8x10 fill #202428: M 60,240 L 56,230 L 64,230 Z
+node pa6md7qp path in 199.25,239.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 200,240 L 320,240 L 320,300 L 200,300 Z
+node pa6md7qp text in 218,260 84x20 Regular 14 #202428
+  218,260 w 84 "Reject order"
+edge 4xtwed1c path in 119.25,269.25 71.5x1.5 stroke #202428 1.5: M 120,270 L 190,270
+edge 4xtwed1c path in 190,266 10x8 fill #202428: M 200,270 L 190,274 L 190,266 Z
+edge 4xtwed1c path in 150,260 20x20 fill #ffffff: M 150,260 L 170,260 L 170,280 L 150,280 Z
+edge 4xtwed1c text in 154,262 12x16 Regular 12 #202428
+  154,262 w 12 "No"
+node egw9eazg path in -0.75,359.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,360 L 120,360 L 120,420 L 0,420 Z
+node egw9eazg text in 21.5,380 77x20 Regular 14 #202428
+  21.5,380 w 77 "Check stock"
+edge z7h6z1p9 path in 59.25,299.25 1.5x51.5 stroke #202428 1.5: M 60,300 L 60,350
+edge z7h6z1p9 path in 56,350 8x10 fill #202428: M 60,360 L 56,350 L 64,350 Z
+edge z7h6z1p9 path in 47,320 26x20 fill #ffffff: M 47,320 L 73,320 L 73,340 L 47,340 Z
+edge z7h6z1p9 text in 51,322 18x16 Regular 12 #202428
+  51,322 w 18 "Yes"
+node 10p153z8 path in -0.75,479.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 60,480 L 120,510 L 60,540 L 0,510 Z
+node 10p153z8 text in 28.5,500 63x20 Regular 14 #202428
+  28.5,500 w 63 "In stock?"
+edge zpsr8rp7 path in 59.25,419.25 1.5x51.5 stroke #202428 1.5: M 60,420 L 60,470
+edge zpsr8rp7 path in 56,470 8x10 fill #202428: M 60,480 L 56,470 L 64,470 Z
+node 7kfsgr04 path in 199.25,479.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 200,480 L 320,480 L 320,540 L 200,540 Z
+node 7kfsgr04 text in 228.5,500 63x20 Regular 14 #202428
+  228.5,500 w 63 "Backorder"
+edge 3cps7rf3 path in 119.25,509.25 71.5x1.5 stroke #202428 1.5: M 120,510 L 190,510
+edge 3cps7rf3 path in 190,506 10x8 fill #202428: M 200,510 L 190,514 L 190,506 Z
+edge 3cps7rf3 path in 150,500 20x20 fill #ffffff: M 150,500 L 170,500 L 170,520 L 150,520 Z
+edge 3cps7rf3 text in 154,502 12x16 Regular 12 #202428
+  154,502 w 12 "No"
+node c51ksbz1 path in 199.25,599.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 200,600 L 320,600 L 320,660 L 200,660 Z
+node c51ksbz1 text in 232,610 56x40 Regular 14 #202428
+  239,610 w 42 "Notify"
+  232,630 w 56 "customer"
+edge 5490f3qp path in 259.25,539.25 1.5x51.5 stroke #202428 1.5: M 260,540 L 260,590
+edge 5490f3qp path in 256,590 8x10 fill #202428: M 260,600 L 256,590 L 264,590 Z
+edge 8va037pc path in 59.25,429.25 201.5x171.5 stroke #202428 1.5: M 260,600 L 260,510 L 60,510 L 60,430
+edge 8va037pc path in 56,420 8x10 fill #202428: M 60,420 L 64,430 L 56,430 Z
+node 8wcf01q2 path in -0.75,599.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,600 L 120,600 L 120,660 L 0,660 Z
+node 8wcf01q2 text in 21.5,620 77x20 Regular 14 #202428
+  21.5,620 w 77 "Charge card"
+edge kz2n7bg4 path in 59.25,539.25 1.5x51.5 stroke #202428 1.5: M 60,540 L 60,590
+edge kz2n7bg4 path in 56,590 8x10 fill #202428: M 60,600 L 56,590 L 64,590 Z
+edge kz2n7bg4 path in 47,560 26x20 fill #ffffff: M 47,560 L 73,560 L 73,580 L 47,580 Z
+edge kz2n7bg4 text in 51,562 18x16 Regular 12 #202428
+  51,562 w 18 "Yes"
+node jh9h8j0q path in -0.75,719.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 60,720 L 120,750 L 60,780 L 0,750 Z
+node jh9h8j0q text in 21.5,740 77x20 Regular 14 #202428
+  21.5,740 w 77 "Payment ok?"
+edge ybxmg8gb path in 59.25,659.25 1.5x51.5 stroke #202428 1.5: M 60,660 L 60,710
+edge ybxmg8gb path in 56,710 8x10 fill #202428: M 60,720 L 56,710 L 64,710 Z
+node p6ac9rw3 path in 199.25,719.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 200,720 L 320,720 L 320,780 L 200,780 Z
+node p6ac9rw3 text in 214.5,740 91x20 Regular 14 #202428
+  214.5,740 w 91 "Retry payment"
+edge jggbnskv path in 119.25,749.25 71.5x1.5 stroke #202428 1.5: M 120,750 L 190,750
+edge jggbnskv path in 190,746 10x8 fill #202428: M 200,750 L 190,754 L 190,746 Z
+edge jggbnskv path in 150,740 20x20 fill #ffffff: M 150,740 L 170,740 L 170,760 L 150,760 Z
+edge jggbnskv text in 154,742 12x16 Regular 12 #202428
+  154,742 w 12 "No"
+edge 700zy36w path in 59.25,669.25 201.5x51.5 stroke #202428 1.5: M 260,720 L 260,690 L 60,690 L 60,670
+edge 700zy36w path in 56,660 8x10 fill #202428: M 60,660 L 64,670 L 56,670 Z
+node 3qrg4kv1 path in -0.75,839.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,840 L 120,840 L 120,900 L 0,900 Z
+node 3qrg4kv1 text in 46,860 28x20 Regular 14 #202428
+  46,860 w 28 "Pack"
+edge 5y5ck8kb path in 59.25,779.25 1.5x51.5 stroke #202428 1.5: M 60,780 L 60,830
+edge 5y5ck8kb path in 56,830 8x10 fill #202428: M 60,840 L 56,830 L 64,830 Z
+edge 5y5ck8kb path in 47,800 26x20 fill #ffffff: M 47,800 L 73,800 L 73,820 L 47,820 Z
+edge 5y5ck8kb text in 51,802 18x16 Regular 12 #202428
+  51,802 w 18 "Yes"
+node 1wg3aw6z path in -0.75,959.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,960 L 120,960 L 120,1020 L 0,1020 Z
+node 1wg3aw6z text in 46,980 28x20 Regular 14 #202428
+  46,980 w 28 "Ship"
+edge 1sw6c59z path in 59.25,899.25 1.5x51.5 stroke #202428 1.5: M 60,900 L 60,950
+edge 1sw6c59z path in 56,950 8x10 fill #202428: M 60,960 L 56,950 L 64,950 Z
+node 4hjnerrq path in -0.75,1079.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,1080 L 120,1080 L 120,1140 L 0,1140 Z
+node 4hjnerrq text in 18,1100 84x20 Regular 14 #202428
+  18,1100 w 84 "Send receipt"
+edge n8z2x794 path in 59.25,1019.25 1.5x51.5 stroke #202428 1.5: M 60,1020 L 60,1070
+edge n8z2x794 path in 56,1070 8x10 fill #202428: M 60,1080 L 56,1070 L 64,1070 Z
+node kxzq08qa path in -0.75,1199.25 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 30,1200 L 90,1200 C 106.56854,1200 120,1213.4314 120,1230 C 120,1246.5686 106.56854,1260 90,1260 L 30,1260 C 13.4314575,1260 0,1246.5686 0,1230 C 0,1213.4314 13.4314575,1200 30,1200 Z
+node kxzq08qa text in 49.5,1220 21x20 Regular 14 #202428
+  49.5,1220 w 21 "End"
+edge e14xq0dp path in 59.25,1139.25 1.5x51.5 stroke #202428 1.5: M 60,1140 L 60,1190
+edge e14xq0dp path in 56,1190 8x10 fill #202428: M 60,1200 L 56,1190 L 64,1190 Z
+edge bm1mpp57 path in 59.25,299.25 201.5x891.5 stroke #202428 1.5: M 260,300 L 260,750 L 60,750 L 60,1190
+edge bm1mpp57 path in 56,1190 8x10 fill #202428: M 60,1200 L 56,1190 L 64,1190 Z

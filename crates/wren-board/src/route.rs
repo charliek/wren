@@ -139,6 +139,14 @@ pub fn route(kind: Route, from: &Terminal, to: &Terminal) -> Routed {
     }
 }
 
+/// Where an end meets its node and the side it leaves by, a floating end
+/// and a free point taking `nominal`. A connector whose other end names
+/// no node draws its stub from here.
+pub fn leave(terminal: &Terminal, nominal: Side) -> (Point, Side) {
+    let (point, side, _) = end(terminal, nominal);
+    (point, side)
+}
+
 /// Where an end is, the side it leaves by, and the side it reports.
 fn end(terminal: &Terminal, nominal: Side) -> (Point, Side, Option<Side>) {
     match *terminal {
