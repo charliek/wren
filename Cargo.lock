@@ -4940,6 +4940,7 @@ dependencies = [
  "iced",
  "muda",
  "png 0.18.1",
+ "resvg",
  "rfd",
  "rustix 1.1.6",
  "serde_json",

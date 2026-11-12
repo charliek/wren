@@ -562,9 +562,168 @@ mod harness {
 
 #[cfg(test)]
 mod tests {
-    use wren_board::scene::{Draw, Source};
+    use std::sync::Arc;
+
+    use resvg::{tiny_skia, usvg};
+    use wren_board::scene::{self, Draw, Line, Source};
+    use wren_board::svg;
 
     use super::*;
+
+    macro_rules! sample {
+        ($name:literal) => {
+            (
+                $name,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tools/wrentest/fixtures/boards/workspace/Boards/Samples/",
+                    $name,
+                    ".wren-board"
+                )),
+            )
+        };
+    }
+
+    /// The boards of the sample workspace.
+    const SAMPLES: [(&str, &str); 5] = [
+        sample!("Checkout flow"),
+        sample!("Shapes"),
+        sample!("Overlap"),
+        sample!("Hand written"),
+        sample!("Future"),
+    ];
+
+    /// How many pixels a board unit takes when a line is rendered.
+    const RENDER_SCALE: f32 = 4.0;
+
+    /// `element`, a `<text>` of an exported SVG, with its content replaced.
+    fn with_content(element: &str, content: &str) -> String {
+        let open = element.find('>').expect("a start tag") + 1;
+        let close = element.rfind("</text>").expect("an end tag");
+        format!("{}{content}{}", &element[..open], &element[close..])
+    }
+
+    /// The width of the ink of one `<text>` of an exported SVG as resvg
+    /// draws it, in board units: the element alone, in a document whose
+    /// view box is the line's box widened on every side.
+    fn ink_width(element: &str, line: &Line, size: f32, options: &usvg::Options) -> Option<f32> {
+        let reach = size * 2.0;
+        let (x, y) = (line.origin.x - reach, line.origin.y - reach);
+        let (width, height) = (
+            line.width + 2.0 * reach,
+            scene::line_height(size) + 2.0 * reach,
+        );
+        let (pixels_x, pixels_y) = (
+            (width * RENDER_SCALE).ceil(),
+            (height * RENDER_SCALE).ceil(),
+        );
+        let document = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pixels_x}\" height=\"{pixels_y}\" \
+             viewBox=\"{x} {y} {} {}\">\n{element}\n</svg>\n",
+            pixels_x / RENDER_SCALE,
+            pixels_y / RENDER_SCALE,
+        );
+        let tree = usvg::Tree::from_str(&document, options).expect("an exported line is SVG");
+        let mut pixmap = tiny_skia::Pixmap::new(pixels_x as u32, pixels_y as u32)?;
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        let columns = pixmap.width() as usize;
+        let inked: Vec<usize> = (0..columns)
+            .filter(|column| {
+                pixmap
+                    .pixels()
+                    .iter()
+                    .skip(*column)
+                    .step_by(columns)
+                    .any(|pixel| pixel.alpha() > 0)
+            })
+            .collect();
+        let (first, last) = (inked.first()?, inked.last()?);
+        Some((last + 1 - first) as f32 / RENDER_SCALE)
+    }
+
+    /// Phase 1's confirmation step: an SVG viewer that has Inter lays each
+    /// exported line out as wide as the canvas measured it, so a label
+    /// that fits its box on screen fits it in the export.
+    #[test]
+    fn resvg_draws_each_exported_line_as_wide_as_the_canvas_measured_it() {
+        fonts::load();
+        let mut options = usvg::Options::default();
+        let mut faces = usvg::fontdb::Database::new();
+        faces.load_font_data(fonts::FACES[0].to_vec());
+        options.fontdb = Arc::new(faces);
+        // The largest advance and ink differences, in board units.
+        let mut worst = (0.0f32, 0.0f32);
+        let mut checked = 0;
+        for (name, text) in SAMPLES {
+            let view = BoardView::open(text, palette(definitions::DARK), fonts::UI)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let exported = svg::write(
+                view.scene(),
+                &svg::Options {
+                    background: Some(view.palette().canvas),
+                    padding: 40.0,
+                },
+            );
+            let lines: Vec<(&Line, f32)> = view
+                .scene()
+                .items
+                .iter()
+                .filter_map(|item| match &item.draw {
+                    Draw::Text { lines, size, .. } => Some(lines.iter().map(|line| (line, *size))),
+                    Draw::Path { .. } => None,
+                })
+                .flatten()
+                .collect();
+            let elements: Vec<&str> = exported
+                .lines()
+                .filter(|element| element.starts_with("<text "))
+                .collect();
+            assert_eq!(elements.len(), lines.len(), "{name}: one <text> per line");
+            for (element, (line, size)) in elements.into_iter().zip(lines) {
+                if line.text.trim().is_empty() {
+                    continue;
+                }
+                let ink = |element: &str| {
+                    ink_width(element, line, size, &options)
+                        .unwrap_or_else(|| panic!("{name}: no ink for {:?}", line.text))
+                };
+                // The ink stops short of the advance by the first glyph's
+                // left bearing and the last one's right bearing ("End" by
+                // 2.3 px), so the run's advance is read as the S4 check
+                // read the canvas's: written between two bars, less the
+                // two bars alone.
+                let content = &element[element.find('>').expect("a start tag") + 1
+                    ..element.rfind("</text>").expect("an end tag")];
+                let advance = ink(&with_content(element, &format!("|{content}|")))
+                    - ink(&with_content(element, "||"));
+                let difference = advance - line.width;
+                assert!(
+                    difference.abs() <= 2.0,
+                    "{name}: {:?} advances {advance} in resvg and {} measured",
+                    line.text,
+                    line.width
+                );
+                if difference.abs() > worst.0.abs() {
+                    worst.0 = difference;
+                }
+                let bearings = ink(element) - line.width;
+                if bearings.abs() > worst.1.abs() {
+                    worst.1 = bearings;
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 40, "{checked} lines");
+        eprintln!(
+            "{checked} lines; resvg's advance minus the measured width is {:.2} at most, \
+             and its ink minus the measured width {:.2}",
+            worst.0, worst.1
+        );
+    }
 
     #[test]
     fn the_grid_is_a_sound_board_with_every_shape_label_and_connector() {
