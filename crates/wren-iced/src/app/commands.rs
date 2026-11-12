@@ -63,6 +63,7 @@ pub enum CommandId {
     MoveLineDown,
     ToggleMarkdownAssist,
     SwitchEngine,
+    ExportSvg,
 }
 
 /// Who runs a command from its shortcut.
@@ -126,6 +127,13 @@ definitions![
         OpenConflictCopy,
         "note.open_conflict",
         "Open conflict copy",
+        "This note",
+        App
+    ),
+    (
+        ExportSvg,
+        "note.export_svg",
+        "Export board as SVG…",
         "This note",
         App
     ),
@@ -360,6 +368,12 @@ impl CommandId {
         })
     }
 
+    /// Whether the command exists only while the `boards` setting is on:
+    /// with it off it is not listed anywhere.
+    pub fn boards(self) -> bool {
+        matches!(self, Self::ExportSvg)
+    }
+
     pub fn parse(key: &str) -> Option<Self> {
         DEFINITIONS
             .iter()
@@ -516,6 +530,7 @@ impl App {
                     && self.surface() == Surface::Text
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
+            ExportSvg => self.surface() == Surface::Board && self.board_export.is_none(),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 self.surface() == Surface::Text
                     && self.ensure_editor_ready().is_ok()
@@ -772,6 +787,7 @@ impl App {
             TextReset => self.step_text_size(None),
             ToggleMarkdownAssist => self.toggle_markdown_assist(),
             SwitchEngine => self.toggle_editor_engine(),
+            ExportSvg => self.export_board(),
             CommandPalette => self.open_palette(Mode::Commands),
             OpenSettings => self.open_settings(),
             ReloadSettings => {

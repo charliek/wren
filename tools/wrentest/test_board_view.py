@@ -9,6 +9,7 @@ on a board as they do on a Markdown note.
 from __future__ import annotations
 
 import shutil
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 import pytest
@@ -131,3 +132,71 @@ def test_a_raw_board_is_edited_in_the_focused_editor(samples: Path) -> None:
         app.client.call("editor.insert", {"text": "# typed\n"})
         assert "# typed" in app.client.call("editor.get")["text"]
         wait_focus(app, ["note-editor"])
+
+
+ESCAPES = '''schema = 1
+
+[node.odd]
+text = "a < b & \\"c\\""
+kind = "shape"
+at = [0, 0]
+size = [160, 60]
+z = "a"
+'''
+
+
+def export_rows(app: WrenApp) -> list[dict]:
+    """The export command's rows in the Commands palette."""
+    app.client.call("palette.open", {"mode": "commands"})
+    modal = app.client.call("palette.query", {"query": "Export board"})["navigation"]["modal"]
+    app.client.call("palette.close")
+    return [row for row in modal["results"] if row["title"] == "Export board as SVG…"]
+
+
+def test_export_svg_writes_the_shown_board_as_xml(samples: Path, tmp_path: Path) -> None:
+    """§6.8 Phase 1 item 8, through what the command writes once its save
+    dialog has closed."""
+    (samples / "Boards/Samples/Escapes.wren-board").write_text(ESCAPES, encoding="utf-8")
+    flow = samples / FLOW
+    before = (flow.read_bytes(), flow.stat().st_mtime_ns)
+    text = "{http://www.w3.org/2000/svg}text"
+    with board_app(samples, "board-export") as app:
+        open_note(app, NOTES)
+        assert [row["enabled"] for row in export_rows(app)] == [False]
+        assert command(app, "note.export_svg")["disposition"] == "blocked"
+        with pytest.raises(RemoteError, match="board"):
+            app.client.call("board.export", {"format": "svg", "path": str(tmp_path / "x.svg")})
+
+        open_note(app, FLOW)
+        assert [row["enabled"] for row in export_rows(app)] == [True]
+        out = tmp_path / "flow.svg"
+        reply = app.client.call("board.export", {"format": "svg", "path": str(out)})
+        assert reply["bytes"] == out.stat().st_size
+        root = ElementTree.parse(out).getroot()
+        labels = [node.text or "" for node in root.iter(text)]
+        # Fifteen shapes, some of them two lines, and the connector labels.
+        assert len(labels) > 15 and "Receive order" in labels, labels
+        assert root[0].tag == "{http://www.w3.org/2000/svg}rect", "the canvas behind it all"
+
+        open_note(app, "Boards/Samples/Escapes.wren-board")
+        out = tmp_path / "escapes.svg"
+        app.client.call("board.export", {"format": "svg", "path": str(out)})
+        assert [node.text for node in ElementTree.parse(out).getroot().iter(text)] == [
+            'a < b & "c"'
+        ]
+        assert '>a &lt; b &amp; &quot;c&quot;</text>' in out.read_text(encoding="utf-8")
+
+        with pytest.raises(RemoteError, match="Could not export"):
+            app.client.call("board.export", {
+                "format": "svg", "path": str(tmp_path / "missing" / "x.svg"),
+            })
+        assert app.client.call("session.get")["document"]["dirty"] is False
+    assert (flow.read_bytes(), flow.stat().st_mtime_ns) == before
+
+
+def test_with_the_setting_off_there_is_no_export_command(samples: Path) -> None:
+    with WrenApp(workspace=samples, settings="boards = off\n",
+                 artifacts_dir=artifact_directory("board-export-off")) as app:
+        open_note(app, NOTES)
+        assert export_rows(app) == []
+        assert command(app, "note.export_svg")["disposition"] == "blocked"

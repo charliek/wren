@@ -428,10 +428,10 @@ impl App {
         match mode {
             Mode::Commands => {
                 for group in GROUPS {
-                    for definition in DEFINITIONS
-                        .iter()
-                        .filter(|definition| definition.group == group)
-                    {
+                    for definition in DEFINITIONS.iter().filter(|definition| {
+                        definition.group == group
+                            && (self.preferences.boards || !definition.id.boards())
+                    }) {
                         if fuzzy_score(&query, definition.label).is_none() {
                             continue;
                         }

@@ -83,6 +83,8 @@ pub struct App {
     folder_serial: u64,
     folder_request: Option<u64>,
     folder_correlation: Option<u64>,
+    /// An SVG export waiting for its save dialog; see `board::Export`.
+    board_export: Option<board::Export>,
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
@@ -153,6 +155,9 @@ pub enum Message {
     #[cfg(target_os = "macos")]
     MenuCommand(String),
     FolderChosen(u64, Option<PathBuf>),
+    /// Where the save dialog of the board export with this tag was told
+    /// to write, if anywhere.
+    BoardExportChosen(u64, Option<PathBuf>),
     Revealed {
         correlation: u64,
         generation: u64,
@@ -313,6 +318,7 @@ impl App {
             folder_serial: 0,
             folder_request: None,
             folder_correlation: None,
+            board_export: None,
             action_serial: 0,
             last_processed: None,
             palette: None,
@@ -436,6 +442,9 @@ impl App {
             Message::PaletteClose => return self.close_palette().task,
             Message::PaletteRevealed => {}
             Message::FolderChosen(tag, path) => return self.folder_chosen(tag, path).task,
+            Message::BoardExportChosen(tag, path) => {
+                return self.board_export_chosen(tag, path).task
+            }
             Message::Revealed {
                 correlation,
                 generation,
