@@ -88,6 +88,9 @@ pub struct App {
     focus: bool,
     filters: Filters,
     viewport: iced::Size,
+    /// The window's scale factor, which a board needs for precise wheel
+    /// deltas and iced does not give a widget.
+    scale_factor: f32,
     spring_section: Option<SectionId>,
     gesture_generation: u64,
     drag_preview: Option<crate::drag::Preview>,
@@ -308,6 +311,7 @@ impl App {
             focus: false,
             filters: Filters::default(),
             viewport: iced::Size::new(1280.0, 800.0),
+            scale_factor: 1.0,
             spring_section: None,
             gesture_generation: 1,
             drag_preview: None,
@@ -516,6 +520,10 @@ impl App {
                 iced::window::Event::Opened { size, .. } => {
                     self.viewport = size;
                     self.window = Some(id);
+                    // A window opened at its scale says nothing of it.
+                    let scale = iced::window::scale_factor(id).map(move |factor| {
+                        Message::Window(id, iced::window::Event::Rescaled(factor))
+                    });
                     #[cfg(target_os = "macos")]
                     {
                         crate::macos_menu::install(&self.preferences.keymap);
@@ -531,17 +539,23 @@ impl App {
                                 .map(move |info| Message::RendererReady(id, info));
                         }
                         if self.endpoint.is_some() {
-                            return focus_editor().chain(
-                                Task::future(self.frames.next(id)).map(Message::FirstFrame),
-                            );
+                            return Task::batch([
+                                focus_editor().chain(
+                                    Task::future(self.frames.next(id)).map(Message::FirstFrame),
+                                ),
+                                scale,
+                            ]);
                         }
-                        return focus_editor();
+                        return Task::batch([focus_editor(), scale]);
                     }
                     #[cfg(not(feature = "smoke-test"))]
-                    return focus_editor();
+                    return Task::batch([focus_editor(), scale]);
                 }
                 iced::window::Event::Resized(size) => {
                     self.viewport = size;
+                }
+                iced::window::Event::Rescaled(factor) => {
+                    self.scale_factor = factor;
                 }
                 iced::window::Event::CloseRequested => {
                     return self.request_quit().unwrap_or_else(|_| Task::none());

@@ -91,13 +91,19 @@ impl App {
         self.show_board_spike(&grid(count))
     }
 
-    /// Show the board `text` holds in place of the one on screen.
+    /// Show the board `text` holds in place of the one on screen, fitted
+    /// to the widget as a board opens.
     fn show_board_spike(&mut self, text: &str) -> Result<(), String> {
+        #[cfg(feature = "smoke-test")]
+        let opened = std::time::Instant::now();
         // Labels are measured when the view opens, before a window exists.
         fonts::load();
-        let view = BoardView::open(text, palette(self.definition), fonts::UI)
+        let mut view = BoardView::open(text, palette(self.definition), fonts::UI)
             .map_err(|error| error.to_string())?;
+        view.fit();
         self.board_spike = Some(view);
+        #[cfg(feature = "smoke-test")]
+        self.board_perf.opened(opened);
         Ok(())
     }
 
@@ -110,7 +116,10 @@ impl App {
     }
 
     pub(super) fn board_spike_input(&mut self, message: wren_canvas::Message) -> Task<Message> {
-        match message {}
+        if let Some(view) = &mut self.board_spike {
+            view.update(message, std::time::Instant::now());
+        }
+        Task::none()
     }
 
     pub(super) fn board_spike_view<'a>(&'a self, view: &'a BoardView) -> Element<'a, Message> {
@@ -139,12 +148,13 @@ impl App {
             background: Some(theme::color(colors.titlebar).into()),
             ..Default::default()
         });
-        #[cfg(feature = "smoke-test")]
         let style = wren_canvas::Style {
+            #[cfg(feature = "smoke-test")]
             labels: self.board_perf.labels,
+            #[cfg(not(feature = "smoke-test"))]
+            labels: None,
+            scale_factor: self.scale_factor,
         };
-        #[cfg(not(feature = "smoke-test"))]
-        let style = wren_canvas::Style::default();
         let body = column![
             header,
             view.view("note-editor", style).map(Message::BoardSpike)
@@ -166,7 +176,7 @@ mod harness {
     use serde_json::{json, Value};
     use wren_board::scene::{self, Draw, Rect, Source};
     use wren_board::{Access, Id, Rgba};
-    use wren_canvas::{BoardView, Labels, Probe, Viewport};
+    use wren_canvas::{BoardView, Labels, Probe, Scroll, Viewport};
 
     use super::super::{App, Message};
     use crate::test_ipc::Request;
@@ -177,9 +187,19 @@ mod harness {
     pub struct Perf {
         frame_micros: VecDeque<u64>,
         open_micros: Option<u64>,
+        /// When the board on screen began to open; launch for the first.
+        opened: Option<Instant>,
         run: Option<Run>,
         /// `None` leaves the rule to the widget, which picks by renderer.
         pub labels: Option<Labels>,
+    }
+
+    impl Perf {
+        /// A board began to open at `at`: `open_micros` times it afresh.
+        pub fn opened(&mut self, at: Instant) {
+            self.opened = Some(at);
+            self.open_micros = None;
+        }
     }
 
     /// A pan or zoom of one step per redraw.
@@ -326,8 +346,9 @@ mod harness {
             }
         }
 
-        /// Time from launch to the first redraw after the board's first
-        /// `draw` returned.
+        /// Time from the start of the board's opening (launch, for the
+        /// first) to the first redraw after the board's first `draw` that
+        /// painted it returned.
         pub(in super::super) fn time_board_open(&mut self) -> Task<Message> {
             if self.board_spike.is_none() || self.board_perf.open_micros.is_some() {
                 return Task::none();
@@ -354,8 +375,9 @@ mod harness {
                     if view.probe.first_draw.get().is_none() {
                         return self.await_board_pulse();
                     }
+                    let opened = self.board_perf.opened.unwrap_or(self.launched);
                     self.board_perf.open_micros = Some(
-                        now.saturating_duration_since(self.launched)
+                        now.saturating_duration_since(opened)
                             .as_micros()
                             .try_into()
                             .unwrap_or(u64::MAX),
@@ -406,9 +428,14 @@ mod harness {
 
         /// `spike.board`: change what the spike shows, then report it.
         /// `scene` replaces the board (`{"grid": N}` or `{"text": "…"}`),
-        /// `labels` sets the label rule (`null` for the renderer's own),
-        /// `cap` the most layers, `viewport` where the view looks, and
-        /// `nodes` names the nodes to report the boxes and labels of.
+        /// opened fitted and timed as a board opens; `edit` gives one node a
+        /// new label (`{"node": id, "text": "…"}`) and reloads the view with
+        /// the canonical text, as an edit from elsewhere would; `labels`
+        /// sets the label rule (`null` for the renderer's own), `cap` the
+        /// most layers, `viewport` where the view looks; `fit`,
+        /// `zoom_step` (stops, up or down) and `zoom_reset` run the view's
+        /// own; and `nodes` names the nodes to report the boxes and labels
+        /// of.
         pub(in super::super) fn spike_board(&mut self, params: &Value) -> Result<Value, String> {
             self.spike()?;
             if let Some(scene) = params.get("scene") {
@@ -439,6 +466,21 @@ mod harness {
             }
             let labels = self.board_perf.labels;
             let view = self.spike()?;
+            if let Some(edit) = params.get("edit") {
+                let id = edit
+                    .get("node")
+                    .and_then(Value::as_str)
+                    .and_then(Id::new)
+                    .ok_or("edit needs a node id")?;
+                let text = edit
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or("edit needs the label's text")?;
+                let mut board = view.board().clone();
+                board.nodes.get_mut(&id).ok_or("no such node")?.text = text.to_owned();
+                view.reload(&wren_board::write(&board))
+                    .map_err(|error| error.to_string())?;
+            }
             if let Some(cap) = params.get("cap") {
                 let cap = cap
                     .as_u64()
@@ -457,6 +499,19 @@ mod harness {
                     y: number(viewport, "y")?,
                     zoom,
                 });
+            }
+            if params.get("fit").and_then(Value::as_bool) == Some(true) {
+                view.fit();
+            }
+            if let Some(by) = params.get("zoom_step") {
+                let by = by
+                    .as_i64()
+                    .and_then(|by| i8::try_from(by).ok())
+                    .ok_or("zoom_step must be from -128 to 127")?;
+                view.zoom_step(by);
+            }
+            if params.get("zoom_reset").and_then(Value::as_bool) == Some(true) {
+                view.zoom_reset();
             }
             let view = &*view;
             let nodes: Vec<Value> = params
@@ -480,6 +535,15 @@ mod harness {
                     "min_px": labels.min_px, "moving": labels.moving,
                 })),
                 "moving": probe.moving.get(),
+                "size": view.size().map(|(width, height)| json!({"width": width, "height": height})),
+                "epoch": view.epoch(),
+                "panning": view.machine().panning(),
+                "space": view.machine().space(),
+                "arrows": probe.arrows.get(),
+                "wheel": probe.wheel.borrow().iter().map(|delta| match *delta {
+                    Scroll::Lines { x, y } => json!({"lines": true, "x": x, "y": y}),
+                    Scroll::Pixels { x, y } => json!({"lines": false, "x": x, "y": y}),
+                }).collect::<Vec<_>>(),
                 "scene_bounds": rect(view.scene().bounds),
                 "line_height": scene::line_height(scene::LABEL_SIZE),
                 "nodes": nodes,

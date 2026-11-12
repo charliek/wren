@@ -92,6 +92,7 @@ pub const CHECKOUT_FLOW: &str = sample!("Checkout flow");
 pub const SHAPES: &str = sample!("Shapes");
 pub const OVERLAP: &str = sample!("Overlap");
 pub const FUTURE: &str = sample!("Future");
+pub const HAND_WRITTEN: &str = sample!("Hand written");
 
 pub fn palette() -> Palette {
     Palette {

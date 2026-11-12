@@ -13,10 +13,14 @@ and build::
 so the window fits the screen), and ``WGPU_BACKEND=vulkan LIBGL_ALWAYS_SOFTWARE=1
 ICED_BACKEND=wgpu ICED_PRESENT_MODE=immediate`` selects software Vulkan.
 
-Checks: ``perf`` (scene, draw and frame times, and what an idle board
-builds), ``layers`` (a label under a later shape does not show through it),
-``zoom`` (label placement at six zoom levels) and ``measure`` (measured
-against drawn widths).
+Checks: ``perf`` (scene, draw and frame times, what an idle board builds,
+and a label edit), ``open`` (how long a board of 1,000 and of 10,000
+elements takes to open), ``layers`` (a label under a later shape does not
+show through it), ``zoom`` (label placement at six zoom levels), ``measure``
+(measured against drawn widths), ``view`` (the opening fit, ``fit`` and the
+keyboard's zoom stops in a real window), and ``keys`` and ``wheel`` (focus,
+captured arrows, scroll units, the burst latch, middle and Space drags; these
+two need X11 and xdotool).
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import argparse
 import json
 import math
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -33,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tools.wrentest.png import PNG, read_png  # noqa: E402
-from tools.wrentest.ui import WrenApp  # noqa: E402
+from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
 
 SETTLE = 0.4
 ZOOMS = (0.25, 0.5, 1.0, 1.5, 2.0, 4.0)
@@ -171,10 +176,103 @@ def run_perf(spike: Spike, args) -> dict:
             "rest_draw_micros": max(at_rest) if at_rest else None,
             "rest_builds": rested["builds"] - after["builds"],
         }
+    # One edit from elsewhere: a label changes, the view reloads and builds
+    # its scene once, and the next draw paints it.
+    result["edits"] = {}
+    for name, start in (("at fit", "fit"), ("at 100", "100")):
+        spike.set(viewport=starts[start])
+        spike.rest()
+        samples = []
+        for serial in range(5):
+            spike.call("perf.board", {"clear": True})
+            before = spike.set()
+            spike.set(edit={"node": "n1", "text": f"Edited {name} {serial}\nrequest and reply"})
+            spike.rest()
+            rings = spike.call("perf.board", {})
+            after = spike.set()
+            scene, draw = rings["scene_micros"], rings["draw_micros"]
+            samples.append({
+                "scene_builds": after["scenes"] - before["scenes"],
+                "scene_micros": scene[-1] if scene else None,
+                "draw_micros": draw[0] if draw else None,
+            })
+        totals = [sample["scene_micros"] + sample["draw_micros"] for sample in samples
+                  if sample["scene_micros"] is not None and sample["draw_micros"] is not None]
+        result["edits"][name] = {
+            "scene_micros": summary([sample["scene_micros"] for sample in samples
+                                     if sample["scene_micros"] is not None]),
+            "draw_micros": summary([sample["draw_micros"] for sample in samples
+                                    if sample["draw_micros"] is not None]),
+            "scene_plus_draw_micros": summary(totals),
+            "scene_builds": [sample["scene_builds"] for sample in samples],
+        }
     result["pass"] = (
         result["idle"]["scene_builds"] == 0
         and result["idle"]["geometry_builds"] == 0
         and all(run["scene_builds"] == 0 for run in result["runs"].values())
+        and all(edit["scene_builds"] == [1] * 5 for edit in result["edits"].values())
+    )
+    return result
+
+
+def run_open(spike: Spike, args) -> dict:
+    """Open generated boards of about 1,000 and 10,000 elements, three times
+    each, and time each from the start of its opening to the first redraw
+    after its first painted draw."""
+    result: dict = {"cases": []}
+    for shapes in (347, 3380):
+        opens, scenes = [], []
+        for _ in range(3):
+            state = spike.set(scene={"grid": shapes})
+            rings = wait_for(lambda: (lambda r: r if r["open_micros"] is not None else None)(
+                spike.call("perf.board", {})), timeout=60, description="the board opened")
+            opens.append(rings["open_micros"])
+            scenes.append(rings["scene_micros"][-1])
+        state = spike.set()
+        result["cases"].append({
+            "shapes": shapes, "elements": state["count"] + state["edges"], "items": state["items"],
+            "fit_zoom": round(state["viewport"]["zoom"], 3),
+            "open_micros": summary(opens), "scene_micros": summary(scenes),
+        })
+    return result
+
+
+def run_view(spike: Spike, args) -> dict:
+    """The board opens fitted; ``fit`` and the zoom stops act about the
+    widget's middle in a real window."""
+    result: dict = {}
+    state = wait_for(lambda: (lambda s: s if s["size"] else None)(spike.set()),
+                     description="the widget said its size")
+    size = state["size"]
+    result["size"] = size
+    result["size_matches_focus_bounds"] = (
+        abs(size["width"] - spike.bounds["width"]) < 0.5 and abs(size["height"] - spike.bounds["height"]) < 0.5
+    )
+    want = fit(spike, state)
+    result["opened"] = state["viewport"]
+    result["opened_fitted"] = all(abs(state["viewport"][key] - want[key]) < 0.01 for key in want)
+    spike.set(viewport={"x": 123.0, "y": -45.0, "zoom": 2.5})
+    state = spike.set(fit=True)
+    result["fit_again"] = all(abs(state["viewport"][key] - want[key]) < 0.01 for key in want)
+    middle = (size["width"] / 2, size["height"] / 2)
+    spike.set(viewport={"x": 0.0, "y": 0.0, "zoom": 1.0})
+    stops = []
+    for by in (1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1):
+        before = spike.set()["viewport"]
+        under = (before["x"] + middle[0] / before["zoom"], before["y"] + middle[1] / before["zoom"])
+        after = spike.set(zoom_step=by)["viewport"]
+        back = ((under[0] - after["x"]) * after["zoom"], (under[1] - after["y"]) * after["zoom"])
+        stops.append({"by": by, "zoom": after["zoom"],
+                      "middle_kept": abs(back[0] - middle[0]) < 0.01 and abs(back[1] - middle[1]) < 0.01})
+    result["stops"] = stops
+    reset = spike.set(zoom_reset=True)["viewport"]
+    result["reset_zoom"] = reset["zoom"]
+    want_stops = [1.5, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25, 0.1, 0.1]
+    result["pass"] = (
+        result["size_matches_focus_bounds"] and result["opened_fitted"] and result["fit_again"]
+        and len(stops) == len(want_stops)
+        and all(abs(stop["zoom"] - want) < 1e-6 for stop, want in zip(stops, want_stops))
+        and all(stop["middle_kept"] for stop in stops) and reset["zoom"] == 1.0
     )
     return result
 
@@ -389,6 +487,155 @@ def run_measure(spike: Spike, args) -> dict:
     }
 
 
+def xdo(*args: str) -> str:
+    done = subprocess.run(["xdotool", *args], check=True, capture_output=True, text=True, timeout=10)
+    return done.stdout.strip()
+
+
+def native_window(spike: Spike) -> str:
+    windows = xdo("search", "--onlyvisible", "--pid", str(spike.app.pid)).splitlines()
+    if len(windows) != 1:
+        raise RuntimeError(f"expected one window, found {windows}")
+    xdo("windowfocus", "--sync", windows[0])
+    spike.call("editor.focus")
+    return windows[0]
+
+
+def pointer_over(spike: Spike, window: str, x: float = 400, y: float = 300) -> None:
+    xdo("mousemove", "--window", window, "--sync",
+        str(round(spike.bounds["x"] + x)), str(round(spike.bounds["y"] + y)))
+
+
+def palette_open(spike: Spike) -> bool:
+    return bool(spike.call("navigation.get").get("modal"))
+
+
+def run_keys(spike: Spike, args) -> dict:
+    window = native_window(spike)
+    result: dict = {"focused_at_open": spike.focused}
+    result["focus"] = spike.call("focus.get")["named"]
+    before = spike.set()["arrows"]
+    for key in ("Up", "Down", "Left", "Right", "shift+Down"):
+        xdo("key", "--window", window, "--clearmodifiers", key)
+    wait_for(lambda: spike.set()["arrows"] == before + 5, description="five arrows captured")
+    result["arrows_captured"] = spike.set()["arrows"] - before
+    # Space is the board's: held, it arms a pan; released, it lets go.
+    xdo("keydown", "--window", window, "space")
+    wait_for(lambda: spike.set()["space"], description="Space held")
+    result["space_held"] = True
+    xdo("keyup", "--window", window, "space")
+    wait_for(lambda: not spike.set()["space"], description="Space released")
+    result["space_released"] = True
+    # A bound App shortcut still runs with the board focused.
+    xdo("key", "--window", window, "--clearmodifiers", "alt+k")
+    wait_for(lambda: palette_open(spike), description="the palette shortcut ran")
+    result["shortcut_opened_palette"] = True
+    result["focus_with_palette"] = spike.call("focus.get")["named"]
+    counted = spike.set()["arrows"]
+    xdo("key", "--window", window, "--clearmodifiers", "Down")
+    time.sleep(0.3)
+    result["arrows_while_unfocused"] = spike.set()["arrows"] - counted
+    xdo("key", "--window", window, "--clearmodifiers", "Escape")
+    wait_for(lambda: not palette_open(spike), description="Escape closed the palette")
+    wait_for(lambda: spike.call("focus.get")["named"] == ["note-editor"], description="focus returned")
+    result["focus_after_palette"] = spike.call("focus.get")["named"]
+    # Escape with nothing open leaves the board focused.
+    xdo("key", "--window", window, "--clearmodifiers", "Escape")
+    time.sleep(0.3)
+    result["focus_after_escape"] = spike.call("focus.get")["named"]
+    xdo("key", "--window", window, "--clearmodifiers", "Up")
+    wait_for(lambda: spike.set()["arrows"] == counted + 1, description="arrows captured again")
+    result["pass"] = (
+        result["focus"] == ["note-editor"]
+        and result["arrows_captured"] == 5
+        and result["arrows_while_unfocused"] == 0
+        and result["focus_after_palette"] == ["note-editor"]
+        and result["focus_after_escape"] == ["note-editor"]
+    )
+    return result
+
+
+def run_wheel(spike: Spike, args) -> dict:
+    window = native_window(spike)
+    pointer_over(spike, window)
+    result: dict = {"steps": []}
+    spike.set(viewport={"x": 0.0, "y": 0.0, "zoom": 1.0})
+
+    def step(name: str, action, expect, settle: float = 0.3) -> None:
+        before = spike.set()
+        action()
+        time.sleep(settle)
+        after = spike.set()
+        deltas = after["wheel"][len(before["wheel"]):]
+        start, end = before["viewport"], after["viewport"]
+        x = sum(delta["x"] for delta in deltas)
+        y = sum(delta["y"] for delta in deltas)
+        if expect == "pan":
+            want = {"x": start["x"] - x * 40 / start["zoom"], "y": start["y"] - y * 40 / start["zoom"],
+                    "zoom": start["zoom"]}
+        elif expect == "sideways":
+            want = {"x": start["x"] - y * 40 / start["zoom"], "y": start["y"], "zoom": start["zoom"]}
+        elif expect == "zoom":
+            zoom = start["zoom"]
+            for delta in deltas:
+                zoom *= 1.1 ** delta["y"]
+            # About the pointer: the board point under it stays put.
+            px = round(spike.bounds["x"] + 400) - spike.bounds["x"]
+            py = round(spike.bounds["y"] + 300) - spike.bounds["y"]
+            want = {"x": start["x"] + px / start["zoom"] - px / zoom,
+                    "y": start["y"] + py / start["zoom"] - py / zoom, "zoom": zoom}
+        else:
+            want = {"x": start["x"] - expect[0] / start["zoom"], "y": start["y"] - expect[1] / start["zoom"],
+                    "zoom": start["zoom"]}
+        ok = all(abs(end[key] - want[key]) < 0.01 for key in want) and (
+            bool(deltas) or expect not in ("pan", "sideways", "zoom"))
+        if expect not in ("pan", "sideways", "zoom"):
+            ok = ok and not after["panning"] and not after["space"]
+        result["steps"].append({"input": name, "deltas": deltas, "from": start, "to": end, "as_expected": ok})
+
+    step("button 5 (wheel down)", lambda: xdo("click", "5"), "pan")
+    step("button 4 (wheel up)", lambda: xdo("click", "4"), "pan")
+    step("button 7 (wheel right)", lambda: xdo("click", "7"), "pan")
+    step("button 6 (wheel left)", lambda: xdo("click", "6"), "pan")
+    step("shift + button 5", lambda: (xdo("keydown", "shift"),
+                                      xdo("click", "5"),
+                                      xdo("keyup", "shift")), "sideways")
+    step("ctrl + button 4 (zoom in)", lambda: (xdo("keydown", "ctrl"),
+                                               xdo("click", "4"),
+                                               xdo("keyup", "ctrl")), "zoom")
+    step("ctrl + button 5 (zoom out)", lambda: (xdo("keydown", "ctrl"),
+                                                xdo("click", "5"),
+                                                xdo("keyup", "ctrl")), "zoom")
+    step("three fast button 5, ctrl pressed after the first (burst latch)", lambda: (
+        xdo("click", "5"),
+        xdo("keydown", "ctrl"),
+        xdo("click", "--repeat", "2", "--delay", "20", "5"),
+        xdo("keyup", "ctrl"),
+    ), "pan")
+    step("middle-button drag by (60, 30)", lambda: (
+        xdo("mousedown", "2"),
+        xdo("mousemove_relative", "--sync", "60", "30"),
+        xdo("mouseup", "2"),
+    ), (60, 30))
+    pointer_over(spike, window)
+    step("Space held, left drag by (-50, 20)", lambda: (
+        xdo("keydown", "--window", window, "space"),
+        wait_for(lambda: spike.set()["space"], description="Space held"),
+        xdo("mousedown", "1"),
+        xdo("mousemove_relative", "--sync", "--", "-50", "20"),
+        xdo("mouseup", "1"),
+        xdo("keyup", "--window", window, "space"),
+    ), (-50, 20))
+    pointer_over(spike, window)
+    step("left drag without Space", lambda: (
+        xdo("mousedown", "1"),
+        xdo("mousemove_relative", "--sync", "40", "40"),
+        xdo("mouseup", "1"),
+    ), (0, 0))
+    result["pass"] = all(step["as_expected"] for step in result["steps"])
+    return result
+
+
 def show(name: str, value, depth: int = 0) -> None:
     """Print a result with one line per record, so a run reads as a table."""
     def scalar(entry) -> bool:
@@ -404,7 +651,10 @@ def show(name: str, value, depth: int = 0) -> None:
         show(str(key), entry, depth + 1)
 
 
-CHECKS = {"perf": run_perf, "layers": run_layers, "zoom": run_zoom, "measure": run_measure}
+CHECKS = {
+    "perf": run_perf, "open": run_open, "layers": run_layers, "zoom": run_zoom, "measure": run_measure,
+    "view": run_view, "keys": run_keys, "wheel": run_wheel,
+}
 
 
 def main() -> int:

@@ -2,9 +2,10 @@
 //! which cannot reach focus, the input method or renderer layers.
 //!
 //! It paints the view's scene through iced's geometry API, one renderer
-//! layer per layer of the view's plan. Everything it shows lives in the
-//! host's [`BoardView`]; its own state is focus, when the view last moved,
-//! and geometry.
+//! layer per layer of the view's plan, and turns iced's events into the
+//! machine's [`Input`]s. Everything it shows lives in the host's
+//! [`BoardView`]; its own state is focus, the pointer, when the view last
+//! moved, and geometry.
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -13,9 +14,11 @@ use iced::advanced::graphics::geometry::Renderer as _;
 use iced::advanced::renderer::Headless as _;
 use iced::advanced::widget::{self, operation, tree, Tree};
 use iced::advanced::{layout, mouse, renderer, Clipboard, Layout, Renderer as _, Shell, Widget};
+use iced::keyboard::{self, key::Named, Key};
 use iced::widget::canvas;
-use iced::{window, Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{window, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 
+use crate::machine::{Button, Input, Scroll};
 use crate::paint::{self, Cull};
 use crate::{BoardView, Labels, Message, Style, Viewport, REST};
 
@@ -45,8 +48,29 @@ struct State {
     focused: bool,
     /// The time of the last redraw, which decides whether the view rests.
     now: Instant,
+    modifiers: keyboard::Modifiers,
+    /// Where the last `CursorMoved` put the pointer. iced hands `update`
+    /// the cursor as it is after a whole batch of events, so a press and
+    /// the move after it can arrive together; a drag starts from here.
+    pointer: Option<Point>,
+    /// The button whose press the widget sent, until its release.
+    pressed: Option<mouse::Button>,
     motion: Motion,
     geometry: RefCell<Geometry>,
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            focused: false,
+            now: Instant::now(),
+            modifiers: keyboard::Modifiers::default(),
+            pointer: None,
+            pressed: None,
+            motion: Motion::default(),
+            geometry: RefCell::default(),
+        }
+    }
 }
 
 /// When the view last moved, as its redraws show it. The host moves the
@@ -54,22 +78,26 @@ struct State {
 /// widget dates a move by the first redraw that shows it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Motion {
-    /// The scene and the viewport of the last redraw.
-    seen: Option<(u64, Viewport)>,
+    /// The scene, the view's count of jumps and the viewport of the last
+    /// redraw.
+    seen: Option<(u64, u64, Viewport)>,
     moved: Option<Instant>,
 }
 
 impl Motion {
-    /// A redraw at `now` shows `viewport` over the scene of `revision`.
-    /// Another viewport over the same scene is a move; another scene is
-    /// another board, or the same one changed, and that is not.
-    fn redraw(&mut self, revision: u64, viewport: Viewport, now: Instant) {
-        if let Some((seen, from)) = self.seen {
-            if seen == revision && from != viewport {
+    /// A redraw at `now` shows `viewport` over the scene of `revision`,
+    /// after `jumps` discrete changes of view. Another viewport over the
+    /// same scene is a move, unless a jump (a zoom step, a reset, a fit)
+    /// put it there: one jump is drawn in full at once. Another scene is
+    /// another board, or the same one changed, and that is not a move
+    /// either.
+    fn redraw(&mut self, revision: u64, jumps: u64, viewport: Viewport, now: Instant) {
+        if let Some((seen, jumped, from)) = self.seen {
+            if seen == revision && jumped == jumps && from != viewport {
                 self.moved = Some(now);
             }
         }
-        self.seen = Some((revision, viewport));
+        self.seen = Some((revision, jumps, viewport));
     }
 
     fn moving(&self, now: Instant) -> bool {
@@ -113,12 +141,7 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State {
-            focused: false,
-            now: Instant::now(),
-            motion: Motion::default(),
-            geometry: RefCell::default(),
-        })
+        tree::State::new(State::new())
     }
 
     fn size(&self) -> Size<Length> {
@@ -149,12 +172,29 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
+        let bounds = layout.bounds();
+        let view = self.view;
+        let local = |point: Point| (point.x - bounds.x, point.y - bounds.y);
+        let input = |input: Input| Message::Input(view.epoch(), input);
+        // Whether the machine holds something a lost focus has to end.
+        let holding = view.machine().panning() || view.machine().space();
         match event {
             Event::Window(window::Event::RedrawRequested(now)) => {
                 state.now = *now;
-                state
-                    .motion
-                    .redraw(self.view.revision(), self.view.viewport(), *now);
+                let size = (bounds.width, bounds.height);
+                if view.size() != Some(size) && size.0 > 0.0 && size.1 > 0.0 {
+                    shell.publish(Message::Resized {
+                        width: size.0,
+                        height: size.1,
+                    });
+                }
+                // A fit waiting for the size draws nothing, so it is not
+                // seen and its viewport is no move.
+                if !view.fit_pending() {
+                    state
+                        .motion
+                        .redraw(view.revision(), view.jumps(), view.viewport(), *now);
+                }
                 // Labels left out of a moving frame come back at rest.
                 if !self.labels(renderer).moving && state.motion.moving(*now) {
                     if let Some(rest) = state.motion.rests_at() {
@@ -162,13 +202,95 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
                     }
                 }
             }
-            Event::Mouse(mouse::Event::ButtonPressed(_)) => {
-                if cursor.is_over(layout.bounds()) {
-                    state.focused = true;
+            Event::Window(window::Event::Unfocused) if holding => {
+                shell.publish(input(Input::Cancel));
+            }
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+            }
+            // The wheel reaches an unfocused board under the pointer.
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if let Some(at) = pointer(state, cursor, bounds) {
+                    let delta = match *delta {
+                        mouse::ScrollDelta::Lines { x, y } => Scroll::Lines { x, y },
+                        mouse::ScrollDelta::Pixels { x, y } => Scroll::Pixels { x, y },
+                    };
+                    shell.publish(input(Input::Wheel {
+                        delta,
+                        at: local(at),
+                        zoom: state.modifiers.command(),
+                        sideways: state.modifiers.shift(),
+                        scale_factor: self.style.scale_factor,
+                    }));
                     shell.capture_event();
-                } else {
-                    state.focused = false;
                 }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                match pointer(state, cursor, bounds) {
+                    Some(at) => {
+                        state.focused = true;
+                        if state.pressed.is_none() {
+                            state.pressed = Some(*button);
+                            shell.publish(input(Input::Press {
+                                button: machine_button(*button),
+                                at: local(at),
+                            }));
+                        }
+                        shell.capture_event();
+                    }
+                    None => {
+                        if state.focused && holding {
+                            shell.publish(input(Input::Cancel));
+                        }
+                        state.focused = false;
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                state.pointer = Some(*position);
+                if state.pressed.is_some() {
+                    shell.publish(input(Input::Move {
+                        at: local(*position),
+                    }));
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(button))
+                if state.pressed == Some(*button) =>
+            {
+                state.pressed = None;
+                shell.publish(input(Input::Release {
+                    button: machine_button(*button),
+                }));
+                shell.capture_event();
+            }
+            // iced hands key events to every widget; only a focused board
+            // acts on them, except to let go of a Space it was given.
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                repeat,
+                ..
+            }) if state.focused => match ours(key, *modifiers) {
+                Some(Ours::Space) => {
+                    if !*repeat {
+                        shell.publish(input(Input::Space { held: true }));
+                    }
+                    shell.capture_event();
+                }
+                Some(Ours::Arrow) => {
+                    #[cfg(feature = "test-support")]
+                    view.probe.arrows.set(view.probe.arrows.get() + 1);
+                    shell.capture_event();
+                }
+                None => {}
+            },
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key: Key::Named(Named::Space),
+                ..
+            }) if view.machine().space() => {
+                shell.publish(input(Input::Space { held: false }));
+                shell.capture_event();
             }
             _ => {}
         }
@@ -202,6 +324,11 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             },
             paint::color(view.palette().canvas),
         );
+        // A board waiting to be fitted would show one frame from the
+        // wrong place.
+        if view.fit_pending() {
+            return;
+        }
 
         let moving = state.motion.moving(state.now);
         let cull = Cull::new(
@@ -270,6 +397,53 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
     }
 }
 
+/// The pointer over the widget: where the last move put it, or iced's
+/// cursor when no move has been seen there. `None` when the pointer is
+/// elsewhere, or over an overlay drawn above the widget.
+fn pointer(state: &State, cursor: mouse::Cursor, bounds: Rectangle) -> Option<Point> {
+    let end = cursor.position_over(bounds)?;
+    Some(
+        state
+            .pointer
+            .filter(|pointer| bounds.contains(*pointer))
+            .unwrap_or(end),
+    )
+}
+
+fn machine_button(button: mouse::Button) -> Button {
+    match button {
+        mouse::Button::Left => Button::Left,
+        mouse::Button::Middle => Button::Middle,
+        mouse::Button::Right => Button::Right,
+        _ => Button::Other,
+    }
+}
+
+/// A key the focused board takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ours {
+    /// Held, it turns a left drag into a pan.
+    Space,
+    /// Taken and given no meaning yet, so it neither moves Wren's columns
+    /// nor commits a later phase to one.
+    Arrow,
+}
+
+/// Whether the focused board takes `key`. A key with ⌘, Ctrl or Alt held
+/// is a shortcut, and the app's.
+fn ours(key: &Key, modifiers: keyboard::Modifiers) -> Option<Ours> {
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key {
+        Key::Named(Named::Space) => Some(Ours::Space),
+        Key::Named(Named::ArrowUp | Named::ArrowDown | Named::ArrowLeft | Named::ArrowRight) => {
+            Some(Ours::Arrow)
+        }
+        _ => None,
+    }
+}
+
 impl<'a> From<Canvas<'a>> for Element<'a, Message> {
     fn from(canvas: Canvas<'a>) -> Self {
         Element::new(canvas)
@@ -295,11 +469,11 @@ mod tests {
         let mut motion = Motion::default();
         let start = Instant::now();
         assert!(!motion.moving(start));
-        motion.redraw(7, at(120.0), start);
+        motion.redraw(7, 0, at(120.0), start);
         assert!(!motion.moving(start));
         assert_eq!(motion.rests_at(), None);
         // Redrawn where it was, it stays at rest.
-        motion.redraw(7, at(120.0), start + REST / 3);
+        motion.redraw(7, 0, at(120.0), start + REST / 3);
         assert!(!motion.moving(start + REST / 3));
     }
 
@@ -307,16 +481,16 @@ mod tests {
     fn a_view_moves_until_it_has_been_still_for_the_rest() {
         let mut motion = Motion::default();
         let start = Instant::now();
-        motion.redraw(7, at(0.0), start);
-        motion.redraw(7, at(8.0), start + REST);
+        motion.redraw(7, 0, at(0.0), start);
+        motion.redraw(7, 0, at(8.0), start + REST);
         assert!(motion.moving(start + REST));
         assert_eq!(motion.rests_at(), Some(start + REST * 2));
         // Each further step starts the rest again.
-        motion.redraw(7, at(16.0), start + REST * 3 / 2);
+        motion.redraw(7, 0, at(16.0), start + REST * 3 / 2);
         assert!(motion.moving(start + REST * 2));
         assert_eq!(motion.rests_at(), Some(start + REST * 5 / 2));
         // A redraw without a step does not.
-        motion.redraw(7, at(16.0), start + REST * 2);
+        motion.redraw(7, 0, at(16.0), start + REST * 2);
         assert_eq!(motion.rests_at(), Some(start + REST * 5 / 2));
         assert!(!motion.moving(start + REST * 5 / 2));
         // A clock that reads earlier than the move is not a panic.
@@ -327,23 +501,102 @@ mod tests {
     fn another_scene_at_another_place_is_not_a_move() {
         let mut motion = Motion::default();
         let start = Instant::now();
-        motion.redraw(7, at(0.0), start);
+        motion.redraw(7, 0, at(0.0), start);
         // The host swapped the view, or the board was reloaded.
-        motion.redraw(8, at(500.0), start + REST);
+        motion.redraw(8, 0, at(500.0), start + REST);
         assert!(!motion.moving(start + REST));
         // From there on, the new scene's viewport is the one followed.
-        motion.redraw(8, at(508.0), start + REST * 2);
+        motion.redraw(8, 0, at(508.0), start + REST * 2);
         assert!(motion.moving(start + REST * 2));
     }
 
     #[test]
+    fn a_jump_is_drawn_at_once_and_a_move_after_it_is_a_move() {
+        let mut motion = Motion::default();
+        let start = Instant::now();
+        motion.redraw(7, 0, at(0.0), start);
+        // A zoom step, a reset or a fit.
+        motion.redraw(7, 1, at(300.0), start + REST);
+        assert!(!motion.moving(start + REST));
+        motion.redraw(7, 1, at(308.0), start + REST * 2);
+        assert!(motion.moving(start + REST * 2));
+        // A jump during a move does not end the move.
+        motion.redraw(7, 2, at(600.0), start + REST * 2);
+        assert!(motion.moving(start + REST * 2));
+    }
+
+    #[test]
+    fn the_board_takes_space_and_the_arrows_and_leaves_shortcuts() {
+        use keyboard::Modifiers;
+        let plain = Modifiers::default();
+        assert_eq!(ours(&Key::Named(Named::Space), plain), Some(Ours::Space));
+        for arrow in [
+            Named::ArrowUp,
+            Named::ArrowDown,
+            Named::ArrowLeft,
+            Named::ArrowRight,
+        ] {
+            assert_eq!(ours(&Key::Named(arrow), plain), Some(Ours::Arrow));
+            assert_eq!(
+                ours(&Key::Named(arrow), Modifiers::SHIFT),
+                Some(Ours::Arrow)
+            );
+            for shortcut in [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO] {
+                assert_eq!(ours(&Key::Named(arrow), shortcut), None);
+            }
+        }
+        for key in [
+            Key::Named(Named::Escape),
+            Key::Named(Named::Enter),
+            Key::Named(Named::Tab),
+            Key::Character("k".into()),
+            Key::Character("=".into()),
+        ] {
+            assert_eq!(ours(&key, plain), None, "{key:?}");
+        }
+        assert_eq!(ours(&Key::Named(Named::Space), Modifiers::ALT), None);
+    }
+
+    #[test]
+    fn mouse_buttons_reach_the_machine_by_name() {
+        assert_eq!(machine_button(mouse::Button::Left), Button::Left);
+        assert_eq!(machine_button(mouse::Button::Middle), Button::Middle);
+        assert_eq!(machine_button(mouse::Button::Right), Button::Right);
+        assert_eq!(machine_button(mouse::Button::Back), Button::Other);
+        assert_eq!(machine_button(mouse::Button::Other(9)), Button::Other);
+    }
+
+    #[test]
+    fn the_last_move_places_the_pointer_and_an_overlay_hides_it() {
+        let bounds = Rectangle::new(Point::new(100.0, 50.0), Size::new(400.0, 300.0));
+        let mut state = State::new();
+        let cursor = mouse::Cursor::Available(Point::new(300.0, 200.0));
+        assert_eq!(
+            pointer(&state, cursor, bounds),
+            Some(Point::new(300.0, 200.0))
+        );
+        // A press batched with the move after it: the move before counts.
+        state.pointer = Some(Point::new(120.0, 60.0));
+        assert_eq!(
+            pointer(&state, cursor, bounds),
+            Some(Point::new(120.0, 60.0))
+        );
+        // A last move outside the widget is not where the pointer is now.
+        state.pointer = Some(Point::new(10.0, 10.0));
+        assert_eq!(
+            pointer(&state, cursor, bounds),
+            Some(Point::new(300.0, 200.0))
+        );
+        // Outside, or under an overlay, there is no pointer for the board.
+        let outside = mouse::Cursor::Available(Point::new(20.0, 20.0));
+        assert_eq!(pointer(&state, outside, bounds), None);
+        let levitating = mouse::Cursor::Levitating(Point::new(300.0, 200.0));
+        assert_eq!(pointer(&state, levitating, bounds), None);
+    }
+
+    #[test]
     fn the_widget_state_takes_and_gives_up_focus() {
-        let mut state = State {
-            focused: false,
-            now: Instant::now(),
-            motion: Motion::default(),
-            geometry: RefCell::default(),
-        };
+        let mut state = State::new();
         assert!(!state.is_focused());
         state.focus();
         assert!(state.is_focused());
