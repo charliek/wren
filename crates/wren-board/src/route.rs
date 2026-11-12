@@ -63,10 +63,10 @@ const NEAR: usize = 16;
 /// runs out, on a crowded board or along a very long route, keeps the best
 /// route it has scored, else its plain route, so routing costs at most
 /// this much per connector whatever the size of the board.
-const BUDGET: u32 = 8192;
+const BUDGET: u32 = 12288;
 /// The same while its middle segments move off other lines; one that runs
 /// out stays where it is.
-const SEPARATE_BUDGET: u32 = 2048;
+const SEPARATE_BUDGET: u32 = 1024;
 
 /// How an end attached to a node meets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,11 +205,11 @@ pub struct Connector {
 ///
 /// Connectors whose sides are fixed (straight ones, pinned and anchored
 /// ends, and floating ends that rule 4 holds to their nominal side) are
-/// routed against the boxes alone. A connector with a free choice of side
-/// is then routed against the boxes and the lines of those fixed
-/// connectors, so that it neither runs along nor needlessly crosses them.
-/// Last, middle segments that still lie on another connector's line move
-/// aside by [`NUDGE`] steps.
+/// routed against the boxes alone. Those with a free choice of side are
+/// then routed, in order, against the boxes and the lines of the fixed
+/// connectors and of the free ones before them, so that none runs along
+/// or needlessly crosses another. Last, middle segments that still lie on
+/// another connector's line move aside by [`NUDGE`] steps.
 pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
     let obstacles = Grid::new(boxes.iter().copied());
     let free: Vec<bool> = connectors
@@ -217,7 +217,7 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
         .map(|c| c.kind == Route::Elbow && has_choice(&c.ends[0], &c.ends[1]))
         .collect();
     let mut routes: Vec<Option<Routed>> = vec![None; connectors.len()];
-    let mut fixed = Lines::default();
+    let mut drawn = Lines::default();
     for (i, connector) in connectors.iter().enumerate() {
         if free[i] {
             continue;
@@ -225,14 +225,18 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
         let mut router = Router::new(&obstacles, connector.nodes, None, BUDGET);
         let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
         for pair in routed.points.windows(2) {
-            fixed.insert(pair[0], pair[1], i);
+            drawn.insert(pair[0], pair[1], i);
         }
         routes[i] = Some(routed);
     }
     for (i, connector) in connectors.iter().enumerate() {
         if free[i] {
-            let mut router = Router::new(&obstacles, connector.nodes, Some(&fixed), BUDGET);
-            routes[i] = Some(router.route(connector.kind, &connector.ends[0], &connector.ends[1]));
+            let mut router = Router::new(&obstacles, connector.nodes, Some(&drawn), BUDGET);
+            let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
+            for pair in routed.points.windows(2) {
+                drawn.insert(pair[0], pair[1], i);
+            }
+            routes[i] = Some(routed);
         }
     }
     let mut routes: Vec<Routed> = routes.into_iter().flatten().collect();
@@ -859,7 +863,8 @@ fn length_of(points: &[Point]) -> f32 {
 }
 
 /// Routes one connector among the node boxes and, for a connector with a
-/// side to choose, the lines of the connectors whose sides are fixed.
+/// side to choose, the lines already drawn: the fixed connectors' and
+/// those of the free connectors before it.
 struct Router<'a> {
     obstacles: &'a Grid,
     /// The index of each end's node among the obstacles.
@@ -1243,8 +1248,8 @@ impl<'a> Router<'a> {
     }
 
     /// How many middle segments lie on the centre line of a node within
-    /// [`REACH`] along it, and how many segments lie on a fixed
-    /// connector's line; and how many fixed connectors' lines it crosses.
+    /// [`REACH`] along it, and how many segments lie on a line already
+    /// drawn; and how many of those lines it crosses.
     /// `None` when the budget runs out.
     fn penalties(&mut self, points: &[Point]) -> Option<(u32, u32)> {
         let mut shared = 0;
@@ -2040,6 +2045,75 @@ mod tests {
             assert!(collinear_overlap(w[0], w[1], p(60.0, 60.0), p(60.0, 120.0)) == 0.0);
         }
         assert_eq!(routes[1].sides, [Some(Side::Bottom), Some(Side::Right)]);
+    }
+
+    /// The length that two connectors' routes run on one line together.
+    fn shared_length(a: &Routed, b: &Routed) -> f32 {
+        a.points
+            .windows(2)
+            .flat_map(|w| {
+                b.points
+                    .windows(2)
+                    .map(move |v| collinear_overlap(w[0], w[1], v[0], v[1]))
+            })
+            .sum()
+    }
+
+    /// Connectors that each choose a side see the ones chosen before them:
+    /// three from one node to a column below and to its right no longer
+    /// share a trunk out of its bottom (170 and 370 px did), and a pair
+    /// each way between two boxes that others force into a Z no longer
+    /// share their first and last segments (190 px did).
+    #[test]
+    fn free_connectors_keep_off_each_others_lines() {
+        let fan = [
+            A,
+            Rect::new(300.0, 200.0, 120.0, 60.0),
+            Rect::new(300.0, 400.0, 120.0, 60.0),
+            Rect::new(300.0, 600.0, 120.0, 60.0),
+        ];
+        let square = |x: f32, y: f32| Rect::new(x, y, 100.0, 100.0);
+        let pair = [
+            square(0.0, 0.0),
+            square(300.0, 300.0),
+            square(300.0, 0.0),
+            square(0.0, 300.0),
+        ];
+        for (name, boxes, ends) in [
+            ("fan-out", &fan, [(0, 1), (0, 2), (0, 3)].as_slice()),
+            ("both ways", &pair, [(0, 1), (1, 0)].as_slice()),
+        ] {
+            let connectors: Vec<Connector> = ends
+                .iter()
+                .map(|&(i, j)| Connector {
+                    kind: Route::Elbow,
+                    ends: [
+                        node(boxes[i], Attach::Floating),
+                        node(boxes[j], Attach::Floating),
+                    ],
+                    nodes: [Some(i), Some(j)],
+                })
+                .collect();
+            let routes = route_all(boxes, &connectors);
+            assert_eq!(routes, route_all(boxes, &connectors), "{name}");
+            for (k, (c, routed)) in connectors.iter().zip(&routes).enumerate() {
+                assert_sound(Route::Elbow, &c.ends[0], &c.ends[1], routed, name);
+                let others: Vec<Rect> = (0..boxes.len())
+                    .filter(|&i| c.nodes[0] != Some(i) && c.nodes[1] != Some(i))
+                    .map(|i| boxes[i])
+                    .collect();
+                assert!(
+                    entered(&routed.points, &others).is_empty(),
+                    "{name}: {routed:?}"
+                );
+                for other in &routes[..k] {
+                    assert!(
+                        shared_length(routed, other) <= SHARED_LENGTH,
+                        "{name}: {routed:?} on {other:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Random boxes and connectors of every end form: routing all of them
