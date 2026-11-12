@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="684.75" height="440.75" viewBox="-84 -40.75 684.75 440.75">
+<path d="M0 0L120 0L120 60L0 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="46" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rect</text>
+<path d="M168 0L272 0C276.41827 0 280 3.5817218 280 8L280 52C280 56.418278 276.41827 60 272 60L168 60C163.58173 60 160 56.418278 160 52L160 8C160 3.5817218 163.58173 0 168 0Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="195.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rounded</text>
+<path d="M350 0L410 0C426.56854 0 440 13.4314575 440 30C440 46.568542 426.56854 60 410 60L350 60C333.43146 60 320 46.568542 320 30C320 13.4314575 333.43146 0 350 0Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="366" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Pill</text>
+<path d="M540 0C573.1371 0 600 13.4314575 600 30C600 46.568542 573.1371 60 540 60C506.8629 60 480 46.568542 480 30C480 13.4314575 506.8629 0 540 0Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="515.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Ellipse</text>
+<path d="M60 120L120 150L60 180L0 150Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="35.5" y="155.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Diamond</text>
+<path d="M180 120L280 120L260 180L160 180Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="185" y="145.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Parallelog</text>
+<text x="209.5" y="165.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">ram</text>
+<path d="M320 130C320 124.47715 346.8629 120 380 120C413.1371 120 440 124.47715 440 130L440 170C440 175.52284 413.1371 180 380 180C346.8629 180 320 175.52284 320 170Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<path d="M320 130C320 135.52284 346.8629 140 380 140C413.1371 140 440 135.52284 440 130" fill="none" stroke="#202428" stroke-width="1.5"/>
+<text x="352" y="163.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Cylinder</text>
+<path d="M480 120L600 120L600 172.5Q570 157.5 540 172.5Q510 187.5 480 172.5Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="512" y="149.59277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Document</text>
+<path d="M120 30L150 30" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M160 30L150 34L150 26Z" fill="#202428"/>
+<path d="M220 0L220 -20L300 -20L300 80L380 80L380 70" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M380 60L384 70L376 70Z" fill="#202428"/>
+<path d="M440 30L470 30" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M480 30L470 34L470 26Z" fill="#202428"/>
+<path d="M540 60L540 90L480 90L480 110" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M480 120L476 110L484 110Z" fill="#202428"/>
+<path d="M120 150L140 150L140 280L-80 280L-80 290" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M-80 300L-84 290L-76 290Z" fill="#202428"/>
+<path d="M0 300L0 240L380 240L380 190" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M380 180L384 190L376 190Z" fill="#202428"/>
+<path d="M-40 -40L-40 390" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M-40 400L-44 390L-36 390Z" fill="#202428"/>
+</svg>
