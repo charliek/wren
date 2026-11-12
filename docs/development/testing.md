@@ -81,6 +81,65 @@ The `make smoke-*` targets pass the variable through, so
 cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four Linux
 smoke lanes.
 
+### Boards
+
+Boards are behind the `boards` setting, which is off by default. The board
+cases live in `tools/wrentest/test_board_*.py` and set the setting
+themselves; `tools/wrentest/boards.py` holds their helpers. Each copies the
+sample workspace, `tools/wrentest/fixtures/boards/workspace/`, before opening
+it, because opening a workspace writes `.wren/workspace.toml` into it. A board
+with git conflict markers is written at run time by `conflict_board()` and is
+never committed, and large boards come from `grid_board(n)`.
+
+| File | What it covers |
+|---|---|
+| `test_board_view.py` | Focus and the editor column, the opening fit, pixel checks of fills, connectors and labels, wheel and drag panning, zoom, the raw-text fallback, search, and SVG export. |
+| `test_board_gate.py` | The setting off, a board never written by looking at it, the hidden editor never writing a board, and the state file's board paths. |
+| `test_board_native.py` | Real wheel, Ctrl+wheel and middle-button input under X11 (`native_x11`). |
+| `test_board_perf.py` | Timings against debug ceilings, written to `measurements.json` beside the case's artifacts. |
+
+Run them alone with a path glob (`-k board` would also pick every keyboard
+and clipboard case):
+
+```bash
+make build-smoke
+ICED_BACKEND=tiny-skia make smoke-x11 SMOKE_TESTS='tools/wrentest/test_board*.py'
+make smoke-wayland SMOKE_TESTS='tools/wrentest/test_board*.py'
+```
+
+`WRENTEST_BOARDS=off` or `on` writes that `boards` line into the
+`config.conf` of every `WrenApp` whose settings do not name `boards`
+already, so the whole suite can run with the setting on. Unset, nothing is
+added and the build's default holds.
+
+`WRENTEST_PERF=release` makes `test_board_perf.py` assert the release
+budgets instead of the debug ceilings. Build the release binary in its own
+target directory so the smoke build is not replaced:
+
+```bash
+cargo build --locked --release -p wren-iced --features smoke-test --target-dir target/perf
+WRENTEST_PERF=release WREN_TEST_BIN=$PWD/target/perf/release/wren ICED_BACKEND=tiny-skia \
+  python3 tools/run_display.py x11 -- \
+  uv run --locked --group test pytest tools/wrentest/test_board_perf.py -s
+```
+
+`test_board_gate.py` has one case that opens a workspace with a released
+Wren and with this build in turn. It runs only when `WRENTEST_RELEASED_BIN`
+names a v0.1.1 build made with `--features smoke-test`.
+
+The board requests:
+
+| Request | What it does |
+|---|---|
+| `board.get` `{"elements": bool}` | The open note's surface (`board`, `raw`, `text` or none), whether the setting is on, and for a board its counts, issues, viewport, whether it is read-only and whether the widget is panning, idle or unfocused. With `elements` it lists every node and connector by their file fields. For raw text, `error` names the line, column and message. |
+| `board.bounds` | Where the widget and each node, label and connector are drawn in the window, in logical pixels, with each element's fill and stroke colour and the window's scale factor. |
+| `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`) or one step of a middle-button pan (`press`, `move`, `release` with `"button": "middle"`), through the path the widget's own input takes. `at` is `{"node": id}`, `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. |
+| `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG writes, without the save dialog. |
+| `perf.board` | The board's scene, draw and frame timings and how long it took to open, optionally after a pan or zoom run of one step a redraw. |
+
+Every board request but `board.get` fails when the open note is not shown
+as a board.
+
 ## Looking at real screens
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`
@@ -103,6 +162,21 @@ shoots just these editor scenes:
 ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
   python3 tools/capture_scenes.py --engine advanced --theme light \
   --setting editor-line-height=2 --label tall --only markdown
+```
+
+`--only boards` opens the board samples with `boards = on` and writes the
+board scenes: `board-flow` (fitted), `board-zoom-in` (200 %),
+`board-zoom-out` (25 %), `board-shapes`, `board-overlap`, `board-raw` (a
+board with conflict markers, shown as text under its banner),
+`board-notes-list` (the kind icon), `board-search` (a label hit) and
+`board-wide` (columns folded), with `board-flow.svg` beside them. Shoot
+them on both renderers in both themes:
+
+```bash
+for r in tiny-skia wgpu; do for t in dark light; do
+  WGPU_BACKEND=vulkan LIBGL_ALWAYS_SOFTWARE=1 ICED_BACKEND=$r python3 tools/run_display.py x11 -- \
+    python3 tools/capture_scenes.py --only boards --theme $t --label $r
+done; done
 ```
 
 ## macOS
