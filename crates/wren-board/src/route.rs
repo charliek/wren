@@ -55,6 +55,18 @@ const CHANNELS: usize = 6;
 const PAIR_CHANNELS: usize = 4;
 /// How many times a detour is pushed past the boxes it still crosses.
 const PUSHES: usize = 4;
+/// At most this many boxes near a connector's ends give it channel
+/// positions, the nearest first.
+const NEAR: usize = 16;
+/// The lookup one connector may do while it is routed, counted in grid
+/// cells visited and in boxes and segments looked at. A connector that
+/// runs out, on a crowded board or along a very long route, keeps the best
+/// route it has scored, else its plain route, so routing costs at most
+/// this much per connector whatever the size of the board.
+const BUDGET: u32 = 8192;
+/// The same while its middle segments move off other lines; one that runs
+/// out stays where it is.
+const SEPARATE_BUDGET: u32 = 2048;
 
 /// How an end attached to a node meets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,13 +186,7 @@ pub fn route_among(
     obstacles: &Obstacles,
     ends: [Option<usize>; 2],
 ) -> Routed {
-    let mut router = Router {
-        obstacles: &obstacles.0,
-        own: ends,
-        lines: None,
-        found: Vec::new(),
-    };
-    router.route(kind, from, to)
+    Router::new(&obstacles.0, ends, None, BUDGET).route(kind, from, to)
 }
 
 /// One connector of a board, for [`route_all`].
@@ -215,12 +221,7 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
         if free[i] {
             continue;
         }
-        let mut router = Router {
-            obstacles: &obstacles,
-            own: connector.nodes,
-            lines: None,
-            found: Vec::new(),
-        };
+        let mut router = Router::new(&obstacles, connector.nodes, None, BUDGET);
         let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
         for pair in routed.points.windows(2) {
             fixed.insert(pair[0], pair[1], i);
@@ -229,12 +230,7 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
     }
     for (i, connector) in connectors.iter().enumerate() {
         if free[i] {
-            let mut router = Router {
-                obstacles: &obstacles,
-                own: connector.nodes,
-                lines: Some(&fixed),
-                found: Vec::new(),
-            };
+            let mut router = Router::new(&obstacles, connector.nodes, Some(&fixed), BUDGET);
             routes[i] = Some(router.route(connector.kind, &connector.ends[0], &connector.ends[1]));
         }
     }
@@ -526,25 +522,58 @@ impl Grid {
         }
     }
 
-    /// The indices of the rectangles touching `area`, ascending.
-    fn query(&self, area: Rect, out: &mut Vec<u32>) {
+    /// The indices of the rectangles touching `area`, ascending, each cell
+    /// visited and each rectangle looked at taken from `budget`. When the
+    /// budget runs out the query stops, leaves it at 0 and returns false;
+    /// `out` is then incomplete.
+    fn query(&self, area: Rect, out: &mut Vec<u32>, budget: &mut u32) -> bool {
         out.clear();
         let (x, y, count) = Self::cells_of(area);
+        // Each list is ascending, so only a merge of two needs sorting.
+        let mut lists = 0;
         if count > self.rects.len() as i64 {
+            if !spend(budget, self.rects.len()) {
+                return false;
+            }
             out.extend(0..self.rects.len() as u32);
         } else {
             for cx in x[0]..=x[1] {
                 for cy in y[0]..=y[1] {
-                    if let Some(found) = self.cells.get(&(cx, cy)) {
-                        out.extend_from_slice(found);
+                    let found = self.cells.get(&(cx, cy)).map_or(&[][..], Vec::as_slice);
+                    if !spend(budget, 1 + found.len()) {
+                        return false;
                     }
+                    lists += usize::from(!found.is_empty());
+                    out.extend_from_slice(found);
                 }
             }
+            if !spend(budget, self.large.len()) {
+                return false;
+            }
+            lists += usize::from(!self.large.is_empty());
             out.extend_from_slice(&self.large);
         }
         out.retain(|&i| touches(self.rects[i as usize], area));
-        out.sort_unstable();
-        out.dedup();
+        if lists > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
+        true
+    }
+}
+
+/// Takes `n` from `budget`, or empties it and returns false when it holds
+/// less.
+fn spend(budget: &mut u32, n: usize) -> bool {
+    match u32::try_from(n).ok().and_then(|n| budget.checked_sub(n)) {
+        Some(left) => {
+            *budget = left;
+            true
+        }
+        None => {
+            *budget = 0;
+            false
+        }
     }
 }
 
@@ -595,30 +624,55 @@ impl Lines {
         self.grid.insert(grow(segment_box(p, q), LINE_TOLERANCE));
     }
 
-    /// The segments of other connectors near the one from `p` to `q`.
-    fn near(&self, p: Point, q: Point, owner: Option<usize>, found: &mut Vec<u32>) {
-        self.grid.query(segment_box(p, q), found);
+    /// The segments of other connectors near the one from `p` to `q`, as
+    /// [`Grid::query`] finds them within `budget`.
+    fn near(
+        &self,
+        p: Point,
+        q: Point,
+        owner: Option<usize>,
+        found: &mut Vec<u32>,
+        budget: &mut u32,
+    ) -> bool {
+        let complete = self.grid.query(segment_box(p, q), found, budget);
         found.retain(|&i| Some(self.segments[i as usize].2) != owner);
+        complete
     }
 
-    /// Whether the segment from `p` to `q` lies on another connector's.
-    fn shares(&mut self, p: Point, q: Point, owner: Option<usize>) -> bool {
+    /// Whether the segment from `p` to `q` lies on another connector's;
+    /// `None` when `budget` runs out first.
+    fn shares(
+        &mut self,
+        p: Point,
+        q: Point,
+        owner: Option<usize>,
+        budget: &mut u32,
+    ) -> Option<bool> {
         let mut found = std::mem::take(&mut self.found);
-        self.near(p, q, owner, &mut found);
+        let complete = self.near(p, q, owner, &mut found, budget);
         let shared = found.iter().any(|&i| {
             let (a, b, _) = self.segments[i as usize];
             collinear_overlap(p, q, a, b) > SHARED_LENGTH
         });
         self.found = found;
-        shared
+        complete.then_some(shared)
     }
 
-    /// How many other connectors' segments the route crosses.
-    fn crossings(&mut self, points: &[Point], owner: Option<usize>) -> u32 {
+    /// How many other connectors' segments the route crosses; `None` when
+    /// `budget` runs out first.
+    fn crossings(
+        &mut self,
+        points: &[Point],
+        owner: Option<usize>,
+        budget: &mut u32,
+    ) -> Option<u32> {
         let mut found = std::mem::take(&mut self.found);
-        let mut count = 0;
+        let (mut count, mut complete) = (0, true);
         for pair in points.windows(2) {
-            self.near(pair[0], pair[1], owner, &mut found);
+            if !self.near(pair[0], pair[1], owner, &mut found, budget) {
+                complete = false;
+                break;
+            }
             count += found
                 .iter()
                 .filter(|&&i| {
@@ -628,7 +682,7 @@ impl Lines {
                 .count() as u32;
         }
         self.found = found;
-        count
+        complete.then_some(count)
     }
 }
 
@@ -811,9 +865,26 @@ struct Router<'a> {
     own: [Option<usize>; 2],
     lines: Option<&'a Lines>,
     found: Vec<u32>,
+    /// What lookup this connector may still do ([`BUDGET`]).
+    budget: u32,
 }
 
-impl Router<'_> {
+impl<'a> Router<'a> {
+    fn new(
+        obstacles: &'a Grid,
+        own: [Option<usize>; 2],
+        lines: Option<&'a Lines>,
+        budget: u32,
+    ) -> Self {
+        Self {
+            obstacles,
+            own,
+            lines,
+            found: Vec::new(),
+            budget,
+        }
+    }
+
     fn route(&mut self, kind: Route, from: &Terminal, to: &Terminal) -> Routed {
         let (ra, rb) = (from.bounds(), to.bounds());
         let exit = nominal_exit(ra, rb);
@@ -831,13 +902,16 @@ impl Router<'_> {
         let from_sides = choices(from, exit, free);
         let to_sides = choices(to, entry, free);
         let single = from_sides.len() == 1 && to_sides.len() == 1;
-        let near = self.near(ra, rb);
+        let mut near: Option<Vec<Rect>> = None;
         let mut best: Option<(Score, Routed)> = None;
         let mut hits = Vec::new();
         let mut candidates: Vec<Vec<Point>> = Vec::new();
         let mut first = true;
-        for &sa in &from_sides {
+        'pairs: for &sa in &from_sides {
             for &sb in &to_sides {
+                if self.budget == 0 {
+                    break 'pairs;
+                }
                 let (a, da, a_shown) = end(from, sa, exit);
                 let (b, db, b_shown) = end(to, sb, entry);
                 let routed = |points| Routed {
@@ -879,8 +953,12 @@ impl Router<'_> {
                 if clean && fewest(a, da, b, db) >= best.as_ref().map_or(f32::MAX, |b| b.0.cost) {
                     continue;
                 }
+                if near.is_none() {
+                    near = Some(self.near(ra, rb));
+                }
                 candidates.clear();
-                self.templates((a, da, ra), (b, db, rb), &near, !clean, &mut candidates);
+                let around = near.as_deref().unwrap_or_default();
+                self.templates((a, da, ra), (b, db, rb), around, !clean, &mut candidates);
                 for points in candidates.drain(..) {
                     let points = simplify(points);
                     if !leaves_and_enters(&points, da, db) {
@@ -888,6 +966,9 @@ impl Router<'_> {
                     }
                     let Some(score) = self.score(&points, best.as_ref().map(|b| b.0), &mut hits)
                     else {
+                        if self.budget == 0 {
+                            break 'pairs;
+                        }
                         continue;
                     };
                     if score.beats(best.as_ref().map(|b| b.0)) {
@@ -899,11 +980,17 @@ impl Router<'_> {
         match best {
             Some((_, routed)) => routed,
             None => {
-                // Unreachable: the first pair always scores. Kept total.
+                // Out of budget before the plain route of the first pair
+                // was scored: it is drawn as it is.
                 let (a, da, a_shown) = end(from, exit, exit);
                 let (b, db, b_shown) = end(to, entry, entry);
+                let points = if a == b {
+                    vec![a, b]
+                } else {
+                    elbow(a, da, ra, b, db, rb)
+                };
                 Routed {
-                    points: vec![a, b],
+                    points,
                     sides: [a_shown, b_shown],
                     outward: [da, db],
                 }
@@ -911,16 +998,45 @@ impl Router<'_> {
         }
     }
 
-    /// The boxes near both ends, other than the ends' own, whose edges
-    /// give a detour its channels.
+    /// The boxes near the ends, other than the ends' own, whose edges give
+    /// a detour its channels: those around both ends together, or around
+    /// each end when that area is large, the [`NEAR`] nearest an end kept.
     fn near(&mut self, ra: Rect, rb: Rect) -> Vec<Rect> {
-        let area = grow(hull(ra, rb), 4.0 * ELBOW_MARGIN);
-        self.obstacles.query(area, &mut self.found);
-        self.found
-            .iter()
-            .filter(|&&i| !self.own.contains(&Some(i as usize)))
-            .map(|&i| self.obstacles.rects[i as usize])
-            .collect()
+        let margin = 4.0 * ELBOW_MARGIN;
+        let area = grow(hull(ra, rb), margin);
+        let areas = if Grid::cells_of(area).2 <= MAX_CELLS {
+            vec![area]
+        } else {
+            vec![grow(ra, margin), grow(rb, margin)]
+        };
+        let mut picked: Vec<u32> = Vec::new();
+        for area in areas {
+            if !self
+                .obstacles
+                .query(area, &mut self.found, &mut self.budget)
+            {
+                return Vec::new();
+            }
+            picked.extend(
+                self.found
+                    .iter()
+                    .filter(|&&i| !self.own.contains(&Some(i as usize))),
+            );
+        }
+        let rects = &self.obstacles.rects;
+        let gap = |i: u32| {
+            let r = rects[i as usize];
+            let apart = |e: Rect| {
+                (r.x - e.right()).max(e.x - r.right()).max(0.0)
+                    + (r.y - e.bottom()).max(e.y - r.bottom()).max(0.0)
+            };
+            apart(ra).min(apart(rb))
+        };
+        picked.sort_unstable();
+        picked.dedup();
+        picked.sort_by(|&i, &j| gap(i).total_cmp(&gap(j)).then(i.cmp(&j)));
+        picked.truncate(NEAR);
+        picked.into_iter().map(|i| rects[i as usize]).collect()
     }
 
     /// The candidate routes between two sides: the plain route's shape with
@@ -1070,7 +1186,9 @@ impl Router<'_> {
         let mut c = start;
         let mut hits = Vec::new();
         for _ in 0..PUSHES {
-            self.hits(&simplify(template(c)), &mut hits);
+            if !self.hits(&simplify(template(c)), &mut hits) {
+                return None;
+            }
             if hits.is_empty() {
                 return (c != start).then_some(c);
             }
@@ -1094,14 +1212,18 @@ impl Router<'_> {
     }
 
     /// The node boxes the route enters, ascending: any but its own, and
-    /// its own except by the segment that leaves or arrives at it.
-    fn hits(&mut self, points: &[Point], out: &mut Vec<u32>) {
+    /// its own except by the segment that leaves or arrives at it. False,
+    /// with `out` incomplete, when the budget runs out.
+    fn hits(&mut self, points: &[Point], out: &mut Vec<u32>) -> bool {
         out.clear();
         let last = points.len().saturating_sub(2);
         let grid = self.obstacles;
         for (i, pair) in points.windows(2).enumerate() {
             let (p, q) = (pair[0], pair[1]);
-            grid.query(grow(segment_box(p, q), CLEARANCE), &mut self.found);
+            let area = grow(segment_box(p, q), CLEARANCE);
+            if !grid.query(area, &mut self.found, &mut self.budget) {
+                return false;
+            }
             for &k in &self.found {
                 let from = self.own[0] == Some(k as usize);
                 let to = self.own[1] == Some(k as usize);
@@ -1116,12 +1238,14 @@ impl Router<'_> {
         }
         out.sort_unstable();
         out.dedup();
+        true
     }
 
     /// How many middle segments lie on the centre line of a node within
     /// [`REACH`] along it, and how many segments lie on a fixed
     /// connector's line; and how many fixed connectors' lines it crosses.
-    fn penalties(&mut self, points: &[Point]) -> (u32, u32) {
+    /// `None` when the budget runs out.
+    fn penalties(&mut self, points: &[Point]) -> Option<(u32, u32)> {
         let mut shared = 0;
         let n = points.len().saturating_sub(1);
         let grid = self.obstacles;
@@ -1150,7 +1274,9 @@ impl Router<'_> {
                     s.height + 2.0 * REACH,
                 )
             };
-            grid.query(area, &mut self.found);
+            if !grid.query(area, &mut self.found, &mut self.budget) {
+                return None;
+            }
             let on_centre = self.found.iter().any(|&k| {
                 let c = grid.rects[k as usize].center();
                 !self.own.contains(&Some(k as usize))
@@ -1166,7 +1292,9 @@ impl Router<'_> {
         if let Some(lines) = self.lines {
             for pair in points.windows(2) {
                 let (p, q) = (pair[0], pair[1]);
-                lines.near(p, q, None, &mut self.found);
+                if !lines.near(p, q, None, &mut self.found, &mut self.budget) {
+                    return None;
+                }
                 let mut on_line = false;
                 for &k in &self.found {
                     let (a, b, _) = lines.segments[k as usize];
@@ -1179,10 +1307,11 @@ impl Router<'_> {
                 shared += u32::from(on_line);
             }
         }
-        (shared, crossed)
+        Some((shared, crossed))
     }
 
-    /// The score of a candidate, or `None` when it cannot beat `best`.
+    /// The score of a candidate, or `None` when it cannot beat `best` or
+    /// the budget runs out.
     fn score(
         &mut self,
         points: &[Point],
@@ -1194,14 +1323,16 @@ impl Router<'_> {
         if best.is_some_and(|b| b.crossings == 0 && cost >= b.cost) {
             return None;
         }
-        self.hits(points, hits);
+        if !self.hits(points, hits) {
+            return None;
+        }
         let crossings = hits.len() as u32;
         if best.is_some_and(|b| {
             crossings > b.crossings || (crossings == b.crossings && cost >= b.cost)
         }) {
             return None;
         }
-        let (shared, crossed) = self.penalties(points);
+        let (shared, crossed) = self.penalties(points)?;
         cost += SHARED_COST * shared as f32 + CROSSING_COST * crossed as f32;
         Some(Score { crossings, cost })
     }
@@ -1228,19 +1359,18 @@ fn separate(obstacles: &Grid, connectors: &[Connector], routes: &mut [Routed]) {
         if connector.kind != Route::Elbow {
             continue;
         }
-        let mut router = Router {
-            obstacles,
-            own: connector.nodes,
-            lines: None,
-            found: Vec::new(),
-        };
+        let mut router = Router::new(obstacles, connector.nodes, None, SEPARATE_BUDGET);
         let points = &mut routes[i].points;
         let mut j = 1;
         while j + 2 < points.len() {
-            if placed.shares(points[j], points[j + 1], Some(i)) {
-                if let Some(moved) = nudge(&mut router, &mut placed, points, j, i) {
-                    *points = moved;
+            match placed.shares(points[j], points[j + 1], Some(i), &mut router.budget) {
+                Some(true) => {
+                    if let Some(moved) = nudge(&mut router, &mut placed, points, j, i) {
+                        *points = moved;
+                    }
                 }
+                Some(false) => {}
+                None => break,
             }
             j += 1;
         }
@@ -1267,8 +1397,13 @@ fn nudge(
         return None;
     }
     let mut hits = Vec::new();
-    router.hits(points, &mut hits);
+    if !router.hits(points, &mut hits) {
+        return None;
+    }
     let entered = hits.len();
+    let shares = |placed: &mut Lines, budget: &mut u32, a: Point, b: Point| {
+        placed.shares(a, b, Some(owner), budget)
+    };
     let shortest = |index: usize| {
         if index == 0 || index + 2 == points.len() {
             ARROW_LENGTH
@@ -1295,20 +1430,23 @@ fn nudge(
                 moved[at].x += d;
             }
         }
-        if placed.shares(moved[j], moved[j + 1], Some(owner))
-            || (placed.shares(moved[j - 1], moved[j], Some(owner))
-                && !placed.shares(points[j - 1], points[j], Some(owner)))
-            || (placed.shares(moved[j + 1], moved[j + 2], Some(owner))
-                && !placed.shares(points[j + 1], points[j + 2], Some(owner)))
+        let budget = &mut router.budget;
+        if shares(placed, budget, moved[j], moved[j + 1])?
+            || (shares(placed, budget, moved[j - 1], moved[j])?
+                && !shares(placed, budget, points[j - 1], points[j])?)
+            || (shares(placed, budget, moved[j + 1], moved[j + 2])?
+                && !shares(placed, budget, points[j + 1], points[j + 2])?)
         {
             continue;
         }
-        router.hits(&moved, &mut hits);
+        if !router.hits(&moved, &mut hits) {
+            return None;
+        }
         if hits.len() > entered {
             continue;
         }
         let key = (
-            placed.crossings(&moved, Some(owner)),
+            placed.crossings(&moved, Some(owner), &mut router.budget)?,
             d.abs(),
             -new_lead.abs().min(new_trail.abs()),
         );
@@ -1740,6 +1878,38 @@ mod tests {
                 }],
             );
             assert_eq!(all, [routed]);
+        }
+    }
+
+    /// The work of routing one connector does not grow with the board:
+    /// among thousands of boxes stacked on one spot, a lookup there costs
+    /// more than the budget allows, so each connector keeps its plain
+    /// route. Before the budget, each connector searched every one of the
+    /// boxes for every candidate, and this took minutes.
+    #[test]
+    fn a_crowded_connector_keeps_its_plain_route() {
+        let mut boxes: Vec<Rect> = (0..5_000)
+            .map(|i| Rect::new((i % 7) as f32, (i % 5) as f32, 100.0, 60.0))
+            .collect();
+        let far = boxes.len();
+        boxes.push(Rect::new(5_000.0, 5_000.0, 100.0, 60.0));
+        let connectors: Vec<Connector> = (0..40)
+            .map(|i| Connector {
+                kind: Route::Elbow,
+                ends: [
+                    node(boxes[i], Attach::Floating),
+                    node(boxes[far], Attach::Floating),
+                ],
+                nodes: [Some(i), Some(far)],
+            })
+            .collect();
+        let routes = route_all(&boxes, &connectors);
+        for (c, routed) in connectors.iter().zip(&routes) {
+            let (ra, rb) = (c.ends[0].bounds(), c.ends[1].bounds());
+            let (a, da, _) = end(&c.ends[0], Side::Bottom, Side::Bottom);
+            let (b, db, _) = end(&c.ends[1], Side::Top, Side::Top);
+            assert_eq!(routed.points, elbow(a, da, ra, b, db, rb));
+            assert_eq!(routed.sides, [Some(Side::Bottom), Some(Side::Top)]);
         }
     }
 
