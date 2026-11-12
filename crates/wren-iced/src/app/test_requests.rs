@@ -279,6 +279,19 @@ impl App {
                 }
                 request.respond(Ok(self.editor_snapshot()));
             }
+            "board.get" | "board.bounds" | "board.pointer" => return self.board_request(request),
+            "board.export" => {
+                // What `note.export_svg` writes once its save dialog closes.
+                if string(params, "format")? != "svg" {
+                    return Err("format must be svg".into());
+                }
+                let path = PathBuf::from(string(params, "path")?);
+                if !path.is_absolute() {
+                    return Err("path must be absolute".into());
+                }
+                let bytes = self.write_board_svg(&path)?;
+                request.respond(Ok(json!({"path": path, "bytes": bytes})));
+            }
             "focus.get" => {
                 let request = Arc::clone(request);
                 return Ok(iced::advanced::widget::operate(Focused::default()).map(move |focused| {
@@ -992,10 +1005,10 @@ const FOCUS_NAMES: &[&str] = &[
 /// grips during a resize) as a count. `bounds` places each known widget on
 /// screen, focused or not, so a test can click it.
 #[derive(Debug, Clone, Default)]
-struct Focused {
-    named: Vec<&'static str>,
-    unnamed: usize,
-    bounds: Vec<(&'static str, iced::Rectangle)>,
+pub(super) struct Focused {
+    pub(super) named: Vec<&'static str>,
+    pub(super) unnamed: usize,
+    pub(super) bounds: Vec<(&'static str, iced::Rectangle)>,
 }
 
 impl iced::advanced::widget::Operation<Focused> for Focused {
@@ -1214,6 +1227,99 @@ mod tests {
         ] {
             assert!(core_op(&params).is_err(), "{params}");
         }
+    }
+
+    /// §6.8 Phase 1 item 6, without a window: every harness request that
+    /// writes through the editor is refused on a board, and the palette's
+    /// Bold is blocked.
+    #[test]
+    fn editor_requests_are_refused_on_a_board() {
+        use super::super::board::tests as boards;
+
+        let (directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        let path = directory.path().join("Boards/Samples/Flow.wren-board");
+        for (op, params) in [
+            ("editor.insert", json!({"text":"bypass"})),
+            ("editor.undo", json!({})),
+            ("editor.redo", json!({})),
+            ("editor.action", json!({"kind":"enter"})),
+            ("editor.action", json!({"kind":"select_all"})),
+            ("editor.command", json!({"intent":"bold"})),
+            ("editor.cursor", json!({"line":0,"column":0})),
+            ("editor.find", json!({"query":"schema"})),
+        ] {
+            let (request, mut reply) = Request::detached(op, params);
+            let _ = app.handle_test(request);
+            let error = reply.try_recv().unwrap().expect_err(op);
+            assert!(error.contains("board"), "{op}: {error}");
+        }
+        let outcome = app
+            .navigation_request("command.run", &json!({"id":"markdown.bold"}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "blocked");
+        let outcome = app
+            .navigation_request("command.run", &json!({"id":"editor.toggle_engine"}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "completed");
+
+        assert_eq!(app.editor.text(), "");
+        assert!(!app.find_open);
+        let document = app.session.as_ref().unwrap().document().unwrap();
+        assert_eq!(document.text, boards::FLOW);
+        assert!(!document.dirty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), boards::FLOW);
+        // The editor snapshot reads the empty editor, never the board's text.
+        assert_eq!(app.editor_snapshot()["text"], "");
+    }
+
+    /// `board.export` writes what `note.export_svg` writes, and only for
+    /// a board on screen.
+    #[test]
+    fn board_export_writes_the_shown_board_and_refuses_anything_else() {
+        use super::super::board::{self, tests as boards};
+
+        let (directory, mut app) = boards::fixture();
+        let out = crate::test_support::tempdir();
+        let target = out.path().join("Flow.svg");
+        let export = |app: &mut App, params: Value| {
+            let (request, mut reply) = Request::detached("board.export", params);
+            let _ = app.handle_test(request);
+            reply.try_recv().unwrap()
+        };
+        let svg = json!({"format":"svg","path":target});
+
+        // No board on screen: no note, a Markdown note, raw text.
+        let error = export(&mut app, svg.clone()).expect_err("no note");
+        assert!(error.contains("board"), "{error}");
+        boards::open_board(&mut app, "Broken");
+        assert!(export(&mut app, svg.clone()).is_err());
+        assert!(!target.exists());
+
+        boards::open_board(&mut app, "Flow");
+        for params in [
+            json!({"format":"png","path":target}),
+            json!({"format":"svg","path":"relative.svg"}),
+            json!({"format":"svg"}),
+        ] {
+            assert!(export(&mut app, params.clone()).is_err(), "{params}");
+        }
+        let reply = export(&mut app, svg).expect("an export");
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, board::svg_document(app.board.as_ref().unwrap()));
+        assert_eq!(reply["bytes"], written.len());
+        assert_eq!(reply["path"], json!(target));
+        let missing = json!({"format":"svg","path":out.path().join("no/such/Flow.svg")});
+        let error = export(&mut app, missing).expect_err("an unwritable path");
+        assert!(
+            error.starts_with("Could not export the board to "),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("Boards/Samples/Flow.wren-board"))
+                .unwrap(),
+            boards::FLOW
+        );
     }
 
     fn navigation_fixture() -> (tempfile::TempDir, App) {

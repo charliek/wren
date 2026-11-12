@@ -9,6 +9,7 @@ use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
 
+use super::board::Surface;
 use super::commands::{CommandId, Disposition, Gateway, Scope};
 use super::palette::{Key, Mode};
 use super::{workspace, App, Message};
@@ -28,6 +29,10 @@ pub struct Preferences {
     pub settings: Settings,
     pub keymap: Keymap,
     pub path: Option<PathBuf>,
+    /// The `boards` setting as it was at launch, which is what the app runs
+    /// with: a Session lists boards or not for its whole life, so a later
+    /// value waits for a restart.
+    pub boards: bool,
     /// The bytes last loaded, so focus-triggered reloads skip unchanged files.
     loaded: Option<String>,
     /// The warning last shown for these settings, so a clean reload can
@@ -112,6 +117,7 @@ impl Preferences {
         let (loaded, settings) = read(path.as_deref());
         let mut preferences = Self {
             keymap: Keymap::default(),
+            boards: settings.boards,
             settings,
             path,
             loaded,
@@ -177,6 +183,12 @@ impl Preferences {
         }
     }
 
+    /// What to say when the file asks for a `boards` value other than the
+    /// one the app launched with.
+    fn restart_notice(&self) -> Option<String> {
+        (self.settings.boards != self.boards).then(|| "Restart Wren to apply `boards`.".to_owned())
+    }
+
     fn warning(&self) -> Option<String> {
         let mut warnings = self.settings.warnings.clone();
         warnings.extend(self.editor_font().1);
@@ -230,6 +242,10 @@ impl App {
         if theme != self.definition {
             self.definition = theme;
             self.toolkit_theme = crate::theme::from_definition(theme);
+            let palette = self.board_palette();
+            if let Some(board) = &mut self.board {
+                board.set_palette(palette);
+            }
         }
     }
 
@@ -249,9 +265,15 @@ impl App {
             crate::macos_menu::install(&self.preferences.keymap);
         }
         let warning = self.preferences.warning();
-        match &warning {
-            Some(warning) => {
-                self.banner = Some(warning.clone());
+        // The restart notice is shown like a warning and retracted like one,
+        // but a setting that waits for a restart has not failed.
+        let shown = match (&warning, self.preferences.restart_notice()) {
+            (Some(warning), Some(notice)) => Some(format!("{warning} {notice}")),
+            (warning, notice) => warning.clone().or(notice),
+        };
+        match &shown {
+            Some(shown) => {
+                self.banner = Some(shown.clone());
                 self.banner_kind = workspace::WarningKind::General;
             }
             None if self.banner.is_some() && self.banner == self.preferences.shown_warning => {
@@ -259,7 +281,7 @@ impl App {
             }
             None => {}
         }
-        self.preferences.shown_warning = warning.clone();
+        self.preferences.shown_warning = shown;
         warning
     }
 
@@ -270,28 +292,47 @@ impl App {
         self.editor.set_line_height(settings.editor_line_height);
         self.editor.set_font_size(settings.editor_font_size);
         self.editor.set_line_numbers(settings.line_numbers);
-        self.editor.set_markdown_assist(settings.markdown_assist);
-        self.editor.set_key_policy(key_policy(
-            &self.preferences.keymap,
-            settings.markdown_assist,
-        ));
+        let assist = self.markdown_assist();
+        self.editor.set_markdown_assist(assist);
+        self.editor
+            .set_key_policy(key_policy(&self.preferences.keymap, assist));
         self.apply_editor_engine();
+    }
+
+    /// Whether the editor's Markdown keys act: as the setting says, and
+    /// never in a board's raw text, which is not Markdown.
+    fn markdown_assist(&self) -> bool {
+        self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
+    }
+
+    /// Bring the editor's Markdown keys in step with the surface.
+    pub(super) fn apply_markdown_assist(&mut self) {
+        let assist = self.markdown_assist();
+        if assist != self.editor.markdown_assist() {
+            self.editor.set_markdown_assist(assist);
+            self.editor
+                .set_key_policy(key_policy(&self.preferences.keymap, assist));
+        }
     }
 
     /// Rebuild the editor on the configured engine from the session draft,
     /// or from the editor's own text when no note is open (the `--editor`
     /// spike). The cursor, find query, font, size, and gutter carry over;
-    /// undo history does not.
+    /// undo history does not. Behind a board the editor stays empty: the
+    /// board's text is never loaded into it.
     fn apply_editor_engine(&mut self) {
         let kind = backend_kind(self.preferences.settings.editor_engine);
         if kind == self.editor.backend() {
             return;
         }
-        let text = self
-            .session
-            .as_ref()
-            .and_then(|session| session.document())
-            .map_or_else(|| self.editor.text(), |document| document.text.clone());
+        let text = if self.surface() == Surface::Board {
+            String::new()
+        } else {
+            self.session
+                .as_ref()
+                .and_then(|session| session.document())
+                .map_or_else(|| self.editor.text(), |document| document.text.clone())
+        };
         self.editor.set_backend(kind, &text);
     }
 
@@ -365,6 +406,9 @@ impl App {
 
     /// Step the editor text size by `delta` points, or back to the default
     /// for `None`, and save it. At either limit this is a no-op.
+    ///
+    /// On a board the same commands zoom it instead, one stop up or down or
+    /// back to 100 %: a look at the board, which changes no setting.
     pub(super) fn step_text_size(&mut self, delta: Option<f32>) -> Gateway {
         let current = self.preferences.settings.editor_font_size;
         let size = delta.map_or(settings::DEFAULT_FONT_SIZE, |delta| {
@@ -377,6 +421,15 @@ impl App {
         } else {
             Task::none()
         };
+        if let Some(board) = &mut self.board {
+            match delta {
+                Some(delta) if delta > 0.0 => board.zoom_step(1),
+                Some(delta) if delta < 0.0 => board.zoom_step(-1),
+                Some(_) => {}
+                None => board.zoom_reset(),
+            }
+            return self.finish_action(Disposition::Completed, None, task);
+        }
         if size == current {
             return self.finish_action(Disposition::Completed, None, task);
         }
@@ -662,6 +715,55 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn a_changed_boards_setting_waits_for_a_restart_and_says_so() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let options = || super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert!(!app.preferences.boards);
+        assert!(app.banner.is_none());
+
+        std::fs::write(&path, "boards = on\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("Restart Wren to apply `boards`.")
+        );
+        assert!(!app.preferences.boards);
+        assert!(app.preferences.settings.boards);
+
+        // A settings warning is still returned, with the notice beside it.
+        std::fs::write(&path, "boards = on\nmystery = 1\n").unwrap();
+        let warning = app.reload_settings(false).unwrap();
+        assert!(warning.contains("mystery") && !warning.contains("Restart"));
+        let banner = app.banner.clone().unwrap();
+        assert!(
+            banner.starts_with(&warning) && banner.ends_with("Restart Wren to apply `boards`.")
+        );
+
+        // Back at the launch value there is nothing to wait for.
+        std::fs::write(&path, "boards = off\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert!(app.banner.is_none());
+
+        // A launch with the setting on runs with it, and turning it off waits.
+        std::fs::write(&path, "boards = on\n").unwrap();
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert!(app.preferences.boards);
+        assert!(app.banner.is_none());
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("Restart Wren to apply `boards`.")
+        );
+        assert!(app.preferences.boards);
     }
 
     #[test]

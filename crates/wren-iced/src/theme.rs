@@ -50,9 +50,33 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
     (style, palette)
 }
 
+/// The colours a board is drawn in under `definition`, in the canvas and in
+/// an export alike.
+pub fn board_palette(definition: theme::Theme) -> wren_board::Palette {
+    theme::board_palette(&definition.colors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_board_takes_the_editor_surface_and_text_of_every_theme() {
+        for definition in theme::BUILT_INS {
+            let c = definition.colors;
+            let palette = board_palette(*definition);
+            let rgb = |Rgb(r, g, b): Rgb| wren_board::Rgba::rgb(r, g, b);
+            assert_eq!(palette.canvas, rgb(c.editor), "{}", definition.id);
+            assert_eq!(palette.ink, rgb(c.text), "{}", definition.id);
+            assert_eq!(palette.issue, rgb(c.danger), "{}", definition.id);
+            assert_eq!(
+                palette.dark,
+                definition.appearance == theme::Appearance::Dark,
+                "{}",
+                definition.id
+            );
+        }
+    }
 
     #[test]
     fn editor_style_has_editor_background() {

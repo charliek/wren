@@ -84,6 +84,19 @@ pub struct Request {
 }
 
 impl Request {
+    /// A request with no connection behind it, and where its reply arrives.
+    #[cfg(test)]
+    pub fn detached(op: &str, params: Value) -> (Arc<Self>, oneshot::Receiver<Reply>) {
+        let (reply, receive) = oneshot::channel();
+        let request = Arc::new(Self {
+            id: 0,
+            op: op.to_owned(),
+            params,
+            reply: Mutex::new(Some(reply)),
+        });
+        (request, receive)
+    }
+
     pub fn respond(&self, result: Reply) {
         if let Some(reply) = self
             .reply

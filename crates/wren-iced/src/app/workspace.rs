@@ -6,9 +6,10 @@ use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, Parent, SectionId, Workspace};
 #[cfg(feature = "smoke-test")]
 use wren_core::ops::Document;
-use wren_core::ops::{Event, ExternalChangeKind, Op, Session};
+use wren_core::ops::{Event, ExternalChangeKind, Op, Session, SessionOptions};
 use wren_core::reconcile::ReconcileResult;
 
+use super::board::{self, Surface};
 use super::commands::{Disposition, Gateway};
 use super::{focus_editor, App, Message};
 
@@ -202,9 +203,12 @@ pub struct LoadOutcome {
     opened: bool,
 }
 
+/// Opens `path` in `previous`, which keeps its options, or in a new Session
+/// with `options`.
 fn load_workspace(
     previous: Option<Session>,
     path: PathBuf,
+    options: SessionOptions,
     #[cfg(feature = "smoke-test")] sandbox: Option<PathBuf>,
 ) -> LoadOutcome {
     if let Some(mut session) = previous {
@@ -224,11 +228,11 @@ fn load_workspace(
                     message,
                     events: Vec::new(),
                 })
-                .and_then(|trash| Session::with_trash(&path, Box::new(trash))),
-            None => Session::open(&path),
+                .and_then(|trash| Session::with_options(&path, Box::new(trash), options)),
+            None => Session::open_with(&path, options),
         };
         #[cfg(not(feature = "smoke-test"))]
-        let result = Session::open(&path);
+        let result = Session::open_with(&path, options);
         match result {
             Ok(mut session) => {
                 // Replacement Sessions created by OpenWorkspace inherit this.
@@ -251,6 +255,7 @@ fn load_workspace(
 struct LoadJob {
     previous: Option<Session>,
     path: PathBuf,
+    options: SessionOptions,
     #[cfg(feature = "smoke-test")]
     sandbox: Option<PathBuf>,
 }
@@ -272,6 +277,7 @@ async fn threaded_load(job: LoadJob) -> Arc<Mutex<Option<LoadOutcome>>> {
             let outcome = load_workspace(
                 job.previous,
                 job.path,
+                job.options,
                 #[cfg(feature = "smoke-test")]
                 job.sandbox,
             );
@@ -319,6 +325,12 @@ impl App {
             return self.blocked("No workspace is open");
         };
         let before = EffectBefore::capture(session, &op);
+        // A board this op opens is timed from here.
+        #[cfg(feature = "smoke-test")]
+        {
+            self.board_perf.opening = matches!(op, Op::OpenNote { .. } | Op::Back | Op::Forward)
+                .then(std::time::Instant::now);
+        }
         let (events, mut error) = match session.apply(op.clone()) {
             Ok(events) => (events, None),
             Err(error) => (error.events, Some(error.message)),
@@ -376,6 +388,10 @@ impl App {
         let created = self.process_events(&events);
         if !events.is_empty() || error.is_some() {
             self.sync_editor(false);
+        }
+        #[cfg(feature = "smoke-test")]
+        {
+            self.board_perf.opening = None;
         }
         let follow_up = match created {
             Some(ItemRef::Note(note)) => Some(Op::OpenNote { note: Some(note) }),
@@ -467,6 +483,8 @@ impl App {
         } else {
             focus
         };
+        #[cfg(feature = "smoke-test")]
+        let task = Task::batch([task, self.time_board_open()]);
         let mut outcome = self.finish_action(
             if error.is_some() {
                 if committed {
@@ -537,6 +555,14 @@ impl App {
         self.process_core(Op::FinishReconcile(result)).task
     }
 
+    /// How every Session of this run lists a workspace: by the settings as
+    /// they were at launch.
+    pub(super) fn session_options(&self) -> SessionOptions {
+        SessionOptions {
+            boards: self.preferences.boards,
+        }
+    }
+
     fn begin_workspace(&mut self, path: PathBuf) -> Result<Task<Message>, String> {
         if !path.is_absolute() {
             return Err("Workspace path must be absolute".into());
@@ -590,6 +616,7 @@ impl App {
             threaded_load(LoadJob {
                 previous,
                 path,
+                options: self.session_options(),
                 #[cfg(feature = "smoke-test")]
                 sandbox,
             }),
@@ -775,6 +802,11 @@ impl App {
         created
     }
 
+    /// Brings the surface in step with the Session's open document: which
+    /// of the editor and the board viewer shows it, and with what text. It
+    /// decides again only when another note is open or the Session's text is
+    /// not what the surface last took, so a surface's own draft changes
+    /// nothing here.
     pub(super) fn sync_editor(&mut self, workspace_changed: bool) {
         let Some(session) = &self.session else {
             return;
@@ -783,13 +815,68 @@ impl App {
         let text = session
             .document()
             .map_or("", |document| document.text.as_str());
+        let board_note = note.filter(|note| {
+            session
+                .model()
+                .note(*note)
+                .is_some_and(|entry| entry.kind == NoteKind::Board)
+        });
         let identity_changed = workspace_changed || self.editor_note != note;
-        if identity_changed || self.editor.text() != text {
-            self.editor.replace_text(text, !identity_changed);
-            self.words = text.split_whitespace().count();
-            self.words_due = None;
+        let kind_changed = board_note.is_some() != (self.surface() != Surface::Text);
+        let taken = match &self.board {
+            Some(view) => view.synced() == text,
+            None => self.editor.text() == text,
+        };
+        if identity_changed || kind_changed || !taken {
+            let mut error = None;
+            // The view of the same board takes the new text in place and
+            // keeps its viewport.
+            let reloaded = !identity_changed
+                && board_note.is_some()
+                && self
+                    .board
+                    .as_mut()
+                    .is_some_and(|view| match view.reload(text) {
+                        Ok(()) => true,
+                        Err(reason) => {
+                            error = Some(reason);
+                            false
+                        }
+                    });
+            if !reloaded {
+                if let (Some(view), Some(previous)) = (self.board.take(), self.editor_note) {
+                    board::close(&view, previous, &mut self.board_viewports);
+                }
+                if workspace_changed {
+                    self.board_viewports.clear();
+                }
+                if let (Some(note), None) = (board_note, &error) {
+                    #[cfg(feature = "smoke-test")]
+                    let started = self
+                        .board_perf
+                        .opening
+                        .unwrap_or_else(std::time::Instant::now);
+                    let palette = crate::theme::board_palette(self.definition);
+                    match board::open(text, note, palette, &self.board_viewports) {
+                        Ok(view) => {
+                            self.board = Some(view);
+                            #[cfg(feature = "smoke-test")]
+                            self.board_perf.opened(started);
+                        }
+                        Err(reason) => error = Some(reason),
+                    }
+                }
+                let shown = if self.board.is_some() { "" } else { text };
+                self.editor.replace_text(shown, !identity_changed);
+                self.words = shown.split_whitespace().count();
+                self.words_due = None;
+            }
+            self.board_error = error;
             self.edit_revision += 1;
             self.editor_note = note;
+            if self.board.is_some() {
+                self.find_open = false;
+            }
         }
         self.selected_note = note;
         if let Some(entry) = note.and_then(|note| session.model().note(note)) {
@@ -820,6 +907,7 @@ impl App {
                 }),
             };
         }
+        self.apply_markdown_assist();
     }
 
     pub(super) fn model(&self) -> Option<&Workspace> {
@@ -861,6 +949,11 @@ impl App {
         }
         if self.workspace_mode && self.session.as_ref().and_then(Session::document).is_none() {
             return Err("Select a note before editing".into());
+        }
+        // Only the visible surface may write: the editor behind a board is
+        // empty, and its text must never become the board's draft.
+        if self.surface() == Surface::Board {
+            return Err("The open note is a board; the text editor is not showing it".into());
         }
         Ok(())
     }
@@ -1026,12 +1119,113 @@ mod tests {
     }
 
     fn load(previous: Option<Session>, path: PathBuf) -> LoadOutcome {
+        load_with(previous, path, SessionOptions::default())
+    }
+
+    fn load_with(previous: Option<Session>, path: PathBuf, options: SessionOptions) -> LoadOutcome {
         load_workspace(
             previous,
             path,
+            options,
             #[cfg(feature = "smoke-test")]
             None,
         )
+    }
+
+    #[test]
+    fn a_workspace_whose_open_note_is_a_board_loads_onto_the_board_surface() {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join("Inbox/General");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("Note.md"), "note").unwrap();
+        std::fs::write(group.join("Flow.wren-board"), wren_board::EMPTY).unwrap();
+        let options = SessionOptions { boards: true };
+        let mut earlier = Session::open_with(directory.path(), options).unwrap();
+        let of_kind = |session: &Session, kind| {
+            let notes = &session.model().notes;
+            notes.iter().find(|note| note.kind == kind).unwrap().id
+        };
+        for kind in [NoteKind::Markdown, NoteKind::Board] {
+            let note = Some(of_kind(&earlier, kind));
+            earlier.apply(Op::OpenNote { note }).unwrap();
+        }
+        drop(earlier);
+
+        let (mut app, _) = App::new(Options::default());
+        app.preferences.boards = true;
+        let slot = returning(&mut app, load_with(None, directory.path().into(), options));
+        let _ = app.workspace_loaded(app.load_generation, slot);
+        assert_eq!(app.surface(), Surface::Board);
+        assert_eq!(app.editor.text(), "");
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(view.synced(), wren_board::EMPTY);
+        assert!(view.fit_pending());
+        // The Session holds the workspace's writer lock.
+        drop(app);
+
+        // With the setting off the same workspace opens the Markdown note
+        // that was open before the board.
+        let (mut app, _) = App::new(Options::default());
+        let slot = returning(&mut app, load(None, directory.path().into()));
+        let _ = app.workspace_loaded(app.load_generation, slot);
+        assert_eq!(app.surface(), Surface::Text);
+        assert_eq!(app.editor.text(), "note");
+    }
+
+    #[test]
+    fn a_workspace_lists_boards_only_when_the_setting_was_on_at_launch() {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join("Inbox/General");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("Note.md"), "note").unwrap();
+        std::fs::write(group.join("Flow.wren-board"), wren_board::EMPTY).unwrap();
+        let kinds = |session: &Session| -> Vec<(String, NoteKind)> {
+            let mut notes: Vec<_> = session
+                .model()
+                .notes
+                .iter()
+                .map(|note| (note.title.clone(), note.kind))
+                .collect();
+            notes.sort();
+            notes
+        };
+
+        let off = load(None, directory.path().into()).session.unwrap();
+        assert_eq!(kinds(&off), [("Note".to_owned(), NoteKind::Markdown)]);
+        assert!(off.model().warnings.is_empty());
+        // A workspace opened from that Session keeps its options.
+        let off = load_with(
+            Some(off),
+            directory.path().into(),
+            SessionOptions { boards: true },
+        )
+        .session
+        .unwrap();
+        assert_eq!(kinds(&off), [("Note".to_owned(), NoteKind::Markdown)]);
+        drop(off);
+
+        let on = load_with(
+            None,
+            directory.path().into(),
+            SessionOptions { boards: true },
+        )
+        .session
+        .unwrap();
+        assert_eq!(
+            kinds(&on),
+            [
+                ("Flow".to_owned(), NoteKind::Board),
+                ("Note".to_owned(), NoteKind::Markdown)
+            ]
+        );
+
+        // The app passes the launch value, not the file's later one.
+        let (mut app, _) = App::new(Options::default());
+        app.preferences.settings.boards = true;
+        assert_eq!(app.session_options(), SessionOptions { boards: false });
+        app.preferences.boards = true;
+        app.preferences.settings.boards = false;
+        assert_eq!(app.session_options(), SessionOptions { boards: true });
     }
 
     #[test]
@@ -1882,6 +2076,7 @@ mod tests {
         let mut future = Box::pin(threaded_load(LoadJob {
             previous: Some(session),
             path: directory.path().into(),
+            options: SessionOptions::default(),
             #[cfg(feature = "smoke-test")]
             sandbox: None,
         }));
@@ -2150,10 +2345,16 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(second.path().join("Section/Group")).unwrap();
         std::fs::write(second.path().join("Section/Group/Note.md"), "quarantined").unwrap();
-        let first = load_workspace(None, first.path().into(), Some(sandbox.path().into()))
-            .session
-            .unwrap();
-        let outcome = load_workspace(Some(first), second.path().into(), None);
+        let options = SessionOptions::default();
+        let first = load_workspace(
+            None,
+            first.path().into(),
+            options,
+            Some(sandbox.path().into()),
+        )
+        .session
+        .unwrap();
+        let outcome = load_workspace(Some(first), second.path().into(), options, None);
         assert!(outcome.result.is_ok());
         let (mut app, _) = App::new(Options {
             editor: true,

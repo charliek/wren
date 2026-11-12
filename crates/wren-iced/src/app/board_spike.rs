@@ -6,37 +6,10 @@ use std::fmt::Write as _;
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill, Task};
-use wren_board::{Palette, Rgba};
 use wren_canvas::BoardView;
-use wren_core::theme::{Appearance, Rgb, Theme};
 
 use super::{definitions, App, Message};
 use crate::{fonts, theme};
-
-/// The colours a theme gives the spike's board. The hues are stand-ins:
-/// the app chain derives the real palette from each theme.
-pub(super) fn palette(definition: Theme) -> Palette {
-    let rgb = |Rgb(r, g, b): Rgb| Rgba::rgb(r, g, b);
-    let colors = definition.colors;
-    Palette {
-        canvas: rgb(colors.editor),
-        ink: rgb(colors.text),
-        muted: rgb(colors.muted),
-        raised: rgb(colors.raised),
-        accent: rgb(colors.accent),
-        issue: rgb(colors.danger),
-        hues: [
-            rgb(colors.danger),
-            rgb(colors.warning),
-            rgb(colors.heading2),
-            rgb(colors.success),
-            rgb(colors.link),
-            rgb(colors.heading),
-            rgb(colors.accent),
-        ],
-        dark: definition.appearance == Appearance::Dark,
-    }
-}
 
 /// A board of `count` rounded rectangles of 160 by 64 in a grid, each
 /// with a two-line label and an elbow connector to its right and lower
@@ -98,7 +71,7 @@ impl App {
         let opened = std::time::Instant::now();
         // Labels are measured when the view opens, before a window exists.
         fonts::load();
-        let mut view = BoardView::open(text, palette(self.definition), fonts::UI)
+        let mut view = BoardView::open(text, theme::board_palette(self.definition), fonts::UI)
             .map_err(|error| error.to_string())?;
         view.fit();
         self.board_spike = Some(view);
@@ -109,7 +82,7 @@ impl App {
 
     /// Repaint the spike's board in the current theme's colours.
     pub(super) fn retheme_board_spike(&mut self) {
-        let palette = palette(self.definition);
+        let palette = theme::board_palette(self.definition);
         if let Some(view) = &mut self.board_spike {
             view.set_palette(palette);
         }
@@ -148,16 +121,10 @@ impl App {
             background: Some(theme::color(colors.titlebar).into()),
             ..Default::default()
         });
-        let style = wren_canvas::Style {
-            #[cfg(feature = "smoke-test")]
-            labels: self.board_perf.labels,
-            #[cfg(not(feature = "smoke-test"))]
-            labels: None,
-            scale_factor: self.scale_factor,
-        };
         let body = column![
             header,
-            view.view("note-editor", style).map(Message::BoardSpike)
+            view.view("note-editor", self.board_style())
+                .map(Message::BoardSpike)
         ];
         self.palette_view(body.width(Fill).height(Fill).into())
     }
@@ -182,13 +149,19 @@ mod harness {
     use crate::test_ipc::Request;
 
     /// The timings `perf.board` reports that the view does not keep, the
-    /// run in flight, and the label rule the harness asked for.
+    /// run in flight, and the label rule the harness asked for. They are
+    /// the shown board's: the spike's, or the open note's.
     #[derive(Default)]
     pub struct Perf {
         frame_micros: VecDeque<u64>,
         open_micros: Option<u64>,
         /// When the board on screen began to open; launch for the first.
         opened: Option<Instant>,
+        /// Whether that opening still waits for its redraws to be watched.
+        unwatched: bool,
+        /// When the note operation in progress began, which a board it
+        /// opens is timed from.
+        pub opening: Option<Instant>,
         run: Option<Run>,
         /// `None` leaves the rule to the widget, which picks by renderer.
         pub labels: Option<Labels>,
@@ -199,6 +172,7 @@ mod harness {
         pub fn opened(&mut self, at: Instant) {
             self.opened = Some(at);
             self.open_micros = None;
+            self.unwatched = true;
         }
     }
 
@@ -284,6 +258,11 @@ mod harness {
                 .ok_or_else(|| "the surface is not a board".to_string())
         }
 
+        /// The board on screen: the spike's, or the open note's.
+        fn shown_board(&self) -> Option<&BoardView> {
+            self.board_spike.as_ref().or(self.board.as_ref())
+        }
+
         /// `perf.board`: the timing rings, optionally after a pan or zoom
         /// run of one step per redraw.
         pub(in super::super) fn perf_board(
@@ -291,7 +270,7 @@ mod harness {
             request: &Arc<Request>,
         ) -> Result<Task<Message>, String> {
             let params = &request.params;
-            self.spike()?;
+            self.shown_board().ok_or("the surface is not a board")?;
             let step = if let Some(pan) = params.get("pan") {
                 Some((
                     Step::Pan {
@@ -313,7 +292,7 @@ mod harness {
                 request.respond(Ok(self.perf_board_rings()));
                 if params.get("clear").and_then(Value::as_bool) == Some(true) {
                     self.board_perf.frame_micros.clear();
-                    if let Some(view) = &self.board_spike {
+                    if let Some(view) = self.shown_board() {
                         view.probe.scene_micros.borrow_mut().clear();
                         view.probe.draw_micros.borrow_mut().clear();
                     }
@@ -348,11 +327,13 @@ mod harness {
 
         /// Time from the start of the board's opening (launch, for the
         /// first) to the first redraw after the board's first `draw` that
-        /// painted it returned.
+        /// painted it returned. Each opening is watched once, from when
+        /// the window is up.
         pub(in super::super) fn time_board_open(&mut self) -> Task<Message> {
-            if self.board_spike.is_none() || self.board_perf.open_micros.is_some() {
+            if self.window.is_none() || self.shown_board().is_none() || !self.board_perf.unwatched {
                 return Task::none();
             }
+            self.board_perf.unwatched = false;
             self.await_board_pulse()
         }
 
@@ -367,7 +348,11 @@ mod harness {
                 }
                 return Task::none();
             }
-            let Some(view) = &mut self.board_spike else {
+            let Some(view) = self.board_spike.as_mut().or(self.board.as_mut()) else {
+                if let Some(run) = self.board_perf.run.take() {
+                    run.request
+                        .respond(Err("the board was closed during the run".into()));
+                }
                 return Task::none();
             };
             let Some(run) = &mut self.board_perf.run else {
@@ -391,9 +376,14 @@ mod harness {
             run.last = Some(now);
             if run.pulses < run.steps {
                 let viewport = view.viewport();
+                // About the widget's middle; the spike's window before it
+                // has said its size.
+                let middle = view.size().map_or((640.0, 360.0), |(width, height)| {
+                    (width / 2.0, height / 2.0)
+                });
                 view.set_viewport(match run.step {
                     Step::Pan { dx, dy } => viewport.panned(dx, dy),
-                    Step::Zoom { factor } => viewport.zoomed(factor, (640.0, 360.0)),
+                    Step::Zoom { factor } => viewport.zoomed(factor, middle),
                 });
             }
             run.pulses += 1;
@@ -408,13 +398,14 @@ mod harness {
 
         fn perf_board_rings(&self) -> Value {
             let ring = |ring: &VecDeque<u64>| ring.iter().copied().collect::<Vec<_>>();
-            let (scenes, draws) = self
-                .board_spike
-                .as_ref()
+            let (scenes, draws, counts) = self
+                .shown_board()
                 .map(|view| {
+                    let probe = &view.probe;
                     (
-                        ring(&view.probe.scene_micros.borrow()),
-                        ring(&view.probe.draw_micros.borrow()),
+                        ring(&probe.scene_micros.borrow()),
+                        ring(&probe.draw_micros.borrow()),
+                        [probe.parses.get(), probe.scenes.get(), probe.builds.get()],
                     )
                 })
                 .unwrap_or_default();
@@ -423,6 +414,9 @@ mod harness {
                 "draw_micros": draws,
                 "frame_micros": ring(&self.board_perf.frame_micros),
                 "open_micros": self.board_perf.open_micros,
+                "parses": counts[0],
+                "scenes": counts[1],
+                "builds": counts[2],
             })
         }
 
@@ -660,7 +654,7 @@ mod tests {
         let mut worst = (0.0f32, 0.0f32);
         let mut checked = 0;
         for (name, text) in SAMPLES {
-            let view = BoardView::open(text, palette(definitions::DARK), fonts::UI)
+            let view = BoardView::open(text, theme::board_palette(definitions::DARK), fonts::UI)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             let exported = svg::write(
                 view.scene(),
@@ -757,8 +751,12 @@ mod tests {
     #[test]
     fn one_shape_in_ten_covers_its_neighbours_label_in_two_layers() {
         fonts::load();
-        let view = BoardView::open(&grid(1000), palette(definitions::DARK), fonts::UI)
-            .expect("the generated board opens");
+        let view = BoardView::open(
+            &grid(1000),
+            theme::board_palette(definitions::DARK),
+            fonts::UI,
+        )
+        .expect("the generated board opens");
         assert_eq!(view.layers().count, 2);
         assert_eq!(view.layers().overflow, 0);
         let raised = view

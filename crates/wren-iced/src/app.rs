@@ -13,6 +13,7 @@ use wren_editor::EditorView;
 pub use crate::cli::Options;
 use crate::{fonts, theme};
 
+mod board;
 mod board_spike;
 mod columns;
 mod workspace;
@@ -32,6 +33,8 @@ use palette::Palette;
 use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
+mod board_harness;
+#[cfg(feature = "smoke-test")]
 mod test_requests;
 
 pub struct App {
@@ -44,6 +47,12 @@ pub struct App {
     preview: preferences::Preview,
     preferences: preferences::Preferences,
     editor: EditorView,
+    /// The open note as a board, when it is one and its text parses; see
+    /// `board::Surface`. The editor is empty meanwhile.
+    board: Option<wren_canvas::BoardView>,
+    /// Why the open board is shown as raw text in the editor instead.
+    board_error: Option<wren_board::ParseError>,
+    board_viewports: board::Viewports,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
     find_open: bool,
@@ -76,6 +85,8 @@ pub struct App {
     folder_serial: u64,
     folder_request: Option<u64>,
     folder_correlation: Option<u64>,
+    /// An SVG export waiting for its save dialog; see `board::Export`.
+    board_export: Option<board::Export>,
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
@@ -131,6 +142,8 @@ pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
     Editor(wren_editor::Message),
+    /// Input from the board viewer that shows the open note.
+    Board(wren_canvas::Message),
     BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
@@ -144,6 +157,9 @@ pub enum Message {
     #[cfg(target_os = "macos")]
     MenuCommand(String),
     FolderChosen(u64, Option<PathBuf>),
+    /// Where the save dialog of the board export with this tag was told
+    /// to write, if anywhere.
+    BoardExportChosen(u64, Option<PathBuf>),
     Revealed {
         correlation: u64,
         generation: u64,
@@ -188,6 +204,13 @@ pub enum Message {
     Reply(
         std::sync::Arc<crate::test_ipc::Request>,
         Result<serde_json::Value, String>,
+    ),
+    /// Where the board widget sits and whether it has the keyboard, read
+    /// for a `board.*` harness request.
+    #[cfg(feature = "smoke-test")]
+    BoardProbed(
+        std::sync::Arc<crate::test_ipc::Request>,
+        board_harness::Placement,
     ),
     /// An editor command's shortcut, as the editor widget publishes it:
     /// `Some` only while the editor has the keyboard.
@@ -271,6 +294,9 @@ impl App {
             preview: preferences::Preview::default(),
             preferences,
             editor: EditorView::with_backend(engine, &contents),
+            board: None,
+            board_error: None,
+            board_viewports: board::Viewports::new(),
             board_spike: None,
             find_open: false,
             find_query: String::new(),
@@ -301,6 +327,7 @@ impl App {
             folder_serial: 0,
             folder_request: None,
             folder_correlation: None,
+            board_export: None,
             action_serial: 0,
             last_processed: None,
             palette: None,
@@ -394,6 +421,10 @@ impl App {
             #[cfg(feature = "smoke-test")]
             Message::Reply(request, result) => request.respond(result),
             #[cfg(feature = "smoke-test")]
+            Message::BoardProbed(request, placement) => {
+                return self.board_probed(&request, placement)
+            }
+            #[cfg(feature = "smoke-test")]
             Message::EditorShortcut(request, intent) => {
                 let task = intent.map_or_else(Task::none, |intent| {
                     self.update(Message::Editor(wren_editor::Message::Intent(intent)))
@@ -412,6 +443,7 @@ impl App {
                 self.retheme_board_spike();
             }
             Message::Editor(message) => return self.edit(message),
+            Message::Board(message) => self.board_input(message),
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
@@ -423,6 +455,9 @@ impl App {
             Message::PaletteClose => return self.close_palette().task,
             Message::PaletteRevealed => {}
             Message::FolderChosen(tag, path) => return self.folder_chosen(tag, path).task,
+            Message::BoardExportChosen(tag, path) => {
+                return self.board_export_chosen(tag, path).task
+            }
             Message::Revealed {
                 correlation,
                 generation,
@@ -640,6 +675,10 @@ impl App {
     /// which autosave saves, the edit revision, and a word recount on a
     /// later tick.
     fn text_changed(&mut self, started: Instant) {
+        // The editor behind a board is not its writer, whatever changed it.
+        if self.surface() == board::Surface::Board {
+            return;
+        }
         if let Some(note) = self.selected_note {
             let _ = self.apply_core(Op::EditDraft {
                 note,

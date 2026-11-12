@@ -12,7 +12,9 @@ key=value` adds a `config.conf` line (`--setting editor-line-height=2`), and
 `--label` names a further directory level for them. `--only markdown` shoots
 just the editor scenes: the Markdown tour, the headings note, the long list
 items, and all three again with the browser columns folded so the editor is
-wider than its column.
+wider than its column. `--only boards` opens the board sample workspace
+(`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
+scenes, writing `board-flow.svg` beside them.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -32,6 +34,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tools.wrentest.boards import SAMPLES as BOARD_SAMPLES  # noqa: E402
+from tools.wrentest.boards import conflict_board  # noqa: E402
 from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
 
 # Every construct the highlighter draws, for the `markdown` scene.
@@ -225,6 +229,80 @@ def folded_editor_scenes(client, shot_here) -> None:
     client.call("column.open", {"column": "sections"})
 
 
+BOARD_GROUP = "Boards/Samples"
+
+
+def build_board_workspace(root: Path) -> None:
+    """The board samples, a board with conflict markers, and fixed
+    modification times, so the notes list reads the same each capture."""
+    shutil.copytree(BOARD_SAMPLES, root)
+    (root / BOARD_GROUP / "Conflict.wren-board").write_text(conflict_board(), encoding="utf-8")
+    now = time.time()
+    names = sorted(path.name for path in (root / BOARD_GROUP).iterdir())
+    for offset, name in enumerate(names):
+        mtime = now - (offset + 1.5) * 3600
+        os.utime(root / BOARD_GROUP / name, (mtime, mtime))
+
+
+def board_scenes(client, shot_here, out: Path) -> None:
+    """discovery/boards.md §6.3, Phase 1."""
+
+    def open_board(name: str) -> None:
+        open_note(client, f"{name}.wren-board")
+        client.call("editor.focus")
+
+        def fitted():
+            state = client.call("board.get")
+            if state["surface"] != "board":
+                return False
+            placed = client.call("board.bounds")
+            return all(node["visible"] == node["bounds"] for node in placed["nodes"])
+
+        wait_for(fitted, timeout=10, description=f"{name} fitted")
+
+    open_board("Checkout flow")
+    shot_here("board-flow")
+    svg = out / "board-flow.svg"
+    svg.unlink(missing_ok=True)
+    client.call("board.export", {"format": "svg", "path": str(svg)})
+    print(svg)
+    # The kind icon, with the notes list holding the keyboard.
+    client.call("column.open", {"column": "notes"})
+    shot_here("board-notes-list")
+    client.call("column.open", {"column": "editor"})
+    client.call("editor.focus")
+    client.call("command.run", {"id": "font.reset"})
+    for _ in range(2):
+        client.call("command.run", {"id": "font.increase"})
+    shot_here("board-zoom-in")
+    client.call("command.run", {"id": "font.reset"})
+    for _ in range(3):
+        client.call("command.run", {"id": "font.decrease"})
+    shot_here("board-zoom-out")
+    open_board("Shapes")
+    shot_here("board-shapes")
+    open_board("Overlap")
+    shot_here("board-overlap")
+    open_note(client, "Conflict.wren-board")
+    client.call("editor.focus")
+    shot_here("board-raw")
+    client.call("palette.open", {"mode": "search"})
+    client.call("palette.query", {"query": "payment"})
+    shot_here("board-search")
+    client.call("palette.close")
+    # The flow again, with the browser columns folded away.
+    open_note(client, "Checkout flow.wren-board")
+    for _ in range(3):
+        client.call("command.run", {"id": "navigation.column_left"})
+    for _ in range(3):
+        client.call("command.run", {"id": "navigation.column_right"})
+    client.call("command.run", {"id": "font.reset"})
+    client.call("command.run", {"id": "font.decrease"})
+    client.call("command.run", {"id": "font.decrease"})
+    shot_here("board-wide")
+    client.call("column.open", {"column": "sections"})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
@@ -234,7 +312,7 @@ def main() -> int:
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown",), help="shoot only these scenes")
+    parser.add_argument("--only", choices=("markdown", "boards"), help="shoot only these scenes")
     args = parser.parse_args()
     out = args.out if args.engine == "classic" else args.out / args.engine
     if args.label:
@@ -265,6 +343,21 @@ def main() -> int:
         print(path)
 
     with scene_workspaces() as temp:
+        if args.only == "boards":
+            workspace = Path(temp).resolve() / "boards"
+            build_board_workspace(workspace)
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "boards = on\n") as app:
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_board(name: str) -> None:
+                    shot(app.client, name)
+
+                board_scenes(app.client, shot_board, out)
+            return 0
         if args.only == "markdown":
             workspace = Path(temp).resolve() / "work"
             build_workspace(workspace)

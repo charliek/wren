@@ -159,6 +159,7 @@ mod tests {
     fn templates() {
         assert_eq!(NoteKind::Markdown.template(), "");
         assert_eq!(NoteKind::Board.template(), "schema = 1\n");
+        assert_eq!(NoteKind::Board.template(), wren_board::EMPTY);
         for kind in NoteKind::ALL {
             assert_eq!(
                 NoteKind::from_name(OsStr::new(&format!("n{}", kind.extension()))),

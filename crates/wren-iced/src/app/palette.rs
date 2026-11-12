@@ -11,6 +11,7 @@ use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::Op;
 use wren_editor::{Placement, Viewport};
 
+use super::board::Surface;
 use super::commands::{
     item_commands, Command, CommandId, Disposition, Gateway, ItemTarget, ReorderTarget,
     DEFINITIONS, GROUPS,
@@ -309,7 +310,9 @@ impl App {
         {
             return self.blocked("Open a workspace first");
         }
-        if mode == Mode::Outline && self.ensure_editor_ready().is_err() {
+        if mode == Mode::Outline
+            && (self.ensure_editor_ready().is_err() || self.surface() != Surface::Text)
+        {
             return self.blocked("Open a note to see its outline");
         }
         if matches!(mode, Mode::MoveNote(note) if self.model().and_then(|model| model.note(note)).is_none())
@@ -425,10 +428,10 @@ impl App {
         match mode {
             Mode::Commands => {
                 for group in GROUPS {
-                    for definition in DEFINITIONS
-                        .iter()
-                        .filter(|definition| definition.group == group)
-                    {
+                    for definition in DEFINITIONS.iter().filter(|definition| {
+                        definition.group == group
+                            && (self.preferences.boards || !definition.id.boards())
+                    }) {
                         if fuzzy_score(&query, definition.label).is_none() {
                             continue;
                         }
@@ -1045,7 +1048,9 @@ impl App {
             // Offset provenance is retained in the snapshot, but never trusted
             // after the barrier: conflicts and external edits can change bytes.
             let _queried_revision = target.index_revision;
-            if target.content_match.is_some() {
+            // A board's match is in its labels, which the empty editor
+            // behind it does not hold.
+            if target.content_match.is_some() && self.surface() != Surface::Board {
                 self.editor.reveal_literal(target.query.trim());
             }
             self.palette = None;

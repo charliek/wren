@@ -274,6 +274,10 @@ impl BoardView {
     /// host has loaded.
     pub fn open(text: &str, palette: Palette, font: Font) -> Result<Self, ParseError> {
         let board = wren_board::parse(text)?;
+        #[cfg(feature = "test-support")]
+        let probe = Probe::default();
+        #[cfg(feature = "test-support")]
+        probe.parses.set(1);
         let mut view = Self {
             issues: wren_board::check(&board),
             access: wren_board::access(&board),
@@ -295,7 +299,7 @@ impl BoardView {
             fit_pending: false,
             jumps: 0,
             #[cfg(feature = "test-support")]
-            probe: Probe::default(),
+            probe,
         };
         view.build();
         Ok(view)
@@ -308,6 +312,8 @@ impl BoardView {
         if text == self.synced {
             return Ok(());
         }
+        #[cfg(feature = "test-support")]
+        self.probe.parses.set(self.probe.parses.get() + 1);
         let board = wren_board::parse(text)?;
         self.issues = wren_board::check(&board);
         self.access = wren_board::access(&board);
@@ -467,7 +473,10 @@ impl BoardView {
         widget::Canvas::new(self, id, style).into()
     }
 
-    pub(crate) fn fit_pending(&self) -> bool {
+    /// Whether a [`fit`](Self::fit) still waits for the widget's size, so
+    /// [`viewport`](Self::viewport) is not yet where the board will be
+    /// looked at from.
+    pub fn fit_pending(&self) -> bool {
         self.fit_pending
     }
 
@@ -523,6 +532,8 @@ impl BoardView {
 #[cfg(feature = "test-support")]
 #[derive(Debug, Default)]
 pub struct Probe {
+    /// How many times this view parsed a board's text, its opening included.
+    pub parses: std::cell::Cell<u64>,
     /// How many times the scene was built.
     pub scenes: std::cell::Cell<u64>,
     /// Microseconds each recent scene build took, layers included.

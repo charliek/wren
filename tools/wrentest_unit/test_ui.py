@@ -200,8 +200,13 @@ class _WrenAppTestBase(unittest.TestCase):
             ui, "_find_binary", return_value=Path("/bin/true"),
         )
         self._binary_patch.start()
+        # The settings cases assume no board lane setting from outside.
+        self._environment = patch.dict(os.environ)
+        self._environment.start()
+        os.environ.pop("WRENTEST_BOARDS", None)
 
     def tearDown(self) -> None:
+        self._environment.stop()
         self._binary_patch.stop()
         for s in self._servers:
             s.close()
@@ -433,6 +438,36 @@ class TestWrenAppReadiness(_WrenAppTestBase):
         with patch.object(subprocess, "Popen", side_effect=factory):
             with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
                 self.assertFalse(app.settings_path.exists())
+
+    def test_wrentest_boards_writes_an_explicit_boards_line(self) -> None:
+        factory = self._make_popen(_good_identify())
+        cases = [
+            ("on", None, "boards = on\n"),
+            ("off", "editor-engine = advanced\n", "editor-engine = advanced\nboards = off\n"),
+            ("on", "editor-engine = advanced", "editor-engine = advanced\nboards = on\n"),
+            # A case that sets it itself keeps its own.
+            ("on", "boards = off\n", "boards = off\n"),
+            ("off", "  boards=on\n", "  boards=on\n"),
+        ]
+        for value, settings, expected in cases:
+            with self.subTest(value=value, settings=settings), \
+                    patch.dict(os.environ, {"WRENTEST_BOARDS": value}), \
+                    patch.object(subprocess, "Popen", side_effect=factory):
+                with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                             settings=settings) as app:
+                    self.assertEqual(app.settings_path.read_text(encoding="utf-8"), expected)
+
+    def test_wrentest_boards_unset_or_empty_adds_nothing(self) -> None:
+        for environment in ({}, {"WRENTEST_BOARDS": ""}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                self.assertIsNone(ui._boards_setting(None))
+                self.assertEqual(ui._boards_setting("x = 1\n"), "x = 1\n")
+
+    def test_wrentest_boards_must_be_off_or_on(self) -> None:
+        for value in ("yes", "ON", "1"):
+            with self.subTest(value=value), patch.dict(os.environ, {"WRENTEST_BOARDS": value}), \
+                    self.assertRaisesRegex(ValueError, "WRENTEST_BOARDS"):
+                WrenApp(settings=None)
 
     def test_settings_must_be_text(self) -> None:
         for value in (b"editor-engine = advanced", 1, ["editor-engine = advanced"]):

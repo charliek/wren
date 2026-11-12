@@ -1957,7 +1957,10 @@ mod tests {
         for number in 0..200 {
             fs::write(
                 root.path().join(format!("S/G/Board {number}.wren-board")),
-                format!("schema = 1\n\n[node.n{number}]\ntext = \"Label {number}\"\n"),
+                format!(
+                    "schema = 1\n\n[node.n{number}]\ntext = \"Label {number}\"\n\
+                     kind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n"
+                ),
             )
             .unwrap();
         }
@@ -1966,6 +1969,8 @@ mod tests {
         session.watcher = None;
         assert_eq!(session.model.notes.len(), 201);
         assert_eq!(session.index.extractions, 200);
+        let labelled = id_at(&session, "S/G/Board 7.wren-board");
+        assert_eq!(session.index.content(labelled), Some("Label 7"));
         let revision = session.index.revision();
 
         for tick in 1..=40 {
