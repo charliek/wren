@@ -20,7 +20,11 @@ mod released;
 const STATE: &str = ".wren/workspace.toml";
 const BOARD: &str = "schema = 1\n";
 
-/// What `main` (393ae14) writes for `scripted_ops`; see `record_main_bytes`.
+/// What `main` (393ae14) writes for `scripted_ops`. To record it again, copy
+/// `scripted_ops` and its helpers, minus `Op::CreateNote`'s `kind` field, into a
+/// test in `git archive 393ae14` with its own `CARGO_TARGET_DIR`, run them on
+/// `script_workspace(true)` through `Session::with_trash`, and save the state
+/// file's bytes here (discovery/boards.md, §8.5, boards-p1-core).
 const MAIN_STATE: &[u8] = include_bytes!("fixtures/main-state.toml");
 
 struct Bin {
@@ -427,8 +431,8 @@ recent = ["A/G/One.md", "A/G/Flow.wren-board"]
     assert!(!workspace.table().contains_key("navigation"));
 }
 
-/// The ops whose state file `main` recorded in `fixtures/main-state.toml`.
-/// `record_main_bytes` runs the same ops on `main`; keep the two in step.
+/// The ops whose state file `main` recorded in `fixtures/main-state.toml`; a
+/// change here means recording that file again (see `MAIN_STATE`).
 fn scripted_ops(session: &mut Session) {
     let mut time = 0;
     let mut next = || {
