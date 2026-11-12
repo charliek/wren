@@ -28,6 +28,10 @@ pub struct Preferences {
     pub settings: Settings,
     pub keymap: Keymap,
     pub path: Option<PathBuf>,
+    /// The `boards` setting as it was at launch, which is what the app runs
+    /// with: a Session lists boards or not for its whole life, so a later
+    /// value waits for a restart.
+    pub boards: bool,
     /// The bytes last loaded, so focus-triggered reloads skip unchanged files.
     loaded: Option<String>,
     /// The warning last shown for these settings, so a clean reload can
@@ -112,6 +116,7 @@ impl Preferences {
         let (loaded, settings) = read(path.as_deref());
         let mut preferences = Self {
             keymap: Keymap::default(),
+            boards: settings.boards,
             settings,
             path,
             loaded,
@@ -175,6 +180,12 @@ impl Preferences {
                 )),
             ),
         }
+    }
+
+    /// What to say when the file asks for a `boards` value other than the
+    /// one the app launched with.
+    fn restart_notice(&self) -> Option<String> {
+        (self.settings.boards != self.boards).then(|| "Restart Wren to apply `boards`.".to_owned())
     }
 
     fn warning(&self) -> Option<String> {
@@ -249,9 +260,15 @@ impl App {
             crate::macos_menu::install(&self.preferences.keymap);
         }
         let warning = self.preferences.warning();
-        match &warning {
-            Some(warning) => {
-                self.banner = Some(warning.clone());
+        // The restart notice is shown like a warning and retracted like one,
+        // but a setting that waits for a restart has not failed.
+        let shown = match (&warning, self.preferences.restart_notice()) {
+            (Some(warning), Some(notice)) => Some(format!("{warning} {notice}")),
+            (warning, notice) => warning.clone().or(notice),
+        };
+        match &shown {
+            Some(shown) => {
+                self.banner = Some(shown.clone());
                 self.banner_kind = workspace::WarningKind::General;
             }
             None if self.banner.is_some() && self.banner == self.preferences.shown_warning => {
@@ -259,7 +276,7 @@ impl App {
             }
             None => {}
         }
-        self.preferences.shown_warning = warning.clone();
+        self.preferences.shown_warning = shown;
         warning
     }
 
@@ -662,6 +679,55 @@ mod tests {
         assert!(!app.preferences.settings.line_numbers);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "theme = rose-pine\nline-numbers = false\n");
+    }
+
+    #[test]
+    fn a_changed_boards_setting_waits_for_a_restart_and_says_so() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let options = || super::super::Options {
+            editor: true,
+            ..Default::default()
+        };
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert!(!app.preferences.boards);
+        assert!(app.banner.is_none());
+
+        std::fs::write(&path, "boards = on\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("Restart Wren to apply `boards`.")
+        );
+        assert!(!app.preferences.boards);
+        assert!(app.preferences.settings.boards);
+
+        // A settings warning is still returned, with the notice beside it.
+        std::fs::write(&path, "boards = on\nmystery = 1\n").unwrap();
+        let warning = app.reload_settings(false).unwrap();
+        assert!(warning.contains("mystery") && !warning.contains("Restart"));
+        let banner = app.banner.clone().unwrap();
+        assert!(
+            banner.starts_with(&warning) && banner.ends_with("Restart Wren to apply `boards`.")
+        );
+
+        // Back at the launch value there is nothing to wait for.
+        std::fs::write(&path, "boards = off\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert!(app.banner.is_none());
+
+        // A launch with the setting on runs with it, and turning it off waits.
+        std::fs::write(&path, "boards = on\n").unwrap();
+        let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert!(app.preferences.boards);
+        assert!(app.banner.is_none());
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(
+            app.banner.as_deref(),
+            Some("Restart Wren to apply `boards`.")
+        );
+        assert!(app.preferences.boards);
     }
 
     #[test]
