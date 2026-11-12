@@ -173,6 +173,12 @@ def dump(m):
             ("edge", EDGE_FIRST, m["edges"], EDGE_DEFAULTS, EDGE_STYLE_DEFAULTS)):
         for i in sorted(coll, key=bytes_of):
             rec = canonical(coll[i], defaults, style_defaults)
+            # Label text is written as the loader gives it back (section 4.9).
+            if table == "node" and isinstance(rec.get("text"), str):
+                rec["text"] = label_text(rec["text"])
+            for label in rec.get("labels", []) if table == "edge" and isinstance(rec.get("labels"), list) else []:
+                if isinstance(label, dict) and isinstance(label.get("text"), str):
+                    label["text"] = label_text(label["text"])
             out += ["", "[%s.%s]" % (table, i)]
             order = [k for k in first if k in rec] + sorted((k for k in rec if k not in first), key=bytes_of)
             for k in order:

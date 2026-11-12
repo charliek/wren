@@ -54,6 +54,21 @@ class BoardFixtureTests(unittest.TestCase):
         z = [r["z"] for r in list(nodes.values()) + list(edges.values())]
         self.assertEqual(len(set(z)), len(z))
 
+    def test_a_label_with_a_carriage_return_is_written_as_it_reads_back(self):
+        for typed in ("A\r\nB", "A\rB", "\r"):
+            m = {"schema": 1, "nodes": {"a": {"text": typed, "kind": "shape", "z": typed}},
+                 "edges": {"e": {"kind": "edge", "labels": [{"text": typed}], "text": typed}}}
+            with self.subTest(typed=typed):
+                written = board_format.dump(m)
+                self.assertEqual(board_format.dump(board_format.load(written)), written)
+                back = board_format.load(written)
+                lines = typed.replace("\r\n", "\n").replace("\r", "\n")
+                self.assertEqual(back["nodes"]["a"]["text"], lines)
+                self.assertEqual(back["edges"]["e"]["labels"][0]["text"], lines)
+                # Only labels: a CR in any other string is kept.
+                self.assertEqual(back["nodes"]["a"]["z"], typed)
+                self.assertEqual(back["edges"]["e"]["text"], typed)
+
     def test_hand_written_loads_and_is_not_canonical(self):
         text = (board_fixtures.SAMPLES / "Hand written.wren-board").read_text(encoding="utf-8")
         self.assertNotIn("\r", text)

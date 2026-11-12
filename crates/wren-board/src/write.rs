@@ -81,10 +81,21 @@ enum Field<'a> {
     Items(Vec<Field<'a>>),
 }
 
+/// Label text as the loader gives it back (§4.9): CRLF and a lone CR as
+/// LF. Writing it so keeps `write(parse(write(m))) == write(m)` for a
+/// label that was typed or pasted with one.
+fn label_text(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 fn node_fields(out: &mut String, node: &Node) {
     if !node.text.is_empty() {
         out.push_str("text = ");
-        string(out, &node.text);
+        string(out, &label_text(&node.text));
         out.push('\n');
     }
     if let Some(kind) = &node.kind {
@@ -193,7 +204,7 @@ fn end(end: &End) -> Field<'_> {
 }
 
 fn label(label: &Label) -> Field<'_> {
-    let mut known = vec![("text", Field::Str(Cow::Borrowed(label.text.as_str())))];
+    let mut known = vec![("text", Field::Str(label_text(&label.text)))];
     if label.at != Label::DEFAULT_AT {
         known.push(("at", Field::Int(label.at)));
     }
@@ -971,7 +982,9 @@ mod tests {
         };
         for _ in 0..rng.below(8) {
             let node = Node {
-                text: random_string(rng, false),
+                // A label may hold a CR: the writer gives it back as the
+                // reader does, so the model still round-trips.
+                text: random_string(rng, true),
                 kind: (!rng.one_in(8)).then(|| named::<NodeKind>(rng)),
                 at: [int(rng), int(rng)],
                 parent: rng.one_in(4).then(|| random_string(rng, true)),
@@ -1000,7 +1013,7 @@ mod tests {
                 },
                 labels: (0..rng.below(3))
                     .map(|_| Label {
-                        text: random_string(rng, false),
+                        text: random_string(rng, true),
                         at: if rng.one_in(2) {
                             Label::DEFAULT_AT
                         } else {
@@ -1089,6 +1102,29 @@ mod tests {
                 Some(text.as_str())
             );
             assert_eq!(back.extra.get(&text), board.extra.get(&text));
+        }
+    }
+
+    #[test]
+    fn a_label_with_a_carriage_return_is_written_as_it_reads_back() {
+        let source = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\nz = \"a\"\n\n[edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"a\" }\nlabels = [\n  { text = \"x\" },\n]\nz = \"b\"\n";
+        let id = |name: &str| Id::new(name).unwrap();
+        for typed in ["A\r\nB", "A\rB", "A\r\r\nB\r", "\r"] {
+            let mut board = read(source);
+            board.nodes.get_mut(&id("a")).unwrap().text = typed.into();
+            board.edges.get_mut(&id("e")).unwrap().labels[0].text = typed.into();
+            let written = write(&board);
+            assert_eq!(write(&read(&written)), written, "{typed:?}");
+            let lines = typed.replace("\r\n", "\n").replace('\r', "\n");
+            let back = read(&written);
+            assert_eq!(back.nodes[&id("a")].text, lines);
+            assert_eq!(back.edges[&id("e")].labels[0].text, lines);
+            // Only the labels: a CR elsewhere is kept as written.
+            board.nodes.get_mut(&id("a")).unwrap().z = Some(typed.into());
+            assert_eq!(
+                read(&write(&board)).nodes[&id("a")].z.as_deref(),
+                Some(typed)
+            );
         }
     }
 
