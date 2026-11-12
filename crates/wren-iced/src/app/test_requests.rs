@@ -11,6 +11,7 @@ use super::{focus_editor, App, Message};
 use crate::panes::{Pane, PANES};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::{Op, Session};
 
@@ -852,6 +853,11 @@ fn core_op(params: &Value) -> Result<Op, String> {
         "create_note" => Op::CreateNote {
             group: group(params.get("parent").ok_or("parent is required")?)?,
             title: string(params, "title")?.into(),
+            kind: match params.get("kind").map(|kind| kind.as_str()) {
+                None | Some(Some("markdown")) => NoteKind::Markdown,
+                Some(Some("board")) => NoteKind::Board,
+                Some(_) => return Err("kind must be \"markdown\" or \"board\"".into()),
+            },
         },
         "select_parent" => Op::SelectParent {
             parent: parent(params.get("parent").ok_or("parent is required")?)?,
@@ -1106,9 +1112,26 @@ mod tests {
             core_op(&json!({"op":"create_note","parent":{"group":2},"title":"Note"})).unwrap(),
             Op::CreateNote {
                 group: GroupId(2),
+                kind: NoteKind::Markdown,
                 ..
             }
         ));
+        assert!(matches!(
+            core_op(
+                &json!({"op":"create_note","parent":{"group":2},"title":"Flow","kind":"board"})
+            )
+            .unwrap(),
+            Op::CreateNote {
+                kind: NoteKind::Board,
+                ..
+            }
+        ));
+        for kind in [json!("Board"), json!(1), Value::Null] {
+            assert!(core_op(
+                &json!({"op":"create_note","parent":{"group":2},"title":"Flow","kind":kind})
+            )
+            .is_err());
+        }
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub enum Op {
     CreateNote {
         group: GroupId,
         title: String,
+        kind: NoteKind,
     },
     Rename {
         target: ItemRef,
@@ -559,18 +560,18 @@ impl Session {
                 self.state.reorder(&path, None, &siblings)?;
                 self.finish_structure(events)
             }
-            Op::CreateNote { group, title } => {
+            Op::CreateNote { group, title, kind } => {
                 let path = self.parent_path(Parent::Group(group))?;
                 let receipt = self
                     .store
-                    .create_file(&path, &title, NoteKind::Markdown, b"")
+                    .create_file(&path, &title, kind, kind.template().as_bytes())
                     .map_err(|error| error.to_string())?;
                 let id = NoteId(self.model.allocate_id());
                 self.model.notes.push(Note {
                     id,
                     group,
-                    title: NoteKind::Markdown.title(receipt.path.file_name()),
-                    kind: NoteKind::Markdown,
+                    title: kind.title(receipt.path.file_name()),
+                    kind,
                     path: receipt.path,
                     subtitle: None,
                     modified: receipt.file.modified,
@@ -1060,12 +1061,12 @@ impl Session {
                 match self.store.write(copy, bytes, Expected::Bytes(baseline)) {
                     Ok(receipt) => receipt,
                     Err(error) if error.is_conflict() || error.is_not_found() => {
-                        self.create_conflict(path, &parent, bytes)?
+                        self.create_conflict(path, &parent, document.entry.kind, bytes)?
                     }
                     Err(error) => return Err(error.to_string()),
                 }
             }
-            _ => self.create_conflict(path, &parent, bytes)?,
+            _ => self.create_conflict(path, &parent, document.entry.kind, bytes)?,
         };
         document.recovery = Some((receipt.path.clone(), receipt.file.bytes.clone()));
         if let Some(error) = receipt.durability_error {
@@ -1141,17 +1142,18 @@ impl Session {
         &mut self,
         path: &RelPath,
         parent: &RelPath,
+        kind: NoteKind,
         bytes: &[u8],
     ) -> Result<WriteReceipt, String> {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H%M");
-        let title = NoteKind::Markdown.title(path.file_name());
+        let title = kind.title(path.file_name());
         let mut end = title.len().min(180);
         while !title.is_char_boundary(end) {
             end -= 1;
         }
         let title = format!("{} (conflict {stamp})", &title[..end]);
         self.store
-            .create_file(parent, &title, NoteKind::Markdown, bytes)
+            .create_file(parent, &title, kind, bytes)
             .map_err(|error| error.to_string())
     }
 
@@ -1391,17 +1393,16 @@ impl Session {
             .filter(|note| note.path.as_path().starts_with(from.as_path()))
             .map(|note| note.id)
             .collect();
+        let leaf = match target {
+            ItemRef::Note(_) => Leaf::Note(
+                NoteKind::from_name(from.file_name())
+                    .ok_or("The note's file name has no note kind")?,
+            ),
+            ItemRef::Section(_) | ItemRef::Group(_) => Leaf::Directory,
+        };
         let receipt = self
             .store
-            .relocate(
-                from,
-                parent,
-                name,
-                match target {
-                    ItemRef::Note(_) => Leaf::Note(NoteKind::Markdown),
-                    ItemRef::Section(_) | ItemRef::Group(_) => Leaf::Directory,
-                },
-            )
+            .relocate(from, parent, name, leaf)
             .map_err(|error| error.to_string())?;
         self.model.remap_paths(from, &receipt.path);
         let mut moved_group_section = None;
@@ -2036,6 +2037,7 @@ mod tests {
                     Op::CreateNote {
                         group,
                         title: "created".into(),
+                        kind: NoteKind::Markdown,
                     },
                     secs(1),
                 )
