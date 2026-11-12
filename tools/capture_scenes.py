@@ -1,7 +1,7 @@
 """Capture the main Wren screens for visual review against the mockup.
 
-Builds the mockup's sample workspace in a private directory, launches the
-smoke-test build under the test harness, and writes one PNG per scene:
+Builds the mockup's sample workspace in `target/scene-workspace/`, launches
+the smoke-test build under the test harness, and writes one PNG per scene:
 
     cargo build --locked -p wren-iced --features smoke-test
     python3 tools/capture_scenes.py --theme wren-dark --out target/scenes
@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
-import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
 
@@ -158,6 +161,16 @@ SAMPLE["Inbox/Triage/Long items.md"] = LONG_ITEMS
 EMPTY_SECTION = "Archive"
 
 
+@contextmanager
+def scene_workspaces() -> Iterator[Path]:
+    """An emptied `target/scene-workspace/`. The header draws the workspace
+    path, so a fixed one lets two captures of one build match byte for byte."""
+    root = ROOT / "target" / "scene-workspace"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    yield root
+
+
 def build_workspace(root: Path) -> None:
     (root / EMPTY_SECTION).mkdir(parents=True)
     for relative, text in SAMPLE.items():
@@ -240,7 +253,7 @@ def main() -> int:
         client.call("app.screenshot", {"path": str(path)})
         print(path)
 
-    with tempfile.TemporaryDirectory() as temp:
+    with scene_workspaces() as temp:
         if args.only == "markdown":
             workspace = Path(temp).resolve() / "work"
             build_workspace(workspace)
