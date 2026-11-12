@@ -279,6 +279,7 @@ impl App {
                 }
                 request.respond(Ok(self.editor_snapshot()));
             }
+            "board.get" | "board.bounds" | "board.pointer" => return self.board_request(request),
             "board.export" => {
                 // What `note.export_svg` writes once its save dialog closes.
                 if string(params, "format")? != "svg" {
@@ -1004,10 +1005,10 @@ const FOCUS_NAMES: &[&str] = &[
 /// grips during a resize) as a count. `bounds` places each known widget on
 /// screen, focused or not, so a test can click it.
 #[derive(Debug, Clone, Default)]
-struct Focused {
-    named: Vec<&'static str>,
-    unnamed: usize,
-    bounds: Vec<(&'static str, iced::Rectangle)>,
+pub(super) struct Focused {
+    pub(super) named: Vec<&'static str>,
+    pub(super) unnamed: usize,
+    pub(super) bounds: Vec<(&'static str, iced::Rectangle)>,
 }
 
 impl iced::advanced::widget::Operation<Focused> for Focused {

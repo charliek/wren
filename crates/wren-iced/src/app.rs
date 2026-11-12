@@ -33,6 +33,8 @@ use palette::Palette;
 use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
+mod board_harness;
+#[cfg(feature = "smoke-test")]
 mod test_requests;
 
 pub struct App {
@@ -202,6 +204,13 @@ pub enum Message {
     Reply(
         std::sync::Arc<crate::test_ipc::Request>,
         Result<serde_json::Value, String>,
+    ),
+    /// Where the board widget sits and whether it has the keyboard, read
+    /// for a `board.*` harness request.
+    #[cfg(feature = "smoke-test")]
+    BoardProbed(
+        std::sync::Arc<crate::test_ipc::Request>,
+        board_harness::Placement,
     ),
     /// An editor command's shortcut, as the editor widget publishes it:
     /// `Some` only while the editor has the keyboard.
@@ -411,6 +420,10 @@ impl App {
             }
             #[cfg(feature = "smoke-test")]
             Message::Reply(request, result) => request.respond(result),
+            #[cfg(feature = "smoke-test")]
+            Message::BoardProbed(request, placement) => {
+                return self.board_probed(&request, placement)
+            }
             #[cfg(feature = "smoke-test")]
             Message::EditorShortcut(request, intent) => {
                 let task = intent.map_or_else(Task::none, |intent| {

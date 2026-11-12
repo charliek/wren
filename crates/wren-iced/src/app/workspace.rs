@@ -325,6 +325,12 @@ impl App {
             return self.blocked("No workspace is open");
         };
         let before = EffectBefore::capture(session, &op);
+        // A board this op opens is timed from here.
+        #[cfg(feature = "smoke-test")]
+        {
+            self.board_perf.opening = matches!(op, Op::OpenNote { .. } | Op::Back | Op::Forward)
+                .then(std::time::Instant::now);
+        }
         let (events, mut error) = match session.apply(op.clone()) {
             Ok(events) => (events, None),
             Err(error) => (error.events, Some(error.message)),
@@ -382,6 +388,10 @@ impl App {
         let created = self.process_events(&events);
         if !events.is_empty() || error.is_some() {
             self.sync_editor(false);
+        }
+        #[cfg(feature = "smoke-test")]
+        {
+            self.board_perf.opening = None;
         }
         let follow_up = match created {
             Some(ItemRef::Note(note)) => Some(Op::OpenNote { note: Some(note) }),
@@ -473,6 +483,8 @@ impl App {
         } else {
             focus
         };
+        #[cfg(feature = "smoke-test")]
+        let task = Task::batch([task, self.time_board_open()]);
         let mut outcome = self.finish_action(
             if error.is_some() {
                 if committed {
@@ -839,9 +851,18 @@ impl App {
                     self.board_viewports.clear();
                 }
                 if let (Some(note), None) = (board_note, &error) {
+                    #[cfg(feature = "smoke-test")]
+                    let started = self
+                        .board_perf
+                        .opening
+                        .unwrap_or_else(std::time::Instant::now);
                     let palette = crate::theme::board_palette(self.definition);
                     match board::open(text, note, palette, &self.board_viewports) {
-                        Ok(view) => self.board = Some(view),
+                        Ok(view) => {
+                            self.board = Some(view);
+                            #[cfg(feature = "smoke-test")]
+                            self.board_perf.opened(started);
+                        }
                         Err(reason) => error = Some(reason),
                     }
                 }
