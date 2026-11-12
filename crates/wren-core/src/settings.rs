@@ -131,6 +131,9 @@ pub struct Settings {
     pub editor_engine: EditorEngine,
     /// The Markdown-aware Enter, Tab, Backspace, and Home.
     pub markdown_assist: bool,
+    /// Whether board notes are listed and opened, read when a workspace
+    /// opens. Left out of [`TEMPLATE`] until boards ship.
+    pub boards: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -147,6 +150,7 @@ impl Default for Settings {
             line_numbers: true,
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
+            boards: false,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -239,6 +243,10 @@ impl Settings {
                 },
                 "markdown-assist" => match parse_bool(value) {
                     Some(enabled) => settings.markdown_assist = enabled,
+                    None => invalid(),
+                },
+                "boards" => match parse_bool(value) {
+                    Some(enabled) => settings.boards = enabled,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -560,6 +568,32 @@ mod tests {
         assert!(!settings.markdown_assist);
         assert_eq!(settings.warnings.len(), 1);
         assert!(settings.warnings[0].contains("markdown-assist"));
+    }
+
+    #[test]
+    fn boards_default_off_and_parse_booleans() {
+        assert!(!Settings::default().boards);
+        for (value, enabled) in [
+            ("on", true),
+            ("yes", true),
+            ("true", true),
+            ("ON", true),
+            ("\"on\"", true),
+            ("off", false),
+            ("no", false),
+            ("false", false),
+        ] {
+            let settings = Settings::parse(&format!("boards = {value}\n"));
+            assert_eq!(settings.boards, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        for bad in ["sometimes", "1", ""] {
+            let settings = Settings::parse(&format!("boards = on\nboards = {bad}\n"));
+            assert!(settings.boards, "{bad:?} keeps the earlier value");
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid boards value"));
+        }
+        assert!(!TEMPLATE.contains("boards"));
     }
 
     #[test]

@@ -1369,7 +1369,63 @@ Items 5 and 6, in run 1a.
 - *For the Model chain.* `tomllib` cannot read `bom.in` or `toml11.in`; their outputs were written from TOML 1.0 spellings of the same boards. Cases the two parsers read differently are left out of the fixtures: CRLF inside a multi-line string in unknown content (the crate keeps `\r\n`, `tomllib` gives LF) and a `+00:00` offset (`tomllib` cannot tell it from `Z`). Open point: a TOML 1.1 time without seconds (`07:32`) reads into a `Datetime` whose `Display` is `07:32`, which is not TOML 1.0, against §4.1; no fixture holds one, and the writer should probably add `:00`.
 
 #### boards-p1-core
-Nothing yet.
+Items C1 to C3, session 1.
+- *Shapes chosen inside §3.5.* `NoteKind::extension()` includes the dot (`.wren-board` is the 11 bytes of C2). `title` is a method, `kind.title(name)`, which returns the name whole when it does not carry that kind's extension (as `note_title` did for `.md`). Until C4 the scan asks a private `listed_kind`, which lists Markdown only; C4 replaces it with `Kinds`. `create_conflict` takes the kind from the open document's entry; `Session::relocate` takes the leaf from the source path's name, as specified, and returns an error for a name with no kind, which a scanned note never has.
+- *Deviation: the op-by-kind table runs for Markdown only until C4.* Every structural op and every reconcile rescans the tree, and `Session::open` lists Markdown only until C4, so a board created by `Op::CreateNote` leaves the model at the next op. C3 writes the table once, `ops_keep_the_note_kind(kind, open_session)` in `tests/session.rs` (create, open, flush, rename twice, move, move and rename of its group, reorder, clean external reload, dirty conflict copy, back and forward, delete), and runs it for Markdown; C4 adds the Board run with `Session::open_with`. Until then `board_ops_write_board_names_and_bytes` checks C3's board paths on disk (the template bytes, a collision, the conflict copy's `.wren-board` name, rename and move names), and the `Flow.md` beside `Flow.wren-board` row is checked from the Markdown side (`markdown_ops_beside_a_board_of_the_same_title_collide_only_by_full_name`); C4 extends it with boards listed.
+- *Not in the plan:* the harness's `create_note` decoder accepts an optional `"kind": "markdown" | "board"`, Markdown when absent; any other value is an error.
+
+Items C4, C6 and C7, session 2.
+- *C4 shapes.* `scan::Kinds` is a copyable value with `MARKDOWN` (the default) and `ALL`, `lists(kind)` and `of(name)`; `scan`, `scan_with_contents` and `ReconcileJob::new` take it, so no scan call is without one. `SessionOptions { boards }` (default off) is kept by the Session, read with `options()`, and passed to `load` by `Op::OpenWorkspace`. Besides `Session::open_with(path, options)` there is `Session::with_options(path, trash, options)`, the twin of `with_trash`, because the app (A2) and the tests open with their own trash. A board at the root gets "board at workspace root ignored" (the Markdown text names Markdown and is unchanged); a board directly in a section gets the Markdown file's message unchanged, which names no kind.
+- *Deviation: `Op::CreateNote` refuses a board when the Session does not list boards* ("Boards are turned off; set `boards = on` to create one") and writes nothing. Otherwise the file would be written and then dropped from the model by the next rescan, which breaks "with it off no board is ... opened" (§3.3). C3's `board_ops_write_board_names_and_bytes` now opens its session with boards listed.
+- *Deviation: the Board run of the op-by-kind table moves to C5.* With boards listed, opening a board puts its path into `history`, and `WorkspaceState::set_history` refuses the non-`.md` path and makes the state read-only (`disable`), so every later metadata op of the table (`Reorder` first) fails with "Workspace metadata is read-only". That is the state-file rule of §3.5, item C5. C4 runs the Markdown table again with boards listed (`op_by_kind_table_markdown_with_boards_listed`) and covers the board side of `Flow.md` beside `Flow.wren-board` with boards listed (create, rename and move of a board, and the Markdown row with both listed); C5 adds `op_by_kind_table_board` with `Fixture::board_session`.
+- *C6 shapes.* `index::Content` holds `source` and the searched `text`; for Markdown both are one `Arc`, so retained bytes and search results are unchanged, and `retained_bytes` counts an extracted text only when there is one. The index keeps each entry's kind (from the model) and drops a content whose kind changed. `searchable` returns `None` for both kinds until A1. The board preview and snippet paths of §3.6 are in place now and read the searched text: the preview is its first line with words, trimmed and clipped as a Markdown preview is, and a snippet keeps every character and shows each line break as ` · ` (`plain_lines`, which shares the joining code factored out of `plain_markdown`). Until A1 a board's searched text is its TOML source, so its preview reads `schema = 1`; nothing lists a board in the app before A2. The test-only counter is `Index::extractions` (board sources that passed the change test); `ReconcileResult::sent_contents` is test-only as well.
+- *C7.* `Settings.boards` parses with the other booleans (`on`, `yes`, `true`, `off`, `no`, `false`, any case, quoted or not), a bad value warns and keeps the earlier value, and `TEMPLATE` does not mention it (a test asserts that). Nothing reads it yet: A2 passes it to `SessionOptions`.
+
+Item C5, session 3.
+- *Shapes chosen inside §3.5.* The three list setters became one, `WorkspaceState::set_navigation(history, position, recent)`, because the v1 position is a projection of the history. `set_last_open_note` keeps its name. The accessors `history()`, `history_position()`, `recent()` and `last_open_note()` now return the lists of every kind: from a believed `[navigation]`, otherwise from the v1 keys. `Session::open` reads them unchanged. The "Markdown entry" test is the released validator's own test (`parse_path` with `Reference::Note`), so the v1 keys can never hold a path it refuses. The keys of `[navigation]` are the four of §3.5. When none of the lists names another kind, those keys are removed, and the table goes once it is empty, so an unknown key a later build puts in `[navigation]` survives. A stale `[navigation]` is dropped from memory at load. The file is untouched until the next save, which writes it without the table.
+- *Rule 4, refined.* Only a Markdown `last_open` must equal `last_open_note`. A board as `last_open` constrains nothing, and neither does an empty one. Deleting the open board empties `last_open` and leaves `last_open_note` on the earlier Markdown note. The random walk found this: requiring `None` there called a file this build had just written stale.
+- *Not in the plan: the Markdown fallback when reopening.* `Session::open` tries `selection`, then `last_open_note()` (any kind), then `markdown_last_open_note()` (the v1 key), and `resolve_selection` tries the same two in a group. With boards off, a workspace whose last open note was a board then reopens the Markdown note released Wren would reopen. Without the fallback, nothing would be selected. With boards off, the first save drops the boards from the lists and removes `[navigation]`, so the boards' places in Back/Forward are not kept for when the setting comes back on.
+- *Not in the plan: `transform_paths` derives the v1 lists from the transformed `[navigation]`.* It does not transform them on their own. The v1 rule moves a pruned position to the first remaining visit, and that visit can be a board. Two separate transforms would then disagree, and the next load would call `[navigation]` stale.
+- *Tests.*
+  - Unit tests in `workspace_state.rs`, one or more per rule:
+    - the projection table, including a position with no Markdown at or before it
+    - a board as `last_open`
+    - removal, which keeps unknown keys
+    - a lenient read that never disables the file: wrong types, `../` and absolute entries, a 100,000-entry array
+    - skipped entries re-point the position
+    - the trust table, including an older build that only went back
+    - rename and delete remap and prune `[navigation]`
+    - a prune that would move the two positions apart
+  - `tests/support/released_v0_1_1.rs`: the frozen validator, copied verbatim with `git show v0.1.1:…`.
+  - `tests/released_state.rs`:
+    - Back and Forward across kinds, with the exact v1 and `[navigation]` values.
+    - Quitting with a board open. It reopens with boards on. With boards off, the Markdown note reopens, and opening writes nothing.
+    - A board named in `selection` reopens.
+    - Renaming the group of the open board, then deleting the board.
+    - The pretend older build. It keeps a stale `[navigation]` and changes the v1 keys, and the v1 keys win.
+    - The seeded 200-step random walk over mixed kinds (2,000 steps for three seeds, `#[ignore]`). Its steps:
+      - open, Back, Forward
+      - create either kind
+      - rename and move notes
+      - delete
+      - rename groups
+      - delete a file from outside, then reconcile
+      - a dirty conflict copy; the test asserts the walk made one
+      - reopen with boards on or off
+    - After every step, the walk checks that:
+      - the frozen validator accepts the file
+      - no v1 key names a board
+      - `[navigation]` exists only beside another kind
+      - a fresh load believes `[navigation]`
+      - when a step wrote the file, it wrote the lists the Session holds
+      - after a reopen, the note named in `selection` is the open document
+    - Byte identity. `tests/fixtures/main-state.toml` holds what `main` (`393ae14`) writes for a scripted run of 17 ops. To record it, the same script ran against an export of `main` (`git archive`) with its own target folder. The same script must give those bytes with boards off and a board on disk, and with boards on and no board on disk.
+  - The Board run of the op-by-kind table, `op_by_kind_table_board`. All three runs of the table now check the file with the frozen validator after every op.
+
+Review (§8.1), at `1248f85`.
+- *Counts:* 0 blockers, 0 majors, 2 minors. The reviewer re-ran the gates (`make check`, the X11 tiny-skia suite on both engines with 241 passed and 1 skipped, the aarch64 clippy check) and re-recorded `main-state.toml` from `git archive 393ae14`, byte-identical.
+- *Fixed:* `c1d772c`, the fixture's doc comments named a `record_main_bytes` that does not exist; they now give the recording recipe. A comment fix, so no regression test.
+- *Not fixed:* the `CLAUDE.md` Layout map lacks `kind.rs` (and, already on `main`, `workspace_state.rs`). §7.1 item 5 forbids a Stage A chain to edit `CLAUDE.md`; it is carried to `boards-p3-docs` (D1), which owns `CLAUDE.md`.
 #### boards-p1-model
 M1 (model types and `parse`).
 - *Surface added inside §3.2's meaning:* `parse` and `ParseError` (with `Display` and `Error`) at the crate root from a private `read.rs`; a `Vocabulary` trait over the closed-set enums (`ALL`, `name`, `from_name`), `Named::{read, as_str, known}`, `Color::read`, `Default` for `Board` (the empty schema-1 board), `NodeStyle` and `EdgeStyle`, `Edge::DEFAULT_HEADS`, `Label::DEFAULT_AT`.

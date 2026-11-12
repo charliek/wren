@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use iced::Task;
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, Parent, SectionId, Workspace};
 #[cfg(feature = "smoke-test")]
 use wren_core::ops::Document;
@@ -940,7 +941,11 @@ impl App {
         let op = match dialog.kind {
             DialogKind::CreateSection => Op::CreateSection { name },
             DialogKind::CreateGroup(section) => Op::CreateGroup { section, name },
-            DialogKind::CreateNote(group) => Op::CreateNote { group, title: name },
+            DialogKind::CreateNote(group) => Op::CreateNote {
+                group,
+                title: name,
+                kind: NoteKind::Markdown,
+            },
             DialogKind::Rename(target) => Op::Rename {
                 target,
                 new_name: name,
@@ -1283,7 +1288,8 @@ mod tests {
         assert!(app
             .apply_core(Op::CreateNote {
                 group,
-                title: "Created".into()
+                title: "Created".into(),
+                kind: NoteKind::Markdown,
             })
             .is_err());
         let created = app

@@ -1,8 +1,15 @@
 //! Optional workspace metadata. `schema_version = 1` is the current format;
 //! an absent version is accepted for files containing only optional fields.
 //! Unknown TOML values survive saves, but comments and formatting are not retained.
+//!
+//! Released Wren (0.1.0, 0.1.1) refuses the whole file when `history`,
+//! `recent` or `last_open_note` names anything but a Markdown note, so those
+//! keys hold the Markdown projection of the navigation lists. The lists with
+//! every kind live in `[navigation]`, which is written only while one of them
+//! names another kind, and is believed only while its projection still equals
+//! the v1 keys: a mismatch means an older build has navigated since.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
@@ -14,6 +21,237 @@ const SCHEMA_VERSION: i64 = 1;
 /// Pane widths live under `[widths.columns]`, the name from when Wren had a
 /// second layout, so widths saved by earlier versions still apply.
 const WIDTHS_TABLE: &str = "columns";
+const NAVIGATION: &str = "navigation";
+const NAVIGATION_KEYS: [&str; 4] = ["history", "history_position", "recent", "last_open"];
+
+/// Back/Forward history, the visit position in it, the most-recently-used
+/// list, and the last open note, for notes of every kind.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Navigation {
+    history: Vec<RelPath>,
+    position: Option<usize>,
+    recent: Vec<RelPath>,
+    last_open: Option<RelPath>,
+}
+
+impl Navigation {
+    /// The lists as the v1 keys hold them.
+    fn released(table: &Table) -> Self {
+        Self {
+            history: paths(table, "history"),
+            position: integer_position(table.get("history_position")),
+            recent: paths(table, "recent"),
+            last_open: optional_path(table, "last_open_note"),
+        }
+    }
+
+    /// The lists `[navigation]` holds, read leniently: a bad entry is skipped
+    /// and a wrong-typed value ignored, so nothing in it can disable the file.
+    /// `None` when the table holds none of the known keys.
+    fn stored(table: &Table) -> Option<Self> {
+        let stored = table.get(NAVIGATION)?.as_table()?;
+        if !NAVIGATION_KEYS.iter().any(|key| stored.contains_key(*key)) {
+            return None;
+        }
+        let entries = |key| {
+            stored
+                .get(key)
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice)
+        };
+        let lenient = |value: &Value| {
+            value
+                .as_str()
+                .and_then(|path| parse_path(path, Reference::Any).ok())
+        };
+        let raw_history = entries("history");
+        let raw_position = integer_position(stored.get("history_position"))
+            .filter(|position| *position < raw_history.len());
+        let mut history = Vec::new();
+        let mut through_position = 0usize;
+        for (index, path) in raw_history.iter().enumerate() {
+            if let Some(path) = lenient(path) {
+                history.push(path);
+                if raw_position.is_some_and(|position| index <= position) {
+                    through_position += 1;
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut recent: Vec<_> = entries("recent")
+            .iter()
+            .rev()
+            .filter_map(lenient)
+            .filter(|path| seen.insert(path.clone()))
+            .collect();
+        recent.reverse();
+        Some(Self {
+            history,
+            position: raw_position.and_then(|_| through_position.checked_sub(1)),
+            recent,
+            last_open: stored.get("last_open").and_then(lenient),
+        })
+    }
+
+    /// Whether any list names a path the v1 keys cannot hold.
+    fn mixed(&self) -> bool {
+        self.history
+            .iter()
+            .chain(&self.recent)
+            .chain(&self.last_open)
+            .any(|path| !released_note(path))
+    }
+
+    /// The v1 history, position and MRU list: other kinds filtered out, and
+    /// the position re-pointed at the last Markdown visit at or before it.
+    fn projection(&self) -> (Vec<RelPath>, Option<usize>, Vec<RelPath>) {
+        let mut history = Vec::new();
+        let mut through_position = 0usize;
+        for (index, path) in self.history.iter().enumerate() {
+            if released_note(path) {
+                history.push(path.clone());
+                if self.position.is_some_and(|position| index <= position) {
+                    through_position += 1;
+                }
+            }
+        }
+        let position = self.position.and_then(|_| through_position.checked_sub(1));
+        let recent = self
+            .recent
+            .iter()
+            .filter(|path| released_note(path))
+            .cloned()
+            .collect();
+        (history, position, recent)
+    }
+
+    /// Whether the v1 keys are this navigation's projection. Only a Markdown
+    /// `last_open` constrains `last_open_note`: opening a board leaves it as
+    /// it was, and deleting that board then leaves `last_open` empty beside it.
+    fn agrees_with(&self, released: &Navigation) -> bool {
+        let (history, position, recent) = self.projection();
+        let last_open = match &self.last_open {
+            Some(path) if released_note(path) => released.last_open.as_ref() == Some(path),
+            _ => true,
+        };
+        history == released.history
+            && position == released.position
+            && recent == released.recent
+            && last_open
+    }
+
+    /// Writes the v1 `history`, `history_position` and `recent` as the
+    /// projection, then `[navigation]`. `last_open_note` is not touched.
+    fn write_lists(&self, table: &mut Table) -> Result<(), String> {
+        let (history, position, recent) = self.projection();
+        table.insert("history".into(), encode_paths(&history, Reference::Note)?);
+        set_position(table, position);
+        table.insert("recent".into(), encode_paths(&recent, Reference::Note)?);
+        self.write(table)
+    }
+
+    /// Writes `[navigation]` when a list names another kind, and otherwise
+    /// removes its known keys (and the table, once nothing else is in it).
+    fn write(&self, table: &mut Table) -> Result<(), String> {
+        if !self.mixed() {
+            clear_navigation(table);
+            return Ok(());
+        }
+        let history = encode_paths(&self.history, Reference::Any)?;
+        let recent = encode_paths(&self.recent, Reference::Any)?;
+        let last_open = self
+            .last_open
+            .as_ref()
+            .map(|path| encode_path(path, Reference::Any))
+            .transpose()?;
+        let entry = table
+            .entry(NAVIGATION)
+            .or_insert_with(|| Value::Table(Table::new()));
+        if !entry.is_table() {
+            *entry = Value::Table(Table::new());
+        }
+        let stored = entry.as_table_mut().expect("navigation was made a table");
+        stored.insert("history".into(), history);
+        set_position(stored, self.position);
+        stored.insert("recent".into(), recent);
+        match last_open {
+            Some(path) => stored.insert("last_open".into(), Value::String(path)),
+            None => stored.remove("last_open"),
+        };
+        Ok(())
+    }
+
+    /// Remaps and prunes by the rules `transform_paths` applies to the v1 keys.
+    fn transform(
+        &self,
+        transform: &impl Fn(&RelPath) -> Result<Option<RelPath>, String>,
+    ) -> Result<Self, String> {
+        let mut history = Vec::new();
+        let mut through_position = 0usize;
+        for (index, path) in self.history.iter().enumerate() {
+            if let Some(path) = transform(path)? {
+                history.push(path);
+                if self.position.is_some_and(|position| index <= position) {
+                    through_position += 1;
+                }
+            }
+        }
+        let position = self
+            .position
+            .filter(|_| !history.is_empty())
+            .map(|_| through_position.saturating_sub(1));
+        let mut recent: Vec<RelPath> = Vec::new();
+        for path in &self.recent {
+            if let Some(path) = transform(path)? {
+                recent.retain(|candidate| *candidate != path);
+                recent.push(path);
+            }
+        }
+        let last_open = match &self.last_open {
+            Some(path) => transform(path)?,
+            None => None,
+        };
+        Ok(Self {
+            history,
+            position,
+            recent,
+            last_open,
+        })
+    }
+}
+
+/// Whether released Wren accepts `path` in `history`, `recent` or
+/// `last_open_note`.
+fn released_note(path: &RelPath) -> bool {
+    path.as_path()
+        .to_str()
+        .is_some_and(|path| parse_path(path, Reference::Note).is_ok())
+}
+
+/// Removes the known keys of `[navigation]`, and the table once it is empty.
+fn clear_navigation(table: &mut Table) {
+    if let Some(stored) = table.get_mut(NAVIGATION).and_then(Value::as_table_mut) {
+        for key in NAVIGATION_KEYS {
+            stored.remove(key);
+        }
+        if stored.is_empty() {
+            table.remove(NAVIGATION);
+        }
+    }
+}
+
+fn set_position(table: &mut Table, position: Option<usize>) {
+    match position.and_then(|position| i64::try_from(position).ok()) {
+        Some(position) => table.insert("history_position".into(), Value::Integer(position)),
+        None => table.remove("history_position"),
+    };
+}
+
+fn integer_position(value: Option<&Value>) -> Option<usize> {
+    value
+        .and_then(Value::as_integer)
+        .and_then(|position| usize::try_from(position).ok())
+}
 
 #[derive(Debug)]
 pub struct WorkspaceState {
@@ -50,8 +288,13 @@ impl WorkspaceState {
                 text.parse::<Table>()
                     .map_err(|error| format!("invalid TOML in {STATE_PATH}: {}", error.message()))
             })
-            .and_then(|table| {
+            .and_then(|mut table| {
                 validate(&table)?;
+                let stale = Navigation::stored(&table)
+                    .is_some_and(|stored| !stored.agrees_with(&Navigation::released(&table)));
+                if stale {
+                    clear_navigation(&mut table);
+                }
                 Ok(table)
             });
         match parsed {
@@ -111,66 +354,70 @@ impl WorkspaceState {
         self.set_optional_path("selection", selection, Reference::Any);
     }
 
+    /// The last open note, of any kind.
     pub fn last_open_note(&self) -> Option<RelPath> {
+        self.navigation().last_open
+    }
+
+    /// The last open Markdown note, as released Wren reads it. It differs
+    /// from `last_open_note` only while a note of another kind was open last.
+    pub fn markdown_last_open_note(&self) -> Option<RelPath> {
         optional_path(&self.table, "last_open_note")
     }
 
+    /// Records the open note. `last_open_note` keeps its Markdown note while
+    /// a note of another kind is open.
     pub fn set_last_open_note(&mut self, note: Option<&RelPath>) {
-        self.set_optional_path("last_open_note", note, Reference::Note);
-    }
-
-    pub fn history(&self) -> Vec<RelPath> {
-        paths(&self.table, "history")
-    }
-
-    pub fn set_history(&mut self, history: &[RelPath]) {
-        let encoded = encode_paths(history, Reference::Note);
-        match encoded {
-            Ok(value) => {
-                self.table.insert("history".to_owned(), value);
-                if self
-                    .history_position()
-                    .is_some_and(|position| position >= history.len())
-                {
-                    self.set_history_position(None);
-                }
-            }
-            Err(reason) => self.disable(reason),
+        let mut navigation = self.navigation();
+        navigation.last_open = note.cloned();
+        if note.is_none_or(released_note) {
+            self.set_optional_path("last_open_note", note, Reference::Note);
         }
+        self.store_navigation(&navigation);
+    }
+
+    /// Back/Forward visits, of every kind, from oldest to newest.
+    pub fn history(&self) -> Vec<RelPath> {
+        self.navigation().history
     }
 
     /// Zero-based visit occurrence in `history`, including duplicate paths.
     pub fn history_position(&self) -> Option<usize> {
-        self.table
-            .get("history_position")
-            .and_then(Value::as_integer)
-            .and_then(|position| usize::try_from(position).ok())
-    }
-
-    pub fn set_history_position(&mut self, position: Option<usize>) {
-        match position.and_then(|position| i64::try_from(position).ok()) {
-            Some(position) => {
-                self.table
-                    .insert("history_position".into(), Value::Integer(position));
-            }
-            None => {
-                self.table.remove("history_position");
-            }
-        }
+        self.navigation().position
     }
 
     /// Unique visited note paths, from least to most recently visited. Unlike
     /// Back/Forward history, a new navigation branch does not discard these.
     pub fn recent(&self) -> Vec<RelPath> {
-        paths(&self.table, "recent")
+        self.navigation().recent
     }
 
-    pub fn set_recent(&mut self, recent: &[RelPath]) {
-        match encode_paths(recent, Reference::Note) {
-            Ok(value) => {
-                self.table.insert("recent".into(), value);
-            }
-            Err(reason) => self.disable(reason),
+    /// Replaces the navigation lists, which may name notes of any kind; the
+    /// v1 keys receive their Markdown projection.
+    pub fn set_navigation(
+        &mut self,
+        history: &[RelPath],
+        position: Option<usize>,
+        recent: &[RelPath],
+    ) {
+        let navigation = Navigation {
+            history: history.to_vec(),
+            position,
+            recent: recent.to_vec(),
+            last_open: self.navigation().last_open,
+        };
+        if let Err(reason) = navigation.write_lists(&mut self.table) {
+            self.disable(reason);
+        }
+    }
+
+    fn navigation(&self) -> Navigation {
+        Navigation::stored(&self.table).unwrap_or_else(|| Navigation::released(&self.table))
+    }
+
+    fn store_navigation(&mut self, navigation: &Navigation) {
+        if let Err(reason) = navigation.write(&mut self.table) {
+            self.disable(reason);
         }
     }
 
@@ -373,6 +620,9 @@ impl WorkspaceState {
     fn transform_paths(&mut self, transform: impl Fn(&RelPath) -> Result<Option<RelPath>, String>) {
         let result = (|| {
             let mut table = self.table.clone();
+            let navigation = Navigation::stored(&table)
+                .map(|navigation| navigation.transform(&transform))
+                .transpose()?;
             for (field, kind) in [
                 ("selection", Reference::Any),
                 ("last_open_note", Reference::Note),
@@ -395,7 +645,7 @@ impl WorkspaceState {
             ] {
                 if table.contains_key(field) {
                     let position = (field == "history")
-                        .then(|| self.history_position())
+                        .then(|| integer_position(table.get("history_position")))
                         .flatten();
                     let mut mapped = Vec::new();
                     let mut through_position = 0usize;
@@ -445,6 +695,11 @@ impl WorkspaceState {
                 // container's sort mode.
                 mapped.extend(changed);
                 *sort = mapped;
+            }
+            if let Some(navigation) = navigation {
+                // Derive the v1 lists from the mixed ones, so the pair still
+                // agrees when a prune moves the two positions differently.
+                navigation.write_lists(&mut table)?;
             }
             validate(&table)?;
             Ok(table)
@@ -700,7 +955,11 @@ mod tests {
         state.set_width("notes", 300).unwrap();
         state.set_selection(Some(&note));
         state.set_last_open_note(Some(&note));
-        state.set_history(&[note.clone(), rel("Inbox/other.md"), note.clone()]);
+        state.set_navigation(
+            &[note.clone(), rel("Inbox/other.md"), note.clone()],
+            None,
+            &[],
+        );
         state.set_width("groups", 268).unwrap();
         state.set_sort(&rel("Projects/Group"), "title").unwrap();
         state.save(&mut store).unwrap();
@@ -1358,12 +1617,300 @@ mod tests {
         let mut state = WorkspaceState::load(&store);
         state.set_selection(None);
         state.set_last_open_note(None);
-        state.set_history(&[]);
+        state.set_navigation(&[], None, &[]);
         state.save(&mut store).unwrap();
         let loaded = WorkspaceState::load(&store);
         assert!(loaded.writable());
         assert_eq!(loaded.selection(), None);
         assert_eq!(loaded.last_open_note(), None);
         assert!(loaded.history().is_empty());
+    }
+
+    fn rels(paths: &[&str]) -> Vec<RelPath> {
+        paths.iter().copied().map(rel).collect()
+    }
+
+    fn strings(value: &Value) -> Vec<&str> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect()
+    }
+
+    const ONE: &str = "A/G/one.md";
+    const TWO: &str = "A/G/two.md";
+    const FLOW: &str = "A/G/flow.wren-board";
+    const MAP: &str = "B/K/map.wren-board";
+
+    #[test]
+    fn markdown_navigation_writes_the_v1_keys_alone() {
+        let (directory, mut store) = fixture(None);
+        let mut state = WorkspaceState::load(&store);
+        state.set_last_open_note(Some(&rel(ONE)));
+        state.set_navigation(&rels(&[ONE, TWO, ONE]), Some(1), &rels(&[TWO, ONE]));
+        assert!(!state.table.contains_key(NAVIGATION));
+        state.save(&mut store).unwrap();
+        let saved = disk_table(&directory);
+        assert_eq!(strings(&saved["history"]), [ONE, TWO, ONE]);
+        assert_eq!(saved["history_position"].as_integer(), Some(1));
+        assert_eq!(strings(&saved["recent"]), [TWO, ONE]);
+        assert_eq!(saved["last_open_note"].as_str(), Some(ONE));
+        assert!(!saved.contains_key(NAVIGATION));
+    }
+
+    #[test]
+    fn the_v1_keys_hold_the_markdown_projection_and_navigation_the_whole_lists() {
+        for (history, position, v1_history, v1_position) in [
+            (
+                &[ONE, FLOW, TWO, MAP][..],
+                Some(3),
+                &[ONE, TWO][..],
+                Some(1),
+            ),
+            (&[ONE, FLOW, TWO, MAP], Some(1), &[ONE, TWO], Some(0)),
+            (&[ONE, FLOW, TWO, MAP], Some(2), &[ONE, TWO], Some(1)),
+            (&[FLOW, ONE], Some(0), &[ONE], None),
+            (&[FLOW, ONE], None, &[ONE], None),
+            (&[FLOW, MAP], Some(1), &[], None),
+        ] {
+            let (directory, mut store) = fixture(None);
+            let mut state = WorkspaceState::load(&store);
+            state.set_navigation(&rels(history), position, &rels(&[MAP, ONE, FLOW]));
+            state.save(&mut store).unwrap();
+            let saved = disk_table(&directory);
+            assert_eq!(strings(&saved["history"]), v1_history, "{history:?}");
+            assert_eq!(
+                saved.get("history_position").and_then(Value::as_integer),
+                v1_position.map(|position| position as i64),
+                "{history:?} at {position:?}"
+            );
+            assert_eq!(strings(&saved["recent"]), [ONE]);
+            let navigation = &saved[NAVIGATION];
+            assert_eq!(strings(&navigation["history"]), history);
+            assert_eq!(
+                navigation
+                    .get("history_position")
+                    .and_then(Value::as_integer),
+                position.map(|position| position as i64)
+            );
+            assert_eq!(strings(&navigation["recent"]), [MAP, ONE, FLOW]);
+            let loaded = WorkspaceState::load(&store);
+            assert!(loaded.writable());
+            assert_eq!(loaded.history(), rels(history));
+            assert_eq!(loaded.history_position(), position);
+            assert_eq!(loaded.recent(), rels(&[MAP, ONE, FLOW]));
+        }
+    }
+
+    #[test]
+    fn a_board_open_last_leaves_last_open_note_as_it_was() {
+        let (directory, mut store) = fixture(None);
+        let mut state = WorkspaceState::load(&store);
+        state.set_last_open_note(Some(&rel(ONE)));
+        state.set_last_open_note(Some(&rel(FLOW)));
+        state.set_selection(Some(&rel(FLOW)));
+        assert_eq!(state.last_open_note(), Some(rel(FLOW)));
+        assert_eq!(state.markdown_last_open_note(), Some(rel(ONE)));
+        state.save(&mut store).unwrap();
+        let saved = disk_table(&directory);
+        assert_eq!(saved["last_open_note"].as_str(), Some(ONE));
+        assert_eq!(saved["selection"].as_str(), Some(FLOW));
+        assert_eq!(saved[NAVIGATION]["last_open"].as_str(), Some(FLOW));
+        let loaded = WorkspaceState::load(&store);
+        assert_eq!(loaded.last_open_note(), Some(rel(FLOW)));
+        assert_eq!(loaded.selection(), Some(rel(FLOW)));
+
+        state.set_last_open_note(Some(&rel(TWO)));
+        assert_eq!(state.markdown_last_open_note(), Some(rel(TWO)));
+        assert!(!state.table.contains_key(NAVIGATION));
+        state.set_last_open_note(Some(&rel(FLOW)));
+        state.set_last_open_note(None);
+        assert_eq!(state.last_open_note(), None);
+        assert_eq!(state.markdown_last_open_note(), None);
+        assert!(!state.table.contains_key(NAVIGATION));
+    }
+
+    #[test]
+    fn navigation_is_removed_with_its_last_board_but_keeps_unknown_keys() {
+        let (_directory, store) = fixture(Some(b"[navigation]\nfuture = 1\n"));
+        let mut state = WorkspaceState::load(&store);
+        assert!(state.writable());
+        state.set_navigation(&rels(&[ONE, FLOW]), Some(1), &rels(&[ONE, FLOW]));
+        assert_eq!(state.table[NAVIGATION]["future"].as_integer(), Some(1));
+        assert_eq!(state.history(), rels(&[ONE, FLOW]));
+        state.set_navigation(&rels(&[ONE]), Some(0), &rels(&[ONE]));
+        let navigation = state.table[NAVIGATION].as_table().unwrap();
+        assert_eq!(navigation.keys().collect::<Vec<_>>(), ["future"]);
+        assert_eq!(state.history(), rels(&[ONE]));
+
+        let (_directory, store) = fixture(None);
+        let mut state = WorkspaceState::load(&store);
+        state.set_navigation(&rels(&[FLOW]), Some(0), &rels(&[FLOW]));
+        assert!(state.table.contains_key(NAVIGATION));
+        state.set_navigation(&[], None, &[]);
+        assert!(!state.table.contains_key(NAVIGATION));
+    }
+
+    #[test]
+    fn navigation_is_read_leniently_and_never_disables_the_file() {
+        let huge = format!(
+            "[navigation]\nhistory = [{}]\n",
+            vec!["'../x.wren-board'"; 100_000].join(", ")
+        );
+        let cases: Vec<&[u8]> = vec![
+            b"navigation = 5",
+            b"navigation = ['A/G/flow.wren-board']",
+            b"[navigation]\nhistory = 5\nrecent = { a = 1 }\nlast_open = []",
+            b"[navigation]\nhistory = ['../x.wren-board', 3, '', '/abs.wren-board', 'A\\\\x']",
+            b"[navigation]\nhistory_position = 'x'\nrecent = [true]",
+            b"[navigation]\nhistory = ['A/G/flow.wren-board']\nhistory_position = -1",
+            b"[navigation]\nhistory = ['A/G/flow.wren-board']\nhistory_position = 99",
+            b"[navigation]\nlast_open = '../flow.wren-board'",
+            b"[navigation]\nlast_open = 3",
+            b"[navigation]\nschema_version = 2\nhistory = [[], {}]",
+            huge.as_bytes(),
+        ];
+        for bytes in cases {
+            let shown = String::from_utf8_lossy(&bytes[..bytes.len().min(80)]).into_owned();
+            let (_directory, mut store) = fixture(Some(bytes));
+            let mut state = WorkspaceState::load(&store);
+            assert!(state.writable(), "{shown}");
+            assert_eq!(state.warning(), None, "{shown}");
+            state.set_width("notes", 300).unwrap();
+            state.save(&mut store).unwrap();
+            assert!(WorkspaceState::load(&store).writable(), "{shown}");
+        }
+    }
+
+    #[test]
+    fn bad_navigation_entries_are_skipped_and_the_position_follows_them() {
+        let (_directory, store) = fixture(Some(
+            br#"history = ['A/G/one.md']
+history_position = 0
+recent = ['A/G/one.md']
+[navigation]
+history = ['../x.wren-board', 'A/G/one.md', 3, 'A/G/flow.wren-board', 'A/G/flow.wren-board']
+history_position = 3
+recent = ['A/G/flow.wren-board', 'A/G/one.md', 'A/G/flow.wren-board', 7]
+"#,
+        ));
+        let state = WorkspaceState::load(&store);
+        assert_eq!(state.history(), rels(&[ONE, FLOW, FLOW]));
+        assert_eq!(state.history_position(), Some(1));
+        assert_eq!(state.recent(), rels(&[ONE, FLOW]));
+    }
+
+    #[test]
+    fn navigation_is_believed_only_while_its_projection_equals_the_v1_keys() {
+        let agreeing = "history = ['A/G/one.md', 'A/G/two.md']\nhistory_position = 0\nrecent = ['A/G/two.md', 'A/G/one.md']\nlast_open_note = 'A/G/one.md'\n";
+        let navigation = "[navigation]\nhistory = ['A/G/one.md', 'A/G/flow.wren-board', 'A/G/two.md']\nhistory_position = 1\nrecent = ['A/G/two.md', 'A/G/one.md', 'A/G/flow.wren-board']\nlast_open = 'A/G/flow.wren-board'\n";
+        let mixed = rels(&[ONE, FLOW, TWO]);
+        for (v1, last_open, believed) in [
+            (agreeing.to_owned(), FLOW, true),
+            // An older build went back once: only the position changed.
+            (
+                agreeing.replace("history_position = 0", "history_position = 1"),
+                FLOW,
+                false,
+            ),
+            (agreeing.replace("history_position = 0\n", ""), FLOW, false),
+            (
+                agreeing.replace(
+                    "'A/G/two.md']\nhistory_position",
+                    "'A/G/two.md', 'A/G/one.md']\nhistory_position",
+                ),
+                FLOW,
+                false,
+            ),
+            (
+                agreeing.replace(
+                    "recent = ['A/G/two.md', 'A/G/one.md']",
+                    "recent = ['A/G/one.md', 'A/G/two.md']",
+                ),
+                FLOW,
+                false,
+            ),
+            // A Markdown last_open must be last_open_note itself.
+            (agreeing.to_owned(), ONE, true),
+            (agreeing.to_owned(), TWO, false),
+        ] {
+            let source = format!(
+                "{v1}{}",
+                navigation.replace(FLOW_LAST, &format!("last_open = '{last_open}'"))
+            );
+            let (directory, mut store) = fixture(Some(source.as_bytes()));
+            let mut state = WorkspaceState::load(&store);
+            assert!(state.writable(), "{source}");
+            if believed {
+                assert_eq!(state.history(), mixed, "{source}");
+                assert_eq!(state.history_position(), Some(1));
+                assert_eq!(state.last_open_note(), Some(rel(last_open)));
+            } else {
+                assert_eq!(state.history(), Navigation::released(&state.table).history);
+                assert!(!state.table.contains_key(NAVIGATION), "{source}");
+                state.save(&mut store).unwrap();
+                assert!(!disk_table(&directory).contains_key(NAVIGATION));
+            }
+        }
+    }
+
+    const FLOW_LAST: &str = "last_open = 'A/G/flow.wren-board'";
+
+    #[test]
+    fn renames_and_deletes_remap_and_prune_navigation() {
+        let (directory, mut store) = fixture(None);
+        let mut state = WorkspaceState::load(&store);
+        state.set_last_open_note(Some(&rel(ONE)));
+        state.set_last_open_note(Some(&rel(FLOW)));
+        state.set_navigation(&rels(&[ONE, FLOW, MAP]), Some(1), &rels(&[MAP, ONE, FLOW]));
+        state.remap_paths(&rel("A/G"), &rel("A/H"));
+        assert_eq!(
+            state.history(),
+            rels(&["A/H/one.md", "A/H/flow.wren-board", MAP])
+        );
+        assert_eq!(
+            state.recent(),
+            rels(&[MAP, "A/H/one.md", "A/H/flow.wren-board"])
+        );
+        assert_eq!(state.last_open_note(), Some(rel("A/H/flow.wren-board")));
+        assert_eq!(state.markdown_last_open_note(), Some(rel("A/H/one.md")));
+        state.save(&mut store).unwrap();
+        assert_eq!(WorkspaceState::load(&store).history(), state.history());
+
+        state.remove_paths(&rel("A/H/flow.wren-board"));
+        assert_eq!(state.history(), rels(&["A/H/one.md", MAP]));
+        assert_eq!(state.history_position(), Some(0));
+        assert_eq!(state.last_open_note(), None);
+        assert_eq!(state.markdown_last_open_note(), Some(rel("A/H/one.md")));
+        state.save(&mut store).unwrap();
+        let loaded = WorkspaceState::load(&store);
+        assert_eq!(loaded.history(), state.history());
+        assert_eq!(loaded.last_open_note(), None);
+
+        state.remove_paths(&rel("B"));
+        assert!(!state.table.contains_key(NAVIGATION));
+        assert_eq!(state.history(), rels(&["A/H/one.md"]));
+        assert_eq!(state.recent(), rels(&["A/H/one.md"]));
+        state.save(&mut store).unwrap();
+        assert!(!disk_table(&directory).contains_key(NAVIGATION));
+    }
+
+    #[test]
+    fn a_prune_that_moves_the_positions_apart_keeps_navigation_believed() {
+        // Removing the visits before the position moves the v1 position to
+        // the first remaining Markdown visit but the real one onto the board.
+        let (_directory, mut store) = fixture(None);
+        let mut state = WorkspaceState::load(&store);
+        state.set_navigation(&rels(&["B/K/gone.md", FLOW, ONE]), Some(1), &[]);
+        state.remove_paths(&rel("B"));
+        assert_eq!(state.history(), rels(&[FLOW, ONE]));
+        assert_eq!(state.history_position(), Some(0));
+        assert_eq!(state.table.get("history_position"), None);
+        state.save(&mut store).unwrap();
+        let loaded = WorkspaceState::load(&store);
+        assert_eq!(loaded.history(), rels(&[FLOW, ONE]));
+        assert_eq!(loaded.history_position(), Some(0));
     }
 }

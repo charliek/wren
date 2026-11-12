@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use iced::Task;
+use wren_core::kind::NoteKind;
 use wren_core::model::{ItemRef, Parent};
 use wren_core::ops::Op;
 
@@ -655,6 +656,7 @@ impl App {
                 let outcome = self.process_core(Op::CreateNote {
                     group: self.selected_group.expect("enabled group"),
                     title: wren_core::ops::dated_title(),
+                    kind: NoteKind::Markdown,
                 });
                 if outcome.processed.disposition.committed() {
                     self.palette = None;

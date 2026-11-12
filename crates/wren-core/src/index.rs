@@ -11,6 +11,7 @@ use nucleo_matcher::{Matcher, Utf32Str};
 use wren_markdown::block::{self, Kind, Scanner};
 
 use crate::fs_store::{DiskFile, FsStore, RelPath};
+use crate::kind::NoteKind;
 use crate::model::{GroupId, Note, NoteId, SectionId, Workspace};
 
 pub const MAX_CONTENT_BYTES: usize = 128 * 1024 * 1024;
@@ -71,7 +72,12 @@ pub struct Snippet {
 
 #[derive(Debug)]
 struct Content {
-    // Shared with background reconciliation snapshots, which compare exact bytes.
+    /// The note's text as read or drafted. Shared with background
+    /// reconciliation snapshots, which compare exact bytes, so a change is
+    /// detected without extracting anything.
+    source: Arc<str>,
+    /// What search reads: the same allocation as `source` when nothing is
+    /// extracted from it.
     text: Arc<str>,
     folded: Box<str>,
     preview: Preview,
@@ -79,13 +85,19 @@ struct Content {
 
 impl Content {
     fn bytes(&self) -> usize {
-        self.text.len() + self.folded.len()
+        let extracted = if Arc::ptr_eq(&self.source, &self.text) {
+            0
+        } else {
+            self.text.len()
+        };
+        self.source.len() + extracted + self.folded.len()
     }
 }
 
 #[derive(Debug)]
 struct Entry {
     title: String,
+    kind: NoteKind,
     path: RelPath,
     group: GroupId,
     section: Option<SectionId>,
@@ -104,6 +116,10 @@ pub struct Index {
     sequence: u64,
     revision: u64,
     warnings: Vec<String>,
+    /// Board sources handed to extraction, so tests can prove that unchanged
+    /// boards are never extracted again.
+    #[cfg(test)]
+    pub(crate) extractions: usize,
 }
 
 impl Default for Index {
@@ -122,6 +138,8 @@ impl Index {
             sequence: 0,
             revision: 0,
             warnings: Vec::new(),
+            #[cfg(test)]
+            extractions: 0,
         }
     }
 
@@ -138,7 +156,8 @@ impl Index {
         self.revision
     }
 
-    /// Retained original and lowercase content bytes, excluding title metadata.
+    /// Retained source, extracted and lowercase content bytes, excluding title
+    /// metadata.
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -148,6 +167,8 @@ impl Index {
         Some(&content.preview.text)
     }
 
+    /// The text search reads: a Markdown note's source, or what was
+    /// extracted from a board's.
     pub fn content(&self, note: NoteId) -> Option<&str> {
         Some(&self.entries.get(&note)?.content.as_ref()?.text)
     }
@@ -230,7 +251,7 @@ impl Index {
                 });
                 let snippet = match &entry.content {
                     Some(content) => match &content_match {
-                        Some(hit) => snippet(&content.text, hit.clone()),
+                        Some(hit) => snippet(&content.text, hit.clone(), entry.kind),
                         None => content.preview.snippet(),
                     },
                     None => Snippet {
@@ -273,6 +294,12 @@ impl Index {
         for note in &workspace.notes {
             let section = sections.get(&note.group).copied();
             if let Some(entry) = self.entries.get_mut(&note.id) {
+                if entry.kind != note.kind {
+                    // The searched text was derived for the old kind.
+                    entry.kind = note.kind;
+                    self.drop_content(note.id);
+                }
+                let entry = self.entries.get_mut(&note.id).expect("known index entry");
                 if entry.title != note.title
                     || entry.path != note.path
                     || entry.group != note.group
@@ -291,6 +318,7 @@ impl Index {
                     note.id,
                     Entry {
                         title: note.title.clone(),
+                        kind: note.kind,
                         path: note.path.clone(),
                         group: note.group,
                         section,
@@ -323,6 +351,7 @@ impl Index {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.entries.entry(note.id) {
             entry.insert(Entry {
                 title: note.title.clone(),
+                kind: note.kind,
                 path: note.path.clone(),
                 group: note.group,
                 section: None,
@@ -342,12 +371,12 @@ impl Index {
         }
     }
 
-    /// Exact retained text per note, shared rather than copied, so a background
-    /// scan can send back only notes whose disk bytes differ.
+    /// Exact retained source per note, shared rather than copied, so a
+    /// background scan can send back only notes whose disk bytes differ.
     pub(crate) fn content_snapshot(&self) -> HashMap<NoteId, Arc<str>> {
         self.entries
             .iter()
-            .filter_map(|(id, entry)| Some((*id, Arc::clone(&entry.content.as_ref()?.text))))
+            .filter_map(|(id, entry)| Some((*id, Arc::clone(&entry.content.as_ref()?.source))))
             .collect()
     }
 
@@ -387,18 +416,32 @@ impl Index {
         }
     }
 
-    pub(crate) fn set_content(&mut self, note: NoteId, text: &str, priority: bool) {
+    /// Takes a note's source. Only a source that differs from the one kept
+    /// is extracted and folded again.
+    pub(crate) fn set_content(&mut self, note: NoteId, source: &str, priority: bool) {
         let Some(entry) = self.entries.get(&note) else {
             return;
         };
         if entry
             .content
             .as_ref()
-            .is_some_and(|content| &*content.text == text)
+            .is_some_and(|content| &*content.source == source)
         {
             return;
         }
+        let kind = entry.kind;
         self.drop_content(note);
+        #[cfg(test)]
+        if kind == NoteKind::Board {
+            self.extractions += 1;
+        }
+        let source: Arc<str> = source.into();
+        let text = searchable(kind, &source).map_or_else(|| Arc::clone(&source), Arc::from);
+        let extracted = if Arc::ptr_eq(&source, &text) {
+            0
+        } else {
+            text.len()
+        };
         let folded_bytes: usize = if text.is_ascii() {
             text.len()
         } else {
@@ -407,7 +450,10 @@ impl Index {
                 .map(char::len_utf8)
                 .sum()
         };
-        let bytes = text.len().saturating_add(folded_bytes);
+        let bytes = source
+            .len()
+            .saturating_add(extracted)
+            .saturating_add(folded_bytes);
         if bytes > self.budget {
             self.set_limitation(note, Some(self.budget_message()));
             return;
@@ -438,9 +484,10 @@ impl Index {
             folded
         };
         let content = Content {
-            text: text.into(),
+            preview: Preview::new(&text, kind),
+            source,
+            text,
             folded: folded.into_boxed_str(),
-            preview: Preview::new(text),
         };
         self.retained_bytes += content.bytes();
         self.entries
@@ -542,6 +589,16 @@ fn fuzzy_pattern(query: &str) -> Pattern {
     )
 }
 
+/// The text search reads for a note of `kind`, or `None` to read the source
+/// itself, which keeps a Markdown note's text one shared allocation, byte for
+/// byte what was read. Boards are searched by their source until `wren-core`
+/// can parse them.
+fn searchable(kind: NoteKind, _source: &str) -> Option<String> {
+    match kind {
+        NoteKind::Markdown | NoteKind::Board => None,
+    }
+}
+
 fn lowercase(text: &str) -> String {
     if text.is_ascii() {
         text.to_ascii_lowercase()
@@ -618,16 +675,23 @@ struct Preview {
 }
 
 impl Preview {
-    fn new(text: &str) -> Self {
-        let line = body_line(text);
+    /// A board's searched text is plain, one label per line, so its preview
+    /// is the first line with words rather than a Markdown body line.
+    fn new(text: &str, kind: NoteKind) -> Self {
+        let line = match kind {
+            NoteKind::Markdown => body_line(text),
+            NoteKind::Board => first_line(text),
+        };
         let end = text[line.clone()]
             .char_indices()
             .nth(PREVIEW_CHARS)
             .map_or(line.end, |(byte, _)| line.start + byte);
+        let text = match kind {
+            NoteKind::Markdown => plain_markdown(&text[line.start..end], true).0,
+            NoteKind::Board => text[line.start..end].to_owned(),
+        };
         Self {
-            text: plain_markdown(&text[line.start..end], true)
-                .0
-                .into_boxed_str(),
+            text: text.into_boxed_str(),
             truncated: end < line.end,
         }
     }
@@ -662,9 +726,21 @@ fn original_range(text: &str, folded: Range<usize>) -> Range<usize> {
     start.unwrap_or(text.len())..text.len()
 }
 
+/// The first line of `text` with words, trimmed.
+fn first_line(text: &str) -> Range<usize> {
+    wren_markdown::line_ranges(text)
+        .map(|(line, _)| {
+            let words = &text[line.clone()];
+            let start = line.start + (words.len() - words.trim_start().len());
+            start..start + words.trim().len()
+        })
+        .find(|line| !line.is_empty())
+        .unwrap_or(0..0)
+}
+
 /// A search hit's context: the hit with up to [`CONTEXT_CHARS`] on each side,
 /// started and ended on word boundaries and reduced to plain words.
-fn snippet(text: &str, hit: Range<usize>) -> Snippet {
+fn snippet(text: &str, hit: Range<usize>, kind: NoteKind) -> Snippet {
     let start = text[..hit.start]
         .char_indices()
         .rev()
@@ -692,8 +768,13 @@ fn snippet(text: &str, hit: Range<usize>) -> Snippet {
         result.push('…');
     }
     let prefix = result.len();
-    let at_line_start = start == 0 || text[..start].ends_with(['\n', '\r']);
-    let (plain, map) = plain_markdown(&text[start..end], at_line_start);
+    let (plain, map) = match kind {
+        NoteKind::Markdown => {
+            let at_line_start = start == 0 || text[..start].ends_with(['\n', '\r']);
+            plain_markdown(&text[start..end], at_line_start)
+        }
+        NoteKind::Board => plain_lines(&text[start..end]),
+    };
     result.push_str(&plain);
     if end != text.len() {
         result.push('…');
@@ -809,7 +890,25 @@ fn plain_markdown(text: &str, at_line_start: bool) -> (String, Vec<usize>) {
                 1
             };
     }
+    join_words(text, &dropped, &block_break)
+}
 
+/// Plain lines, such as a board's labels, with each line break shown as
+/// [`BLOCK_SEPARATOR`] and nothing dropped. Returns the same offset map as
+/// [`plain_markdown`].
+fn plain_lines(text: &str) -> (String, Vec<usize>) {
+    let block_break: Vec<bool> = text
+        .bytes()
+        .map(|byte| matches!(byte, b'\n' | b'\r'))
+        .collect();
+    join_words(text, &vec![false; text.len()], &block_break)
+}
+
+/// `text` without its `dropped` bytes, each whitespace run between words
+/// shown as one space, or as [`BLOCK_SEPARATOR`] when it holds a
+/// `block_break`. Returns the text and, for each source byte offset
+/// `0..=text.len()`, the matching offset in the result.
+fn join_words(text: &str, dropped: &[bool], block_break: &[bool]) -> (String, Vec<usize>) {
     let mut plain = String::with_capacity(text.len());
     let mut map = Vec::with_capacity(text.len() + 1);
     // Bytes of separator at the end of `plain`, dropped if no word follows.
@@ -966,6 +1065,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
+    use crate::kind::NoteKind;
     use crate::model::{self, Group, Note, Section};
 
     use super::*;
@@ -999,7 +1099,8 @@ mod tests {
             workspace.notes.push(Note {
                 id,
                 group,
-                title: model::note_title(RelPath::new(path).unwrap().file_name()),
+                title: NoteKind::Markdown.title(RelPath::new(path).unwrap().file_name()),
+                kind: NoteKind::Markdown,
                 path: RelPath::new(path).unwrap(),
                 subtitle: None,
                 modified: SystemTime::UNIX_EPOCH,
@@ -1323,7 +1424,7 @@ mod tests {
         let text = "Intro words here\n- [ ] Review promo\n- [x] Share Q4 deck\n- [x]";
         for needle in ["promo\n- [x] Share", "Share", "Review"] {
             let hit = text.find(needle).unwrap();
-            let result = snippet(text, hit..hit + needle.len());
+            let result = snippet(text, hit..hit + needle.len(), NoteKind::Markdown);
             assert_eq!(
                 result.text,
                 "Intro words here · Review promo · Share Q4 deck"
@@ -1337,7 +1438,7 @@ mod tests {
             "z".repeat(CONTEXT_CHARS)
         );
         let hit = text.find("packet").unwrap();
-        let result = snippet(&text, hit..hit + 6);
+        let result = snippet(&text, hit..hit + 6, NoteKind::Markdown);
         assert_eq!(result.text, "Review promo packet draft…");
         assert_eq!(&result.text[result.highlight.unwrap()], "packet");
     }
@@ -1346,14 +1447,17 @@ mod tests {
     fn snippet_highlights_follow_the_match_through_dropped_markup() {
         let text = "## Agenda\n- API migration: cutover and **rollback** window\n";
         let hit = text.find("rollback").unwrap();
-        let result = snippet(text, hit..hit + "rollback".len());
+        let result = snippet(text, hit..hit + "rollback".len(), NoteKind::Markdown);
         assert_eq!(
             result.text,
             "Agenda · API migration: cutover and rollback window"
         );
         assert_eq!(&result.text[result.highlight.unwrap()], "rollback");
         let marker = text.find("**").unwrap();
-        assert_eq!(snippet(text, marker..marker + 2).highlight, None);
+        assert_eq!(
+            snippet(text, marker..marker + 2, NoteKind::Markdown).highlight,
+            None
+        );
 
         // Context trimmed mid-word or mid-link snaps to the next word.
         let text = format!(
@@ -1362,7 +1466,7 @@ mod tests {
             "tail ".repeat(20)
         );
         let hit = text.find("rollback").unwrap();
-        let result = snippet(&text, hit..hit + 8);
+        let result = snippet(&text, hit..hit + 8, NoteKind::Markdown);
         assert!(
             result.text.starts_with("…Ramp") || result.text.starts_with("…diff"),
             "{}",
@@ -1387,7 +1491,7 @@ mod tests {
             "»*«",
         ] {
             plain_markdown(text, true);
-            Preview::new(text);
+            Preview::new(text, NoteKind::Markdown);
         }
         assert_eq!(
             plain_markdown("café *latte* naïve_name", true).0,
@@ -1396,7 +1500,7 @@ mod tests {
         // The leading context's first whitespace is a three-byte ideographic space.
         let text = format!("{}\u{3000}abc needle", "語".repeat(100));
         let hit = text.find("needle").unwrap();
-        let result = snippet(&text, hit..hit + 6);
+        let result = snippet(&text, hit..hit + 6, NoteKind::Markdown);
         assert_eq!(result.text, "…abc needle");
         assert_eq!(&result.text[result.highlight.unwrap()], "needle");
     }
@@ -1404,16 +1508,16 @@ mod tests {
     #[test]
     fn snippets_are_utf8_safe_near_both_ends_and_in_long_content() {
         for text in ["é日本", "", "a"] {
-            let result = Preview::new(text).snippet();
+            let result = Preview::new(text, NoteKind::Markdown).snippet();
             assert_eq!(result.text, text);
             assert!(result.highlight.is_none());
         }
         let text = format!("{}Needle{}", "界".repeat(200), "é".repeat(200));
-        let result = snippet(&text, 600..606);
+        let result = snippet(&text, 600..606, NoteKind::Markdown);
         assert!(result.text.starts_with('…') && result.text.ends_with('…'));
         assert_eq!(&result.text[result.highlight.unwrap()], "Needle");
         for hit in [0..3, text.len() - 2..text.len()] {
-            let result = snippet(&text, hit.clone());
+            let result = snippet(&text, hit.clone(), NoteKind::Markdown);
             assert_eq!(&result.text[result.highlight.unwrap()], &text[hit]);
         }
     }
@@ -1461,6 +1565,113 @@ mod tests {
         assert!(index.take_warnings().is_empty());
         index.set_content(NoteId(4), "recovered", false);
         assert_eq!(index.limitation(NoteId(4)), None);
+
+        // A board's source is the change test: the same source is never
+        // extracted again and changes nothing.
+        let mut index = board_index();
+        index.set_content(BOARD, BOARD_SOURCE, false);
+        assert_eq!(index.extractions, 1);
+        let revision = index.revision();
+        for _ in 0..40 {
+            index.set_content(BOARD, BOARD_SOURCE, false);
+        }
+        assert_eq!(index.extractions, 1);
+        assert_eq!(index.revision(), revision);
+        index.set_content(BOARD, "schema = 1\n", false);
+        assert_eq!(index.extractions, 2);
+        assert!(index.revision() > revision);
+        index.set_content(NoteId(4), "markdown", false);
+        assert_eq!(index.extractions, 2);
+    }
+
+    const BOARD: NoteId = NoteId(9);
+    const BOARD_SOURCE: &str = "schema = 1\n\n[node.a]\ntext = \"Receive *order*\"\n";
+
+    /// The test workspace plus a board beside the Markdown notes of `A/G`.
+    fn board_index() -> Index {
+        let mut workspace = workspace();
+        let path = RelPath::new("A/G/Flow.wren-board").unwrap();
+        workspace.notes.push(Note {
+            id: BOARD,
+            group: GroupId(3),
+            title: NoteKind::Board.title(path.file_name()),
+            kind: NoteKind::Board,
+            path,
+            subtitle: None,
+            modified: SystemTime::UNIX_EPOCH,
+            bytes: 0,
+        });
+        let mut index = Index::default();
+        index.sync_metadata(&workspace);
+        index
+    }
+
+    #[test]
+    fn markdown_searches_its_source_in_one_shared_allocation() {
+        let mut index = board_index();
+        let text = "# Title\n\nBody *words*\n";
+        index.set_content(NoteId(5), text, false);
+        let content = index.entries[&NoteId(5)].content.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&content.source, &content.text));
+        assert_eq!(&*content.source, text);
+        assert_eq!(index.content(NoteId(5)), Some(text));
+        assert_eq!(index.retained_bytes(), 2 * text.len());
+        assert_eq!(index.preview(NoteId(5)), Some("Body words"));
+        assert_eq!(index.extractions, 0);
+
+        index.set_content(BOARD, BOARD_SOURCE, false);
+        let snapshot = index.content_snapshot();
+        assert_eq!(&*snapshot[&NoteId(5)], text);
+        assert_eq!(&*snapshot[&BOARD], BOARD_SOURCE);
+        assert!(Arc::ptr_eq(
+            &snapshot[&BOARD],
+            &index.entries[&BOARD].content.as_ref().unwrap().source
+        ));
+    }
+
+    #[test]
+    fn a_board_preview_and_snippet_read_plain_lines() {
+        let mut index = board_index();
+        index.set_content(
+            BOARD,
+            "\n   # Receive *order*  \n- Check stock\nShip",
+            false,
+        );
+        assert_eq!(index.preview(BOARD), Some("# Receive *order*"));
+        let hits = index.query("check", Scope::Group(GroupId(3)), QueryKind::Search, 10);
+        assert_eq!(hits.len(), 1);
+        let snippet = &hits[0].snippet;
+        assert_eq!(snippet.text, "# Receive *order* · - Check stock · Ship");
+        assert_eq!(&snippet.text[snippet.highlight.clone().unwrap()], "Check");
+
+        let long = "word ".repeat(100);
+        index.set_content(BOARD, &format!("{long}\nsecond"), false);
+        let preview = index.entries[&BOARD]
+            .content
+            .as_ref()
+            .unwrap()
+            .preview
+            .snippet();
+        assert_eq!(preview.text.chars().count(), PREVIEW_CHARS + 1);
+        assert!(preview.text.ends_with('…'));
+        index.set_content(BOARD, " \n\t\n", false);
+        assert_eq!(index.preview(BOARD), Some(""));
+    }
+
+    #[test]
+    fn plain_lines_join_lines_with_the_block_separator() {
+        for (text, plain) in [
+            ("one", "one"),
+            ("one\ntwo", "one · two"),
+            ("one \r\n\n  two  three\n", "one · two three"),
+            ("\n\nlead", "lead"),
+            ("", ""),
+        ] {
+            let (result, map) = plain_lines(text);
+            assert_eq!(result, plain, "{text:?}");
+            assert_eq!(map.len(), text.len() + 1);
+            assert!(map.iter().all(|offset| result.is_char_boundary(*offset)));
+        }
     }
 
     #[test]
@@ -1669,7 +1880,7 @@ mod tests {
             index.preview(NoteId(4)).unwrap().chars().count(),
             PREVIEW_CHARS
         );
-        let snippet = Preview::new(&text).snippet();
+        let snippet = Preview::new(&text, NoteKind::Markdown).snippet();
         assert!(snippet.text.ends_with('…'));
         assert_eq!(snippet.text.chars().count(), PREVIEW_CHARS + 1);
     }
@@ -1686,6 +1897,7 @@ mod tests {
                 id: NoteId(number + 10),
                 group: GroupId(3),
                 title: title.clone(),
+                kind: NoteKind::Markdown,
                 path: RelPath::new(format!("A/G/{title}.md")).unwrap(),
                 subtitle: None,
                 modified: SystemTime::UNIX_EPOCH,
