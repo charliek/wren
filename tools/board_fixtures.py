@@ -118,7 +118,7 @@ def shapes():
         return dict(text=text, kind="shape", at=[x, y], shape=shape, size=[w, h], z=stack(keys), **kw)
 
     nodes = {
-        "rect": shape("Rectangle", "rect", 0, 0),
+        "rect": shape("Rectangle\nמלבן", "rect", 0, 0),
         "rounded": shape("Rounded", "rounded", 160, 0, style={"color": "blue"}),
         "pill": shape("Pill", "pill", 320, 0, style={"color": "green"}),
         "ellipse": shape("Ellipse", "ellipse", 480, 0, style={"color": "purple"}),

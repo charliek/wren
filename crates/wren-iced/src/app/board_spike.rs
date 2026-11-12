@@ -641,11 +641,18 @@ mod tests {
     }
 
     /// Phase 1's confirmation step: an SVG viewer that has Inter lays each
-    /// exported line out as wide as the canvas measured it, so a label
-    /// that fits its box on screen fits it in the export.
+    /// exported line Inter can draw out as wide as the canvas measured it,
+    /// so a label that fits its box on screen fits it in the export. A
+    /// line in another script is drawn in whatever face each side falls
+    /// back to.
     #[test]
     fn resvg_draws_each_exported_line_as_wide_as_the_canvas_measured_it() {
         fonts::load();
+        let inter = swash::FontRef::from_index(fonts::FACES[0], 0).expect("Inter");
+        let drawn_in_inter = |text: &str| {
+            text.chars()
+                .all(|ch| ch.is_whitespace() || inter.charmap().map(ch) != 0)
+        };
         let mut options = usvg::Options::default();
         let mut faces = usvg::fontdb::Database::new();
         faces.load_font_data(fonts::FACES[0].to_vec());
@@ -679,7 +686,7 @@ mod tests {
                 .collect();
             assert_eq!(elements.len(), lines.len(), "{name}: one <text> per line");
             for (element, (line, size)) in elements.into_iter().zip(lines) {
-                if line.text.trim().is_empty() {
+                if line.text.trim().is_empty() || !drawn_in_inter(&line.text) {
                     continue;
                 }
                 let ink = |element: &str| {

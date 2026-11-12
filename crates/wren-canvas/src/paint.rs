@@ -155,17 +155,38 @@ pub(crate) fn item(frame: &mut Frame, item: &Item, viewport: Viewport, fonts: &M
                 frame.fill_text(canvas::Text {
                     content: line.text.clone(),
                     position: point(line.origin),
-                    max_width: f32::INFINITY,
+                    max_width: room(line.width, *size, zoom),
                     color: color(*ink),
                     size: Pixels(size * zoom),
                     line_height: LineHeight::Absolute(Pixels(height * zoom)),
                     font,
-                    align_x: iced::advanced::text::Alignment::Left,
+                    // Not `Left`: iced lays a right-to-left line out
+                    // again at its own width only under the default, and
+                    // otherwise leaves it against the right of its room.
+                    align_x: iced::advanced::text::Alignment::Default,
                     align_y: alignment::Vertical::Top,
                     shaping: Shaping::Advanced,
                 });
             }
         }
+    }
+}
+
+/// The most room a line is given, in pixels: far wider than any label, and
+/// far inside the pixel positions a glyph cache can hold.
+const MAX_ROOM: f32 = 16_777_216.0;
+
+/// The width a line of `width` units in text of `size` is laid out in at
+/// `zoom`, in pixels: its own width and an em to spare, so it does not
+/// wrap. It must be bounded: cosmic-text starts a right-to-left line at
+/// the right edge of its room before iced fits the room to the line, and
+/// an unbounded room puts every glyph past any pixel position.
+fn room(width: f32, size: f32, zoom: f32) -> f32 {
+    let room = (width + size) * zoom;
+    if room.is_finite() {
+        room.clamp(0.0, MAX_ROOM)
+    } else {
+        MAX_ROOM
     }
 }
 
@@ -218,6 +239,17 @@ mod tests {
 
     fn at(x: f32, y: f32, zoom: f32) -> Viewport {
         Viewport { x, y, zoom }
+    }
+
+    #[test]
+    fn a_line_is_laid_out_in_bounded_room_to_spare() {
+        assert_eq!(room(100.0, 14.0, 1.0), 114.0);
+        assert_eq!(room(100.0, 14.0, 0.5), 57.0);
+        assert_eq!(room(0.0, 12.0, 4.0), 48.0);
+        for (width, zoom) in [(f32::INFINITY, 1.0), (f32::NAN, 1.0), (1e30, 4.0)] {
+            assert_eq!(room(width, 14.0, zoom), MAX_ROOM, "{width} at {zoom}");
+        }
+        assert_eq!(room(-500.0, 14.0, 1.0), 0.0);
     }
 
     #[test]

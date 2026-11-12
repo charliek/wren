@@ -9,6 +9,7 @@ on a board as they do on a Markdown note.
 
 from __future__ import annotations
 
+import math
 import time
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -239,6 +240,106 @@ def test_the_board_is_drawn_in_its_colours(samples: Path, theme: str) -> None:
             assert near(pixel(point), edge["stroke"], 24), (edge["id"], point, pixel(point), edge["stroke"])
             stroked += 1
         assert stroked >= 1, "no connector's middle was in view and clear"
+
+
+RIGHT_TO_LEFT = '''schema = 1
+
+[node.arabic]
+text = "العربية"
+kind = "shape"
+at = [0, 0]
+size = [160, 60]
+z = "a"
+
+[node.hebrew]
+text = "שלום עולם"
+kind = "shape"
+at = [200, 0]
+size = [160, 60]
+z = "b"
+
+[node.mixed]
+text = "Send שלום עולם to العربية and back again"
+kind = "shape"
+at = [0, 100]
+size = [160, 100]
+z = "c"
+
+[node.feed]
+text = "abc\\nשלום"
+kind = "shape"
+at = [200, 100]
+size = [160, 60]
+z = "d"
+
+[node.mark]
+text = "\\u200Fmark first"
+kind = "shape"
+at = [0, 240]
+size = [160, 60]
+z = "e"
+
+[node.free]
+text = "טקסט חופשי"
+kind = "text"
+at = [200, 240]
+size = [160, 40]
+z = "f"
+
+[edge.e]
+kind = "edge"
+from = { node = "arabic", side = "right" }
+to = { node = "hebrew", side = "left" }
+route = "straight"
+labels = [
+  { text = "כן" },
+]
+z = "g"
+'''
+
+
+def ink(image, rect: dict, scale: float) -> tuple[int, float, float]:
+    """How many pixels of a label box are not its most common colour, and
+    the first and last column holding one, in logical pixels from its left."""
+    x0, y0 = int(rect["x"] * scale), int(rect["y"] * scale)
+    x1, y1 = int((rect["x"] + rect["width"]) * scale), int((rect["y"] + rect["height"]) * scale)
+    pixels = {(x, y): image.pixel(x, y)[:3] for y in range(y0, y1) for x in range(x0, x1)}
+    values = list(pixels.values())
+    ground = max(set(values), key=values.count)
+    columns = [x for (x, _), pixel in pixels.items() if not near(pixel, ground, 24)]
+    if not columns:
+        return 0, math.inf, -math.inf
+    return len(columns), min(columns) / scale - rect["x"], (max(columns) + 1) / scale - rect["x"]
+
+
+def test_right_to_left_labels_are_drawn(samples: Path) -> None:
+    """A right-to-left line is drawn in its box, not past an unbounded one."""
+    path = "Boards/Samples/Right to left.wren-board"
+    (samples / path).write_text(RIGHT_TO_LEFT, encoding="utf-8")
+    artifacts = artifact_directory("board-right-to-left")
+    with board_app(samples, "board-right-to-left") as app:
+        open_note(app, path)
+        fitted(app)
+        for step in ("fitted", "font.reset", "font.increase", "font.increase"):
+            if step != "fitted":
+                command(app, step)
+            time.sleep(REST)
+            placed = bounds(app)
+            image = screenshot(app, artifacts / f"{step}-{placed['viewport']['zoom']:.2f}.png")
+            scale = placed["scale_factor"]
+            labels = [(node["id"], node["label"]) for node in placed["nodes"]]
+            labels += [(edge["id"], edge["label"]) for edge in placed["edges"]]
+            for name, label in labels:
+                assert label is not None, (step, name)
+                if not inside((label["x"], label["y"]), placed["root"]) or not inside(
+                        (label["x"] + label["width"], label["y"] + label["height"]), placed["root"]):
+                    continue
+                count, left, right = ink(image, label, scale)
+                # The ink spans the box the line was measured into: a line
+                # placed past it is cut off on one side.
+                assert count >= 10, (step, name, label)
+                assert left <= 3 and right >= label["width"] - 3, (step, name, label, left, right)
+        assert app.client.call("session.get")["document"]["dirty"] is False
 
 
 def moved(before: dict, after: dict) -> set[tuple[float, float]]:

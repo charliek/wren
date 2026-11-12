@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="685.5" height="541.5" viewBox="-0.75 -0.75 685.5 541.5">
 <path d="M0 0L120 0L120 60L0 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
-<text x="28.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rectangle</text>
+<text x="28.5" y="25.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rectangle</text>
+<text x="46" y="45.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">מלבן</text>
 <path d="M168 0L272 0C276.41827 0 280 3.5817218 280 8L280 52C280 56.418278 276.41827 60 272 60L168 60C163.58173 60 160 56.418278 160 52L160 8C160 3.5817218 163.58173 0 168 0Z" fill="#e6ecf9" stroke="#3060d0" stroke-width="1.5"/>
 <text x="195.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Rounded</text>
 <path d="M350 0L410 0C426.56854 0 440 13.4314575 440 30C440 46.568542 426.56854 60 410 60L350 60C333.43146 60 320 46.568542 320 30C320 13.4314575 333.43146 0 350 0Z" fill="#e6f2e8" stroke="#309040" stroke-width="1.5"/>

@@ -1,7 +1,8 @@
 bounds -0.75,-0.75 685.5x541.5
 node rect path in -0.75,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,0 L 120,0 L 120,60 L 0,60 Z
-node rect text in 28.5,20 63x20 Regular 14 #202428
-  28.5,20 w 63 "Rectangle"
+node rect text in 28.5,10 63x40 Regular 14 #202428
+  28.5,10 w 63 "Rectangle"
+  46,30 w 28 "מלבן"
 node rounded path in 159.25,-0.75 121.5x61.5 fill #e6ecf9 stroke #3060d0 1.5: M 168,0 L 272,0 C 276.41827,0 280,3.5817218 280,8 L 280,52 C 280,56.418278 276.41827,60 272,60 L 168,60 C 163.58173,60 160,56.418278 160,52 L 160,8 C 160,3.5817218 163.58173,0 168,0 Z
 node rounded text in 195.5,20 49x20 Regular 14 #202428
   195.5,20 w 49 "Rounded"
