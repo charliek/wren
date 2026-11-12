@@ -100,17 +100,21 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
             state = board(app)
             assert state["counts"]["nodes"] == SHAPES
 
-            # Idle: no scene is built and the view is cheap.
+            # Idle (exit criterion 9): over a second, forty ticks, nothing is
+            # parsed, no scene and no geometry is built, and the view is cheap.
             time.sleep(0.3)
-            rings(app, clear=True)
+            before = rings(app, clear=True)
             app.client.call("perf.view", {"clear": True})
             time.sleep(1.0)
             for _ in range(30):
                 app.client.call("identify")
             idle = rings(app)
             views = app.client.call("perf.view", {"clear": True})["view_micros"]
-            measured["idle"] = {"scene_micros": idle["scene_micros"], "view_micros": views}
+            counts = {key: idle[key] - before[key] for key in ("parses", "scenes", "builds")}
+            measured["idle"] = {"scene_micros": idle["scene_micros"], "view_micros": views,
+                                "counts": counts}
             assert idle["scene_micros"] == [], "an idle board built its scene"
+            assert counts == {"parses": 0, "scenes": 0, "builds": 0}, counts
             assert len(views) >= 10 and median_ms(views) <= VIEW, views
 
             # One change of the whole scene, a theme switch, and the draw that
@@ -131,12 +135,15 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
                               ("zoom", {"zoom": {"steps": 30, "factor": 1.05}})):
                 app.client.call("command.run", {"id": "font.reset"})
                 time.sleep(0.3)
-                rings(app, clear=True)
+                start = rings(app, clear=True)
                 result = rings(app, **run)
                 steps = next(iter(run.values()))["steps"]
                 measured[name] = {"frame_micros": result["frame_micros"],
                                   "draw_micros": result["draw_micros"][-steps:]}
                 assert result["scene_micros"] == [], f"a {name} built the scene"
+                # The geometry counter the idle check reads is live: moving
+                # the view rebuilds geometry.
+                assert result["builds"] > start["builds"], (start, result)
                 if RELEASE and RENDERER == "wgpu":
                     assert median_ms(measured[name]["draw_micros"]) <= DRAW, measured[name]
                 else:

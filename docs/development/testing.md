@@ -96,7 +96,7 @@ never committed, and large boards come from `grid_board(n)`.
 | `test_board_view.py` | Focus and the editor column, the opening fit, pixel checks of fills, connectors and labels, wheel and drag panning, zoom, the raw-text fallback, search, and SVG export. |
 | `test_board_gate.py` | The setting off, a board never written by looking at it, the hidden editor never writing a board, and the state file's board paths. |
 | `test_board_native.py` | Real wheel, Ctrl+wheel and middle-button input under X11 (`native_x11`). |
-| `test_board_perf.py` | Timings against debug ceilings, written to `measurements.json` beside the case's artifacts. |
+| `test_board_perf.py` | Timings against debug ceilings, written to `measurements.json` beside the case's artifacts, and an idle second with no parse, scene build or geometry build. |
 
 Run them alone with a path glob (`-k board` would also pick every keyboard
 and clipboard case):
@@ -135,7 +135,7 @@ The board requests:
 | `board.bounds` | Where the widget and each node, label and connector are drawn in the window, in logical pixels, with each element's fill and stroke colour and the window's scale factor. |
 | `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`) or one step of a middle-button pan (`press`, `move`, `release` with `"button": "middle"`), through the path the widget's own input takes. `at` is `{"node": id}`, `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. |
 | `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG writes, without the save dialog. |
-| `perf.board` | The board's scene, draw and frame timings and how long it took to open, optionally after a pan or zoom run of one step a redraw. |
+| `perf.board` | The board's scene, draw and frame timings, how long it took to open, and how many times the view has parsed, built its scene and built geometry, optionally after a pan or zoom run of one step a redraw. |
 
 Every board request but `board.get` fails when the open note is not shown
 as a board.

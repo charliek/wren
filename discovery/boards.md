@@ -776,7 +776,8 @@ board.apply    {"edits": [{"op":"add_node","id":"n9","shape":"rect","at":[0,0],"
                           {"op":"connect","id":"e9","from":{"node":"n1"},"to":{"node":"n9"}}, {"op":"delete","ids":["e9"]}]}  -> SNAPSHOT
 board.export   {"format": "svg|png", "path": "/abs/out.svg"}              -> {"path", "bytes"}
 perf.board     {"clear": true} | {"pan": {"steps":60,"dx":8,"dy":0}} | {"zoom": {"steps":30,"factor":1.05}}
-                                        -> {"scene_micros":[...], "draw_micros":[...], "frame_micros":[...], "open_micros": n}
+                                        -> {"scene_micros":[...], "draw_micros":[...], "frame_micros":[...], "open_micros": n,
+                                            "parses": n, "scenes": n, "builds": n}
 
 SNAPSHOT = {"enabled": true, "surface": "board|raw|text"|null, "note": 7, "read_only": false,
             "error": null | {"line": 12, "column": 3, "message": "..."}, "issues": [{"kind":"dangling_edge","id":"e9"}],

@@ -398,12 +398,14 @@ mod harness {
 
         fn perf_board_rings(&self) -> Value {
             let ring = |ring: &VecDeque<u64>| ring.iter().copied().collect::<Vec<_>>();
-            let (scenes, draws) = self
+            let (scenes, draws, counts) = self
                 .shown_board()
                 .map(|view| {
+                    let probe = &view.probe;
                     (
-                        ring(&view.probe.scene_micros.borrow()),
-                        ring(&view.probe.draw_micros.borrow()),
+                        ring(&probe.scene_micros.borrow()),
+                        ring(&probe.draw_micros.borrow()),
+                        [probe.parses.get(), probe.scenes.get(), probe.builds.get()],
                     )
                 })
                 .unwrap_or_default();
@@ -412,6 +414,9 @@ mod harness {
                 "draw_micros": draws,
                 "frame_micros": ring(&self.board_perf.frame_micros),
                 "open_micros": self.board_perf.open_micros,
+                "parses": counts[0],
+                "scenes": counts[1],
+                "builds": counts[2],
             })
         }
 
