@@ -19,7 +19,9 @@ mod check;
 #[cfg(test)]
 mod fixtures;
 mod read;
+pub mod route;
 pub mod scene;
+pub mod shape;
 mod write;
 
 pub use check::{
@@ -306,6 +308,21 @@ pub enum Side {
     Right,
     Bottom,
     Left,
+}
+
+impl Side {
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Top => Self::Bottom,
+            Self::Right => Self::Left,
+            Self::Bottom => Self::Top,
+            Self::Left => Self::Right,
+        }
+    }
+
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
