@@ -105,10 +105,14 @@ impl Machine {
                 },
                 _,
             ) => self.wheel(delta, at, zoom, sideways, scale_factor, view),
-            (Input::Press { button, at }, State::Idle) => {
-                if button == Button::Middle || (button == Button::Left && self.space) {
-                    self.state = State::Panning { button, from: at };
-                }
+            // A press during a drag means the drag's release never came
+            // (the widget lost it with its state), so the press starts over.
+            (Input::Press { button, at }, _) => {
+                self.state = if button == Button::Middle || (button == Button::Left && self.space) {
+                    State::Panning { button, from: at }
+                } else {
+                    State::Idle
+                };
                 None
             }
             (Input::Move { at }, State::Panning { button, from }) => {
@@ -570,6 +574,55 @@ mod tests {
         );
         assert_eq!(viewport.x, -8.0);
         assert!(!machine.panning() && !machine.space());
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_starts_over() {
+        let now = Instant::now();
+        let middle = Input::Press {
+            button: Button::Middle,
+            at: (100.0, 100.0),
+        };
+        // A middle drag whose release never came, then a plain left drag.
+        let mut machine = Machine::default();
+        let mut viewport = Viewport::default();
+        run(
+            &mut machine,
+            &mut viewport,
+            now,
+            Duration::ZERO,
+            &[
+                middle,
+                Input::Press {
+                    button: Button::Left,
+                    at: (600.0, 400.0),
+                },
+                Input::Move { at: (650.0, 400.0) },
+                Input::Release {
+                    button: Button::Left,
+                },
+            ],
+        );
+        assert_eq!(viewport, Viewport::default());
+        assert!(!machine.panning());
+        // A second middle drag pans from its own press, with no jump.
+        let mut machine = Machine::default();
+        run(
+            &mut machine,
+            &mut viewport,
+            now,
+            Duration::ZERO,
+            &[
+                middle,
+                Input::Press {
+                    button: Button::Middle,
+                    at: (600.0, 400.0),
+                },
+                Input::Move { at: (650.0, 400.0) },
+            ],
+        );
+        assert_eq!((viewport.x, viewport.y), (-50.0, 0.0));
+        assert!(machine.panning());
     }
 
     #[test]

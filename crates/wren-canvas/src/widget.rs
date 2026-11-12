@@ -255,14 +255,16 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
                     shell.capture_event();
                 }
             }
-            Event::Mouse(mouse::Event::ButtonReleased(button))
-                if state.pressed == Some(*button) =>
-            {
-                state.pressed = None;
-                shell.publish(input(Input::Release {
-                    button: machine_button(*button),
-                }));
-                shell.capture_event();
+            Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                let ours = state.pressed == Some(*button);
+                if let Some(release) =
+                    released(&mut state.pressed, *button, view.machine().panning())
+                {
+                    shell.publish(input(release));
+                    if ours {
+                        shell.capture_event();
+                    }
+                }
             }
             // iced hands key events to every widget; only a focused board
             // acts on them, except to let go of a Space it was given.
@@ -408,6 +410,26 @@ fn pointer(state: &State, cursor: mouse::Cursor, bounds: Rectangle) -> Option<Po
             .filter(|pointer| bounds.contains(*pointer))
             .unwrap_or(end),
     )
+}
+
+/// What a release of `button` sends. The release of the button the widget
+/// pressed ends its drag. A release it did not see pressed still reaches a
+/// machine that is panning: iced rebuilds the widget's state when the tree
+/// around the board changes during a drag (opening the palette does), and
+/// the machine would otherwise wait for a release that has come and gone.
+fn released(
+    pressed: &mut Option<mouse::Button>,
+    button: mouse::Button,
+    panning: bool,
+) -> Option<Input> {
+    if *pressed == Some(button) {
+        *pressed = None;
+    } else if pressed.is_some() || !panning {
+        return None;
+    }
+    Some(Input::Release {
+        button: machine_button(button),
+    })
 }
 
 fn machine_button(button: mouse::Button) -> Button {
@@ -564,6 +586,63 @@ mod tests {
         assert_eq!(machine_button(mouse::Button::Right), Button::Right);
         assert_eq!(machine_button(mouse::Button::Back), Button::Other);
         assert_eq!(machine_button(mouse::Button::Other(9)), Button::Other);
+    }
+
+    #[test]
+    fn a_drag_ends_when_the_widget_state_is_rebuilt_under_it() {
+        use crate::machine::{Machine, View};
+        let mut machine = Machine::default();
+        let viewport = Viewport::default();
+        let view = View {
+            viewport,
+            now: Instant::now(),
+        };
+        let mut state = State::new();
+        state.pressed = Some(mouse::Button::Middle);
+        machine.step(
+            Input::Press {
+                button: Button::Middle,
+                at: (100.0, 100.0),
+            },
+            &view,
+        );
+        assert!(machine.panning());
+        // The palette opens over the board: a new tree, a new state.
+        let mut state = State::new();
+        let release = released(&mut state.pressed, mouse::Button::Middle, machine.panning());
+        assert_eq!(
+            release,
+            Some(Input::Release {
+                button: Button::Middle
+            })
+        );
+        machine.step(release.unwrap(), &view);
+        assert!(!machine.panning());
+        // A plain left drag after it does not pan.
+        state.pressed = Some(mouse::Button::Left);
+        for input in [
+            Input::Press {
+                button: Button::Left,
+                at: (600.0, 400.0),
+            },
+            Input::Move { at: (650.0, 400.0) },
+        ] {
+            assert!(machine.step(input, &view).is_empty());
+        }
+        let release = released(&mut state.pressed, mouse::Button::Left, machine.panning());
+        assert_eq!(
+            release,
+            Some(Input::Release {
+                button: Button::Left
+            })
+        );
+        assert_eq!(state.pressed, None);
+        // With no drag in the machine, a release the widget did not press
+        // is not the board's; nor is another button's during its own drag.
+        assert_eq!(released(&mut None, mouse::Button::Right, false), None);
+        let mut held = Some(mouse::Button::Middle);
+        assert_eq!(released(&mut held, mouse::Button::Left, true), None);
+        assert_eq!(held, Some(mouse::Button::Middle));
     }
 
     #[test]
