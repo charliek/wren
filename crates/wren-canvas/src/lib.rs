@@ -9,10 +9,15 @@
 //! widget over generated scenes, built to measure how a scene is best
 //! painted and to try the label editor's mechanism.
 
+#[cfg(test)]
+mod fixtures;
 pub mod layers;
+mod measure;
 mod paint;
 pub mod spike;
 mod widget;
+
+pub use measure::Measurer;
 
 /// Where a board sits in the widget: the board point at the widget's
 /// top-left corner, and how many screen pixels a board unit takes.
