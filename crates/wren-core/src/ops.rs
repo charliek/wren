@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::autosave::Autosave;
-use crate::fs_store::{DiskFile, Expected, Fault, FsStore, RelPath, WriteReceipt};
+use crate::fs_store::{DiskFile, Expected, Fault, FsStore, Leaf, RelPath, WriteReceipt};
 use crate::index::Index;
 use crate::kind::NoteKind;
 use crate::model::{
@@ -563,7 +563,7 @@ impl Session {
                 let path = self.parent_path(Parent::Group(group))?;
                 let receipt = self
                     .store
-                    .create_file(&path, &title, b"")
+                    .create_file(&path, &title, NoteKind::Markdown, b"")
                     .map_err(|error| error.to_string())?;
                 let id = NoteId(self.model.allocate_id());
                 self.model.notes.push(Note {
@@ -1151,7 +1151,7 @@ impl Session {
         }
         let title = format!("{} (conflict {stamp})", &title[..end]);
         self.store
-            .create_file(parent, &title, bytes)
+            .create_file(parent, &title, NoteKind::Markdown, bytes)
             .map_err(|error| error.to_string())
     }
 
@@ -1393,7 +1393,15 @@ impl Session {
             .collect();
         let receipt = self
             .store
-            .relocate(from, parent, name, matches!(target, ItemRef::Note(_)))
+            .relocate(
+                from,
+                parent,
+                name,
+                match target {
+                    ItemRef::Note(_) => Leaf::Note(NoteKind::Markdown),
+                    ItemRef::Section(_) | ItemRef::Group(_) => Leaf::Directory,
+                },
+            )
             .map_err(|error| error.to_string())?;
         self.model.remap_paths(from, &receipt.path);
         let mut moved_group_section = None;

@@ -1018,7 +1018,9 @@ mod tests {
         let mut store = FsStore::open(dir.path()).unwrap();
         let section = store.create_dir(None, "Section").unwrap();
         let group = store.create_dir(Some(&section), "Group").unwrap();
-        let created = store.create_file(&group, "café.MD", b"first").unwrap();
+        let created = store
+            .create_file(&group, "café.MD", NoteKind::Markdown, b"first")
+            .unwrap();
         let previous = scan(&store, None).unwrap();
         assert_eq!(previous.root, store.root());
         assert_eq!(previous.sections.len(), 1);
@@ -1111,7 +1113,9 @@ mod tests {
         let mut store = FsStore::open(dir.path()).unwrap();
         let parent = RelPath::new(&relative).unwrap();
         store.ensure_dir(&parent).unwrap();
-        let created = store.create_file(&parent, "note", b"deep note").unwrap();
+        let created = store
+            .create_file(&parent, "note", NoteKind::Markdown, b"deep note")
+            .unwrap();
         assert!(created.durability_error.is_none());
         assert!(store.take_warnings().is_empty());
         assert!(!store.pending_durability());
