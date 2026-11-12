@@ -37,6 +37,35 @@ impl std::error::Error for ScanError {
 }
 
 // ---------------------------------------------------------------------------
+// Kinds
+// ---------------------------------------------------------------------------
+
+/// The note kinds a scan lists. Markdown is always listed; boards only when
+/// the session was opened with them, so a scan without them sees a board as
+/// any other file it does not list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Kinds {
+    boards: bool,
+}
+
+impl Kinds {
+    pub const MARKDOWN: Self = Self { boards: false };
+    pub const ALL: Self = Self { boards: true };
+
+    pub fn lists(self, kind: NoteKind) -> bool {
+        match kind {
+            NoteKind::Markdown => true,
+            NoteKind::Board => self.boards,
+        }
+    }
+
+    /// The kind a file name gives, when this scan lists that kind.
+    pub fn of(self, name: &OsStr) -> Option<NoteKind> {
+        NoteKind::from_name(name).filter(|kind| self.lists(*kind))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -45,8 +74,12 @@ impl std::error::Error for ScanError {
 /// When `previous` is provided, IDs are preserved for entries whose paths
 /// have not changed, and entries under unreadable subtrees are carried
 /// forward rather than silently dropped.
-pub fn scan(store: &FsStore, previous: Option<&Workspace>) -> Result<Workspace, ScanError> {
-    scan_with_contents(store.reader(), previous, |_, _| {})
+pub fn scan(
+    store: &FsStore,
+    previous: Option<&Workspace>,
+    kinds: Kinds,
+) -> Result<Workspace, ScanError> {
+    scan_with_contents(store.reader(), previous, kinds, |_, _| {})
 }
 
 /// Streams each accepted note's exact descriptor-relative read to `visit`.
@@ -60,9 +93,10 @@ pub fn scan(store: &FsStore, previous: Option<&Workspace>) -> Result<Workspace, 
 pub fn scan_with_contents(
     store: &StoreReader,
     previous: Option<&Workspace>,
+    kinds: Kinds,
     mut visit: impl FnMut(&Note, Result<&DiskFile, &str>),
 ) -> Result<Workspace, ScanError> {
-    scan_with_fs_contents(store, previous, &RealScanFs, &mut visit)
+    scan_with_fs_contents(store, previous, kinds, &RealScanFs, &mut visit)
 }
 
 type ContentsVisitor<'a> = dyn FnMut(&Note, Result<&DiskFile, &str>) + 'a;
@@ -73,12 +107,19 @@ fn scan_with_fs(
     previous: Option<&Workspace>,
     scan_fs: &impl ScanFs,
 ) -> Result<Workspace, ScanError> {
-    scan_with_fs_contents(store.reader(), previous, scan_fs, &mut |_, _| {})
+    scan_with_fs_contents(
+        store.reader(),
+        previous,
+        Kinds::MARKDOWN,
+        scan_fs,
+        &mut |_, _| {},
+    )
 }
 
 fn scan_with_fs_contents(
     store: &StoreReader,
     previous: Option<&Workspace>,
+    kinds: Kinds,
     scan_fs: &impl ScanFs,
     visit: &mut ContentsVisitor<'_>,
 ) -> Result<Workspace, ScanError> {
@@ -127,11 +168,12 @@ fn scan_with_fs_contents(
         }
 
         if kind == EntryKind::File {
-            if listed_kind(&name).is_some() {
-                ws.warnings.push(warn(
-                    entry.path(),
-                    "Markdown file at workspace root ignored",
-                ));
+            if let Some(note_kind) = kinds.of(&name) {
+                let message = match note_kind {
+                    NoteKind::Markdown => "Markdown file at workspace root ignored",
+                    NoteKind::Board => "board at workspace root ignored",
+                };
+                ws.warnings.push(warn(entry.path(), message));
             }
             continue;
         }
@@ -173,6 +215,7 @@ fn scan_with_fs_contents(
                 scan_section_entries(
                     store,
                     &mut ws,
+                    kinds,
                     section_id,
                     &section_rel,
                     &listing.entries,
@@ -204,6 +247,7 @@ fn scan_with_fs_contents(
 fn scan_section_entries(
     store: &StoreReader,
     ws: &mut Workspace,
+    kinds: Kinds,
     section_id: SectionId,
     section_rel: &RelPath,
     entries: &[ScanEntry],
@@ -234,7 +278,7 @@ fn scan_section_entries(
         }
 
         if kind == EntryKind::File {
-            if listed_kind(&name).is_some() {
+            if kinds.of(&name).is_some() {
                 ws.warnings.push(warn(
                     entry.path(),
                     "note outside a group ignored; move it into a group to see it",
@@ -274,7 +318,7 @@ fn scan_section_entries(
         });
 
         scan_group_entries(
-            store, ws, group_id, &group_rel, prev_notes, progress, scan_fs, visit,
+            store, ws, kinds, group_id, &group_rel, prev_notes, progress, scan_fs, visit,
         );
     }
 }
@@ -287,6 +331,7 @@ fn scan_section_entries(
 fn scan_group_entries(
     store: &StoreReader,
     ws: &mut Workspace,
+    kinds: Kinds,
     group_id: GroupId,
     group_rel: &RelPath,
     prev_notes: &HashMap<&Path, &Note>,
@@ -334,7 +379,7 @@ fn scan_group_entries(
             }
 
             if kind == EntryKind::File {
-                let Some(note_kind) = listed_kind(&name) else {
+                let Some(note_kind) = kinds.of(&name) else {
                     continue;
                 };
                 let name_str = match name.to_str() {
@@ -689,12 +734,6 @@ fn is_dot_prefixed(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with('.')
 }
 
-/// The kind of note a file name gives, among the kinds a scan lists. Only
-/// Markdown is listed until a session asks for boards.
-fn listed_kind(name: &OsStr) -> Option<NoteKind> {
-    NoteKind::from_name(name).filter(|kind| *kind == NoteKind::Markdown)
-}
-
 fn warn(path: impl Into<PathBuf>, message: impl Into<String>) -> ScanWarning {
     ScanWarning {
         path: path.into(),
@@ -891,16 +930,17 @@ mod tests {
         let store = FsStore::open(directory.path()).unwrap();
         let mut index = crate::index::Index::default();
         let mut seen = HashSet::new();
-        let workspace = scan_with_contents(store.reader(), None, |note, contents| {
-            let file = contents.unwrap();
-            assert!(seen.insert(note.id));
-            assert_eq!(note.bytes, file.bytes.len());
-            index.ingest(note, Ok(file));
-            // The scanner has already obtained these exact bytes. Changing the
-            // pathname now must not cause an index-side second read.
-            fs::write(store.root().join(note.path.as_path()), "later bytes").unwrap();
-        })
-        .unwrap();
+        let workspace =
+            scan_with_contents(store.reader(), None, Kinds::MARKDOWN, |note, contents| {
+                let file = contents.unwrap();
+                assert!(seen.insert(note.id));
+                assert_eq!(note.bytes, file.bytes.len());
+                index.ingest(note, Ok(file));
+                // The scanner has already obtained these exact bytes. Changing the
+                // pathname now must not cause an index-side second read.
+                fs::write(store.root().join(note.path.as_path()), "later bytes").unwrap();
+            })
+            .unwrap();
         index.sync_metadata(&workspace);
         assert_eq!(seen.len(), workspace.notes.len());
         for note in &workspace.notes {
@@ -924,10 +964,11 @@ mod tests {
         }
         let store = FsStore::open(directory.path()).unwrap();
         let mut index = crate::index::Index::default();
-        let previous = scan_with_contents(store.reader(), None, |note, contents| {
-            index.ingest(note, contents)
-        })
-        .unwrap();
+        let previous =
+            scan_with_contents(store.reader(), None, Kinds::MARKDOWN, |note, contents| {
+                index.ingest(note, contents)
+            })
+            .unwrap();
         index.sync_metadata(&previous);
         write_file(directory.path(), "S/G/a.md", "changed bytes");
         let mut scan_fs = FaultyScanFs::default();
@@ -943,6 +984,7 @@ mod tests {
         let current = scan_with_fs_contents(
             store.reader(),
             Some(&previous),
+            Kinds::MARKDOWN,
             &scan_fs,
             &mut |note, contents| {
                 assert!(seen.insert(note.id), "duplicate content callback");
@@ -965,9 +1007,12 @@ mod tests {
                     .contains("scan incomplete"));
             }
         }
-        let complete = scan_with_contents(store.reader(), Some(&current), |note, contents| {
-            index.ingest(note, contents)
-        })
+        let complete = scan_with_contents(
+            store.reader(),
+            Some(&current),
+            Kinds::MARKDOWN,
+            |note, contents| index.ingest(note, contents),
+        )
         .unwrap();
         index.sync_metadata(&complete);
         for note in &complete.notes {
@@ -982,6 +1027,7 @@ mod tests {
         assert!(scan_with_fs_contents(
             store.reader(),
             Some(&complete),
+            Kinds::MARKDOWN,
             &failed,
             &mut |_, _| panic!("a root error must not publish callbacks")
         )
@@ -1000,7 +1046,7 @@ mod tests {
         write_file(root, "Inbox/Today/scratch.md", "# Scratch");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.sections.len(), 2);
         assert_eq!(section_names(&ws), vec!["Inbox", "Projects"]);
@@ -1021,7 +1067,7 @@ mod tests {
         let created = store
             .create_file(&group, "café.MD", NoteKind::Markdown, b"first")
             .unwrap();
-        let previous = scan(&store, None).unwrap();
+        let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
         assert_eq!(previous.root, store.root());
         assert_eq!(previous.sections.len(), 1);
         assert_eq!(previous.groups.len(), 1);
@@ -1039,7 +1085,7 @@ mod tests {
                 Expected::Bytes(b"first"),
             )
             .unwrap();
-        let current = scan(&store, Some(&previous)).unwrap();
+        let current = scan(&store, Some(&previous), Kinds::MARKDOWN).unwrap();
         assert_eq!(entry_ids(&current), entry_ids(&previous));
         assert_eq!(current.notes[0].bytes, saved.file.bytes.len());
         assert_eq!(current.notes[0].modified, saved.file.modified);
@@ -1056,7 +1102,7 @@ mod tests {
         write_file(root, "Inbox/readme.txt", "not markdown");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.sections.len(), 1);
         assert_eq!(ws.groups.len(), 0);
@@ -1080,7 +1126,7 @@ mod tests {
         write_file(root, "Projects/WebApp/src/impl/detail.md", "deeper");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.groups.len(), 1);
         assert_eq!(ws.notes.len(), 3);
@@ -1123,7 +1169,7 @@ mod tests {
 
         let ws = std::thread::Builder::new()
             .stack_size(128 * 1024)
-            .spawn(move || scan(&store, None).unwrap())
+            .spawn(move || scan(&store, None, Kinds::MARKDOWN).unwrap())
             .unwrap()
             .join()
             .unwrap();
@@ -1175,7 +1221,7 @@ mod tests {
         write_file(root, "Projects/WebApp/visible.md", "ok");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.sections.len(), 1);
         assert_eq!(ws.groups.len(), 1);
@@ -1195,7 +1241,7 @@ mod tests {
         write_file(root, "Projects/WebApp/readme", "no ext");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 1);
         assert_eq!(ws.notes[0].title, "design");
@@ -1211,7 +1257,7 @@ mod tests {
         write_file(root, "Inbox/Today/note.md", "ok");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 1);
         assert!(has_warning_containing(&ws, "workspace root"));
@@ -1227,7 +1273,7 @@ mod tests {
         write_file(root, "Ñotas/Bebidas/café.md", "coffee");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.sections.len(), 2);
         assert!(ws.sections.iter().any(|s| s.name == "日記"));
@@ -1255,7 +1301,7 @@ mod tests {
         write_file(root, "Sec/G/not.txt", "e");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 4);
         let titles: Vec<&str> = ws.notes.iter().map(|n| n.title.as_str()).collect();
@@ -1283,7 +1329,7 @@ mod tests {
         std::os::unix::fs::symlink("/tmp", root.join("Sec/linked_group")).unwrap();
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 1);
         assert_eq!(ws.notes[0].title, "real");
@@ -1304,7 +1350,7 @@ mod tests {
         let root = dir.path().join("workspace");
         write_file(&root, "Section/Group/note.md", "trusted");
         let store = FsStore::open(&root).unwrap();
-        let previous = scan(&store, None).unwrap();
+        let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
         let previous_ids = entry_ids(&previous);
         let outside = tempfile::tempdir().unwrap();
         write_file(
@@ -1318,7 +1364,7 @@ mod tests {
 
         for previous in [None, Some(&previous)] {
             assert!(matches!(
-                scan(&store, previous),
+                scan(&store, previous, Kinds::MARKDOWN),
                 Err(ScanError::RootUnreadable(_))
             ));
         }
@@ -1328,7 +1374,7 @@ mod tests {
         assert_eq!(entry_ids(&previous), previous_ids);
         fs::remove_file(&root).unwrap();
         fs::rename(&parked, &root).unwrap();
-        let restored = scan(&store, Some(&previous)).unwrap();
+        let restored = scan(&store, Some(&previous), Kinds::MARKDOWN).unwrap();
         assert_eq!(entry_ids(&restored), previous_ids);
         assert!(restored.warnings.is_empty());
     }
@@ -1349,7 +1395,7 @@ mod tests {
             write_file(dir.path(), "Section/Group/deep/note.md", "trusted deep");
             write_file(dir.path(), "Other/Group/note.md", "unaffected");
             let store = FsStore::open(dir.path()).unwrap();
-            let previous = scan(&store, None).unwrap();
+            let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
             let outside = tempfile::tempdir().unwrap();
             for name in [
                 "OutsideOnly/ForeignGroup/foreign.md",
@@ -1422,7 +1468,7 @@ mod tests {
         fs::create_dir(root.join(bad_name)).unwrap();
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.sections.len(), 1);
         assert_eq!(ws.sections[0].name, "Good");
@@ -1444,7 +1490,7 @@ mod tests {
         fs::write(root.join("Sec/G").join(bad_name), b"bad").unwrap();
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 1);
         assert_eq!(ws.notes[0].title, "good");
@@ -1461,8 +1507,8 @@ mod tests {
         write_file(root, "Inbox/Today/scratch.md", "v1");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
-        let ws2 = scan(&store, Some(&ws1)).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
+        let ws2 = scan(&store, Some(&ws1), Kinds::MARKDOWN).unwrap();
 
         for s1 in &ws1.sections {
             let s2 = ws2.sections.iter().find(|s| s.name == s1.name).unwrap();
@@ -1485,13 +1531,13 @@ mod tests {
         write_file(root, "Projects/WebApp/design.md", "v1");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
         let max_id_1 = ws1.next_id();
 
         write_file(root, "Projects/WebApp/notes.md", "new");
         write_file(root, "Archive/2025/old.md", "archived");
 
-        let ws2 = scan(&store, Some(&ws1)).unwrap();
+        let ws2 = scan(&store, Some(&ws1), Kinds::MARKDOWN).unwrap();
 
         let new_note = ws2.notes.iter().find(|n| n.title == "notes").unwrap();
         assert!(new_note.id.0 >= max_id_1, "new note should have higher ID");
@@ -1513,7 +1559,7 @@ mod tests {
         write_file(root, "Projects/Planning/plan.md", "v1");
 
         let store = FsStore::open(root).unwrap();
-        let mut ws1 = scan(&store, None).unwrap();
+        let mut ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
         let sec_id = ws1
             .sections
             .iter()
@@ -1533,7 +1579,7 @@ mod tests {
         // Rename on disk
         fs::rename(root.join("Projects"), root.join("Work")).unwrap();
 
-        let ws2 = scan(&store, Some(&ws1)).unwrap();
+        let ws2 = scan(&store, Some(&ws1), Kinds::MARKDOWN).unwrap();
 
         assert_eq!(
             ws2.sections.iter().find(|s| s.name == "Work").unwrap().id,
@@ -1562,11 +1608,11 @@ mod tests {
         write_file(root, "Sec/G/b.md", "b");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
         assert_eq!(ws1.notes.len(), 2);
 
         fs::remove_file(root.join("Sec/G/b.md")).unwrap();
-        let ws2 = scan(&store, Some(&ws1)).unwrap();
+        let ws2 = scan(&store, Some(&ws1), Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws2.notes.len(), 1);
         assert_eq!(ws2.notes[0].title, "a");
@@ -1580,12 +1626,12 @@ mod tests {
         write_file(root, "Sec/Other/other.md", "other");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
         assert_eq!(ws1.groups.len(), 2);
         assert_eq!(ws1.notes.len(), 2);
 
         fs::remove_dir_all(root.join("Sec/Grp")).unwrap();
-        let ws2 = scan(&store, Some(&ws1)).unwrap();
+        let ws2 = scan(&store, Some(&ws1), Kinds::MARKDOWN).unwrap();
 
         assert_eq!(group_names(&ws2), vec!["Other"]);
         assert_eq!(ws2.notes.len(), 1);
@@ -1600,11 +1646,11 @@ mod tests {
         write_file(root, "Beta/G/note.md", "b");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
         assert_eq!(ws1.sections.len(), 2);
 
         fs::remove_dir_all(root.join("Beta")).unwrap();
-        let ws2 = scan(&store, Some(&ws1)).unwrap();
+        let ws2 = scan(&store, Some(&ws1), Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws2.sections.len(), 1);
         assert_eq!(ws2.sections[0].name, "Alpha");
@@ -1628,7 +1674,7 @@ mod tests {
             write_file(dir.path(), "Section/Group/note.md", "grouped");
             write_file(dir.path(), "Section/Group/deep/note.md", "deep");
             let store = FsStore::open(dir.path()).unwrap();
-            let previous = scan(&store, None).unwrap();
+            let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
             write_file(dir.path(), "New/Group/new.md", "new");
             let unreadable_path = store.root().join(unreadable);
             let mut scan_fs = FaultyScanFs::default();
@@ -1665,7 +1711,7 @@ mod tests {
             write_file(dir.path(), "Section/Group/deep/note.md", "deep");
             write_file(dir.path(), "Other/Group/note.md", "other");
             let store = FsStore::open(dir.path()).unwrap();
-            let previous = scan(&store, None).unwrap();
+            let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
             let mut scan_fs = FaultyScanFs::default();
             scan_fs
                 .metadata_errors
@@ -1701,7 +1747,7 @@ mod tests {
             write_file(dir.path(), "Section/Group/deep/note.md", "deep");
             write_file(dir.path(), "Other/Group/gone.md", "gone");
             let store = FsStore::open(dir.path()).unwrap();
-            let previous = scan(&store, None).unwrap();
+            let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
             fs::remove_file(dir.path().join("Other/Group/gone.md")).unwrap();
             let mut scan_fs = FaultyScanFs::default();
             scan_fs.listing_errors.insert(
@@ -1750,7 +1796,7 @@ mod tests {
                 write_file(dir.path(), &relative(path), "previous");
             }
             let store = FsStore::open(dir.path()).unwrap();
-            let previous = scan(&store, None).unwrap();
+            let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
             fs::remove_dir_all(dir.path().join(relative("Missing"))).unwrap();
             fs::remove_file(dir.path().join(relative("Seen/inner/gone.md"))).unwrap();
             write_file(
@@ -1809,7 +1855,7 @@ mod tests {
             assert!(has_warning_containing(&current, "symlink ignored"));
             assert_unique_entries(&current);
 
-            let complete = scan(&store, Some(&current)).unwrap();
+            let complete = scan(&store, Some(&current), Kinds::MARKDOWN).unwrap();
             assert_eq!(complete.notes.len(), 4, "{container}");
             assert!(!entry_ids(&complete)
                 .keys()
@@ -1823,7 +1869,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "Section/Group/note.md", "previous");
         let store = FsStore::open(dir.path()).unwrap();
-        let previous = scan(&store, None).unwrap();
+        let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
         let former_note_id = previous.notes[0].id;
         fs::remove_file(dir.path().join("Section/Group/note.md")).unwrap();
         fs::create_dir(dir.path().join("Section/Group/note.md")).unwrap();
@@ -1850,11 +1896,11 @@ mod tests {
         write_file(root, "Inbox/Today/scratch.md", "scratch");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
         assert_eq!(ws1.notes.len(), 3);
 
         let permissions = RestorePermissions::restrict(&root.join("Projects"), 0o000);
-        let result = scan(&store, Some(&ws1));
+        let result = scan(&store, Some(&ws1), Kinds::MARKDOWN);
         drop(permissions);
         let ws2 = result.unwrap();
 
@@ -1883,10 +1929,10 @@ mod tests {
         write_file(root, "Sec/Other/other.md", "other");
 
         let store = FsStore::open(root).unwrap();
-        let ws1 = scan(&store, None).unwrap();
+        let ws1 = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         let permissions = RestorePermissions::restrict(&root.join("Sec/Grp"), 0o000);
-        let result = scan(&store, Some(&ws1));
+        let result = scan(&store, Some(&ws1), Kinds::MARKDOWN);
         drop(permissions);
         let ws2 = result.unwrap();
 
@@ -1902,12 +1948,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "Section/Group/note.md", "previous bytes");
         let store = FsStore::open(dir.path()).unwrap();
-        let previous = scan(&store, None).unwrap();
+        let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
         write_file(dir.path(), "Section/Group/note.md", "changed");
         let permissions =
             RestorePermissions::restrict(&dir.path().join("Section/Group/note.md"), 0);
         let read_error = store.read(&previous.notes[0].path).unwrap_err();
-        let result = scan(&store, Some(&previous));
+        let result = scan(&store, Some(&previous), Kinds::MARKDOWN);
         drop(permissions);
         let current = result.unwrap();
 
@@ -1930,10 +1976,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "Section/Group/deep/note.md", "previous");
         let store = FsStore::open(dir.path()).unwrap();
-        let previous = scan(&store, None).unwrap();
+        let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
         let previous_ids = entry_ids(&previous);
         let permissions = RestorePermissions::restrict(dir.path(), 0o400);
-        let result = scan(&store, Some(&previous));
+        let result = scan(&store, Some(&previous), Kinds::MARKDOWN);
         drop(permissions);
 
         assert!(matches!(
@@ -1942,7 +1988,7 @@ mod tests {
                 if error.kind() == std::io::ErrorKind::PermissionDenied
         ));
         assert_eq!(entry_ids(&previous), previous_ids);
-        let current = scan(&store, Some(&previous)).unwrap();
+        let current = scan(&store, Some(&previous), Kinds::MARKDOWN).unwrap();
         assert_eq!(entry_ids(&current), previous_ids);
         assert!(current
             .warnings
@@ -1959,9 +2005,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "Section/Group/note.md", "previous");
         let store = FsStore::open(dir.path()).unwrap();
-        let previous = scan(&store, None).unwrap();
+        let previous = scan(&store, None, Kinds::MARKDOWN).unwrap();
         let permissions = RestorePermissions::restrict(dir.path(), 0);
-        let result = scan(&store, Some(&previous));
+        let result = scan(&store, Some(&previous), Kinds::MARKDOWN);
         drop(permissions);
 
         let error = result.unwrap_err();
@@ -1969,7 +2015,7 @@ mod tests {
             matches!(error, ScanError::RootUnreadable(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
         );
         assert_eq!(previous.notes.len(), 1);
-        assert!(scan(&store, Some(&previous)).is_ok());
+        assert!(scan(&store, Some(&previous), Kinds::MARKDOWN).is_ok());
     }
 
     #[test]
@@ -1980,7 +2026,7 @@ mod tests {
         let store = FsStore::open(&root).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
-        let err = scan(&store, None).unwrap_err();
+        let err = scan(&store, None, Kinds::MARKDOWN).unwrap_err();
         assert!(
             matches!(&err, ScanError::RootUnreadable(error) if error.kind() == std::io::ErrorKind::NotFound)
         );
@@ -1993,7 +2039,7 @@ mod tests {
     fn scan_empty_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsStore::open(dir.path()).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert!(ws.sections.is_empty());
         assert!(ws.groups.is_empty());
@@ -2014,7 +2060,7 @@ mod tests {
         make_dir(root, "Section 10");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(
             section_names(&ws),
@@ -2037,7 +2083,7 @@ mod tests {
         write_file(root, "Sec/G/new.md", "new");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 2);
         assert_eq!(ws.notes[0].title, "new");
@@ -2054,7 +2100,7 @@ mod tests {
         write_file(root, "Sec/G/note.md", content);
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes[0].bytes, content.len());
         let age = SystemTime::now()
@@ -2073,7 +2119,7 @@ mod tests {
         write_file(root, "Sec/Other/second.md", "c");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         for (title, group) in [("grouped", "Grp"), ("second", "Other")] {
             let note = ws.notes.iter().find(|n| n.title == title).unwrap();
@@ -2092,7 +2138,7 @@ mod tests {
         make_dir(root, "Sec/beta");
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(group_names(&ws), vec!["Alpha", "beta", "Zebra"]);
     }
@@ -2109,23 +2155,225 @@ mod tests {
     }
 
     #[test]
-    fn listed_kind_is_markdown_only() {
-        for (name, listed) in [
-            ("note.md", true),
-            ("NOTE.MD", true),
-            ("x.Md", true),
-            ("a.md", true),
-            ("x.wren-board.md", true),
-            (".md", false),
-            ("file.txt", false),
-            ("readme", false),
-            ("md", false),
-            ("x.wren-board", false),
-            ("x.md.wren-board", false),
+    fn kinds_list_markdown_always_and_boards_on_request() {
+        for (name, markdown, all) in [
+            (
+                "note.md",
+                Some(NoteKind::Markdown),
+                Some(NoteKind::Markdown),
+            ),
+            (
+                "NOTE.MD",
+                Some(NoteKind::Markdown),
+                Some(NoteKind::Markdown),
+            ),
+            ("x.Md", Some(NoteKind::Markdown), Some(NoteKind::Markdown)),
+            (
+                "x.wren-board.md",
+                Some(NoteKind::Markdown),
+                Some(NoteKind::Markdown),
+            ),
+            (".md", None, None),
+            ("file.txt", None, None),
+            ("readme", None, None),
+            ("md", None, None),
+            ("x.wren-board", None, Some(NoteKind::Board)),
+            ("x.WREN-BOARD", None, Some(NoteKind::Board)),
+            ("x.md.wren-board", None, Some(NoteKind::Board)),
+            (".wren-board", None, None),
+            ("wren-board", None, None),
         ] {
-            let kind = listed_kind(std::ffi::OsStr::new(name));
-            assert_eq!(kind, listed.then_some(NoteKind::Markdown), "{name}");
+            let name_os = std::ffi::OsStr::new(name);
+            assert_eq!(Kinds::MARKDOWN.of(name_os), markdown, "{name}");
+            assert_eq!(Kinds::ALL.of(name_os), all, "{name}");
         }
+        assert_eq!(Kinds::default(), Kinds::MARKDOWN);
+        assert!(Kinds::MARKDOWN.lists(NoteKind::Markdown));
+        assert!(!Kinds::MARKDOWN.lists(NoteKind::Board));
+        assert!(Kinds::ALL.lists(NoteKind::Board));
+    }
+
+    /// Everything a scan produces, with the root left out so two folders
+    /// can be compared.
+    fn scan_summary(ws: &Workspace, root: &Path) -> String {
+        let warnings: Vec<_> = ws
+            .warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.path.strip_prefix(root).unwrap().to_path_buf(),
+                    warning.message.clone(),
+                )
+            })
+            .collect();
+        format!(
+            "{:?}\n{:?}\n{:?}\n{:?}\n{}",
+            ws.sections,
+            ws.groups,
+            ws.notes,
+            warnings,
+            ws.next_id()
+        )
+    }
+
+    fn write_markdown_tree(root: &Path) {
+        write_file(root, "Work/Ideas/Flow.md", "markdown flow");
+        write_file(root, "Work/Ideas/deep/Plan.md", "deep plan");
+        write_file(
+            root,
+            "Work/Ideas/x.wren-board.md",
+            "markdown with a board-like stem",
+        );
+        write_file(root, "Work/Empty/.keep", "");
+        write_file(root, "Loose.md", "root markdown");
+        write_file(root, "Work/Section note.md", "section markdown");
+    }
+
+    fn write_boards(root: &Path) {
+        write_file(root, "Work/Ideas/Flow.wren-board", "schema = 1\n");
+        write_file(root, "Work/Ideas/x.md.wren-board", "schema = 1\n");
+        write_file(root, "Work/Ideas/deep/Map.WREN-BOARD", "schema = 1\n");
+        write_file(root, "Work/Boards only/Only.wren-board", "schema = 1\n");
+        write_file(root, "Root.wren-board", "schema = 1\n");
+        write_file(root, "Work/Section.wren-board", "schema = 1\n");
+    }
+
+    #[test]
+    fn a_scan_without_boards_equals_a_scan_of_the_folder_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_markdown_tree(root);
+        make_dir(root, "Work/Boards only");
+        let without = scan(&FsStore::open(root).unwrap(), None, Kinds::MARKDOWN).unwrap();
+
+        write_boards(root);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::OsStr::from_bytes(b"\xff.wren-board");
+            fs::write(root.join("Work/Ideas").join(name), "schema = 1\n").unwrap();
+        }
+        let store = FsStore::open(root).unwrap();
+        let mut visited = Vec::new();
+        let with = scan_with_contents(store.reader(), None, Kinds::MARKDOWN, |note, _| {
+            visited.push(note.path.clone())
+        })
+        .unwrap();
+        assert_eq!(scan_summary(&with, root), scan_summary(&without, root));
+        assert!(visited
+            .iter()
+            .all(|path| NoteKind::from_name(path.file_name()) == Some(NoteKind::Markdown)));
+        assert_eq!(visited.len(), 3);
+
+        // A rescan with the previous model keeps every id and lists nothing new.
+        let again = scan(&store, Some(&with), Kinds::MARKDOWN).unwrap();
+        assert_eq!(scan_summary(&again, root), scan_summary(&without, root));
+    }
+
+    #[test]
+    fn a_scan_with_boards_lists_their_titles_and_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_markdown_tree(root);
+        write_boards(root);
+        let ws = scan(&FsStore::open(root).unwrap(), None, Kinds::ALL).unwrap();
+        let mut notes: Vec<_> = ws
+            .notes
+            .iter()
+            .map(|note| {
+                (
+                    note.path.as_path().to_str().unwrap(),
+                    note.title.as_str(),
+                    note.kind,
+                    note.subtitle.as_deref(),
+                )
+            })
+            .collect();
+        notes.sort();
+        assert_eq!(
+            notes,
+            [
+                (
+                    "Work/Boards only/Only.wren-board",
+                    "Only",
+                    NoteKind::Board,
+                    None
+                ),
+                ("Work/Ideas/Flow.md", "Flow", NoteKind::Markdown, None),
+                ("Work/Ideas/Flow.wren-board", "Flow", NoteKind::Board, None),
+                (
+                    "Work/Ideas/deep/Map.WREN-BOARD",
+                    "Map",
+                    NoteKind::Board,
+                    Some("deep/Map.WREN-BOARD")
+                ),
+                (
+                    "Work/Ideas/deep/Plan.md",
+                    "Plan",
+                    NoteKind::Markdown,
+                    Some("deep/Plan.md")
+                ),
+                ("Work/Ideas/x.md.wren-board", "x.md", NoteKind::Board, None),
+                (
+                    "Work/Ideas/x.wren-board.md",
+                    "x.wren-board",
+                    NoteKind::Markdown,
+                    None
+                ),
+            ]
+        );
+        let warning = |path: &str| {
+            ws.warnings
+                .iter()
+                .find(|warning| warning.path == root.join(path))
+                .map(|warning| warning.message.as_str())
+        };
+        assert_eq!(
+            warning("Root.wren-board"),
+            Some("board at workspace root ignored")
+        );
+        assert_eq!(
+            warning("Loose.md"),
+            Some("Markdown file at workspace root ignored")
+        );
+        assert_eq!(
+            warning("Work/Section.wren-board"),
+            warning("Work/Section note.md")
+        );
+        assert!(warning("Work/Section.wren-board")
+            .unwrap()
+            .starts_with("note outside a group ignored"));
+        assert_eq!(
+            warning("Work/Ideas/deep/Map.WREN-BOARD"),
+            Some("note deeper than group level; shown under enclosing group")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_board_name_gets_the_markdown_warning() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        make_dir(root, "S/G");
+        for name in [&b"\xff.wren-board"[..], b"\xfe.md"] {
+            fs::write(
+                root.join("S/G").join(std::ffi::OsStr::from_bytes(name)),
+                "x",
+            )
+            .unwrap();
+        }
+        let store = FsStore::open(root).unwrap();
+        let ws = scan(&store, None, Kinds::ALL).unwrap();
+        assert!(ws.notes.is_empty());
+        let messages: Vec<_> = ws
+            .warnings
+            .iter()
+            .map(|warning| warning.message.as_str())
+            .collect();
+        assert_eq!(messages, ["non-UTF-8 filename", "non-UTF-8 filename"]);
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
+        assert_eq!(ws.warnings.len(), 1);
     }
 
     // -- special files silently skipped --
@@ -2141,7 +2389,7 @@ mod tests {
         make_fifo(&root.join("Sec/G/pipe.md"));
 
         let store = FsStore::open(root).unwrap();
-        let ws = scan(&store, None).unwrap();
+        let ws = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         assert_eq!(ws.notes.len(), 1);
         assert_eq!(ws.notes[0].title, "note");

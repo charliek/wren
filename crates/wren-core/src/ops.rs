@@ -203,6 +203,24 @@ impl Document {
 
 const MAX_NAVIGATION_ENTRIES: usize = 100;
 
+/// How a Session lists a workspace, fixed for its life and inherited by a
+/// Session that `Op::OpenWorkspace` opens from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// Whether board notes are scanned, listed, indexed and opened.
+    pub boards: bool,
+}
+
+impl SessionOptions {
+    fn kinds(self) -> scan::Kinds {
+        if self.boards {
+            scan::Kinds::ALL
+        } else {
+            scan::Kinds::MARKDOWN
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Navigation {
     Visit,
@@ -226,6 +244,7 @@ pub struct Session {
     history_index: Option<usize>,
     recent: Vec<NoteId>,
     last_save_micros: u128,
+    options: SessionOptions,
     background_reconcile: bool,
     reconcile_requested: bool,
     reconcile_in_flight: Option<u64>,
@@ -253,26 +272,45 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
+    /// Opens a Markdown-only Session, as every release before boards did.
     pub fn open(path: &Path) -> Result<Self, OpError> {
         Self::with_trash(path, Box::new(SystemTrash))
     }
 
+    pub fn open_with(path: &Path, options: SessionOptions) -> Result<Self, OpError> {
+        Self::with_options(path, Box::new(SystemTrash), options)
+    }
+
     pub fn with_trash(path: &Path, trash: Box<dyn Trash>) -> Result<Self, OpError> {
-        Self::load(path, trash, 1).map_err(|message| OpError {
+        Self::with_options(path, trash, SessionOptions::default())
+    }
+
+    pub fn with_options(
+        path: &Path,
+        trash: Box<dyn Trash>,
+        options: SessionOptions,
+    ) -> Result<Self, OpError> {
+        Self::load(path, trash, 1, options).map_err(|message| OpError {
             message,
             events: Vec::new(),
         })
     }
 
-    fn load(path: &Path, trash: Box<dyn Trash>, generation: u64) -> Result<Self, String> {
+    fn load(
+        path: &Path,
+        trash: Box<dyn Trash>,
+        generation: u64,
+        options: SessionOptions,
+    ) -> Result<Self, String> {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
         let mut index = Index::default();
-        let mut model = scan::scan_with_contents(store.reader(), None, |note, contents| {
-            index.ingest(note, contents);
-        })
-        .map_err(|error| error.to_string())?;
+        let mut model =
+            scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
+                index.ingest(note, contents);
+            })
+            .map_err(|error| error.to_string())?;
         let watcher = match watch {
             Ok(watcher) => Some(watcher),
             Err(error) => {
@@ -338,6 +376,7 @@ impl Session {
             history_index,
             recent: Vec::new(),
             last_save_micros: 0,
+            options,
             background_reconcile: false,
             reconcile_requested: false,
             reconcile_in_flight: None,
@@ -433,6 +472,9 @@ impl Session {
     }
     pub fn last_save_micros(&self) -> u128 {
         self.last_save_micros
+    }
+    pub fn options(&self) -> SessionOptions {
+        self.options
     }
     pub fn pending_durability(&self) -> bool {
         self.store.pending_durability()
@@ -561,6 +603,9 @@ impl Session {
                 self.finish_structure(events)
             }
             Op::CreateNote { group, title, kind } => {
+                if !self.options.kinds().lists(kind) {
+                    return Err("Boards are turned off; set `boards = on` to create one".into());
+                }
                 let path = self.parent_path(Parent::Group(group))?;
                 let receipt = self
                     .store
@@ -745,6 +790,7 @@ impl Session {
                     &path,
                     Box::new(SystemTrash),
                     self.generation.wrapping_add(1),
+                    self.options,
                 )?;
                 std::mem::swap(&mut replacement.trash, &mut self.trash);
                 replacement.background_reconcile = self.background_reconcile;
@@ -1219,6 +1265,7 @@ impl Session {
                 tree_revision: self.tree_revision,
             },
             reader,
+            self.options.kinds(),
             self.model.scan_baseline(),
             self.index.content_snapshot(),
         ));
@@ -1505,8 +1552,11 @@ impl Session {
             self.index.set_content(document.note, &document.text, true);
             (document.note, document.entry.path.clone())
         });
-        let scanned =
-            scan::scan_with_contents(self.store.reader(), Some(&self.model), |note, contents| {
+        let scanned = scan::scan_with_contents(
+            self.store.reader(),
+            Some(&self.model),
+            self.options.kinds(),
+            |note, contents| {
                 // A scan is not a document transition. In particular, a replacement
                 // at the active path must not insert a new ID or replace its draft.
                 if !active
@@ -1515,7 +1565,8 @@ impl Session {
                 {
                     self.index.ingest(note, contents);
                 }
-            });
+            },
+        );
         let scanned = match scanned {
             Ok(scanned) => scanned,
             Err(error) => {

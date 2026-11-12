@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use wren_core::fs_store::{Fault, RelPath};
+use wren_core::index::{QueryKind, Scope};
 use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, NoteId, SectionId};
-use wren_core::ops::{Event, ExternalChangeKind, Op, Session, Trash};
+use wren_core::ops::{Event, ExternalChangeKind, Op, Session, SessionOptions, Trash};
 
 const ORIGINAL: &str = "original\n";
 const DRAFT: &str = "my unsaved draft\n";
@@ -127,6 +128,16 @@ impl Fixture {
 
     fn session_with_failure(&self, fail: bool) -> Session {
         Session::with_trash(self.path(), self.quarantine.fake(fail)).unwrap()
+    }
+
+    /// A session that lists boards beside Markdown.
+    fn board_session(&self) -> Session {
+        Session::with_options(
+            self.path(),
+            self.quarantine.fake(false),
+            SessionOptions { boards: true },
+        )
+        .unwrap()
     }
 }
 
@@ -2832,13 +2843,33 @@ fn op_by_kind_table_markdown() {
 }
 
 #[test]
+fn op_by_kind_table_markdown_with_boards_listed() {
+    ops_keep_the_note_kind(NoteKind::Markdown, Fixture::board_session);
+}
+
+#[test]
 fn markdown_ops_beside_a_board_of_the_same_title_collide_only_by_full_name() {
+    markdown_beside_a_board_of_the_same_title(Fixture::session);
+}
+
+#[test]
+fn markdown_ops_beside_a_listed_board_of_the_same_title_collide_only_by_full_name() {
+    markdown_beside_a_board_of_the_same_title(Fixture::board_session);
+}
+
+fn markdown_beside_a_board_of_the_same_title(open_session: impl Fn(&Fixture) -> Session) {
     let fixture = Fixture::empty();
     let board = b"schema = 1\n";
     fixture.write("A/G/Flow.wren-board", board);
     fixture.write("A/H/Flow.wren-board", board);
     fixture.write("A/H/Other.md", b"other\n");
-    let mut session = fixture.session();
+    let mut session = open_session(&fixture);
+    let boards_listed = session.options().boards;
+    let boards: Vec<_> = ["A/G/Flow.wren-board", "A/H/Flow.wren-board"]
+        .into_iter()
+        .filter(|_| boards_listed)
+        .map(|path| (path, note(&session, path)))
+        .collect();
     let g = group(&session, "A/G");
     let h = group(&session, "A/H");
 
@@ -2886,16 +2917,100 @@ fn markdown_ops_beside_a_board_of_the_same_title_collide_only_by_full_name() {
     );
     assert_eq!(fixture.read("A/G/Flow.wren-board"), board);
     assert_eq!(fixture.read("A/H/Flow.wren-board"), board);
+    for (path, id) in boards {
+        assert_note_kind(&session, &fixture, id, path, "Flow", NoteKind::Board);
+    }
+    let kinds = |session: &Session| {
+        let mut kinds: Vec<_> = session
+            .model()
+            .notes
+            .iter()
+            .map(|note| (note.path.as_path().to_str().unwrap().to_owned(), note.kind))
+            .collect();
+        kinds.sort();
+        kinds
+    };
+    let mut expected = vec![
+        ("A/H/Flow 2.md".to_owned(), NoteKind::Markdown),
+        ("A/H/Flow.md".to_owned(), NoteKind::Markdown),
+    ];
+    if boards_listed {
+        expected.push(("A/G/Flow.wren-board".to_owned(), NoteKind::Board));
+        expected.push(("A/H/Flow.wren-board".to_owned(), NoteKind::Board));
+        expected.sort();
+    }
+    assert_eq!(kinds(&session), expected);
+}
+
+#[test]
+fn board_ops_beside_markdown_of_the_same_title_collide_only_by_full_name() {
+    let fixture = Fixture::empty();
+    fixture.write("A/G/Flow.md", b"note\n");
+    fixture.write("A/G/Plan.wren-board", b"schema = 1\n");
+    fixture.write("A/H/Flow.md", b"other\n");
+    let mut session = fixture.board_session();
+    let g = group(&session, "A/G");
+    let h = group(&session, "A/H");
+    let flow = created_note(&run(
+        &mut session,
+        Op::CreateNote {
+            group: g,
+            title: "Flow".into(),
+            kind: NoteKind::Board,
+        },
+    ));
+    assert_note_kind(
+        &session,
+        &fixture,
+        flow,
+        "A/G/Flow.wren-board",
+        "Flow",
+        NoteKind::Board,
+    );
+    let plan = note(&session, "A/G/Plan.wren-board");
+    run(
+        &mut session,
+        Op::Rename {
+            target: ItemRef::Note(plan),
+            new_name: "Flow".into(),
+        },
+    );
+    assert_note_kind(
+        &session,
+        &fixture,
+        plan,
+        "A/G/Flow 2.wren-board",
+        "Flow 2",
+        NoteKind::Board,
+    );
+    run(&mut session, Op::MoveNote { note: flow, to: h });
+    assert_note_kind(
+        &session,
+        &fixture,
+        flow,
+        "A/H/Flow.wren-board",
+        "Flow",
+        NoteKind::Board,
+    );
+    let markdown = note(&session, "A/H/Flow.md");
+    assert_note_kind(
+        &session,
+        &fixture,
+        markdown,
+        "A/H/Flow.md",
+        "Flow",
+        NoteKind::Markdown,
+    );
+    assert_eq!(fixture.read("A/G/Flow.md"), b"note\n");
+    assert_eq!(fixture.read("A/H/Flow.md"), b"other\n");
 }
 
 #[test]
 fn board_ops_write_board_names_and_bytes() {
-    // Session::open lists Markdown only, so each board here is created by the
-    // op under test and checked on disk after any op that rescans.
     let fixture = Fixture::empty();
     fixture.write("A/G/Flow.md", b"note\n");
     fs::create_dir_all(fixture.path().join("A/H")).unwrap();
-    let mut session = fixture.session();
+    let mut session = fixture.board_session();
     let g = group(&session, "A/G");
     let h = group(&session, "A/H");
     let create = |session: &mut Session, title: &str| {
@@ -2954,4 +3069,187 @@ fn board_ops_write_board_names_and_bytes() {
     run(&mut session, Op::MoveNote { note: moved, to: h });
     assert_eq!(fixture.read("A/H/Flow.md.wren-board"), b"schema = 1\n");
     assert_eq!(fixture.read("A/G/Flow.md"), b"note\n");
+}
+
+// -- Session options: boards are listed only when asked for.
+
+fn write_mixed(fixture: &Fixture) {
+    fixture.write("A/G/Note.md", b"note body\n");
+    fixture.write("A/G/Flow.wren-board", b"schema = 1\nlabelword\n");
+    fixture.write("A/G/deep/Map.wren-board", b"schema = 1\n");
+    fixture.write("A/Loose.wren-board", b"schema = 1\n");
+    fixture.write("Root.wren-board", b"schema = 1\n");
+}
+
+fn listed(session: &Session) -> Vec<(String, String, NoteKind)> {
+    let mut notes: Vec<_> = session
+        .model()
+        .notes
+        .iter()
+        .map(|note| {
+            (
+                note.path.as_path().to_str().unwrap().to_owned(),
+                note.title.clone(),
+                note.kind,
+            )
+        })
+        .collect();
+    notes.sort();
+    notes
+}
+
+#[test]
+fn a_session_without_boards_neither_lists_indexes_nor_creates_them() {
+    let fixture = Fixture::empty();
+    write_mixed(&fixture);
+    let mut session = fixture.session();
+    assert_eq!(session.options(), SessionOptions::default());
+    assert_eq!(
+        listed(&session),
+        [("A/G/Note.md".into(), "Note".into(), NoteKind::Markdown)]
+    );
+    assert_eq!(session.index().len(), 1);
+    assert!(session
+        .index()
+        .query("labelword", Scope::Workspace, QueryKind::Search, 10)
+        .is_empty());
+    assert!(!session
+        .model()
+        .warnings
+        .iter()
+        .any(|warning| warning.path.to_string_lossy().contains("wren-board")));
+
+    let g = group(&session, "A/G");
+    let error = session
+        .apply_at(
+            Op::CreateNote {
+                group: g,
+                title: "New".into(),
+                kind: NoteKind::Board,
+            },
+            ms(0),
+        )
+        .unwrap_err();
+    assert!(error.message.contains("boards = on"), "{}", error.message);
+    assert!(!fixture.path().join("A/G/New.wren-board").exists());
+
+    run(&mut session, Op::Reconcile);
+    assert_eq!(listed(&session).len(), 1);
+    assert_eq!(
+        fixture.read("A/G/Flow.wren-board"),
+        b"schema = 1\nlabelword\n"
+    );
+}
+
+#[test]
+fn a_session_with_boards_lists_titles_kinds_and_warnings() {
+    let fixture = Fixture::empty();
+    write_mixed(&fixture);
+    let session = fixture.board_session();
+    assert_eq!(session.options(), SessionOptions { boards: true });
+    assert_eq!(
+        listed(&session),
+        [
+            ("A/G/Flow.wren-board".into(), "Flow".into(), NoteKind::Board),
+            ("A/G/Note.md".into(), "Note".into(), NoteKind::Markdown),
+            (
+                "A/G/deep/Map.wren-board".into(),
+                "Map".into(),
+                NoteKind::Board
+            ),
+        ]
+    );
+    assert_eq!(session.index().len(), 3);
+    let hits = session
+        .index()
+        .query("labelword", Scope::Workspace, QueryKind::Search, 10);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].note, note(&session, "A/G/Flow.wren-board"));
+    let warning = |path: &str| {
+        session
+            .model()
+            .warnings
+            .iter()
+            .find(|warning| warning.path == fixture.path().join(path))
+            .map(|warning| warning.message.clone())
+    };
+    assert_eq!(
+        warning("Root.wren-board").as_deref(),
+        Some("board at workspace root ignored")
+    );
+    assert!(warning("A/Loose.wren-board")
+        .unwrap()
+        .starts_with("note outside a group ignored"));
+}
+
+#[test]
+fn a_workspace_opened_from_a_session_inherits_its_options() {
+    for boards in [false, true] {
+        let first = Fixture::empty();
+        first.write("A/G/One.md", b"one\n");
+        let second = Fixture::empty();
+        write_mixed(&second);
+        let mut session = Session::with_options(
+            first.path(),
+            first.quarantine.fake(false),
+            SessionOptions { boards },
+        )
+        .unwrap();
+        run(
+            &mut session,
+            Op::OpenWorkspace {
+                path: second.path().to_path_buf(),
+            },
+        );
+        assert_eq!(session.options(), SessionOptions { boards });
+        assert_eq!(listed(&session).len(), if boards { 3 } else { 1 });
+
+        // Background reconciliation scans with the same kinds.
+        session.set_background_reconcile(true);
+        second.write("A/G/Later.wren-board", b"schema = 1\n");
+        let mut time = 2_000;
+        let job = loop {
+            at(&mut session, Op::Tick, time);
+            if let Some(job) = session.take_reconcile_job() {
+                break job;
+            }
+            time += 1_000;
+            assert!(time < 10_000, "no background job was prepared");
+        };
+        at(&mut session, Op::FinishReconcile(job.run()), time + 1);
+        assert_eq!(listed(&session).len(), if boards { 4 } else { 1 });
+    }
+}
+
+#[test]
+fn a_board_that_is_not_utf8_takes_the_markdown_path() {
+    let fixture = Fixture::empty();
+    fixture.write("A/G/Note.md", b"note\n");
+    fixture.write("A/G/Broken.wren-board", &[0xff, b'\n']);
+    let mut session = fixture.board_session();
+    let id = note(&session, "A/G/Broken.wren-board");
+    assert_eq!(session.model().note(id).unwrap().kind, NoteKind::Board);
+    assert!(session.index().content(id).is_none());
+    assert!(session.index().limitation(id).unwrap().contains("UTF-8"));
+    assert!(session
+        .model()
+        .warnings
+        .iter()
+        .any(|warning| warning.message.contains("Broken.wren-board")
+            && warning.message.contains("UTF-8")));
+    let error = session
+        .apply_at(Op::OpenNote { note: Some(id) }, ms(0))
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("not valid UTF-8; it was left untouched"),
+        "{}",
+        error.message
+    );
+    assert!(session
+        .document()
+        .is_none_or(|document| document.note != id));
+    run(&mut session, Op::Reconcile);
+    assert_eq!(fixture.read("A/G/Broken.wren-board"), [0xff, b'\n']);
 }

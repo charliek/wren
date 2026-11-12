@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::fs_store::{RelPath, StoreReader};
 use crate::index::NOT_UTF8;
 use crate::model::{NoteId, Workspace};
-use crate::scan;
+use crate::scan::{self, Kinds};
 
 // Process-wide so a result can never match a different Session, including a
 // replacement Session that reuses the same root and generation number.
@@ -42,6 +42,7 @@ type Payload = Option<Result<Scanned, String>>;
 /// descriptor. Running it never mutates the Session.
 pub struct ReconcileJob {
     reader: StoreReader,
+    kinds: Kinds,
     previous: Workspace,
     indexed: HashMap<NoteId, Arc<str>>,
     result: ReconcileResult,
@@ -60,11 +61,13 @@ impl ReconcileJob {
     pub(crate) fn new(
         tags: Tags,
         reader: StoreReader,
+        kinds: Kinds,
         previous: Workspace,
         indexed: HashMap<NoteId, Arc<str>>,
     ) -> Self {
         Self {
             reader,
+            kinds,
             previous,
             indexed,
             result: ReconcileResult {
@@ -85,12 +88,13 @@ impl ReconcileJob {
     pub fn run(self) -> ReconcileResult {
         let Self {
             reader,
+            kinds,
             previous,
             indexed,
             result,
         } = self;
         let mut contents = Vec::new();
-        let scanned = scan::scan_with_contents(&reader, Some(&previous), |note, file| {
+        let scanned = scan::scan_with_contents(&reader, Some(&previous), kinds, |note, file| {
             let update = match file {
                 Ok(file)
                     if indexed
