@@ -464,7 +464,7 @@ mod harness {
                     });
                 }
             }
-            let labels = self.board_perf.labels;
+            let (labels, scale_factor) = (self.board_perf.labels, self.scale_factor);
             let view = self.spike()?;
             if let Some(edit) = params.get("edit") {
                 let id = edit
@@ -535,6 +535,7 @@ mod harness {
                     "min_px": labels.min_px, "moving": labels.moving,
                 })),
                 "moving": probe.moving.get(),
+                "scale_factor": scale_factor,
                 "size": view.size().map(|(width, height)| json!({"width": width, "height": height})),
                 "epoch": view.epoch(),
                 "panning": view.machine().panning(),

@@ -191,10 +191,12 @@ def run_perf(spike: Spike, args) -> dict:
             rings = spike.call("perf.board", {})
             after = spike.set()
             scene, draw = rings["scene_micros"], rings["draw_micros"]
+            # Every request is followed by a redraw, and only the one after
+            # the edit builds geometry: the dearest draw is that one.
             samples.append({
                 "scene_builds": after["scenes"] - before["scenes"],
                 "scene_micros": scene[-1] if scene else None,
-                "draw_micros": draw[0] if draw else None,
+                "draw_micros": max(draw) if draw else None,
             })
         totals = [sample["scene_micros"] + sample["draw_micros"] for sample in samples
                   if sample["scene_micros"] is not None and sample["draw_micros"] is not None]
@@ -219,20 +221,24 @@ def run_open(spike: Spike, args) -> dict:
     """Open generated boards of about 1,000 and 10,000 elements, three times
     each, and time each from the start of its opening to the first redraw
     after its first painted draw."""
+    # The renderer's own label rule, as a board opens in the app.
+    spike.set(labels=None)
     result: dict = {"cases": []}
     for shapes in (347, 3380):
-        opens, scenes = [], []
+        opens, scenes, draws = [], [], []
         for _ in range(3):
+            spike.call("perf.board", {"clear": True})
             state = spike.set(scene={"grid": shapes})
             rings = wait_for(lambda: (lambda r: r if r["open_micros"] is not None else None)(
-                spike.call("perf.board", {})), timeout=60, description="the board opened")
+                spike.call("perf.board", {})), timeout=60, interval=0.02, description="the board opened")
             opens.append(rings["open_micros"])
             scenes.append(rings["scene_micros"][-1])
+            draws.append(max(rings["draw_micros"]))
         state = spike.set()
         result["cases"].append({
             "shapes": shapes, "elements": state["count"] + state["edges"], "items": state["items"],
             "fit_zoom": round(state["viewport"]["zoom"], 3),
-            "open_micros": summary(opens), "scene_micros": summary(scenes),
+            "open_micros": summary(opens), "scene_micros": summary(scenes), "first_draw_micros": summary(draws),
         })
     return result
 
@@ -501,9 +507,13 @@ def native_window(spike: Spike) -> str:
     return windows[0]
 
 
-def pointer_over(spike: Spike, window: str, x: float = 400, y: float = 300) -> None:
-    xdo("mousemove", "--window", window, "--sync",
-        str(round(spike.bounds["x"] + x)), str(round(spike.bounds["y"] + y)))
+def pointer_over(spike: Spike, window: str, x: float = 400, y: float = 300) -> tuple[float, float]:
+    """Put the pointer at ``(x, y)`` in the board, in logical pixels, and
+    return where it landed there: xdotool counts physical pixels."""
+    scale = spike.set()["scale_factor"]
+    physical = (round((spike.bounds["x"] + x) * scale), round((spike.bounds["y"] + y) * scale))
+    xdo("mousemove", "--window", window, "--sync", str(physical[0]), str(physical[1]))
+    return physical[0] / scale - spike.bounds["x"], physical[1] / scale - spike.bounds["y"]
 
 
 def palette_open(spike: Spike) -> bool:
@@ -557,8 +567,11 @@ def run_keys(spike: Spike, args) -> dict:
 
 def run_wheel(spike: Spike, args) -> dict:
     window = native_window(spike)
-    pointer_over(spike, window)
-    result: dict = {"steps": []}
+    px, py = pointer_over(spike, window)
+    # xdotool moves the pointer in physical pixels, the board pans in
+    # logical ones.
+    scale = spike.set()["scale_factor"]
+    result: dict = {"scale_factor": scale, "steps": []}
     spike.set(viewport={"x": 0.0, "y": 0.0, "zoom": 1.0})
 
     def step(name: str, action, expect, settle: float = 0.3) -> None:
@@ -580,13 +593,11 @@ def run_wheel(spike: Spike, args) -> dict:
             for delta in deltas:
                 zoom *= 1.1 ** delta["y"]
             # About the pointer: the board point under it stays put.
-            px = round(spike.bounds["x"] + 400) - spike.bounds["x"]
-            py = round(spike.bounds["y"] + 300) - spike.bounds["y"]
             want = {"x": start["x"] + px / start["zoom"] - px / zoom,
                     "y": start["y"] + py / start["zoom"] - py / zoom, "zoom": zoom}
         else:
-            want = {"x": start["x"] - expect[0] / start["zoom"], "y": start["y"] - expect[1] / start["zoom"],
-                    "zoom": start["zoom"]}
+            want = {"x": start["x"] - expect[0] / scale / start["zoom"],
+                    "y": start["y"] - expect[1] / scale / start["zoom"], "zoom": start["zoom"]}
         ok = all(abs(end[key] - want[key]) < 0.01 for key in want) and (
             bool(deltas) or expect not in ("pan", "sideways", "zoom"))
         if expect not in ("pan", "sideways", "zoom"):
