@@ -3,6 +3,7 @@ use iced::widget::{
     text_input,
 };
 use iced::{Border, Element, Fill, Shrink};
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
@@ -574,14 +575,24 @@ impl App {
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
                 // The age sits at the end of the title row, so the second
                 // row is all preview.
-                let title = row![
+                let name: Element<'_, Message> =
                     ellipsis(&note.title, 13.0, theme::color(colors.text))
                         .font(fonts::MEDIUM)
-                        .width(Fill),
-                    chrome::label(modified_label(note), 11, colors.muted)
-                ]
-                .spacing(8)
-                .align_y(iced::Center);
+                        .width(Fill)
+                        .into();
+                // Only a board is marked, so a Markdown row is as it was.
+                let name = if note.kind == NoteKind::Board {
+                    row![chrome::icon(Icon::Board, 13.0, colors.muted), name]
+                        .spacing(6)
+                        .align_y(iced::Center)
+                        .width(Fill)
+                        .into()
+                } else {
+                    name
+                };
+                let title = row![name, chrome::label(modified_label(note), 11, colors.muted)]
+                    .spacing(8)
+                    .align_y(iced::Center);
                 let mut label = column![title].spacing(3).clip(true);
                 if !self.filters.notes.trim().is_empty() {
                     label = label.push(
