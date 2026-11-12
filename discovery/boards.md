@@ -1846,6 +1846,8 @@ In `test_requests.rs`: `editor.insert`, `editor.undo`, `editor.redo`, `editor.ac
 
 *Gates* at `0d44daf`: `make check` (2,801 Rust tests in its two passes, 28 ignored, 0 failed; 293 Python units); `ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced make smoke-x11`, 262 passed and 2 skipped; the board files on headless Weston tiny-skia, 17 passed, 1 skipped, 4 native deselected; `test_board_perf.py` on X11 and Weston with wgpu on lavapipe, passed; the strict docs build, no issues. Nothing draws differently, so no scene was captured; `wren-board` is untouched, so `make fuzz-board` and `make perf-board` were not run.
 
+*Verification* at `a21784a` (the fix step's record, `docs(discovery): record the boards-p1-app fix step`): no blocker or major open, the idle-geometry minor closed by `0d44daf`, the other two minors open as deviations 1 and 2 say. The gates above re-run with the same counts: `make check` 2,801 Rust tests and 293 Python units; the X11 suite 262 passed and 2 skipped, the board files there gate 6 passed and 1 skipped, native 4, perf 1, view 10; Weston tiny-skia 17 passed, 1 skipped, 4 native deselected; `test_board_perf.py` on X11 lavapipe passed; the macOS cross-lint clean; the strict docs build clean. Idle counts with the 1,000-shape grid open were 0 parses, 0 scene builds and 0 geometry builds on X11 tiny-skia and lavapipe. `capture_scenes.py --only boards` on tiny-skia, dark and light, is byte-identical to the review's capture, so the fix step changed nothing drawn.
+
 #### boards-p2-edit
 Nothing yet.
 #### boards-p2-canvas
