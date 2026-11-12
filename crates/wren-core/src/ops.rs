@@ -1939,6 +1939,40 @@ mod tests {
         session.apply_at(Op::FinishReconcile(result), secs(seconds))
     }
 
+    #[test]
+    fn unchanged_boards_are_never_extracted_or_sent_again() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("S/G")).unwrap();
+        for number in 0..200 {
+            fs::write(
+                root.path().join(format!("S/G/Board {number}.wren-board")),
+                format!("schema = 1\n\n[node.n{number}]\ntext = \"Label {number}\"\n"),
+            )
+            .unwrap();
+        }
+        fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        assert_eq!(session.model.notes.len(), 201);
+        assert_eq!(session.index.extractions, 200);
+        let revision = session.index.revision();
+
+        for tick in 1..=40 {
+            session.apply_at(Op::Tick, secs(tick)).unwrap();
+        }
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(session.index.revision(), revision);
+
+        session.set_background_reconcile(true);
+        for tick in 41..=80 {
+            let result = begin(&mut session, tick).run();
+            assert_eq!(result.sent_contents(), Some(0));
+            finish(&mut session, result, tick).unwrap();
+        }
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(session.index.revision(), revision);
+    }
+
     fn id_at(session: &Session, path: &str) -> NoteId {
         session
             .model

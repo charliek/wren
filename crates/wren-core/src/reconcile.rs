@@ -141,6 +141,18 @@ impl std::fmt::Debug for ReconcileResult {
 }
 
 impl ReconcileResult {
+    /// How many notes' contents a finished job sends back.
+    #[cfg(test)]
+    pub(crate) fn sent_contents(&self) -> Option<usize> {
+        self.payload
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()?
+            .as_ref()
+            .ok()
+            .map(|scanned| scanned.contents.len())
+    }
+
     pub(crate) fn take(&self) -> Payload {
         self.payload
             .lock()
