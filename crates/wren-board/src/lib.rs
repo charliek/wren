@@ -10,6 +10,29 @@
 //! ([`Named::Other`]); unknown keys and everything under `ext` are kept as
 //! TOML values ([`Extra`]), so a load followed by a save loses nothing a
 //! newer build wrote.
+//!
+//! The pipeline, each step a plain function of the one before:
+//!
+//! - [`parse`] reads any valid TOML of the board's shape into a [`Board`],
+//!   or fails with a [`ParseError`] naming a line and column. It never
+//!   panics and never repairs anything.
+//! - [`check`] lists what is wrong but still loads (dangling ends, parent
+//!   cycles, missing kinds and stacking keys); [`access`] says whether this
+//!   build may edit the board; [`placements`] resolves the parent tree.
+//! - [`write`] writes the canonical form: deterministic, one field per
+//!   line, so one edit changes one line, and `write(parse(write(m)))` is
+//!   `write(m)`.
+//! - [`scene::build`] lays a board out for drawing, with [`shape`] for
+//!   outlines and label boxes, [`route`] for connector paths and [`style`]
+//!   for colours. [`svg::write`] serialises a scene; [`search_text`]
+//!   gives the labels search indexes.
+//!
+//! The format, the scene rules and their constants are specified in the
+//! plan, `discovery/boards.md`, §3.7 and §4. Golden files under `golden/`
+//! pin the format (`format/`), the scene (`scene/`) and the SVG (`svg/`);
+//! `WREN_BLESS=1 cargo test -p wren-board` rewrites them for review as a
+//! diff. `make fuzz-board` runs the property tests at full count and
+//! `make perf-board` times parse, write and scene build, both in release.
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
@@ -21,6 +44,7 @@ mod fixtures;
 mod read;
 pub mod route;
 pub mod scene;
+mod search;
 pub mod shape;
 pub mod style;
 pub mod svg;
@@ -30,6 +54,7 @@ pub use check::{
     access, check, placements, Access, Issue, IssueKind, Placed, Reason, MAX_DEPTH, SCHEMA,
 };
 pub use read::{parse, ParseError};
+pub use search::search_text;
 pub use write::write;
 
 /// The editing grid, in board units. It is never stored, and off-grid
@@ -493,5 +518,89 @@ mod tests {
         let order: Vec<&str> = nodes.keys().map(Id::as_str).collect();
         assert_eq!(order, ["-", "0", "B", "_", "a", "b"]);
         assert!(nodes.contains_key("B"));
+    }
+
+    /// A board of `nodes` labelled shapes on a 40-column grid, with a
+    /// connector to each right-hand neighbour: about twice as many elements
+    /// as nodes, the shape of a large flowchart.
+    fn grid_board(nodes: usize) -> String {
+        let mut out = String::from(EMPTY);
+        let shapes = [
+            "rect",
+            "rounded",
+            "pill",
+            "ellipse",
+            "diamond",
+            "parallelogram",
+            "cylinder",
+            "document",
+        ];
+        for i in 0..nodes {
+            let (col, row) = (i % 40, i / 40);
+            out += &format!(
+                "\n[node.n{i}]\ntext = \"Step {i}\\nchecks the order\"\nkind = \"shape\"\n\
+                 at = [{}, {}]\nshape = \"{}\"\nsize = [160, 64]\nz = \"V{i}\"\n",
+                col * 200,
+                row * 100,
+                shapes[i % shapes.len()]
+            );
+        }
+        for i in 0..nodes {
+            if i % 40 != 39 && i + 1 < nodes {
+                out += &format!(
+                    "\n[edge.e{i}]\nkind = \"edge\"\nfrom = {{ node = \"n{i}\" }}\n\
+                     to = {{ node = \"n{}\" }}\nlabels = [\n  {{ text = \"next\" }},\n]\nz = \"W{i}\"\n",
+                    i + 1
+                );
+            }
+        }
+        out
+    }
+
+    /// The median of `runs` timings of `work`, in milliseconds.
+    fn median_ms(runs: usize, mut work: impl FnMut()) -> f64 {
+        let mut times: Vec<f64> = (0..runs)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                work();
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        times[runs / 2]
+    }
+
+    /// §6.7's `wren-board` budgets, in release: at 10,000 elements a parse
+    /// within 75 ms and a write within 10 ms; at 1,000 labelled shapes a
+    /// scene build within 5 ms. The other sizes are printed for the record.
+    #[test]
+    #[ignore = "timings; run by make perf-board in release"]
+    fn perf_parse_write_and_scene() {
+        let palette = style::tests::LIGHT;
+        let measure = scene::FixedMeasure;
+        for nodes in [500, 1_000, 5_100] {
+            let text = grid_board(nodes);
+            let board = parse(&text).unwrap();
+            let elements = board.nodes.len() + board.edges.len();
+            let parse_ms = median_ms(9, || drop(parse(&text).unwrap()));
+            let write_ms = median_ms(9, || drop(write(&board)));
+            let scene_ms = median_ms(9, || drop(scene::build(&board, &palette, &measure)));
+            let svg_scene = scene::build(&board, &palette, &measure);
+            let svg_ms = median_ms(9, || drop(svg::write(&svg_scene, &svg::Options::default())));
+            let search_ms = median_ms(9, || drop(search_text(&board)));
+            println!(
+                "{nodes} shapes, {elements} elements, {} KiB: parse {parse_ms:.2} ms, \
+                 write {write_ms:.2} ms, scene {scene_ms:.2} ms, svg {svg_ms:.2} ms, \
+                 search text {search_ms:.2} ms",
+                text.len() / 1024
+            );
+            if elements >= 10_000 {
+                assert!(parse_ms <= 75.0, "parse of {elements}: {parse_ms:.2} ms");
+                assert!(write_ms <= 10.0, "write of {elements}: {write_ms:.2} ms");
+            }
+            if nodes == 1_000 {
+                assert!(scene_ms <= 5.0, "scene of {nodes} shapes: {scene_ms:.2} ms");
+            }
+        }
     }
 }
