@@ -24,7 +24,7 @@
 //!   read ([`Labels`]).
 //!
 //! The viewer takes no input yet beyond focus. With the `test-support`
-//! feature a view counts its scene and geometry builds ([`Probe`]).
+//! feature a view counts its scene and geometry builds (`Probe`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
