@@ -12,6 +12,9 @@ use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, NoteId, SectionId};
 use wren_core::ops::{Event, ExternalChangeKind, Op, Session, SessionOptions, Trash};
 
+#[path = "support/released_v0_1_1.rs"]
+mod released;
+
 const ORIGINAL: &str = "original\n";
 const DRAFT: &str = "my unsaved draft\n";
 const EXTERNAL: &str = "external writer\n";
@@ -2663,6 +2666,32 @@ fn assert_note_kind(
     }
 }
 
+/// Released Wren must load the state file this build wrote, and no v1 key
+/// may name anything but a Markdown note.
+fn assert_released_state(fixture: &Fixture) {
+    let path = fixture.path().join(".wren/workspace.toml");
+    let Ok(bytes) = fs::read(&path) else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    released::accepts(&bytes).unwrap_or_else(|error| panic!("{error}:\n{text}"));
+    let table: toml::Table = text.parse().unwrap();
+    for key in ["history", "recent", "last_open_note"] {
+        let values = match table.get(key) {
+            Some(toml::Value::Array(values)) => values.clone(),
+            Some(value) => vec![value.clone()],
+            None => Vec::new(),
+        };
+        for value in values {
+            let value = value.as_str().unwrap();
+            assert!(
+                value.to_lowercase().ends_with(".md"),
+                "{key} names {value}:\n{text}"
+            );
+        }
+    }
+}
+
 /// Runs the table for one kind. `open` opens a session that lists that kind.
 fn ops_keep_the_note_kind(kind: NoteKind, open_session: impl Fn(&Fixture) -> Session) {
     let ext = kind.extension();
@@ -2672,6 +2701,11 @@ fn ops_keep_the_note_kind(kind: NoteKind, open_session: impl Fn(&Fixture) -> Ses
     fs::create_dir_all(fixture.path().join("A/H")).unwrap();
     fs::create_dir_all(fixture.path().join("B/K")).unwrap();
     let mut session = open_session(&fixture);
+    let at = |session: &mut Session, op: Op, time: u64| {
+        let events = at(session, op, time);
+        assert_released_state(&fixture);
+        events
+    };
     let g = group(&session, "A/G");
     let h = group(&session, "A/H");
     let k = group(&session, "B/K");
@@ -2840,6 +2874,11 @@ fn ops_keep_the_note_kind(kind: NoteKind, open_session: impl Fn(&Fixture) -> Ses
 #[test]
 fn op_by_kind_table_markdown() {
     ops_keep_the_note_kind(NoteKind::Markdown, Fixture::session);
+}
+
+#[test]
+fn op_by_kind_table_board() {
+    ops_keep_the_note_kind(NoteKind::Board, Fixture::board_session);
 }
 
 #[test]

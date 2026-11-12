@@ -390,10 +390,16 @@ impl Session {
             .selection()
             .and_then(|path| session.resolve_selection(&path))
             .or_else(|| {
-                session
-                    .state
-                    .last_open_note()
-                    .and_then(|path| session.resolve_selection(&path))
+                // The Markdown fallback is what released Wren reopens, which
+                // matters when the last open note is a kind this Session does
+                // not list.
+                [
+                    session.state.last_open_note(),
+                    session.state.markdown_last_open_note(),
+                ]
+                .into_iter()
+                .flatten()
+                .find_map(|path| session.resolve_selection(&path))
             });
         if let Some((parent, note)) = selected {
             session.selected_parent = Some(parent);
@@ -978,7 +984,13 @@ impl Session {
                     .find(|section| section.path == *path)
                     .map(|section| self.section_parent(section.id))
             })?;
-        let last = self.state.last_open_note().and_then(|path| {
+        let last = [
+            self.state.last_open_note(),
+            self.state.markdown_last_open_note(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|path| {
             self.model
                 .notes
                 .iter()
@@ -1704,9 +1716,8 @@ impl Session {
             .iter()
             .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
             .collect::<Vec<_>>();
-        self.state.set_history(&history);
-        self.state.set_history_position(self.history_index);
-        self.state.set_recent(&recent);
+        self.state
+            .set_navigation(&history, self.history_index, &recent);
     }
 
     fn persist_metadata(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
