@@ -1,0 +1,4 @@
+# Board fixtures and golden files hold CRLF, BOM and odd-spacing inputs on
+# purpose: no line-ending conversion and no whitespace checks.
+crates/wren-board/golden/** -text -whitespace
+tools/wrentest/fixtures/boards/** -text -whitespace

@@ -4894,6 +4894,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "wren-board"
+version = "0.1.1"
+dependencies = [
+ "toml",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "wren-canvas"
+version = "0.1.1"
+dependencies = [
+ "iced",
+ "wren-board",
+]
+
+[[package]]
 name = "wren-core"
 version = "0.1.1"
 dependencies = [
@@ -4930,6 +4946,8 @@ dependencies = [
  "swash",
  "tempfile",
  "tokio",
+ "wren-board",
+ "wren-canvas",
  "wren-core",
  "wren-editor",
  "wren-markdown",

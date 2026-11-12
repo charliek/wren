@@ -13,11 +13,14 @@ NFPM ?= nfpm
 # poll this URL forever, so the appcast must never move (RELEASING.md).
 SPARKLE_FEED_URL ?= https://raw.githubusercontent.com/charliek/wren/main/packaging/macos/appcast.xml
 SPARKLE_PUBLIC_KEY ?= packaging/macos/sparkle-ed-public-key.txt
+# What the smoke targets hand pytest: a folder, files or a path glob, such as
+# only the board suite. A glob, not -k, so "board" does not match "keyboard".
+SMOKE_TESTS ?= tools/wrentest
 
-.PHONY: help setup build run test test-python fmt fmt-check clippy check check-patches build-smoke smoke-x11 smoke-wayland perf-search package package-debug release-binary deb app dmg icons
+.PHONY: help setup build run test test-python fmt fmt-check clippy check check-patches build-smoke smoke-x11 smoke-wayland perf-search fuzz-board perf-board package package-debug release-binary deb app dmg icons
 
 help:
-	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.' '  make deb            Linux: build target/dist/wren_<version>_<arch>.deb with nfpm (native ARCH only).' '  make app            macOS: build and sign target/dist/macos/Wren.app (Developer ID if WREN_DEVELOPER_ID_IDENTITY is set).' '  make dmg            macOS: package that Wren.app as target/dist/Wren-<version>.dmg.' '  RELEASE_VERSION=X.Y.Z[-pre] names the release; it must equal the Cargo version.' '  make icons          Regenerate committed app icons from assets/icon/wren-icon.svg.' '  make icons ICON_COLORS="eyes=#FFAA00"  Recolor a role in the SVG, then regenerate.'
+	@printf '%s\n' 'Wren development commands:' '  make setup          Fetch locked Rust/Python dependencies.' '  make run            Restore the last workspace, or show onboarding.' '  make run ARGS="--workspace /ABS/PATH"  Browse and autosave Markdown notes.' '  make run ARGS="--editor"  Launch the unsaved editor evaluation.' '  make check          Run formatting, Clippy, Rust, and Python unit tests.' '  make smoke-x11      Run real-window X11 acceptance under Xvfb.' '  make smoke-wayland  Run headless Wayland acceptance.' '  make perf-search    Measure release search and filesystem workloads.' '  make fuzz-board     Run the board format property tests at full count, in release.' '  make perf-board     Time board parse, write and scene build, in release.' '  make smoke-x11 SMOKE_TESTS="PATHS"  Run only those test files.' '  make package        Build a normal release executable and uninstalled native bundle.' '  make package-debug  Build the same bundle with a normal debug executable.' '  PACKAGE_OUTPUT=/new/path overrides the bundle output; existing outputs are never replaced.' '  make deb            Linux: build target/dist/wren_<version>_<arch>.deb with nfpm (native ARCH only).' '  make app            macOS: build and sign target/dist/macos/Wren.app (Developer ID if WREN_DEVELOPER_ID_IDENTITY is set).' '  make dmg            macOS: package that Wren.app as target/dist/Wren-<version>.dmg.' '  RELEASE_VERSION=X.Y.Z[-pre] names the release; it must equal the Cargo version.' '  make icons          Regenerate committed app icons from assets/icon/wren-icon.svg.' '  make icons ICON_COLORS="eyes=#FFAA00"  Recolor a role in the SVG, then regenerate.'
 
 setup:
 	cargo fetch --locked
@@ -39,6 +42,14 @@ test-python:
 perf-search:
 	cargo test -p wren-core --lib --release --locked index::tests::benchmark_search_5000_notes_25mb_under_30ms -- --ignored --exact --nocapture
 	cargo test -p wren-core --test navigation --release --locked benchmark_filesystem_5000_notes_25mb_load_reconcile_and_edits -- --ignored --exact --nocapture
+
+# Full counts of the ignored wren-board tests; the default run keeps small
+# counts so `make test` stays fast. Names start fuzz_ or perf_ to be picked here.
+fuzz-board:
+	cargo test -p wren-board --lib --release --locked fuzz_ -- --ignored --nocapture
+
+perf-board:
+	cargo test -p wren-board --lib --release --locked perf_ -- --ignored --nocapture --test-threads=1
 
 package:
 	cargo build --locked --release -p wren-iced --target-dir target/package-build --target "$(PACKAGE_HOST)"
@@ -95,11 +106,14 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
-# The editor crate also builds on its own, without features the app unifies in.
+# The editor and board crates also build on their own, without features the
+# app unifies in.
 clippy:
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo clippy --workspace --all-targets --locked --features smoke-test -- -D warnings
 	cargo clippy -p wren-editor --all-targets --locked -- -D warnings
+	cargo clippy -p wren-board --all-targets --locked -- -D warnings
+	cargo clippy -p wren-canvas --all-targets --locked -- -D warnings
 
 check: fmt-check clippy test test-python check-patches
 
@@ -115,7 +129,7 @@ build-smoke:
 	cargo build --locked -p wren-iced --features smoke-test
 
 smoke-x11: build-smoke
-	uv run --locked --group test python tools/run_display.py x11 -- uv run --locked --group test pytest tools/wrentest --junitxml=target/wrentest/x11-$(or $(ICED_BACKEND),default)/junit.xml
+	uv run --locked --group test python tools/run_display.py x11 -- uv run --locked --group test pytest $(SMOKE_TESTS) --junitxml=target/wrentest/x11-$(or $(ICED_BACKEND),default)/junit.xml
 
 smoke-wayland: build-smoke
-	uv run --locked --group test python tools/run_display.py wayland -- uv run --locked --group test pytest tools/wrentest -m 'not native_x11' --junitxml=target/wrentest/wayland-$(or $(ICED_BACKEND),default)/junit.xml
+	uv run --locked --group test python tools/run_display.py wayland -- uv run --locked --group test pytest $(SMOKE_TESTS) -m 'not native_x11' --junitxml=target/wrentest/wayland-$(or $(ICED_BACKEND),default)/junit.xml

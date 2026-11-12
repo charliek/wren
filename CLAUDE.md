@@ -9,6 +9,24 @@ when one lands, move what users need into `docs/` and trim the note.
 
 ## Layout
 
+- `crates/wren-board/`: boards (`Name.wren-board`), the second note kind,
+  being built on the `boards` branch to `discovery/boards.md` (§3.1 is the
+  module plan, §4 the file format's only contract). Toolkit-neutral, with
+  no iced or Wren dependency (only `toml` and `unicode-segmentation`).
+  `lib.rs` holds the model (`Board`, `Node`, `Edge`; unknown content kept
+  as `toml` values) and the theme's `Palette`; `scene.rs` holds the display
+  list, built from a board, a `Palette` and a text `Measure`, that both the
+  canvas and the SVG writer draw, so the two cannot disagree.
+  `FixedMeasure` is the font-free measurer for tests. Full-count property
+  tests and timings are ignored tests named `fuzz_*` and `perf_*`, run by
+  `make fuzz-board` and `make perf-board`.
+- `crates/wren-canvas/`: the board widget, kept free of Wren types as
+  `wren-editor` is. It must not depend on `wren-core` or know app messages;
+  the host passes in a `Palette`, a style, the font and a key policy. It
+  paints a `wren_board::scene` through iced's geometry API as a custom
+  advanced widget (not `canvas::Program`), and its interaction machine is a
+  pure function. Test-only accessors sit behind its `test-support`
+  feature, which `wren-iced/smoke-test` enables.
 - `crates/wren-core/`: toolkit-neutral core, with no iced dependency.
   `ops.rs` holds the ordered `Session`, the one owner of every mutation.
   The rest: `scan.rs`/`reconcile.rs` (disk → model, with reconciliation off

@@ -1,0 +1,27 @@
+[package]
+name = "wren-canvas"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "A board canvas widget for iced 0.14"
+
+[lints]
+workspace = true
+
+[features]
+# Accessors the host's functional test harness reads; not part of the API.
+test-support = []
+
+[dependencies]
+# The least iced the widget builds with, as wren-editor's, plus the
+# geometry API it paints a scene through.
+iced = { version = "=0.14.0", default-features = false, features = [
+    "advanced",
+    "canvas",
+    "thread-pool",
+    "tiny-skia",
+    "x11",
+] }
+wren-board.workspace = true

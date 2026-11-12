@@ -1,0 +1,17 @@
+[package]
+name = "wren-board"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The board model, its canonical TOML file format, and the scene it draws"
+
+# Kept free of iced and wren-core so the format and the scene have one
+# toolkit-neutral owner, as wren-markdown is for Markdown.
+[lints]
+workspace = true
+
+[dependencies]
+toml.workspace = true
+unicode-segmentation.workspace = true

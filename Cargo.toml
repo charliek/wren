@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/wren-core", "crates/wren-editor", "crates/wren-iced", "crates/wren-markdown", "crates/wren-sparkle"]
+members = [
+    "crates/wren-board",
+    "crates/wren-canvas",
+    "crates/wren-core",
+    "crates/wren-editor",
+    "crates/wren-iced",
+    "crates/wren-markdown",
+    "crates/wren-sparkle",
+]
 exclude = ["vendor/cosmic-text", "vendor/iced_winit", "vendor/swash"]
 default-members = ["crates/wren-iced"]
 
@@ -12,6 +20,8 @@ publish = false
 license = "MIT"
 
 [workspace.dependencies]
+wren-board = { path = "crates/wren-board" }
+wren-canvas = { path = "crates/wren-canvas" }
 wren-core = { path = "crates/wren-core" }
 wren-editor = { path = "crates/wren-editor" }
 wren-sparkle = { path = "crates/wren-sparkle" }

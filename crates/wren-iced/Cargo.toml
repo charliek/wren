@@ -14,9 +14,11 @@ name = "wren"
 path = "src/main.rs"
 
 [features]
-smoke-test = ["wren-editor/test-support", "iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rustix"]
+smoke-test = ["wren-editor/test-support", "wren-canvas/test-support", "iced/sysinfo", "dep:serde_json", "dep:tokio", "dep:rustix"]
 
 [dependencies]
+wren-board.workspace = true
+wren-canvas.workspace = true
 wren-core.workspace = true
 wren-editor.workspace = true
 wren-markdown.workspace = true
