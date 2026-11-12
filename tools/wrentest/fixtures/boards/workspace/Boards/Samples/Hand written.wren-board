@@ -1,0 +1,37 @@
+# A board written by hand, the way a person or a script might write one.
+# Wren keeps these bytes until the first edit, which rewrites the file in
+# canonical form.
+
+schema=1
+
+[edge.flow]
+kind = "edge"
+to   = { node = "second" }
+from = { node = "first" }
+labels = [ { text = "then" } ]
+z = "c"
+
+[node.second]
+kind="shape"
+text = "Second step"
+at = [ 200, 0 ]
+size = [ 120, 60 ]
+shape = 'rounded'
+z = "b"
+
+[node.first]
+text = """First step"""
+kind = "shape"
+size = [120,60]
+at = [0,0]
+z = "a"
+
+    [node.first.style]
+    color = "green"   # one of the eight colour tokens
+
+[node.caption]
+kind = "text"
+at = [0, 100]
+size = [320, 20]
+text = "Comments and spacing are not kept."
+z = "d"

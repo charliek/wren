@@ -1,0 +1,46 @@
+schema = 1
+requires = ["frames"]
+layout.direction = "right"
+
+[node.build]
+text = "Build"
+kind = "shape"
+at = [280, 80]
+markup = "md"
+parent = "plan"
+rot = 0
+size = [120, 60]
+z = "V03"
+
+[node.design]
+text = "Design"
+kind = "shape"
+at = [40, 80]
+locked = true
+parent = "plan"
+size = [120, 60]
+z = "V02"
+
+[node.notes]
+text = "Notes"
+kind = "note"
+at = [520, 40]
+file = "Notes.md"
+link = "https://example.com/release"
+size = [200, 120]
+subpath = "#Boards"
+z = "V04"
+
+[node.plan]
+text = "Release plan"
+kind = "frame"
+at = [0, 0]
+size = [440, 200]
+z = "V01"
+
+[edge.design-build]
+kind = "edge"
+from = { node = "design" }
+to = { node = "build" }
+points = [[200, 140], [260, 140]]
+z = "V05"

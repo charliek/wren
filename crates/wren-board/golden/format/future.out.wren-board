@@ -1,0 +1,77 @@
+schema = 1
+requires = ["frames"]
+aaa = 1
+layout.direction = "right"
+zzz.k = "v"
+
+[node.card]
+text = "A note card"
+kind = "note"
+at = [40, 60]
+file = "Notes.md"
+markup = "md"
+parent = "frame"
+rot = 15
+size = [160, 80]
+subpath = "#Heading"
+z = "V02"
+
+[node.frame]
+text = "A frame"
+kind = "frame"
+a_first = 1
+at = [0, 0]
+ext.tool.k = "v"
+link = "https://example.com"
+locked = true
+mid = 2
+size = [400, 240]
+z = "V01"
+zz_last = 3
+
+[node.image]
+kind = "image"
+at = [220, 60]
+parent = "frame"
+size = [140, 120]
+src = "assets/0123abcd.png"
+z = "V03"
+
+[node.shape]
+text = "Known kind"
+kind = "shape"
+aa = 0
+at = [0, 300]
+q = 1
+shape = "star"
+size = [120, 60]
+style.a = 1
+style.color = "red"
+style.dash = 2
+style.fill = "gradient"
+style.q = 3
+style.stroke = "dotted"
+style.zz = 4
+z = "V04"
+zz = 2
+
+[edge.e]
+kind = "edge"
+from = { a = 1, node = "shape", port = "x", zz = 2 }
+to = { anchor = [500, 0], b = 3, node = "card", side = "centre" }
+aa = 1
+heads = ["arrow", "open"]
+labels = [
+  { a = 0, at = 100, font = "x", text = "t", zz = 1 },
+]
+locked = false
+m = 2
+points = [[100, 280], [120, 200]]
+route = "curved"
+style.a = 1
+style.color = "blue"
+style.s = 2
+style.stroke = "dashed"
+style.zz = 3
+z = "V05"
+zz = 3

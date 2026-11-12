@@ -17,9 +17,12 @@ when one lands, move what users need into `docs/` and trim the note.
   as `toml` values) and the theme's `Palette`; `scene.rs` holds the display
   list, built from a board, a `Palette` and a text `Measure`, that both the
   canvas and the SVG writer draw, so the two cannot disagree.
-  `FixedMeasure` is the font-free measurer for tests. Full-count property
-  tests and timings are ignored tests named `fuzz_*` and `perf_*`, run by
-  `make fuzz-board` and `make perf-board`.
+  `FixedMeasure` is the font-free measurer for tests. `golden/format/`
+  holds the bytes the canonical writer must reproduce: each
+  `<name>.in.wren-board` writes to `<name>.out.wren-board`, and an `.out`
+  alone writes to itself. Full-count property tests and timings are
+  ignored tests named `fuzz_*` and `perf_*`, run by `make fuzz-board` and
+  `make perf-board`.
 - `crates/wren-canvas/`: the board widget, kept free of Wren types as
   `wren-editor` is. It must not depend on `wren-core` or know app messages;
   the host passes in a `Palette`, a style, the font and a key policy. It
@@ -81,8 +84,11 @@ when one lands, move what users need into `docs/` and trim the note.
 - `tools/`: the Python functional harness (`wrentest/`, which drives a real
   window over a private test socket), its unit tests (`wrentest_unit/`),
   packaging (`package.py`), `capture_scenes.py` for visual review,
-  `check_updater.py` (the Sparkle check on a Mac), and `update_appcast.py`
-  (the release's appcast entry).
+  `check_updater.py` (the Sparkle check on a Mac), `update_appcast.py`
+  (the release's appcast entry), and `board_format.py`, a second
+  implementation of the board file format, with which `board_fixtures.py`
+  writes the board fixtures (`wrentest/fixtures/boards/`, a sample
+  workspace) and `wren-board`'s format golden files.
 
 ## Architecture rules
 

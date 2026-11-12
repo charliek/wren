@@ -1,0 +1,106 @@
+schema = 1
+
+[node.cylinder]
+text = "Cylinder"
+kind = "shape"
+at = [320, 120]
+shape = "cylinder"
+size = [120, 60]
+z = "V07"
+
+[node.diamond]
+text = "Diamond"
+kind = "shape"
+at = [0, 120]
+shape = "diamond"
+size = [120, 60]
+z = "V05"
+
+[node.document]
+text = "Document"
+kind = "shape"
+at = [480, 120]
+shape = "document"
+size = [120, 60]
+z = "V08"
+
+[node.ellipse]
+text = "Ellipse"
+kind = "shape"
+at = [480, 0]
+shape = "ellipse"
+size = [120, 60]
+z = "V04"
+
+[node.parallelogram]
+text = "Parallelogram"
+kind = "shape"
+at = [160, 120]
+shape = "parallelogram"
+size = [120, 60]
+z = "V06"
+
+[node.pill]
+text = "Pill"
+kind = "shape"
+at = [320, 0]
+shape = "pill"
+size = [120, 60]
+z = "V03"
+
+[node.rect]
+text = "Rect"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V01"
+
+[node.rounded]
+text = "Rounded"
+kind = "shape"
+at = [160, 0]
+shape = "rounded"
+size = [120, 60]
+z = "V02"
+
+[edge.e0]
+kind = "edge"
+from = { node = "rect" }
+to = { node = "rounded" }
+z = "V10"
+
+[edge.e1]
+kind = "edge"
+from = { node = "rounded", side = "top" }
+to = { node = "pill", side = "bottom" }
+z = "V11"
+
+[edge.e2]
+kind = "edge"
+from = { node = "pill", side = "right" }
+to = { node = "ellipse", side = "left" }
+z = "V12"
+
+[edge.e3]
+kind = "edge"
+from = { anchor = [500, 1000], node = "ellipse" }
+to = { anchor = [0, 0], node = "document" }
+z = "V13"
+
+[edge.e4]
+kind = "edge"
+from = { anchor = [1000, 500], node = "diamond", side = "left" }
+to = { at = [-80, 300] }
+z = "V14"
+
+[edge.e5]
+kind = "edge"
+from = { at = [0, 300] }
+to = { node = "cylinder" }
+z = "V15"
+
+[edge.e6]
+kind = "edge"
+from = { at = [-40, -40] }
+to = { at = [-40, 400] }
+z = "V16"

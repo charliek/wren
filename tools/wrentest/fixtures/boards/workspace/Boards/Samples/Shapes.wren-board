@@ -1,0 +1,131 @@
+schema = 1
+
+[node.child]
+text = "Child of the frame"
+kind = "shape"
+at = [40, 80]
+parent = "frame"
+size = [160, 60]
+z = "V0B"
+
+[node.cylinder]
+text = "Cylinder"
+kind = "shape"
+at = [380, 120]
+shape = "cylinder"
+size = [120, 80]
+style.color = "cyan"
+z = "V06"
+
+[node.diamond]
+text = "Diamond"
+kind = "shape"
+at = [0, 120]
+shape = "diamond"
+size = [140, 80]
+style.color = "yellow"
+z = "V04"
+
+[node.document]
+text = "Document"
+kind = "shape"
+at = [540, 120]
+shape = "document"
+size = [120, 80]
+style.color = "red"
+style.fill = "solid"
+z = "V07"
+
+[node.ellipse]
+text = "Ellipse"
+kind = "shape"
+at = [480, 0]
+shape = "ellipse"
+size = [120, 60]
+style.color = "purple"
+z = "V03"
+
+[node.frame]
+text = "Frame, a kind this build does not know"
+kind = "frame"
+at = [0, 360]
+size = [400, 180]
+z = "V0A"
+
+[node.hexagon]
+text = "Unknown shape"
+kind = "shape"
+at = [280, 260]
+shape = "hexagon"
+size = [160, 60]
+z = "V09"
+
+[node.parallelogram]
+text = "Parallelogram"
+kind = "shape"
+at = [180, 120]
+shape = "parallelogram"
+size = [160, 60]
+style.color = "orange"
+z = "V05"
+
+[node.pill]
+text = "Pill"
+kind = "shape"
+at = [320, 0]
+shape = "pill"
+size = [120, 60]
+style.color = "green"
+z = "V02"
+
+[node.rect]
+text = "Rectangle"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V"
+
+[node.rounded]
+text = "Rounded"
+kind = "shape"
+at = [160, 0]
+shape = "rounded"
+size = [120, 60]
+style.color = "blue"
+z = "V01"
+
+[node.text]
+text = "Free text has no outline\nand sits top left."
+kind = "text"
+at = [0, 260]
+size = [240, 40]
+z = "V08"
+
+[edge.child-hexagon]
+kind = "edge"
+from = { node = "child" }
+to = { node = "hexagon" }
+labels = [
+  { text = "elbow" },
+]
+z = "V0E"
+
+[edge.dangling]
+kind = "edge"
+from = { node = "document" }
+to = { node = "gone" }
+z = "V0F"
+
+[edge.pill-ellipse]
+kind = "edge"
+from = { node = "pill" }
+to = { node = "ellipse" }
+style.stroke = "dashed"
+z = "V0D"
+
+[edge.rect-rounded]
+kind = "edge"
+from = { node = "rect" }
+to = { node = "rounded" }
+route = "straight"
+z = "V0C"

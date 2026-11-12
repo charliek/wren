@@ -1,0 +1,13 @@
+# A comment before everything
+schema = 1 # trailing comment
+
+# a block comment
+[node.a] # after a header
+text = "First" # after a value
+kind = "shape"
+at = [0, 0]   # spaces, then a comment
+size = [
+  120, # inside an array
+  60,
+]
+z = "V01"

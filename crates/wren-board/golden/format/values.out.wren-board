@@ -1,0 +1,24 @@
+schema = 1
+
+[node.a]
+text = "Values"
+kind = "shape"
+at = [0, 0]
+ext.values.arrays = [[1, 2], [3], [], ["a", 0.5, { k = "v" }]]
+ext.values.bools = [true, false]
+ext.values.date = 1979-05-27
+ext.values.floats = [1.0, 0.25, -0.0, 0.1, 1000000000000000.0, 1e16, 1e21, 1e-5, 1.5e-7, 1.7976931348623157e308, 5e-324, nan, inf, -inf]
+ext.values.ints = [0, -5, 9223372036854775807, -9223372036854775808]
+ext.values.local = 1979-05-27T07:32:00.5
+ext.values.nested.deeper.deepest = "x"
+ext.values.nested.empty = {}
+ext.values.offset = 1979-05-27T07:32:00-08:00
+ext.values.one = 1.0
+ext.values.tables = [
+  { at = [1, 2], name = "first" },
+  {},
+]
+ext.values.time = 07:32:00.25
+ext.values.utc = 2026-11-12T10:00:00Z
+size = [120, 60]
+z = "V01"
