@@ -1658,6 +1658,30 @@ The sample fixtures paint in at most 3 layers: `Checkout flow` 1, `Shapes` 2, `O
 - *Phase 2.* The widget sends a `Move` for every cursor move while a button it saw pressed is held, left drags included, and a `Press` for every button over the board; the 4 px threshold and hit tests can build on them.
 
 **Gates** at the head of V4: `make check` (2,735 Rust tests in its two passes, 28 ignored; 290 Python units); the full X11 tiny-skia suite on both engines, 241 passed and 1 skipped; `cargo clippy --target aarch64-apple-darwin` on `wren-iced` with `smoke-test`, clean; the board checks above in place of the board test files, which are A8's.
+
+**The fix step.**
+
+*Deviations.*
+1. *A drag whose release is lost.* The widget's own state is rebuilt when the tree around the board changes during a drag (the palette's `stack!` does it), so it forgot the press and never forwarded the release, and the machine stayed in Panning. The fix has two parts. The widget forwards a release it did not see pressed whenever the machine is panning, and does not capture it, since the release may belong to the overlay. The machine treats a press during a drag as the start of a new one, because the drag's release never came. A `Cancel` before the press, the review's other suggestion, was not used: it also lets Space go, so a Space still held would stop panning.
+2. *The edit budget is replaced* (see *Budgets* above): 10 ms at 100 % and 12 ms fitted, with the numbers and the reason. The cut that would meet 8 ms waits for Phase 2's `edit::Change`.
+3. *For the serial edit on `boards` at the phase end.* §8.4 leaves those edits to that step, so the review's two minors are listed here:
+   - §3.2 gains `Message::Resized { width, height }`, `Effect::Look(Viewport)` (kept or replaced by Phase 2's contract commit), `Style { labels, scale_factor }`, `BoardView::{layers, palette, epoch, size, machine}`, the public `Measurer`, `Viewport::{fitting, zoomed_to}`, and `FIT_MARGIN`, `ZOOM_STOPS` and `REST`.
+   - §3.7's last paragraph should read "fits every shape but the cylinder", with V2/V3 deviation 1's reason. The other option is §3.7's own rule: change the cylinder's label inset or the default size before the Phase 2 golden layout is written. The owner or the phase-end review chooses.
+   - §6.7's frame-build row takes the replaced budget.
+
+*Review.*
+- Counts: 0 blockers, 2 majors (the stuck drag, the missed edit budget), 2 minors (§3.7's `Notify customer` claim, §3.2's surface).
+- Fix commits:
+  - `fix(canvas): end a drag whose release the widget lost` adds two regression tests, `machine::tests::a_press_after_a_lost_release_starts_over` and `widget::tests::a_drag_ends_when_the_widget_state_is_rebuilt_under_it`. The review's xdotool sequence (middle down, `alt+k`, middle up, Escape, then a plain left drag of 50 px) now leaves `panning` false and the viewport where it was; before the fix the viewport moved to (-250, -100).
+  - `docs(discovery): replace the board edit budget with measured numbers`.
+- Not fixed: the two minors. Both are edits to §3.2 and §3.7, which §8.4 leaves to the phase end; deviation 3 lists them. §3.7's choice is also the owner's or the phase-end review's.
+
+*Gates* at the head of the fix step:
+- `make check`: 2,739 Rust tests in its two passes, 28 ignored; 290 Python units.
+- The full X11 tiny-skia suite on both engines: 241 passed and 1 skipped.
+- `cargo clippy --target aarch64-apple-darwin` on `wren-iced` with `smoke-test`: clean.
+- `tools/board_spike.py`: `view`, `keys`, `wheel`, `layers` and `zoom` on X11 tiny-skia, and `view`, `layers` and `zoom` on headless Weston tiny-skia, all passing.
+- `perf --shapes 1000`: three release runs on each of tiny-skia and lavapipe, all passing their build counts.
 #### boards-p1-app
 Nothing yet.
 #### boards-p2-edit
