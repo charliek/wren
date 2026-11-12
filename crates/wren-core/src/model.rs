@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::fs_store::RelPath;
+use crate::kind::NoteKind;
 
 // ---------------------------------------------------------------------------
 // ID types — shared monotonic counter, never reused within a session
@@ -60,6 +60,7 @@ pub struct Note {
     pub id: NoteId,
     pub group: GroupId,
     pub title: String,
+    pub kind: NoteKind,
     pub path: RelPath,
     pub subtitle: Option<String>,
     pub modified: SystemTime,
@@ -204,7 +205,7 @@ impl Workspace {
         for note in &mut self.notes {
             if let Some(new) = remap_one(note.path.as_path(), from_path, to_path) {
                 if let Ok(rp) = RelPath::new(&new) {
-                    note.title = note_title(rp.file_name());
+                    note.title = note.kind.title(rp.file_name());
                     note.path = rp;
                     note.subtitle = group_paths
                         .get(&note.group)
@@ -218,21 +219,6 @@ impl Workspace {
 // ---------------------------------------------------------------------------
 // Helpers (pub(crate) for use by scan)
 // ---------------------------------------------------------------------------
-
-/// Extract a note title from its filename, stripping a trailing `.md`
-/// (case-insensitive).
-pub(crate) fn note_title(file_name: &OsStr) -> String {
-    let name = file_name.to_string_lossy();
-    if name.len() > 3
-        && name
-            .get(name.len() - 3..)
-            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".md"))
-    {
-        name[..name.len() - 3].to_string()
-    } else {
-        name.into_owned()
-    }
-}
 
 /// Directory display name: the last path component.
 pub(crate) fn dir_name(rel: &RelPath) -> String {
@@ -360,44 +346,6 @@ mod tests {
         assert_eq!(natural_cmp("", ""), Ordering::Equal);
         assert_eq!(natural_cmp("", "a"), Ordering::Less);
         assert_eq!(natural_cmp("a", ""), Ordering::Greater);
-    }
-
-    // -- note_title --
-
-    #[test]
-    fn note_title_strips_md_extension() {
-        assert_eq!(note_title(OsStr::new("design.md")), "design");
-        assert_eq!(note_title(OsStr::new("Design.MD")), "Design");
-        assert_eq!(note_title(OsStr::new("notes.Md")), "notes");
-        assert_eq!(note_title(OsStr::new("UPPER.mD")), "UPPER");
-    }
-
-    #[test]
-    fn note_title_preserves_non_md() {
-        assert_eq!(note_title(OsStr::new("file.txt")), "file.txt");
-        assert_eq!(note_title(OsStr::new("readme")), "readme");
-        assert_eq!(note_title(OsStr::new("data.json")), "data.json");
-    }
-
-    #[test]
-    fn note_title_edge_cases() {
-        assert_eq!(note_title(OsStr::new("a.md")), "a");
-        assert_eq!(note_title(OsStr::new(".md")), ".md");
-        assert_eq!(note_title(OsStr::new("x.md.md")), "x.md");
-    }
-
-    #[test]
-    fn note_title_unicode_stem() {
-        assert_eq!(note_title(OsStr::new("café.md")), "café");
-        assert_eq!(note_title(OsStr::new("日本語.md")), "日本語");
-        assert_eq!(note_title(OsStr::new("🎵.md")), "🎵");
-    }
-
-    #[test]
-    fn note_title_preserves_unicode_without_md_extension() {
-        for name in ["\u{1f426}", "café", "日本語", "éé", "é.M"] {
-            assert_eq!(note_title(OsStr::new(name)), name);
-        }
     }
 
     // -- compute_subtitle --
@@ -528,6 +476,7 @@ mod tests {
             id: nid,
             group: gid,
             title: "design".into(),
+            kind: NoteKind::Markdown,
             path: rel("Projects/WebApp/design.md"),
             subtitle: None,
             modified: SystemTime::UNIX_EPOCH,
@@ -584,6 +533,7 @@ mod tests {
             id: nid1,
             group: gid,
             title: "design".into(),
+            kind: NoteKind::Markdown,
             path: rel("Projects/WebApp/design.md"),
             subtitle: None,
             modified: SystemTime::UNIX_EPOCH,
@@ -593,6 +543,7 @@ mod tests {
             id: nid2,
             group: gid,
             title: "arch".into(),
+            kind: NoteKind::Markdown,
             path: rel("Projects/WebApp/docs/arch.md"),
             subtitle: Some("docs/arch.md".into()),
             modified: SystemTime::UNIX_EPOCH,
@@ -633,6 +584,32 @@ mod tests {
             Path::new("Work/WebApp/docs/arch.md"),
         );
         assert_eq!(ws.notes[1].subtitle.as_deref(), Some("docs/arch.md"));
+    }
+
+    #[test]
+    fn remap_keeps_a_board_title_without_its_extension() {
+        let mut ws = populated_workspace();
+        let board = NoteId(ws.allocate_id());
+        ws.notes.push(Note {
+            id: board,
+            group: ws.groups[0].id,
+            title: "Flow".into(),
+            kind: NoteKind::Board,
+            path: rel("Projects/WebApp/Flow.wren-board"),
+            subtitle: None,
+            modified: SystemTime::UNIX_EPOCH,
+            bytes: 11,
+        });
+
+        ws.remap_paths(&rel("Projects/WebApp"), &rel("Projects/Frontend"));
+
+        let note = ws.note(board).unwrap();
+        assert_eq!(note.title, "Flow");
+        assert_eq!(note.kind, NoteKind::Board);
+        assert_eq!(
+            note.path.as_path(),
+            Path::new("Projects/Frontend/Flow.wren-board")
+        );
     }
 
     #[test]

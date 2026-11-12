@@ -3,6 +3,7 @@ pub mod config;
 pub mod fs_store;
 pub mod index;
 pub mod keybind;
+pub mod kind;
 pub mod model;
 pub mod ops;
 pub mod reconcile;

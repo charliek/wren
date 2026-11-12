@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::fs_store::{
     DirectoryListing, DiskFile, EntryKind, FsStore, RelPath, StoreError, StoreReader,
 };
+use crate::kind::NoteKind;
 use crate::model::{
-    compute_subtitle, natural_cmp, note_title, Group, GroupId, Note, NoteId, ScanWarning, Section,
-    SectionId, Workspace,
+    compute_subtitle, natural_cmp, Group, GroupId, Note, NoteId, ScanWarning, Section, SectionId,
+    Workspace,
 };
 
 // ---------------------------------------------------------------------------
@@ -126,7 +127,7 @@ fn scan_with_fs_contents(
         }
 
         if kind == EntryKind::File {
-            if is_markdown_name(&name) {
+            if listed_kind(&name).is_some() {
                 ws.warnings.push(warn(
                     entry.path(),
                     "Markdown file at workspace root ignored",
@@ -233,7 +234,7 @@ fn scan_section_entries(
         }
 
         if kind == EntryKind::File {
-            if is_markdown_name(&name) {
+            if listed_kind(&name).is_some() {
                 ws.warnings.push(warn(
                     entry.path(),
                     "note outside a group ignored; move it into a group to see it",
@@ -333,9 +334,9 @@ fn scan_group_entries(
             }
 
             if kind == EntryKind::File {
-                if !is_markdown_name(&name) {
+                let Some(note_kind) = listed_kind(&name) else {
                     continue;
-                }
+                };
                 let name_str = match name.to_str() {
                     Some(s) => s,
                     None => {
@@ -360,6 +361,7 @@ fn scan_group_entries(
                     store,
                     ws,
                     group_id,
+                    note_kind,
                     note_rel,
                     &entry.path(),
                     prev_notes,
@@ -399,6 +401,7 @@ fn add_note(
     store: &StoreReader,
     ws: &mut Workspace,
     group: GroupId,
+    kind: NoteKind,
     note_rel: RelPath,
     abs_path: &Path,
     prev_notes: &HashMap<&Path, &Note>,
@@ -415,7 +418,8 @@ fn add_note(
             let note = Note {
                 id: note_id,
                 group,
-                title: note_title(note_rel.file_name()),
+                title: kind.title(note_rel.file_name()),
+                kind,
                 path: note_rel,
                 subtitle,
                 modified: disk_file.modified,
@@ -685,9 +689,10 @@ fn is_dot_prefixed(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with('.')
 }
 
-fn is_markdown_name(name: &OsStr) -> bool {
-    let s = name.to_string_lossy();
-    s.len() > 3 && s.as_bytes()[s.len() - 3..].eq_ignore_ascii_case(b".md")
+/// The kind of note a file name gives, among the kinds a scan lists. Only
+/// Markdown is listed until a session asks for boards.
+fn listed_kind(name: &OsStr) -> Option<NoteKind> {
+    NoteKind::from_name(name).filter(|kind| *kind == NoteKind::Markdown)
 }
 
 fn warn(path: impl Into<PathBuf>, message: impl Into<String>) -> ScanWarning {
@@ -2100,15 +2105,23 @@ mod tests {
     }
 
     #[test]
-    fn test_is_markdown_name() {
-        assert!(is_markdown_name(std::ffi::OsStr::new("note.md")));
-        assert!(is_markdown_name(std::ffi::OsStr::new("NOTE.MD")));
-        assert!(is_markdown_name(std::ffi::OsStr::new("x.Md")));
-        assert!(is_markdown_name(std::ffi::OsStr::new("a.md")));
-        assert!(!is_markdown_name(std::ffi::OsStr::new(".md")));
-        assert!(!is_markdown_name(std::ffi::OsStr::new("file.txt")));
-        assert!(!is_markdown_name(std::ffi::OsStr::new("readme")));
-        assert!(!is_markdown_name(std::ffi::OsStr::new("md")));
+    fn listed_kind_is_markdown_only() {
+        for (name, listed) in [
+            ("note.md", true),
+            ("NOTE.MD", true),
+            ("x.Md", true),
+            ("a.md", true),
+            ("x.wren-board.md", true),
+            (".md", false),
+            ("file.txt", false),
+            ("readme", false),
+            ("md", false),
+            ("x.wren-board", false),
+            ("x.md.wren-board", false),
+        ] {
+            let kind = listed_kind(std::ffi::OsStr::new(name));
+            assert_eq!(kind, listed.then_some(NoteKind::Markdown), "{name}");
+        }
     }
 
     // -- special files silently skipped --

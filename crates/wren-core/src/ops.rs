@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::autosave::Autosave;
 use crate::fs_store::{DiskFile, Expected, Fault, FsStore, RelPath, WriteReceipt};
 use crate::index::Index;
+use crate::kind::NoteKind;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
@@ -568,7 +569,8 @@ impl Session {
                 self.model.notes.push(Note {
                     id,
                     group,
-                    title: model::note_title(receipt.path.file_name()),
+                    title: NoteKind::Markdown.title(receipt.path.file_name()),
+                    kind: NoteKind::Markdown,
                     path: receipt.path,
                     subtitle: None,
                     modified: receipt.file.modified,
@@ -1142,7 +1144,7 @@ impl Session {
         bytes: &[u8],
     ) -> Result<WriteReceipt, String> {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H%M");
-        let title = model::note_title(path.file_name());
+        let title = NoteKind::Markdown.title(path.file_name());
         let mut end = title.len().min(180);
         while !title.is_char_boundary(end) {
             end -= 1;

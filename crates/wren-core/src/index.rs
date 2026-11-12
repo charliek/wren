@@ -966,6 +966,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
+    use crate::kind::NoteKind;
     use crate::model::{self, Group, Note, Section};
 
     use super::*;
@@ -999,7 +1000,8 @@ mod tests {
             workspace.notes.push(Note {
                 id,
                 group,
-                title: model::note_title(RelPath::new(path).unwrap().file_name()),
+                title: NoteKind::Markdown.title(RelPath::new(path).unwrap().file_name()),
+                kind: NoteKind::Markdown,
                 path: RelPath::new(path).unwrap(),
                 subtitle: None,
                 modified: SystemTime::UNIX_EPOCH,
@@ -1686,6 +1688,7 @@ mod tests {
                 id: NoteId(number + 10),
                 group: GroupId(3),
                 title: title.clone(),
+                kind: NoteKind::Markdown,
                 path: RelPath::new(format!("A/G/{title}.md")).unwrap(),
                 subtitle: None,
                 modified: SystemTime::UNIX_EPOCH,
