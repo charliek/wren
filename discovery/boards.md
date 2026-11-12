@@ -1833,6 +1833,19 @@ In `test_requests.rs`: `editor.insert`, `editor.undo`, `editor.redo`, `editor.ac
 - Scenes looked at, tiny-skia and lavapipe: `board-flow` in both themes (47 %, every label, the footer), `board-notes-list` (the Notes column active, the icon on the six boards), `board-zoom-in` (200 %, labels sharp), `board-zoom-out` (25 %: tiny-skia draws no label under 4 px, lavapipe draws them), `board-shapes` (every shape, the free text, the placeholder and its caption, the dangling stub, `1 issue`), `board-overlap` (occlusion right), `board-raw` (the banner naming line 1, column 9, `Board as text · 20 lines`), `board-search` (the snippet with `Payment` highlighted), `board-wide`. `board-flow.svg` rasterised with ImageMagick matches the canvas.
 - Not run, as the chain did not touch `wren-board`: `make fuzz-board`, `make perf-board`.
 
+**The fix step, run 1b.**
+
+*Deviations.*
+1. *The issue colour stays the red hue until Phase 3.* Reproduced: `issue` and `hues[0]` are both the theme's `danger` in all eleven themes (CIE76 ΔE 0), and in `board-shapes` the issue dot on the red solid `Document` is half lost in its fill, its stub drawn in the same red. It is not changed here because no provisional colour removes the collision, it only moves it: seven hues around the wheel leave no saturated colour far from all of them, and `warning`, the obvious other role, comes within ΔE 4.4 of the derived orange (Dracula) and 7.9 of the derived yellow (Nord). The fix belongs where the colours are chosen for good: ST1 and ST3 add a rule that `issue` is a set distance from every hue at solid and at stroke in every theme, or the scene gives the marker and the stub a canvas-coloured ring so they read on any fill (a `wren-board` scene change, with its goldens). Phase 3 chooses; until then a flagged red element's marker is hard to see, and the footer's `N issue(s)` still names it.
+2. *Commit trailers wait for the owner.* Every commit of the chain, this step's included, ends with a `Claude-Session:` link after its `Co-Authored-By:` line, because the session's attribution rule asks for both. Removing it means rewording every commit of the chain before anything is pushed; that is the owner's decision, made once for the whole effort, and is not taken here.
+
+*Review.*
+- Counts: 0 blockers, 0 majors, 3 minors (the issue colour equal to red, no check of geometry builds while idle, the `Claude-Session` trailers).
+- Fix commits: `0d44daf` `test(boards): check an idle board builds no geometry`. `perf.board` reports the open board's `parses`, `scenes` and `builds` (§6.2 and `docs/development/testing.md` say so), and `test_board_perf.py` asserts that none moves over the idle second with the 1,000-shape grid open, the regression test for exit criterion 9; a pan run must move `builds`, so the idle check cannot pass on a dead counter. All four lanes measured 0, 0 and 0.
+- Not fixed: the issue colour (deviation 1: provisional palette, the remedy is Phase 3's, ST1 and ST3 or the scene) and the trailers (deviation 2: the owner decides before any push).
+
+*Gates* at `0d44daf`: `make check` (2,801 Rust tests in its two passes, 28 ignored, 0 failed; 293 Python units); `ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced make smoke-x11`, 262 passed and 2 skipped; the board files on headless Weston tiny-skia, 17 passed, 1 skipped, 4 native deselected; `test_board_perf.py` on X11 and Weston with wgpu on lavapipe, passed; the strict docs build, no issues. Nothing draws differently, so no scene was captured; `wren-board` is untouched, so `make fuzz-board` and `make perf-board` were not run.
+
 #### boards-p2-edit
 Nothing yet.
 #### boards-p2-canvas
