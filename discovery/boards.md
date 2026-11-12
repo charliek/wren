@@ -1672,8 +1672,8 @@ The sample fixtures paint in at most 3 layers: `Checkout flow` 1, `Shapes` 2, `O
 *Review.*
 - Counts: 0 blockers, 2 majors (the stuck drag, the missed edit budget), 2 minors (§3.7's `Notify customer` claim, §3.2's surface).
 - Fix commits:
-  - `fix(canvas): end a drag whose release the widget lost` adds two regression tests, `machine::tests::a_press_after_a_lost_release_starts_over` and `widget::tests::a_drag_ends_when_the_widget_state_is_rebuilt_under_it`. The review's xdotool sequence (middle down, `alt+k`, middle up, Escape, then a plain left drag of 50 px) now leaves `panning` false and the viewport where it was; before the fix the viewport moved to (-250, -100).
-  - `docs(discovery): replace the board edit budget with measured numbers`.
+  - `50c3a9e` `fix(canvas): end a drag whose release the widget lost` adds two regression tests, `machine::tests::a_press_after_a_lost_release_starts_over` and `widget::tests::a_drag_ends_when_the_widget_state_is_rebuilt_under_it`. The review's xdotool sequence (middle down, `alt+k`, middle up, Escape, then a plain left drag of 50 px) now leaves `panning` false and the viewport where it was; before the fix the viewport moved to (-250, -100).
+  - `95fb591` `docs(discovery): replace the board edit budget with measured numbers`.
 - Not fixed: the two minors. Both are edits to §3.2 and §3.7, which §8.4 leaves to the phase end; deviation 3 lists them. §3.7's choice is also the owner's or the phase-end review's.
 
 *Gates* at the head of the fix step:
@@ -1682,6 +1682,9 @@ The sample fixtures paint in at most 3 layers: `Checkout flow` 1, `Shapes` 2, `O
 - `cargo clippy --target aarch64-apple-darwin` on `wren-iced` with `smoke-test`: clean.
 - `tools/board_spike.py`: `view`, `keys`, `wheel`, `layers` and `zoom` on X11 tiny-skia, and `view`, `layers` and `zoom` on headless Weston tiny-skia, all passing.
 - `perf --shapes 1000`: three release runs on each of tiny-skia and lavapipe, all passing their build counts.
+
+*Verification* at `f4ffc7a`: both majors closed, no blocker or major open, the gates above re-run with the same counts. The review's xdotool sequence and its other lost-release cases (a reload or scene swap mid-drag, Space released in the palette) behave correctly. Re-measured edit cost, release, median scene + draw: tiny-skia fitted 6.6 to 8.5 ms and at 100 % 6.4 to 9.3 ms over five runs, with one run at 15.3 ms at 100 % under contention from another process (its 100 % scene build took 13.9 ms against 6.6 ms for the same fitted build); lavapipe fitted 9.6 to 11.0 ms and at 100 % 7.2 to 8.3 ms over three runs. The lavapipe fitted medians sit close to the new 12 ms, so the phase-end performance lens should measure them again.
+
 #### boards-p1-app
 Nothing yet.
 #### boards-p2-edit
