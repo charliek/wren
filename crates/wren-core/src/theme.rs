@@ -514,6 +514,78 @@ pub fn for_appearance(appearance: Appearance) -> Theme {
     }
 }
 
+/// The hue angles, in degrees, of the board's orange, yellow, green, cyan,
+/// purple and blue. Red is the theme's own `danger`.
+const BOARD_HUES: [f32; 6] = [28.0, 48.0, 135.0, 187.0, 270.0, 215.0];
+
+/// The colours a board is drawn in under a theme with these colours.
+///
+/// The seven hues are provisional. Red is the theme's `danger`, and the
+/// other six are that colour turned to a fixed hue angle at its saturation
+/// and lightness, so they suit the theme without being tuned for it: their
+/// contrast on the canvas and under a label is not yet checked. The surface
+/// colours are the editor's.
+pub fn board_palette(colors: &Colors) -> wren_board::Palette {
+    let rgba = |Rgb(r, g, b): Rgb| wren_board::Rgba::rgb(r, g, b);
+    let (_, saturation, lightness) = hsl(colors.danger);
+    let mut hues = [rgba(colors.danger); 7];
+    for (hue, angle) in hues.iter_mut().skip(1).zip(BOARD_HUES) {
+        *hue = rgba(from_hsl(angle, saturation, lightness));
+    }
+    wren_board::Palette {
+        canvas: rgba(colors.editor),
+        ink: rgba(colors.text),
+        muted: rgba(colors.muted),
+        raised: rgba(colors.raised),
+        accent: rgba(colors.accent),
+        issue: rgba(colors.danger),
+        hues,
+        dark: luma(colors.editor) < luma(colors.text),
+    }
+}
+
+/// A rough brightness, enough to tell a dark surface from its light text.
+fn luma(Rgb(r, g, b): Rgb) -> u32 {
+    2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b)
+}
+
+/// Hue in degrees, and saturation and lightness from 0 to 1.
+fn hsl(Rgb(r, g, b): Rgb) -> (f32, f32, f32) {
+    let [r, g, b] = [r, g, b].map(|channel| f32::from(channel) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (max + min) / 2.0;
+    let chroma = max - min;
+    if chroma == 0.0 {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = chroma / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if max == r {
+        ((g - b) / chroma).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / chroma + 2.0
+    } else {
+        (r - g) / chroma + 4.0
+    };
+    (hue * 60.0, saturation, lightness)
+}
+
+fn from_hsl(hue: f32, saturation: f32, lightness: f32) -> Rgb {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue.rem_euclid(360.0) / 60.0;
+    let second = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match sector as u8 {
+        0 => (chroma, second, 0.0),
+        1 => (second, chroma, 0.0),
+        2 => (0.0, chroma, second),
+        3 => (0.0, second, chroma),
+        4 => (second, 0.0, chroma),
+        _ => (chroma, 0.0, second),
+    };
+    let floor = lightness - chroma / 2.0;
+    let channel = |value: f32| ((value + floor) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb(channel(r), channel(g), channel(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +801,72 @@ mod tests {
             assert_eq!(for_appearance(appearance).appearance, appearance);
         }
         assert!(luminance(DARK.colors.editor) < luminance(LIGHT.colors.editor));
+    }
+
+    #[test]
+    fn hsl_round_trips_every_theme_colour() {
+        for theme in BUILT_INS {
+            let c = theme.colors;
+            for color in [c.danger, c.accent, c.success, c.link, c.editor, c.text] {
+                let (hue, saturation, lightness) = hsl(color);
+                let Rgb(r, g, b) = from_hsl(hue, saturation, lightness);
+                for (back, channel) in [(r, color.0), (g, color.1), (b, color.2)] {
+                    assert!(back.abs_diff(channel) <= 1, "{}: {color:?}", theme.name);
+                }
+            }
+        }
+        assert_eq!(from_hsl(0.0, 1.0, 0.5), Rgb(255, 0, 0));
+        assert_eq!(from_hsl(120.0, 1.0, 0.5), Rgb(0, 255, 0));
+        assert_eq!(from_hsl(240.0, 1.0, 0.5), Rgb(0, 0, 255));
+        assert_eq!(from_hsl(77.0, 0.0, 0.5), Rgb(128, 128, 128));
+        assert_eq!(hsl(Rgb(128, 128, 128)).1, 0.0);
+    }
+
+    #[test]
+    fn every_board_token_resolves_in_every_theme() {
+        use wren_board::{style, Color, Fill, Token, Vocabulary};
+
+        assert_eq!(BUILT_INS.len(), 11);
+        for theme in BUILT_INS {
+            let name = theme.name;
+            let c = theme.colors;
+            let palette = board_palette(&c);
+            let rgba = |Rgb(r, g, b): Rgb| wren_board::Rgba::rgb(r, g, b);
+            assert_eq!(palette.dark, theme.appearance == Appearance::Dark, "{name}");
+            assert_eq!(palette.canvas, rgba(c.editor), "{name}");
+            assert_eq!(palette.ink, rgba(c.text), "{name}");
+            assert_eq!(palette.hues[0], rgba(c.danger), "{name}");
+            for (index, hue) in palette.hues.iter().enumerate() {
+                assert!(!palette.hues[..index].contains(hue), "{name}: hue {index}");
+                assert!(![palette.canvas, palette.ink].contains(hue), "{name}");
+            }
+            for token in Token::ALL {
+                for fill in Fill::ALL {
+                    let colors = style::resolve(&Color::Token(*token), *fill, &palette);
+                    let what = format!("{name}: {} at {}", token.name(), fill.name());
+                    assert_ne!(colors.stroke, palette.canvas, "{what}");
+                    let expected = match token {
+                        Token::Neutral => palette.ink,
+                        hue => palette.hues[*hue as usize - 1],
+                    };
+                    assert_eq!(colors.stroke, expected, "{what}");
+                    match (fill, colors.fill) {
+                        (Fill::None, None) => assert_eq!(colors.label, palette.ink, "{what}"),
+                        (Fill::None, Some(_)) | (_, None) => panic!("{what}: fill"),
+                        (Fill::Tint, Some(fill)) => {
+                            assert_ne!(fill, palette.canvas, "{what}");
+                            assert_eq!(colors.label, palette.ink, "{what}");
+                        }
+                        (Fill::Solid, Some(fill)) => {
+                            assert_ne!(colors.label, fill, "{what}");
+                            assert!(
+                                style::contrast(colors.label, fill) >= 3.0,
+                                "{what}: label on fill"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

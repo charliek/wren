@@ -591,11 +591,14 @@ fn fuzzy_pattern(query: &str) -> Pattern {
 
 /// The text search reads for a note of `kind`, or `None` to read the source
 /// itself, which keeps a Markdown note's text one shared allocation, byte for
-/// byte what was read. Boards are searched by their source until `wren-core`
-/// can parse them.
-fn searchable(kind: NoteKind, _source: &str) -> Option<String> {
+/// byte what was read. A board is searched by its labels, so its TOML keys
+/// and ids never match; one that does not parse is searched as it is written.
+fn searchable(kind: NoteKind, source: &str) -> Option<String> {
     match kind {
-        NoteKind::Markdown | NoteKind::Board => None,
+        NoteKind::Markdown => None,
+        NoteKind::Board => wren_board::parse(source)
+            .ok()
+            .map(|board| wren_board::search_text(&board)),
     }
 }
 
@@ -1656,6 +1659,94 @@ mod tests {
         assert!(preview.text.ends_with('…'));
         index.set_content(BOARD, " \n\t\n", false);
         assert_eq!(index.preview(BOARD), Some(""));
+    }
+
+    /// A valid board: two labelled shapes, the lower one first in the file,
+    /// and a labelled connector.
+    const LABELLED_BOARD: &str = r#"schema = 1
+
+[node.pack]
+text = "Pack the parcel"
+kind = "shape"
+at = [0, 200]
+size = [120, 60]
+
+[node.receive]
+text = "Receive order"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+
+[edge.then]
+kind = "edge"
+from = { node = "receive" }
+to = { node = "pack" }
+labels = [{ text = "when paid" }]
+"#;
+
+    fn search(index: &Index, query: &str) -> Vec<Hit> {
+        index.query(query, Scope::Workspace, QueryKind::Search, 10)
+    }
+
+    #[test]
+    fn a_board_is_searched_by_its_labels_and_never_by_its_toml() {
+        let mut index = board_index();
+        index.set_content(BOARD, LABELLED_BOARD, false);
+        assert_eq!(index.extractions, 1);
+        assert_eq!(
+            index.content(BOARD),
+            Some("Receive order\nPack the parcel\nwhen paid")
+        );
+        // The preview is the first label in reading order, not in file order.
+        assert_eq!(index.preview(BOARD), Some("Receive order"));
+        for word in ["parcel", "RECEIVE", "paid"] {
+            let hits = search(&index, word);
+            assert_eq!(hits.len(), 1, "{word}");
+            assert_eq!(hits[0].note, BOARD, "{word}");
+            let range = hits[0].content_match.clone().unwrap();
+            assert!(
+                index.content(BOARD).unwrap()[range].eq_ignore_ascii_case(word),
+                "{word}"
+            );
+        }
+        let snippet = &search(&index, "parcel")[0].snippet;
+        assert_eq!(snippet.text, "Receive order · Pack the parcel · when paid");
+        assert_eq!(&snippet.text[snippet.highlight.clone().unwrap()], "parcel");
+        for syntax in ["schema", "kind", "shape", "node", "size", "labels"] {
+            assert!(search(&index, syntax).is_empty(), "{syntax}");
+        }
+        // Change detection still reads the source, and the extracted text is
+        // counted beside it.
+        assert_eq!(&*index.content_snapshot()[&BOARD], LABELLED_BOARD);
+        let extracted = index.content(BOARD).unwrap().len();
+        assert_eq!(index.retained_bytes(), LABELLED_BOARD.len() + 2 * extracted);
+        index.set_content(BOARD, LABELLED_BOARD, false);
+        assert_eq!(index.extractions, 1);
+
+        // A board with no label has nothing to find and an empty preview.
+        index.set_content(BOARD, wren_board::EMPTY, false);
+        assert_eq!(index.content(BOARD), Some(""));
+        assert_eq!(index.preview(BOARD), Some(""));
+        assert!(search(&index, "schema").is_empty());
+    }
+
+    #[test]
+    fn a_board_that_does_not_parse_is_searched_as_written() {
+        let mut index = board_index();
+        let conflicted = format!("<<<<<<< ours\n{LABELLED_BOARD}=======\n>>>>>>> theirs\n");
+        assert!(wren_board::parse(&conflicted).is_err());
+        index.set_content(BOARD, &conflicted, false);
+        let content = index.entries[&BOARD].content.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&content.source, &content.text));
+        for word in ["schema", "parcel", "theirs"] {
+            assert_eq!(search(&index, word).len(), 1, "{word}");
+        }
+        assert_eq!(index.preview(BOARD), Some("<<<<<<< ours"));
+
+        // Once the text parses again its labels take over.
+        index.set_content(BOARD, LABELLED_BOARD, false);
+        assert!(search(&index, "schema").is_empty());
+        assert_eq!(search(&index, "parcel").len(), 1);
     }
 
     #[test]

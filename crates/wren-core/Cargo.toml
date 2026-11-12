@@ -17,6 +17,7 @@ toml.workspace = true
 chrono.workspace = true
 nucleo-matcher.workspace = true
 directories.workspace = true
+wren-board.workspace = true
 wren-markdown.workspace = true
 
 [dev-dependencies]

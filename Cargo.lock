@@ -4921,6 +4921,7 @@ dependencies = [
  "tempfile",
  "toml",
  "trash",
+ "wren-board",
  "wren-markdown",
 ]
 
