@@ -15,7 +15,12 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+#[cfg(test)]
+mod fixtures;
+mod read;
 pub mod scene;
+
+pub use read::{parse, ParseError};
 
 /// The editing grid, in board units. It is never stored, and off-grid
 /// values are valid.
@@ -41,6 +46,19 @@ pub struct Board {
     pub edges: BTreeMap<Id, Edge>,
     /// Unknown top-level keys.
     pub extra: Extra,
+}
+
+impl Default for Board {
+    /// The empty schema-1 board, which is what [`EMPTY`] reads as.
+    fn default() -> Self {
+        Self {
+            schema: 1,
+            requires: Vec::new(),
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            extra: Extra::new(),
+        }
+    }
 }
 
 /// An element id: 1 to 32 characters of `[A-Za-z0-9_-]`, compared
@@ -88,6 +106,89 @@ impl fmt::Display for Id {
 pub enum Named<T> {
     Known(T),
     Other(String),
+}
+
+impl<T: Vocabulary> Named<T> {
+    /// `text` as a known value when it names one, exactly and with case;
+    /// otherwise kept as written.
+    pub fn read(text: String) -> Self {
+        T::from_name(&text).map_or(Self::Other(text), Self::Known)
+    }
+
+    /// The value as it is written in a file.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Known(value) => value.name(),
+            Self::Other(text) => text,
+        }
+    }
+
+    /// The known value, or `None` for one this build does not know.
+    pub fn known(&self) -> Option<T> {
+        match self {
+            Self::Known(value) => Some(*value),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+/// A closed set of string values, each written as one fixed name.
+pub trait Vocabulary: Copy + Sized + 'static {
+    /// Every value, in declaration order.
+    const ALL: &'static [Self];
+    fn name(self) -> &'static str;
+    fn from_name(name: &str) -> Option<Self>;
+}
+
+macro_rules! vocabulary {
+    ($($ty:ident { $($variant:ident => $name:literal),+ $(,)? })+) => {$(
+        impl Vocabulary for $ty {
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+
+            fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    )+};
+}
+
+vocabulary! {
+    NodeKind { Shape => "shape", Text => "text" }
+    Shape {
+        Rect => "rect",
+        Rounded => "rounded",
+        Pill => "pill",
+        Ellipse => "ellipse",
+        Diamond => "diamond",
+        Parallelogram => "parallelogram",
+        Cylinder => "cylinder",
+        Document => "document",
+    }
+    EdgeKind { Edge => "edge" }
+    Side { Top => "top", Right => "right", Bottom => "bottom", Left => "left" }
+    Head { None => "none", Arrow => "arrow" }
+    Route { Straight => "straight", Elbow => "elbow" }
+    Token {
+        Neutral => "neutral",
+        Red => "red",
+        Orange => "orange",
+        Yellow => "yellow",
+        Green => "green",
+        Cyan => "cyan",
+        Purple => "purple",
+        Blue => "blue",
+    }
+    Fill { None => "none", Tint => "tint", Solid => "solid" }
+    Dash { Solid => "solid", Dashed => "dashed" }
 }
 
 /// `[node.<id>]`.
@@ -138,6 +239,17 @@ pub struct NodeStyle {
     pub extra: Extra,
 }
 
+impl Default for NodeStyle {
+    fn default() -> Self {
+        Self {
+            color: Color::Token(Token::Neutral),
+            fill: Named::Known(Fill::Tint),
+            stroke: Named::Known(Dash::Solid),
+            extra: Extra::new(),
+        }
+    }
+}
+
 /// `[edge.<id>]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Edge {
@@ -154,6 +266,12 @@ pub struct Edge {
     pub z: Option<String>,
     /// Unknown keys, the reserved ring-1 fields, and `ext`.
     pub extra: Extra,
+}
+
+impl Edge {
+    /// No marker at the `from` end and an arrow at the `to` end.
+    pub const DEFAULT_HEADS: [Named<Head>; 2] =
+        [Named::Known(Head::None), Named::Known(Head::Arrow)];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -205,6 +323,11 @@ pub struct Label {
     pub extra: Extra,
 }
 
+impl Label {
+    /// The middle of the route.
+    pub const DEFAULT_AT: i32 = 500;
+}
+
 /// A connector's `style` table. A connector has no fill, so a `fill` key
 /// here is unknown content.
 #[derive(Clone, Debug, PartialEq)]
@@ -212,6 +335,16 @@ pub struct EdgeStyle {
     pub color: Color,
     pub stroke: Named<Dash>,
     pub extra: Extra,
+}
+
+impl Default for EdgeStyle {
+    fn default() -> Self {
+        Self {
+            color: Color::Token(Token::Neutral),
+            stroke: Named::Known(Dash::Solid),
+            extra: Extra::new(),
+        }
+    }
 }
 
 /// `style.color`.
@@ -222,6 +355,33 @@ pub enum Color {
     Hex([u8; 3]),
     /// Any other string, kept as written and drawn as `neutral`.
     Unknown(String),
+}
+
+impl Color {
+    /// A token by its exact name, `#rrggbb` in either case, or else the
+    /// string kept as written.
+    pub fn read(text: String) -> Self {
+        if let Some(token) = Token::from_name(&text) {
+            return Self::Token(token);
+        }
+        match text.strip_prefix('#').and_then(hex_rgb) {
+            Some(rgb) => Self::Hex(rgb),
+            None => Self::Unknown(text),
+        }
+    }
+}
+
+fn hex_rgb(digits: &str) -> Option<[u8; 3]> {
+    let bytes = digits.as_bytes();
+    if bytes.len() != 6 || !bytes.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let channel = |i: usize| {
+        digits
+            .get(i..i + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
 /// The colour tokens. Each theme's [`Palette`] supplies the seven hues

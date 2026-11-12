@@ -1368,7 +1368,10 @@ Items 5 and 6, in run 1a.
 #### boards-p1-core
 Nothing yet.
 #### boards-p1-model
-Nothing yet.
+M1 (model types and `parse`).
+- *Surface added inside §3.2's meaning:* `parse` and `ParseError` (with `Display` and `Error`) at the crate root from a private `read.rs`; a `Vocabulary` trait over the closed-set enums (`ALL`, `name`, `from_name`), `Named::{read, as_str, known}`, `Color::read`, `Default` for `Board` (the empty schema-1 board), `NodeStyle` and `EdgeStyle`, `Edge::DEFAULT_HEADS`, `Label::DEFAULT_AT`.
+- *Where the plan was silent:* an error's line and column are those of the key for a field (the column counts characters, a leading BOM excluded), of the item for an array item, of the id in its header for a record missing `at`, `size`, `from` or `to`, and line 1 for a missing `schema`. `size`, `anchor`, an endpoint's `at` and `heads` must have exactly two items, as `at` must: each is a known field whose type is a pair. In a free end, `side` and `anchor` are unknown content. A `requires` entry outside `[a-z0-9-]{1,32}` is not an error: it is a feature this build does not know (read-only, M3). `schema` must fit `i32` like every known integer. The `toml` crate's nesting cap is exactly 80: depth 80 loads and 81 fails.
+- *Tests split across items:* test 2 compares models in M1 (`requires` compared sorted) and gains the byte comparison with `write` in M2; test 7's read-only cases load in M1 and get their `access` assertions in M3; test 9's "also checks and writes" joins in M2 and M3. Test 9's wrong-type half builds `toml::Table` values directly (33 known-field paths, every wrong type) and asserts the error's path is that field's.
 #### boards-p1-canvas
 Nothing yet. (Holds the spike record: numbers per run, the S2 and S3 screenshots, the chosen strategy, the S8 decision.)
 #### boards-p1-app
