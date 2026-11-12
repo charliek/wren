@@ -1,0 +1,645 @@
+//! The board surface: which of the editor and the board viewer shows the
+//! open note. `sync_editor` decides it, when another note opens or the
+//! Session's text is not what the surface last took, and everything else
+//! asks [`App::surface`].
+
+use std::collections::HashMap;
+
+use wren_board::{Palette, ParseError};
+use wren_canvas::{BoardView, Viewport};
+use wren_core::model::NoteId;
+
+use super::App;
+use crate::fonts;
+
+/// What shows the open note. Only this surface may write its draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Surface {
+    /// A Markdown note, or no note at all, in the editor.
+    Text,
+    /// A board in the viewer. The editor is empty.
+    Board,
+    /// A board whose text does not parse, as text in the editor. It is a
+    /// board again when it is next opened, or when its text changes
+    /// underneath the editor into one that parses; never while it is typed in.
+    Raw,
+}
+
+/// Where each board opened in this run was last looked at from. It is
+/// never stored on disk.
+pub(super) type Viewports = HashMap<NoteId, Viewport>;
+
+/// A view of the board `text` holds, looked at from where `note` was left,
+/// or fitted the first time it opens in this run.
+pub(super) fn open(
+    text: &str,
+    note: NoteId,
+    palette: Palette,
+    viewports: &Viewports,
+) -> Result<BoardView, ParseError> {
+    // Labels are measured when the view opens, which can be before iced
+    // has loaded the bundled faces for a window.
+    fonts::load();
+    let mut view = BoardView::open(text, palette, fonts::UI)?;
+    match viewports.get(&note) {
+        Some(viewport) => view.set_viewport(*viewport),
+        None => view.fit(),
+    }
+    Ok(view)
+}
+
+/// Put away the view of `note`, remembering where it was looked at from.
+/// A view still waiting to be fitted was never looked at.
+pub(super) fn close(view: &BoardView, note: NoteId, viewports: &mut Viewports) {
+    if !view.fit_pending() {
+        viewports.insert(note, view.viewport());
+    }
+}
+
+impl App {
+    pub(super) fn surface(&self) -> Surface {
+        if self.board.is_some() {
+            Surface::Board
+        } else if self.board_error.is_some() {
+            Surface::Raw
+        } else {
+            Surface::Text
+        }
+    }
+
+    /// The colours the current theme gives a board.
+    pub(super) fn board_palette(&self) -> Palette {
+        wren_core::theme::board_palette(&self.definition.colors)
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use iced::widget::text_editor::{Action, Edit, Motion};
+    use wren_core::kind::NoteKind;
+    use wren_core::ops::{Op, Session};
+    use wren_core::theme as definitions;
+
+    use super::super::{Message, Options};
+    use super::*;
+
+    pub const FLOW: &str = r#"schema = 1
+
+[node.pack]
+text = "Pack"
+kind = "shape"
+at = [0, 200]
+size = [120, 60]
+
+[node.receive]
+text = "Receive order"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+
+[edge.then]
+kind = "edge"
+from = { node = "receive" }
+to = { node = "pack" }
+"#;
+
+    /// `FLOW` with one more shape, as another program would save it.
+    pub fn flow_and(label: &str) -> String {
+        format!(
+            "{FLOW}\n[node.extra]\ntext = \"{label}\"\nkind = \"shape\"\nat = [200, 0]\nsize = [120, 60]\n"
+        )
+    }
+
+    /// A board left with merge conflict markers, which is not TOML.
+    pub fn conflicted() -> String {
+        format!("<<<<<<< ours\n{FLOW}=======\n{FLOW}>>>>>>> theirs\n")
+    }
+
+    const GROUP: &str = "Boards/Samples";
+
+    /// A workspace with the setting on: two boards, one that does not
+    /// parse, and a Markdown note. Nothing is open.
+    pub fn fixture() -> (tempfile::TempDir, App) {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join(GROUP);
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("Flow.wren-board"), FLOW).unwrap();
+        std::fs::write(group.join("Other.wren-board"), wren_board::EMPTY).unwrap();
+        std::fs::write(group.join("Broken.wren-board"), conflicted()).unwrap();
+        std::fs::write(group.join("Note.md"), "# Note\n\nwords here\n").unwrap();
+        let app = app_at(directory.path());
+        (directory, app)
+    }
+
+    pub fn app_at(root: &Path) -> App {
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        app.preferences.boards = true;
+        app.workspace_mode = true;
+        app.session = Some(Session::open_with(root, app.session_options()).unwrap());
+        app.sync_editor(true);
+        app
+    }
+
+    pub fn note_id(app: &App, title: &str, kind: NoteKind) -> NoteId {
+        app.model()
+            .unwrap()
+            .notes
+            .iter()
+            .find(|note| note.title == title && note.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind:?} note titled {title}"))
+            .id
+    }
+
+    pub fn open_board(app: &mut App, title: &str) -> NoteId {
+        let note = note_id(app, title, NoteKind::Board);
+        let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
+        note
+    }
+
+    fn open_markdown(app: &mut App, title: &str) -> NoteId {
+        let note = note_id(app, title, NoteKind::Markdown);
+        let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
+        note
+    }
+
+    fn session_text(app: &App) -> String {
+        app.session
+            .as_ref()
+            .and_then(Session::document)
+            .map_or_else(String::new, |document| document.text.clone())
+    }
+
+    fn file(directory: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+        directory.path().join(GROUP).join(name)
+    }
+
+    /// The surface shows the Session's open document and nothing else.
+    #[track_caller]
+    fn assert_in_step(app: &App, expected: Surface) {
+        assert_eq!(app.surface(), expected);
+        let document = app.session.as_ref().unwrap().document();
+        assert_eq!(app.editor_note, document.map(|document| document.note));
+        let text = session_text(app);
+        match expected {
+            Surface::Board => {
+                assert_eq!(app.board.as_ref().unwrap().synced(), text);
+                assert_eq!(app.editor.text(), "", "the hidden editor holds nothing");
+                assert!(app.board_error.is_none());
+            }
+            Surface::Raw => {
+                assert!(app.board.is_none());
+                assert_eq!(app.editor.text(), text);
+                assert!(app.board_error.is_some());
+            }
+            Surface::Text => {
+                assert!(app.board.is_none());
+                assert_eq!(app.editor.text(), text);
+                assert!(app.board_error.is_none());
+            }
+        }
+    }
+
+    /// Give the view a widget size, as its first frame does.
+    fn lay_out(app: &mut App) {
+        let _ = app.board.as_mut().unwrap().update(
+            wren_canvas::Message::Resized {
+                width: 800.0,
+                height: 600.0,
+            },
+            std::time::Instant::now(),
+        );
+    }
+
+    fn parses(app: &App) -> u64 {
+        app.board.as_ref().unwrap().probe.parses.get()
+    }
+
+    fn scenes(app: &App) -> u64 {
+        app.board.as_ref().unwrap().probe.scenes.get()
+    }
+
+    #[test]
+    fn the_surface_follows_the_open_note_through_every_transition() {
+        let (_directory, mut app) = fixture();
+        assert_in_step(&app, Surface::Text);
+        assert!(app.editor_note.is_none());
+
+        open_markdown(&mut app, "Note");
+        assert_in_step(&app, Surface::Text);
+        assert_eq!(app.editor.text(), "# Note\n\nwords here\n");
+        assert_eq!(app.words, 4);
+
+        // Text to Board: the editor is emptied, never left with the note.
+        open_board(&mut app, "Flow");
+        assert_in_step(&app, Surface::Board);
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(view.board().nodes.len(), 2);
+        assert_eq!(view.board().edges.len(), 1);
+        assert_eq!(app.words, 0);
+
+        // Board to Board.
+        open_board(&mut app, "Other");
+        assert_in_step(&app, Surface::Board);
+        assert!(app.board.as_ref().unwrap().board().nodes.is_empty());
+
+        // Board to Raw: the text is in the editor and the error names a line.
+        open_board(&mut app, "Broken");
+        assert_in_step(&app, Surface::Raw);
+        assert_eq!(app.editor.text(), conflicted());
+        assert_eq!(app.board_error.as_ref().unwrap().line, 1);
+
+        // Raw to Board, and Raw to Text.
+        open_board(&mut app, "Flow");
+        assert_in_step(&app, Surface::Board);
+        open_board(&mut app, "Broken");
+        assert_in_step(&app, Surface::Raw);
+        open_markdown(&mut app, "Note");
+        assert_in_step(&app, Surface::Text);
+        assert_eq!(app.editor.text(), "# Note\n\nwords here\n");
+
+        // Board to Text shows the note, not stale or empty text.
+        open_board(&mut app, "Flow");
+        open_markdown(&mut app, "Note");
+        assert_in_step(&app, Surface::Text);
+        assert_eq!(app.editor.text(), "# Note\n\nwords here\n");
+
+        // Back and Forward cross kinds the same way.
+        let _ = app.apply_core(Op::Back).unwrap();
+        assert_in_step(&app, Surface::Board);
+        let _ = app.apply_core(Op::Forward).unwrap();
+        assert_in_step(&app, Surface::Text);
+
+        // No note at all.
+        open_board(&mut app, "Flow");
+        let _ = app.apply_core(Op::OpenNote { note: None }).unwrap();
+        assert_in_step(&app, Surface::Text);
+        assert_eq!(app.editor.text(), "");
+    }
+
+    #[test]
+    fn the_surface_is_decided_again_when_the_text_changes_underneath_it() {
+        let (directory, mut app) = fixture();
+        let flow = file(&directory, "Flow.wren-board");
+        open_board(&mut app, "Flow");
+        assert_eq!(parses(&app), 1);
+
+        // A valid board from elsewhere is reloaded into the same view.
+        std::fs::write(&flow, flow_and("Ship")).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(app.board.as_ref().unwrap().board().nodes.len(), 3);
+        assert_eq!(parses(&app), 2);
+
+        // Conflict markers: raw text, with the line.
+        std::fs::write(&flow, conflicted()).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Raw);
+        assert_eq!(app.board_error.as_ref().unwrap().line, 1);
+
+        // Still not a board: the editor takes the new text and the new error.
+        let broken = format!("{FLOW}\n[node.bad]\nat = \"nowhere\"\n");
+        std::fs::write(&flow, &broken).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Raw);
+        assert_eq!(app.editor.text(), broken);
+        assert!(app.board_error.as_ref().unwrap().line > 1);
+
+        // Fixed on disk: a board again.
+        std::fs::write(&flow, FLOW).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(app.board.as_ref().unwrap().board().nodes.len(), 2);
+
+        // A Markdown file's bytes under a board's name are not a board. (A
+        // heading alone would be: it is a TOML comment, and so an empty one.)
+        let markdown = "# Not a board\n\nJust *words*.\n";
+        std::fs::write(&flow, markdown).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Raw);
+        assert_eq!(app.editor.text(), markdown);
+        assert_eq!(app.board_error.as_ref().unwrap().line, 3);
+
+        // Removed from outside while open.
+        std::fs::write(&flow, FLOW).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Board);
+        std::fs::remove_file(&flow).unwrap();
+        let _ = app.process_core(Op::Reconcile);
+        assert_in_step(&app, Surface::Text);
+        assert!(app.editor_note.is_none());
+    }
+
+    /// `sync_editor` runs only when an op produced events or an error, so
+    /// the surface can follow the Session only if every op that changes the
+    /// open document's identity or text emits one. Each step here changes
+    /// one of the two from outside the surface.
+    #[test]
+    fn every_session_driven_text_change_reaches_the_surface() {
+        let (directory, mut app) = fixture();
+        let flow = file(&directory, "Flow.wren-board");
+        let note = open_board(&mut app, "Flow");
+        assert_in_step(&app, Surface::Board);
+        let mut seen = session_text(&app);
+        let mut changed = |app: &App, what: &str| {
+            let text = session_text(app);
+            assert_ne!(text, seen, "{what} must change the Session's text");
+            seen = text;
+        };
+
+        // A draft from outside the surface, as a later phase's edit or a
+        // harness write would send it.
+        let _ = app
+            .apply_core(Op::EditDraft {
+                note,
+                contents: flow_and("Drafted"),
+            })
+            .unwrap();
+        changed(&app, "a draft");
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(app.board.as_ref().unwrap().board().nodes.len(), 3);
+
+        // That draft meets a change on disk: a conflict copy of the board's
+        // own kind, and the original reloaded.
+        std::fs::write(&flow, flow_and("External")).unwrap();
+        assert!(app.apply_core(Op::Flush).is_err());
+        changed(&app, "a conflict");
+        assert_in_step(&app, Surface::Board);
+        let copy = app.conflict_copy.clone().expect("a conflict copy").1;
+        assert!(copy
+            .as_path()
+            .to_string_lossy()
+            .ends_with(NoteKind::Board.extension()));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join(copy.as_path())).unwrap(),
+            flow_and("Drafted")
+        );
+
+        // A write of the whole note.
+        let _ = app
+            .apply_core(Op::WriteNote {
+                note,
+                contents: flow_and("Written"),
+            })
+            .unwrap();
+        changed(&app, "a write");
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(std::fs::read_to_string(&flow).unwrap(), flow_and("Written"));
+
+        // A clean external reload.
+        std::fs::write(&flow, flow_and("Reloaded")).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        changed(&app, "a reload");
+        assert_in_step(&app, Surface::Board);
+
+        // Ops that keep the text keep the view.
+        let scenes_before = scenes(&app);
+        let parses_before = parses(&app);
+        let _ = app
+            .apply_core(Op::Rename {
+                target: wren_core::model::ItemRef::Note(note),
+                new_name: "Flow renamed".into(),
+            })
+            .unwrap();
+        let _ = app.apply_core(Op::Flush).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(app.editor_note, Some(note));
+        assert_eq!((scenes(&app), parses(&app)), (scenes_before, parses_before));
+
+        // A new board opens from its template; deleting it leaves no board.
+        let group = app.model().unwrap().note(note).unwrap().group;
+        let _ = app
+            .apply_core(Op::CreateNote {
+                group,
+                title: "Fresh".into(),
+                kind: NoteKind::Board,
+            })
+            .unwrap();
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(session_text(&app), wren_board::EMPTY);
+        let fresh = app.editor_note.unwrap();
+        assert_ne!(fresh, note);
+        let _ = app
+            .apply_core(Op::Delete {
+                target: wren_core::model::ItemRef::Note(fresh),
+            })
+            .unwrap();
+        assert_ne!(app.editor_note, Some(fresh));
+        assert_in_step(&app, app.surface());
+    }
+
+    #[test]
+    fn typing_in_a_raw_board_never_flips_the_surface() {
+        let (directory, mut app) = fixture();
+        let note = open_board(&mut app, "Broken");
+        assert_in_step(&app, Surface::Raw);
+
+        // Replace the conflicted text with a board that parses.
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(
+            Action::SelectAll,
+        )));
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+            Edit::Paste(Arc::new(FLOW.into())),
+        ))));
+        assert_eq!(session_text(&app), FLOW);
+        assert_in_step(&app, Surface::Raw);
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
+            Motion::DocumentEnd,
+        ))));
+        let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+            Edit::Paste(Arc::new("# typed\n".into())),
+        ))));
+        let typed = format!("{FLOW}# typed\n");
+        assert_in_step(&app, Surface::Raw);
+
+        // Saving keeps it raw, and saves exactly what was typed.
+        let _ = app.apply_core(Op::Flush).unwrap();
+        assert_in_step(&app, Surface::Raw);
+        assert_eq!(
+            std::fs::read_to_string(file(&directory, "Broken.wren-board")).unwrap(),
+            typed
+        );
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+            let _ = app.apply_core(Op::Reconcile).unwrap();
+        }
+        assert_in_step(&app, Surface::Raw);
+
+        // It is a board the next time it opens.
+        open_markdown(&mut app, "Note");
+        let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(app.board.as_ref().unwrap().board().nodes.len(), 2);
+    }
+
+    #[test]
+    fn an_idle_board_is_never_parsed_or_built_again() {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        let revision = app.edit_revision;
+        assert_eq!((parses(&app), scenes(&app)), (1, 1));
+        for _ in 0..40 {
+            let _ = app.update(Message::Tick);
+        }
+        let _ = app.apply_core(Op::Flush).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        // The same view: a replaced one would have moved the revision.
+        assert_eq!(app.edit_revision, revision);
+        assert_eq!((parses(&app), scenes(&app)), (1, 1));
+
+        // A theme change is one scene build and no parse; the same theme
+        // again is neither.
+        let other = if app.definition == definitions::LIGHT {
+            definitions::DARK
+        } else {
+            definitions::LIGHT
+        };
+        let _ = app.update(Message::ChooseTheme(Some(other)));
+        assert_eq!((parses(&app), scenes(&app)), (1, 2));
+        assert_eq!(
+            *app.board.as_ref().unwrap().palette(),
+            wren_core::theme::board_palette(&other.colors)
+        );
+        let _ = app.update(Message::ChooseTheme(Some(other)));
+        assert_eq!((parses(&app), scenes(&app)), (1, 2));
+    }
+
+    #[test]
+    fn a_board_opens_fitted_once_and_then_returns_to_where_it_was() {
+        let (directory, mut app) = fixture();
+        let flow = open_board(&mut app, "Flow");
+        // The first opening waits for the widget's size, then fits.
+        assert!(app.board.as_ref().unwrap().fit_pending());
+        lay_out(&mut app);
+        let view = app.board.as_ref().unwrap();
+        assert!(!view.fit_pending());
+        let fitted = view.viewport();
+        assert_eq!(
+            fitted,
+            Viewport::fitting(view.scene().bounds, (800.0, 600.0))
+        );
+        let moved = Viewport {
+            x: 37.0,
+            y: -12.0,
+            zoom: 1.5,
+        };
+        app.board.as_mut().unwrap().set_viewport(moved);
+
+        // A reload keeps the viewport.
+        std::fs::write(file(&directory, "Flow.wren-board"), flow_and("Ship")).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_eq!(app.board.as_ref().unwrap().board().nodes.len(), 3);
+        assert_eq!(app.board.as_ref().unwrap().viewport(), moved);
+
+        // Another board has never been looked at: it fits.
+        open_board(&mut app, "Other");
+        assert!(app.board.as_ref().unwrap().fit_pending());
+        // Left before its first frame, it fits the next time too.
+        open_markdown(&mut app, "Note");
+        open_board(&mut app, "Other");
+        assert!(app.board.as_ref().unwrap().fit_pending());
+
+        // Back on the first board, the view is where it was left.
+        let _ = app.apply_core(Op::OpenNote { note: Some(flow) }).unwrap();
+        let view = app.board.as_ref().unwrap();
+        assert!(!view.fit_pending());
+        assert_eq!(view.viewport(), moved);
+        lay_out(&mut app);
+        assert_eq!(app.board.as_ref().unwrap().viewport(), moved);
+
+        // Through the raw fallback and back as well.
+        std::fs::write(file(&directory, "Flow.wren-board"), conflicted()).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_eq!(app.surface(), Surface::Raw);
+        std::fs::write(file(&directory, "Flow.wren-board"), FLOW).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        assert_eq!(app.board.as_ref().unwrap().viewport(), moved);
+
+        // Another workspace's notes are other notes: nothing is remembered.
+        assert_eq!(app.board_viewports.len(), 1);
+        app.sync_editor(true);
+        assert!(app.board_viewports.is_empty());
+        assert!(app.board.as_ref().unwrap().fit_pending());
+    }
+
+    #[test]
+    fn with_the_setting_off_no_board_surface_exists() {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join(GROUP);
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("Flow.wren-board"), FLOW).unwrap();
+        std::fs::write(group.join("Note.md"), "note").unwrap();
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        app.workspace_mode = true;
+        app.session = Some(Session::open_with(directory.path(), app.session_options()).unwrap());
+        app.sync_editor(true);
+        let notes = &app.model().unwrap().notes;
+        assert_eq!(notes.len(), 1);
+        let note = notes[0].id;
+        let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
+        assert_in_step(&app, Surface::Text);
+        assert_eq!(app.editor.text(), "note");
+        assert!(app.board_viewports.is_empty());
+    }
+
+    /// The sample workspace of the harness and the scenes.
+    #[test]
+    fn the_sample_boards_open_as_specified() {
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/wrentest/fixtures/boards/workspace")
+            .join(GROUP);
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join(GROUP);
+        std::fs::create_dir_all(&group).unwrap();
+        for entry in std::fs::read_dir(&samples).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), group.join(entry.file_name())).unwrap();
+        }
+        let mut app = app_at(directory.path());
+        for (title, nodes, edges, issues, editable) in [
+            ("Checkout flow", 15, 17, 0, true),
+            ("Overlap", 3, 0, 0, true),
+            ("Hand written", 3, 1, 0, true),
+            ("Future", 4, 1, 0, false),
+        ] {
+            open_board(&mut app, title);
+            assert_in_step(&app, Surface::Board);
+            let view = app.board.as_ref().unwrap();
+            assert_eq!(view.board().nodes.len(), nodes, "{title}");
+            assert_eq!(view.board().edges.len(), edges, "{title}");
+            assert_eq!(view.issues().len(), issues, "{title}");
+            assert_eq!(
+                *view.access() == wren_board::Access::Editable,
+                editable,
+                "{title}"
+            );
+        }
+        open_board(&mut app, "Shapes");
+        assert_in_step(&app, Surface::Board);
+        let view = app.board.as_ref().unwrap();
+        assert!(!view.issues().is_empty());
+        assert_eq!(*view.access(), wren_board::Access::Editable);
+
+        // Opening wrote nothing.
+        for entry in std::fs::read_dir(&samples).unwrap() {
+            let entry = entry.unwrap();
+            assert_eq!(
+                std::fs::read(entry.path()).unwrap(),
+                std::fs::read(group.join(entry.file_name())).unwrap(),
+                "{:?}",
+                entry.file_name()
+            );
+        }
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+    }
+}

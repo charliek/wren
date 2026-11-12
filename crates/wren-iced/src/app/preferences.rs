@@ -241,6 +241,10 @@ impl App {
         if theme != self.definition {
             self.definition = theme;
             self.toolkit_theme = crate::theme::from_definition(theme);
+            let palette = self.board_palette();
+            if let Some(board) = &mut self.board {
+                board.set_palette(palette);
+            }
         }
     }
 

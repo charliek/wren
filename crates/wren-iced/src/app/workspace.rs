@@ -9,6 +9,7 @@ use wren_core::ops::Document;
 use wren_core::ops::{Event, ExternalChangeKind, Op, Session, SessionOptions};
 use wren_core::reconcile::ReconcileResult;
 
+use super::board::{self, Surface};
 use super::commands::{Disposition, Gateway};
 use super::{focus_editor, App, Message};
 
@@ -789,6 +790,11 @@ impl App {
         created
     }
 
+    /// Brings the surface in step with the Session's open document: which
+    /// of the editor and the board viewer shows it, and with what text. It
+    /// decides again only when another note is open or the Session's text is
+    /// not what the surface last took, so a surface's own draft changes
+    /// nothing here.
     pub(super) fn sync_editor(&mut self, workspace_changed: bool) {
         let Some(session) = &self.session else {
             return;
@@ -797,11 +803,54 @@ impl App {
         let text = session
             .document()
             .map_or("", |document| document.text.as_str());
+        let board_note = note.filter(|note| {
+            session
+                .model()
+                .note(*note)
+                .is_some_and(|entry| entry.kind == NoteKind::Board)
+        });
         let identity_changed = workspace_changed || self.editor_note != note;
-        if identity_changed || self.editor.text() != text {
-            self.editor.replace_text(text, !identity_changed);
-            self.words = text.split_whitespace().count();
-            self.words_due = None;
+        let kind_changed = board_note.is_some() != (self.surface() != Surface::Text);
+        let taken = match &self.board {
+            Some(view) => view.synced() == text,
+            None => self.editor.text() == text,
+        };
+        if identity_changed || kind_changed || !taken {
+            let mut error = None;
+            // The view of the same board takes the new text in place and
+            // keeps its viewport.
+            let reloaded = !identity_changed
+                && board_note.is_some()
+                && self
+                    .board
+                    .as_mut()
+                    .is_some_and(|view| match view.reload(text) {
+                        Ok(()) => true,
+                        Err(reason) => {
+                            error = Some(reason);
+                            false
+                        }
+                    });
+            if !reloaded {
+                if let (Some(view), Some(previous)) = (self.board.take(), self.editor_note) {
+                    board::close(&view, previous, &mut self.board_viewports);
+                }
+                if workspace_changed {
+                    self.board_viewports.clear();
+                }
+                if let (Some(note), None) = (board_note, &error) {
+                    let palette = wren_core::theme::board_palette(&self.definition.colors);
+                    match board::open(text, note, palette, &self.board_viewports) {
+                        Ok(view) => self.board = Some(view),
+                        Err(reason) => error = Some(reason),
+                    }
+                }
+                let shown = if self.board.is_some() { "" } else { text };
+                self.editor.replace_text(shown, !identity_changed);
+                self.words = shown.split_whitespace().count();
+                self.words_due = None;
+            }
+            self.board_error = error;
             self.edit_revision += 1;
             self.editor_note = note;
         }
@@ -1051,6 +1100,46 @@ mod tests {
             #[cfg(feature = "smoke-test")]
             None,
         )
+    }
+
+    #[test]
+    fn a_workspace_whose_open_note_is_a_board_loads_onto_the_board_surface() {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join("Inbox/General");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("Note.md"), "note").unwrap();
+        std::fs::write(group.join("Flow.wren-board"), wren_board::EMPTY).unwrap();
+        let options = SessionOptions { boards: true };
+        let mut earlier = Session::open_with(directory.path(), options).unwrap();
+        let of_kind = |session: &Session, kind| {
+            let notes = &session.model().notes;
+            notes.iter().find(|note| note.kind == kind).unwrap().id
+        };
+        for kind in [NoteKind::Markdown, NoteKind::Board] {
+            let note = Some(of_kind(&earlier, kind));
+            earlier.apply(Op::OpenNote { note }).unwrap();
+        }
+        drop(earlier);
+
+        let (mut app, _) = App::new(Options::default());
+        app.preferences.boards = true;
+        let slot = returning(&mut app, load_with(None, directory.path().into(), options));
+        let _ = app.workspace_loaded(app.load_generation, slot);
+        assert_eq!(app.surface(), Surface::Board);
+        assert_eq!(app.editor.text(), "");
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(view.synced(), wren_board::EMPTY);
+        assert!(view.fit_pending());
+        // The Session holds the workspace's writer lock.
+        drop(app);
+
+        // With the setting off the same workspace opens the Markdown note
+        // that was open before the board.
+        let (mut app, _) = App::new(Options::default());
+        let slot = returning(&mut app, load(None, directory.path().into()));
+        let _ = app.workspace_loaded(app.load_generation, slot);
+        assert_eq!(app.surface(), Surface::Text);
+        assert_eq!(app.editor.text(), "note");
     }
 
     #[test]

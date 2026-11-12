@@ -13,6 +13,7 @@ use wren_editor::EditorView;
 pub use crate::cli::Options;
 use crate::{fonts, theme};
 
+mod board;
 mod board_spike;
 mod columns;
 mod workspace;
@@ -44,6 +45,12 @@ pub struct App {
     preview: preferences::Preview,
     preferences: preferences::Preferences,
     editor: EditorView,
+    /// The open note as a board, when it is one and its text parses; see
+    /// `board::Surface`. The editor is empty meanwhile.
+    board: Option<wren_canvas::BoardView>,
+    /// Why the open board is shown as raw text in the editor instead.
+    board_error: Option<wren_board::ParseError>,
+    board_viewports: board::Viewports,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
     find_open: bool,
@@ -271,6 +278,9 @@ impl App {
             preview: preferences::Preview::default(),
             preferences,
             editor: EditorView::with_backend(engine, &contents),
+            board: None,
+            board_error: None,
+            board_viewports: board::Viewports::new(),
             board_spike: None,
             find_open: false,
             find_query: String::new(),
