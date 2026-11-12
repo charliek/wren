@@ -359,7 +359,7 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             }
             let drawn = cache.draw(renderer, bounds.size(), |frame| {
                 for item in items.iter().filter_map(|index| scene.items.get(*index)) {
-                    paint::item(frame, item, cull.viewport, view.measurer());
+                    paint::item(frame, item, &cull, view.measurer());
                 }
                 #[cfg(feature = "test-support")]
                 {

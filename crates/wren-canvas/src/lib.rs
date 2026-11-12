@@ -36,6 +36,7 @@ use iced::{Element, Font};
 use wren_board::scene::{self, Scene};
 use wren_board::{Access, Board, Issue, Palette, ParseError};
 
+mod clip;
 #[cfg(test)]
 mod fixtures;
 pub mod layers;

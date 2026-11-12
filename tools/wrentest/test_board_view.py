@@ -342,6 +342,75 @@ def test_right_to_left_labels_are_drawn(samples: Path) -> None:
         assert app.client.call("session.get")["document"]["dirty"] is False
 
 
+FAR_ARROW = '''schema = 1
+
+[node.a]
+text = "near"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "a"
+
+[node.b]
+text = "far"
+kind = "shape"
+at = [-8000000, 8000000]
+size = [120, 60]
+z = "b"
+
+[edge.e]
+kind = "edge"
+from = { node = "a" }
+to = { node = "b" }
+z = "c"
+
+[edge.free]
+kind = "edge"
+from = { node = "a", side = "right" }
+to = { at = [16777216, -16777216] }
+route = "straight"
+heads = ["arrow", "arrow"]
+z = "d"
+'''
+
+
+def test_a_connector_millions_of_units_long_is_drawn_at_every_zoom(samples: Path) -> None:
+    """Looking at one end of a connector whose other end, and arrowhead, lie
+    millions of units away, at each zoom stop: the software renderer is
+    never handed a path millions of pixels across."""
+    path = "Boards/Samples/Far arrow.wren-board"
+    (samples / path).write_text(FAR_ARROW, encoding="utf-8")
+    artifacts = artifact_directory("board-far-arrow")
+    with board_app(samples, "board-far-arrow") as app:
+        open_note(app, path)
+        # Too wide to fit: the view stops at the smallest zoom.
+        wait_for(lambda: board(app)["viewport"] is not None, timeout=10, interval=0.05,
+                 description="the board shown")
+        command(app, "font.reset")
+        placed = bounds(app)
+        near_node = next(node for node in placed["nodes"] if node["id"] == "a")["bounds"]
+        root = placed["root"]
+        centre = [root["x"] + root["width"] / 2, root["y"] + root["height"] / 2]
+        # Pan the near node to the middle of the widget.
+        wheel(app, {"screen": centre},
+              y=centre[1] - near_node["y"] - near_node["height"] / 2,
+              x=centre[0] - near_node["x"] - near_node["width"] / 2, unit="pixels")
+        near_node = next(node for node in bounds(app)["nodes"] if node["id"] == "a")
+        assert inside(centre, near_node["visible"]), near_node
+        zooms = []
+        for index, step in enumerate(["font.increase"] * 4 + ["font.decrease"] * 8):
+            command(app, step)
+            time.sleep(0.2)
+            zoom = board(app)["viewport"]["zoom"]
+            zooms.append(round(zoom, 2))
+            screenshot(app, artifacts / f"{index:02}-zoom-{zoom:.2f}.png")
+            placed = bounds(app)
+            near_node = next(node for node in placed["nodes"] if node["id"] == "a")
+            assert near_node["visible"], (zoom, near_node)
+        assert zooms == [1.5, 2.0, 3.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25, 0.1]
+        assert app.client.call("session.get")["document"]["dirty"] is False
+
+
 def moved(before: dict, after: dict) -> set[tuple[float, float]]:
     """How far each node's box and label moved, rounded to 0.01 px."""
     deltas = set()

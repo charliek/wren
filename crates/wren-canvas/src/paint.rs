@@ -14,6 +14,7 @@ use iced::{alignment, Color, Pixels};
 use wren_board::scene::{self, Draw, Item, Point, Rect, Scene, Segment};
 use wren_board::Rgba;
 
+use crate::clip::{self, Piece, Window};
 use crate::layers::Plan;
 use crate::{Labels, Measurer, Viewport};
 
@@ -24,6 +25,11 @@ const EDGE: f32 = 1.0;
 /// How far past its line box a glyph's ink may reach, as a share of the
 /// font size: side bearings and marks, never a whole glyph.
 const OVERHANG: f32 = 0.25;
+
+/// How far past the widget a path is drawn before it is cut, in screen
+/// pixels: past any stroke's reach, and near enough that what the
+/// software renderer is handed stays a few thousand pixels across.
+const CUT_MARGIN: f64 = 2048.0;
 
 /// What one frame shows of a board: the part of it in view, and which
 /// labels. Two frames with equal culls show the same items of a scene at
@@ -73,6 +79,17 @@ impl Cull {
             && bounds.y - reach < visible.bottom()
             && visible.y < bounds.bottom() + reach
     }
+
+    /// The rectangle paths are cut to, in widget-local pixels.
+    fn window(&self) -> Window {
+        let zoom = f64::from(self.viewport.zoom);
+        Window {
+            left: -CUT_MARGIN,
+            top: -CUT_MARGIN,
+            right: f64::from(self.visible.width) * zoom + CUT_MARGIN,
+            bottom: f64::from(self.visible.height) * zoom + CUT_MARGIN,
+        }
+    }
 }
 
 /// The items of `scene` a frame holds, by layer of `plan` and back to
@@ -93,11 +110,13 @@ pub(crate) fn color(color: Rgba) -> Color {
     Color::from_rgba8(color.r, color.g, color.b, f32::from(color.a) / 255.0)
 }
 
-/// Paint one item as `viewport` shows it, text in the font it was
-/// measured in. Each wrapped line is its own unwrapped text, placed where
-/// the scene put it: the two renderers disagree about the wrap width of
-/// text in a scaled frame, so the frame never wraps.
-pub(crate) fn item(frame: &mut Frame, item: &Item, viewport: Viewport, fonts: &Measurer) {
+/// Paint one item as `cull` shows it, text in the font it was measured
+/// in. Each wrapped line is its own unwrapped text, placed where the scene
+/// put it: the two renderers disagree about the wrap width of text in a
+/// scaled frame, so the frame never wraps. A path reaching far past the
+/// widget is cut first ([`clip`]).
+pub(crate) fn item(frame: &mut Frame, item: &Item, cull: &Cull, fonts: &Measurer) {
+    let viewport = cull.viewport;
     let zoom = viewport.zoom;
     let point = |point: Point| {
         let (x, y) = viewport.to_screen((point.x, point.y));
@@ -109,28 +128,33 @@ pub(crate) fn item(frame: &mut Frame, item: &Item, viewport: Viewport, fonts: &M
             fill,
             stroke,
         } => {
-            let path = Path::new(|builder| {
-                for segment in segments {
-                    match *segment {
-                        Segment::MoveTo(to) => builder.move_to(point(to)),
-                        Segment::LineTo(to) => builder.line_to(point(to)),
-                        Segment::QuadTo { control, to } => {
-                            builder.quadratic_curve_to(point(control), point(to));
-                        }
-                        Segment::CubicTo { first, second, to } => {
-                            builder.bezier_curve_to(point(first), point(second), point(to));
-                        }
-                        Segment::Close => builder.close(),
-                    }
-                }
-            });
+            let pieces = pieces(segments, viewport);
+            let window = cull.window();
+            let whole = clip::inside(&pieces, &window).then(|| path(&pieces));
             if let Some(fill) = fill {
-                frame.fill(&path, color(*fill));
+                let cut;
+                let path = match &whole {
+                    Some(path) => path,
+                    None => {
+                        cut = path(&clip::area(&pieces, &window));
+                        &cut
+                    }
+                };
+                frame.fill(path, color(*fill));
             }
             if let Some(stroke) = stroke {
                 let dash = stroke.dash.map(|[on, off]| [on * zoom, off * zoom]);
+                let cut;
+                let path = match &whole {
+                    Some(path) => path,
+                    None => {
+                        let period = dash.map(|[on, off]| f64::from(on) + f64::from(off));
+                        cut = path(&clip::outline(&pieces, &window, period));
+                        &cut
+                    }
+                };
                 frame.stroke(
-                    &path,
+                    path,
                     Stroke {
                         style: canvas::Style::Solid(color(stroke.color)),
                         width: stroke.width * zoom,
@@ -170,6 +194,52 @@ pub(crate) fn item(frame: &mut Frame, item: &Item, viewport: Viewport, fonts: &M
             }
         }
     }
+}
+
+/// `segments` in widget-local pixels at `viewport`, in double precision:
+/// a board coordinate millions of units out is cut against the window
+/// without losing where its line crosses into view.
+fn pieces(segments: &[Segment], viewport: Viewport) -> Vec<Piece> {
+    let (x, y, zoom) = (
+        f64::from(viewport.x),
+        f64::from(viewport.y),
+        f64::from(viewport.zoom),
+    );
+    let at = |point: Point| {
+        (
+            (f64::from(point.x) - x) * zoom,
+            (f64::from(point.y) - y) * zoom,
+        )
+    };
+    segments
+        .iter()
+        .map(|segment| match *segment {
+            Segment::MoveTo(to) => Piece::Move(at(to)),
+            Segment::LineTo(to) => Piece::Line(at(to)),
+            Segment::QuadTo { control, to } => Piece::Quad(at(control), at(to)),
+            Segment::CubicTo { first, second, to } => Piece::Cubic(at(first), at(second), at(to)),
+            Segment::Close => Piece::Close,
+        })
+        .collect()
+}
+
+/// The iced path of `pieces`.
+fn path(pieces: &[Piece]) -> Path {
+    // Each point is in the window or a path left whole, so fits an f32.
+    let point = |(x, y): clip::Pixel| iced::Point::new(x as f32, y as f32);
+    Path::new(|builder| {
+        for piece in pieces {
+            match *piece {
+                Piece::Move(to) => builder.move_to(point(to)),
+                Piece::Line(to) => builder.line_to(point(to)),
+                Piece::Quad(control, to) => builder.quadratic_curve_to(point(control), point(to)),
+                Piece::Cubic(first, second, to) => {
+                    builder.bezier_curve_to(point(first), point(second), point(to));
+                }
+                Piece::Close => builder.close(),
+            }
+        }
+    })
 }
 
 /// The most room a line is given, in pixels: far wider than any label, and
