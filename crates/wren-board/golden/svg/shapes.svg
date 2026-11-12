@@ -30,10 +30,10 @@
 <path d="M160 30L150 34L150 26Z" fill="#202428"/>
 <path d="M440 30L470 30" fill="none" stroke="#202428" stroke-width="1.5" stroke-dasharray="6 4"/>
 <path d="M480 30L470 34L470 26Z" fill="#202428"/>
-<path d="M120 440L120 380L360 380L360 330" fill="none" stroke="#202428" stroke-width="1.5"/>
-<path d="M360 320L364 330L356 330Z" fill="#202428"/>
-<path d="M221 370L259 370L259 390L221 390Z" fill="#ffffff"/>
-<text x="225" y="384.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">elbow</text>
+<path d="M200 470L250 470L250 290L270 290" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M280 290L270 294L270 286Z" fill="#202428"/>
+<path d="M231 380L269 380L269 400L231 400Z" fill="#ffffff"/>
+<text x="235" y="394.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">elbow</text>
 <path d="M660 160L684 160M684 164L684 156" fill="none" stroke="#d02020" stroke-width="1.5"/>
 <path d="M659.25 152.25C660.90686 152.25 662.25 153.59314 662.25 155.25C662.25 156.90686 660.90686 158.25 659.25 158.25C657.59314 158.25 656.25 156.90686 656.25 155.25C656.25 153.59314 657.59314 152.25 659.25 152.25Z" fill="#d02020"/>
 </svg>

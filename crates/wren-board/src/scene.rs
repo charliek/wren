@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::route::{self, Attach, Terminal, STROKE_WIDTH};
+use crate::route::{self, Attach, Connector, Routed, Terminal, STROKE_WIDTH};
 use crate::style::{self, Resolved};
 use crate::{
     check, placements, shape, Board, Dash, Edge, End, Fill, Id, Named, Node, NodeKind, Palette,
@@ -234,6 +234,7 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         }
     }
 
+    let routes = routes(board, &boxes);
     let mut painter = Painter {
         palette,
         measure,
@@ -257,7 +258,9 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
                     scopes.push(inner.into_iter());
                 }
             }
-            Element::Edge(id, edge) => painter.edge(id, edge, &boxes, board),
+            Element::Edge(id, edge) => {
+                painter.edge(id, edge, &boxes, board, routes.get(id));
+            }
         }
     }
 
@@ -284,6 +287,61 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         .reduce(union)
         .unwrap_or_default();
     Scene { bounds, items }
+}
+
+/// Where a connector end is drawn: a free point, or the box, shape and
+/// attachment of the node it names, with that node's id. `None` when it
+/// names no node.
+fn terminal<'a>(
+    end: &End,
+    board: &'a Board,
+    boxes: &BTreeMap<&Id, Rect>,
+) -> Option<(Terminal, Option<&'a Id>)> {
+    match end {
+        End::Free { at, .. } => Some((Terminal::Point(clamp_point(*at)), None)),
+        End::Node {
+            node, side, anchor, ..
+        } => {
+            let (stored, target) = board.nodes.get_key_value(node.as_str())?;
+            let shape = match target.kind.as_ref().and_then(Named::known) {
+                Some(NodeKind::Shape) => shape::drawn(&target.shape),
+                _ => Shape::Rect,
+            };
+            let terminal = Terminal::Node {
+                bounds: *boxes.get(stored)?,
+                shape,
+                attach: Attach::of(side.as_ref(), *anchor),
+            };
+            Some((terminal, Some(stored)))
+        }
+    }
+}
+
+/// The route of every connector whose two ends are drawn, routed among
+/// all the node boxes in id order (§3.7).
+fn routes<'a>(board: &'a Board, boxes: &BTreeMap<&'a Id, Rect>) -> BTreeMap<&'a Id, Routed> {
+    let index: BTreeMap<&Id, usize> = boxes.keys().enumerate().map(|(i, &id)| (id, i)).collect();
+    let rects: Vec<Rect> = boxes.values().copied().collect();
+    let mut ids = Vec::new();
+    let mut connectors = Vec::new();
+    for (id, edge) in &board.edges {
+        let (Some((from, a)), Some((to, b))) = (
+            terminal(&edge.from, board, boxes),
+            terminal(&edge.to, board, boxes),
+        ) else {
+            continue;
+        };
+        let node = |id: Option<&Id>| id.and_then(|id| index.get(id).copied());
+        ids.push(id);
+        connectors.push(Connector {
+            kind: route::drawn(&edge.route),
+            ends: [from, to],
+            nodes: [node(a), node(b)],
+        });
+    }
+    ids.into_iter()
+        .zip(route::route_all(&rects, &connectors))
+        .collect()
 }
 
 /// One element in stacking order.
@@ -557,25 +615,16 @@ impl Painter<'_> {
         }
     }
 
-    fn edge(&mut self, id: &Id, edge: &Edge, boxes: &BTreeMap<&Id, Rect>, board: &Board) {
+    fn edge(
+        &mut self,
+        id: &Id,
+        edge: &Edge,
+        boxes: &BTreeMap<&Id, Rect>,
+        board: &Board,
+        routed: Option<&Routed>,
+    ) {
         let source = Source::Edge(id.clone());
-        let terminal = |end: &End| match end {
-            End::Free { at, .. } => Some(Terminal::Point(clamp_point(*at))),
-            End::Node {
-                node, side, anchor, ..
-            } => {
-                let (stored, target) = board.nodes.get_key_value(node.as_str())?;
-                let shape = match target.kind.as_ref().and_then(Named::known) {
-                    Some(NodeKind::Shape) => shape::drawn(&target.shape),
-                    _ => Shape::Rect,
-                };
-                Some(Terminal::Node {
-                    bounds: *boxes.get(stored)?,
-                    shape,
-                    attach: Attach::of(side.as_ref(), *anchor),
-                })
-            }
-        };
+        let terminal = |end: &End| terminal(end, board, boxes).map(|(t, _)| t);
         let color = style::resolve(&edge.style.color, Fill::None, self.palette).stroke;
         let stroke = Stroke {
             color,
@@ -583,8 +632,10 @@ impl Painter<'_> {
             dash: dash(&edge.style.stroke),
         };
         match (terminal(&edge.from), terminal(&edge.to)) {
-            (Some(from), Some(to)) => {
-                let routed = route::route(route::drawn(&edge.route), &from, &to);
+            (Some(_), Some(_)) => {
+                let Some(routed) = routed else {
+                    return;
+                };
                 let heads = edge.heads.each_ref().map(route::has_arrow);
                 let drawn = routed.draw(heads);
                 let line_box = grow(path_box(&drawn.line), STROKE_WIDTH / 2.0);
@@ -1110,6 +1161,93 @@ edge free path in 496.25,492.25 6x6 fill #d02020:";
         flagged.dedup();
         assert_eq!(markers.len(), flagged.len(), "{issues:?}");
         assert!(!flagged.is_empty());
+    }
+
+    /// The Checkout flow sample's routes: no connector enters the box of a
+    /// node it does not join, and no two run on one line for more than a
+    /// few pixels except within a margin of an end they share.
+    #[test]
+    fn checkout_flow_routes_keep_out_of_shapes_and_off_each_other() {
+        let board = read(fixture("Checkout flow"));
+        let placed = placements(&board);
+        let boxes: BTreeMap<&Id, Rect> = board
+            .nodes
+            .iter()
+            .map(|(id, node)| (id, node_box(placed[id].at, node.size)))
+            .collect();
+        let routes = routes(&board, &boxes);
+        assert_eq!(routes.len(), 17);
+        let joined = |id: &Id| {
+            let edge = &board.edges[id];
+            [&edge.from, &edge.to].map(|end| match end {
+                End::Node { node, .. } => node.clone(),
+                End::Free { .. } => String::new(),
+            })
+        };
+        for (&id, routed) in &routes {
+            for (&node, &r) in &boxes {
+                if joined(id).contains(&node.to_string()) {
+                    continue;
+                }
+                for w in routed.points.windows(2) {
+                    let s = path_box(&[Segment::MoveTo(w[0]), Segment::LineTo(w[1])]);
+                    let inside =
+                        s.x < r.right() && s.right() > r.x && s.y < r.bottom() && s.bottom() > r.y;
+                    assert!(!inside, "{id} enters {node}: {:?}", routed.points);
+                }
+            }
+        }
+        let few = route::SHARED_LENGTH;
+        for (&a, ra) in &routes {
+            for (&b, rb) in &routes {
+                if a >= b {
+                    continue;
+                }
+                let ends = |r: &Routed| [r.points[0], *r.points.last().unwrap()];
+                let common: Vec<Point> = ends(ra)
+                    .into_iter()
+                    .filter(|p| ends(rb).contains(p))
+                    .collect();
+                for s in ra.points.windows(2) {
+                    for t in rb.points.windows(2) {
+                        let shared = shared_away_from(s, t, &common);
+                        assert!(
+                            shared <= few,
+                            "{a} and {b} share {shared} px: {:?} {:?}",
+                            ra.points,
+                            rb.points
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// How long two axis-aligned segments run on one line, leaving out
+    /// what lies within [`route::ELBOW_MARGIN`] of a point in `common`.
+    fn shared_away_from(s: &[Point], t: &[Point], common: &[Point]) -> f32 {
+        let (horizontal, line, sa, ta) = if s[0].y == s[1].y && t[0].y == t[1].y {
+            (true, s[0].y, [s[0].x, s[1].x], [t[0].x, t[1].x])
+        } else if s[0].x == s[1].x && t[0].x == t[1].x {
+            (false, s[0].x, [s[0].y, s[1].y], [t[0].y, t[1].y])
+        } else {
+            return 0.0;
+        };
+        let other = if horizontal { t[0].y } else { t[0].x };
+        if (line - other).abs() > route::LINE_TOLERANCE {
+            return 0.0;
+        }
+        let lo = sa[0].min(sa[1]).max(ta[0].min(ta[1]));
+        let hi = sa[0].max(sa[1]).min(ta[0].max(ta[1]));
+        let mut length = (hi - lo).max(0.0);
+        for p in common {
+            let (on, along) = if horizontal { (p.y, p.x) } else { (p.x, p.y) };
+            if (on - line).abs() <= route::LINE_TOLERANCE {
+                let m = route::ELBOW_MARGIN;
+                length -= (hi.min(along + m) - lo.max(along - m)).max(0.0);
+            }
+        }
+        length.max(0.0)
     }
 
     #[test]

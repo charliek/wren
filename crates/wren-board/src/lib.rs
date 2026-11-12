@@ -524,6 +524,23 @@ mod tests {
     /// connector to each right-hand neighbour: about twice as many elements
     /// as nodes, the shape of a large flowchart.
     fn grid_board(nodes: usize) -> String {
+        let edges = (0..nodes).filter(|i| i % 40 != 39 && i + 1 < nodes);
+        board_text(
+            nodes,
+            |i| [(i % 40) as i64 * 200, (i / 40) as i64 * 100],
+            |_| [160, 64],
+            edges.map(|i| (i, i + 1)),
+        )
+    }
+
+    /// A board of `nodes` labelled shapes, node `i` at `at(i)` sized
+    /// `size(i)`, with a labelled connector between each pair of `edges`.
+    fn board_text(
+        nodes: usize,
+        at: impl Fn(usize) -> [i64; 2],
+        size: impl Fn(usize) -> [i64; 2],
+        edges: impl IntoIterator<Item = (usize, usize)>,
+    ) -> String {
         let mut out = String::from(EMPTY);
         let shapes = [
             "rect",
@@ -536,23 +553,18 @@ mod tests {
             "document",
         ];
         for i in 0..nodes {
-            let (col, row) = (i % 40, i / 40);
+            let ([x, y], [w, h]) = (at(i), size(i));
             out += &format!(
                 "\n[node.n{i}]\ntext = \"Step {i}\\nchecks the order\"\nkind = \"shape\"\n\
-                 at = [{}, {}]\nshape = \"{}\"\nsize = [160, 64]\nz = \"V{i}\"\n",
-                col * 200,
-                row * 100,
+                 at = [{x}, {y}]\nshape = \"{}\"\nsize = [{w}, {h}]\nz = \"V{i}\"\n",
                 shapes[i % shapes.len()]
             );
         }
-        for i in 0..nodes {
-            if i % 40 != 39 && i + 1 < nodes {
-                out += &format!(
-                    "\n[edge.e{i}]\nkind = \"edge\"\nfrom = {{ node = \"n{i}\" }}\n\
-                     to = {{ node = \"n{}\" }}\nlabels = [\n  {{ text = \"next\" }},\n]\nz = \"W{i}\"\n",
-                    i + 1
-                );
-            }
+        for (k, (from, to)) in edges.into_iter().enumerate() {
+            out += &format!(
+                "\n[edge.e{k}]\nkind = \"edge\"\nfrom = {{ node = \"n{from}\" }}\n\
+                 to = {{ node = \"n{to}\" }}\nlabels = [\n  {{ text = \"next\" }},\n]\nz = \"W{k}\"\n"
+            );
         }
         out
     }
@@ -613,6 +625,77 @@ mod tests {
                 i * 100
             );
         }
+        // The grid with every connector made diagonal, to the next row's
+        // right-hand neighbour: each has a side to choose and searches the
+        // whole candidate set among dense boxes. Printed for the record.
+        let grid = |i: usize| [(i % 40) as i64 * 200, (i / 40) as i64 * 100];
+        let edges = (0..1_000usize).filter(|i| i % 40 != 39);
+        let diagonal = board_text(
+            1_000,
+            grid,
+            |_| [160, 64],
+            edges.map(|i| (i, (i + 41).min(999))),
+        );
+        let diagonal = parse(&diagonal).unwrap();
+        let diagonal_ms = median_ms(9, || drop(scene::build(&diagonal, &palette, &measure)));
+        println!("1000 shapes, every connector diagonal: scene {diagonal_ms:.2} ms");
+
+        // Boards on which no connector finds a clean route, so each spends
+        // its whole routing budget (route::BUDGET): long random connectors
+        // and a fan-in on the grid, and shapes stacked on one spot joined
+        // to one far shape. The work grows with the connectors, not with
+        // connectors times boxes, so a 10,000-element board leaves most of
+        // the 1 s open budget. The 5 ms scene budget of §6.7 is not met by
+        // these (recorded in §8.5); the ceilings catch a return of the
+        // quadratic growth, which took 0.2 to 0.7 s at 1,000 shapes and 2.6
+        // to 15 s at 10,000 elements.
+        let mut rng = fixtures::Rng(3);
+        let targets: Vec<usize> = (0..5_100).map(|_| rng.below(5_100)).collect();
+        for nodes in [1_000, 5_100] {
+            let stacked = |i: usize| {
+                if i == nodes {
+                    [5_000, 5_000]
+                } else {
+                    [(i % 7) as i64, (i % 5) as i64]
+                }
+            };
+            let boards = [
+                (
+                    "long random connectors",
+                    board_text(
+                        nodes,
+                        grid,
+                        |_| [160, 64],
+                        (0..nodes).map(|i| (i, targets[i] % nodes)),
+                    ),
+                ),
+                (
+                    "a fan-in",
+                    board_text(nodes, grid, |_| [160, 64], (1..nodes).map(|i| (i, 0))),
+                ),
+                (
+                    "stacked shapes to one far shape",
+                    board_text(
+                        nodes + 1,
+                        stacked,
+                        |_| [100, 60],
+                        (0..nodes).map(|i| (i, nodes)),
+                    ),
+                ),
+            ];
+            for (name, text) in boards {
+                let board = parse(&text).unwrap();
+                let elements = board.nodes.len() + board.edges.len();
+                let scene_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+                println!("{nodes} shapes, {elements} elements, {name}: scene {scene_ms:.2} ms");
+                let ceiling = if elements >= 10_000 { 600.0 } else { 150.0 };
+                assert!(
+                    scene_ms <= ceiling,
+                    "{name}, {elements} elements: {scene_ms:.2} ms"
+                );
+            }
+        }
+
         let board = parse(&text).unwrap();
         let wide_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
         println!("50 wide labels of 8,000 words: scene {wide_ms:.2} ms");
