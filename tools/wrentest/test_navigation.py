@@ -40,6 +40,8 @@ COMMANDS = {
     "edit.move_line_up", "edit.move_line_down",
     "editor.toggle_markdown_assist", "editor.toggle_engine",
 }
+# Listed only with the `boards` setting on, and never enabled on a Markdown note.
+BOARD_COMMANDS = {"note.export_svg"} if os.environ.get("WRENTEST_BOARDS") == "on" else set()
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
@@ -248,8 +250,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         jump(app, FIRST)
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
-        assert set(by_id) == COMMANDS
-        assert len(rows) == len(COMMANDS)
+        assert set(by_id) == COMMANDS | BOARD_COMMANDS
+        assert len(rows) == len(COMMANDS | BOARD_COMMANDS)
         assert {row["group"] for row in rows} == {"This note", "Markdown", "Go", "View", "Workspace",
                                                    "App"}
         assert all(row["title"] for row in rows)
@@ -259,6 +261,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
         assert by_id["note.open_conflict"]["enabled"] is False
+        for key in BOARD_COMMANDS:
+            assert by_id[key]["enabled"] is False, key
         before = session(app)["document"]
         command(app, "navigation.forward", disposition="blocked")
         assert session(app)["document"] == before

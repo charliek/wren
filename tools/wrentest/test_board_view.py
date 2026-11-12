@@ -1,5 +1,6 @@
 """The board viewer in the app, with the `boards` setting on
-(discovery/boards.md §3.3, §5.15, §6.8 Phase 1).
+(discovery/boards.md §3.3, §5.13, §5.15, §6.8 Phase 1 items 2 to 4, 7, 8
+and 10).
 
 A board is shown by the board widget, mounted under the editor's own focus
 id `note-editor`, so the editor column, its focus and the column moves work
@@ -8,39 +9,29 @@ on a board as they do on a Markdown note.
 
 from __future__ import annotations
 
-import shutil
+import time
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 import pytest
 
+from tools.wrentest.boards import (
+    CONFLICT, FLOW, FUTURE, NOTES, SHAPES, board, board_app, bounds, conflict_board, copy_samples,
+    distance_to_polyline, fitted, inside, midpoint, near, open_note, screenshot, stamp, wheel,
+)
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, wait_for
 
-ROOT = Path(__file__).resolve().parents[2]
-SAMPLES = ROOT / "tools" / "wrentest" / "fixtures" / "boards" / "workspace"
-FLOW = "Boards/Samples/Checkout flow.wren-board"
-NOTES = "Boards/Samples/Notes.md"
+# A pan or zoom step draws no label on the software renderer until the
+# view has been still for 150 ms.
+REST = 0.4
 
 
 @pytest.fixture
 def samples(tmp_path: Path) -> Path:
     """A copy of the sample workspace: opening one writes into it."""
-    work = tmp_path / "work"
-    shutil.copytree(SAMPLES, work)
-    return work
-
-
-def board_app(workspace: Path, case: str) -> WrenApp:
-    return WrenApp(workspace=workspace, settings="boards = on\n",
-                   artifacts_dir=artifact_directory(case))
-
-
-def open_note(app: WrenApp, path: str) -> int:
-    note = next(row for row in app.client.call("session.get")["notes"] if row["path"] == path)
-    app.client.call("core.apply", {"op": "open_note", "note": note["id"]})
-    return note["id"]
+    return copy_samples(tmp_path / "work")
 
 
 def column(app: WrenApp) -> str:
@@ -72,19 +63,21 @@ def assert_board_shown(app: WrenApp) -> None:
 
 def test_a_board_is_the_editor_column_under_note_editor(samples: Path) -> None:
     flow = samples / FLOW
-    before = (flow.read_bytes(), flow.stat().st_mtime_ns)
+    before = stamp(flow)
     with board_app(samples, "board-focus") as app:
-        board = open_note(app, FLOW)
+        note = open_note(app, FLOW)
         assert_board_shown(app)
         app.client.call("editor.focus")
         wait_focus(app, ["note-editor"])
         assert column(app) == "editor"
+        assert board(app)["state"] == "idle"
         canvas = app.client.call("focus.get")["bounds"]["note-editor"]
         assert canvas["width"] > 200 and canvas["height"] > 200, canvas
 
         # The column moves leave the board and give it the keyboard back.
         assert command(app, "navigation.column_left")["navigation"]["column"] == "notes"
         wait_focus(app, [])
+        assert board(app)["state"] == "unfocused"
         assert command(app, "navigation.column_right")["navigation"]["column"] == "editor"
         wait_focus(app, ["note-editor"])
 
@@ -102,7 +95,7 @@ def test_a_board_is_the_editor_column_under_note_editor(samples: Path) -> None:
         app.client.call("column.open", {"column": "notes"})
         wait_focus(app, [])
         state = nav(app, "enter")
-        assert state["column"] == "editor" and state["selected_note"] == board
+        assert state["column"] == "editor" and state["selected_note"] == note
         wait_focus(app, ["note-editor"])
 
         # A Markdown note mounts the editor under the same id, and a board
@@ -111,27 +104,288 @@ def test_a_board_is_the_editor_column_under_note_editor(samples: Path) -> None:
         app.client.call("editor.focus")
         wait_focus(app, ["note-editor"])
         assert app.client.call("editor.get")["text"].startswith("#")
+        assert board(app)["surface"] == "text"
         open_note(app, FLOW)
         app.client.call("editor.focus")
         wait_focus(app, ["note-editor"])
         assert_board_shown(app)
         assert app.client.call("session.get")["document"]["dirty"] is False
-    assert (flow.read_bytes(), flow.stat().st_mtime_ns) == before
+    assert stamp(flow) == before
 
 
-def test_a_raw_board_is_edited_in_the_focused_editor(samples: Path) -> None:
-    raw = samples / "Boards/Samples/Conflict.wren-board"
-    raw.write_text("<<<<<<< ours\nschema = 1\n=======\nschema = 1\n>>>>>>> theirs\n",
-                   encoding="utf-8")
-    with board_app(samples, "board-raw-focus") as app:
-        open_note(app, "Boards/Samples/Conflict.wren-board")
+def test_a_board_opens_fitted_with_every_node_in_view(samples: Path) -> None:
+    """§6.8 Phase 1 item 2."""
+    with board_app(samples, "board-opens") as app:
+        rows = [row for row in app.client.call("session.get")["notes"] if row["path"] == FLOW]
+        assert [row["title"] for row in rows] == ["Checkout flow"]
+        open_note(app, FLOW)
+        placed = fitted(app)
+        state = board(app, elements=True)
+        assert state["surface"] == "board" and state["enabled"] is True
+        assert state["counts"] == {"nodes": 15, "edges": 17}
+        assert len(state["nodes"]) == 15 and len(state["edges"]) == 17
+        assert {node["text"] for node in state["nodes"]} >= {"Receive order", "Payment ok?", "End"}
+        assert state["issues"] == [] and state["read_only"] is False and state["error"] is None
+        assert 0.1 <= state["viewport"]["zoom"] <= 1.0
+        assert len(placed["nodes"]) == 15 and len(placed["edges"]) == 17
+        for node in placed["nodes"]:
+            visible = node["visible"]
+            assert visible and visible["width"] > 0 and visible["height"] > 0, node
+            # The fit leaves 40 px around the content.
+            root = placed["root"]
+            assert visible["x"] >= root["x"] + 39 and visible["y"] >= root["y"] + 39, node
+
+
+def fill_point(node: dict, placed: dict) -> tuple[int, int] | None:
+    """A pixel at least 4 px inside a filled rectangle, clear of every
+    label, other node and connector."""
+    rect = node["bounds"]
+    margin = 6
+    candidates = [
+        (rect["x"] + margin, rect["y"] + rect["height"] / 2),
+        (rect["x"] + rect["width"] - margin, rect["y"] + rect["height"] / 2),
+        (rect["x"] + rect["width"] / 2, rect["y"] + margin),
+        (rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] - margin),
+        (rect["x"] + margin, rect["y"] + margin),
+    ]
+    for point in candidates:
+        clear = (
+            not any(inside(point, other["label"], 2) for other in placed["nodes"])
+            and not any(inside(point, edge["label"], 2) for edge in placed["edges"])
+            and not any(inside(point, other["bounds"], 2)
+                        for other in placed["nodes"] if other["id"] != node["id"])
+            and all(distance_to_polyline(point, edge["points"]) > 4 for edge in placed["edges"])
+        )
+        if clear:
+            return round(point[0]), round(point[1])
+    return None
+
+
+def stroke_point(edge: dict, placed: dict) -> tuple[int, int] | None:
+    """The middle of a connector, when it is in view and clear of every
+    node, label and other connector."""
+    point = midpoint(edge["points"])
+    root = placed["root"]
+    clear = (
+        inside(point, root, -8)
+        and not any(inside(point, node["bounds"], 4) for node in placed["nodes"])
+        and not any(inside(point, node["label"], 4) for node in placed["nodes"])
+        and not any(inside(point, other["label"], 4) for other in placed["edges"])
+        and all(distance_to_polyline(point, other["points"]) > 6
+                for other in placed["edges"] if other["id"] != edge["id"])
+    )
+    # A segment's own antialiasing is centred on it: snap across it.
+    return (round(point[0]), round(point[1])) if clear else None
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_the_board_is_drawn_in_its_colours(samples: Path, theme: str) -> None:
+    """§6.8 Phase 1 item 3, on whichever renderer the lane runs."""
+    artifacts = artifact_directory(f"board-pixels-{theme}")
+    with WrenApp(workspace=samples, settings="boards = on\n", artifacts_dir=artifacts) as app:
+        app.client.call("theme.set", {"id": theme})
+        open_note(app, FLOW)
+        placed = fitted(app)
+        time.sleep(REST)
+        image = screenshot(app, artifacts / "fitted.png")
+        scale = placed["scale_factor"]
+
+        def pixel(point: tuple[float, float]) -> tuple[int, ...]:
+            return image.pixel(round(point[0] * scale), round(point[1] * scale))
+
+        filled = 0
+        for node in placed["nodes"]:
+            if node["fill"] is None:
+                continue
+            point = fill_point(node, placed)
+            if point is None:
+                continue
+            assert near(pixel(point), node["fill"], 8), (node["id"], point, pixel(point), node["fill"])
+            filled += 1
+        assert filled >= 5, filled
+
+        # Labels: each label box holds glyph pixels, unlike its fill.
+        inked = 0
+        for node in placed["nodes"]:
+            label, fill = node["label"], node["fill"]
+            if label is None or fill is None:
+                continue
+            x0, y0 = label["x"] * scale, label["y"] * scale
+            x1, y1 = x0 + label["width"] * scale, y0 + label["height"] * scale
+            glyphs = sum(
+                1
+                for y in range(int(y0), int(y1))
+                for x in range(int(x0), int(x1))
+                if not near(image.pixel(x, y), fill, 24)
+            )
+            assert glyphs >= 10, (node["id"], glyphs)
+            inked += 1
+        assert inked >= 10, inked
+
+        # A connector is 1.5 board units wide: at 200 % its middle pixel is
+        # covered whole.
+        app.client.call("command.run", {"id": "font.reset"})
+        app.client.call("command.run", {"id": "font.increase"})
+        app.client.call("command.run", {"id": "font.increase"})
+        placed = bounds(app)
+        assert placed["viewport"]["zoom"] == pytest.approx(2.0)
+        time.sleep(REST)
+        image = screenshot(app, artifacts / "zoomed.png")
+        stroked = 0
+        for edge in placed["edges"]:
+            point = stroke_point(edge, placed)
+            if point is None or edge["stroke"] is None:
+                continue
+            assert near(pixel(point), edge["stroke"], 24), (edge["id"], point, pixel(point), edge["stroke"])
+            stroked += 1
+        assert stroked >= 1, "no connector's middle was in view and clear"
+
+
+def moved(before: dict, after: dict) -> set[tuple[float, float]]:
+    """How far each node's box and label moved, rounded to 0.01 px."""
+    deltas = set()
+    for old, new in zip(before["nodes"], after["nodes"]):
+        assert old["id"] == new["id"]
+        for key in ("bounds", "label"):
+            if old[key] is not None:
+                deltas.add((round(new[key]["x"] - old[key]["x"], 2), round(new[key]["y"] - old[key]["y"], 2)))
+    return deltas
+
+
+def test_the_wheel_pans_and_mod_wheel_zooms_about_the_pointer(samples: Path) -> None:
+    """§6.8 Phase 1 item 4, through `board.pointer`; the native X11 case
+    turns the real wheel."""
+    flow = samples / FLOW
+    before_bytes = stamp(flow)
+    with board_app(samples, "board-wheel") as app:
+        open_note(app, FLOW)
+        start = fitted(app)
+        zoom = start["viewport"]["zoom"]
+        root = start["root"]
+        pointer = (root["x"] + root["width"] / 2, root["y"] + root["height"] / 2)
+
+        # One line down pans by 40 logical px: every rectangle moves alike.
+        wheel(app, {"screen": list(pointer)}, -1)
+        after = bounds(app)
+        assert moved(start, after) == {(0.0, -40.0)}
+        time.sleep(0.2)  # a new burst
+        wheel(app, {"screen": list(pointer)}, -1, mods=("shift",))
+        assert moved(after, bounds(app)) == {(-40.0, 0.0)}
+        time.sleep(0.2)
+
+        # Mod+wheel zooms 1.1 a line about the pointer.
+        placed = bounds(app)
+        view = placed["viewport"]
+        under = (view["x"] + (pointer[0] - root["x"]) / view["zoom"],
+                 view["y"] + (pointer[1] - root["y"]) / view["zoom"])
+        state = wheel(app, {"screen": list(pointer)}, 2, mods=("mod",))
+        view = state["viewport"]
+        assert view["zoom"] == pytest.approx(zoom * 1.1 ** 2, rel=1e-4)
+        back = (root["x"] + (under[0] - view["x"]) * view["zoom"],
+                root["y"] + (under[1] - view["y"]) * view["zoom"])
+        assert abs(back[0] - pointer[0]) <= 1 and abs(back[1] - pointer[1]) <= 1, (back, pointer)
+
+        # The text-size commands step the zoom and write no setting.
+        config = app.settings_path
+        settings = config.read_text(encoding="utf-8")
+        font_size = app.client.call("editor.get")["font_size"]
+        command(app, "font.reset")
+        assert board(app)["viewport"]["zoom"] == pytest.approx(1.0)
+        command(app, "font.increase")
+        assert board(app)["viewport"]["zoom"] == pytest.approx(1.5)
+        command(app, "font.decrease")
+        assert board(app)["viewport"]["zoom"] == pytest.approx(1.0)
+        assert config.read_text(encoding="utf-8") == settings
+        assert app.client.call("editor.get")["font_size"] == font_size
+
+        # A middle drag pans by the pointer's motion and gives the board
+        # the editor column.
+        app.client.call("column.open", {"column": "notes"})
+        start = bounds(app)
+        app.client.call("board.pointer", {"kind": "press", "button": "middle",
+                                          "at": {"screen": list(pointer)}})
+        assert board(app)["state"] == "panning"
+        app.client.call("board.pointer", {"kind": "move",
+                                          "at": {"screen": [pointer[0] + 30, pointer[1] - 20]}})
+        app.client.call("board.pointer", {"kind": "release", "button": "middle"})
+        assert moved(start, bounds(app)) == {(30.0, -20.0)}
+        assert column(app) == "editor"
+        wait_focus(app, ["note-editor"])
+        assert board(app)["state"] == "idle"
+        assert app.client.call("session.get")["document"]["dirty"] is False
+    assert stamp(flow) == before_bytes
+
+
+def test_board_requests_refuse_what_phase_1_does_not_have(samples: Path) -> None:
+    with board_app(samples, "board-requests") as app:
+        open_note(app, NOTES)
+        assert board(app)["surface"] == "text"
+        for op, params in [
+            ("board.bounds", {}),
+            ("board.pointer", {"kind": "wheel", "at": {"canvas": [0, 0]}, "delta": {"y": 1}}),
+        ]:
+            with pytest.raises(RemoteError, match="board"):
+                app.client.call(op, params)
+        open_note(app, FLOW)
+        fitted(app)
+        for params in [
+            {"kind": "click", "button": "left", "at": {"node": "n1"}},
+            {"kind": "press", "button": "left", "at": {"canvas": [0, 0]}},
+            {"kind": "wheel", "at": {"edge": "e1"}, "delta": {"y": 1}},
+        ]:
+            with pytest.raises(RemoteError):
+                app.client.call("board.pointer", params)
+
+
+def test_a_raw_board_is_edited_in_the_focused_editor_and_flips_back(samples: Path) -> None:
+    """§6.8 Phase 1 item 7."""
+    raw = samples / CONFLICT
+    text = conflict_board()
+    raw.write_text(text, encoding="utf-8")
+    with board_app(samples, "board-raw") as app:
+        open_note(app, CONFLICT)
+        state = board(app)
+        assert state["surface"] == "raw" and state["counts"] is None
+        assert state["error"]["line"] == 1 and state["error"]["message"], state
         app.client.call("editor.focus")
         wait_focus(app, ["note-editor"])
-        assert app.client.call("editor.get")["text"].startswith("<<<<<<< ours")
-        # The raw text is the editor's: it takes an edit.
+        assert app.client.call("editor.get")["text"] == text
+        # The raw text is the editor's: it takes an edit, and is saved as typed.
         app.client.call("editor.insert", {"text": "# typed\n"})
-        assert "# typed" in app.client.call("editor.get")["text"]
+        app.client.call("core.apply", {"op": "flush"})
+        assert raw.read_text(encoding="utf-8") == "# typed\n" + text
+        assert board(app)["surface"] == "raw", "typing never flips it"
         wait_focus(app, ["note-editor"])
+
+        # Fixed on disk and reconciled, it is a board again.
+        raw.write_text('schema = 1\n\n[node.a]\ntext = "Fixed"\nkind = "shape"\n'
+                       'at = [0, 0]\nsize = [120, 60]\nz = "a"\n', encoding="utf-8")
+
+        def flipped():
+            app.client.call("core.apply", {"op": "reconcile"})
+            return board(app)["surface"] == "board"
+
+        wait_for(flipped, timeout=10, interval=0.2, description="the fixed board shown as a board")
+        assert board(app)["counts"] == {"nodes": 1, "edges": 0}
+
+        open_note(app, FUTURE)
+        assert board(app)["read_only"] is True
+        open_note(app, SHAPES)
+        issues = board(app)["issues"]
+        assert {"kind": "dangling_edge"} in [{"kind": issue["kind"]} for issue in issues], issues
+
+
+def test_searching_a_label_finds_the_board_and_its_syntax_does_not(samples: Path) -> None:
+    """§6.8 Phase 1 item 10."""
+    with board_app(samples, "board-search") as app:
+        app.client.call("palette.open", {"mode": "search"})
+        modal = app.client.call("palette.query", {"query": "Payment"})["navigation"]["modal"]
+        rows = [row for row in modal["results"] if row["path"] == FLOW]
+        assert len(rows) == 1, modal["results"]
+        assert rows[0]["hit"] == "content" and "Payment" in rows[0]["snippet"], rows[0]
+        modal = app.client.call("palette.query", {"query": "schema"})["navigation"]["modal"]
+        assert [row["path"] for row in modal["results"] if row["path"].endswith(".wren-board")] == []
+        app.client.call("palette.close")
 
 
 ESCAPES = '''schema = 1
@@ -158,7 +412,7 @@ def test_export_svg_writes_the_shown_board_as_xml(samples: Path, tmp_path: Path)
     dialog has closed."""
     (samples / "Boards/Samples/Escapes.wren-board").write_text(ESCAPES, encoding="utf-8")
     flow = samples / FLOW
-    before = (flow.read_bytes(), flow.stat().st_mtime_ns)
+    before = stamp(flow)
     text = "{http://www.w3.org/2000/svg}text"
     with board_app(samples, "board-export") as app:
         open_note(app, NOTES)
@@ -191,12 +445,11 @@ def test_export_svg_writes_the_shown_board_as_xml(samples: Path, tmp_path: Path)
                 "format": "svg", "path": str(tmp_path / "missing" / "x.svg"),
             })
         assert app.client.call("session.get")["document"]["dirty"] is False
-    assert (flow.read_bytes(), flow.stat().st_mtime_ns) == before
+    assert stamp(flow) == before
 
 
 def test_with_the_setting_off_there_is_no_export_command(samples: Path) -> None:
-    with WrenApp(workspace=samples, settings="boards = off\n",
-                 artifacts_dir=artifact_directory("board-export-off")) as app:
+    with board_app(samples, "board-export-off", setting="off") as app:
         open_note(app, NOTES)
         assert export_rows(app) == []
         assert command(app, "note.export_svg")["disposition"] == "blocked"

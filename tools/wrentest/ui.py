@@ -17,6 +17,7 @@ from __future__ import annotations
 import atexit
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -91,6 +92,28 @@ def wait_for(
     return last
 
 
+def _boards_setting(settings: str | None) -> str | None:
+    """*settings* with the ``boards`` line ``WRENTEST_BOARDS`` asks for.
+
+    ``WRENTEST_BOARDS=off`` or ``on`` writes that setting explicitly into
+    every launch's ``config.conf``, so a run means the same thing whatever
+    the build's default is. Unset, nothing is added and the build's default
+    holds. Settings that already name ``boards`` are left as they are: a
+    board case sets it itself.
+    """
+    value = os.environ.get("WRENTEST_BOARDS", "")
+    if not value:
+        return settings
+    if value not in ("off", "on"):
+        raise ValueError(f"WRENTEST_BOARDS must be off or on, got {value!r}")
+    if settings is not None and re.search(r"(?m)^[ \t]*boards[ \t]*=", settings):
+        return settings
+    line = f"boards = {value}\n"
+    if not settings:
+        return line
+    return settings + ("" if settings.endswith("\n") else "\n") + line
+
+
 def _find_binary() -> Path:
     override = os.environ.get("WREN_TEST_BIN")
     binary = Path(override) if override else ROOT / "target" / "debug" / "wren"
@@ -144,6 +167,7 @@ class WrenApp:
     settings:
         Text for the sandbox's ``config.conf``, written before the first
         launch. Restarts keep whatever the app has written there since.
+        ``WRENTEST_BOARDS`` adds a ``boards`` line unless the text has one.
     """
 
     def __init__(
@@ -173,7 +197,7 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
-        self._settings = settings
+        self._settings = _boards_setting(settings)
 
         self._ownroot: Path | None = None
         self._socket_path: Path | None = None

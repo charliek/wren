@@ -618,6 +618,7 @@ def test_theme_and_font_pickers_preview_live_and_restore(engine, editor_app) -> 
     with editor_app(artifacts_dir=artifact_directory("editor-pickers")) as app:
         call = app.client.call
         config = app.settings_path
+        written = config.read_text()
         shown = call("editor.get")["theme"]
 
         modal = call("palette.open", {"mode": "themes"})["navigation"]["modal"]
@@ -627,7 +628,8 @@ def test_theme_and_font_pickers_preview_live_and_restore(engine, editor_app) -> 
         call("palette.close")
         assert call("editor.get")["theme"] == shown
         # Previews never write the settings file.
-        assert config.read_text() == f"editor-engine = {engine}\n"
+        assert config.read_text() == written
+        assert written.startswith(f"editor-engine = {engine}\n")
 
         modal = call("palette.open", {"mode": "fonts"})["navigation"]["modal"]
         assert modal["active_key"] == {"font": "JetBrains Mono"}
