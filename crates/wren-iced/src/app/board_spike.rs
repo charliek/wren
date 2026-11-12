@@ -6,37 +6,10 @@ use std::fmt::Write as _;
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill, Task};
-use wren_board::{Palette, Rgba};
 use wren_canvas::BoardView;
-use wren_core::theme::{Appearance, Rgb, Theme};
 
 use super::{definitions, App, Message};
 use crate::{fonts, theme};
-
-/// The colours a theme gives the spike's board. The hues are stand-ins:
-/// the app chain derives the real palette from each theme.
-pub(super) fn palette(definition: Theme) -> Palette {
-    let rgb = |Rgb(r, g, b): Rgb| Rgba::rgb(r, g, b);
-    let colors = definition.colors;
-    Palette {
-        canvas: rgb(colors.editor),
-        ink: rgb(colors.text),
-        muted: rgb(colors.muted),
-        raised: rgb(colors.raised),
-        accent: rgb(colors.accent),
-        issue: rgb(colors.danger),
-        hues: [
-            rgb(colors.danger),
-            rgb(colors.warning),
-            rgb(colors.heading2),
-            rgb(colors.success),
-            rgb(colors.link),
-            rgb(colors.heading),
-            rgb(colors.accent),
-        ],
-        dark: definition.appearance == Appearance::Dark,
-    }
-}
 
 /// A board of `count` rounded rectangles of 160 by 64 in a grid, each
 /// with a two-line label and an elbow connector to its right and lower
@@ -98,7 +71,7 @@ impl App {
         let opened = std::time::Instant::now();
         // Labels are measured when the view opens, before a window exists.
         fonts::load();
-        let mut view = BoardView::open(text, palette(self.definition), fonts::UI)
+        let mut view = BoardView::open(text, theme::board_palette(self.definition), fonts::UI)
             .map_err(|error| error.to_string())?;
         view.fit();
         self.board_spike = Some(view);
@@ -109,7 +82,7 @@ impl App {
 
     /// Repaint the spike's board in the current theme's colours.
     pub(super) fn retheme_board_spike(&mut self) {
-        let palette = palette(self.definition);
+        let palette = theme::board_palette(self.definition);
         if let Some(view) = &mut self.board_spike {
             view.set_palette(palette);
         }
@@ -148,16 +121,10 @@ impl App {
             background: Some(theme::color(colors.titlebar).into()),
             ..Default::default()
         });
-        let style = wren_canvas::Style {
-            #[cfg(feature = "smoke-test")]
-            labels: self.board_perf.labels,
-            #[cfg(not(feature = "smoke-test"))]
-            labels: None,
-            scale_factor: self.scale_factor,
-        };
         let body = column![
             header,
-            view.view("note-editor", style).map(Message::BoardSpike)
+            view.view("note-editor", self.board_style())
+                .map(Message::BoardSpike)
         ];
         self.palette_view(body.width(Fill).height(Fill).into())
     }
@@ -660,7 +627,7 @@ mod tests {
         let mut worst = (0.0f32, 0.0f32);
         let mut checked = 0;
         for (name, text) in SAMPLES {
-            let view = BoardView::open(text, palette(definitions::DARK), fonts::UI)
+            let view = BoardView::open(text, theme::board_palette(definitions::DARK), fonts::UI)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             let exported = svg::write(
                 view.scene(),
@@ -757,8 +724,12 @@ mod tests {
     #[test]
     fn one_shape_in_ten_covers_its_neighbours_label_in_two_layers() {
         fonts::load();
-        let view = BoardView::open(&grid(1000), palette(definitions::DARK), fonts::UI)
-            .expect("the generated board opens");
+        let view = BoardView::open(
+            &grid(1000),
+            theme::board_palette(definitions::DARK),
+            fonts::UI,
+        )
+        .expect("the generated board opens");
         assert_eq!(view.layers().count, 2);
         assert_eq!(view.layers().overflow, 0);
         let raised = view

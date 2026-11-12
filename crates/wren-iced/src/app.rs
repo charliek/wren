@@ -138,6 +138,8 @@ pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
     Editor(wren_editor::Message),
+    /// Input from the board viewer that shows the open note.
+    Board(wren_canvas::Message),
     BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
@@ -422,6 +424,7 @@ impl App {
                 self.retheme_board_spike();
             }
             Message::Editor(message) => return self.edit(message),
+            Message::Board(message) => self.board_input(message),
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,

@@ -4,11 +4,13 @@
 //! asks [`App::surface`].
 
 use std::collections::HashMap;
+use std::time::Instant;
 
-use wren_board::{Palette, ParseError};
-use wren_canvas::{BoardView, Viewport};
+use wren_board::{Access, Palette, ParseError};
+use wren_canvas::{BoardView, Input, Viewport};
 use wren_core::model::NoteId;
 
+use super::columns::Column;
 use super::App;
 use crate::fonts;
 
@@ -69,8 +71,81 @@ impl App {
 
     /// The colours the current theme gives a board.
     pub(super) fn board_palette(&self) -> Palette {
-        wren_core::theme::board_palette(&self.definition.colors)
+        crate::theme::board_palette(self.definition)
     }
+
+    /// How the board widget presents a board in this window.
+    pub(super) fn board_style(&self) -> wren_canvas::Style {
+        wren_canvas::Style {
+            #[cfg(feature = "smoke-test")]
+            labels: self.board_perf.labels,
+            #[cfg(not(feature = "smoke-test"))]
+            labels: None,
+            scale_factor: self.scale_factor,
+        }
+    }
+
+    /// A message from the widget showing the open board. Input other than
+    /// the wheel means the board has the keyboard, as an edit means the
+    /// editor has it; the wheel reaches a board that does not, and a cancel
+    /// only says the window or the widget lost it.
+    pub(super) fn board_input(&mut self, message: wren_canvas::Message) {
+        let overlay = self.dialog.is_some() || self.palette.is_some();
+        let Some(view) = &mut self.board else {
+            return;
+        };
+        if let wren_canvas::Message::Input(_, input) = &message {
+            if !overlay && !matches!(input, Input::Wheel { .. } | Input::Cancel) {
+                self.column = Column::Editor;
+            }
+        }
+        view.update(message, Instant::now());
+    }
+}
+
+/// What the footer says of a board: its size, then what is worth a look.
+pub(super) struct BoardFooter {
+    /// The counts of nodes and connectors.
+    pub stats: String,
+    /// What is wrong with the board, or why it cannot change.
+    pub flags: Vec<String>,
+    /// How far in it is zoomed.
+    pub zoom: String,
+}
+
+impl BoardFooter {
+    pub fn of(view: &BoardView) -> Self {
+        let count =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let board = view.board();
+        let mut flags = Vec::new();
+        if !view.issues().is_empty() {
+            flags.push(count(view.issues().len(), "issue", "issues"));
+        }
+        if matches!(view.access(), Access::ReadOnly(_)) {
+            flags.push("Read-only".into());
+        }
+        Self {
+            stats: format!(
+                "Board · {} · {}",
+                count(board.nodes.len(), "node", "nodes"),
+                count(board.edges.len(), "connector", "connectors")
+            ),
+            flags,
+            zoom: format!("{:.0}%", view.viewport().zoom * 100.0),
+        }
+    }
+}
+
+/// The banner over a board shown as raw text: where its text stops being
+/// a board, and that it is one again once that is fixed.
+pub(super) fn raw_banner(error: &ParseError) -> String {
+    format!(
+        "This board is shown as text because line {}, column {} is not valid: {}. It opens as a board again once the text is valid.",
+        error.line,
+        error.column,
+        error.message.trim_end().trim_end_matches('.')
+    )
 }
 
 #[cfg(test)]
@@ -104,6 +179,30 @@ size = [120, 60]
 kind = "edge"
 from = { node = "receive" }
 to = { node = "pack" }
+"#;
+
+    /// A board `check` finds nothing wrong with.
+    const CLEAN: &str = r#"schema = 1
+
+[node.pack]
+text = "Pack"
+kind = "shape"
+at = [0, 200]
+size = [120, 60]
+z = "b"
+
+[node.receive]
+text = "Receive order"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "a"
+
+[edge.then]
+kind = "edge"
+from = { node = "receive" }
+to = { node = "pack" }
+z = "c"
 "#;
 
     /// `FLOW` with one more shape, as another program would save it.
@@ -999,5 +1098,171 @@ to = { node = "pack" }
         assert!(outcome.processed.disposition.committed());
         assert_in_step(&app, Surface::Board);
         assert_eq!(app.editor.selected_text(), None);
+    }
+
+    #[test]
+    fn the_footer_names_the_counts_the_issues_the_access_and_the_zoom() {
+        fonts::load();
+        let open = |text: &str| {
+            BoardView::open(
+                text,
+                crate::theme::board_palette(definitions::DARK),
+                fonts::UI,
+            )
+            .unwrap()
+        };
+        let mut clean = open(CLEAN);
+        let footer = BoardFooter::of(&clean);
+        assert_eq!(footer.stats, "Board · 2 nodes · 1 connector");
+        assert_eq!(clean.issues(), []);
+        assert!(footer.flags.is_empty());
+        assert_eq!(footer.zoom, "100%");
+        clean.set_viewport(Viewport {
+            zoom: 0.754,
+            ..clean.viewport()
+        });
+        assert_eq!(BoardFooter::of(&clean).zoom, "75%");
+
+        let flagged = open(&format!(
+            "{CLEAN}\n[edge.loose]\nkind = \"edge\"\nfrom = {{ node = \"pack\" }}\nto = {{ node = \"gone\" }}\nz = \"d\"\n"
+        ));
+        assert_eq!(flagged.issues().len(), 1);
+        let footer = BoardFooter::of(&flagged);
+        assert_eq!(footer.stats, "Board · 2 nodes · 2 connectors");
+        assert_eq!(footer.flags, ["1 issue"]);
+
+        let read_only =
+            open(&CLEAN.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1));
+        assert_eq!(BoardFooter::of(&read_only).flags, ["Read-only"]);
+        let both = open(&FLOW.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1));
+        assert_eq!(BoardFooter::of(&both).flags, ["3 issues", "Read-only"]);
+
+        let one = open("schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n");
+        assert_eq!(BoardFooter::of(&one).stats, "Board · 1 node · 0 connectors");
+        let empty = open(wren_board::EMPTY);
+        assert_eq!(
+            BoardFooter::of(&empty).stats,
+            "Board · 0 nodes · 0 connectors"
+        );
+    }
+
+    #[test]
+    fn the_raw_banner_names_where_the_text_stops_being_a_board() {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Broken");
+        let error = app.board_error.as_ref().unwrap();
+        let banner = raw_banner(error);
+        assert!(
+            banner.starts_with(&format!(
+                "This board is shown as text because line 1, column {} is not valid: ",
+                error.column
+            )),
+            "{banner}"
+        );
+        assert!(banner.contains(&error.message), "{banner}");
+        assert!(banner.ends_with("It opens as a board again once the text is valid."));
+        assert!(!banner.contains(".."), "{banner}");
+        let ends = ParseError {
+            line: 4,
+            column: 2,
+            message: "expected a value.".into(),
+        };
+        assert_eq!(
+            raw_banner(&ends),
+            "This board is shown as text because line 4, column 2 is not valid: expected a value. It opens as a board again once the text is valid."
+        );
+    }
+
+    fn wheel(app: &App) -> Message {
+        Message::Board(wren_canvas::Message::Input(
+            app.board.as_ref().unwrap().epoch(),
+            Input::Wheel {
+                delta: wren_canvas::Scroll::Lines { x: 0.0, y: -1.0 },
+                at: (100.0, 100.0),
+                zoom: false,
+                sideways: false,
+                scale_factor: 1.0,
+            },
+        ))
+    }
+
+    fn input(app: &App, input: Input) -> Message {
+        Message::Board(wren_canvas::Message::Input(
+            app.board.as_ref().unwrap().epoch(),
+            input,
+        ))
+    }
+
+    #[test]
+    fn board_input_reaches_the_view_and_all_but_the_wheel_takes_the_column() {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        let _ = app.update(Message::Board(wren_canvas::Message::Resized {
+            width: 800.0,
+            height: 600.0,
+        }));
+        let view = app.board.as_ref().unwrap();
+        assert!(!view.fit_pending(), "the size reached the view");
+        let fitted = view.viewport();
+        let text = session_text(&app);
+
+        // The wheel pans an unfocused board and leaves the column alone.
+        app.column = Column::Notes;
+        let _ = app.update(wheel(&app));
+        let panned = app.board.as_ref().unwrap().viewport();
+        assert_ne!(panned, fitted);
+        assert_eq!(app.column, Column::Notes);
+        let _ = app.update(input(&app, Input::Cancel));
+        assert_eq!(app.column, Column::Notes);
+
+        // A press is the board taking the keyboard.
+        let press = Input::Press {
+            button: wren_canvas::Button::Middle,
+            at: (100.0, 100.0),
+        };
+        let _ = app.update(input(&app, press));
+        assert_eq!(app.column, Column::Editor);
+        for step in [
+            Input::Move { at: (160.0, 100.0) },
+            Input::Release {
+                button: wren_canvas::Button::Middle,
+            },
+        ] {
+            let _ = app.update(input(&app, step));
+        }
+        let dragged = app.board.as_ref().unwrap().viewport();
+        assert!((panned.x - dragged.x - 60.0 / dragged.zoom).abs() < 0.01);
+        for column in [Column::Notes, Column::Groups] {
+            app.column = column;
+            let _ = app.update(input(&app, Input::Space { held: true }));
+            assert_eq!(app.column, Column::Editor);
+            let _ = app.update(input(&app, Input::Space { held: false }));
+        }
+
+        // Under an open palette the column stays where the palette returns.
+        app.column = Column::Notes;
+        let _ = app.open_palette(super::super::palette::Mode::Commands);
+        assert!(app.palette.is_some());
+        let _ = app.update(input(&app, press));
+        let _ = app.update(input(
+            &app,
+            Input::Release {
+                button: wren_canvas::Button::Middle,
+            },
+        ));
+        assert_eq!(app.column, Column::Notes);
+        assert!(!app.board.as_ref().unwrap().machine().panning());
+
+        // Looking is not a change: the Session's text is what it was.
+        assert_eq!(session_text(&app), text);
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+
+        // With no board open the message has nowhere to go.
+        let _ = app.close_palette();
+        open_markdown(&mut app, "Note");
+        app.column = Column::Notes;
+        let _ = app.update(Message::Board(wren_canvas::Message::Input(0, press)));
+        assert_eq!(app.column, Column::Notes);
+        assert_in_step(&app, Surface::Text);
     }
 }

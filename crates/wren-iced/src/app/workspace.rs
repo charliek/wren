@@ -839,7 +839,7 @@ impl App {
                     self.board_viewports.clear();
                 }
                 if let (Some(note), None) = (board_note, &error) {
-                    let palette = wren_core::theme::board_palette(&self.definition.colors);
+                    let palette = crate::theme::board_palette(self.definition);
                     match board::open(text, note, palette, &self.board_viewports) {
                         Ok(view) => self.board = Some(view),
                         Err(reason) => error = Some(reason),
