@@ -99,7 +99,11 @@ impl App {
                 if id.scope() == Scope::Board {
                     // The board's key policy routes the bound key, and only
                     // a focused board sees it; it is mounted under the
-                    // editor's focus id.
+                    // editor's focus id. The board defaults are always in
+                    // the keymap, so the setting is checked here.
+                    if !self.preferences.boards {
+                        return Err("The command is unavailable".into());
+                    }
                     let keymap = &self.preferences.keymap;
                     let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
                     let super::preferences::BoardRoute::Command(command) =
@@ -1293,6 +1297,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), boards::FLOW);
         // The editor snapshot reads the empty editor, never the board's text.
         assert_eq!(app.editor_snapshot()["text"], "");
+    }
+
+    /// With `boards` off a board key is no shortcut, as `command.run`
+    /// blocks the command.
+    #[test]
+    fn a_board_shortcut_is_refused_with_boards_off() {
+        use super::super::board::tests as boards;
+
+        let (_directory, mut app) = boards::fixture();
+        app.preferences.boards = false;
+        let (request, mut reply) = Request::detached("shortcut", json!({"id":"board.tool.select"}));
+        let _ = app.handle_test(request);
+        let error = reply.try_recv().unwrap().expect_err("shortcut");
+        assert!(error.contains("unavailable"), "{error}");
     }
 
     /// `board.export` writes what `note.export_svg` writes, and only for
