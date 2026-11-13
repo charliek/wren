@@ -27,15 +27,22 @@ if MODE not in ("debug", "release"):
 RELEASE = MODE == "release"
 RENDERER = os.environ.get("ICED_BACKEND", "")
 
-# Milliseconds. Release: the spike's budgets as §8.5 records them (the edit
+# Milliseconds. Release: the spike's budgets as §8.5 records them, the edit
 # budget replaced by the canvas chain's measured 12 ms with the whole board
-# in view). Debug: §6.7's ceilings.
-EDIT = 12 if RELEASE else 100
+# in view, and on wgpu by 16 ms: a quarter over the worst median measured on
+# lavapipe on a quiet machine, whose threads share the processor with the
+# scene build, so that a doubled scene build still fails (§6.7). Debug:
+# §6.7's ceilings.
+EDIT = (16 if RENDERER == "wgpu" else 12) if RELEASE else 100
 FRAME = 33 if RELEASE else 400
 DRAW = 8
 OPEN_1K = 150 if RELEASE else 5000
 OPEN_10K = 1000 if RELEASE else 5000
 VIEW = 1 if RELEASE else 5
+
+# Whole-scene changes left out before the timed ones, and those timed.
+WARM = 3
+EDITS = 7
 
 GROUP = "Perf/Boards"
 SHAPES = 1000
@@ -69,6 +76,15 @@ def rings(app, **params) -> dict:
     return app.client.call("perf.board", params, timeout=600)
 
 
+def painted(app, built: int) -> dict:
+    """The rings once a draw has built the geometry of a changed scene. A
+    request is answered between draws, never during one, so that draw's
+    own time is in the ring by then. Polled without a pause, which also
+    keeps the app's core busy."""
+    return wait_for(lambda: (lambda r: r if r["builds"] > built else None)(rings(app)),
+                    timeout=10, interval=0.001, description="the changed scene drawn")
+
+
 def opened(app) -> dict:
     return wait_for(lambda: (lambda r: r if r["open_micros"] is not None else None)(rings(app)),
                     timeout=60, interval=0.02, description="the board's opening timed")
@@ -76,7 +92,10 @@ def opened(app) -> dict:
 
 def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
     artifacts = artifact_directory(f"board-perf-{MODE}")
-    measured: dict = {"mode": MODE, "renderer": RENDERER, "shapes": SHAPES}
+    # The release budgets hold on a quiet machine only; the load tells a run
+    # made beside other work from a regression.
+    measured: dict = {"mode": MODE, "renderer": RENDERER, "shapes": SHAPES,
+                      "load_average": os.getloadavg()}
     try:
         with board_app(workspace, f"board-perf-{MODE}-app") as app:
             # Opening, from the note operation to the first redraw after the
@@ -118,17 +137,26 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
             assert len(views) >= 10 and median_ms(views) <= VIEW, views
 
             # One change of the whole scene, a theme switch, and the draw that
-            # paints it.
-            edits = []
-            for theme in ("light", "dark", "light", "dark", "light"):
-                rings(app, clear=True)
-                app.client.call("theme.set", {"id": theme})
-                time.sleep(0.4)
-                after = rings(app)
+            # paints it, timed back to back: the first few changes are left
+            # out, so each counted one runs on a core already busy. Taken
+            # after an idle pause, the same build measured twice as long on
+            # a core that had dropped to its idle clock (§6.7).
+            scenes, draws, warm = [], [], []
+            for change in range(WARM + EDITS):
+                before = rings(app, clear=True)
+                app.client.call("theme.set", {"id": ("light", "dark")[change % 2]})
+                after = painted(app, before["builds"])
                 assert len(after["scene_micros"]) == 1, after["scene_micros"]
-                edits.append(after["scene_micros"][0] + max(after["draw_micros"]))
-            measured["edit_micros"] = edits
-            assert median_ms(edits) <= EDIT, edits
+                sample = (after["scene_micros"][0], max(after["draw_micros"]))
+                if change < WARM:
+                    warm.append(sum(sample))
+                else:
+                    scenes.append(sample[0])
+                    draws.append(sample[1])
+            edits = [scene + draw for scene, draw in zip(scenes, draws)]
+            measured.update(edit_micros=edits, edit_scene_micros=scenes,
+                            edit_draw_micros=draws, edit_warm_up_micros=warm)
+            assert median_ms(edits) <= EDIT, measured
 
             # Pan and zoom, one step a redraw.
             for name, run in (("pan", {"pan": {"steps": 60, "dx": 8, "dy": 0}}),

@@ -2244,16 +2244,20 @@ mod tests {
         let root = dir.path();
         write_markdown_tree(root);
         make_dir(root, "Work/Boards only");
-        let without = scan(&FsStore::open(root).unwrap(), None, Kinds::MARKDOWN).unwrap();
+        let store = FsStore::open(root).unwrap();
+        // The store's root is canonical: on macOS the temporary directory
+        // is reached through a symlink and the warnings name the real path.
+        let root = store.root();
+        let without = scan(&store, None, Kinds::MARKDOWN).unwrap();
 
         write_boards(root);
-        #[cfg(unix)]
+        // Linux only: APFS refuses a name that is not UTF-8.
+        #[cfg(target_os = "linux")]
         {
             use std::os::unix::ffi::OsStrExt;
             let name = std::ffi::OsStr::from_bytes(b"\xff.wren-board");
             fs::write(root.join("Work/Ideas").join(name), "schema = 1\n").unwrap();
         }
-        let store = FsStore::open(root).unwrap();
         let mut visited = Vec::new();
         let with = scan_with_contents(store.reader(), None, Kinds::MARKDOWN, |note, _| {
             visited.push(note.path.clone())
@@ -2276,7 +2280,9 @@ mod tests {
         let root = dir.path();
         write_markdown_tree(root);
         write_boards(root);
-        let ws = scan(&FsStore::open(root).unwrap(), None, Kinds::ALL).unwrap();
+        let store = FsStore::open(root).unwrap();
+        let root = store.root();
+        let ws = scan(&store, None, Kinds::ALL).unwrap();
         let mut notes: Vec<_> = ws
             .notes
             .iter()
@@ -2349,7 +2355,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_non_utf8_board_name_gets_the_markdown_warning() {
         use std::os::unix::ffi::OsStrExt;
