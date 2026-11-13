@@ -302,8 +302,9 @@ pub struct BoardView {
     issues: Vec<Issue>,
     access: Access,
     synced: String,
-    /// The text the board was loaded or last saved from, which a draft is
-    /// while the board still writes as `canonical` (§3.4 rule 2).
+    /// The text the board was opened or last reloaded from, which a draft
+    /// is while the board still writes as `canonical` (§3.4 rule 2). A
+    /// save does not replace it: it is the undo floor (§5.11 rule 5).
     pristine: String,
     /// What the canonical writer makes of the pristine text's board.
     canonical: String,
@@ -667,18 +668,12 @@ impl BoardView {
         update
     }
 
-    /// The Session saved `text`, which is now the pristine text (§3.4
-    /// rule 2).
-    pub fn saved(&mut self, text: &str) {
-        if text != self.pristine {
-            // Every text this view drafts, other than the pristine text,
-            // is the canonical writer's own output, which writes again to
-            // itself; so the saved text is its own canonical form, with no
-            // parse.
-            text.clone_into(&mut self.pristine);
-            text.clone_into(&mut self.canonical);
-        }
-    }
+    /// The Session saved `text`. The pristine text stays the one the board
+    /// was opened or reloaded from: it is the undo floor, so undoing to it
+    /// after a save drafts the original bytes again and the Session saves
+    /// them back (§5.11 rule 5). The Session marks a draft clean against
+    /// its own saved bytes, so nothing here needs the saved text.
+    pub fn saved(&mut self, _text: &str) {}
 
     /// The text to send as the board's draft, by the pristine rule (§3.4
     /// rule 2): the pristine text while the board writes as the board it
@@ -2003,25 +1998,29 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_text_is_the_new_pristine_text() {
+    fn undoing_to_the_opening_board_after_a_save_drafts_the_original_bytes() {
+        // §5.11 rule 5 and §6.8's "move then undo on Hand written, waiting
+        // past the debounce": the save in between does not move the floor.
         let mut view = sized(fixtures::HAND_WRITTEN);
         let now = Instant::now();
         view.command(Command::SelectAll, now);
         view.command(Command::Move(Dir::Down), now);
         let saved = view.draft();
+        assert_ne!(saved, fixtures::HAND_WRITTEN);
         view.saved(&saved);
-        assert!(view.pristine());
-        assert_eq!(view.draft(), saved);
-        // Back where the file began is now an edit of the saved text, and
-        // drafts canonically.
-        view.command(Command::Move(Dir::Up), now);
         assert!(!view.pristine());
-        let original = wren_board::parse(fixtures::HAND_WRITTEN).expect("a board");
-        assert_eq!(view.draft(), wren_board::write(&original));
-        // The pristine text saved again changes nothing.
-        let pristine = view.pristine.clone();
-        view.saved(&pristine);
-        assert_eq!(view.canonical, saved);
+        assert_eq!(view.draft(), saved);
+        view.command(Command::Move(Dir::Up), now);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+        assert_eq!(view.synced(), fixtures::HAND_WRITTEN);
+        // The original saved again, then another edit and back: still the
+        // original.
+        view.saved(fixtures::HAND_WRITTEN);
+        view.command(Command::Move(Dir::Right), now);
+        assert_ne!(view.draft(), fixtures::HAND_WRITTEN);
+        view.command(Command::Move(Dir::Left), now);
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
     }
 
     #[test]
