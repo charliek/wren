@@ -3,7 +3,7 @@
 //! Everything here is in absolute board units, as integers: a child node
 //! is compared by where it is drawn, not by its stored `at`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{placements, snap, Board, Dir, End, Id, GRID};
 
@@ -186,23 +186,46 @@ pub fn slot(board: &Board, from: &Id, size: [i32; 2], dir: Dir) -> Option<[i32; 
 
 /// The node in the ideal slot of a node of `size` built from `from` going
 /// `dir`, which `board.connect.<dir>` joins instead of creating one (§5.6
-/// rule 6): of the nodes other than `from` whose boxes share area with the
-/// slot, the nearest by centre distance, ties by id.
+/// rule 6): of the nodes whose boxes share area with the slot, the nearest
+/// by centre distance, ties by id. Neither `from` nor a node it is drawn
+/// inside or that is drawn inside it counts: a container holds every slot
+/// near its child, and joining them is not building a step.
 pub fn occupant(board: &Board, from: &Id, size: [i32; 2], dir: Dir) -> Option<Id> {
     let boxes = boxes(board);
     let source = *boxes.get(from.as_str())?;
+    let kin = kin(board, from);
     let size = size.map(|length| length.max(1));
     let slot = Bounds::new(ideal(source, size.map(i64::from), dir).map(i64::from), size);
     let [cx, cy] = slot.centre();
     boxes
         .iter()
-        .filter(|&(&id, &other)| id != from.as_str() && slot.meets(other))
+        .filter(|&(&id, &other)| !kin.contains(id) && slot.meets(other))
         .min_by_key(|&(&id, &other)| {
             let [x, y] = other.centre();
             let (dx, dy) = (i128::from(x - cx), i128::from(y - cy));
             (dx * dx + dy * dy, id)
         })
         .and_then(|(&id, _)| Id::new(id))
+}
+
+/// `from`, the nodes it is drawn inside and the nodes drawn inside it.
+fn kin<'a>(board: &'a Board, from: &Id) -> BTreeSet<&'a str> {
+    let placed = placements(board);
+    let mut kin = BTreeSet::new();
+    for id in placed.keys() {
+        // The drawn chain has no cycle and at most 32 levels.
+        let chain: Vec<&Id> = std::iter::successors(Some(*id), |id| {
+            placed.get(id).and_then(|place| place.parent)
+        })
+        .collect();
+        if chain.contains(&from) {
+            kin.insert(id.as_str());
+        }
+        if *id == from {
+            kin.extend(chain.iter().map(|id| id.as_str()));
+        }
+    }
+    kin
 }
 
 /// The corner of an unconnected node of `size` that `board.connect.next`
@@ -379,6 +402,20 @@ mod tests {
         // Equal distances go to the lower id.
         let b = board(&[("s", [0, 0]), ("y", [200, -40]), ("x", [200, 40])], &[]);
         assert_eq!(occupant(&b, &id("s"), SIZE, Dir::Right), Some(id("x")));
+        // A child's container fills its slots, and a child drawn outside
+        // its parent sits in one; neither is the occupant. A sibling is.
+        let text = "schema = 1\n\n\
+                    [node.p]\nkind = \"shape\"\nat = [0, 0]\nsize = [400, 400]\nz = \"V\"\n\n\
+                    [node.c]\nkind = \"shape\"\nat = [20, 20]\nparent = \"p\"\nsize = [120, 60]\nz = \"V\"\n\n\
+                    [node.g]\nkind = \"shape\"\nat = [200, 0]\nparent = \"c\"\nsize = [120, 60]\nz = \"V\"\n";
+        let b = parse(text).unwrap();
+        assert_eq!(occupant(&b, &id("c"), SIZE, Dir::Down), None);
+        assert_eq!(occupant(&b, &id("c"), SIZE, Dir::Right), None);
+        let text = format!(
+            "{text}\n[node.d]\nkind = \"shape\"\nat = [20, 140]\nparent = \"p\"\nsize = [120, 60]\nz = \"W\"\n"
+        );
+        let b = parse(&text).unwrap();
+        assert_eq!(occupant(&b, &id("c"), SIZE, Dir::Down), Some(id("d")));
     }
 
     #[test]

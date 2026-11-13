@@ -796,6 +796,22 @@ z = "Z"
         assert_eq!(lines[2], "+at = [200, 120]");
     }
 
+    /// The container a child is drawn in fills the child's slots, yet it
+    /// is not a node to join: a new node is built outside it.
+    #[test]
+    fn extending_a_child_does_not_join_its_container() {
+        let text = "schema = 1\n\n[node.c]\nkind = \"shape\"\nat = [20, 20]\nparent = \"p\"\nsize = [120, 60]\nz = \"V\"\n\n\
+                    [node.p]\nkind = \"shape\"\nat = [0, 0]\nsize = [400, 400]\nz = \"V\"\n";
+        let (plan, lines) = diff(text, &extend("c", Some(Dir::Down), None), &["n1", "n2"]);
+        assert_eq!(plan.select, Some(ids(&["n1"])));
+        assert_eq!(plan.edit, Some(id("n1")));
+        assert_eq!(lines[0], "+[node.n1]");
+        assert!(
+            lines.contains(&"+to = { node = \"n1\" }".to_owned()),
+            "{lines:?}"
+        );
+    }
+
     #[test]
     fn extending_with_no_free_slot_says_so() {
         let text = "schema = 1\n\n[node.s]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n\n\
