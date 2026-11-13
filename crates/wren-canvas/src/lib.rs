@@ -267,6 +267,24 @@ pub enum Message {
     Pasted(u64, String),
 }
 
+/// Where a view draws the ids of the elements it makes.
+#[derive(Clone, Debug)]
+enum Draws {
+    Random(Random),
+    #[cfg(feature = "test-support")]
+    Seeded(wren_board::ids::Seeded),
+}
+
+impl wren_board::ids::Ids for Draws {
+    fn draw(&mut self) -> wren_board::Id {
+        match self {
+            Draws::Random(random) => random.draw(),
+            #[cfg(feature = "test-support")]
+            Draws::Seeded(seeded) => seeded.draw(),
+        }
+    }
+}
+
 /// What a message did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Update {
@@ -343,7 +361,7 @@ pub struct BoardView {
     /// The board as a gesture in flight would leave it, shown in place of
     /// the board until the gesture ends (§3.4 rule 4).
     preview: Option<Preview>,
-    ids: Random,
+    ids: Draws,
     viewport: Viewport,
     revision: u64,
     machine: Machine,
@@ -436,7 +454,7 @@ impl BoardView {
             plan: layers::Plan::default(),
             cap: layers::CAP,
             preview: None,
-            ids: Random::new(),
+            ids: Draws::Random(Random::new()),
             viewport: Viewport::default(),
             revision: 0,
             machine: Machine::default(),
@@ -762,6 +780,14 @@ impl BoardView {
     /// every other key the board's.
     pub fn set_key_policy(&mut self, policy: KeyPolicy) {
         self.key_policy = Some(policy);
+    }
+
+    /// Draw the ids of new elements from `seed` from now on, so a test or
+    /// a scene that builds a board makes the same board every run: routes
+    /// depend on where ids sort (§3.7).
+    #[cfg(feature = "test-support")]
+    pub fn seed_ids(&mut self, seed: u64) {
+        self.ids = Draws::Seeded(wren_board::ids::Seeded::new(seed));
     }
 
     /// What the focused board makes of a press of `key`, which typed

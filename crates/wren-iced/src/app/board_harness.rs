@@ -103,6 +103,20 @@ impl App {
                 Ok(task) => (task, Ok(self.board_snapshot(false, placement.focused))),
                 Err(error) => (Task::none(), Err(error)),
             },
+            "board.seed" => match (params.get("seed").and_then(Value::as_u64), &mut self.board) {
+                (Some(seed), Some(view)) => {
+                    view.seed_ids(seed);
+                    (
+                        Task::none(),
+                        Ok(self.board_snapshot(false, placement.focused)),
+                    )
+                }
+                (None, _) => (Task::none(), Err("seed must be a whole number".into())),
+                (_, None) => (
+                    Task::none(),
+                    Err("The open note is not shown as a board".into()),
+                ),
+            },
             _ => (
                 Task::none(),
                 Err(format!("unknown test operation: {}", request.op)),
@@ -1856,6 +1870,36 @@ mod tests {
         let view = app.board.as_ref().unwrap();
         assert!(view.pristine() && !view.can_undo());
         assert_eq!(boards::session_text(&app), boards::FLOW);
+    }
+
+    #[test]
+    fn board_seed_makes_the_ids_of_new_elements_repeat() {
+        let made = || {
+            let (_directory, mut app) = boards::fixture();
+            boards::open_board(&mut app, "Flow");
+            lay_out(&mut app);
+            ask(&mut app, "board.seed", json!({"seed": 7}), PLACED).unwrap();
+            pointer(
+                &mut app,
+                json!({"kind": "click", "button": "left", "at": {"node": "pack"}}),
+            );
+            key(&mut app, json!({"key": "tab"}));
+            let board = app.board.as_ref().unwrap().board();
+            let mut ids: Vec<String> = board
+                .nodes
+                .keys()
+                .chain(board.edges.keys())
+                .map(|id| id.as_str().to_owned())
+                .collect();
+            ids.sort();
+            ids
+        };
+        let first = made();
+        assert_eq!(first.len(), 5, "{first:?}");
+        assert_eq!(made(), first);
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        assert!(ask(&mut app, "board.seed", json!({"seed": -1}), PLACED).is_err());
     }
 
     #[test]

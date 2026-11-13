@@ -313,7 +313,7 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
             }
             "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
-            | "board.apply" => return self.board_request(request),
+            | "board.apply" | "board.seed" => return self.board_request(request),
             "board.export" => {
                 // What `note.export_svg` writes once its save dialog closes.
                 if string(params, "format")? != "svg" {
