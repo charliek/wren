@@ -18,6 +18,8 @@ use crate::{
 
 mod wrap;
 
+pub use wrap::{graphemes, words, wrap, Wrapped};
+
 /// A node's label: Inter Regular at a fixed logical size, whatever the
 /// editor's font settings.
 pub const LABEL_SIZE: f32 = 14.0;
@@ -547,15 +549,15 @@ impl Painter<'_> {
         let lines: Vec<Line> = wrapped
             .into_iter()
             .enumerate()
-            .filter(|(_, (line, _))| !line.is_empty())
-            .map(|(row, (text, width))| {
+            .filter(|(_, line)| !line.range.is_empty())
+            .map(|(row, Wrapped { range, width })| {
                 let x = if layout.centred() {
                     area.x + (area.width - width) / 2.0
                 } else {
                     area.x
                 };
                 Line {
-                    text,
+                    text: text.get(range).unwrap_or_default().to_owned(),
                     origin: Point::new(x, top + row as f32 * height),
                     width,
                 }
@@ -703,7 +705,7 @@ impl Painter<'_> {
             return;
         }
         let lines = wrap::wrap(text, None, Face::Regular, SMALL_SIZE, self.measure);
-        let width = lines.iter().map(|(_, w)| *w).fold(0.0, f32::max);
+        let width = lines.iter().map(|line| line.width).fold(0.0, f32::max);
         let height = lines.len() as f32 * line_height(SMALL_SIZE);
         let area = Rect::new(
             center.x - width / 2.0,
