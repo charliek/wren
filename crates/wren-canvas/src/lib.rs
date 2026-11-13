@@ -1290,9 +1290,7 @@ impl BoardView {
         let ids: Vec<Id> = self.machine.selection().iter().cloned().collect();
         let editable = self.writable() && !ids.is_empty();
         match command {
-            Command::Delete if editable => {
-                self.edit(&Intent::Delete { ids }, Unit::One, now, update);
-            }
+            Command::Delete if editable => self.delete(ids, now, update),
             Command::Duplicate if editable => {
                 let by = [GRID, GRID];
                 self.edit(&Intent::Duplicate { ids, by }, Unit::One, now, update);
@@ -1308,7 +1306,7 @@ impl BoardView {
             Command::Cut if editable => {
                 if let Some(text) = wren_board::clip::copy(&self.board, &ids) {
                     update.effects.push(Effect::ClipboardWrite(text));
-                    self.edit(&Intent::Delete { ids }, Unit::One, now, update);
+                    self.delete(ids, now, update);
                 }
             }
             // The text comes back as `Message::Pasted`.
@@ -1318,6 +1316,17 @@ impl BoardView {
             }
             Command::Undo => self.travel(false, update),
             Command::Redo => self.travel(true, update),
+            Command::EdgeRouting
+            | Command::EdgeStart
+            | Command::EdgeEnd
+            | Command::EdgeReverse
+            | Command::StrokeDashed
+                if editable =>
+            {
+                if let Some(intent) = edge_style(&self.board, &ids, command) {
+                    self.edit(&intent, Unit::One, now, update);
+                }
+            }
             Command::Select(dir) => self.walk(dir, false),
             Command::ExtendSelection(dir) => self.walk(dir, true),
             Command::ZoomFit => self.fit(),
@@ -1331,6 +1340,21 @@ impl BoardView {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Delete `ids` as one unit (§5.10 rule 1). When that takes the cursor
+    /// with it, the cursor moves to the remaining node nearest where it
+    /// was, by centre, ties by id; nothing is selected after.
+    fn delete(&mut self, ids: Vec<Id>, now: Instant, update: &mut Update) {
+        let cursor = self.machine.cursor();
+        let was = cursor.and_then(|id| bounds(&self.board, &self.scene, id));
+        if !self.edit(&Intent::Delete { ids }, Unit::One, now, update) {
+            return;
+        }
+        if self.machine.cursor().is_none() {
+            let nearest = was.and_then(|was| nearest(&self.board, was.center()));
+            self.machine.select(BTreeSet::new(), nearest);
         }
     }
 
@@ -1490,6 +1514,65 @@ pub(crate) fn bounds(board: &Board, scene: &Scene, id: &Id) -> Option<Rect> {
         .filter(|item| matches!(&item.source, Source::Edge(edge) if edge == id))
         .map(|item| item.bounds)
         .reduce(union)
+}
+
+/// The node whose centre is nearest `point`, ties by id: where the cursor
+/// goes when what it was on is deleted (§5.10 rule 1).
+fn nearest(board: &Board, point: scene::Point) -> Option<Id> {
+    let frames = hit::Frames::new(board);
+    let distances = board.nodes.keys().filter_map(|id| {
+        let centre = frames.get(id)?.center();
+        Some(((centre.x - point.x).hypot(centre.y - point.y), id))
+    });
+    distances
+        .min_by(|(a, x), (b, y)| a.total_cmp(b).then_with(|| x.cmp(y)))
+        .map(|(_, id)| id.clone())
+}
+
+/// What a connector style command does to the selected connectors among
+/// `ids` (§5.12 rule 9), or `None` with none selected. Each switch sets
+/// every one of them to straight, an arrow or dashed, unless all of them
+/// are drawn so already, when it sets elbow, no head or solid: mixed
+/// connectors all take the first, as mixed text takes bold. A value this
+/// build does not know counts as what it is drawn as (§4.4).
+fn edge_style(board: &Board, ids: &[Id], command: Command) -> Option<Intent> {
+    use wren_board::edit::{EdgeEnd, EdgeField};
+    use wren_board::{Dash, Head, Route};
+    let ids: Vec<Id> = ids
+        .iter()
+        .filter(|id| board.edges.contains_key(*id))
+        .cloned()
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    let all = |has: &dyn Fn(&wren_board::Edge) -> bool| {
+        ids.iter().filter_map(|id| board.edges.get(id)).all(has)
+    };
+    let head = |end: EdgeEnd| {
+        let at = usize::from(end == EdgeEnd::To);
+        let arrows = all(&|edge| edge.heads[at] != Named::Known(Head::None));
+        EdgeField::Head(end, if arrows { Head::None } else { Head::Arrow })
+    };
+    let field = match command {
+        Command::EdgeReverse => return Some(Intent::Reverse { ids }),
+        Command::EdgeRouting => {
+            let straight = all(&|edge| edge.route != Named::Known(Route::Elbow));
+            EdgeField::Route(if straight {
+                Route::Elbow
+            } else {
+                Route::Straight
+            })
+        }
+        Command::EdgeStart => head(EdgeEnd::From),
+        Command::EdgeEnd => head(EdgeEnd::To),
+        Command::StrokeDashed => {
+            let dashed = all(&|edge| edge.style.stroke == Named::Known(Dash::Dashed));
+            EdgeField::Stroke(if dashed { Dash::Solid } else { Dash::Dashed })
+        }
+        _ => return None,
+    };
+    Some(Intent::SetEdge { ids, field })
 }
 
 /// Where `scene` centres the first label it draws for the connector `id`
@@ -4479,6 +4562,186 @@ z = "c"
         edit(&mut view, LabelAction::Backspace, later);
         key(&mut view, Key::Escape, later);
         assert!(view.pristine());
+    }
+
+    #[test]
+    fn a_connector_style_command_changes_its_lines_as_one_step() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        let styles = [
+            Command::EdgeRouting,
+            Command::EdgeStart,
+            Command::EdgeEnd,
+            Command::EdgeReverse,
+            Command::StrokeDashed,
+        ];
+        // With no connector selected they do nothing.
+        for command in styles {
+            assert_eq!(view.command(command, now), Update::default());
+        }
+        click_node(&mut view, "a", now);
+        for command in styles {
+            assert_eq!(view.command(command, now), Update::default());
+        }
+        click(&mut view, (210.0, 30.0), now + Duration::from_secs(1));
+        assert_eq!(selected(&view), ["e"]);
+        let lines = |lines: &[&str]| lines.iter().map(|line| (*line).to_owned()).collect();
+        let none: Vec<String> = Vec::new();
+        for (command, added, removed) in [
+            (
+                Command::EdgeRouting,
+                lines(&["route = \"straight\""]),
+                none.clone(),
+            ),
+            (
+                Command::EdgeStart,
+                lines(&["heads = [\"arrow\", \"arrow\"]"]),
+                none.clone(),
+            ),
+            (
+                Command::EdgeEnd,
+                lines(&["heads = [\"none\", \"none\"]"]),
+                none.clone(),
+            ),
+            (
+                Command::StrokeDashed,
+                lines(&["style.stroke = \"dashed\""]),
+                none.clone(),
+            ),
+            (
+                Command::EdgeReverse,
+                lines(&["from = { node = \"b\" }", "to = { node = \"a\" }"]),
+                lines(&["from = { node = \"a\" }", "to = { node = \"b\" }"]),
+            ),
+        ] {
+            assert_eq!(view.command(command, now), CHANGED, "{command:?}");
+            assert_eq!(
+                line_diff(TWO, &view.draft()),
+                (added, removed),
+                "{command:?}"
+            );
+            // Each switches back, and each is one undo step.
+            assert_eq!(view.command(command, now), CHANGED, "{command:?}");
+            assert_eq!(view.draft(), TWO, "{command:?}");
+            travel(&mut view, Command::Undo, now);
+            travel(&mut view, Command::Undo, now);
+            assert!(view.pristine() && !view.can_undo(), "{command:?}");
+            assert_eq!(selected(&view), ["e"]);
+        }
+        // A board that cannot be edited takes none of them.
+        let mut view = sized("schema = 2\n");
+        view.command(Command::SelectAll, now);
+        for command in styles {
+            assert_eq!(view.command(command, now), Update::default());
+        }
+    }
+
+    #[test]
+    fn a_style_command_over_mixed_connectors_gives_them_all_the_first_value() {
+        let text = format!(
+            "{TWO}\n[edge.f]\nkind = \"edge\"\nfrom = {{ node = \"b\" }}\nto = {{ node = \"a\" }}\n\
+             heads = [\"arrow\", \"none\"]\nroute = \"curved\"\nz = \"d\"\n"
+        );
+        let mut view = sized(&text);
+        let now = Instant::now();
+        view.command(Command::SelectAll, now);
+        let edge = |view: &BoardView, name: &str| view.board().edges[&id(name)].clone();
+        // `f`'s unknown route is drawn straight, `e`'s is elbow: both go
+        // straight, then both elbow.
+        view.command(Command::EdgeRouting, now);
+        for name in ["e", "f"] {
+            assert_eq!(
+                edge(&view, name).route,
+                Named::Known(wren_board::Route::Straight)
+            );
+        }
+        view.command(Command::EdgeRouting, now);
+        for name in ["e", "f"] {
+            assert_eq!(
+                edge(&view, name).route,
+                Named::Known(wren_board::Route::Elbow)
+            );
+        }
+        // `e` has an arrow at its end and `f` none: both get one.
+        view.command(Command::EdgeEnd, now);
+        let arrow = Named::Known(wren_board::Head::Arrow);
+        assert_eq!(edge(&view, "e").heads[1], arrow);
+        assert_eq!(edge(&view, "f").heads[1], arrow);
+        // Reversed, each swaps its own ends.
+        view.command(Command::EdgeReverse, now);
+        let ends = |view: &BoardView, name: &str| {
+            let edge = edge(view, name);
+            let node = |end: &wren_board::End| match end {
+                wren_board::End::Node { node, .. } => node.clone(),
+                wren_board::End::Free { .. } => String::new(),
+            };
+            (node(&edge.from), node(&edge.to))
+        };
+        assert_eq!(ends(&view, "e"), ("b".to_owned(), "a".to_owned()));
+        assert_eq!(ends(&view, "f"), ("a".to_owned(), "b".to_owned()));
+    }
+
+    #[test]
+    fn after_a_delete_the_cursor_goes_to_the_nearest_node_left() {
+        // `c` is 200 below `a` and `b` 300 to its right; `d` and `e` are
+        // as far from `f` as each other.
+        let node = |name: &str, x: i32, y: i32| {
+            format!(
+                "\n[node.{name}]\nkind = \"shape\"\nat = [{x}, {y}]\nsize = [120, 60]\nz = \"{name}\"\n"
+            )
+        };
+        let text = [
+            "schema = 1\n".to_owned(),
+            node("a", 0, 0),
+            node("b", 300, 0),
+            node("c", 0, 200),
+            node("d", 1000, 0),
+            node("e", 1400, 0),
+            node("f", 1200, 0),
+        ]
+        .concat();
+        let mut view = sized(&text);
+        let now = Instant::now();
+        view.machine
+            .select(BTreeSet::from([id("a")]), Some(id("a")));
+        assert_eq!(view.command(Command::Delete, now), CHANGED);
+        assert!(selected(&view).is_empty());
+        assert_eq!(view.machine().cursor(), Some(&id("c")));
+        // Undo puts the selection and the cursor back.
+        travel(&mut view, Command::Undo, now);
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        // A tie goes to the lower id.
+        view.machine
+            .select(BTreeSet::from([id("f")]), Some(id("f")));
+        view.command(Command::Delete, now);
+        assert_eq!(view.machine().cursor(), Some(&id("d")));
+        // Cut moves it the same way.
+        view.machine
+            .select(BTreeSet::from([id("d")]), Some(id("d")));
+        view.command(Command::Cut, now);
+        assert_eq!(view.machine().cursor(), Some(&id("e")));
+        // A cursor the delete leaves stays where it is.
+        view.machine
+            .select(BTreeSet::from([id("b"), id("c")]), Some(id("a")));
+        view.command(Command::Delete, now);
+        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        // With no node left there is no cursor.
+        view.command(Command::SelectAll, now);
+        view.command(Command::Delete, now);
+        assert_eq!(view.machine().cursor(), None);
+    }
+
+    #[test]
+    fn a_deleted_connector_leaves_the_cursor_on_the_node_nearest_its_middle() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        // `e` runs from 120,30 to 300,30, so its middle is as far from
+        // either end's node, and the tie goes to `a`.
+        view.machine
+            .select(BTreeSet::from([id("e")]), Some(id("e")));
+        view.command(Command::Delete, now);
+        assert_eq!(view.machine().cursor(), Some(&id("a")));
     }
 
     #[test]
