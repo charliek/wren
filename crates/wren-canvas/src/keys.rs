@@ -53,6 +53,8 @@ pub(crate) enum Out {
 pub(crate) struct Context<'a> {
     /// A label is open, so keys are its text.
     pub(crate) editing: bool,
+    /// Keyboard Connecting, so typed keys are its query.
+    pub(crate) connecting: bool,
     /// An input method holds preedit text, so every key is its own.
     pub(crate) composing: bool,
     /// Escape has a rung of its ladder to act on ([`machine::Machine::escapes`]).
@@ -95,8 +97,9 @@ pub(crate) fn route(
             })]);
         }
         Key::Named(Named::Escape) => return Keyed::Leave,
-        // Held, Space turns a left drag into a pan; in a label it is text.
-        Key::Named(Named::Space) if !shortcut && !context.editing => {
+        // Held, Space turns a left drag into a pan; in a label and in the
+        // connect query it is text.
+        Key::Named(Named::Space) if !shortcut && !context.editing && !context.connecting => {
             let held = (!repeat).then_some(Out::Input(Input::Space { held: true }));
             return Keyed::Take(held.into_iter().collect());
         }
@@ -112,6 +115,14 @@ pub(crate) fn route(
     };
     match route {
         KeyRoute::Host => Keyed::Leave,
+        // In keyboard Connecting a key without Ctrl, Alt or the logo key
+        // is the query's or one it reads, bound or not, so the tool
+        // letters type; every other key is taken and does nothing.
+        _ if context.connecting => Keyed::Take(if shortcut {
+            Vec::new()
+        } else {
+            plain(key, text, false, repeat)
+        }),
         // In a label only these two leave the text (§5.1 rule 3); every
         // other key is the label's, and is taken whether or not the label
         // has a use for it.
@@ -271,6 +282,7 @@ mod tests {
 
     const IDLE: Context<'static> = Context {
         editing: false,
+        connecting: false,
         composing: false,
         escapes: false,
         held_from_before: false,
@@ -380,6 +392,82 @@ mod tests {
                 key: machine::Key::Escape,
                 repeat: true
             })
+        );
+    }
+
+    /// §5.1 rule 3: in keyboard Connecting a printable key is the query's,
+    /// bound or not, and only Enter, Escape, the arrows and Backspace act;
+    /// the host's keys stay the host's.
+    #[test]
+    fn in_keyboard_connecting_a_letter_is_query_text() {
+        let policy = policy();
+        let connecting = Context {
+            connecting: true,
+            escapes: true,
+            policy: Some(&policy),
+            ..IDLE
+        };
+        let plain = Modifiers::default();
+        let chars =
+            |text: &str| Keyed::Take(text.chars().map(|c| Out::Input(Input::Char(c))).collect());
+        // `d` arms the diamond tool elsewhere.
+        assert_eq!(
+            press(character("d"), plain, Some("d"), connecting),
+            chars("d")
+        );
+        assert_eq!(
+            press(
+                character("d"),
+                plain,
+                Some("d"),
+                Context {
+                    policy: Some(&policy),
+                    ..IDLE
+                }
+            ),
+            Keyed::Take(vec![Out::Command(Command::Tool(Tool::Shape(
+                wren_board::Shape::Diamond
+            )))])
+        );
+        assert_eq!(
+            press(character("c"), Modifiers::SHIFT, Some("C"), connecting),
+            chars("C")
+        );
+        assert_eq!(
+            press(Key::Named(Named::Space), plain, Some(" "), connecting),
+            chars(" ")
+        );
+        let read = |key| input(Input::Key { key, repeat: false });
+        for (key, read_as) in [
+            (Named::Enter, machine::Key::Enter),
+            (Named::Backspace, machine::Key::Backspace),
+            (Named::ArrowRight, machine::Key::Arrow(Dir::Right)),
+            (Named::ArrowUp, machine::Key::Arrow(Dir::Up)),
+            (Named::Escape, machine::Key::Escape),
+        ] {
+            assert_eq!(
+                press(Key::Named(key), plain, None, connecting),
+                read(read_as),
+                "{key:?}"
+            );
+        }
+        // Tab, a Ctrl chord and Delete do nothing, and are not the host's.
+        for (key, modifiers, text) in [
+            (Key::Named(Named::Tab), plain, Some("\t")),
+            (character("z"), Modifiers::COMMAND, None),
+            (Key::Named(Named::ArrowRight), Modifiers::CTRL, None),
+            (Key::Named(Named::Delete), plain, None),
+        ] {
+            assert_eq!(
+                press(key.clone(), modifiers, text, connecting),
+                Keyed::Take(Vec::new()),
+                "{key:?}"
+            );
+        }
+        // An Alt chord is the host's.
+        assert_eq!(
+            press(character("n"), Modifiers::ALT, None, connecting),
+            Keyed::Leave
         );
     }
 
@@ -734,6 +822,7 @@ mod tests {
         let policy = policy();
         let composing = Context {
             editing: true,
+            connecting: false,
             composing: true,
             escapes: true,
             held_from_before: false,

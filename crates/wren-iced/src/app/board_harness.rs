@@ -165,7 +165,11 @@ impl App {
                 "target": connecting.target.map(|(id, _)| id.as_str()),
                 "side": connecting.target.and_then(|(_, side)| side).map(Side::name),
                 "query": "",
-            })),
+            })).or_else(|| machine.seeking().map(|seeking| json!({
+                "target": seeking.target.map(Id::as_str),
+                "side": null,
+                "query": seeking.query,
+            }))),
             "viewport": {"x": viewport.x, "y": viewport.y, "zoom": viewport.zoom},
             "can_undo": view.can_undo(),
             "can_redo": view.can_redo(),
@@ -993,6 +997,7 @@ fn shown_handles(view: &BoardView) -> Vec<(Id, &'static str, (f32, f32))> {
         board,
         scene: view.scene(),
         writable: view.writable(),
+        size: view.size(),
     });
     let mut list = Vec::new();
     if let Some((id, frame)) = shown.resize.and_then(|id| Some((id, frames.get(id)?))) {
@@ -1550,6 +1555,65 @@ mod tests {
                 "{params}"
             );
         }
+    }
+
+    #[test]
+    fn board_key_and_board_type_connect_by_keyboard_with_a_query() {
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        key(&mut app, json!({"key": "down"}));
+        let from = key(&mut app, json!({"key": "down"}));
+        assert_eq!(from["selection"], json!(["pack"]));
+        let connecting = key(&mut app, json!({"key": "c"}));
+        assert_eq!(
+            (connecting["state"].clone(), connecting["tool"].clone()),
+            (json!("connecting"), json!("select"))
+        );
+        assert_eq!(
+            connecting["connecting"],
+            json!({"target": null, "side": null, "query": ""})
+        );
+        // Typed text and the tool letters are the query's.
+        let typed = ask(&mut app, "board.type", json!({"text": "Re"}), PLACED).unwrap();
+        assert_eq!(typed["handled"], true);
+        assert_eq!(
+            typed["connecting"],
+            json!({"target": "receive", "side": null, "query": "Re"})
+        );
+        let lettered = key(&mut app, json!({"key": "d"}));
+        assert_eq!(
+            (lettered["connecting"].clone(), lettered["tool"].clone()),
+            (
+                json!({"target": null, "side": null, "query": "Red"}),
+                json!("select")
+            )
+        );
+        let erased = key(&mut app, json!({"key": "backspace"}));
+        assert_eq!(erased["connecting"]["target"], "receive");
+        assert_eq!(erased["counts"]["edges"], 1);
+        // Enter connects, as one draft, and selects the connector.
+        let revision = erased["revision"].as_u64().unwrap();
+        let done = key(&mut app, json!({"key": "enter"}));
+        assert_eq!(
+            (done["state"].clone(), done["connecting"].clone()),
+            (json!("idle"), Value::Null)
+        );
+        assert_eq!(done["counts"]["edges"], 2);
+        assert_eq!(done["revision"].as_u64().unwrap(), revision + 1);
+        let made = done["selection"][0].as_str().unwrap().to_owned();
+        assert_ne!(made, "then");
+        assert!(boards::session_text(&app).contains(&format!("[edge.{made}]")));
+        // Escape ends it with nothing made.
+        key(&mut app, json!({"key": "escape"}));
+        key(&mut app, json!({"key": "down"}));
+        key(&mut app, json!({"key": "c"}));
+        let escaped = key(&mut app, json!({"key": "escape"}));
+        assert_eq!(
+            (escaped["handled"].clone(), escaped["state"].clone()),
+            (json!(true), json!("idle"))
+        );
+        assert_eq!(escaped["counts"]["edges"], 2);
     }
 
     #[test]

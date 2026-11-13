@@ -771,6 +771,7 @@ mod tests {
             board: &board,
             scene: &scene,
             writable: true,
+            size: None,
         };
         let mut state = State::new();
         state.pressed = Some(mouse::Button::Middle);

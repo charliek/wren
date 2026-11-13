@@ -7,8 +7,8 @@
 //! The machine holds what is the surface's and not the board's (the
 //! plan's §5.2 to §5.5, §5.8, §5.12 and §5.14): whether the board has the
 //! keyboard, the armed tool, the selection and the cursor, which label is
-//! open, the node the pointer rests on, and the pointer gesture in flight.
-//! It never changes the board. A
+//! open, the node the pointer rests on, the pointer gesture in flight, and
+//! keyboard Connecting with its query. It never changes the board. A
 //! gesture shows itself as a preview and asks for one edit when it is
 //! released (§3.4 rule 4); the edit's plan comes back through
 //! [`Machine::applied`], which is how a creation selects what it made and
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use wren_board::edit::{Area, EdgeEnd, Edges, Endpoint, Intent, Plan};
 use wren_board::scene::{Rect, Scene};
-use wren_board::{snap, Board, Dir, End, Id, NodeKind, Shape, Side, GRID};
+use wren_board::{place, snap, walk, Board, Dir, End, Id, NodeKind, Shape, Side, GRID};
 
 use crate::command::{Command, Grow, Tool};
 use crate::handles::{self, Handle};
@@ -155,6 +155,17 @@ pub struct View<'a> {
     /// Whether the board may be edited. A read-only one still selects,
     /// pans and zooms (§5.2).
     pub writable: bool,
+    /// The widget's size in logical pixels, once it has said.
+    pub size: Option<(f32, f32)>,
+}
+
+impl View<'_> {
+    /// The board point in the middle of the widget, or at its corner
+    /// before it has a size.
+    fn centre(&self) -> (f32, f32) {
+        let (width, height) = self.size.unwrap_or_default();
+        self.viewport.to_board((width / 2.0, height / 2.0))
+    }
 }
 
 /// What the machine asks of the view that owns the board, in order.
@@ -274,6 +285,29 @@ pub struct Connecting<'a> {
     pub at: (f32, f32),
 }
 
+/// Keyboard Connecting (§5.12 rule 3): a connector from `source` to a
+/// target picked with the arrows or by a query on the labels.
+#[derive(Clone, Debug, PartialEq)]
+struct Seek {
+    source: Id,
+    target: Option<Id>,
+    query: String,
+    /// Where the arrows last took the target, which it goes back to when
+    /// the query is erased.
+    walked: Option<Id>,
+}
+
+/// Keyboard Connecting as the view draws it and the harness reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seeking<'a> {
+    /// The node the connector will come from.
+    pub source: &'a Id,
+    /// The node Enter would connect it to.
+    pub target: Option<&'a Id>,
+    /// What has been typed to find the target.
+    pub query: &'a str,
+}
+
 /// The pointer gesture in flight. `anchor` is the board point that was
 /// under the pointer when it went down, so a wheel pan mid-gesture carries
 /// the gesture with it.
@@ -357,6 +391,7 @@ pub struct Machine {
     /// The run the last command continued, and when.
     run: Option<(Run, Instant)>,
     hover: Option<Hover>,
+    seek: Option<Seek>,
 }
 
 impl Machine {
@@ -388,8 +423,10 @@ impl Machine {
             Input::Press { button, at } => self.press(button, at, view, &mut acts),
             Input::Move { at } => self.moved(at, view, &mut acts),
             Input::Release { button } => self.release(button, view, &mut acts),
-            // In a label Space is text.
-            Input::Space { held } => self.space = held && self.editing.is_none(),
+            // In a label and in the connect query Space is text.
+            Input::Space { held } => {
+                self.space = held && self.editing.is_none() && self.seek.is_none();
+            }
             Input::Cancel => {
                 self.cancel(&mut acts);
                 self.space = false;
@@ -413,7 +450,8 @@ impl Machine {
                 self.focused = false;
                 self.hover = None;
             }
-            Input::Key { .. } | Input::Char(_) => {}
+            Input::Key { key, repeat } => self.seek_key(key, repeat, view, &mut acts),
+            Input::Char(c) => self.seek_char(c, view.board),
         }
         acts
     }
@@ -430,9 +468,28 @@ impl Machine {
         let run = self.run.take();
         // A command may change the board or the view under the pointer.
         self.hover = None;
+        // Keyboard Connecting reads its own keys, so a command reaching it
+        // came from elsewhere and ends it, as Escape does.
+        self.seek = None;
         self.commit(&mut acts);
         match command {
             Command::CommitLabel => {}
+            // With one node selected the connector tool connects it by
+            // keyboard (§5.12 rule 3); otherwise it is armed for the pointer.
+            Command::Tool(Tool::Connector) if view.writable => {
+                match self.only().filter(|id| view.board.nodes.contains_key(id)) {
+                    Some(source) => {
+                        self.tool = Tool::Select;
+                        self.seek = Some(Seek {
+                            source,
+                            target: None,
+                            query: String::new(),
+                            walked: None,
+                        });
+                    }
+                    None => self.tool = Tool::Connector,
+                }
+            }
             Command::Tool(tool) => {
                 if view.writable || matches!(tool, Tool::Select | Tool::Hand) {
                     self.tool = tool;
@@ -456,6 +513,18 @@ impl Machine {
                 self.selection = nodes.chain(edges).cloned().collect();
             }
             Command::SelectNone => self.selection.clear(),
+            // The connector meeting the one selected node on that side
+            // (§5.7 rule 4).
+            Command::SelectConnector(dir) => {
+                let node = self.only().filter(|id| view.board.nodes.contains_key(id));
+                if let Some(edge) = node.and_then(|node| walk::connector(view.board, &node, dir)) {
+                    self.select_only(edge);
+                }
+            }
+            Command::SelectConnected => {
+                let reached = connected(view.board, &self.selection);
+                self.selection.extend(reached);
+            }
             Command::Move(dir) => {
                 if view.writable && !self.selection.is_empty() {
                     let intent = Intent::Move {
@@ -537,6 +606,7 @@ impl Machine {
         self.click = None;
         self.run = None;
         self.hover = None;
+        self.seek = None;
     }
 
     /// The view has no label to open on the element it was asked to
@@ -552,6 +622,15 @@ impl Machine {
         self.cursor = self.cursor.take().filter(|id| exists(board, id));
         self.editing = self.editing.take().filter(|id| exists(board, id));
         self.hover = self.hover.take().filter(|hover| exists(board, &hover.id));
+        let source = self.seek.as_ref().map(|seek| &seek.source);
+        if !source.is_some_and(|source| board.nodes.contains_key(source)) {
+            self.seek = None;
+        }
+        if let Some(seek) = &mut self.seek {
+            let node = |id: &Id| board.nodes.contains_key(id);
+            seek.target = seek.target.take().filter(node);
+            seek.walked = seek.walked.take().filter(node);
+        }
     }
 
     /// Put a selection and a cursor back, as undo and redo do (§5.11 rule
@@ -574,6 +653,7 @@ impl Machine {
             Gesture::Panning { .. } => State::Panning,
             Gesture::Selecting => State::Editing,
             Gesture::None if self.editing.is_some() => State::Editing,
+            Gesture::None if self.seek.is_some() => State::Connecting,
             Gesture::None if !self.focused => State::Unfocused,
             Gesture::None if self.tool != Tool::Select => State::Armed,
             Gesture::None => State::Idle,
@@ -641,6 +721,7 @@ impl Machine {
     pub fn escapes(&self) -> bool {
         self.gesture != Gesture::None
             || self.editing.is_some()
+            || self.seek.is_some()
             || self.tool != Tool::Select
             || !self.selection.is_empty()
     }
@@ -661,6 +742,7 @@ impl Machine {
         self.focused
             && writable
             && self.editing.is_none()
+            && self.seek.is_none()
             && self.gesture == Gesture::None
             && matches!(self.tool, Tool::Select | Tool::Shape(_))
     }
@@ -693,6 +775,15 @@ impl Machine {
         })
     }
 
+    /// Keyboard Connecting, while the board is in it (§5.12 rule 3).
+    pub fn seeking(&self) -> Option<Seeking<'_>> {
+        self.seek.as_ref().map(|seek| Seeking {
+            source: &seek.source,
+            target: seek.target.as_ref(),
+            query: &seek.query,
+        })
+    }
+
     /// The handles on screen: the eight of the one selected node, or the
     /// two of the one selected connector, and the four connect handles of
     /// the node the pointer has rested on, while the board has the
@@ -719,13 +810,17 @@ impl Machine {
     fn press(&mut self, button: Button, at: (f32, f32), view: &View<'_>, acts: &mut Vec<Act>) {
         // A press during a gesture means the gesture's release never came
         // (the widget lost it with its state), so the press starts over.
-        self.cancel(acts);
-        self.run = None;
+        // A pan only moves the view, so keyboard Connecting goes on after
+        // it; any other press ends it.
         let pans = match button {
             Button::Middle => true,
             Button::Left => self.space || self.tool == Tool::Hand,
             _ => false,
         };
+        let seek = self.seek.take().filter(|_| pans);
+        self.cancel(acts);
+        self.seek = seek;
+        self.run = None;
         // Taken before the press gives the board the keyboard: a board
         // without it shows no handle to press.
         let hit = (!pans && matches!(button, Button::Left | Button::Right)).then(|| {
@@ -1142,13 +1237,15 @@ impl Machine {
     }
 
     /// One rung of Escape's ladder, the first that applies (§5.14 rungs 3
-    /// to 8; Connecting's rung 5 comes with it).
+    /// to 8).
     fn escape(&mut self, acts: &mut Vec<Act>) {
         self.run = None;
         if self.gesture != Gesture::None {
             self.cancel(acts);
         } else if self.editing.is_some() {
             self.commit(acts);
+        } else if self.seek.is_some() {
+            self.seek = None;
         } else if self.tool != Tool::Select {
             self.tool = Tool::Select;
         } else {
@@ -1156,8 +1253,10 @@ impl Machine {
         }
     }
 
-    /// Drop the gesture in flight, with the board as it was at the press.
+    /// Drop the gesture in flight, with the board as it was at the press,
+    /// and keyboard Connecting with nothing made.
     fn cancel(&mut self, acts: &mut Vec<Act>) {
+        self.seek = None;
         let shows = match std::mem::take(&mut self.gesture) {
             Gesture::Moving { by, .. } => by != [0, 0],
             Gesture::Resizing { edges, .. } => edges != Edges::default(),
@@ -1188,6 +1287,7 @@ impl Machine {
     fn open(&mut self, id: Id, acts: &mut Vec<Act>) {
         self.tool = Tool::Select;
         self.space = false;
+        self.seek = None;
         self.editing = Some(id.clone());
         acts.push(Act::OpenLabel(id));
     }
@@ -1285,10 +1385,17 @@ impl Machine {
 
     /// `board.connect.next` and `board.connect.<dir>` from the one selected
     /// node, or for the former from the node the one selected connector
-    /// points at (§5.6 rules 5 to 7). The armed shape is the new node's,
-    /// and the tool is spent.
+    /// points at, or with nothing selected from no node at all (§5.6 rules
+    /// 5 to 7). The armed shape is the new node's, and the tool is spent.
     fn extend(&mut self, dir: Option<Dir>, view: &View<'_>, acts: &mut Vec<Act>) {
-        let Some(id) = self.only().filter(|_| view.writable) else {
+        if !view.writable {
+            return;
+        }
+        if dir.is_none() && self.selection.is_empty() {
+            self.start(view, acts);
+            return;
+        }
+        let Some(id) = self.only() else {
             return;
         };
         let board = view.board;
@@ -1311,6 +1418,87 @@ impl Machine {
         };
         self.tool = Tool::Select;
         acts.push(Act::Edit(Intent::Extend { from, dir, shape }));
+    }
+
+    /// `board.connect.next` with nothing selected (§5.6 rule 5): a node
+    /// with no connector in the middle of the view, stepped right until it
+    /// is clear of the others. Past [`place::STEPS`] steps nothing is made.
+    fn start(&mut self, view: &View<'_>, acts: &mut Vec<Act>) {
+        let shape = match self.tool {
+            Tool::Shape(shape) => shape,
+            _ => Shape::Rect,
+        };
+        self.tool = Tool::Select;
+        let (x, y) = view.centre();
+        if let Some(at) = place::start(view.board, [x, y], NODE_SIZE) {
+            acts.push(Act::Edit(Intent::AddNode {
+                kind: NodeKind::Shape,
+                shape,
+                at,
+                size: NODE_SIZE,
+                from: None,
+            }));
+        }
+    }
+
+    /// A key keyboard Connecting reads (§5.12 rule 3): an arrow walks the
+    /// target from where it is, or at first from the source, and clears
+    /// the query; Backspace erases the query's last character; Enter
+    /// connects the source to the target and ends it. Escape is the
+    /// ladder's. Outside keyboard Connecting these keys do nothing here.
+    fn seek_key(&mut self, key: Key, repeat: bool, view: &View<'_>, acts: &mut Vec<Act>) {
+        let Some(seek) = &mut self.seek else {
+            return;
+        };
+        match key {
+            Key::Escape => {}
+            Key::Arrow(dir) => {
+                let from = seek.target.as_ref().unwrap_or(&seek.source);
+                if let Some(next) = walk::next(view.board, from, dir) {
+                    seek.target = Some(next);
+                }
+                seek.query.clear();
+                seek.walked.clone_from(&seek.target);
+            }
+            Key::Backspace => {
+                if seek.query.pop().is_some() {
+                    seek.target = if seek.query.is_empty() {
+                        seek.walked.clone()
+                    } else {
+                        walk::query(view.board, &seek.query)
+                    };
+                }
+            }
+            // Holding Enter does one thing (§5.1 rule 4).
+            Key::Enter if repeat => {}
+            Key::Enter => {
+                let Some(Seek { source, target, .. }) = self.seek.take() else {
+                    return;
+                };
+                let board = view.board;
+                let target = target.filter(|target| {
+                    *target != source
+                        && board.nodes.contains_key(target)
+                        && !place::joins(board, &source, target)
+                });
+                if let Some(target) = target {
+                    let end = |node| Endpoint::Node { node, side: None };
+                    acts.push(Act::Edit(Intent::AddEdge {
+                        from: end(source),
+                        to: end(target),
+                    }));
+                }
+            }
+        }
+    }
+
+    /// A character typed in keyboard Connecting: the query grows, and the
+    /// target is its best match, or none (§5.12 rule 3).
+    fn seek_char(&mut self, c: char, board: &Board) {
+        if let Some(seek) = &mut self.seek {
+            seek.query.push(c);
+            seek.target = walk::query(board, &seek.query);
+        }
     }
 
     fn wheel(
@@ -1354,6 +1542,41 @@ impl Machine {
 
 fn exists(board: &Board, id: &Id) -> bool {
     board.nodes.contains_key(id) || board.edges.contains_key(id)
+}
+
+/// What `board.select.connected` adds to `selection` (§5.3 rule 6): every
+/// node reachable from it along connectors in their `from` to `to`
+/// direction, and those connectors. A selected connector leads to its `to`
+/// node; a connector to a free point or to a node that is not there leads
+/// nowhere and is not taken.
+fn connected(board: &Board, selection: &BTreeSet<Id>) -> BTreeSet<Id> {
+    let node = |end: &End| match end {
+        End::Node { node, .. } => board.nodes.get_key_value(node.as_str()).map(|(id, _)| id),
+        End::Free { .. } => None,
+    };
+    let mut reached = BTreeSet::new();
+    let mut frontier: Vec<&Id> = Vec::new();
+    for id in selection {
+        if board.nodes.contains_key(id) {
+            frontier.push(id);
+        } else if let Some(to) = board.edges.get(id).and_then(|edge| node(&edge.to)) {
+            frontier.push(to);
+        }
+    }
+    let mut seen: BTreeSet<&Id> = frontier.iter().copied().collect();
+    while let Some(from) = frontier.pop() {
+        reached.insert(from.clone());
+        for (id, edge) in &board.edges {
+            let leaves = node(&edge.from) == Some(from);
+            if let Some(to) = node(&edge.to).filter(|_| leaves) {
+                reached.insert(id.clone());
+                if seen.insert(to) {
+                    frontier.push(to);
+                }
+            }
+        }
+    }
+    reached
 }
 
 fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -1559,6 +1782,7 @@ mod tests {
             board: &board,
             scene: &scene,
             writable: true,
+            size: None,
         };
         machine.step(input, &view)
     }
@@ -2208,6 +2432,7 @@ z = "F"
                 board: &self.board,
                 scene: &self.scene,
                 writable: self.writable,
+                size: None,
             };
             let acts = self.machine.step(input, &view);
             for act in &acts {
@@ -2225,6 +2450,7 @@ z = "F"
                 board: &self.board,
                 scene: &self.scene,
                 writable: self.writable,
+                size: None,
             };
             self.machine.command(command, &view)
         }
@@ -2249,6 +2475,7 @@ z = "F"
                 board: &self.board,
                 scene: &self.scene,
                 writable: self.writable,
+                size: None,
             };
             self.machine.handles(&view).connect.map(Id::as_str)
         }
@@ -2427,6 +2654,10 @@ z = "F"
         ConnectingTool,
         /// The `to` end of `e` dragged.
         ConnectingEnd,
+        /// Keyboard Connecting from `a`, with no target yet.
+        Seeking,
+        /// Keyboard Connecting from `a`, with `b` the target.
+        SeekingTarget,
         /// The label of `a` open.
         Editing,
         /// The label of `a` open and the left button down in it.
@@ -2461,6 +2692,9 @@ z = "F"
         Release(Button),
         /// A left release, then the view's part of the edit it asks for.
         ReleaseMade,
+        /// A key the machine reads, then the view's part of the edit it
+        /// asks for.
+        Key(Key),
         Settle,
     }
 
@@ -2572,6 +2806,14 @@ z = "F"
                     State::Pressed
                 }
             }
+            From::Seeking | From::SeekingTarget => {
+                rig.click(A);
+                rig.run(Command::Tool(Tool::Connector));
+                if matches!(from, From::SeekingTarget) {
+                    rig.step(Input::Char('b'));
+                }
+                State::Connecting
+            }
             From::Editing => {
                 rig.click(A);
                 rig.run(Command::EditLabel);
@@ -2640,15 +2882,18 @@ z = "F"
                 let acts = rig.release();
                 rig.play(&acts);
             }
+            Then::Key(key) => {
+                let acts = rig.step(Input::Key { key, repeat: false });
+                rig.play(&acts);
+            }
             Then::Settle => {
                 rig.machine.settle();
             }
         }
     }
 
-    /// Every transition of the plan's §5.2 table but keyboard Connecting's,
-    /// one row each: where it starts, what happens, and the state it
-    /// leaves.
+    /// Every transition of the plan's §5.2 table, one row each: where it
+    /// starts, what happens, and the state it leaves.
     #[test]
     fn every_transition_leaves_the_state_the_table_says() {
         use Button::{Left, Middle, Right};
@@ -2687,7 +2932,8 @@ z = "F"
                 T::Made(C::Connect(Dir::Right)),
                 State::Editing,
             ),
-            (From::Idle, T::Made(C::ConnectNext), State::Idle),
+            (From::Idle, T::Command(C::ConnectNext), State::Idle),
+            (From::Idle, T::Made(C::ConnectNext), State::Editing),
             (From::Idle, T::PressNode, State::Pressed),
             (From::Idle, T::Press(Left), State::Pressed),
             (From::Idle, T::Press(Middle), State::Panning),
@@ -2738,6 +2984,18 @@ z = "F"
                 State::Editing,
             ),
             (From::Armed(Tool::Hand), T::Press(Left), State::Panning),
+            // The connector tool with one node selected connects it by
+            // keyboard.
+            (
+                From::Selected,
+                T::Command(C::Tool(Tool::Connector)),
+                State::Connecting,
+            ),
+            (
+                From::ArmedSelected(DIAMOND),
+                T::Command(C::Tool(Tool::Connector)),
+                State::Connecting,
+            ),
             // The connector tool takes a press on a node and no other.
             (From::Armed(Tool::Connector), T::Press(Left), State::Armed),
             (From::Armed(Tool::Connector), T::PressNode, State::Pressed),
@@ -2815,6 +3073,33 @@ z = "F"
             (From::ConnectingEnd, T::Release(Left), State::Idle),
             (From::ConnectingEnd, escape, State::Idle),
             (From::ConnectingEnd, T::Settle, State::Idle),
+            // Keyboard Connecting: its keys and the view's moves keep it;
+            // Enter connects or not, and anything else ends it.
+            (From::Seeking, T::Input(Input::Char('b')), State::Connecting),
+            (
+                From::Seeking,
+                T::Key(Key::Arrow(Dir::Right)),
+                State::Connecting,
+            ),
+            (From::Seeking, T::Key(Key::Backspace), State::Connecting),
+            (
+                From::Seeking,
+                T::Input(Input::Space { held: true }),
+                State::Connecting,
+            ),
+            (From::Seeking, T::Input(Input::Tick), State::Connecting),
+            (From::Seeking, scroll, State::Connecting),
+            (From::Seeking, T::Press(Middle), State::Panning),
+            (From::Seeking, T::Key(Key::Enter), State::Idle),
+            (From::SeekingTarget, T::Key(Key::Enter), State::Idle),
+            (From::Seeking, escape, State::Idle),
+            (From::Seeking, cancel, State::Idle),
+            (From::Seeking, T::Settle, State::Idle),
+            (From::Seeking, focus(false), State::Unfocused),
+            (From::Seeking, hand, State::Armed),
+            (From::Seeking, T::Command(C::EditLabel), State::Editing),
+            (From::Seeking, T::PressNode, State::Pressed),
+            (From::Seeking, T::Press(Right), State::Idle),
             // Editing: every way out but the label's own press commits.
             (From::Editing, T::Command(C::CommitLabel), State::Idle),
             (From::Editing, escape, State::Idle),
@@ -3395,6 +3680,7 @@ z = "F"
                 board: &rig.board,
                 scene: &rig.scene,
                 writable: rig.writable,
+                size: None,
             };
             let shown = rig.machine.handles(&view);
             (
@@ -3792,10 +4078,12 @@ z = "F"
         ));
 
         // A selected node's resize handle is on its box, so the tool
-        // draws from there as well.
+        // draws from there as well. The tool armed with one node selected
+        // connects by keyboard, so the selection comes after it, as undo
+        // would bring it back.
         let mut rig = Rig::new();
-        rig.click(A);
         rig.run(Command::Tool(Tool::Connector));
+        rig.machine.select(BTreeSet::from([id("a")]), Some(id("a")));
         rig.press(A_CORNER);
         rig.to(B);
         assert_eq!(rig.state(), State::Connecting);
@@ -4438,17 +4726,28 @@ z = "F"
         rig.click(E);
         assert_eq!(rig.run(Command::ConnectNext), [extend("b", None, None)]);
         assert!(rig.run(Command::Connect(Dir::Right)).is_empty());
-        // A connector that ends nowhere, several elements, or none: this
+        // A connector that ends nowhere, or several elements: this
         // machine makes nothing, and the tool stays armed.
         rig.click(FREE);
         assert!(rig.run(Command::ConnectNext).is_empty());
         rig.run(Command::SelectAll);
         rig.run(Command::Tool(DIAMOND));
         assert!(rig.run(Command::ConnectNext).is_empty());
+        assert_eq!(rig.machine.tool(), DIAMOND);
+        // With nothing selected a direction needs a node too, but Tab makes
+        // one with no connector, in the armed shape.
         rig.run(Command::SelectNone);
-        assert!(rig.run(Command::ConnectNext).is_empty());
         assert!(rig.run(Command::Connect(Dir::Down)).is_empty());
         assert_eq!(rig.machine.tool(), DIAMOND);
+        assert!(matches!(
+            rig.run(Command::ConnectNext).as_slice(),
+            [Act::Edit(Intent::AddNode {
+                shape: Shape::Diamond,
+                from: None,
+                ..
+            })]
+        ));
+        assert_eq!(rig.machine.tool(), Tool::Select);
     }
 
     #[test]
@@ -4489,6 +4788,303 @@ z = "F"
         };
         rig.machine.applied(&plan, &rig.board);
         assert_eq!((rig.selected(), rig.cursor()), (vec![], Some("e")));
+    }
+
+    fn key(key: Key) -> Input {
+        Input::Key { key, repeat: false }
+    }
+
+    impl Rig {
+        /// Keyboard Connecting's source, target and query.
+        fn seeking(&self) -> Option<(&str, Option<&str>, &str)> {
+            let seeking = self.machine.seeking()?;
+            Some((
+                seeking.source.as_str(),
+                seeking.target.map(Id::as_str),
+                seeking.query,
+            ))
+        }
+
+        fn typed(&mut self, text: &str) {
+            for c in text.chars() {
+                self.step(Input::Char(c));
+            }
+        }
+    }
+
+    #[test]
+    fn the_connector_tool_with_one_node_selected_connects_by_keyboard() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        assert!(rig.run(Command::Tool(Tool::Connector)).is_empty());
+        assert_eq!(rig.state(), State::Connecting);
+        assert_eq!(rig.seeking(), Some(("a", None, "")));
+        // No tool is armed, and Escape has a rung to act on.
+        assert_eq!(rig.machine.tool(), Tool::Select);
+        assert!(rig.machine.escapes());
+        // An arrow walks the target from the source, then from the target.
+        rig.step(key(Key::Arrow(Dir::Down)));
+        assert_eq!(rig.seeking(), Some(("a", Some("off"), "")));
+        rig.step(key(Key::Arrow(Dir::Right)));
+        assert_eq!(rig.seeking(), Some(("a", Some("kid"), "")));
+        rig.step(key(Key::Arrow(Dir::Right)));
+        assert_eq!(rig.seeking(), Some(("a", Some("box"), "")));
+        // Nothing that way keeps the target.
+        rig.step(key(Key::Arrow(Dir::Right)));
+        assert_eq!(rig.seeking(), Some(("a", Some("box"), "")));
+        // Enter connects, selects the connector and ends it.
+        let acts = rig.step(key(Key::Enter));
+        assert_eq!(acts, [Act::Edit(joined("a", floating("box")))]);
+        assert!(rig.play(&acts).is_empty());
+        assert_eq!(rig.state(), State::Idle);
+        assert_eq!(rig.seeking(), None);
+        let [edge] = rig.selected()[..] else {
+            panic!("{:?}", rig.selected())
+        };
+        assert_eq!(rig.cursor(), Some(edge));
+        assert!(rig.board.edges.contains_key(edge));
+
+        // Several selected, a connector selected or nothing selected arm
+        // the tool for the pointer, and so does a board that cannot be
+        // edited not at all.
+        for select in [Command::SelectAll, Command::SelectNone] {
+            let mut rig = Rig::new();
+            rig.run(select);
+            rig.run(Command::Tool(Tool::Connector));
+            assert_eq!(rig.state(), State::Armed);
+        }
+        let mut rig = Rig::new();
+        rig.click(E);
+        rig.run(Command::Tool(Tool::Connector));
+        assert_eq!((rig.state(), rig.seeking()), (State::Armed, None));
+        let mut rig = Rig::new();
+        rig.writable = false;
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        assert_eq!((rig.state(), rig.seeking()), (State::Idle, None));
+    }
+
+    #[test]
+    fn the_connect_query_picks_the_best_label_and_an_arrow_clears_it() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        // Case does not matter; nothing matching is no target.
+        rig.typed("KI");
+        assert_eq!(rig.seeking(), Some(("a", Some("kid"), "KI")));
+        rig.typed("x");
+        assert_eq!(rig.seeking(), Some(("a", None, "KIx")));
+        rig.step(key(Key::Backspace));
+        assert_eq!(rig.seeking(), Some(("a", Some("kid"), "KI")));
+        // Erased, the query gives the target back to the arrows: none yet.
+        rig.step(key(Key::Backspace));
+        rig.step(key(Key::Backspace));
+        assert_eq!(rig.seeking(), Some(("a", None, "")));
+        rig.step(key(Key::Backspace));
+        assert_eq!(rig.seeking(), Some(("a", None, "")));
+        rig.step(key(Key::Arrow(Dir::Right)));
+        rig.typed("f");
+        assert_eq!(rig.seeking(), Some(("a", Some("off"), "f")));
+        rig.step(key(Key::Backspace));
+        assert_eq!(rig.seeking(), Some(("a", Some("b"), "")));
+        // An arrow clears the query and walks from the target it found.
+        rig.typed("of");
+        rig.step(key(Key::Arrow(Dir::Right)));
+        assert_eq!(rig.seeking(), Some(("a", Some("kid"), "")));
+        // A space is the query's, not a pan.
+        rig.step(Input::Space { held: true });
+        rig.step(Input::Char(' '));
+        assert!(!rig.machine.space());
+        assert_eq!(rig.seeking(), Some(("a", None, " ")));
+        // Enter held down does one thing.
+        let held = rig.step(Input::Key {
+            key: Key::Enter,
+            repeat: true,
+        });
+        assert!(held.is_empty());
+        assert_eq!(rig.state(), State::Connecting);
+    }
+
+    #[test]
+    fn enter_connects_only_to_another_node_not_yet_connected_from_the_source() {
+        let mut rig = Rig::new();
+        // No target; the source itself; `b`, which `e` already joins.
+        for query in ["", "A", "B"] {
+            rig.click(A);
+            rig.run(Command::Tool(Tool::Connector));
+            rig.typed(query);
+            assert!(rig.step(key(Key::Enter)).is_empty(), "{query:?}");
+            assert_eq!((rig.state(), rig.seeking()), (State::Idle, None));
+        }
+        // From `b` back to `a` is another connector.
+        rig.click(B);
+        rig.run(Command::Tool(Tool::Connector));
+        rig.typed("a");
+        assert_eq!(
+            rig.step(key(Key::Enter)),
+            [Act::Edit(joined("b", floating("a")))]
+        );
+        // Escape makes nothing.
+        rig.click(B);
+        rig.run(Command::Tool(Tool::Connector));
+        rig.typed("a");
+        assert!(rig.step(ESCAPE).is_empty());
+        assert_eq!((rig.state(), rig.selected()), (State::Idle, vec!["b"]));
+    }
+
+    #[test]
+    fn keyboard_connecting_lasts_through_a_pan_and_ends_at_anything_else() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        rig.typed("b");
+        // The wheel and a middle drag only move the view.
+        rig.step(wheel(lines(-1.0), false));
+        rig.press_with(Button::Middle, CANVAS);
+        rig.by(30.0, 0.0);
+        rig.step(Input::Release {
+            button: Button::Middle,
+        });
+        assert_eq!(rig.seeking(), Some(("a", Some("b"), "b")));
+        // A command ends it, as a click does.
+        rig.run(Command::SelectAll);
+        assert_eq!(rig.seeking(), None);
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        rig.click(B);
+        assert_eq!((rig.seeking(), rig.selected()), (None, vec!["b"]));
+        // So does the board's going away, or the source's.
+        rig.run(Command::Tool(Tool::Connector));
+        rig.step(Input::Focus(false));
+        assert_eq!(rig.seeking(), None);
+        rig.step(Input::Focus(true));
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        rig.typed("b");
+        rig.board.nodes.remove(&id("b"));
+        rig.machine.retain(&rig.board);
+        assert_eq!(rig.seeking(), Some(("a", None, "b")));
+        rig.board.nodes.remove(&id("a"));
+        rig.machine.retain(&rig.board);
+        assert_eq!(rig.seeking(), None);
+        // The pointer does not rest on a node meanwhile.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        assert!(!rig.machine.hovers(true));
+        // Outside it, its keys do nothing.
+        let mut rig = Rig::new();
+        rig.click(A);
+        for input in [key(Key::Enter), key(Key::Backspace), Input::Char('b')] {
+            assert!(rig.step(input).is_empty());
+        }
+        assert_eq!((rig.state(), rig.selected()), (State::Idle, vec!["a"]));
+    }
+
+    #[test]
+    fn a_connector_is_selected_by_the_side_it_meets_its_node() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::SelectConnector(Dir::Right));
+        assert_eq!((rig.selected(), rig.cursor()), (vec!["e"], Some("e")));
+        // Nothing on that side, or a connector selected: nothing changes.
+        rig.run(Command::SelectConnector(Dir::Up));
+        assert_eq!(rig.selected(), ["e"]);
+        rig.click(B);
+        rig.run(Command::SelectConnector(Dir::Left));
+        assert_eq!(rig.selected(), ["e"]);
+        rig.run(Command::SelectConnector(Dir::Left));
+        assert_eq!(rig.selected(), ["e"]);
+        rig.click(B);
+        rig.run(Command::SelectConnector(Dir::Down));
+        assert_eq!(rig.selected(), ["b"]);
+        // Two selected: nothing.
+        rig.run(Command::SelectAll);
+        rig.run(Command::SelectConnector(Dir::Left));
+        assert_eq!(rig.selected().len(), 7);
+        // A board that cannot be edited still selects.
+        let mut rig = Rig::new();
+        rig.writable = false;
+        rig.click(B);
+        rig.run(Command::SelectConnector(Dir::Left));
+        assert_eq!(rig.selected(), ["e"]);
+    }
+
+    #[test]
+    fn select_connected_follows_connectors_from_to_to() {
+        // A loop a, b, c; `d` leads into it; `c` also leads to a free
+        // point and to a node that is not there.
+        let text = r#"schema = 1
+
+[node.a]
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+
+[node.b]
+kind = "shape"
+at = [200, 0]
+size = [120, 60]
+
+[node.c]
+kind = "shape"
+at = [200, 200]
+size = [120, 60]
+
+[node.d]
+kind = "shape"
+at = [0, 200]
+size = [120, 60]
+
+[edge.ab]
+kind = "edge"
+from = { node = "a" }
+to = { node = "b" }
+
+[edge.bc]
+kind = "edge"
+from = { node = "b" }
+to = { node = "c" }
+
+[edge.ca]
+kind = "edge"
+from = { node = "c" }
+to = { node = "a" }
+
+[edge.da]
+kind = "edge"
+from = { node = "d" }
+to = { node = "a" }
+
+[edge.cx]
+kind = "edge"
+from = { node = "c" }
+to = { at = [400, 400] }
+
+[edge.cy]
+kind = "edge"
+from = { node = "c" }
+to = { node = "gone" }
+"#;
+        let mut rig = Rig::with(text);
+        rig.step(Input::Focus(true));
+        rig.machine.select(BTreeSet::from([id("b")]), Some(id("b")));
+        rig.run(Command::SelectConnected);
+        assert_eq!(rig.selected(), ["a", "ab", "b", "bc", "c", "ca"]);
+        assert_eq!(rig.cursor(), Some("b"));
+        // From a connector, its `to` node onwards; from `d`, everything.
+        rig.machine
+            .select(BTreeSet::from([id("da")]), Some(id("da")));
+        rig.run(Command::SelectConnected);
+        assert_eq!(rig.selected(), ["a", "ab", "b", "bc", "c", "ca", "da"]);
+        rig.machine.select(BTreeSet::from([id("d")]), Some(id("d")));
+        rig.run(Command::SelectConnected);
+        assert_eq!(rig.selected().len(), 8);
+        // A dangling connector leads nowhere.
+        rig.machine
+            .select(BTreeSet::from([id("cy")]), Some(id("cy")));
+        rig.run(Command::SelectConnected);
+        assert_eq!(rig.selected(), ["cy"]);
     }
 
     #[test]
@@ -4805,7 +5401,9 @@ z = "F"
                     | Command::CommitLabel
                     | Command::ConnectNext
                     | Command::Connect(_)
+                    | Command::SelectConnector(_)
                     | Command::SelectAll
+                    | Command::SelectConnected
                     | Command::SelectNone
                     | Command::Move(_)
                     | Command::Resize(_)
@@ -4820,9 +5418,9 @@ z = "F"
                 passed += 1;
             }
         }
-        // Walking, the connector commands, delete, duplicate, the
+        // Walking, the connector style commands, delete, duplicate, the
         // clipboard, undo and the two zooms.
-        assert_eq!(passed, 27);
+        assert_eq!(passed, 22);
     }
 
     #[test]

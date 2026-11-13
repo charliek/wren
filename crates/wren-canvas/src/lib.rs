@@ -626,10 +626,18 @@ impl BoardView {
                     board: &self.board,
                     scene: &self.scene,
                     writable: self.access == Access::Editable,
+                    size: self.size,
                 };
+                let target = self.seek_target();
                 let acts = self.machine.step(input, &view);
                 self.carry(acts, Unit::One, now, &mut update);
                 self.keep_label();
+                // Keyboard Connecting's target is brought into view as the
+                // cursor is when a key moves it (§5.7 rule 5).
+                let now_target = self.seek_target();
+                if let Some(id) = now_target.as_ref().filter(|_| now_target != target) {
+                    self.reveal_element(id);
+                }
             }
             Message::Label(epoch, action) if epoch == self.epoch => {
                 self.label_action(action, now, &mut update);
@@ -682,6 +690,7 @@ impl BoardView {
             board: &self.board,
             scene: &self.scene,
             writable: self.access == Access::Editable,
+            size: self.size,
         };
         let acts = self.machine.command(command, &view);
         // A key move or key resize may join the run before it (§5.11 rule
@@ -771,6 +780,7 @@ impl BoardView {
     ) -> Option<Vec<Message>> {
         let context = keys::Context {
             editing: self.machine.editing().is_some(),
+            connecting: self.machine.seeking().is_some(),
             composing: self
                 .label
                 .as_ref()
@@ -1425,13 +1435,25 @@ impl BoardView {
     /// Pan by the least amount that shows the cursor element with
     /// [`REVEAL_MARGIN`] around it (§5.7 rule 5).
     fn reveal(&mut self) {
+        if let Some(cursor) = self.machine.cursor().cloned() {
+            self.reveal_element(&cursor);
+        }
+    }
+
+    /// Pan by the least amount that shows the element `id` with
+    /// [`REVEAL_MARGIN`] around it.
+    fn reveal_element(&mut self, id: &Id) {
         let Some(size) = self.size else {
             return;
         };
-        let cursor = self.machine.cursor();
-        if let Some(bounds) = cursor.and_then(|id| bounds(&self.board, &self.scene, id)) {
+        if let Some(bounds) = bounds(&self.board, &self.scene, id) {
             self.jump(revealing(self.viewport, size, bounds));
         }
+    }
+
+    /// The target of keyboard Connecting.
+    fn seek_target(&self) -> Option<Id> {
+        self.machine.seeking()?.target.cloned()
     }
 
     /// The model to the display list and its layers.
@@ -4457,5 +4479,104 @@ z = "c"
         edit(&mut view, LabelAction::Backspace, later);
         key(&mut view, Key::Escape, later);
         assert!(view.pristine());
+    }
+
+    #[test]
+    fn tab_with_nothing_selected_makes_a_node_in_the_middle_of_the_view() {
+        let mut view = sized(wren_board::EMPTY);
+        let now = Instant::now();
+        let middle = view.viewport().to_board((SIZE.0 / 2.0, SIZE.1 / 2.0));
+        let first = wren_board::place::start(view.board(), [middle.0, middle.1], [120, 60]);
+        assert_eq!(view.command(Command::ConnectNext, now), CHANGED);
+        assert_eq!(view.machine().state(), machine::State::Editing);
+        let made = |view: &BoardView| {
+            let mut nodes: Vec<[i32; 2]> =
+                view.board().nodes.values().map(|node| node.at).collect();
+            nodes.sort_unstable();
+            nodes
+        };
+        assert_eq!(made(&view).first().copied(), first);
+        assert!(view.board().edges.is_empty());
+        typed(&mut view, "Start", now);
+        // The next one, with nothing selected, steps right of it by its
+        // width and a gap.
+        key(&mut view, Key::Escape, now);
+        view.command(Command::SelectNone, now);
+        view.command(Command::ConnectNext, now);
+        let [at, next] = made(&view)[..] else {
+            panic!("{:?}", made(&view))
+        };
+        assert_eq!(next, [at[0] + 200, at[1]]);
+        assert!(view.board().edges.is_empty());
+        // Several selected: nothing.
+        key(&mut view, Key::Escape, now);
+        view.command(Command::SelectAll, now);
+        assert_eq!(view.command(Command::ConnectNext, now), Update::default());
+    }
+
+    #[test]
+    fn the_connect_query_is_typed_with_the_tool_letters_and_enter_connects() {
+        use iced::keyboard::key::{Code, Named as Pressed, Physical};
+        use iced::keyboard::{Key as Typed, Modifiers};
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        // `a` and `d` are tool keys, Enter edits a label and the arrows walk.
+        view.set_key_policy(std::sync::Arc::new(|key, _, _, _| match key.as_ref() {
+            Typed::Character("a") => KeyRoute::Command(Command::Tool(Tool::Connector)),
+            Typed::Character("d") => KeyRoute::Command(Command::Tool(Tool::Shape(Shape::Diamond))),
+            Typed::Named(Pressed::Enter) => KeyRoute::Command(Command::EditLabel),
+            Typed::Named(Pressed::ArrowLeft) => KeyRoute::Command(Command::Select(Dir::Left)),
+            _ => KeyRoute::Pass,
+        }));
+        let press = |view: &mut BoardView, key: Typed, text: Option<&str>| {
+            let physical = Physical::Code(Code::KeyA);
+            let sent = view.key(&key, physical, Modifiers::empty(), text, false, false);
+            let mut update = Update::default();
+            for message in sent.expect("the board's key") {
+                let one = view.update(message, now);
+                update.changed |= one.changed;
+            }
+            update
+        };
+        click_node(&mut view, "b", now);
+        press(&mut view, Typed::Character("a".into()), Some("a"));
+        assert_eq!(view.machine().state(), machine::State::Connecting);
+        // The same letter is now the query's, and so is `d`.
+        press(&mut view, Typed::Character("d".into()), Some("d"));
+        press(&mut view, Typed::Named(Pressed::Backspace), None);
+        press(&mut view, Typed::Character("a".into()), Some("a"));
+        let seeking = view.machine().seeking().expect("connecting");
+        assert_eq!((seeking.target, seeking.query), (Some(&id("a")), "a"));
+        // An arrow walks: left of `b` is `a` too.
+        press(&mut view, Typed::Named(Pressed::ArrowLeft), None);
+        let seeking = view.machine().seeking().expect("connecting");
+        assert_eq!((seeking.target, seeking.query), (Some(&id("a")), ""));
+        assert_eq!(view.machine().tool(), Tool::Select);
+        let update = press(&mut view, Typed::Named(Pressed::Enter), None);
+        assert!(update.changed);
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        let [made] = selected(&view)[..] else {
+            panic!("{:?}", selected(&view))
+        };
+        let edge = &view.board().edges[&id(made)];
+        let names = |end: &wren_board::End| match end {
+            wren_board::End::Node {
+                node,
+                side: None,
+                anchor: None,
+                ..
+            } => node.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            (names(&edge.from), names(&edge.to)),
+            ("b".to_owned(), "a".to_owned())
+        );
+        // One block and one undo step.
+        let (added, removed) = line_diff(TWO, &view.draft());
+        assert_eq!(added.len(), 6, "{added:?}");
+        assert!(removed.is_empty());
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine() && !view.can_undo());
     }
 }

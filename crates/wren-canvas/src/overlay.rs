@@ -37,6 +37,9 @@ const HINT_TEXT: f32 = 14.0;
 /// How wide the open label's caret is drawn, in screen pixels.
 const CARET_WIDTH: f32 = 1.5;
 
+/// The mode chip in keyboard Connecting, before its query (§5.2).
+const CONNECT_TO: &str = "Connect to";
+
 /// What the empty board says (§5.2).
 pub(crate) const HINT: &str = "Tab adds a shape. R O D U T pick a tool.";
 
@@ -76,8 +79,8 @@ pub(crate) enum Mark {
     /// The open label's caret, [`CARET_WIDTH`] wide, in the colour the
     /// label is drawn in.
     Caret(Rect, Rgba),
-    /// The armed tool's name.
-    Chip(&'static str),
+    /// The armed tool's name, or keyboard Connecting's query.
+    Chip(String),
     Hint,
 }
 
@@ -150,6 +153,7 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
             board: view.board(),
             scene: view.scene(),
             writable: view.writable(),
+            size: view.size(),
         });
         if let Some(bounds) = shown.resize.and_then(|id| frames.get(id)) {
             let resize = handles::resize(bounds, viewport);
@@ -196,6 +200,17 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
         }
     }
 
+    // Keyboard Connecting outlines its target; the source is the
+    // selection.
+    let seeking = machine.seeking();
+    let target = seeking.and_then(|seeking| seeking.target);
+    if let Some(bounds) = target
+        .filter(|id| !selection.contains(*id))
+        .and_then(|id| frames.get(id))
+    {
+        marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
+    }
+
     if let Some(area) = machine.marquee() {
         marks.push(Mark::Marquee(screen(area)));
     }
@@ -227,8 +242,13 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
             marks.push(Mark::Caret(caret, label.ink));
         }
     }
-    if let Some(name) = tool_name(machine.tool()) {
-        marks.push(Mark::Chip(name));
+    if let Some(seeking) = seeking {
+        marks.push(Mark::Chip(match seeking.query {
+            "" => CONNECT_TO.to_owned(),
+            query => format!("{CONNECT_TO}: {query}"),
+        }));
+    } else if let Some(name) = tool_name(machine.tool()) {
+        marks.push(Mark::Chip(name.to_owned()));
     }
     let empty = picture.board.nodes.is_empty() && picture.board.edges.is_empty();
     if empty && view.writable() {
@@ -707,11 +727,55 @@ mod tests {
             (Tool::Hand, "Hand"),
         ] {
             view.command(Command::Tool(tool), now);
-            assert_eq!(marks(&view).marks, [Mark::Chip(name)]);
+            assert_eq!(marks(&view).marks, [Mark::Chip(name.to_owned())]);
         }
         view.command(Command::Tool(Tool::Select), now);
         assert_eq!(marks(&view).marks, []);
         assert_eq!(tool_name(Tool::Connector), Some("Connector"));
+    }
+
+    #[test]
+    fn keyboard_connecting_outlines_its_target_and_shows_its_query() {
+        let mut view = open(fixtures::TWO);
+        click(&mut view, (60.0, 30.0));
+        view.command(Command::Tool(Tool::Connector), Instant::now());
+        let source = Mark::Outline(Rect::new(-3.0, -3.0, 126.0, 66.0));
+        let chip = |text: &str| Mark::Chip(text.to_owned());
+        let overlay = marks(&view);
+        assert!(overlay.marks.contains(&source));
+        assert!(overlay.marks.contains(&chip("Connect to")));
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Outline(_))), 1);
+        for c in "b".chars() {
+            input(&mut view, Input::Char(c));
+        }
+        let overlay = marks(&view);
+        assert!(overlay.marks.contains(&chip("Connect to: b")));
+        // The target is brought into view, 40 px from the top.
+        let outlines: Vec<&Mark> = overlay
+            .marks
+            .iter()
+            .filter(|mark| matches!(mark, Mark::Outline(_)))
+            .collect();
+        assert_eq!(
+            outlines,
+            [
+                &Mark::Outline(Rect::new(-3.0, 37.0, 126.0, 66.0)),
+                &Mark::Outline(Rect::new(297.0, 37.0, 126.0, 66.0))
+            ]
+        );
+        // An armed tool is named no more.
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Chip(_))), 1);
+        input(
+            &mut view,
+            Input::Key {
+                key: Key::Escape,
+                repeat: false,
+            },
+        );
+        assert!(!marks(&view)
+            .marks
+            .iter()
+            .any(|mark| matches!(mark, Mark::Chip(_))));
     }
 
     #[test]
