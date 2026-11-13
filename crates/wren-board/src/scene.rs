@@ -13,7 +13,7 @@ use crate::route::{self, Attach, Connector, Routed, Terminal, STROKE_WIDTH};
 use crate::style::{self, Resolved};
 use crate::{
     check, placements, shape, Board, Dash, Edge, End, Fill, Id, Named, Node, NodeKind, Palette,
-    Rgba, Shape, Side,
+    Placed, Rgba, Shape, Side,
 };
 
 mod wrap;
@@ -210,14 +210,7 @@ impl Measure for FixedMeasure {
 /// issue markers, and clamped drawing of out-of-range values.
 pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
     let placed = placements(board);
-    let boxes: BTreeMap<&Id, Rect> = board
-        .nodes
-        .iter()
-        .filter_map(|(id, node)| {
-            let corner = placed.get(id)?.at;
-            Some((id, node_box(corner, node.size)))
-        })
-        .collect();
+    let boxes = boxes(board, &placed);
     let mut children: BTreeMap<&Id, Vec<Element<'_>>> = BTreeMap::new();
     let mut roots: Vec<Element<'_>> = board
         .edges
@@ -289,6 +282,44 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         .reduce(union)
         .unwrap_or_default();
     Scene { bounds, items }
+}
+
+/// The side each connector meets its nodes on as [`build`] draws it,
+/// the `from` end then the `to` end: the sides of its route when both ends
+/// are drawn, else the side the stub leaves the end that is by. `None` at a
+/// free end and at an end that names no node.
+pub fn sides(board: &Board) -> BTreeMap<&Id, [Option<Side>; 2]> {
+    let placed = placements(board);
+    let boxes = boxes(board, &placed);
+    let places = places(board, &boxes);
+    let routes = routes(board, &boxes, &places);
+    let mut out = BTreeMap::new();
+    for ((id, edge), routed) in board.edges.iter().zip(routes) {
+        let terminal = |end: &End| terminal(end, &places).map(|(t, _)| t);
+        let stub = |valid: &Terminal, nominal| {
+            matches!(valid, Terminal::Node { .. }).then(|| route::leave(valid, nominal).1)
+        };
+        let sides = match (routed, terminal(&edge.from), terminal(&edge.to)) {
+            (Some(routed), _, _) => routed.sides,
+            (None, Some(valid), None) => [stub(&valid, Side::Right), None],
+            (None, None, Some(valid)) => [None, stub(&valid, Side::Left)],
+            _ => [None, None],
+        };
+        out.insert(id, sides);
+    }
+    out
+}
+
+/// Each drawn node's box, by id.
+fn boxes<'a>(board: &'a Board, placed: &BTreeMap<&Id, Placed<'_>>) -> BTreeMap<&'a Id, Rect> {
+    board
+        .nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            let corner = placed.get(id)?.at;
+            Some((id, node_box(corner, node.size)))
+        })
+        .collect()
 }
 
 /// A drawn node as a connector end finds it: its index among the boxes

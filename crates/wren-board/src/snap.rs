@@ -135,6 +135,12 @@ pub fn resize(at: [i64; 2], size: [i32; 2], handle: Handle, by: [f32; 2]) -> Edg
 
 const G: i64 = GRID as i64;
 
+/// The grid line nearest an integer `value`, ties to the larger, as an
+/// `i32`: [`grid`] without the float, for places computed in integers.
+pub(crate) fn line(value: i64) -> i32 {
+    clamp(floor(value.saturating_add(G / 2)))
+}
+
 /// The grid line nearest `value`, ties to the larger; NaN is 0.
 fn nearest(value: f64) -> i64 {
     let cells = (value / G as f64 + 0.5).floor();
@@ -195,6 +201,15 @@ mod tests {
             assert_eq!(grid(value), line, "{value}");
         }
         assert_eq!(point([10.0, -10.5]), [20, -20]);
+    }
+
+    #[test]
+    fn integers_snap_as_floats_do() {
+        for value in -1_000..1_000 {
+            assert_eq!(line(value), grid(value as f32), "{value}");
+        }
+        assert_eq!(line(i64::MAX), 2_147_483_640);
+        assert_eq!(line(i64::MIN), -2_147_483_640);
     }
 
     #[test]
