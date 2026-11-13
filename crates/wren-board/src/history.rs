@@ -155,6 +155,14 @@ struct Run {
     last: Instant,
 }
 
+impl Run {
+    fn joins(&self, unit: Unit, selection: &BTreeSet<Id>, now: Instant) -> bool {
+        self.unit == unit
+            && self.selection == *selection
+            && now.saturating_duration_since(self.last) <= RUN_PAUSE
+    }
+}
+
 /// The undo and redo stacks of one open board.
 #[derive(Clone, Debug, Default)]
 pub struct History {
@@ -174,19 +182,41 @@ impl History {
     /// the redo side; a record that joins the open group or the open run
     /// adds nothing.
     pub fn record(&mut self, before: Snapshot, unit: Unit, now: Instant) {
+        let selection = before.selection.clone();
+        self.record_with(unit, &selection, now, || before);
+    }
+
+    /// As [`History::record`], with `selection` the selection before the
+    /// change, but the state before it is asked of `before` only when an
+    /// entry keeps it: a change that joins the open group or the open run
+    /// takes none, so a held move key does not copy a large board at every
+    /// repeat.
+    pub fn record_with(
+        &mut self,
+        unit: Unit,
+        selection: &BTreeSet<Id>,
+        now: Instant,
+        before: impl FnOnce() -> Snapshot,
+    ) {
         if unit == Unit::Label {
             self.run = None;
             if self.group.is_none() {
-                self.open(before);
+                self.open(before());
             }
             return;
         }
+        if self.group.is_none() {
+            if let Some(run) = &mut self.run {
+                if run.joins(unit, selection, now) {
+                    run.last = now;
+                    return;
+                }
+            }
+        }
+        let before = before();
         self.close_group(&before.board);
         if let Some(run) = &mut self.run {
-            let joins = run.unit == unit
-                && run.selection == before.selection
-                && now.saturating_duration_since(run.last) <= RUN_PAUSE;
-            if joins {
+            if run.joins(unit, &before.selection, now) {
                 run.last = now;
                 return;
             }
@@ -424,6 +454,31 @@ mod tests {
             undo_all(&mut history, "10"),
             ["9", "8", "7", "6", "4", "3", "0"]
         );
+    }
+
+    #[test]
+    fn a_run_and_a_group_take_the_state_before_only_once() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut history = History::new();
+        let selection: BTreeSet<Id> = [Id::new("a").unwrap()].into();
+        let asked = std::cell::Cell::new(0);
+        let mut record = |label: &str, unit: Unit, ms: u64| {
+            history.record_with(unit, &selection, at(ms), || {
+                asked.set(asked.get() + 1);
+                state(label, &["a"])
+            });
+        };
+        for (k, label) in ["0", "1", "2", "3", "4"].into_iter().enumerate() {
+            record(label, Unit::Move, 100 * k as u64);
+        }
+        assert_eq!(asked.get(), 1, "a run of five moves");
+        for (k, label) in ["5", "6", "7"].into_iter().enumerate() {
+            record(label, Unit::Label, 1_000 + 100 * k as u64);
+        }
+        assert_eq!(asked.get(), 2, "and a label's three changes");
+        history.close_group(&board("8"));
+        assert_eq!(undo_all(&mut history, "8"), ["5", "0"]);
     }
 
     #[test]

@@ -308,6 +308,16 @@ fn epoch() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The board, the selection and the cursor as they are: what undo goes
+/// back to (§5.11 rule 1).
+fn snapshot(board: &Board, machine: &Machine) -> Snapshot {
+    Snapshot {
+        board: board.clone(),
+        selection: machine.selection().clone(),
+        cursor: machine.cursor().cloned(),
+    }
+}
+
 /// One open board: its model, what is wrong with it, the scene that draws
 /// it and where the widget looks at it.
 pub struct BoardView {
@@ -935,7 +945,9 @@ impl BoardView {
             if plan.edit.is_some() {
                 self.history.open_group(self.snapshot());
             } else if unit != Unit::Label || !self.history.group_open() {
-                self.history.record(self.snapshot(), unit, now);
+                let (board, machine) = (&self.board, &self.machine);
+                self.history
+                    .record_with(unit, machine.selection(), now, || snapshot(board, machine));
             }
             self.board.apply(&plan.changes);
             self.issues = wren_board::check(&self.board);
@@ -955,11 +967,7 @@ impl BoardView {
     /// The board, the selection and the cursor as they are: what undo
     /// goes back to (§5.11 rule 1).
     fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            board: self.board.clone(),
-            selection: self.machine.selection().clone(),
-            cursor: self.machine.cursor().cloned(),
-        }
+        snapshot(&self.board, &self.machine)
     }
 
     /// `board.undo` and `board.redo` (§5.11): the board, the selection and
