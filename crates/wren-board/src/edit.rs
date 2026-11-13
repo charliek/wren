@@ -170,9 +170,22 @@ impl Plan {
 pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
     let _ = ids;
     match intent {
+        Intent::SetText { id, text, size } => set_text(board, id, text, *size),
         Intent::Move { ids: chosen, by } => moved(board, chosen, *by),
         _ => Plan::default(),
     }
+}
+
+/// A label as it is stored: line breaks as LF, and no trailing blank lines
+/// (§5.9 rule 4). A blank line holds only white space, so a label of only
+/// white space is empty.
+pub fn trim_label(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 impl Board {
@@ -194,6 +207,28 @@ impl Board {
                 }
             }
         }
+    }
+}
+
+/// Sets a node's label, trimmed as it is stored, and its size (§5.9 rules
+/// 4 and 7). A label and size the node already has plan nothing.
+fn set_text(board: &Board, id: &Id, text: &str, size: [i32; 2]) -> Plan {
+    let Some(node) = board.nodes.get(id) else {
+        return Plan::default();
+    };
+    let text = trim_label(text);
+    let size = size.map(|length| length.max(1));
+    if node.text == text && node.size == size {
+        return Plan::default();
+    }
+    let node = Node {
+        text,
+        size,
+        ..node.clone()
+    };
+    Plan {
+        changes: vec![Change::PutNode(id.clone(), Box::new(node))],
+        ..Plan::default()
     }
 }
 
@@ -348,6 +383,36 @@ z = "Y"
             };
             assert_eq!(diff(&intent), pairs(&[(old, new)]), "{moved:?}");
         }
+    }
+
+    #[test]
+    fn a_label_change_is_one_line_and_its_growth_another() {
+        let set = |id: &str, text: &str, size| Intent::SetText {
+            id: Id::new(id).unwrap(),
+            text: text.to_owned(),
+            size,
+        };
+        let text = ("text = \"Inner\"", "text = \"Inner\\nmore\"");
+        // Trailing blank lines are not stored, and a CR is a line break.
+        for typed in ["Inner\nmore", "Inner\r\nmore\n \n\t\n"] {
+            assert_eq!(diff(&set("b", typed, [120, 60])), pairs(&[text]));
+        }
+        assert_eq!(
+            diff(&set("b", "Inner\nmore", [120, 80])),
+            pairs(&[text, ("size = [120, 60]", "size = [120, 80]")])
+        );
+        let board = parse(BOARD).unwrap();
+        for same in [
+            set("b", "Inner", [120, 60]),
+            set("b", "Inner\n\n", [120, 60]),
+            set("e", "A connector", [1, 1]),
+            set("gone", "x", [1, 1]),
+        ] {
+            let plan = plan(&board, &same, &mut Listed(Vec::new()));
+            assert!(plan.is_empty(), "{same:?}");
+        }
+        assert_eq!(trim_label("a \n\n b\n \n"), "a \n\n b");
+        assert_eq!(trim_label(" \n\t"), "");
     }
 
     #[test]
