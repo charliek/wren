@@ -52,6 +52,8 @@ use wren_board::{
     Palette, ParseError, Rgba, Shape, GRID,
 };
 
+#[cfg(test)]
+mod accept;
 mod clip;
 mod command;
 #[cfg(test)]
