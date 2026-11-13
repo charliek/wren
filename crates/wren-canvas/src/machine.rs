@@ -817,6 +817,11 @@ impl Machine {
             return;
         }
         match std::mem::take(&mut self.gesture) {
+            // The hand tool is one-shot, as every tool is (§5.2).
+            Gesture::Panning {
+                button: Button::Left,
+                ..
+            } if self.tool == Tool::Hand => self.tool = Tool::Select,
             Gesture::None | Gesture::Panning { .. } | Gesture::Selecting => {}
             Gesture::Pressed {
                 anchor, on, double, ..
@@ -2401,7 +2406,7 @@ z = "F"
             (From::PanningEditing, T::Release(Middle), State::Editing),
             (From::PanningEditing, escape, State::Editing),
             (From::PanningEditing, T::Settle, State::Idle),
-            (From::PanningHand, T::Release(Left), State::Armed),
+            (From::PanningHand, T::Release(Left), State::Idle),
             (From::PanningHand, T::Release(Middle), State::Panning),
         ];
         // Moving, Resizing and Marquee: release ends them, anything that
@@ -3787,7 +3792,7 @@ z = "F"
     }
 
     #[test]
-    fn the_hand_tool_pans_and_stays() {
+    fn the_hand_tool_pans_once() {
         let mut rig = Rig::new();
         rig.run(Command::Tool(Tool::Hand));
         rig.press(A);
@@ -3798,14 +3803,25 @@ z = "F"
             (before.x + 30.0, before.y - 10.0)
         );
         assert!(rig.release().is_empty());
-        // Nothing was selected or made, and the next drag pans too.
+        // Nothing was selected or made, and the tool is spent (§5.2: no
+        // tool lock), so the next press selects.
         assert!(rig.selected().is_empty());
+        assert_eq!(
+            (rig.state(), rig.machine.tool()),
+            (State::Idle, Tool::Select)
+        );
+        rig.click(A);
+        assert_eq!(rig.selected(), ["a"]);
+        // A middle drag with the hand armed leaves it armed.
+        rig.run(Command::Tool(Tool::Hand));
+        rig.press_with(Button::Middle, A);
+        rig.step(Input::Release {
+            button: Button::Middle,
+        });
         assert_eq!(
             (rig.state(), rig.machine.tool()),
             (State::Armed, Tool::Hand)
         );
-        rig.press(A);
-        assert_eq!(rig.state(), State::Panning);
     }
 
     #[test]
