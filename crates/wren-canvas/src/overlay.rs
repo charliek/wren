@@ -1,7 +1,8 @@
-//! What the widget draws over a board's scene (the plan's §5.2, §5.3 and
-//! §5.8): the selection, the cursor ring, the handles, the marquee, the
-//! mode chip and the empty board's hint. None of it is the board's, so
-//! none of it is in the scene, an export or a draft.
+//! What the widget draws over a board's scene (the plan's §5.2, §5.3,
+//! §5.8 and §5.9): the selection, the cursor ring, the handles, the
+//! marquee, the open label's caret and selected text, the mode chip and
+//! the empty board's hint. None of it is the board's, so none of it is in
+//! the scene, an export or a draft.
 //!
 //! [`marks`] decides what is drawn, in widget-local pixels, as a pure
 //! function of the view; [`paint`] draws it.
@@ -11,7 +12,8 @@ use std::time::Instant;
 use iced::advanced::text::{LineHeight, Shaping};
 use iced::widget::canvas::{self, Frame, LineDash, Path, Stroke};
 use iced::{alignment, Pixels, Size};
-use wren_board::scene::{Draw, Face, Measure as _, Rect, Source};
+use wren_board::scene::{self, Draw, Face, Measure as _, Rect, Source};
+use wren_board::Rgba;
 
 use crate::command::Tool;
 use crate::hit::Frames;
@@ -30,6 +32,8 @@ const CHIP_INSET: f32 = 12.0;
 const CHIP_PAD: (f32, f32) = (8.0, 4.0);
 const CHIP_TEXT: f32 = 12.0;
 const HINT_TEXT: f32 = 14.0;
+/// How wide the open label's caret is drawn, in screen pixels.
+const CARET_WIDTH: f32 = 1.5;
 
 /// What the empty board says (§5.2).
 pub(crate) const HINT: &str = "Tab adds a shape. R O D U T pick a tool.";
@@ -43,6 +47,9 @@ pub(crate) enum Mark {
     /// A selected connector: this stroked item of the shown scene, drawn
     /// again.
     Line(usize),
+    /// This item of the shown scene, painted again as it is: a selected
+    /// connector's label, which its highlight would strike through.
+    Over(usize),
     /// Around the cursor element while the selection is something else.
     Ring(Rect),
     /// A resize handle's centre.
@@ -52,6 +59,15 @@ pub(crate) enum Mark {
     /// A connector end's handle.
     End((f32, f32)),
     Marquee(Rect),
+    /// Behind the caret of a connector's label that has no text yet: the
+    /// scene backs a label only once it has some, and the caret would be
+    /// lost on the connector's own line.
+    Blank(Rect),
+    /// One line's worth of the open label's selected text.
+    Selected(Rect),
+    /// The open label's caret, [`CARET_WIDTH`] wide, in the colour the
+    /// label is drawn in.
+    Caret(Rect, Rgba),
     /// The armed tool's name.
     Chip(&'static str),
     Hint,
@@ -91,17 +107,23 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
             marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
             continue;
         }
-        let lines = picture.scene.items.iter().enumerate().filter(|(_, item)| {
-            matches!(&item.source, Source::Edge(edge) if edge == id)
-                && matches!(
-                    &item.draw,
-                    Draw::Path {
-                        stroke: Some(_),
-                        ..
-                    }
-                )
-        });
-        marks.extend(lines.map(|(index, _)| Mark::Line(index)));
+        let stroked = |item: &scene::Item| {
+            matches!(
+                &item.draw,
+                Draw::Path {
+                    stroke: Some(_),
+                    ..
+                }
+            )
+        };
+        let items = picture.scene.items.iter().enumerate();
+        let own: Vec<(usize, bool)> = items
+            .filter(|(_, item)| matches!(&item.source, Source::Edge(edge) if edge == id))
+            .map(|(index, item)| (index, stroked(item)))
+            .collect();
+        let part = |lines: bool| own.iter().filter(move |(_, line)| *line == lines);
+        marks.extend(part(true).map(|(index, _)| Mark::Line(*index)));
+        marks.extend(part(false).map(|(index, _)| Mark::Over(*index)));
     }
 
     if focused {
@@ -139,6 +161,34 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
 
     if let Some(area) = machine.marquee() {
         marks.push(Mark::Marquee(screen(area)));
+    }
+    if let Some(label) = view.label() {
+        let measurer = view.measurer();
+        let connector = picture.board.edges.contains_key(label.id());
+        if connector && label.stored().is_empty() {
+            let [across, down] = scene::EDGE_LABEL_PAD;
+            let lines = label.bounds(measurer);
+            marks.push(Mark::Blank(screen(Rect::new(
+                lines.x - across,
+                lines.y - down,
+                lines.width + 2.0 * across,
+                lines.height + 2.0 * down,
+            ))));
+        }
+        let selected = label.selected(measurer).into_iter();
+        marks.extend(selected.map(|line| Mark::Selected(screen(line))));
+        // A board without the keyboard has no caret: nothing typed would
+        // go there.
+        if focused {
+            let caret = screen(label.caret_box(measurer));
+            let caret = Rect::new(
+                caret.x - CARET_WIDTH / 2.0,
+                caret.y,
+                CARET_WIDTH,
+                caret.height,
+            );
+            marks.push(Mark::Caret(caret, label.ink));
+        }
     }
     if let Some(name) = tool_name(machine.tool()) {
         marks.push(Mark::Chip(name));
@@ -218,6 +268,12 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
                     paint::trace(frame, item, cull, solid(3.0));
                 }
             }
+            Mark::Over(index) => {
+                if let Some(item) = scene.items.get(*index) {
+                    paint::item(frame, item, cull, view.measurer());
+                }
+            }
+            Mark::Blank(bounds) => frame.fill(&rect(*bounds), canvas_colour),
             Mark::Ring(bounds) => frame.stroke(
                 &rect(*bounds),
                 Stroke {
@@ -244,9 +300,12 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
                 frame.fill(&path, colour.scale_alpha(0.12));
                 frame.stroke(&path, solid(1.0));
             }
+            // Over the text, which shows through it.
+            Mark::Selected(bounds) => frame.fill(&rect(*bounds), colour.scale_alpha(0.3)),
+            Mark::Caret(bounds, ink) => frame.fill(&rect(*bounds), paint::color(*ink)),
             Mark::Chip(name) => {
                 let width = view.measurer().width(name, Face::Regular, CHIP_TEXT);
-                let height = wren_board::scene::line_height(CHIP_TEXT);
+                let height = scene::line_height(CHIP_TEXT);
                 let chip = Path::rounded_rectangle(
                     iced::Point::new(CHIP_INSET, CHIP_INSET),
                     Size::new(width + 2.0 * CHIP_PAD.0, height + 2.0 * CHIP_PAD.1),
@@ -266,7 +325,7 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
             }
             Mark::Hint => {
                 let width = view.measurer().width(HINT, Face::Regular, HINT_TEXT);
-                let height = wren_board::scene::line_height(HINT_TEXT);
+                let height = scene::line_height(HINT_TEXT);
                 let at = (
                     ((size.width - width) / 2.0).max(0.0),
                     (size.height - height) / 2.0,
@@ -293,7 +352,7 @@ fn text(
         max_width: width + size,
         color: paint::color(colour),
         size: Pixels(size),
-        line_height: LineHeight::Absolute(Pixels(wren_board::scene::line_height(size))),
+        line_height: LineHeight::Absolute(Pixels(scene::line_height(size))),
         font: view.measurer().font(Face::Regular),
         align_x: iced::advanced::text::Alignment::Default,
         align_y: alignment::Vertical::Top,
@@ -471,6 +530,68 @@ mod tests {
         assert!((ends[1].0 - 300.0).abs() < 2.0 && (ends[1].1 - 30.0).abs() < 0.5);
     }
 
+    /// The highlight is drawn over the scene, so what the scene draws
+    /// over a connector's line is painted again over the highlight: its
+    /// label stays readable, and its arrowhead as it was.
+    #[test]
+    fn a_selected_connector_s_label_is_painted_over_its_highlight() {
+        let mut view = open(fixtures::HAND_WRITTEN);
+        let flow = wren_board::Id::new("flow").expect("an id");
+        view.machine
+            .select(std::collections::BTreeSet::from([flow.clone()]), Some(flow));
+        let overlay = marks(&view);
+        let kinds: Vec<&str> = overlay
+            .marks
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Line(_) => Some("line"),
+                Mark::Over(index) => Some(match &view.scene().items[*index].draw {
+                    Draw::Text { .. } => "text",
+                    Draw::Path { .. } => "fill",
+                }),
+                _ => None,
+            })
+            .collect();
+        // The line traced; then the arrowhead, the label's backing and
+        // its text, in the scene's order.
+        assert_eq!(kinds, ["line", "fill", "fill", "text"]);
+    }
+
+    #[test]
+    fn a_connector_s_blank_label_has_a_backing_for_its_caret() {
+        let mut view = open(fixtures::TWO);
+        click(&mut view, (210.0, 30.0));
+        view.command(Command::EditLabel, Instant::now());
+        let overlay = marks(&view);
+        // One 12 px line of no width at the middle of the route, padded as
+        // the scene pads a connector's label, and the caret on it.
+        let blank = overlay.marks.iter().find_map(|mark| match mark {
+            Mark::Blank(bounds) => Some(*bounds),
+            _ => None,
+        });
+        let blank = blank.expect("a backing");
+        assert!((blank.x - 206.0).abs() < 0.01, "{blank:?}");
+        assert_eq!((blank.y, blank.width, blank.height), (20.0, 8.0, 20.0));
+        let at = |mark: &Mark| overlay.marks.iter().position(|other| other == mark);
+        let caret = overlay
+            .marks
+            .iter()
+            .find(|mark| matches!(mark, Mark::Caret(..)));
+        assert!(at(&Mark::Blank(blank)) < caret.and_then(at));
+        // A node's label needs none, nor does a connector's with text.
+        let mut view = open(fixtures::HAND_WRITTEN);
+        input(&mut view, Input::Focus(true));
+        for name in ["first", "flow"] {
+            let id = wren_board::Id::new(name).expect("an id");
+            view.machine
+                .select(std::collections::BTreeSet::from([id.clone()]), Some(id));
+            view.command(Command::EditLabel, Instant::now());
+            let overlay = marks(&view);
+            assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Blank(_))), 0);
+            assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 1);
+        }
+    }
+
     #[test]
     fn outlines_and_handles_follow_a_drag_and_the_zoom() {
         let mut view = open(fixtures::TWO);
@@ -556,5 +677,87 @@ mod tests {
         let view = open(wren_board::EMPTY);
         let width = view.measurer().width(HINT, Face::Regular, HINT_TEXT);
         assert!(width > 200.0 && width < 400.0, "{width}");
+    }
+    #[test]
+    fn an_open_label_shows_its_selection_and_its_caret() {
+        use crate::LabelAction;
+        let mut view = open(fixtures::TWO);
+        click(&mut view, (60.0, 30.0));
+        view.command(Command::EditLabel, Instant::now());
+        // The scene's line for `a`, which is centred in its box.
+        let line = view
+            .scene()
+            .items
+            .iter()
+            .find_map(|item| match &item.draw {
+                Draw::Text { lines, .. } => lines.first().cloned(),
+                _ => None,
+            })
+            .expect("a label");
+        let overlay = marks(&view);
+        // No handles while a label is open; the outline stays.
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Handle(_))), 0);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Outline(_))), 1);
+        // The label opens with its text selected, the caret after it.
+        let selected: Vec<&Mark> = overlay
+            .marks
+            .iter()
+            .filter(|mark| matches!(mark, Mark::Selected(_)))
+            .collect();
+        let over = Rect::new(line.origin.x, line.origin.y, line.width, 20.0);
+        assert_eq!(selected, [&Mark::Selected(over)]);
+        let ink = view.label().expect("a label").ink;
+        let caret = Rect::new(over.right() - 0.75, over.y, 1.5, 20.0);
+        assert!(overlay.marks.contains(&Mark::Caret(caret, ink)));
+        // They follow the viewport, in screen pixels.
+        view.set_viewport(Viewport {
+            x: 10.0,
+            y: -20.0,
+            zoom: 2.0,
+        });
+        let zoomed = marks(&view);
+        let at = Rect::new(
+            (over.x - 10.0) * 2.0,
+            (over.y + 20.0) * 2.0,
+            over.width * 2.0,
+            40.0,
+        );
+        assert!(zoomed.marks.contains(&Mark::Selected(at)));
+        assert!(zoomed.marks.contains(&Mark::Caret(
+            Rect::new(at.right() - 0.75, at.y, 1.5, 40.0),
+            ink
+        )));
+        // A caret alone once the selection is gone.
+        let end = LabelAction::Move {
+            motion: crate::Motion::End,
+            select: false,
+        };
+        view.update(Message::Label(view.epoch(), end), Instant::now());
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Selected(_))), 0);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 1);
+        // Closed, neither.
+        input(
+            &mut view,
+            Input::Key {
+                key: Key::Escape,
+                repeat: false,
+            },
+        );
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 0);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Handle(_))), 8);
+        // A label a command opened on a board without the keyboard shows
+        // its selection and no caret: no key would reach it.
+        let mut view = open(fixtures::TWO);
+        let a = wren_board::Id::new("a").expect("an id");
+        view.machine
+            .select(std::collections::BTreeSet::from([a.clone()]), Some(a));
+        view.command(Command::EditLabel, Instant::now());
+        assert!(view.label().is_some());
+        let overlay = marks(&view);
+        assert!(!overlay.focused);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Selected(_))), 1);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 0);
     }
 }

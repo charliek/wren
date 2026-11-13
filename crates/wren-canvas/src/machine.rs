@@ -11,7 +11,8 @@
 //! gesture shows itself as a preview and asks for one edit when it is
 //! released (§3.4 rule 4); the edit's plan comes back through
 //! [`Machine::applied`], which is how a creation selects what it made and
-//! opens its label.
+//! opens its label. The open label's text is the view's; the machine says
+//! when it opens and closes, and sends it the pointer ([`Act::Caret`]).
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -168,6 +169,10 @@ pub enum Act {
     /// Commit the open label and close its editor (§5.9 rule 4). When that
     /// removes the element, the view says so with [`Machine::retain`].
     CommitLabel,
+    /// The pointer went down in the open label, or is dragged with the
+    /// button held: put its caret at this board point, or with `select`
+    /// take its selection there.
+    Caret { at: (f32, f32), select: bool },
     /// A command the machine has no rule of its own for. The state allows
     /// it, any open label is committed, and the view runs it on the
     /// selection.
@@ -266,6 +271,8 @@ enum Gesture {
     },
     /// A drag moves the view; `from` is where the pointer was last seen.
     Panning { button: Button, from: (f32, f32) },
+    /// A drag in the open label selects its text.
+    Selecting,
 }
 
 /// A run of key moves or of key resizes.
@@ -455,6 +462,12 @@ impl Machine {
         self.run = None;
     }
 
+    /// The view has no label to open on the element it was asked to
+    /// ([`Act::OpenLabel`]): one the scene does not draw.
+    pub fn abandon(&mut self) {
+        self.editing = None;
+    }
+
     /// Forget the elements `board` no longer has: in the selection, as the
     /// cursor, and as the open label.
     pub fn retain(&mut self, board: &Board) {
@@ -479,6 +492,7 @@ impl Machine {
             Gesture::Marquee { .. } => State::Marquee,
             Gesture::Creating { .. } => State::Creating,
             Gesture::Panning { .. } => State::Panning,
+            Gesture::Selecting => State::Editing,
             Gesture::None if self.editing.is_some() => State::Editing,
             Gesture::None if !self.focused => State::Unfocused,
             Gesture::None if self.tool != Tool::Select => State::Armed,
@@ -599,8 +613,16 @@ impl Machine {
         let Some(hit) = hit else {
             return;
         };
-        // A press on the element being labelled is the label's own.
+        // A press on the element being labelled is the label's own: it
+        // puts the caret there, and a drag from it selects.
         if self.editing.is_some() && hit.element() == self.editing.as_ref() {
+            if button == Button::Left {
+                self.gesture = Gesture::Selecting;
+                acts.push(Act::Caret {
+                    at: view.viewport.to_board(at),
+                    select: self.mods.shift,
+                });
+            }
             return;
         }
         self.commit(acts);
@@ -726,6 +748,10 @@ impl Machine {
                     acts.extend(now.map(|area| Act::Preview(Some(creating(self.tool, area)))));
                 }
             }
+            Gesture::Selecting => acts.push(Act::Caret {
+                at: to,
+                select: true,
+            }),
         }
     }
 
@@ -791,7 +817,7 @@ impl Machine {
             return;
         }
         match std::mem::take(&mut self.gesture) {
-            Gesture::None | Gesture::Panning { .. } => {}
+            Gesture::None | Gesture::Panning { .. } | Gesture::Selecting => {}
             Gesture::Pressed {
                 anchor, on, double, ..
             } => self.click(on, double, anchor, view, acts),
@@ -888,7 +914,10 @@ impl Machine {
                 self.selection = before;
                 false
             }
-            Gesture::None | Gesture::Pressed { .. } | Gesture::Panning { .. } => false,
+            Gesture::None
+            | Gesture::Pressed { .. }
+            | Gesture::Panning { .. }
+            | Gesture::Selecting => false,
         };
         if shows {
             acts.push(Act::Preview(None));
@@ -2018,6 +2047,8 @@ z = "F"
         Creating,
         /// The label of `a` open.
         Editing,
+        /// The label of `a` open and the left button down in it.
+        Selecting,
         /// By the middle button.
         Panning,
         /// By the middle button, with the label of `a` open.
@@ -2131,6 +2162,12 @@ z = "F"
             From::Editing => {
                 rig.click(A);
                 rig.run(Command::EditLabel);
+                State::Editing
+            }
+            From::Selecting => {
+                rig.click(A);
+                rig.run(Command::EditLabel);
+                rig.press(A);
                 State::Editing
             }
             From::Panning => {
@@ -2339,6 +2376,19 @@ z = "F"
             (From::Editing, cancel, State::Editing),
             (From::Editing, T::Settle, State::Idle),
             (From::Editing, focus(false), State::Unfocused),
+            // A drag in the label selects its text, and ends without
+            // closing it unless the board is settled or loses the keyboard.
+            (From::Selecting, T::Far, State::Editing),
+            (From::Selecting, T::Release(Left), State::Editing),
+            (From::Selecting, T::Release(Right), State::Editing),
+            (From::Selecting, escape, State::Editing),
+            (From::Selecting, cancel, State::Editing),
+            (From::Selecting, hand, State::Editing),
+            (From::Selecting, T::Command(C::CommitLabel), State::Editing),
+            (From::Selecting, T::PressOther, State::Pressed),
+            (From::Selecting, T::Press(Middle), State::Panning),
+            (From::Selecting, T::Settle, State::Idle),
+            (From::Selecting, focus(false), State::Unfocused),
             // Panning ends where it began.
             (From::Panning, T::Far, State::Panning),
             (From::Panning, T::Release(Middle), State::Idle),
@@ -3444,11 +3494,13 @@ z = "F"
         assert_eq!(rig.state(), State::Pressed);
         rig.release();
         assert_eq!((rig.selected(), rig.editing()), (vec!["b"], None));
-        // A press on the element itself is the label's.
+        // A press on the element itself is the label's: it never moves
+        // the node or commits.
         rig.run(Command::EditLabel);
         rig.wait(400);
-        assert!(rig.press(B).is_empty());
-        assert!(rig.by(40.0, 40.0).is_empty());
+        let caret = |at, select| Act::Caret { at, select };
+        assert_eq!(rig.press(B), [caret(B, false)]);
+        assert_eq!(rig.by(40.0, 40.0), [caret((300.0, 70.0), true)]);
         assert!(rig.release().is_empty());
         assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("b")));
         assert!(rig.press_with(Button::Right, B).is_empty());
@@ -3462,6 +3514,67 @@ z = "F"
         assert_eq!(rig.state(), State::Editing);
         assert_eq!(rig.step(Input::Focus(false)), [Act::CommitLabel]);
         assert_eq!(rig.state(), State::Unfocused);
+    }
+
+    #[test]
+    fn the_pointer_in_an_open_label_places_its_caret_and_selects() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::EditLabel);
+        rig.wait(400);
+        let caret = |at, select| Act::Caret { at, select };
+        // A press puts the caret there; the drag that follows selects,
+        // from its first pixel and wherever it goes.
+        assert_eq!(rig.press(A), [caret(A, false)]);
+        assert!(rig.machine.dragging());
+        assert_eq!(rig.state(), State::Editing);
+        assert_eq!(rig.by(1.0, 0.0), [caret((61.0, 30.0), true)]);
+        assert_eq!(rig.to(CANVAS), [caret(CANVAS, true)]);
+        assert!(rig.release().is_empty());
+        assert!(!rig.machine.dragging());
+        assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("a")));
+        assert_eq!(rig.selected(), ["a"]);
+        // With Shift the press itself extends the selection.
+        rig.step(shift());
+        assert_eq!(rig.press(A), [caret(A, true)]);
+        rig.release();
+        rig.step(plain());
+        // The point is the board's at any zoom and pan.
+        rig.viewport = Viewport {
+            x: -35.0,
+            y: 12.0,
+            zoom: 2.0,
+        };
+        let acts = rig.press(A);
+        let [Act::Caret { at, select: false }] = acts[..] else {
+            panic!("a caret: {acts:?}");
+        };
+        assert!((at.0 - A.0).abs() < 1e-3 && (at.1 - A.1).abs() < 1e-3);
+        // Escape ends the drag and keeps the label; the next commits it.
+        assert!(rig.step(ESCAPE).is_empty());
+        assert!(!rig.machine.dragging());
+        assert_eq!(rig.state(), State::Editing);
+        assert!(rig.to(CANVAS).is_empty());
+        assert_eq!(rig.step(ESCAPE), [Act::CommitLabel]);
+        // A lost pointer ends the drag too, and a command waits for it.
+        rig.run(Command::EditLabel);
+        rig.press(A);
+        assert!(rig.run(Command::CommitLabel).is_empty());
+        assert!(rig.step(Input::Cancel).is_empty());
+        assert_eq!(
+            (rig.state(), rig.machine.dragging()),
+            (State::Editing, false)
+        );
+        // Settling mid-drag commits.
+        rig.press(A);
+        assert_eq!(rig.machine.settle(), [Act::CommitLabel]);
+        assert_eq!((rig.state(), rig.machine.dragging()), (State::Idle, false));
+        // The view may find no label to open.
+        rig.run(Command::EditLabel);
+        rig.machine.abandon();
+        assert_eq!((rig.state(), rig.editing()), (State::Idle, None));
+        assert!(rig.step(ESCAPE).is_empty());
+        assert_eq!(rig.state(), State::Idle);
     }
 
     #[test]

@@ -3,9 +3,12 @@
 //!
 //! It paints the view's scene through iced's geometry API, one renderer
 //! layer per layer of the view's plan, and turns iced's events into the
-//! machine's [`Input`]s. Everything it shows lives in the host's
-//! [`BoardView`]; its own state is focus, the pointer, when the view last
-//! moved, and geometry.
+//! machine's [`Input`]s and, while a label is open, into its
+//! [`LabelAction`]s. The label editor is this widget, never a second one
+//! with a focus of its own: it asks for the input method at the label's
+//! caret and tracks the composition itself (the plan's §5.9 rules 9 and
+//! 10). Everything it shows lives in the host's [`BoardView`]; its own
+//! state is focus, the pointer, when the view last moved, and geometry.
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -13,12 +16,18 @@ use std::time::Instant;
 use iced::advanced::graphics::geometry::Renderer as _;
 use iced::advanced::renderer::Headless as _;
 use iced::advanced::widget::{self, operation, tree, Tree};
-use iced::advanced::{layout, mouse, renderer, Clipboard, Layout, Renderer as _, Shell, Widget};
+use iced::advanced::{
+    input_method, layout, mouse, renderer, Clipboard, InputMethod, Layout, Renderer as _, Shell,
+    Widget,
+};
 use iced::keyboard::{self, key::Named, Key};
 use iced::widget::canvas;
-use iced::{window, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{
+    window, Element, Event, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector,
+};
 
 use crate::keys::{self, Keyed, Out};
+use crate::label::LabelAction;
 use crate::machine::{Button, Input, Scroll};
 use crate::overlay;
 use crate::paint::{self, Cull};
@@ -46,8 +55,36 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// What the board asks of the input method (§5.9 rule 9): nothing, unless
+/// it has the keyboard in a focused window and a label is open; then the
+/// candidates at the label's caret, and the composition there at the size
+/// the label's text has on screen. iced draws the composition itself.
+fn input_method(view: &BoardView, focused: bool, bounds: Rectangle) -> InputMethod<&str> {
+    let (Some(label), Some((caret, size))) = (view.label(), view.label_caret()) else {
+        return InputMethod::Disabled;
+    };
+    if !focused {
+        return InputMethod::Disabled;
+    }
+    InputMethod::Enabled {
+        cursor: Rectangle::new(
+            Point::new(bounds.x + caret.x, bounds.y + caret.y),
+            Size::new(1.0, caret.height),
+        ),
+        purpose: input_method::Purpose::Normal,
+        preedit: label.preedit().map(|preedit| input_method::Preedit {
+            content: preedit.text.as_str(),
+            selection: preedit.selection.clone(),
+            text_size: Some(Pixels(size)),
+        }),
+    }
+}
+
 struct State {
     focused: bool,
+    /// Whether the window has the desktop's focus: without it no input
+    /// method is asked for.
+    window_focused: bool,
     /// The time of the last redraw, which decides whether the view rests.
     now: Instant,
     modifiers: keyboard::Modifiers,
@@ -65,6 +102,7 @@ impl State {
     fn new() -> Self {
         Self {
             focused: false,
+            window_focused: true,
             now: Instant::now(),
             modifiers: keyboard::Modifiers::default(),
             pointer: None,
@@ -199,6 +237,8 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
                     shell.request_redraw_at(rest);
                 }
             }
+            let focused = state.focused && state.window_focused;
+            shell.request_input_method(&input_method(view, focused, bounds));
         }
         let sent = translate(state, event, bounds, cursor, view, self.style);
         for message in sent.messages {
@@ -352,10 +392,42 @@ fn translate(
     // Whether the machine holds something that has to end when the pointer
     // or the window goes.
     let holding = machine.dragging() || machine.space();
+    let editing = machine.editing().is_some();
+    let composing = view.label().is_some_and(|label| label.preedit().is_some());
+    let edit = |action: LabelAction| Message::Label(view.epoch(), action);
     match event {
-        Event::Window(window::Event::Unfocused) if holding => {
-            sent.messages.push(input(Input::Cancel));
+        Event::Window(window::Event::Focused) => state.window_focused = true,
+        Event::Window(window::Event::Unfocused) => {
+            state.window_focused = false;
+            if holding {
+                sent.messages.push(input(Input::Cancel));
+            }
         }
+        // The input method's own events, which iced hands to every widget:
+        // only the board with a label open reads them.
+        Event::InputMethod(event) if state.focused && editing => match event {
+            input_method::Event::Opened | input_method::Event::Closed => {
+                if composing {
+                    sent.messages.push(edit(LabelAction::Preedit {
+                        text: String::new(),
+                        selection: None,
+                    }));
+                }
+            }
+            input_method::Event::Preedit(text, selection) => {
+                if composing || !text.is_empty() {
+                    sent.messages.push(edit(LabelAction::Preedit {
+                        text: text.clone(),
+                        selection: selection.clone(),
+                    }));
+                }
+                sent.captured = true;
+            }
+            input_method::Event::Commit(text) => {
+                sent.messages.push(edit(LabelAction::Insert(text.clone())));
+                sent.captured = true;
+            }
+        },
         // The pointer left the window with no button held.
         Event::Mouse(mouse::Event::CursorLeft) if holding && state.pressed.is_none() => {
             sent.messages.push(input(Input::Cancel));
@@ -434,7 +506,8 @@ fn translate(
             ..
         }) if state.focused => {
             let context = keys::Context {
-                editing: machine.editing().is_some(),
+                editing,
+                composing,
                 escapes: machine.escapes(),
                 policy: view.key_policy(),
             };
@@ -454,6 +527,7 @@ fn translate(
                 sent.messages.extend(outs.into_iter().map(|out| match out {
                     Out::Input(taken) => input(taken),
                     Out::Command(command) => Message::Command(command),
+                    Out::Label(action) => edit(action),
                 }));
                 sent.captured = true;
             }
@@ -1027,5 +1101,329 @@ mod tests {
         assert!(state.is_focused());
         state.unfocus();
         assert!(!state.is_focused());
+    }
+    /// A focused board with the label of `a` open, its text "A" selected,
+    /// as a double-click leaves it.
+    fn labelling() -> (BoardView, State) {
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        for _ in 0..2 {
+            let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+            send(&mut view, &mut state, press, ON_A);
+            let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+            send(&mut view, &mut state, release, ON_A);
+        }
+        assert_eq!(view.machine().state(), Surface::Editing);
+        assert_eq!(view.label().map(crate::Label::text), Some("A"));
+        (view, state)
+    }
+
+    fn labels(sent: &Sent) -> Vec<LabelAction> {
+        sent.messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Label(_, action) => Some(action.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ime(event: input_method::Event) -> Event {
+        Event::InputMethod(event)
+    }
+
+    fn text_of(view: &BoardView) -> &str {
+        view.board()
+            .nodes
+            .values()
+            .next()
+            .map_or("", |node| node.text.as_str())
+    }
+
+    #[test]
+    fn keys_in_an_open_label_are_its_text() {
+        let (mut view, mut state) = labelling();
+        let plain = keyboard::Modifiers::default();
+        let sent = send(
+            &mut view,
+            &mut state,
+            key(
+                Key::Character("s".into()),
+                keyboard::Modifiers::SHIFT,
+                Some("S"),
+            ),
+            ON_A,
+        );
+        assert!(sent.captured);
+        assert_eq!(
+            sent.messages,
+            [Message::Label(
+                view.epoch(),
+                LabelAction::Insert("S".to_owned())
+            )]
+        );
+        assert_eq!(text_of(&view), "S");
+        // Space is text there, and never the pan key.
+        let space = key(Key::Named(Named::Space), plain, Some(" "));
+        let sent = send(&mut view, &mut state, space, ON_A);
+        assert_eq!(labels(&sent), [LabelAction::Insert(" ".to_owned())]);
+        assert!(!view.machine().space());
+        // Enter breaks the line; the arrows and Backspace are the text's.
+        for (named, text) in [
+            (Named::Enter, Some("\r")),
+            (Named::ArrowLeft, None),
+            (Named::Backspace, None),
+        ] {
+            let sent = send(
+                &mut view,
+                &mut state,
+                key(Key::Named(named), plain, text),
+                ON_A,
+            );
+            assert!(sent.captured && labels(&sent).len() == 1, "{named:?}");
+        }
+        assert_eq!(view.label().map(crate::Label::text), Some("S\n"));
+        assert_eq!(text_of(&view), "S");
+        assert_eq!(view.machine().state(), Surface::Editing);
+        // A key the label has no use for is taken and goes nowhere.
+        let sent = send(
+            &mut view,
+            &mut state,
+            key(Key::Named(Named::F5), plain, None),
+            ON_A,
+        );
+        assert!(sent.captured && sent.messages.is_empty());
+        // Escape commits, and the board keeps the keyboard.
+        let escape = key(Key::Named(Named::Escape), plain, None);
+        let sent = send(&mut view, &mut state, escape, ON_A);
+        assert!(sent.captured);
+        assert_eq!(view.label(), None);
+        assert_eq!(view.machine().state(), Surface::Idle);
+        assert!(state.focused);
+        assert_eq!(text_of(&view), "S");
+    }
+
+    /// The plan's review attack 5, with events built as iced builds them:
+    /// a composition is shown beside the text, no key ends the label or
+    /// runs a command while it lasts, and only its commit is typed.
+    #[test]
+    fn a_composition_holds_every_key_until_it_commits() {
+        let (mut view, mut state) = labelling();
+        view.set_key_policy(Arc::new(|key, _, modifiers, _| {
+            if modifiers.alt() {
+                KeyRoute::Host
+            } else if *key == Key::Named(Named::Tab) {
+                KeyRoute::Command(Command::ConnectNext)
+            } else if *key == Key::Named(Named::Enter) && modifiers.command() {
+                KeyRoute::Command(Command::CommitLabel)
+            } else {
+                KeyRoute::Pass
+            }
+        }));
+        let plain = keyboard::Modifiers::default();
+        send(
+            &mut view,
+            &mut state,
+            key(Key::Named(Named::ArrowRight), plain, None),
+            ON_A,
+        );
+        // The input method opening says nothing by itself.
+        let opened = send(
+            &mut view,
+            &mut state,
+            ime(input_method::Event::Opened),
+            ON_A,
+        );
+        assert_eq!(opened, Sent::default());
+        let preedit = ime(input_method::Event::Preedit("にほ".to_owned(), Some(0..6)));
+        let sent = send(&mut view, &mut state, preedit, ON_A);
+        assert!(sent.captured);
+        assert_eq!(
+            labels(&sent),
+            [LabelAction::Preedit {
+                text: "にほ".to_owned(),
+                selection: Some(0..6)
+            }]
+        );
+        let composing = view.label().and_then(crate::Label::preedit);
+        assert_eq!(composing.map(|preedit| preedit.text.as_str()), Some("にほ"));
+        assert_eq!(text_of(&view), "A");
+
+        for (pressed, modifiers, text) in [
+            (Key::Named(Named::Enter), plain, Some("\r")),
+            (Key::Named(Named::Enter), keyboard::Modifiers::COMMAND, None),
+            (Key::Named(Named::Tab), plain, Some("\t")),
+            (Key::Named(Named::Escape), plain, None),
+            (Key::Named(Named::Backspace), plain, None),
+            (Key::Named(Named::ArrowLeft), plain, None),
+            (Key::Character("d".into()), plain, Some("d")),
+            (
+                Key::Character("k".into()),
+                keyboard::Modifiers::ALT,
+                Some("k"),
+            ),
+        ] {
+            let sent = send(
+                &mut view,
+                &mut state,
+                key(pressed.clone(), modifiers, text),
+                ON_A,
+            );
+            assert!(sent.captured && sent.messages.is_empty(), "{pressed:?}");
+        }
+        assert_eq!(view.machine().state(), Surface::Editing);
+        assert_eq!(view.label().map(crate::Label::text), Some("A"));
+        assert!(view.label().is_some_and(|label| label.preedit().is_some()));
+        assert_eq!(view.board().nodes.len(), 2);
+        assert!(view.pristine());
+
+        // The commit is typed at the caret and ends the composition.
+        let commit = ime(input_method::Event::Commit("日本".to_owned()));
+        let sent = send(&mut view, &mut state, commit, ON_A);
+        assert!(sent.captured);
+        assert_eq!(labels(&sent), [LabelAction::Insert("日本".to_owned())]);
+        assert_eq!(text_of(&view), "A日本");
+        assert_eq!(view.label().and_then(crate::Label::preedit), None);
+        // An empty preedit, or the input method closing, ends one with
+        // nothing typed.
+        for end in [
+            input_method::Event::Preedit(String::new(), None),
+            input_method::Event::Closed,
+        ] {
+            let preedit = ime(input_method::Event::Preedit("x".to_owned(), None));
+            send(&mut view, &mut state, preedit, ON_A);
+            assert!(view.label().is_some_and(|label| label.preedit().is_some()));
+            send(&mut view, &mut state, ime(end), ON_A);
+            assert_eq!(view.label().and_then(crate::Label::preedit), None);
+        }
+        assert_eq!(text_of(&view), "A日本");
+        // With the composition over, Tab is the board's again.
+        let tab = key(Key::Named(Named::Tab), plain, Some("\t"));
+        let sent = send(&mut view, &mut state, tab, ON_A);
+        assert_eq!(sent.messages, [Message::Command(Command::ConnectNext)]);
+        assert_eq!(view.label(), None);
+    }
+
+    #[test]
+    fn the_input_method_s_events_are_for_a_focused_board_with_a_label_open() {
+        let commit = || ime(input_method::Event::Commit("x".to_owned()));
+        let preedit = || ime(input_method::Event::Preedit("x".to_owned(), None));
+        // No label.
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        state.focus();
+        send(&mut view, &mut state, mouse(mouse::Event::CursorLeft), AWAY);
+        for event in [commit(), preedit()] {
+            assert_eq!(send(&mut view, &mut state, event, ON_A), Sent::default());
+        }
+        // A label, and the keyboard elsewhere: the widget's next event
+        // tells the machine, which commits the label.
+        let (mut view, mut state) = labelling();
+        state.unfocus();
+        let sent = send(&mut view, &mut state, commit(), ON_A);
+        assert_eq!(inputs(&sent), [Input::Focus(false)]);
+        assert!(labels(&sent).is_empty());
+        assert_eq!(view.label(), None);
+        assert_eq!(text_of(&view), "A");
+    }
+
+    #[test]
+    fn the_input_method_is_asked_to_the_caret_while_a_label_is_open() {
+        let view = open(fixtures::TWO);
+        assert_eq!(input_method(&view, true, BOUNDS), InputMethod::Disabled);
+        let (mut view, _) = labelling();
+        // Not without the keyboard, or in a window that lost its focus.
+        assert_eq!(input_method(&view, false, BOUNDS), InputMethod::Disabled);
+        for zoom in [0.5, 1.0, 2.0] {
+            view.set_viewport(Viewport {
+                x: -40.0,
+                y: 25.0,
+                zoom,
+            });
+            let label = view.label().expect("a label");
+            let caret = label.caret_box(view.measurer());
+            let (x, y) = view.viewport().to_screen((caret.x, caret.y));
+            let at = Rectangle::new(
+                Point::new(BOUNDS.x + x, BOUNDS.y + y),
+                Size::new(1.0, 20.0 * zoom),
+            );
+            assert_eq!(
+                input_method(&view, true, BOUNDS),
+                InputMethod::Enabled {
+                    cursor: at,
+                    purpose: input_method::Purpose::Normal,
+                    preedit: None
+                },
+                "{zoom}"
+            );
+            // A composition is shown at the size the label has on screen.
+            let composing = LabelAction::Preedit {
+                text: "にほんご".to_owned(),
+                selection: Some(3..6),
+            };
+            view.update(Message::Label(view.epoch(), composing), Instant::now());
+            assert_eq!(
+                input_method(&view, true, BOUNDS),
+                InputMethod::Enabled {
+                    cursor: at,
+                    purpose: input_method::Purpose::Normal,
+                    preedit: Some(input_method::Preedit {
+                        content: "にほんご",
+                        selection: Some(3..6),
+                        text_size: Some(Pixels(14.0 * zoom)),
+                    })
+                },
+                "{zoom}"
+            );
+            let over = LabelAction::Preedit {
+                text: String::new(),
+                selection: None,
+            };
+            view.update(Message::Label(view.epoch(), over), Instant::now());
+        }
+        // The label closed, it is let go.
+        view.settle(Instant::now());
+        assert_eq!(input_method(&view, true, BOUNDS), InputMethod::Disabled);
+    }
+
+    #[test]
+    fn the_window_s_focus_is_followed_for_the_input_method() {
+        let (mut view, mut state) = labelling();
+        assert!(state.window_focused);
+        let blur = Event::Window(window::Event::Unfocused);
+        assert_eq!(send(&mut view, &mut state, blur, ON_A), Sent::default());
+        assert!(!state.window_focused);
+        let focus = Event::Window(window::Event::Focused);
+        assert_eq!(send(&mut view, &mut state, focus, ON_A), Sent::default());
+        assert!(state.window_focused);
+    }
+
+    #[test]
+    fn a_drag_in_an_open_label_selects_and_never_moves_the_node() {
+        let (mut view, mut state) = labelling();
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        // Left of the centred "A", then dragged right across it.
+        let left = Point::new(ON_A.x - 30.0, ON_A.y);
+        send(
+            &mut view,
+            &mut state,
+            mouse(mouse::Event::CursorMoved { position: left }),
+            left,
+        );
+        let sent = send(&mut view, &mut state, press, left);
+        assert!(sent.captured);
+        let label = view.label().expect("a label");
+        assert_eq!((label.caret(), label.selection()), (0, 0..0));
+        let right = Point::new(ON_A.x + 300.0, ON_A.y + 200.0);
+        let moved = mouse(mouse::Event::CursorMoved { position: right });
+        let sent = send(&mut view, &mut state, moved, right);
+        assert!(sent.captured);
+        let label = view.label().expect("a label");
+        assert_eq!((label.caret(), label.selection()), (1, 0..1));
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        send(&mut view, &mut state, release, right);
+        assert_eq!(view.machine().state(), Surface::Editing);
+        assert!(view.pristine());
+        assert_eq!(view.shown(), view.scene());
     }
 }
