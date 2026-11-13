@@ -483,7 +483,7 @@ fn translate(
                     // held at its press.
                     sent.messages.extend(mods_change(state.modifiers, view));
                     sent.messages.push(input(Input::Press {
-                        button: machine_button(*button),
+                        button: pressed_button(*button, state.modifiers, cfg!(target_os = "macos")),
                         at: local(at),
                     }));
                 }
@@ -608,6 +608,16 @@ fn released(
     })
 }
 
+/// The button a press is to the machine: on macOS a Ctrl-click is a
+/// right-click (§5.3 rule 3, §5.17 rule 2). Its release needs no such
+/// care, since a right press starts no gesture for a release to end.
+fn pressed_button(button: mouse::Button, modifiers: keyboard::Modifiers, macos: bool) -> Button {
+    match button {
+        mouse::Button::Left if macos && modifiers.control() => Button::Right,
+        _ => machine_button(button),
+    }
+}
+
 fn machine_button(button: mouse::Button) -> Button {
     match button {
         mouse::Button::Left => Button::Left,
@@ -711,6 +721,23 @@ mod tests {
         assert_eq!(machine_button(mouse::Button::Right), Button::Right);
         assert_eq!(machine_button(mouse::Button::Back), Button::Other);
         assert_eq!(machine_button(mouse::Button::Other(9)), Button::Other);
+    }
+
+    #[test]
+    fn a_control_click_is_a_right_click_on_macos_only() {
+        let control = keyboard::Modifiers::CTRL;
+        let left = mouse::Button::Left;
+        assert_eq!(pressed_button(left, control, true), Button::Right);
+        assert_eq!(
+            pressed_button(left, keyboard::Modifiers::default(), true),
+            Button::Left
+        );
+        assert_eq!(
+            pressed_button(mouse::Button::Middle, control, true),
+            Button::Middle
+        );
+        // Elsewhere Ctrl is the duplicate-drag key (§5.8 rule 3).
+        assert_eq!(pressed_button(left, control, false), Button::Left);
     }
 
     #[test]
