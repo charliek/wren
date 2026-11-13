@@ -96,6 +96,28 @@ impl App {
                         },
                     ));
                 }
+                if id.scope() == Scope::Board {
+                    // The board's key policy routes the bound key, and only
+                    // a focused board sees it; it is mounted under the
+                    // editor's focus id.
+                    let keymap = &self.preferences.keymap;
+                    let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
+                    let super::preferences::BoardRoute::Command(command) =
+                        super::preferences::board_route(keymap, trigger, false)
+                    else {
+                        return Err("The board does not route this command's key".into());
+                    };
+                    let request = Arc::clone(request);
+                    let board = self.surface() == super::board::Surface::Board;
+                    return Ok(iced::widget::operation::is_focused("note-editor").map(
+                        move |focused| {
+                            Message::BoardShortcut(
+                                Arc::clone(&request),
+                                (board && focused).then_some(command),
+                            )
+                        },
+                    ));
+                }
                 let task = self.run_shortcut(id);
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
@@ -795,7 +817,7 @@ fn result_key(value: &Value) -> Result<Key, String> {
 fn key_json(key: &Key) -> Value {
     match key {
         Key::Command(id) => {
-            json!({"command":super::commands::DEFINITIONS.iter().find(|definition| definition.id == *id).map(|definition| definition.key)})
+            json!({"command":id.key()})
         }
         Key::Note(note) => json!({"note":note.0}),
         Key::Section(section) => json!({"section":section.0}),

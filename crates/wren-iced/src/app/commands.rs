@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use iced::Task;
+use wren_board::{Access, Dir, Shape};
+use wren_canvas::{Command as BoardCommand, Grow, Tool};
 use wren_core::kind::NoteKind;
 use wren_core::model::{ItemRef, Parent};
 use wren_core::ops::Op;
@@ -64,6 +66,8 @@ pub enum CommandId {
     ToggleMarkdownAssist,
     SwitchEngine,
     ExportSvg,
+    /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
+    Board(BoardCommand),
 }
 
 /// Who runs a command from its shortcut.
@@ -74,6 +78,10 @@ pub enum Scope {
     /// The focused editor, through its key policy. The app ignores the
     /// shortcut, so it acts only while the editor has the keyboard.
     Editor,
+    /// The focused board, through its key policy and the keymap's board
+    /// layer. The base layer holds none of these, so the app never sees
+    /// their keys.
+    Board,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +115,15 @@ const REVEAL_GROUP: &str = "Reveal group in Files";
 const REVEAL_SECTION: &str = "Reveal section in Files";
 
 /// Palette section order; `Hidden` commands are bindable but not listed.
-pub const GROUPS: [&str; 6] = ["This note", "Markdown", "Go", "View", "Workspace", "App"];
+pub const GROUPS: [&str; 7] = [
+    "This note",
+    "Markdown",
+    "Board",
+    "Go",
+    "View",
+    "Workspace",
+    "App",
+];
 
 // These keys are the stable production/test protocol, independent of labels.
 definitions![
@@ -338,10 +354,258 @@ definitions![
     ),
 ];
 
+const fn board(command: BoardCommand, key: &'static str, label: &'static str) -> Definition {
+    Definition {
+        id: CommandId::Board(command),
+        key,
+        label,
+        group: "Board",
+        scope: Scope::Board,
+    }
+}
+
+const fn board_view(command: BoardCommand, key: &'static str, label: &'static str) -> Definition {
+    Definition {
+        group: "View",
+        ..board(command, key, label)
+    }
+}
+
+/// The board's rows, in the order of the plan's command table (§5.19). Each
+/// key is the one `wren_canvas::Command::key` gives; a test holds them
+/// together.
+pub const BOARD_DEFINITIONS: [Definition; 64] = {
+    use BoardCommand as C;
+    use Dir::{Down, Left, Right, Up};
+    [
+        board(C::Tool(Tool::Select), "board.tool.select", "Select tool"),
+        board(C::Tool(Tool::Hand), "board.tool.hand", "Hand tool"),
+        board(
+            C::Tool(Tool::Shape(Shape::Rect)),
+            "board.tool.rectangle",
+            "Rectangle tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Ellipse)),
+            "board.tool.ellipse",
+            "Ellipse tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Diamond)),
+            "board.tool.diamond",
+            "Diamond tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Pill)),
+            "board.tool.pill",
+            "Pill tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Cylinder)),
+            "board.tool.cylinder",
+            "Cylinder tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Parallelogram)),
+            "board.tool.parallelogram",
+            "Parallelogram tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Rounded)),
+            "board.tool.rounded",
+            "Rounded rectangle tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Document)),
+            "board.tool.document",
+            "Document tool",
+        ),
+        board(C::Tool(Tool::Text), "board.tool.text", "Text tool"),
+        board(
+            C::Tool(Tool::Connector),
+            "board.tool.connector",
+            "Connector tool",
+        ),
+        board(
+            C::Shape(Shape::Rect),
+            "board.shape.rectangle",
+            "Change shape to rectangle",
+        ),
+        board(
+            C::Shape(Shape::Ellipse),
+            "board.shape.ellipse",
+            "Change shape to ellipse",
+        ),
+        board(
+            C::Shape(Shape::Diamond),
+            "board.shape.diamond",
+            "Change shape to diamond",
+        ),
+        board(
+            C::Shape(Shape::Pill),
+            "board.shape.pill",
+            "Change shape to pill",
+        ),
+        board(
+            C::Shape(Shape::Cylinder),
+            "board.shape.cylinder",
+            "Change shape to cylinder",
+        ),
+        board(
+            C::Shape(Shape::Parallelogram),
+            "board.shape.parallelogram",
+            "Change shape to parallelogram",
+        ),
+        board(
+            C::Shape(Shape::Rounded),
+            "board.shape.rounded",
+            "Change shape to rounded rectangle",
+        ),
+        board(
+            C::Shape(Shape::Document),
+            "board.shape.document",
+            "Change shape to document",
+        ),
+        board(C::EditLabel, "board.label.edit", "Edit label"),
+        board(C::CommitLabel, "board.label.commit", "Finish label"),
+        board(C::ConnectNext, "board.connect.next", "Add next shape"),
+        board(C::Connect(Left), "board.connect.left", "Connect left"),
+        board(C::Connect(Right), "board.connect.right", "Connect right"),
+        board(C::Connect(Up), "board.connect.up", "Connect up"),
+        board(C::Connect(Down), "board.connect.down", "Connect down"),
+        board(C::Select(Left), "board.select.left", "Select left"),
+        board(C::Select(Right), "board.select.right", "Select right"),
+        board(C::Select(Up), "board.select.up", "Select up"),
+        board(C::Select(Down), "board.select.down", "Select down"),
+        board(
+            C::ExtendSelection(Left),
+            "board.select.extend_left",
+            "Extend selection left",
+        ),
+        board(
+            C::ExtendSelection(Right),
+            "board.select.extend_right",
+            "Extend selection right",
+        ),
+        board(
+            C::ExtendSelection(Up),
+            "board.select.extend_up",
+            "Extend selection up",
+        ),
+        board(
+            C::ExtendSelection(Down),
+            "board.select.extend_down",
+            "Extend selection down",
+        ),
+        board(
+            C::SelectConnector(Left),
+            "board.select.connector_left",
+            "Select connector on the left",
+        ),
+        board(
+            C::SelectConnector(Right),
+            "board.select.connector_right",
+            "Select connector on the right",
+        ),
+        board(
+            C::SelectConnector(Up),
+            "board.select.connector_up",
+            "Select connector above",
+        ),
+        board(
+            C::SelectConnector(Down),
+            "board.select.connector_down",
+            "Select connector below",
+        ),
+        board(C::SelectAll, "board.select.all", "Select all"),
+        board(
+            C::SelectConnected,
+            "board.select.connected",
+            "Select connected",
+        ),
+        board(C::SelectNone, "board.select.none", "Clear selection"),
+        board(C::Move(Left), "board.move.left", "Move left"),
+        board(C::Move(Right), "board.move.right", "Move right"),
+        board(C::Move(Up), "board.move.up", "Move up"),
+        board(C::Move(Down), "board.move.down", "Move down"),
+        board(C::Resize(Grow::Wider), "board.resize.wider", "Make wider"),
+        board(
+            C::Resize(Grow::Narrower),
+            "board.resize.narrower",
+            "Make narrower",
+        ),
+        board(
+            C::Resize(Grow::Taller),
+            "board.resize.taller",
+            "Make taller",
+        ),
+        board(
+            C::Resize(Grow::Shorter),
+            "board.resize.shorter",
+            "Make shorter",
+        ),
+        board(C::Delete, "board.delete", "Delete selection"),
+        board(C::Duplicate, "board.duplicate", "Duplicate"),
+        board(C::Copy, "board.copy", "Copy"),
+        board(C::Cut, "board.cut", "Cut"),
+        board(C::Paste, "board.paste", "Paste"),
+        board(C::Undo, "board.undo", "Undo"),
+        board(C::Redo, "board.redo", "Redo"),
+        board(
+            C::EdgeRouting,
+            "board.edge.routing",
+            "Connector: straight or elbow",
+        ),
+        board(C::EdgeStart, "board.edge.start", "Connector: start head"),
+        board(C::EdgeEnd, "board.edge.end", "Connector: end head"),
+        board(C::EdgeReverse, "board.edge.reverse", "Connector: reverse"),
+        board(C::StrokeDashed, "board.stroke.dashed", "Solid or dashed"),
+        board_view(C::ZoomFit, "board.zoom.fit", "Zoom to fit"),
+        board_view(
+            C::ZoomSelection,
+            "board.zoom.selection",
+            "Zoom to selection",
+        ),
+    ]
+};
+
+/// Every command row: the app's, then the board's.
+pub fn definitions() -> impl Iterator<Item = &'static Definition> {
+    DEFINITIONS.iter().chain(&BOARD_DEFINITIONS)
+}
+
+/// Whether a board command changes the board, so a read-only board
+/// refuses it. Arming a tool that creates counts: it leads nowhere else.
+fn board_mutates(command: BoardCommand) -> bool {
+    use BoardCommand as C;
+    !matches!(
+        command,
+        C::Tool(Tool::Select | Tool::Hand)
+            | C::Select(_)
+            | C::ExtendSelection(_)
+            | C::SelectConnector(_)
+            | C::SelectAll
+            | C::SelectConnected
+            | C::SelectNone
+            | C::Copy
+            | C::ZoomFit
+            | C::ZoomSelection
+    )
+}
+
+/// Whether a held key repeats the command (§5.1 rule 4): walking,
+/// extending, moving and resizing do; holding Tab or Delete does one thing.
+pub(super) fn board_repeats(command: BoardCommand) -> bool {
+    use BoardCommand as C;
+    matches!(
+        command,
+        C::Select(_) | C::ExtendSelection(_) | C::Move(_) | C::Resize(_)
+    )
+}
+
 impl CommandId {
     fn definition(self) -> &'static Definition {
-        DEFINITIONS
-            .iter()
+        definitions()
             .find(|definition| definition.id == self)
             .expect("complete command table")
     }
@@ -368,15 +632,22 @@ impl CommandId {
         })
     }
 
+    /// What a Board-scoped command asks the board to do.
+    pub fn board_command(self) -> Option<BoardCommand> {
+        match self {
+            Self::Board(command) => Some(command),
+            _ => None,
+        }
+    }
+
     /// Whether the command exists only while the `boards` setting is on:
     /// with it off it is not listed anywhere.
     pub fn boards(self) -> bool {
-        matches!(self, Self::ExportSvg)
+        matches!(self, Self::ExportSvg | Self::Board(_))
     }
 
     pub fn parse(key: &str) -> Option<Self> {
-        DEFINITIONS
-            .iter()
+        definitions()
             .find(|definition| definition.key == key)
             .map(|definition| definition.id)
     }
@@ -544,6 +815,12 @@ impl App {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.can_forward()),
+            // Only on a board, which exists only on the Board surface; a
+            // read-only one takes the commands that do not change it.
+            Board(command) => self
+                .board
+                .as_ref()
+                .is_some_and(|view| !board_mutates(command) || *view.access() == Access::Editable),
         }
     }
 
@@ -811,6 +1088,14 @@ impl App {
                 let intent = id.intent().expect("an editor command");
                 let task = self.edit(wren_editor::Message::Intent(intent));
                 self.finish_action(Disposition::Completed, None, task.chain(focus))
+            }
+            Board(command) => {
+                // From the palette, the menu or the harness: act on the
+                // board as it stands, then give it the keyboard (§5.1 rule 5).
+                self.palette = None;
+                let focus = self.return_to_editor();
+                self.board_command(command);
+                self.finish_action(Disposition::Completed, None, focus)
             }
             Quit => {
                 self.palette = None;
@@ -1124,9 +1409,12 @@ mod tests {
     #[test]
     fn full_command_protocol_is_unique_and_round_trips() {
         let mut keys = HashSet::new();
-        for definition in DEFINITIONS {
+        let mut labels = HashSet::new();
+        for definition in definitions() {
             assert!(keys.insert(definition.key));
+            assert!(labels.insert(definition.label), "{}", definition.label);
             assert_eq!(CommandId::parse(definition.key), Some(definition.id));
+            assert_eq!(definition.id.key(), definition.key);
         }
         for key in [
             "workspace.add",
@@ -1178,7 +1466,7 @@ mod tests {
 
     #[test]
     fn editor_scoped_commands_are_exactly_the_editor_intents() {
-        for definition in DEFINITIONS {
+        for definition in definitions() {
             assert_eq!(
                 definition.scope == Scope::Editor,
                 definition.id.intent().is_some(),
@@ -1191,6 +1479,44 @@ mod tests {
                 definition.key
             );
         }
+    }
+
+    #[test]
+    fn board_scoped_commands_are_exactly_the_board_commands() {
+        for definition in definitions() {
+            assert_eq!(
+                definition.scope == Scope::Board,
+                definition.id.board_command().is_some(),
+                "{}",
+                definition.key
+            );
+            assert_eq!(
+                definition.key.starts_with("board."),
+                definition.scope == Scope::Board,
+                "{}",
+                definition.key
+            );
+            assert!(definition.id.board_command().is_none() || definition.id.boards());
+        }
+        // The board's rows are the canvas's commands, key for key, in its
+        // order, all in the Board group but the two zooms.
+        assert!(BOARD_DEFINITIONS
+            .iter()
+            .map(|definition| (definition.id, definition.key))
+            .eq(BoardCommand::all().map(|command| (CommandId::Board(command), command.key()))));
+        for definition in &BOARD_DEFINITIONS {
+            let zoom = matches!(
+                definition.id,
+                CommandId::Board(BoardCommand::ZoomFit | BoardCommand::ZoomSelection)
+            );
+            assert_eq!(
+                definition.group,
+                if zoom { "View" } else { "Board" },
+                "{}",
+                definition.key
+            );
+        }
+        assert_eq!(GROUPS[..3], ["This note", "Markdown", "Board"]);
     }
 
     #[test]

@@ -489,6 +489,12 @@ impl Keymap {
     pub fn board_bindings(&self) -> impl Iterator<Item = (&Accel, &str)> {
         iterate(&self.board)
     }
+
+    /// Keep only the board-layer bindings `keep` accepts, for a host that
+    /// drops the ones the base layer would shadow.
+    pub fn retain_board(&mut self, mut keep: impl FnMut(&Accel, &str) -> bool) {
+        self.board.retain(|(accel, action)| keep(accel, action));
+    }
 }
 
 fn find_action<'a>(table: &'a [(Accel, String)], accel: &Accel) -> Option<&'a str> {
@@ -919,5 +925,22 @@ mod tests {
         assert_eq!(keymap.action(&accel("alt+n")), Some("note.new"));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("unknown action"), "{warnings:?}");
+    }
+
+    #[test]
+    fn retain_board_drops_only_board_bindings() {
+        let (mut keymap, _) = Keymap::build(both_defaults(Platform::Linux), &[], by_name);
+        let base: Vec<_> = keymap
+            .bindings()
+            .map(|(accel, action)| (accel.clone(), action.to_owned()))
+            .collect();
+        keymap.retain_board(|accel, action| *accel != self::accel("tab") && action != "board.copy");
+        assert_eq!(keymap.board_action(&accel("tab")), None);
+        assert_eq!(keymap.accel("board.copy"), None);
+        assert_eq!(keymap.board_action(&accel("v")), Some("board.tool.select"));
+        assert!(keymap
+            .bindings()
+            .map(|(accel, action)| (accel.clone(), action.to_owned()))
+            .eq(base));
     }
 }

@@ -109,6 +109,13 @@ impl App {
         }
         view.update(message, Instant::now());
     }
+
+    /// Run a board command on the open board, as its key would.
+    pub(super) fn board_command(&mut self, command: wren_canvas::Command) {
+        if let Some(view) = &mut self.board {
+            view.command(command, Instant::now());
+        }
+    }
 }
 
 /// An SVG export of the open board, made when it was asked for and kept
@@ -1448,6 +1455,170 @@ z = "c"
         assert_in_step(&app, Surface::Text);
     }
 
+    /// The groups and keys of the Commands palette's rows.
+    fn command_rows(app: &mut App) -> Vec<(&'static str, CommandId, bool)> {
+        let _ = app.open_palette(super::super::palette::Mode::Commands);
+        let rows = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .filter_map(|row| match row.key {
+                super::super::palette::Key::Command(id) => Some((row.group, id, row.enabled)),
+                _ => None,
+            })
+            .collect();
+        let _ = app.close_palette();
+        rows
+    }
+
+    fn board_ids() -> impl Iterator<Item = CommandId> {
+        wren_canvas::Command::all().map(CommandId::Board)
+    }
+
+    #[test]
+    fn the_palette_lists_the_board_group_only_on_a_board_and_no_markdown_there() {
+        let (_directory, mut app) = fixture();
+        let is_board = |id: CommandId| id.board_command().is_some();
+
+        open_board(&mut app, "Flow");
+        let rows = command_rows(&mut app);
+        assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
+        let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
+        assert_eq!(listed.len(), 64);
+        assert!(listed.iter().all(|(_, _, enabled)| *enabled));
+        let groups: Vec<_> = rows.iter().map(|(group, ..)| *group).collect();
+        let board = groups.iter().position(|group| *group == "Board").unwrap();
+        assert!(groups[..board].iter().all(|group| *group == "This note"));
+        assert!(rows.iter().any(|(group, id, _)| *group == "View"
+            && *id == CommandId::Board(wren_canvas::Command::ZoomFit)));
+
+        // A text note and a board shown as text list none of them, and the
+        // Markdown group again.
+        for title in ["Note", "Broken"] {
+            if title == "Note" {
+                open_markdown(&mut app, title);
+            } else {
+                open_board(&mut app, title);
+            }
+            let rows = command_rows(&mut app);
+            assert!(rows.iter().all(|(_, id, _)| !is_board(*id)), "{title}");
+            assert!(
+                rows.iter().any(|(group, ..)| *group == "Markdown"),
+                "{title}"
+            );
+        }
+
+        // With the setting off no board row is listed anywhere.
+        app.preferences.boards = false;
+        open_markdown(&mut app, "Note");
+        assert!(command_rows(&mut app).iter().all(|(_, id, _)| !id.boards()));
+    }
+
+    #[test]
+    fn board_commands_need_a_board_and_a_writable_one_to_change_it() {
+        let (directory, mut app) = fixture();
+        open_markdown(&mut app, "Note");
+        for id in board_ids() {
+            assert!(!app.command_enabled(id), "{id:?}");
+        }
+        let outcome = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::SelectAll,
+        )));
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        open_board(&mut app, "Broken");
+        assert!(board_ids().all(|id| !app.command_enabled(id)));
+        open_board(&mut app, "Flow");
+        assert!(board_ids().all(|id| app.command_enabled(id)));
+
+        // A read-only board takes looking, selecting, copying and zooming.
+        std::fs::write(
+            file(&directory, "Locked.wren-board"),
+            FLOW.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1),
+        )
+        .unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        open_board(&mut app, "Locked");
+        assert!(matches!(
+            app.board.as_ref().unwrap().access(),
+            Access::ReadOnly(_)
+        ));
+        let enabled: Vec<_> = board_ids()
+            .filter(|id| app.command_enabled(*id))
+            .map(CommandId::key)
+            .collect();
+        assert_eq!(
+            enabled,
+            [
+                "board.tool.select",
+                "board.tool.hand",
+                "board.select.left",
+                "board.select.right",
+                "board.select.up",
+                "board.select.down",
+                "board.select.extend_left",
+                "board.select.extend_right",
+                "board.select.extend_up",
+                "board.select.extend_down",
+                "board.select.connector_left",
+                "board.select.connector_right",
+                "board.select.connector_up",
+                "board.select.connector_down",
+                "board.select.all",
+                "board.select.connected",
+                "board.select.none",
+                "board.copy",
+                "board.zoom.fit",
+                "board.zoom.selection",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_board_command_from_the_palette_closes_it_and_gives_the_board_the_keyboard() {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        let text = session_text(&app);
+        app.column = Column::Notes;
+        let _ = app.open_palette(super::super::palette::Mode::Commands);
+        let outcome = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::ZoomFit,
+        )));
+        assert_eq!(outcome.processed.disposition, Disposition::Completed);
+        assert!(app.palette.is_none());
+        assert_eq!(app.column, Column::Editor);
+        assert!(outcome.task.units() > 0, "the board is focused");
+        assert_eq!(session_text(&app), text);
+        assert_in_step(&app, Surface::Board);
+    }
+
+    #[test]
+    fn the_app_leaves_board_command_keys_to_the_board() {
+        use crate::keys::Input;
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        let text = session_text(&app);
+        let serial = app.action_serial;
+        let keymap = app.preferences.keymap.clone();
+        let mut pressed = 0;
+        for id in board_ids() {
+            let Some(accel) = keymap.accel(id.key()) else {
+                continue;
+            };
+            pressed += 1;
+            let _ = app.update(Message::Key(Input::Accel(accel.clone())));
+            assert_eq!(app.action_serial, serial, "{} ran an action", id.key());
+        }
+        assert_eq!(pressed, 54);
+        assert!(app.palette.is_none() && app.dialog.is_none() && !app.focus);
+        assert_eq!(session_text(&app), text);
+        assert_in_step(&app, Surface::Board);
+        // An app command's key still runs, once.
+        let _ = app.update(crate::app::preferences::shortcut(CommandId::Jump));
+        assert_eq!(app.action_serial, serial.wrapping_add(1));
+    }
+
     /// The export command's row in the Commands palette, if it is listed.
     fn export_row(app: &mut App) -> Option<bool> {
         let _ = app.open_palette(super::super::palette::Mode::Commands);
@@ -1486,11 +1657,12 @@ z = "c"
         open_board(&mut app, "Flow");
         assert!(enabled(&app));
         assert_eq!(export_row(&mut app), Some(true));
-        // No other command is held back by the setting.
-        for definition in super::super::commands::DEFINITIONS {
+        // Only the board's own commands are held back by the setting.
+        for definition in super::super::commands::definitions() {
             assert_eq!(
                 definition.id.boards(),
-                definition.id == CommandId::ExportSvg,
+                definition.id == CommandId::ExportSvg
+                    || definition.scope == super::super::commands::Scope::Board,
                 "{}",
                 definition.key
             );
