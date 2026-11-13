@@ -23,6 +23,8 @@ use crate::{
 mod copy;
 mod delete;
 mod node;
+#[cfg(test)]
+mod property;
 
 pub(crate) use copy::{copies, fragment, Fragment, Layout};
 
