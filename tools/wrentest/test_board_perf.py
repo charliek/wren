@@ -43,6 +43,18 @@ VIEW = 1 if RELEASE else 5
 # One label keystroke's draft at 1,000 nodes, the canonical write and the
 # Session's op with its index parse (§3.4 rule 7): release only.
 KEYSTROKE = 8
+# One drag preview step's and one label keystroke's scene build at 1,000
+# shapes, from the view's scene cache, release only: the frame ceiling
+# wherever every quiet median is well under it, else the owner's rule, about
+# a quarter over the worst quiet median (§6.7, §8.5 boards-p2-preview). A
+# drag step on the boards whose every connector spends its routing budget
+# routes most of them again, which drawing exactly what a whole build draws
+# requires; the grid's keystroke on wgpu measured up to 15.6 ms in one run
+# of eight, lavapipe sharing the processor with the build.
+WGPU = RENDERER == "wgpu"
+DRAG = {"grid": EDIT, ROUTED[0]: 92 if WGPU else 68, ROUTED[1]: 47 if WGPU else 36,
+        ROUTED[2]: 38 if WGPU else 22}
+TYPED = {"grid": 20 if WGPU else 12, ROUTED[0]: EDIT, ROUTED[1]: EDIT, ROUTED[2]: EDIT}
 
 # Whole-scene changes left out before the timed ones, and those timed.
 WARM = 3
@@ -207,14 +219,18 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
             if RELEASE:
                 assert median_ms(keys["draft_micros"]) <= KEYSTROKE, measured["keystroke"]
 
-            # On the boards whose every connector spends its whole routing
-            # budget, a drag's preview, rebuilt once a pointer move, and a
-            # label keystroke each build the whole scene (§7.3 attack 11).
-            # Recorded, not asserted: the frame ceilings above are the
-            # grid's, and these miss them (§8.5, boards-p2-wire).
+            # A drag's preview, rebuilt once a pointer move (§3.4 rule 4),
+            # and a label keystroke each build the scene from the view's
+            # cache (§8.5, boards-p2-preview): on the grid, and on the
+            # boards whose every connector spends its whole routing budget
+            # (§7.3 attack 11). The keystroke routes nothing again; a drag
+            # step there routes most connectors again (§6.7).
             measured["routed"] = {}
-            for index, kind in enumerate(ROUTED):
-                open_row(app, notes[f"{GROUP}/Routed {index}.wren-board"])
+            boards = [("grid", f"{GROUP}/Grid.wren-board")]
+            boards += [(kind, f"{GROUP}/Routed {index}.wren-board") for index, kind in enumerate(ROUTED)]
+            for kind, path in boards:
+                open_row(app, notes[f"{GROUP}/Note.md"])
+                open_row(app, notes[path])
                 opened(app)
                 rings(app, clear=True)
                 # Far enough at the fitted zoom that each move is past the
@@ -236,5 +252,12 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
                 # Four preview steps and the release's own build.
                 assert len(dragged["scene_micros"]) == 5, measured["routed"][kind]
                 assert len(typed["draft_micros"]) == 4, measured["routed"][kind]
+            if RELEASE:
+                for kind, row in measured["routed"].items():
+                    # The release makes the board the last step showed, so
+                    # it routes nothing again and is left out.
+                    steps = row["drag_scene_micros"][:4]
+                    assert median_ms(steps) <= DRAG[kind], (kind, row)
+                    assert median_ms(row["keystroke_scene_micros"]) <= TYPED[kind], (kind, row)
     finally:
         (artifacts / "measurements.json").write_text(json.dumps(measured, indent=2), encoding="utf-8")
