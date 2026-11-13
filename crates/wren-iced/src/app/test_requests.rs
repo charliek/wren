@@ -138,6 +138,13 @@ impl App {
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }
+            "dialog.tab" => {
+                // A Tab no widget took, as the keyboard subscription sends it.
+                let reverse = params.get("reverse").and_then(Value::as_bool).unwrap_or(false);
+                let task = self.update(Message::DialogTab(reverse));
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
             "dialog.name" => { let task = self.update(Message::DialogName(string(params, "name")?.into())); request.respond(Ok(self.navigation_snapshot())); return Ok(task); }
             "dialog.submit" | "dialog.confirm_trash" | "dialog.close" => {
                 let task = self.update(match request.op.as_str() { "dialog.submit" => Message::SubmitDialog, "dialog.confirm_trash" => Message::ConfirmTrash, _ => Message::CancelDialog });

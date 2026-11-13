@@ -9,7 +9,9 @@ large boards come from :func:`grid_board`. It imports no pytest, so
 
 from __future__ import annotations
 
+import difflib
 import math
+import re
 import shutil
 from pathlib import Path
 
@@ -176,3 +178,142 @@ def midpoint(points: list[list[float]]) -> tuple[float, float]:
             return ax + t * (bx - ax), ay + t * (by - ay)
         remaining -= length
     return tuple(points[-1])  # type: ignore[return-value]
+
+
+def key(app: WrenApp, name: str, *mods: str, repeat: bool = False) -> dict:
+    """A key pressed on the focused board (§6.2 ``board.key``): ``mod`` is
+    ⌘ on macOS and Ctrl elsewhere."""
+    return app.client.call("board.key", {"key": name, "mods": list(mods), "repeat": repeat})
+
+
+def type_text(app: WrenApp, text: str) -> dict:
+    """Text typed on the focused board: the open label's, or the connect
+    query's."""
+    return app.client.call("board.type", {"text": text})
+
+
+def pointer(app: WrenApp, kind: str, at: dict | None = None, *, button: str = "left",
+            mods: tuple[str, ...] = ()) -> dict:
+    params: dict = {"kind": kind, "button": button, "mods": list(mods)}
+    if at is not None:
+        params["at"] = at
+    return app.client.call("board.pointer", params)
+
+
+def press(app: WrenApp, at: dict, *, button: str = "left", mods: tuple[str, ...] = ()) -> dict:
+    return pointer(app, "press", at, button=button, mods=mods)
+
+
+def click(app: WrenApp, at: dict, *, mods: tuple[str, ...] = (), double: bool = False) -> dict:
+    return pointer(app, "double_click" if double else "click", at, mods=mods)
+
+
+def canvas_point(app: WrenApp, at: dict) -> tuple[float, float]:
+    """Where ``at`` is in board units, as ``board.pointer`` reads it: a
+    node's middle, one of the handles the board shows, a board point or a
+    window point."""
+    placed = bounds(app)
+    view, root = placed["viewport"], placed["root"]
+
+    def from_screen(x: float, y: float) -> tuple[float, float]:
+        return view["x"] + (x - root["x"]) / view["zoom"], view["y"] + (y - root["y"]) / view["zoom"]
+
+    if "canvas" in at:
+        return tuple(at["canvas"])  # type: ignore[return-value]
+    if "screen" in at:
+        return from_screen(*at["screen"])
+    if "handle" in at:
+        rect = next(h["bounds"] for h in placed["handles"]
+                    if h["id"] == at["node"] and h["handle"] == at["handle"])
+    else:
+        rect = next(n["bounds"] for n in placed["nodes"] if n["id"] == at["node"])
+    return from_screen(rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2)
+
+
+def drag(app: WrenApp, start: dict, by: tuple[float, float], *, button: str = "left",
+         mods: tuple[str, ...] = (), steps: int = 4) -> dict:
+    """Press at ``start``, move ``by`` board units in ``steps`` moves and
+    release: one gesture, as a hand makes it."""
+    x, y = canvas_point(app, start)
+    press(app, start, button=button, mods=mods)
+    for step in range(1, steps + 1):
+        pointer(app, "move", {"canvas": [x + by[0] * step / steps, y + by[1] * step / steps]},
+                button=button, mods=mods)
+    return pointer(app, "release", button=button, mods=mods)
+
+
+# The keys of the acceptance script's notation (§5.20), and the modifiers.
+SCRIPT_KEYS = {"Tab": "tab", "Esc": "escape", "↵": "enter", "←": "left", "→": "right",
+               "↑": "up", "↓": "down", "⌫": "backspace"}
+SCRIPT_MODS = {"⌘": "mod", "⇧": "shift", "⌥": "alt"}
+NUMBERS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+           "nine": 9, "ten": 10}
+
+
+def script_steps(text: str) -> list[tuple[str, ...]]:
+    """The steps of a script written as §5.20 writes one: key presses in
+    backticks, separated by spaces (``⇧⌘←``, ``Esc``, ``D``: a capital is
+    its key, unshifted), and the text between them typed. ``N times`` after
+    a group of keys presses it N times in all. Each step is ``("key", name,
+    *mods)`` or ``("type", text)``."""
+    steps: list[tuple[str, ...]] = []
+    last: list[tuple[str, ...]] = []
+    for index, part in enumerate(text.replace("\n", " ").split("`")):
+        if index % 2:
+            last = []
+            for token in part.split():
+                mods: list[str] = []
+                while token and token[0] in SCRIPT_MODS and len(token) > 1:
+                    mods.append(SCRIPT_MODS[token[0]])
+                    token = token[1:]
+                name = SCRIPT_KEYS.get(token, token.lower() if len(token) == 1 else None)
+                if name is None:
+                    raise ValueError(f"no key {token!r} in the script")
+                last.append(("key", name, *mods))
+            steps.extend(last)
+            continue
+        words = part.strip().strip(",").strip()
+        repeat = re.fullmatch(r"(\w+) times", words)
+        if repeat:
+            count = NUMBERS.get(repeat.group(1)) or int(repeat.group(1))
+            steps.extend(last * (count - 1))
+        elif words:
+            steps.append(("type", words))
+    return steps
+
+
+def script(app: WrenApp, text: str) -> dict:
+    """Replay a script written as in §5.20 through ``board.key`` and
+    ``board.type``; every key must reach the board. Returns the last
+    snapshot."""
+    state: dict = {}
+    for step in script_steps(text):
+        if step[0] == "key":
+            state = key(app, step[1], *step[2:])
+            assert state["handled"], (step, state)
+        else:
+            state = type_text(app, step[1])
+    return state
+
+
+def line_diff(before: bytes | str, after: bytes | str) -> list[str]:
+    """The lines a save removed (``-``) and added (``+``), in order: what
+    the product promises stays small for a small edit."""
+    def lines(text: bytes | str) -> list[str]:
+        return (text.decode("utf-8") if isinstance(text, bytes) else text).splitlines()
+
+    return [line for line in difflib.ndiff(lines(before), lines(after))
+            if line.startswith(("- ", "+ "))]
+
+
+def blocks(text: bytes | str) -> list[str]:
+    """The ``[node.…]`` and ``[edge.…]`` headers of a board file, in order."""
+    text = text.decode("utf-8") if isinstance(text, bytes) else text
+    return re.findall(r"^\[(?:node|edge)\.[^\]]+\]$", text, flags=re.MULTILINE)
+
+
+def flushed(app: WrenApp) -> None:
+    """Whatever the open note's draft holds is on disk."""
+    app.client.call("core.apply", {"op": "flush"})
+    wait_for(lambda: not app.client.call("session.get")["pending_durability"],
+             timeout=10, interval=0.02, description="the flush")

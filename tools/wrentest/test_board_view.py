@@ -486,13 +486,16 @@ def test_the_wheel_pans_and_mod_wheel_zooms_about_the_pointer(samples: Path) -> 
     assert stamp(flow) == before_bytes
 
 
-def test_board_requests_refuse_what_phase_1_does_not_have(samples: Path) -> None:
+def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> None:
     with board_app(samples, "board-requests") as app:
         open_note(app, NOTES)
         assert board(app)["surface"] == "text"
         for op, params in [
             ("board.bounds", {}),
             ("board.pointer", {"kind": "wheel", "at": {"canvas": [0, 0]}, "delta": {"y": 1}}),
+            ("board.key", {"key": "r"}),
+            ("board.type", {"text": "x"}),
+            ("board.apply", {"edits": []}),
         ]:
             with pytest.raises(RemoteError, match="board"):
                 app.client.call(op, params)
@@ -500,7 +503,7 @@ def test_board_requests_refuse_what_phase_1_does_not_have(samples: Path) -> None
         fitted(app)
         for params in [
             {"kind": "click", "button": "left", "at": {"node": "n1"}},
-            {"kind": "press", "button": "left", "at": {"canvas": [0, 0]}},
+            {"kind": "press", "button": "fourth", "at": {"canvas": [0, 0]}},
             {"kind": "wheel", "at": {"edge": "e1"}, "delta": {"y": 1}},
         ]:
             with pytest.raises(RemoteError):
