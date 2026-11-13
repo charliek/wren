@@ -421,12 +421,23 @@ impl Keymap {
                 warnings.push(format!("keybind: invalid trigger {trigger:?}"));
                 continue;
             };
+            let needs_modifier = || {
+                format!(
+                    "keybind: {trigger:?} needs ctrl, alt, or super (only f1–f24 may be bound alone)"
+                )
+            };
             let action = action.trim();
             let (layer, unbind) = match action {
                 UNBIND => (Layer::Base, true),
                 BOARD_UNBIND => (Layer::Board, true),
                 _ => match layer_of(action) {
                     Some(layer) => (layer, false),
+                    // Outside the board layer the trigger is checked first,
+                    // so a line that was already wrong keeps its warning.
+                    None if !accel.is_bindable() => {
+                        warnings.push(needs_modifier());
+                        continue;
+                    }
                     None => {
                         warnings.push(format!("keybind: unknown action {action:?}"));
                         continue;
@@ -434,9 +445,7 @@ impl Keymap {
                 },
             };
             if layer == Layer::Base && !accel.is_bindable() {
-                warnings.push(format!(
-                    "keybind: {trigger:?} needs ctrl, alt, or super (only f1–f24 may be bound alone)"
-                ));
+                warnings.push(needs_modifier());
                 continue;
             }
             let table = keymap.layer_mut(layer);
@@ -925,6 +934,24 @@ mod tests {
         assert_eq!(keymap.action(&accel("alt+n")), Some("note.new"));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("unknown action"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_bare_key_with_an_unknown_action_still_needs_a_modifier() {
+        // 0.1.1 checked the trigger before the action; keep its warning.
+        let user = [
+            ("x".to_string(), "no.such".to_string()),
+            ("alt+x".to_string(), "no.such".to_string()),
+        ];
+        let known = |action: &str| by_name(action).filter(|_| action != "no.such");
+        let (_, warnings) = Keymap::build(both_defaults(Platform::Linux), &user, known);
+        assert_eq!(
+            warnings,
+            [
+                "keybind: \"x\" needs ctrl, alt, or super (only f1–f24 may be bound alone)",
+                "keybind: unknown action \"no.such\"",
+            ]
+        );
     }
 
     #[test]
