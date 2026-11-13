@@ -294,6 +294,14 @@ fn revision() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// An epoch no view has had. Epochs are not per view: input meant for one
+/// board never passes for another's, when the host opens the next board
+/// while a message for the last is still on its way.
+fn epoch() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// One open board: its model, what is wrong with it, the scene that draws
 /// it and where the widget looks at it.
 pub struct BoardView {
@@ -319,8 +327,8 @@ pub struct BoardView {
     viewport: Viewport,
     revision: u64,
     machine: Machine,
-    /// Bumped whenever the board changes underneath its input, so input
-    /// meant for the board before is dropped.
+    /// Replaced whenever the board changes underneath its input, so input
+    /// meant for the board before is dropped; see [`epoch`].
     epoch: u64,
     /// The widget's size, once it has said.
     size: Option<(f32, f32)>,
@@ -391,7 +399,7 @@ impl BoardView {
             viewport: Viewport::default(),
             revision: 0,
             machine: Machine::default(),
-            epoch: 0,
+            epoch: epoch(),
             size: None,
             fit_pending: false,
             jumps: 0,
@@ -429,7 +437,7 @@ impl BoardView {
         self.label = None;
         self.machine.reset();
         self.machine.retain(&self.board);
-        self.epoch += 1;
+        self.epoch = epoch();
         self.build();
         Ok(())
     }
@@ -675,7 +683,8 @@ impl BoardView {
         self.key_policy.as_ref()
     }
 
-    /// Which board the view's input is for; see [`Message::Input`].
+    /// Which board the view's input is for; see [`Message::Input`]. No two
+    /// views share one, and a reload gives the view another.
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

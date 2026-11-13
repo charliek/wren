@@ -854,7 +854,10 @@ impl App {
                     .board
                     .as_mut()
                     .is_some_and(|view| match view.reload(text) {
-                        Ok(()) => true,
+                        Ok(()) => {
+                            self.board_revision += 1;
+                            true
+                        }
                         Err(reason) => {
                             error = Some(reason);
                             false
@@ -875,8 +878,12 @@ impl App {
                         .unwrap_or_else(std::time::Instant::now);
                     let palette = crate::theme::board_palette(self.definition);
                     match board::open(text, note, palette, &self.board_viewports) {
-                        Ok(view) => {
+                        Ok(mut view) => {
+                            view.set_key_policy(super::preferences::board_policy(
+                                &self.preferences.keymap,
+                            ));
                             self.board = Some(view);
+                            self.board_revision = 0;
                             #[cfg(feature = "smoke-test")]
                             self.board_perf.opened(started);
                         }

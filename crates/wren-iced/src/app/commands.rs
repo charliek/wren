@@ -1107,8 +1107,13 @@ impl App {
                 // board as it stands, then give it the keyboard (§5.1 rule 5).
                 self.palette = None;
                 let focus = self.return_to_editor();
-                self.board_command(command);
-                self.finish_action(Disposition::Completed, None, focus)
+                let did = self.board_command(command);
+                let task = Task::batch([did.task, focus]);
+                // A notice says why the command did nothing.
+                match did.failed.or(did.notice) {
+                    Some(warning) => self.finish_action(Disposition::Blocked, Some(warning), task),
+                    None => self.finish_action(Disposition::Completed, None, task),
+                }
             }
             Quit => {
                 self.palette = None;

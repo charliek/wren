@@ -139,7 +139,7 @@ impl App {
             },
             "tool": "select",
             "viewport": {"x": viewport.x, "y": viewport.y, "zoom": viewport.zoom},
-            "revision": view.epoch(),
+            "revision": self.board_revision,
             "counts": {"nodes": board.nodes.len(), "edges": board.edges.len()},
         });
         merge(&mut snapshot, fields);
@@ -345,12 +345,12 @@ impl App {
             _ => return Err("kind must be wheel, press, move or release".into()),
         };
         let epoch = view.epoch();
-        self.board_input(wren_canvas::Message::Input(epoch, input));
+        let task = self.board_edit(wren_canvas::Message::Input(epoch, input));
         // A press on the widget gives it the keyboard, as a real one does.
         Ok(if matches!(input, Input::Press { .. }) {
-            focus_editor()
+            Task::batch([task, focus_editor()])
         } else {
-            Task::none()
+            task
         })
     }
 }
@@ -525,7 +525,7 @@ mod tests {
     }
 
     fn lay_out(app: &mut App) {
-        app.board_input(wren_canvas::Message::Resized {
+        let _ = app.board_edit(wren_canvas::Message::Resized {
             width: 800.0,
             height: 600.0,
         });

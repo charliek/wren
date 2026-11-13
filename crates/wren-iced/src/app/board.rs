@@ -12,9 +12,10 @@ use std::time::Instant;
 
 use iced::Task;
 use wren_board::{svg, Access, Palette, ParseError};
-use wren_canvas::{BoardView, Input, Viewport};
+use wren_canvas::{BoardView, Effect, Input, Viewport};
 use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
+use wren_core::ops::Op;
 
 use super::columns::Column;
 use super::commands::{Disposition, Gateway};
@@ -93,31 +94,123 @@ impl App {
         }
     }
 
-    /// A message from the widget showing the open board. Input other than
-    /// the wheel means the board has the keyboard, as an edit means the
-    /// editor has it; the wheel reaches a board that does not, and a cancel
-    /// or a focus change only says the window or the widget gained or lost
-    /// it.
-    pub(super) fn board_input(&mut self, message: wren_canvas::Message) {
-        let overlay = self.dialog.is_some() || self.palette.is_some();
+    /// A message from the widget showing the open board: the twin of
+    /// [`App::edit`], and with `dispatch` the only way to the board's draft
+    /// (§3.4 rule 1). A key the board layer binds goes on to `dispatch`, as
+    /// a palette row or a menu item does.
+    ///
+    /// Input other than the wheel means the board has the keyboard, as an
+    /// edit means the editor has it; the wheel reaches a board that does
+    /// not, and a cancel or a focus change only says the window or the
+    /// widget gained or lost it. Under a dialog or a palette, and while a
+    /// workspace loads, the board takes only what looks at it or ends
+    /// what was in flight. Input meant for the board as it was before a
+    /// reload, or for another board, is dropped.
+    pub(super) fn board_edit(&mut self, message: wren_canvas::Message) -> Task<Message> {
+        use wren_canvas::Message as Sent;
+        let held = self.dialog.is_some() || self.palette.is_some() || self.loading.is_some();
         let Some(view) = &mut self.board else {
-            return;
+            return Task::none();
         };
-        if let wren_canvas::Message::Input(_, input) = &message {
-            let passive = matches!(input, Input::Wheel { .. } | Input::Cancel | Input::Focus(_));
-            if !overlay && !passive {
+        match &message {
+            Sent::Resized { .. } => {}
+            Sent::Command(command) => {
+                if held {
+                    return Task::none();
+                }
+                let id = super::commands::CommandId::Board(*command);
+                return self.dispatch(super::commands::Command::Run(id)).task;
+            }
+            Sent::Input(epoch, _) | Sent::Label(epoch, _) | Sent::Pasted(epoch, _)
+                if *epoch != view.epoch() =>
+            {
+                return Task::none();
+            }
+            Sent::Input(_, input) => {
+                let passive =
+                    matches!(input, Input::Wheel { .. } | Input::Cancel | Input::Focus(_));
+                let ends = matches!(
+                    input,
+                    Input::Release { .. } | Input::Modifiers(_) | Input::Space { held: false }
+                );
+                if held && !(passive || ends) {
+                    return Task::none();
+                }
+                if !held && !passive {
+                    self.column = Column::Editor;
+                }
+            }
+            Sent::Label(..) | Sent::Pasted(..) => {
+                if held || !view.writable() {
+                    return Task::none();
+                }
                 self.column = Column::Editor;
             }
         }
-        view.update(message, Instant::now());
+        let update = view.update(message, Instant::now());
+        self.board_did(update).task
     }
 
-    /// Run a board command on the open board, as its key would.
-    pub(super) fn board_command(&mut self, command: wren_canvas::Command) {
-        if let Some(view) = &mut self.board {
-            view.command(command, Instant::now());
-        }
+    /// Run a board command on the open board, as its key would. Only
+    /// `run_command` calls it, so every command comes through `dispatch`.
+    pub(super) fn board_command(&mut self, command: wren_canvas::Command) -> BoardDid {
+        let Some(view) = &mut self.board else {
+            return BoardDid::default();
+        };
+        let update = view.command(command, Instant::now());
+        self.board_did(update)
     }
+
+    /// Carry out what the board's view answered: its draft when the board
+    /// changed, then what it asks of the app.
+    fn board_did(&mut self, update: wren_canvas::Update) -> BoardDid {
+        let mut did = BoardDid::default();
+        if update.changed {
+            did.failed = self.board_changed().err();
+        }
+        for effect in update.effects {
+            match effect {
+                Effect::Notice(notice) => {
+                    self.banner = Some(notice.clone());
+                    self.banner_kind = WarningKind::General;
+                    did.notice = Some(notice);
+                }
+                // The view moved itself; the clipboard and the two
+                // palettes are not wired yet.
+                Effect::Look(_)
+                | Effect::ClipboardWrite(_)
+                | Effect::ClipboardRead
+                | Effect::OpenActions
+                | Effect::OpenJump => {}
+            }
+        }
+        did
+    }
+
+    /// The board changed: its draft goes to the Session, which autosave
+    /// saves. This is the only place a board sends `Op::EditDraft` (§3.4
+    /// rule 1). The view picks the text by the pristine rule and takes it
+    /// as synced before the op runs, so the `sync_editor` that follows
+    /// sees its own draft and reloads nothing.
+    fn board_changed(&mut self) -> Result<(), String> {
+        let (Some(view), Some(note)) = (&mut self.board, self.editor_note) else {
+            return Ok(());
+        };
+        let contents = view.draft();
+        self.board_revision += 1;
+        self.apply_core(Op::EditDraft { note, contents }).map(drop)
+    }
+}
+
+/// What the app did with a board view's answer.
+#[derive(Default)]
+pub(super) struct BoardDid {
+    /// What is left to run.
+    pub task: Task<Message>,
+    /// Why the board did not do what was asked, which is the banner now.
+    pub notice: Option<String>,
+    /// Why the board's draft did not reach the Session.
+    pub failed: Option<String>,
 }
 
 /// An SVG export of the open board, made when it was asked for and kept
@@ -452,26 +545,26 @@ z = "c"
         note
     }
 
-    fn open_markdown(app: &mut App, title: &str) -> NoteId {
+    pub fn open_markdown(app: &mut App, title: &str) -> NoteId {
         let note = note_id(app, title, NoteKind::Markdown);
         let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
         note
     }
 
-    fn session_text(app: &App) -> String {
+    pub fn session_text(app: &App) -> String {
         app.session
             .as_ref()
             .and_then(Session::document)
             .map_or_else(String::new, |document| document.text.clone())
     }
 
-    fn file(directory: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+    pub fn file(directory: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
         directory.path().join(GROUP).join(name)
     }
 
     /// The surface shows the Session's open document and nothing else.
     #[track_caller]
-    fn assert_in_step(app: &App, expected: Surface) {
+    pub fn assert_in_step(app: &App, expected: Surface) {
         assert_eq!(app.surface(), expected);
         let document = app.session.as_ref().unwrap().document();
         assert_eq!(app.editor_note, document.map(|document| document.note));
@@ -506,7 +599,7 @@ z = "c"
         );
     }
 
-    fn parses(app: &App) -> u64 {
+    pub fn parses(app: &App) -> u64 {
         app.board.as_ref().unwrap().probe.parses.get()
     }
 
@@ -938,13 +1031,13 @@ z = "c"
     use super::super::commands::{Command, CommandId, Disposition};
     use super::super::palette::SearchTarget;
 
-    fn modified(path: &Path) -> SystemTime {
+    pub fn modified(path: &Path) -> SystemTime {
         std::fs::metadata(path).unwrap().modified().unwrap()
     }
 
     /// Forty ticks that take the Session's clock to `seconds`, past the
     /// autosave delay, so a dirty draft would be on disk afterwards.
-    fn tick_to(app: &mut App, seconds: u64) {
+    pub fn tick_to(app: &mut App, seconds: u64) {
         for tick in 1..=40 {
             let _ = app.update(Message::Tick);
             let at = Duration::from_millis(seconds * 1000 * tick / 40);

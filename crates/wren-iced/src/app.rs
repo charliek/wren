@@ -53,6 +53,8 @@ pub struct App {
     /// Why the open board is shown as raw text in the editor instead.
     board_error: Option<wren_board::ParseError>,
     board_viewports: board::Viewports,
+    /// How many drafts the open board has sent, plus its reloads.
+    board_revision: u64,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
     find_open: bool,
@@ -309,6 +311,7 @@ impl App {
             board: None,
             board_error: None,
             board_viewports: board::Viewports::new(),
+            board_revision: 0,
             board_spike: None,
             find_open: false,
             find_query: String::new(),
@@ -463,7 +466,7 @@ impl App {
                 self.retheme_board_spike();
             }
             Message::Editor(message) => return self.edit(message),
-            Message::Board(message) => self.board_input(message),
+            Message::Board(message) => return self.board_edit(message),
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
@@ -930,6 +933,9 @@ impl App {
 fn focus_editor() -> Task<Message> {
     iced::widget::operation::focus("note-editor")
 }
+
+#[cfg(test)]
+mod board_edit_tests;
 
 #[cfg(test)]
 mod navigation_tests;
