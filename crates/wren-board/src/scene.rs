@@ -5,7 +5,7 @@
 //! growing right and y growing down. Labels arrive wrapped into lines, each
 //! placed and measured, so a painter never lays text out itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -222,7 +222,8 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
     let mut roots: Vec<Element<'_>> = board
         .edges
         .iter()
-        .map(|(id, edge)| Element::Edge(id, edge))
+        .enumerate()
+        .map(|(k, (id, edge))| Element::Edge(id, edge, k))
         .collect();
     for (id, node) in &board.nodes {
         match placed.get(id).and_then(|p| p.parent) {
@@ -234,7 +235,8 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         }
     }
 
-    let routes = routes(board, &boxes);
+    let places = places(board, &boxes);
+    let routes = routes(board, &boxes, &places);
     let mut painter = Painter {
         palette,
         measure,
@@ -258,8 +260,8 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
                     scopes.push(inner.into_iter());
                 }
             }
-            Element::Edge(id, edge) => {
-                painter.edge(id, edge, &boxes, board, routes.get(id));
+            Element::Edge(id, edge, k) => {
+                painter.edge(id, edge, &places, routes.get(k).and_then(Option::as_ref));
             }
         }
     }
@@ -289,66 +291,103 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
     Scene { bounds, items }
 }
 
+/// A drawn node as a connector end finds it: its index among the boxes
+/// given to the router, the node, and its box.
+#[derive(Clone, Copy)]
+struct Place<'a> {
+    index: usize,
+    node: &'a Node,
+    bounds: Rect,
+}
+
+/// The drawn nodes by id, for connector ends: one hash lookup each, where
+/// walking the ordered maps by string three times over cost as much as
+/// routing a 1,000-shape grid.
+fn places<'a>(board: &'a Board, boxes: &BTreeMap<&'a Id, Rect>) -> HashMap<&'a str, Place<'a>> {
+    // `boxes` holds some of the nodes, in the same order.
+    let mut nodes = board.nodes.iter();
+    let mut out = HashMap::with_capacity(boxes.len());
+    for (index, (&id, &bounds)) in boxes.iter().enumerate() {
+        if let Some((_, node)) = nodes.find(|&(stored, _)| stored == id) {
+            out.insert(
+                id.as_str(),
+                Place {
+                    index,
+                    node,
+                    bounds,
+                },
+            );
+        }
+    }
+    out
+}
+
 /// Where a connector end is drawn: a free point, or the box, shape and
-/// attachment of the node it names, with that node's id. `None` when it
-/// names no node.
-fn terminal<'a>(
-    end: &End,
-    board: &'a Board,
-    boxes: &BTreeMap<&Id, Rect>,
-) -> Option<(Terminal, Option<&'a Id>)> {
+/// attachment of the node it names, with that node's index among the
+/// boxes. `None` when it names no drawn node.
+fn terminal(end: &End, places: &HashMap<&str, Place<'_>>) -> Option<(Terminal, Option<usize>)> {
     match end {
         End::Free { at, .. } => Some((Terminal::Point(clamp_point(*at)), None)),
         End::Node {
             node, side, anchor, ..
         } => {
-            let (stored, target) = board.nodes.get_key_value(node.as_str())?;
-            let shape = match target.kind.as_ref().and_then(Named::known) {
-                Some(NodeKind::Shape) => shape::drawn(&target.shape),
+            let place = places.get(node.as_str())?;
+            let shape = match place.node.kind.as_ref().and_then(Named::known) {
+                Some(NodeKind::Shape) => shape::drawn(&place.node.shape),
                 _ => Shape::Rect,
             };
             let terminal = Terminal::Node {
-                bounds: *boxes.get(stored)?,
+                bounds: place.bounds,
                 shape,
                 attach: Attach::of(side.as_ref(), *anchor),
             };
-            Some((terminal, Some(stored)))
+            Some((terminal, Some(place.index)))
         }
     }
 }
 
 /// The route of every connector whose two ends are drawn, routed among
-/// all the node boxes in id order (§3.7).
-fn routes<'a>(board: &'a Board, boxes: &BTreeMap<&'a Id, Rect>) -> BTreeMap<&'a Id, Routed> {
-    let index: BTreeMap<&Id, usize> = boxes.keys().enumerate().map(|(i, &id)| (id, i)).collect();
+/// all the node boxes in id order (§3.7), by the connector's position in
+/// `board.edges`.
+fn routes(
+    board: &Board,
+    boxes: &BTreeMap<&Id, Rect>,
+    places: &HashMap<&str, Place<'_>>,
+) -> Vec<Option<Routed>> {
     let rects: Vec<Rect> = boxes.values().copied().collect();
-    let mut ids = Vec::new();
+    let mut positions = Vec::new();
     let mut connectors = Vec::new();
-    for (id, edge) in &board.edges {
-        let (Some((from, a)), Some((to, b))) = (
-            terminal(&edge.from, board, boxes),
-            terminal(&edge.to, board, boxes),
-        ) else {
+    for (k, edge) in board.edges.values().enumerate() {
+        let (Some((from, a)), Some((to, b))) =
+            (terminal(&edge.from, places), terminal(&edge.to, places))
+        else {
             continue;
         };
-        let node = |id: Option<&Id>| id.and_then(|id| index.get(id).copied());
-        ids.push(id);
+        positions.push(k);
         connectors.push(Connector {
             kind: route::drawn(&edge.route),
             ends: [from, to],
-            nodes: [node(a), node(b)],
+            nodes: [a, b],
         });
     }
-    ids.into_iter()
+    let mut out = vec![None; board.edges.len()];
+    for (k, routed) in positions
+        .into_iter()
         .zip(route::route_all(&rects, &connectors))
-        .collect()
+    {
+        if let Some(slot) = out.get_mut(k) {
+            *slot = Some(routed);
+        }
+    }
+    out
 }
 
 /// One element in stacking order.
 #[derive(Clone, Copy)]
 enum Element<'a> {
     Node(&'a Id, &'a Node),
-    Edge(&'a Id, &'a Edge),
+    /// A connector, with its position in `board.edges`.
+    Edge(&'a Id, &'a Edge, usize),
 }
 
 impl<'a> Element<'a> {
@@ -357,7 +396,7 @@ impl<'a> Element<'a> {
     fn order(&self) -> (&'a [u8], &'a str, u8) {
         let (z, id, rank) = match *self {
             Self::Node(id, node) => (node.z.as_deref(), id, 0),
-            Self::Edge(id, edge) => (edge.z.as_deref(), id, 1),
+            Self::Edge(id, edge, _) => (edge.z.as_deref(), id, 1),
         };
         let z = z.unwrap_or("").as_bytes();
         (&z[..z.len().min(MAX_Z)], id.as_str(), rank)
@@ -615,45 +654,44 @@ impl Painter<'_> {
         }
     }
 
+    /// A connector: its route when both ends are drawn, else a stub from
+    /// the end that is.
     fn edge(
         &mut self,
         id: &Id,
         edge: &Edge,
-        boxes: &BTreeMap<&Id, Rect>,
-        board: &Board,
+        places: &HashMap<&str, Place<'_>>,
         routed: Option<&Routed>,
     ) {
         let source = Source::Edge(id.clone());
-        let terminal = |end: &End| terminal(end, board, boxes).map(|(t, _)| t);
+        let terminal = |end: &End| terminal(end, places).map(|(t, _)| t);
         let color = style::resolve(&edge.style.color, Fill::None, self.palette).stroke;
         let stroke = Stroke {
             color,
             width: STROKE_WIDTH,
             dash: dash(&edge.style.stroke),
         };
-        match (terminal(&edge.from), terminal(&edge.to)) {
-            (Some(_), Some(_)) => {
-                let Some(routed) = routed else {
-                    return;
-                };
-                let heads = edge.heads.each_ref().map(route::has_arrow);
-                let drawn = routed.draw(heads);
-                let line_box = grow(path_box(&drawn.line), STROKE_WIDTH / 2.0);
-                self.corners
-                    .insert(id.clone(), Point::new(line_box.x, line_box.y));
-                self.path(&source, drawn.line, None, Some(stroke), line_box);
-                let arrows: Vec<Segment> = drawn.heads.into_iter().flatten().collect();
-                if !arrows.is_empty() {
-                    let arrows_box = path_box(&arrows);
-                    self.path(&source, arrows, Some(color), None, arrows_box);
-                }
-                for label in edge.labels.iter().take(MAX_LABELS) {
-                    self.edge_label(&source, &label.text, routed.point_at(label.at), color);
-                }
+        let Some(routed) = routed else {
+            match (terminal(&edge.from), terminal(&edge.to)) {
+                (Some(valid), None) => self.stub(id, &valid, Side::Right),
+                (None, Some(valid)) => self.stub(id, &valid, Side::Left),
+                _ => {}
             }
-            (Some(valid), None) => self.stub(id, &valid, Side::Right),
-            (None, Some(valid)) => self.stub(id, &valid, Side::Left),
-            (None, None) => {}
+            return;
+        };
+        let heads = edge.heads.each_ref().map(route::has_arrow);
+        let drawn = routed.draw(heads);
+        let line_box = grow(path_box(&drawn.line), STROKE_WIDTH / 2.0);
+        self.corners
+            .insert(id.clone(), Point::new(line_box.x, line_box.y));
+        self.path(&source, drawn.line, None, Some(stroke), line_box);
+        let arrows: Vec<Segment> = drawn.heads.into_iter().flatten().collect();
+        if !arrows.is_empty() {
+            let arrows_box = path_box(&arrows);
+            self.path(&source, arrows, Some(color), None, arrows_box);
+        }
+        for label in edge.labels.iter().take(MAX_LABELS) {
+            self.edge_label(&source, &label.text, routed.point_at(label.at), color);
         }
     }
 
@@ -1175,7 +1213,13 @@ edge free path in 496.25,492.25 6x6 fill #d02020:";
             .iter()
             .map(|(id, node)| (id, node_box(placed[id].at, node.size)))
             .collect();
-        let routes = routes(&board, &boxes);
+        let places = places(&board, &boxes);
+        let routes: BTreeMap<&Id, Routed> = board
+            .edges
+            .keys()
+            .zip(routes(&board, &boxes, &places))
+            .filter_map(|(id, routed)| Some((id, routed?)))
+            .collect();
         assert_eq!(routes.len(), 17);
         let joined = |id: &Id| {
             let edge = &board.edges[id];
