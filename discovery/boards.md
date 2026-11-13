@@ -160,33 +160,57 @@ pub mod scene {
     pub enum Draw { Path { segments: Vec<Segment>, fill: Option<Rgba>, stroke: Option<Stroke> },
                     Text { lines: Vec<Line>, face: Face, size: f32, color: Rgba } }   // Line { text, origin, width }
     pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene;
+    pub fn wrap(text: &str, width: Option<f32>, face: Face, size: f32, measure: &dyn Measure) -> Vec<Wrapped>;  // [P2] build's own wrap
+    pub struct Wrapped { pub range: Range<usize>, pub width: f32 }   pub fn graphemes(text) -> impl Iterator;  pub fn words(line) -> impl Iterator;
 }
 pub mod svg { pub struct Options { pub background: Option<Rgba>, pub padding: f32 } pub fn write(scene: &Scene, options: &Options) -> String; }
 // Phase 2: edit::{Intent, Change, Plan}, edit::plan(&Board, &Intent, &mut dyn Ids) -> Plan, Board::apply(&[Change]),
 //          clip::copy, history::History, walk::next, place::slot, z::key_between
 
-// wren-canvas: the whole public surface at boards-p1 (clip, measure, paint and widget are private modules)
-pub use machine::{Button, Input, Machine, Scroll};  pub use measure::Measurer;
+// wren-canvas: the public surface at boards-p2-canvas (clip, command, keys, measure, overlay, paint and widget are private
+// modules; what command, keys and measure export is re-exported here)
+pub use command::{Command, Grow, Tool};  pub use keys::{KeyPolicy, KeyRoute};  pub use label::{Label, LabelAction, Motion, Preedit};
+pub use machine::{Button, Input, Key, Machine, Mods, Scroll};  pub use measure::Measurer;
 impl BoardView {
     pub fn open(text: &str, palette: Palette, font: iced::Font) -> Result<Self, ParseError>;
     pub fn reload(&mut self, text: &str) -> Result<(), ParseError>;   // the Session's text changed underneath; keeps the viewport
     pub fn synced(&self) -> &str;                                    // the Session text this view last took or sent
     pub fn set_palette(&mut self, palette: Palette);                 // theme change: one scene rebuild
     pub fn board(&self) -> &Board;  pub fn scene(&self) -> &Scene;  pub fn issues(&self) -> &[Issue];  pub fn access(&self) -> &Access;
+    pub fn shown(&self) -> &Scene;          // the scene on screen: a gesture's preview, else scene()
+    pub fn writable(&self) -> bool;         // access is Editable
+    pub fn pristine(&self) -> bool;         // write(board) equals the opening text's canonical form, so draft() is that text
     pub fn viewport(&self) -> Viewport;  pub fn set_viewport(&mut self, v: Viewport);
     pub fn zoom_step(&mut self, by: i8);  pub fn zoom_reset(&mut self);  pub fn fit(&mut self);
     pub fn update(&mut self, message: Message, now: Instant) -> Update;
+    pub fn command(&mut self, command: Command, now: Instant) -> Update;   // after committing an open label (§5.1 rule 5)
+    pub fn settle(&mut self, now: Instant) -> Update;                     // §3.4 rule 3
+    pub fn saved(&mut self, text: &str);    // changes nothing: the opening text stays the undo floor (§3.4 rule 2)
+    pub fn draft(&mut self) -> String;      // §3.4 rule 2; records what it returns as synced
+    pub fn set_key_policy(&mut self, policy: KeyPolicy);
     pub fn view(&self, id: &'static str, style: Style) -> iced::Element<'_, Message>;
     pub fn layers(&self) -> &layers::Plan;  pub fn palette(&self) -> &Palette;  pub fn epoch(&self) -> u64;
     pub fn size(&self) -> Option<(f32, f32)>;  pub fn machine(&self) -> &Machine;
     pub fn fit_pending(&self) -> bool;                               // a fit still waiting for the widget's size
+    pub fn label(&self) -> Option<&Label>;                           // the open label (§5.9)
+    pub fn label_box(&self) -> Option<Rect>;                         // around its lines, board units
+    pub fn label_caret(&self) -> Option<(Rect, f32)>;                // caret in widget px and its text size on screen
     #[cfg(feature = "test-support")] pub fn set_layer_cap(&mut self, cap: usize);   // and, with that feature, the field `pub probe: Probe`
-    // Phase 2: command(Command, now) -> Update;  settle(now) -> Update;  saved(&mut self, text: &str);  draft(&mut self) -> String
 }
-pub enum Message { Input(u64 /* epoch */, Input), Resized { width: f32, height: f32 }
-                   /* Phase 2: Label(u64, LabelAction), Command(Command), Pasted(u64, String) */ }
+pub fn revealing(viewport: Viewport, size: (f32, f32), bounds: Rect) -> Viewport;   // §5.7 rule 5
+pub enum Message { Input(u64 /* epoch */, Input), Resized { width: f32, height: f32 },
+                   Label(u64, LabelAction), Command(Command), Pasted(u64, String) }
 pub struct Update { pub changed: bool, pub effects: Vec<Effect> }   // Default: unchanged, no effect
-pub enum Effect { Look(Viewport) }   // Phase 2 adds the host's: ClipboardWrite, ClipboardRead, OpenActions, OpenJump, Notice
+pub enum Effect { Look(Viewport) /* applied by update itself */, ClipboardWrite(String), ClipboardRead, OpenActions, OpenJump, Notice(String) }
+pub enum KeyRoute { Host, Command(Command), Pass }
+pub type KeyPolicy = Arc<dyn Fn(&Key, key::Physical, Modifiers, bool /* repeat */) -> KeyRoute + Send + Sync>;   // iced's key types
+pub enum Command { Tool(Tool), Shape(Shape), EditLabel, CommitLabel, ConnectNext, Connect(Dir), Select(Dir), ExtendSelection(Dir),
+                   SelectConnector(Dir), SelectAll, SelectConnected, SelectNone, Move(Dir), Resize(Grow), Delete, Duplicate, Copy, Cut,
+                   Paste, Undo, Redo, EdgeRouting, EdgeStart, EdgeEnd, EdgeReverse, StrokeDashed, ZoomFit, ZoomSelection }
+impl Command { pub fn all() -> impl Iterator<Item = Self>; pub fn key(self) -> &'static str; pub fn parse(key: &str) -> Option<Self>; }  // the 64 keys of §5.19
+pub enum Tool { Select, Hand, Shape(Shape), Text, Connector }   pub enum Grow { Wider, Narrower, Taller, Shorter }
+pub const REST: Duration /* 150 ms */;  pub const FIT_MARGIN: f32 = 40.0;  pub const ZOOM_STOPS: [f32; 9];
+pub const REVEAL_MARGIN: f32 = 40.0;  pub const MIN_LABEL_PX: f32 = 10.0;  pub const LABEL_FULL: &str;
 pub struct Style { pub labels: Option<Labels>, pub scale_factor: f32 }   // Default: None, 1.0. None: the renderer's own label rule (§5.13 rule 8)
 pub struct Labels { pub min_px: f32, pub moving: bool }   // ALWAYS; SOFTWARE (none under 4 px, none while moving); for_renderer(name: &str) -> Self
 pub struct Viewport { pub x: f32, pub y: f32, pub zoom: f32 }   // the board point at the widget's corner; Default: (0, 0) at 100 %
@@ -196,17 +220,50 @@ impl Viewport {
     pub fn panned(self, dx: f32, dy: f32) -> Self;  pub fn zoomed(self, factor: f32, about: (f32, f32)) -> Self;
     pub fn zoomed_to(self, zoom: f32, about: (f32, f32)) -> Self;  pub fn fitting(content: Rect, size: (f32, f32)) -> Self;
 }
-pub const FIT_MARGIN: f32 = 40.0;  pub const ZOOM_STOPS: [f32; 9];  pub const REST: Duration /* 150 ms */;
 impl Measurer { pub fn new(font: Font) -> Self; pub fn font(&self, face: Face) -> Font; pub fn sweep(&self); }   // impl scene::Measure
 pub mod machine {
-    pub const LINE: f32 = 40.0;  pub const ZOOM_PER_LINE: f32 = 1.1;  pub const BURST: Duration /* 150 ms */;
+    pub const LINE: f32 = 40.0;  pub const ZOOM_PER_LINE: f32 = 1.1;  pub const BURST: Duration /* 150 ms */;  pub const THRESHOLD: f32 = 4.0;
+    pub const DOUBLE_CLICK: Duration /* 300 ms */;  pub const DOUBLE_REACH: f32 = 6.0;  pub const NODE_SIZE: [i32; 2] = [120, 60];
+    pub const TEXT_SIZE: [i32; 2] = [120, 20];  pub const RUN_PAUSE: Duration /* 1 s, §5.11 rule 3 */;
     pub enum Scroll { Lines { x: f32, y: f32 }, Pixels { x: f32, y: f32 } }   pub enum Button { Left, Middle, Right, Other }
+    pub struct Mods { pub shift: bool, pub duplicate: bool }   // duplicate: ⌥ on macOS, Ctrl elsewhere, resolved by the widget
+    pub enum Key { Escape, Enter, Backspace, Arrow(Dir) }
     pub enum Input { Wheel { delta: Scroll, at: (f32, f32), zoom: bool, sideways: bool, scale_factor: f32 },
                      Press { button: Button, at: (f32, f32) }, Move { at: (f32, f32) }, Release { button: Button },
-                     Space { held: bool }, Cancel }
-    pub struct View { pub viewport: Viewport, pub now: Instant }
-    impl Machine { pub fn step(&mut self, input: Input, view: &View) -> Vec<Effect>;      // Phase 1 has Idle and Panning only
-                   pub fn panning(&self) -> bool;  pub fn space(&self) -> bool;  pub fn reset(&mut self); }
+                     Space { held: bool }, Cancel, Modifiers(Mods), Key { key: Key, repeat: bool }, Char(char), Focus(bool), Tick }
+    pub struct View<'a> { pub viewport: Viewport, pub now: Instant, pub board: &'a Board, pub scene: &'a Scene, pub writable: bool }
+    pub enum Act { Look(Viewport), Edit(Intent), Continue(Intent) /* joins the previous undo step */, Preview(Option<Intent>),
+                   OpenLabel(Id), CommitLabel, Caret { at: (f32, f32), select: bool }, Run(Command) /* the view's to carry out */ }
+    pub enum State { Unfocused, Idle, Armed, Pressed, Moving, Marquee, Resizing, Creating, Editing, Panning }   // name() is §6.2's
+    impl Machine { pub fn step(&mut self, input: Input, view: &View) -> Vec<Act>;  pub fn command(&mut self, c: Command, view: &View) -> Vec<Act>;
+                   pub fn applied(&mut self, plan: &Plan, board: &Board) -> Vec<Act>;   // takes the plan's select and edit
+                   pub fn settle(&mut self) -> Vec<Act>;  pub fn reset(&mut self);  pub fn abandon(&mut self);  pub fn retain(&mut self, board: &Board);
+                   pub fn select(&mut self, selection: BTreeSet<Id>, cursor: Option<Id>);
+                   pub fn state(&self) -> State;  pub fn tool(&self) -> Tool;  pub fn selection(&self) -> &BTreeSet<Id>;  pub fn cursor(&self) -> Option<&Id>;
+                   pub fn editing(&self) -> Option<&Id>;  pub fn marquee(&self) -> Option<Rect>;  pub fn focused(&self) -> bool;  pub fn panning(&self) -> bool;
+                   pub fn dragging(&self) -> bool;  pub fn mods(&self) -> Mods;  pub fn space(&self) -> bool;  pub fn escapes(&self) -> bool;
+                   pub fn handles(&self, view: &View) -> hit::Shown; }
+}
+pub mod hit {   // §5.3 rules 4 and 5
+    pub const EDGE_REACH: f32 = 6.0;
+    pub enum Hit { Resize(Id, Handle), Connect(Id, Side), End(Id, EdgeEnd), Node(Id), Edge(Id), Canvas }   // element() -> Option<&Id>
+    pub struct Shown<'a> { pub resize: Option<&'a Id>, pub connect: Option<&'a Id>, pub ends: Option<&'a Id> }
+    pub struct Frames<'a>;   // new(&Board), corner(&Id) -> Option<[i64; 2]>, get(&Id) -> Option<Rect>: absolute boxes through placements
+    pub fn hit(board: &Board, scene: &Scene, viewport: Viewport, at: (f32, f32), shown: Shown) -> Hit;
+    pub fn inside(board: &Board, scene: &Scene, area: Rect) -> BTreeSet<Id>;
+}
+pub mod handles {
+    pub const SIZE: f32 = 8.0;  pub const REACH: f32 = 6.0;  pub const CONNECT_GAP: f32 = 16.0;  pub const MIDDLE_MIN: f32 = 32.0;
+    pub enum Handle { /* nw, n, ne, e, se, s, sw, w */ }   // ALL, name() -> &str (§6.2's names), sides() -> [Option<Side>; 2]
+    pub fn resize(bounds: Rect, viewport: Viewport) -> Vec<(Handle, (f32, f32))>;  pub fn connect(bounds: Rect, viewport: Viewport) -> [(Side, (f32, f32)); 4];
+    pub fn ends(board: &Board, scene: &Scene, id: &Id) -> Option<[Point; 2]>;
+}
+pub mod label {
+    pub enum LabelAction { Insert(String), Move { motion: Motion, select: bool }, SelectAll, Backspace, Delete, Copy, Cut, Paste, Undo, Redo,
+                           Preedit { text: String, selection: Option<Range<usize>> } }
+    pub enum Motion { Left, Right, Up, Down, WordLeft, WordRight, LineStart, LineEnd, Start, End }
+    pub struct Preedit { pub text: String, pub selection: Option<Range<usize>> }
+    pub struct Label;   // id() -> &Id, text() -> &str, caret() -> usize, selection() -> Range<usize>, preedit() -> Option<&Preedit>
 }
 pub mod layers {
     pub const CAP: usize = 4;
@@ -220,7 +277,7 @@ pub struct Probe { pub parses: Cell<u64>, pub scenes: Cell<u64>, pub builds: Cel
                                                                     // Probe::SAMPLES = 256, each ring's length
 ```
 
-`Message::Resized` is how the widget reports its size, which `fit` and the zoom stops need and a `BoardView` cannot ask for; it is not board input (§5.15 rule 1). The machine moves the view through `Effect::Look(Viewport)`, which `BoardView::update` applies itself, so in Phase 1 `Update` is always the default; Phase 2's contract commit keeps `Look` beside the host effects or replaces it with an equivalent. `update` drops input stamped with an older epoch. `reload` with the text the view already has does nothing; `set_viewport` clamps the zoom to 10 to 400 % and ignores a viewport that is not finite. The `wren-canvas` listing is the crate's public surface at the end of Phase 1, checked against `lib.rs` and its public modules; `clip.rs` (§3.8) is private and exposes nothing, since paint calls it. Phase 2's contract commit starts from this surface.
+`Message::Resized` is how the widget reports its size, which `fit` and the zoom stops need and a `BoardView` cannot ask for; it is not board input (§5.15 rule 1). The machine moves the view through `Effect::Look(Viewport)`, which `BoardView::update` applies itself, so in Phase 1 `Update` is always the default; Phase 2's contract commit keeps `Look` beside the host effects or replaces it with an equivalent. `update` drops input stamped with an older epoch. `reload` with the text the view already has does nothing; `set_viewport` clamps the zoom to 10 to 400 % and ignores a viewport that is not finite. The `wren-canvas` listing is the crate's public surface after the canvas chain of Phase 2 (`boards-p2-canvas`, its review's fix step), checked against `lib.rs` and its public modules; `clip.rs` (§3.8) is private and exposes nothing, since paint calls it. Phase 1's surface is kept whole; the wiring and connector chains start from this one.
 
 `BoardView` is defined in `wren-canvas` and owned by `App`, as `EditorView` is defined in `wren-editor`. It holds the committed model, the pristine pair, the synced text, the scene, the viewport, the machine and, from Phase 2, the history, the in-flight plan and the open label's text. None of that lives in widget tree state, so the harness drives and reads it with no window and a rebuilt widget tree loses nothing. Phase 1 ships `Message::Input(epoch, Input)` and the `Machine::step` signature with wheel and pan inputs only; Phase 2 extends both and replaces neither.
 
@@ -559,7 +616,7 @@ Rules for the widget:
 
 ### 5.2 Surface states [P2]
 
-The machine is `Machine::step(&mut self, input, view) -> Vec<Effect>` over toolkit-neutral inputs: a command, text, pointer press, move and release with button and modifiers, wheel, focus change, and a timestamp on each. Effects are intents for the model, an undo boundary, viewport changes and requests (clipboard, actions palette, jump). The widget only translates iced events; the harness injects at the same seam (§6.2).
+The machine is `Machine::step(&mut self, input, view) -> Vec<Act>` over toolkit-neutral inputs (pointer press, move and release, modifiers, wheel, Space, keys the machine reads itself, typed characters, focus change, `Cancel` and `Tick`), with commands through `Machine::command(&mut self, command, view) -> Vec<Act>`; the `View` carries the viewport, the time, the committed board and scene and whether the board may be edited (§3.2). Acts are for the view that owns the board: a viewport, an intent to plan and apply as an undo step of its own or joined to the one before, a preview, opening and committing the label, the caret, and a command for the view to run. The view turns the host's requests (clipboard, actions palette, jump, notices) into `Effect`s. The widget only translates iced events; the harness injects at the same seam (§6.2).
 
 | State | Leaves by |
 |---|---|
