@@ -26,8 +26,11 @@
 //! Input reaches the view as [`Message`]s, which [`BoardView::update`]
 //! runs through the pure [`Machine`]: the wheel pans, or zooms with ⌘ or
 //! Ctrl held, and a middle-button or Space drag pans. Zoom and pan are view
-//! state, never the board's. With the `test-support` feature a view counts
-//! its scene and geometry builds (`Probe`).
+//! state, never the board's. The machine also keeps the selection, the
+//! armed tool and the pointer gesture in flight, finds what a press lands
+//! on with [`hit`] and [`handles`], and answers with [`machine::Act`]s for
+//! the view to carry out. With the `test-support` feature a view counts its
+//! scene and geometry builds (`Probe`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -347,6 +350,7 @@ impl BoardView {
         self.board = board;
         text.clone_into(&mut self.synced);
         self.machine.reset();
+        self.machine.retain(&self.board);
         self.epoch += 1;
         self.build();
         Ok(())
@@ -452,21 +456,25 @@ impl BoardView {
     /// Apply a message from the widget at `now`. Input stamped with an
     /// earlier epoch is dropped.
     pub fn update(&mut self, message: Message, now: Instant) -> Update {
-        let mut update = Update::default();
+        let update = Update::default();
         match message {
             Message::Input(epoch, input) if epoch == self.epoch => {
                 #[cfg(feature = "test-support")]
                 if let Input::Wheel { delta, .. } = input {
                     self.probe.wheeled(delta);
                 }
+                // The view carries out no edit yet, so the machine is shown
+                // a board it may not change: it selects, pans and zooms.
                 let view = machine::View {
                     viewport: self.viewport,
                     now,
+                    board: &self.board,
+                    scene: &self.scene,
+                    writable: false,
                 };
-                for effect in self.machine.step(input, &view) {
-                    match effect {
-                        Effect::Look(viewport) => self.set_viewport(viewport),
-                        effect => update.effects.push(effect),
+                for act in self.machine.step(input, &view) {
+                    if let machine::Act::Look(viewport) = act {
+                        self.set_viewport(viewport);
                     }
                 }
             }

@@ -593,9 +593,17 @@ mod tests {
         use crate::machine::{Machine, View};
         let mut machine = Machine::default();
         let viewport = Viewport::default();
+        let board = wren_board::Board::default();
+        let scene = wren_board::scene::Scene {
+            bounds: wren_board::scene::Rect::default(),
+            items: Vec::new(),
+        };
         let view = View {
             viewport,
             now: Instant::now(),
+            board: &board,
+            scene: &scene,
+            writable: true,
         };
         let mut state = State::new();
         state.pressed = Some(mouse::Button::Middle);
