@@ -1,10 +1,10 @@
-//! The handles a selection shows (the plan's §5.3 rule 4, §5.5 rule 8 and
-//! §5.8 rule 5): where each sits and how near a press must be to take it.
-//! Positions are widget-local pixels and sizes are screen pixels, so a
-//! handle is as easy to take at any zoom.
+//! The handles a board shows (the plan's §5.3 rule 4, §5.5 rule 8, §5.8
+//! rule 5 and §5.12 rules 1, 5 and 6): where each sits and how near the
+//! pointer must be to take it. Positions are widget-local pixels and sizes
+//! are screen pixels, so a handle is as easy to take at any zoom.
 
 use wren_board::scene::{Draw, Point, Rect, Scene, Segment, Source};
-use wren_board::{route, Board, Id, Side};
+use wren_board::{route, shape, Board, Id, Named, Node, NodeKind, Shape, Side};
 
 use crate::Viewport;
 
@@ -20,6 +20,10 @@ pub const CONNECT_GAP: f32 = 16.0;
 /// A side shorter than this on screen has no handle at its middle, which
 /// leaves a small node room to be pressed between its corners.
 pub const MIDDLE_MIN: f32 = 32.0;
+
+/// A connector end released this near a side handle of the node it is
+/// dropped on is pinned to that side (§5.12 rule 5).
+pub const PIN_REACH: f32 = 10.0;
 
 /// One of the eight resize handles of the selected node, by compass point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -120,6 +124,34 @@ pub fn connect(bounds: Rect, viewport: Viewport) -> [(Side, (f32, f32)); 4] {
         (Side::Bottom, at(centre.x, bounds.bottom(), 0.0, 1.0)),
         (Side::Left, at(bounds.x, centre.y, -1.0, 0.0)),
     ]
+}
+
+/// The side handles of a node a connector end is dragged over (§5.12 rule
+/// 1), each with its centre: the middle of each side on the shape's
+/// outline, which is where an end pinned to that side meets it.
+pub fn sides(node: &Node, bounds: Rect, viewport: Viewport) -> [(Side, (f32, f32)); 4] {
+    let shape = outline(node);
+    [Side::Top, Side::Right, Side::Bottom, Side::Left].map(|side| {
+        let point = shape::side_point(shape, bounds, side);
+        (side, viewport.to_screen((point.x, point.y)))
+    })
+}
+
+/// How near a side handle of a node an end must be released to be pinned
+/// there: [`PIN_REACH`], and never more than a quarter of the node's
+/// shorter side on screen, so an end dropped on the middle of a node
+/// floats however small the node is drawn.
+pub fn pin_reach(bounds: Rect, viewport: Viewport) -> f32 {
+    PIN_REACH.min(bounds.width.min(bounds.height) * viewport.zoom / 4.0)
+}
+
+/// The shape whose outline a connector end meets: the node's own, and a
+/// rectangle for free text and a placeholder, as the scene routes to them.
+pub(crate) fn outline(node: &Node) -> Shape {
+    match node.kind.as_ref().and_then(Named::known) {
+        Some(NodeKind::Shape) => shape::drawn(&node.shape),
+        _ => Shape::Rect,
+    }
 }
 
 /// Where the two ends of a connector are drawn, `from` then `to`, in board
@@ -277,6 +309,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn side_handles_sit_where_a_pinned_end_meets_each_shape() {
+        // A parallelogram's slanted sides and a document's wavy bottom
+        // meet a connector off the box's own side middles (§3.7).
+        let board = parse(
+            r#"schema = 1
+
+[node.p]
+kind = "shape"
+at = [0, 0]
+shape = "parallelogram"
+size = [120, 60]
+z = "a"
+
+[node.d]
+kind = "shape"
+at = [300, 200]
+shape = "document"
+size = [120, 60]
+z = "b"
+
+[node.t]
+text = "free"
+kind = "text"
+at = [0, 300]
+shape = "diamond"
+size = [120, 40]
+z = "c"
+
+[edge.right]
+kind = "edge"
+from = { node = "p", side = "right" }
+to = { node = "d", side = "bottom" }
+heads = ["none", "none"]
+z = "d"
+
+[edge.left]
+kind = "edge"
+from = { node = "p", side = "left" }
+to = { node = "t", side = "top" }
+heads = ["none", "none"]
+z = "e"
+"#,
+        )
+        .expect("a board");
+        let scene = scene::build(&board, &fixtures::palette(), &FixedMeasure);
+        let frames = Frames::new(&board);
+        let id = |name: &str| Id::new(name).expect("an id");
+        let viewport = Viewport {
+            x: -40.0,
+            y: 25.0,
+            zoom: 2.0,
+        };
+        let handle = |name: &str, side: Side| {
+            let name = id(name);
+            let node = &board.nodes[&name];
+            let bounds = frames.get(&name).expect("a drawn node");
+            let found = sides(node, bounds, viewport)
+                .into_iter()
+                .find(|(of, _)| *of == side);
+            let (_, centre) = found.expect("four sides");
+            let (x, y) = viewport.to_board(centre);
+            Point::new(x, y)
+        };
+        let drawn = |name: &str| ends(&board, &scene, &id(name)).expect("a route");
+        assert_eq!(
+            drawn("right"),
+            [handle("p", Side::Right), handle("d", Side::Bottom)]
+        );
+        assert_eq!(
+            drawn("left"),
+            [handle("p", Side::Left), handle("t", Side::Top)]
+        );
+        // Neither slanted side is the box's own, nor is the wavy bottom;
+        // free text is a box whatever shape it names.
+        assert_eq!(handle("p", Side::Right), Point::new(110.0, 30.0));
+        assert_eq!(handle("p", Side::Left), Point::new(10.0, 30.0));
+        assert_eq!(handle("d", Side::Bottom), Point::new(360.0, 252.5));
+        assert_eq!(handle("t", Side::Left), Point::new(0.0, 320.0));
+    }
+
+    #[test]
+    fn an_end_is_pinned_within_ten_pixels_or_less_on_a_small_node() {
+        let bounds = Rect::new(0.0, 0.0, 120.0, 60.0);
+        let at = |zoom| Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom,
+        };
+        assert_eq!(pin_reach(bounds, at(1.0)), PIN_REACH);
+        assert_eq!(pin_reach(bounds, at(4.0)), PIN_REACH);
+        // 30 pixels tall: the reach is a quarter of that, so the handles of
+        // two facing sides never meet in the middle.
+        assert_eq!(pin_reach(bounds, at(0.5)), 7.5);
+        assert_eq!(pin_reach(bounds, at(0.1)), 1.5);
+        assert_eq!(pin_reach(Rect::new(0.0, 0.0, 20.0, 200.0), at(1.0)), 5.0);
     }
 
     /// How far `point` is from the border of `bounds`, when it lies on or

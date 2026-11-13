@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tools.wrentest.boards import SAMPLES as BOARD_SAMPLES  # noqa: E402
-from tools.wrentest.boards import conflict_board  # noqa: E402
+from tools.wrentest.boards import ACCEPTANCE, conflict_board, script_steps  # noqa: E402
 from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
 
 # Every construct the highlighter draws, for the `markdown` scene.
@@ -314,7 +314,9 @@ def board_scenes(client, shot_here, out: Path) -> None:
 def board_edit_scenes(client, shot_here, open_board) -> None:
     """discovery/boards.md §6.3, Phase 2: what editing draws over a board.
     These change the board, so they come last."""
-    pack, receive = "3qrg4kv1", "12axfsny"
+    pack, receive, reject, into_receive = "3qrg4kv1", "12axfsny", "pa6md7qp", "4x2tte9d"
+    start, notify, charge = "ahj860xh", "c51ksbz1", "8wcf01q2"
+    into_check, reject_no = "8va037pc", "4xtwed1c"
 
     def key(name: str, *mods: str) -> dict:
         return client.call("board.key", {"key": name, "mods": list(mods)})
@@ -360,17 +362,84 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
     key("d")
     shot_here("board-armed")
     key("escape")
+    # The connect handles of the node the pointer has rested on.
+    pointer("move", {"node": receive})
+    wait_for(lambda: len(client.call("board.bounds")["handles"]) == 4, timeout=5,
+             description="the connect handles shown")
+    shot_here("board-connect-handles")
+    # A connector dragged from one: over a node, which is outlined and
+    # shows its side handles, the one in reach taken; and over empty
+    # canvas, where a release would make a node. Both routes run clear of
+    # every other connector: where a new one would share a line, which of
+    # the two moves aside follows its id, which is drawn at random.
+    pointer("press", {"node": receive, "handle": "connect_right"})
+    pointer("move", {"node": reject})
+    pointer("move", {"node": reject, "handle": "side_top"})
+    shot_here("board-connect-target")
+    pointer("move", {"canvas": [420, 300]})
+    shot_here("board-connect-new")
+    key("escape")
+    # An end of a connector dragged off its node, where a release would
+    # leave it as it was.
+    pointer("click", {"edge": into_receive})
+    pointer("press", {"edge": into_receive, "handle": "to"})
+    pointer("move", {"canvas": [420, 300]})
+    shot_here("board-connect-end")
+    key("escape")
+    key("escape")
+    # Keyboard Connecting from Pack: the query in the mode chip and the
+    # node it found outlined.
+    pointer("click", {"node": pack})
+    key("c")
+    client.call("board.type", {"text": "che"})
+    shot_here("board-connecting")
+    key("escape")
+    key("escape")
     # A label open, its text replaced and the caret after it.
     pointer("double_click", {"node": pack})
     client.call("board.type", {"text": "Pack the order"})
     shot_here("board-editing")
     key("escape")
+    # Connectors styled by the style commands, beside the labelled and
+    # elbow ones the flow has: a straight diagonal with a head at each end,
+    # a dashed branch, and one with no head.
+    for connector, commands in (
+        (into_check, ("board.edge.routing", "board.edge.start")),
+        (reject_no, ("board.stroke.dashed",)),
+        (into_receive, ("board.edge.end",)),
+    ):
+        pointer("click", {"edge": connector})
+        for command in commands:
+            client.call("command.run", {"id": command})
+    pointer("click", {"node": start})
+    for node in (reject, notify, charge):
+        pointer("click", {"node": node}, ("shift",))
+    client.call("command.run", {"id": "board.zoom.selection"})
+    # Away and back: the view is kept, the selection and its cursor are not.
+    open_note(client, "Notes.md")
+    open_note(client, "Checkout flow.wren-board")
+    client.call("editor.focus")
+    wait_for(lambda: client.call("board.get")["surface"] == "board", timeout=10,
+             description="the flow open again")
+    shot_here("board-edges")
     # A new board: empty, with the hint.
     client.call("command.run", {"id": "note.new_board"})
     client.call("dialog.name", {"name": "Empty board"})
     client.call("dialog.submit")
     focused()
     shot_here("board-empty-hint")
+    # The flowchart the acceptance script builds on it, fitted, the last
+    # connector still selected as the script leaves it. Its ids are drawn
+    # from a seed: where two connectors would share a line, which moves
+    # aside follows their ids.
+    client.call("board.seed", {"seed": 20})
+    for step in script_steps(ACCEPTANCE):
+        if step[0] == "key":
+            key(step[1], *step[2:])
+        else:
+            client.call("board.type", {"text": step[1]})
+    client.call("command.run", {"id": "board.zoom.fit"})
+    shot_here("board-built")
 
 
 def main() -> int:

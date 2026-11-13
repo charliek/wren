@@ -405,6 +405,53 @@ fn input_for_another_board_or_an_earlier_one_is_dropped() {
     assert_in_step(&app, Surface::Text);
 }
 
+/// A letter pressed on the focused board, as the widget publishes it.
+fn press(epoch: u64, letter: &str) -> Message {
+    use iced::keyboard::key::{Code, Physical};
+    Message::Board(Sent::Key(
+        epoch,
+        wren_canvas::KeyPress {
+            key: iced::keyboard::Key::Character(letter.into()),
+            physical: Physical::Code(Code::KeyQ),
+            modifiers: iced::keyboard::Modifiers::empty(),
+            text: Some(letter.to_owned()),
+            repeat: false,
+            held: true,
+        },
+    ))
+}
+
+#[test]
+fn a_board_key_is_read_when_it_is_applied_and_a_bound_one_goes_through_dispatch() {
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    // Both published before either is applied, as two quick keys are.
+    let epoch = view(&app).epoch();
+    let (c, h) = (press(epoch, "c"), press(epoch, "h"));
+    let serial = app.action_serial;
+    let _ = app.update(c);
+    assert_ne!(app.action_serial, serial, "C went through dispatch");
+    let serial = app.action_serial;
+    let _ = app.update(h);
+    assert_eq!(app.action_serial, serial, "H is the connect query's");
+    let seeking = view(&app).machine().seeking();
+    assert_eq!(seeking.map(|seeking| seeking.query), Some("h"));
+    assert_eq!(app.column, Column::Editor);
+
+    // A key meant for the board before a reload, or under a palette, does
+    // nothing.
+    let _ = app.open_palette(super::palette::Mode::Commands);
+    let serial = app.action_serial;
+    let _ = app.update(press(view(&app).epoch(), "c"));
+    assert_eq!(app.action_serial, serial);
+    let _ = app.close_palette();
+    let serial = app.action_serial;
+    let _ = app.update(press(epoch.wrapping_sub(1), "c"));
+    assert_eq!(app.action_serial, serial);
+}
+
 #[test]
 fn a_board_key_reads_the_keymap_the_app_reads() {
     use iced::keyboard::key::{Code, Named, Physical};

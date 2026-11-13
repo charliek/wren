@@ -103,6 +103,20 @@ impl App {
                 Ok(task) => (task, Ok(self.board_snapshot(false, placement.focused))),
                 Err(error) => (Task::none(), Err(error)),
             },
+            "board.seed" => match (params.get("seed").and_then(Value::as_u64), &mut self.board) {
+                (Some(seed), Some(view)) => {
+                    view.seed_ids(seed);
+                    (
+                        Task::none(),
+                        Ok(self.board_snapshot(false, placement.focused)),
+                    )
+                }
+                (None, _) => (Task::none(), Err("seed must be a whole number".into())),
+                (_, None) => (
+                    Task::none(),
+                    Err("The open note is not shown as a board".into()),
+                ),
+            },
             _ => (
                 Task::none(),
                 Err(format!("unknown test operation: {}", request.op)),
@@ -161,6 +175,15 @@ impl App {
             "editing": view.label().map(|label| json!({
                 "id": label.id().as_str(), "text": label.text(), "caret": label.caret(),
             })),
+            "connecting": machine.connecting().map(|connecting| json!({
+                "target": connecting.target.map(|(id, _)| id.as_str()),
+                "side": connecting.target.and_then(|(_, side)| side).map(Side::name),
+                "query": "",
+            })).or_else(|| machine.seeking().map(|seeking| json!({
+                "target": seeking.target.map(Id::as_str),
+                "side": null,
+                "query": seeking.query,
+            }))),
             "viewport": {"x": viewport.x, "y": viewport.y, "zoom": viewport.zoom},
             "can_undo": view.can_undo(),
             "can_redo": view.can_redo(),
@@ -294,8 +317,9 @@ impl App {
 
     /// `board.pointer`: the input the widget would send for a wheel step
     /// or a button pressed, moved, released, clicked or double-clicked at a
-    /// node's middle, one of its handles, a connector's middle, a board
-    /// point or a window point.
+    /// node's middle, one of its handles, a connector's middle or one of
+    /// its ends, a board point or a window point. A move with no button
+    /// down is the pointer passing over the board.
     fn board_pointer(
         &mut self,
         params: &Value,
@@ -378,6 +402,12 @@ impl App {
                     0
                 }
                 "move" => {
+                    // The widget's first event after it got the keyboard
+                    // says so, and only then is a pointer passing over
+                    // the board's (§5.5 rule 8).
+                    if placement.focused && !view.machine().focused() {
+                        inputs.push(Input::Focus(true));
+                    }
                     inputs.push(Input::Move { at: at()? });
                     0
                 }
@@ -855,8 +885,9 @@ fn character_code(c: char) -> Option<iced::keyboard::key::Code> {
 }
 
 /// Where `at` points, in widget-local pixels: a node's middle, one of its
-/// handles (`nw` to `w`, `connect_top` to `connect_left`), a connector's
-/// middle along its drawn line, a board point or a window point.
+/// handles (`nw` to `w`, `connect_top` to `connect_left`, `side_top` to
+/// `side_left`), a connector's middle along its drawn line or one of its
+/// ends (`from`, `to`), a board point or a window point.
 fn pointed(view: &BoardView, at: &Value, placement: Placement) -> Result<(f32, f32), String> {
     let viewport = view.viewport();
     let named = |key: &str| -> Result<Option<Id>, String> {
@@ -884,6 +915,15 @@ fn pointed(view: &BoardView, at: &Value, placement: Placement) -> Result<(f32, f
                 .map(|(_, at)| at)
                 .ok_or_else(|| "no such connect handle".into());
         }
+        if let Some(side) = handle.strip_prefix("side_") {
+            let side = Side::from_name(side).ok_or("no such side handle")?;
+            let node = view.board().nodes.get(&id).ok_or("no such node")?;
+            return handles::sides(node, frame, viewport)
+                .into_iter()
+                .find(|(of, _)| *of == side)
+                .map(|(_, at)| at)
+                .ok_or_else(|| "no such side handle".into());
+        }
         return handles::resize(frame, viewport)
             .into_iter()
             .find(|(of, _)| of.name() == handle)
@@ -891,6 +931,16 @@ fn pointed(view: &BoardView, at: &Value, placement: Placement) -> Result<(f32, f
             .ok_or_else(|| format!("the node shows no {handle} handle at this zoom"));
     }
     if let Some(id) = named("edge")? {
+        if let Some(handle) = at.get("handle") {
+            let [from, to] = handles::ends(view.board(), view.scene(), &id)
+                .ok_or("the connector is not drawn")?;
+            let end = match handle.as_str() {
+                Some("from") => from,
+                Some("to") => to,
+                _ => return Err("a connector's handles are from and to".into()),
+            };
+            return Ok(viewport.to_screen((end.x, end.y)));
+        }
         let points = edge_line(view, &id).ok_or("the connector is not drawn")?;
         let (x, y) = halfway(&points);
         return Ok(viewport.to_screen((x, y)));
@@ -948,7 +998,9 @@ fn halfway(points: &[(f32, f32)]) -> (f32, f32) {
 }
 
 /// The handles the board shows now, each with its owner, its name and its
-/// centre in widget-local pixels.
+/// centre in widget-local pixels: those of the selection and of the node
+/// the pointer rests on, and the side handles of the node a connector end
+/// is dragged over.
 fn shown_handles(view: &BoardView) -> Vec<(Id, &'static str, (f32, f32))> {
     let viewport = view.viewport();
     let board = view.board();
@@ -959,6 +1011,7 @@ fn shown_handles(view: &BoardView) -> Vec<(Id, &'static str, (f32, f32))> {
         board,
         scene: view.scene(),
         writable: view.writable(),
+        size: view.size(),
     });
     let mut list = Vec::new();
     if let Some((id, frame)) = shown.resize.and_then(|id| Some((id, frames.get(id)?))) {
@@ -981,6 +1034,21 @@ fn shown_handles(view: &BoardView) -> Vec<(Id, &'static str, (f32, f32))> {
         if let Some([from, to]) = handles::ends(board, view.scene(), id) {
             list.push((id.clone(), "from", viewport.to_screen((from.x, from.y))));
             list.push((id.clone(), "to", viewport.to_screen((to.x, to.y))));
+        }
+    }
+    let target = view.machine().connecting().and_then(|connecting| {
+        let (id, _) = connecting.target?;
+        Some((id, board.nodes.get(id)?, frames.get(id)?))
+    });
+    if let Some((id, node, frame)) = target {
+        for (side, at) in handles::sides(node, frame, viewport) {
+            let name = match side {
+                Side::Top => "side_top",
+                Side::Right => "side_right",
+                Side::Bottom => "side_bottom",
+                Side::Left => "side_left",
+            };
+            list.push((id.clone(), name, at));
         }
     }
     list
@@ -1504,6 +1572,65 @@ mod tests {
     }
 
     #[test]
+    fn board_key_and_board_type_connect_by_keyboard_with_a_query() {
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        key(&mut app, json!({"key": "down"}));
+        let from = key(&mut app, json!({"key": "down"}));
+        assert_eq!(from["selection"], json!(["pack"]));
+        let connecting = key(&mut app, json!({"key": "c"}));
+        assert_eq!(
+            (connecting["state"].clone(), connecting["tool"].clone()),
+            (json!("connecting"), json!("select"))
+        );
+        assert_eq!(
+            connecting["connecting"],
+            json!({"target": null, "side": null, "query": ""})
+        );
+        // Typed text and the tool letters are the query's.
+        let typed = ask(&mut app, "board.type", json!({"text": "Re"}), PLACED).unwrap();
+        assert_eq!(typed["handled"], true);
+        assert_eq!(
+            typed["connecting"],
+            json!({"target": "receive", "side": null, "query": "Re"})
+        );
+        let lettered = key(&mut app, json!({"key": "d"}));
+        assert_eq!(
+            (lettered["connecting"].clone(), lettered["tool"].clone()),
+            (
+                json!({"target": null, "side": null, "query": "Red"}),
+                json!("select")
+            )
+        );
+        let erased = key(&mut app, json!({"key": "backspace"}));
+        assert_eq!(erased["connecting"]["target"], "receive");
+        assert_eq!(erased["counts"]["edges"], 1);
+        // Enter connects, as one draft, and selects the connector.
+        let revision = erased["revision"].as_u64().unwrap();
+        let done = key(&mut app, json!({"key": "enter"}));
+        assert_eq!(
+            (done["state"].clone(), done["connecting"].clone()),
+            (json!("idle"), Value::Null)
+        );
+        assert_eq!(done["counts"]["edges"], 2);
+        assert_eq!(done["revision"].as_u64().unwrap(), revision + 1);
+        let made = done["selection"][0].as_str().unwrap().to_owned();
+        assert_ne!(made, "then");
+        assert!(boards::session_text(&app).contains(&format!("[edge.{made}]")));
+        // Escape ends it with nothing made.
+        key(&mut app, json!({"key": "escape"}));
+        key(&mut app, json!({"key": "down"}));
+        key(&mut app, json!({"key": "c"}));
+        let escaped = key(&mut app, json!({"key": "escape"}));
+        assert_eq!(
+            (escaped["handled"].clone(), escaped["state"].clone()),
+            (json!(true), json!("idle"))
+        );
+        assert_eq!(escaped["counts"]["edges"], 2);
+    }
+
+    #[test]
     fn board_type_fills_the_open_label_and_drafts_each_change() {
         let (directory, mut app) = boards::fixture();
         boards::open_board(&mut app, "Flow");
@@ -1629,6 +1756,150 @@ mod tests {
         };
         assert!(inside(editor, &receive), "{editor} {receive}");
         assert_eq!(bounds["handles"], json!([]));
+    }
+
+    #[test]
+    fn board_pointer_draws_and_re_attaches_a_connector() {
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        pointer(
+            &mut app,
+            json!({"kind": "click", "button": "left", "at": {"canvas": [400, 400]}}),
+        );
+        let handles = |app: &mut App| -> Vec<(String, String)> {
+            let bounds = ask(app, "board.bounds", json!({}), PLACED).unwrap();
+            let handles = bounds["handles"].as_array().unwrap().iter();
+            handles
+                .map(|handle| {
+                    let text = |key: &str| handle[key].as_str().unwrap().to_owned();
+                    (text("id"), text("handle"))
+                })
+                .collect()
+        };
+        // The pointer passing over is nobody acting on the board: the
+        // keyboard stays where it is, and nothing is drafted.
+        app.column = Column::Notes;
+        let over = json!({"kind": "move", "at": {"node": "receive"}});
+        let resting = pointer(&mut app, over.clone());
+        assert_eq!(app.column, Column::Notes);
+        assert_eq!(
+            (resting["state"].clone(), resting["revision"].clone()),
+            (json!("idle"), json!(0))
+        );
+        assert!(handles(&mut app).is_empty());
+        // Rested there, the node shows its four connect handles.
+        std::thread::sleep(wren_canvas::machine::HOVER_DELAY);
+        pointer(&mut app, over);
+        let shown = handles(&mut app);
+        let names: Vec<&str> = shown.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "connect_top",
+                "connect_right",
+                "connect_bottom",
+                "connect_left"
+            ]
+        );
+        assert!(shown.iter().all(|(id, _)| id == "receive"));
+        assert_eq!(app.column, Column::Notes);
+
+        // A drag from one onto a side handle of another node.
+        let pressed = pointer(
+            &mut app,
+            json!({"kind": "press", "button": "left", "at": {"node": "receive", "handle": "connect_right"}}),
+        );
+        assert_eq!(pressed["state"], "pressed");
+        assert_eq!(app.column, Column::Editor);
+        let dragged = pointer(
+            &mut app,
+            json!({"kind": "move", "at": {"node": "pack", "handle": "side_right"}}),
+        );
+        assert_eq!(dragged["state"], "connecting");
+        assert_eq!(
+            dragged["connecting"],
+            json!({"target": "pack", "side": "right", "query": ""})
+        );
+        assert_eq!(dragged["counts"]["edges"], 1);
+        assert_eq!(dragged["revision"], 0);
+        let names: Vec<String> = handles(&mut app)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(
+            names,
+            ["side_top", "side_right", "side_bottom", "side_left"]
+        );
+        let released = pointer(&mut app, json!({"kind": "release", "button": "left"}));
+        assert_eq!(released["state"], "idle");
+        assert_eq!(released["connecting"], Value::Null);
+        assert_eq!(released["counts"]["edges"], 2);
+        assert_eq!(released["revision"], 1);
+        let made = released["selection"][0].as_str().unwrap().to_owned();
+        assert!(boards::session_text(&app).contains("to = { node = \"pack\", side = \"right\" }"));
+
+        // The new connector is selected, so it shows its ends; its `to`
+        // end dragged to the middle of the node floats.
+        assert_eq!(
+            handles(&mut app),
+            [
+                (made.clone(), "from".to_owned()),
+                (made.clone(), "to".to_owned())
+            ]
+        );
+        pointer(
+            &mut app,
+            json!({"kind": "press", "button": "left", "at": {"edge": made, "handle": "to"}}),
+        );
+        let moved = pointer(&mut app, json!({"kind": "move", "at": {"node": "pack"}}));
+        assert_eq!(
+            moved["connecting"],
+            json!({"target": "pack", "side": null, "query": ""})
+        );
+        let released = pointer(&mut app, json!({"kind": "release", "button": "left"}));
+        assert_eq!(released["revision"], 2);
+        assert_eq!(released["selection"], json!([made]));
+        assert!(!boards::session_text(&app).contains("side ="));
+        // Two gestures, two undo steps, back to the board as it opened.
+        use super::super::commands::{Command, CommandId};
+        for _ in 0..2 {
+            let undo = CommandId::Board(wren_canvas::Command::Undo);
+            let _ = app.dispatch(Command::Run(undo));
+        }
+        let view = app.board.as_ref().unwrap();
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!(boards::session_text(&app), boards::FLOW);
+    }
+
+    #[test]
+    fn board_seed_makes_the_ids_of_new_elements_repeat() {
+        let made = || {
+            let (_directory, mut app) = boards::fixture();
+            boards::open_board(&mut app, "Flow");
+            lay_out(&mut app);
+            ask(&mut app, "board.seed", json!({"seed": 7}), PLACED).unwrap();
+            pointer(
+                &mut app,
+                json!({"kind": "click", "button": "left", "at": {"node": "pack"}}),
+            );
+            key(&mut app, json!({"key": "tab"}));
+            let board = app.board.as_ref().unwrap().board();
+            let mut ids: Vec<String> = board
+                .nodes
+                .keys()
+                .chain(board.edges.keys())
+                .map(|id| id.as_str().to_owned())
+                .collect();
+            ids.sort();
+            ids
+        };
+        let first = made();
+        assert_eq!(first.len(), 5, "{first:?}");
+        assert_eq!(made(), first);
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        assert!(ask(&mut app, "board.seed", json!({"seed": -1}), PLACED).is_err());
     }
 
     #[test]

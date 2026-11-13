@@ -18,7 +18,7 @@ import pytest
 
 from tools.wrentest.boards import (
     FLOW, HAND_WRITTEN, GROUP, blocks, board, board_app, bounds, canvas_point, click, copy_samples,
-    drag, fitted, flushed, key, line_diff, open_note, pointer, press, stamp, type_text,
+    drag, edge, fitted, flushed, hover, key, line_diff, open_note, pointer, press, stamp, type_text,
 )
 from tools.wrentest.test_board_view import wait_focus
 from tools.wrentest.ui import WrenApp, wait_for
@@ -188,6 +188,96 @@ def test_a_new_node_or_connector_is_one_block(samples: Path) -> None:
         new = set(blocks(after)) - set(blocks(before))
         assert len(new) == 1 and next(iter(new)).startswith("[edge."), new
         assert all(line.startswith("+") for line in line_diff(before, after))
+
+
+def test_the_keyboard_builds_and_styles_connectors_one_block_or_line_at_a_time(samples: Path) -> None:
+    """Item 2 by keyboard (§5.6, §5.12 rules 3 and 9): Tab with nothing
+    selected adds one node block, keyboard Connecting one connector block,
+    and each connector style command one line."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-keyboard") as app:
+        ready(app)
+        original = flow.read_bytes()
+        state = key(app, "tab")
+        assert state["state"] == "editing" and state["counts"] == {"nodes": 16, "edges": 17}, state
+        made = state["selection"][0]
+        type_text(app, "Audit")
+        key(app, "escape")
+        flushed(app)
+        after = flow.read_bytes()
+        assert set(blocks(after)) - set(blocks(original)) == {f"[node.{made}]"}
+        assert all(line.startswith("+") for line in line_diff(original, after))
+
+        # From the new node to Valid? by its query: one connector block.
+        state = key(app, "c")
+        assert state["state"] == "connecting", state
+        type_text(app, "val")
+        state = key(app, "enter")
+        assert state["counts"]["edges"] == 18, state
+        connector = state["selection"][0]
+        flushed(app)
+        before, after = after, flow.read_bytes()
+        assert set(blocks(after)) - set(blocks(before)) == {f"[edge.{connector}]"}
+        assert all(line.startswith("+") for line in line_diff(before, after))
+        assert edge(app, connector)["to"]["node"] == VALID
+
+        # Each style command on the selected connector is one line.
+        for command, line in (
+            ("board.edge.routing", '+ route = "straight"'),
+            ("board.edge.start", '+ heads = ["arrow", "arrow"]'),
+            ("board.stroke.dashed", '+ style.stroke = "dashed"'),
+        ):
+            flushed(app)
+            before = flow.read_bytes()
+            app.client.call("command.run", {"id": command})
+            flushed(app)
+            assert line_diff(before, flow.read_bytes()) == [line], command
+            app.client.call("command.run", {"id": command})
+            flushed(app)
+            assert flow.read_bytes() == before, command
+        app.client.call("command.run", {"id": "board.edge.reverse"})
+        assert edge(app, connector)["from"]["node"] == VALID
+        # Every step undone gives the original bytes back.
+        while board(app)["can_undo"]:
+            key(app, "z", "mod")
+        flushed(app)
+        assert flow.read_bytes() == original
+
+
+def test_connectors_and_what_they_reach_are_selected_by_keyboard(samples: Path) -> None:
+    """§5.7 rule 4, §5.3 rule 6 and §5.10 rule 1's cursor: nothing here
+    changes the file but the delete."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-select") as app:
+        ready(app)
+        original = flow.read_bytes()
+        click(app, {"node": RECEIVE})
+        assert key(app, "down", "mod", "shift")["selection"] == [FROM_RECEIVE]
+        # Up from that connector is its end further up, Receive order.
+        assert key(app, "up")["selection"] == [RECEIVE]
+        assert key(app, "up", "mod", "shift")["selection"] == [INTO_RECEIVE]
+        # From Pack: Ship, Send receipt and End, and the three connectors.
+        click(app, {"node": PACK})
+        state = key(app, "a", "mod", "shift")
+        assert len(state["selection"]) == 7 and state["cursor"] == PACK, state
+        # From Start, the whole chart.
+        click(app, {"node": START})
+        state = key(app, "a", "mod", "shift")
+        assert len(state["selection"]) == 32, state
+        flushed(app)
+        assert flow.read_bytes() == original and not dirty(app)
+
+        # Deleting Backorder leaves the cursor on Notify customer, the
+        # nearest node to it, and nothing selected.
+        backorder = next(n["id"] for n in board(app, elements=True)["nodes"]
+                         if n["text"] == "Backorder")
+        notify = next(n["id"] for n in board(app, elements=True)["nodes"]
+                      if n["text"] == "Notify customer")
+        click(app, {"node": backorder})
+        state = key(app, "delete")
+        assert state["selection"] == [] and state["cursor"] == notify, state
+        # An arrow then selects the cursor.
+        assert key(app, "down")["selection"] == [notify]
 
 
 def test_deleting_a_node_takes_its_two_connectors_and_nothing_else(samples: Path) -> None:
@@ -395,6 +485,146 @@ def test_the_mouse_creates_selects_moves_resizes_edits_and_deletes(samples: Path
         assert key(app, "delete")["counts"]["nodes"] == 17
         flushed(app)
         tomllib.loads(flow.read_text(encoding="utf-8"))
+
+
+def test_the_pointer_draws_pins_and_re_attaches_connectors(samples: Path) -> None:
+    """Items 2 and 6, drag-connect: §5.5 rule 8 and §5.12 rules 1, 5 and 6
+    through `board.pointer`, each gesture one block or one line of the file
+    and one undo step."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-connect") as app:
+        ready(app)
+        original = flow.read_bytes()
+        nowhere = {"canvas": [600, 310]}
+
+        # Resting on a node shows its four connect handles, and selects
+        # and writes nothing.
+        handles = hover(app, START)
+        assert [h["handle"] for h in handles] == [
+            "connect_top", "connect_right", "connect_bottom", "connect_left"]
+        state = board(app)
+        assert state["selection"] == [] and state["revision"] == 0 and state["pristine"], state
+
+        # A drag from one onto another node: a connector floating at both
+        # ends, selected, and one new block in the file.
+        press(app, {"node": START, "handle": "connect_right"})
+        state = pointer(app, "move", {"node": PACK})
+        assert state["state"] == "connecting", state
+        assert state["connecting"] == {"target": PACK, "side": None, "query": ""}, state
+        assert state["revision"] == 0 and state["counts"]["edges"] == 17, state
+        assert [h["handle"] for h in bounds(app)["handles"]] == [
+            "side_top", "side_right", "side_bottom", "side_left"]
+        state = pointer(app, "release")
+        assert state["state"] == "idle" and state["counts"]["edges"] == 18, state
+        assert state["revision"] == 1 and len(state["selection"]) == 1, state
+        made = state["selection"][0]
+        assert edge(app, made)["from"] == {"node": START, "side": None, "anchor": None}
+        assert edge(app, made)["to"] == {"node": PACK, "side": None, "anchor": None}
+        flushed(app)
+        drawn = flow.read_bytes()
+        assert set(blocks(drawn)) - set(blocks(original)) == {f"[edge.{made}]"}
+        assert all(line.startswith("+") for line in line_diff(original, drawn))
+
+        # Its `to` end dragged onto a side handle of another node: that one
+        # line, with the side.
+        assert [h["handle"] for h in bounds(app)["handles"]] == ["from", "to"]
+        press(app, {"edge": made, "handle": "to"})
+        state = pointer(app, "move", {"node": VALID, "handle": "side_right"})
+        assert state["connecting"] == {"target": VALID, "side": "right", "query": ""}, state
+        state = pointer(app, "release")
+        assert state["revision"] == 2 and state["selection"] == [made], state
+        flushed(app)
+        pinned = flow.read_bytes()
+        assert line_diff(drawn, pinned) == [
+            f'- to = {{ node = "{PACK}" }}', f'+ to = {{ node = "{VALID}", side = "right" }}']
+
+        # Released on empty canvas an attached end goes back: no draft.
+        press(app, {"edge": made, "handle": "to"})
+        state = pointer(app, "move", nowhere)
+        assert state["state"] == "connecting" and state["connecting"]["target"] is None, state
+        state = pointer(app, "release")
+        assert state["state"] == "idle" and state["revision"] == 2, state
+
+        # A new connector released on empty canvas ends in a new node,
+        # centred there on the grid, with its label open: two blocks.
+        hover(app, PACK)
+        press(app, {"node": PACK, "handle": "connect_right"})
+        pointer(app, "move", nowhere)
+        state = pointer(app, "release")
+        assert state["state"] == "editing" and state["counts"] == {"nodes": 16, "edges": 19}, state
+        new = state["selection"][0]
+        assert node(app, new)["at"] == [540, 280] and node(app, new)["shape"] == "rect"
+        type_text(app, "Wrap")
+        key(app, "escape")
+        flushed(app)
+        wrapped = flow.read_bytes()
+        added = set(blocks(wrapped)) - set(blocks(pinned))
+        assert len(added) == 2 and f"[node.{new}]" in added, added
+        assert all(line.startswith("+") for line in line_diff(pinned, wrapped))
+
+        # A click on a connect handle is `board.connect.<side>` from its
+        # node: nothing lies left of Start, so it makes a node there.
+        key(app, "escape")
+        hover(app, START)
+        state = click(app, {"node": START, "handle": "connect_left"})
+        assert state["state"] == "editing" and state["counts"] == {"nodes": 17, "edges": 20}, state
+        assert node(app, state["selection"][0])["at"] == [-200, 0]
+        key(app, "escape")
+
+        # The connector tool draws from a node, and from nowhere else.
+        key(app, "escape")
+        assert key(app, "c")["tool"] == "connector"
+        press(app, {"canvas": [600, 100]})
+        assert pointer(app, "move", {"canvas": [640, 140]})["state"] == "armed"
+        assert pointer(app, "release")["state"] == "armed"
+        press(app, {"node": RECEIVE})
+        assert pointer(app, "move", {"node": PACK})["state"] == "connecting"
+        state = pointer(app, "release")
+        assert state["tool"] == "select" and state["counts"]["edges"] == 21, state
+
+        # Five gestures were five steps: as many undos give the bytes back.
+        flushed(app)
+        assert flow.read_bytes() != wrapped
+        for _ in range(5):
+            key(app, "z", "mod")
+        state = board(app)
+        assert state["pristine"] and not state["can_undo"], state
+        flushed(app)
+        assert flow.read_bytes() == original
+
+
+def test_a_connector_is_selected_and_its_label_edited(samples: Path) -> None:
+    """§5.12 rule 8: a click selects a connector, a double-click edits its
+    one label, and only its `labels` lines change."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-edge-label") as app:
+        ready(app)
+        original = flow.read_bytes()
+        assert edge(app, INTO_RECEIVE)["labels"] == []
+        state = click(app, {"edge": INTO_RECEIVE})
+        assert state["selection"] == [INTO_RECEIVE] and state["cursor"] == INTO_RECEIVE, state
+        assert state["state"] == "idle" and state["revision"] == 0, state
+        # Long enough after that click to be a double-click of its own. The
+        # label is too small to read at the fitted zoom, so the view goes to
+        # 100 % as it opens (§5.9 rule 2).
+        time.sleep(0.4)
+        state = click(app, {"edge": INTO_RECEIVE}, double=True)
+        assert state["state"] == "editing" and state["editing"]["id"] == INTO_RECEIVE, state
+        assert state["viewport"]["zoom"] == 1.0, state
+        type_text(app, "first")
+        key(app, "escape")
+        flushed(app)
+        assert line_diff(original, flow.read_bytes()) == [
+            "+ labels = [", '+   { text = "first" },', "+ ]"]
+        placed = next(e for e in bounds(app)["edges"] if e["id"] == INTO_RECEIVE)
+        assert placed["label"] is not None
+        # Enter edits it too, and emptied it is gone again.
+        key(app, "enter")
+        key(app, "backspace")
+        state = key(app, "escape")
+        assert state["pristine"], state
+        flushed(app)
+        assert flow.read_bytes() == original
 
 
 def test_reloading_saved_bytes_and_a_no_op_writes_nothing(samples: Path) -> None:

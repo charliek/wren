@@ -81,6 +81,41 @@ def test_in_a_label_a_tool_letter_is_text(samples: Path) -> None:
         assert b'text = "rodutC' in flow.read_bytes()
 
 
+def test_in_keyboard_connecting_a_tool_letter_is_query_text(samples: Path) -> None:
+    """§5.1 rule 3: in keyboard Connecting a tool letter types into the
+    query, and only Enter, Escape, the arrows and Backspace act."""
+    with board_app(samples, "board-keys-query") as app:
+        ready(app)
+        click(app, {"node": PACK})
+        state = key(app, "c")
+        assert state["state"] == "connecting" and state["tool"] == "select", state
+        assert state["connecting"] == {"target": None, "side": None, "query": ""}, state
+        for letter in "che":
+            state = key(app, letter)
+            assert state["handled"] and state["tool"] == "select", state
+        check = next(n["id"] for n in board(app, elements=True)["nodes"]
+                     if n["text"] == "Check stock")
+        assert state["connecting"] == {"target": check, "side": None, "query": "che"}, state
+        # Tool letters, Shift and Space are text too.
+        for name, mods in (("d", ()), ("r", ("shift",)), ("space", ())):
+            state = key(app, name, *mods)
+            assert state["handled"] and state["tool"] == "select", state
+        assert state["connecting"] == {"target": None, "side": None, "query": "chedR "}, state
+        for _ in range(3):
+            state = key(app, "backspace")
+        assert state["connecting"]["target"] == check, state
+        assert state["connecting"]["query"] == "che", state
+        assert state["counts"]["edges"] == 17
+        state = key(app, "enter")
+        assert state["state"] == "idle" and state["connecting"] is None, state
+        assert state["counts"]["edges"] == 18
+        made = state["selection"][0]
+        made_edge = next(e for e in board(app, elements=True)["edges"] if e["id"] == made)
+        floating = {"side": None, "anchor": None}
+        assert made_edge["from"] == {"node": PACK, **floating}, made_edge
+        assert made_edge["to"] == {"node": check, **floating}, made_edge
+
+
 def test_a_held_tab_or_delete_acts_once(samples: Path) -> None:
     with board_app(samples, "board-keys-repeat") as app:
         ready(app)

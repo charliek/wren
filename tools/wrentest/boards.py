@@ -256,6 +256,25 @@ def click(app: WrenApp, at: dict, *, mods: tuple[str, ...] = (), double: bool = 
     return pointer(app, "double_click" if double else "click", at, mods=mods)
 
 
+def hover(app: WrenApp, node: str) -> list[dict]:
+    """Rest the pointer on a node until it shows its four connect handles
+    (§5.5 rule 8), which the widget's own redraw brings up once the
+    machine's 120 ms have passed. Returns them."""
+    pointer(app, "move", {"node": node})
+
+    def shown():
+        handles = [h for h in bounds(app)["handles"]
+                   if h["id"] == node and h["handle"].startswith("connect_")]
+        return handles if len(handles) == 4 else None
+
+    return wait_for(shown, timeout=5, interval=0.02, description="the connect handles shown")
+
+
+def edge(app: WrenApp, id_: str) -> dict:
+    """A connector's schema-1 fields."""
+    return next(e for e in board(app, elements=True)["edges"] if e["id"] == id_)
+
+
 def canvas_point(app: WrenApp, at: dict) -> tuple[float, float]:
     """Where ``at`` is in board units, as ``board.pointer`` reads it: a
     node's middle, one of the handles the board shows, a board point or a
@@ -296,6 +315,19 @@ SCRIPT_KEYS = {"Tab": "tab", "Esc": "escape", "↵": "enter", "←": "left", "�
 SCRIPT_MODS = {"⌘": "mod", "⇧": "shift", "⌥": "alt"}
 NUMBERS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
            "nine": 9, "ten": 10}
+
+
+# The acceptance script of §5.20, as the plan writes it.
+ACCEPTANCE = """
+`U Tab` Start, `Tab` Receive order, `Esc D Tab` Valid?
+`Esc ⌘→` Reject order, `Esc ⇧⌘← ↵` No `Esc ←`
+`Tab` Check stock, `Esc ⇧⌘↑ ↵` Yes, `Esc D Tab` In stock?
+`Esc ⌘→` Backorder, `Esc ⇧⌘← ↵` No, `Tab` Notify customer, `Esc C` che `↵`, `← ↓`
+`Tab` Charge card, `Esc ⇧⌘↑ ↵` Yes, `Esc D Tab` Payment ok?
+`Esc ⌘→` Retry payment, `Esc ⇧⌘← ↵` No, `Esc → C` cha `↵`, `← ↓`
+`Tab` Pack, `Esc ⇧⌘↑ ↵` Yes, `Tab` Ship, `Tab` Send receipt, `Esc U Tab` End
+`Esc`, `↑` eight times, `→`, `C` end `↵`
+"""
 
 
 def script_steps(text: str) -> list[tuple[str, ...]]:

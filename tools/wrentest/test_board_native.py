@@ -15,7 +15,7 @@ import time
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, board, board_app, bounds, fitted, open_note, stamp,
+    FLOW, NOTES, board, board_app, bounds, fitted, open_note, stamp,
 )
 from tools.wrentest.test_board_view import column, moved, samples, wait_focus  # noqa: F401  (fixture)
 from tools.wrentest.test_editor import xdo
@@ -282,3 +282,84 @@ def test_native_a_letter_in_the_palette_arms_nothing(samples) -> None:
         xdo("key", "Escape")
         wait_focus(app, ["note-editor"])
         assert board(app)["tool"] == "select"
+
+
+REJECT = "pa6md7qp"
+
+
+@pytest.mark.native_x11
+def test_native_drag_from_a_connect_handle_onto_another_shape(samples) -> None:
+    """The real pointer rests on a node until its connect handles show,
+    then drags from one onto another node (§5.5 rule 8, §5.12 rule 1)."""
+    with board_app(samples, "board-native-connect") as app:
+        window, placed = native_board(app)
+        # A click gives the board the keyboard, without which no handle
+        # shows; then the pointer comes onto Receive order and rests.
+        move(window, screen_of(placed, START))
+        xdo("click", "1")
+        settled(app, lambda state: state["selection"] == [START], "Start selected")
+        move(window, screen_of(placed, RECEIVE))
+        handles = wait_for(
+            lambda: [h for h in bounds(app)["handles"]
+                     if h["id"] == RECEIVE and h["handle"].startswith("connect_")],
+            timeout=3, interval=0.025, description="the connect handles shown")
+        assert len(handles) == 4, handles
+        handle = next(h["bounds"] for h in handles if h["handle"] == "connect_right")
+        grip = (round(handle["x"] + handle["width"] / 2), round(handle["y"] + handle["height"] / 2))
+        before = {edge["id"] for edge in board(app, elements=True)["edges"]}
+        native_drag(window, grip, screen_of(placed, REJECT))
+        state = settled(app, lambda state: state["state"] == "idle" and state["counts"]["edges"] == 18,
+                        "the connector drawn")
+        (made,) = [edge for edge in state["edges"] if edge["id"] not in before]
+        # Released in the middle of the node, the end floats.
+        assert (made["from"]["node"], made["to"]["node"], made["to"]["side"]) == (RECEIVE, REJECT, None)
+        assert state["counts"]["nodes"] == 15
+        assert column(app) == "editor"
+
+
+@pytest.mark.native_x11
+def test_native_keys_build_the_first_four_nodes_of_the_acceptance_script(samples) -> None:
+    """§5.20's first line and the start of its second with real keys, on
+    a new board: `U Tab` Start, `Tab` Receive order, `Esc D Tab` Valid?,
+    `Esc ⌘→` Reject order (Ctrl on Linux)."""
+    with board_app(samples, "board-native-script") as app:
+        open_note(app, NOTES)
+        app.client.call("command.run", {"id": "note.new_board"})
+        app.client.call("dialog.name", {"name": "Typed"})
+        app.client.call("dialog.submit")
+        wait_for(lambda: board(app)["surface"] == "board", timeout=10, interval=0.05,
+                 description="the new board open")
+        windows = xdo("search", "--onlyvisible", "--pid", str(app.pid)).splitlines()
+        assert len(windows) == 1, windows
+        xdo("windowfocus", "--sync", windows[0])
+        wait_focus(app, ["note-editor"])
+
+        def typed(text: str) -> None:
+            xdo("type", "--delay", "20", text)
+            settled(app, lambda state: state["editing"] and state["editing"]["text"] == text,
+                    f"{text!r} typed")
+
+        xdo("key", "--delay", "0", "u", "Tab")
+        typed("Start")
+        xdo("key", "Tab")
+        typed("Receive order")
+        xdo("key", "--delay", "0", "Escape", "d", "Tab")
+        typed("Valid?")
+        xdo("key", "--delay", "0", "Escape", "ctrl+Right")
+        typed("Reject order")
+        xdo("key", "Escape")
+        state = settled(app, lambda state: state["state"] == "idle", "the last label committed")
+
+        assert state["counts"] == {"nodes": 4, "edges": 3}, state
+        nodes = {node["text"]: node for node in state["nodes"]}
+        start = nodes["Start"]["at"]
+        cells = {text: (node["shape"], [(node["at"][0] - start[0]) // 20, (node["at"][1] - start[1]) // 20])
+                 for text, node in nodes.items()}
+        # The keyboard model's layout (golden/accept/checkout-flow.toml).
+        assert cells == {"Start": ("pill", [0, 0]), "Receive order": ("rect", [0, 6]),
+                         "Valid?": ("diamond", [0, 12]), "Reject order": ("rect", [10, 12])}
+        ids = {node["id"]: text for text, node in nodes.items()}
+        links = {(ids[edge["from"]["node"]], ids[edge["to"]["node"]]) for edge in state["edges"]}
+        assert links == {("Start", "Receive order"), ("Receive order", "Valid?"),
+                         ("Valid?", "Reject order")}
+        assert state["selection"] == [nodes["Reject order"]["id"]]

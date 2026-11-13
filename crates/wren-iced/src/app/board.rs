@@ -101,10 +101,11 @@ impl App {
     ///
     /// Input other than the wheel means the board has the keyboard, as an
     /// edit means the editor has it; the wheel reaches a board that does
-    /// not, and a cancel or a focus change only says the window or the
-    /// widget gained or lost it. Under a dialog or a palette, and while a
-    /// workspace loads, the board takes only what looks at it or ends
-    /// what was in flight. Input meant for the board as it was before a
+    /// not, a cancel or a focus change only says the window or the widget
+    /// gained or lost it, and the pointer passing over with no button
+    /// down, leaving, or resting until a tick, is nobody acting on the
+    /// board. Under a dialog or a palette, and while a workspace loads,
+    /// the board takes only what looks at it or ends what was in flight. Input meant for the board as it was before a
     /// reload, or for another board, is dropped.
     pub(super) fn board_edit(&mut self, message: wren_canvas::Message) -> Task<Message> {
         use wren_canvas::Message as Sent;
@@ -121,14 +122,33 @@ impl App {
                 let id = super::commands::CommandId::Board(*command);
                 return self.dispatch(super::commands::Command::Run(id)).task;
             }
+            // Read now, after the keys before it, and carried out as what
+            // it reads as, so a bound key still goes through `dispatch`.
+            Sent::Key(epoch, press) => {
+                if held || *epoch != view.epoch() {
+                    return Task::none();
+                }
+                let read = view.press(press).unwrap_or_default();
+                let tasks: Vec<Task<Message>> = read
+                    .into_iter()
+                    .map(|message| self.board_edit(message))
+                    .collect();
+                return Task::batch(tasks);
+            }
             Sent::Input(epoch, _) | Sent::Label(epoch, _) | Sent::Pasted(epoch, _)
                 if *epoch != view.epoch() =>
             {
                 return Task::none();
             }
             Sent::Input(_, input) => {
-                let passive =
-                    matches!(input, Input::Wheel { .. } | Input::Cancel | Input::Focus(_));
+                let passive = matches!(
+                    input,
+                    Input::Wheel { .. }
+                        | Input::Cancel
+                        | Input::Focus(_)
+                        | Input::Leave
+                        | Input::Tick
+                );
                 let ends = matches!(
                     input,
                     Input::Release { .. } | Input::Modifiers(_) | Input::Space { held: false }
@@ -136,7 +156,8 @@ impl App {
                 if held && !(passive || ends) {
                     return Task::none();
                 }
-                if !held && !passive {
+                let hovers = matches!(input, Input::Move { .. }) && !view.machine().dragging();
+                if !held && !passive && !hovers {
                     self.column = Column::Editor;
                 }
             }
