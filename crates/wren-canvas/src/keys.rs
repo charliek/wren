@@ -57,6 +57,9 @@ pub(crate) struct Context<'a> {
     pub(crate) composing: bool,
     /// Escape has a rung of its ladder to act on ([`machine::Machine::escapes`]).
     pub(crate) escapes: bool,
+    /// The key was first pressed before the label opened, as the Enter
+    /// that opens one is: its repeats are not the label's.
+    pub(crate) held_from_before: bool,
     pub(crate) policy: Option<&'a KeyPolicy>,
 }
 
@@ -74,6 +77,11 @@ pub(crate) fn route(
     // steer a composition, and must neither leave the label nor reach the
     // host (§5.9 rule 9, §5.14 rung 1).
     if context.composing {
+        return Keyed::Take(Vec::new());
+    }
+    // A held key does one thing (§5.1 rule 4): the Enter that opened a
+    // label must not go on to replace its text with line breaks.
+    if repeat && context.editing && context.held_from_before {
         return Keyed::Take(Vec::new());
     }
     let shortcut = modifiers.control() || modifiers.alt() || modifiers.logo();
@@ -265,6 +273,7 @@ mod tests {
         editing: false,
         composing: false,
         escapes: false,
+        held_from_before: false,
         policy: None,
     };
 
@@ -322,7 +331,7 @@ mod tests {
                 Key::Named(Named::Enter) if modifiers.command() => {
                     KeyRoute::Command(Command::CommitLabel)
                 }
-                Key::Named(Named::Enter) => KeyRoute::Command(Command::EditLabel),
+                Key::Named(Named::Enter) if !repeat => KeyRoute::Command(Command::EditLabel),
                 Key::Named(Named::ArrowRight) => KeyRoute::Command(Command::Select(Dir::Right)),
                 Key::Character("z") if modifiers.command() => KeyRoute::Command(Command::Undo),
                 _ => KeyRoute::Pass,
@@ -547,6 +556,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_held_key_that_opened_the_label_does_not_type_in_it() {
+        let policy = policy();
+        let editing = Context {
+            editing: true,
+            escapes: true,
+            policy: Some(&policy),
+            ..IDLE
+        };
+        let enter = |context| {
+            route(
+                &Key::Named(Named::Enter),
+                Physical::Code(Code::Enter),
+                Modifiers::default(),
+                Some("\r"),
+                true,
+                context,
+            )
+        };
+        // The Enter that opened the label, held: its repeats do nothing.
+        let opener = Context {
+            held_from_before: true,
+            ..editing
+        };
+        assert_eq!(enter(opener), Keyed::Take(Vec::new()));
+        // An Enter first pressed in the label repeats there as text.
+        assert_eq!(enter(editing), edits(&[insert("\n")]));
+    }
+
     /// §5.9 rule 3, key by key: what the label makes of each.
     #[test]
     fn the_label_s_own_keys() {
@@ -698,6 +736,7 @@ mod tests {
             editing: true,
             composing: true,
             escapes: true,
+            held_from_before: false,
             policy: Some(&policy),
         };
         let plain = Modifiers::default();

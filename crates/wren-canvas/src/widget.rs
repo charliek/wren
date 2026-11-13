@@ -94,6 +94,9 @@ struct State {
     pointer: Option<Point>,
     /// The button whose press the widget sent, until its release.
     pressed: Option<mouse::Button>,
+    /// The key last pressed on the focused board, until its release, and
+    /// whether a label was open at that first press.
+    key_held: Option<(keyboard::key::Physical, bool)>,
     motion: Motion,
     geometry: RefCell<Geometry>,
 }
@@ -107,6 +110,7 @@ impl State {
             modifiers: keyboard::Modifiers::default(),
             pointer: None,
             pressed: None,
+            key_held: None,
             motion: Motion::default(),
             geometry: RefCell::default(),
         }
@@ -395,6 +399,14 @@ fn translate(
     let editing = machine.editing().is_some();
     let composing = view.label().is_some_and(|label| label.preedit().is_some());
     let edit = |action: LabelAction| Message::Label(view.epoch(), action);
+    if let Event::Keyboard(keyboard::Event::KeyReleased { physical_key, .. }) = event {
+        if state
+            .key_held
+            .is_some_and(|(held, _)| held == *physical_key)
+        {
+            state.key_held = None;
+        }
+    }
     match event {
         Event::Window(window::Event::Focused) => state.window_focused = true,
         Event::Window(window::Event::Unfocused) => {
@@ -505,10 +517,14 @@ fn translate(
             repeat,
             ..
         }) if state.focused => {
+            if !*repeat {
+                state.key_held = Some((*physical_key, editing));
+            }
             let context = keys::Context {
                 editing,
                 composing,
                 escapes: machine.escapes(),
+                held_from_before: state.key_held == Some((*physical_key, false)),
                 policy: view.key_policy(),
             };
             let keyed = keys::route(
@@ -1102,6 +1118,59 @@ mod tests {
         state.unfocus();
         assert!(!state.is_focused());
     }
+    #[test]
+    fn a_held_enter_opens_the_label_and_leaves_its_text_alone() {
+        let mut view = open(fixtures::TWO);
+        view.set_key_policy(Arc::new(|key, _, _, repeat| match key {
+            // As the keys chain's policy has it: a command that does not
+            // repeat lets its repeats pass.
+            Key::Named(Named::Enter) if !repeat => KeyRoute::Command(Command::EditLabel),
+            _ => KeyRoute::Pass,
+        }));
+        let mut state = State::new();
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        send(&mut view, &mut state, press, ON_A);
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        send(&mut view, &mut state, release, ON_A);
+        let enter = |repeat| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Named(Named::Enter),
+                modified_key: Key::Named(Named::Enter),
+                physical_key: Physical::Code(Code::Enter),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+                text: Some("\r".into()),
+                repeat,
+            })
+        };
+        let sent = send(&mut view, &mut state, enter(false), ON_A);
+        assert_eq!(sent.messages, [Message::Command(Command::EditLabel)]);
+        assert_eq!(view.machine().state(), Surface::Editing);
+        // Held: its repeats are taken and do nothing to the label.
+        for _ in 0..3 {
+            let sent = send(&mut view, &mut state, enter(true), ON_A);
+            assert!(sent.captured && sent.messages.is_empty());
+        }
+        let label = view.label().expect("a label");
+        assert_eq!((label.text(), label.selection()), ("A", 0..1));
+        assert_eq!(text_of(&view), "A");
+        // Let go and pressed again in the label, it breaks the line, and
+        // held there it goes on doing so.
+        let up = Event::Keyboard(keyboard::Event::KeyReleased {
+            key: Key::Named(Named::Enter),
+            modified_key: Key::Named(Named::Enter),
+            physical_key: Physical::Code(Code::Enter),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+        });
+        send(&mut view, &mut state, up, ON_A);
+        let sent = send(&mut view, &mut state, enter(false), ON_A);
+        assert_eq!(labels(&sent), [LabelAction::Insert("\n".to_owned())]);
+        let sent = send(&mut view, &mut state, enter(true), ON_A);
+        assert_eq!(labels(&sent), [LabelAction::Insert("\n".to_owned())]);
+        assert_eq!(view.label().map(crate::Label::text), Some("\n\n"));
+    }
+
     /// A focused board with the label of `a` open, its text "A" selected,
     /// as a double-click leaves it.
     fn labelling() -> (BoardView, State) {
