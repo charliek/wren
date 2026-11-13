@@ -257,6 +257,12 @@ pub enum Message {
     Resized { width: f32, height: f32 },
     /// An edit of the open label, stamped with the epoch it was meant for.
     Label(u64, LabelAction),
+    /// A key pressed on the focused board, stamped with the epoch it was
+    /// meant for. It is read when it is applied ([`BoardView::press`]),
+    /// not when the widget sent it: iced applies the messages of a batch
+    /// of events only after the whole batch, and a key pressed quickly
+    /// after another must be read in the state that one leaves.
+    Key(u64, KeyPress),
     /// A key the board layer binds, stamped with the epoch it was meant
     /// for. The host runs it through its own command path, which reaches
     /// [`BoardView::command`], unless the board has changed since.
@@ -265,6 +271,19 @@ pub enum Message {
     /// stamped with the epoch of the view that asked. It goes to what asked,
     /// the open label or the board, and is dropped if that has gone.
     Pasted(u64, String),
+}
+
+/// One key press, as the widget was given it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyPress {
+    pub key: iced::keyboard::Key,
+    pub physical: iced::keyboard::key::Physical,
+    pub modifiers: iced::keyboard::Modifiers,
+    pub text: Option<String>,
+    pub repeat: bool,
+    /// Whether the widget saw this key go down and it has not come up
+    /// since, so a repeat is of a press the view has read.
+    pub held: bool,
 }
 
 /// Where a view draws the ids of the elements it makes.
@@ -376,6 +395,10 @@ pub struct BoardView {
     /// fit), which the widget draws in full at once instead of as a move.
     jumps: u64,
     key_policy: Option<KeyPolicy>,
+    /// The key whose first press was read last, and whether a label was
+    /// open then: the repeats of a key held since before a label opened
+    /// are not its text.
+    pressed: Option<(iced::keyboard::key::Physical, bool)>,
     /// The open label (§5.9): the machine says whose it is
     /// ([`Machine::editing`]), the view holds its text.
     label: Option<Label>,
@@ -463,6 +486,7 @@ impl BoardView {
             fit_pending: false,
             jumps: 0,
             key_policy: None,
+            pressed: None,
             label: None,
             making: None,
             history: History::new(),
@@ -685,11 +709,19 @@ impl BoardView {
                     }
                 }
             }
+            Message::Key(epoch, press) if epoch == self.epoch => {
+                for message in self.press(&press).into_iter().flatten() {
+                    let did = self.update(message, now);
+                    update.changed |= did.changed;
+                    update.effects.extend(did.effects);
+                }
+            }
             Message::Command(epoch, command) if epoch == self.epoch => {
                 return self.command(command, now);
             }
             Message::Input(..)
             | Message::Label(..)
+            | Message::Key(..)
             | Message::Command(..)
             | Message::Pasted(..) => {}
         }
@@ -795,8 +827,10 @@ impl BoardView {
     /// board sends for it in order, which is nothing for a key that only
     /// must not reach the host. `held_from_before` is whether the key went
     /// down before the open label opened, as the Enter that opens one did.
-    /// The widget asks this for every key it is given; a host that delivers
-    /// keys itself, as a test harness does, asks the same.
+    /// The widget asks this for whether the board takes a key, and
+    /// [`BoardView::press`] for what the key does once the keys before it
+    /// are applied; a host that delivers keys one at a time itself, as a
+    /// test harness does, may ask this alone.
     pub fn key(
         &self,
         key: &iced::keyboard::Key,
@@ -830,6 +864,26 @@ impl BoardView {
                     keys::Out::Label(action) => Message::Label(epoch, action),
                 })
                 .collect(),
+        )
+    }
+
+    /// What the board makes of `press` in the state it is in now: what
+    /// [`BoardView::key`] says, with whether a repeat is of a key held
+    /// since before the open label opened. A host that applies
+    /// [`Message::Key`] itself, to send commands through its own path,
+    /// asks this.
+    pub fn press(&mut self, press: &KeyPress) -> Option<Vec<Message>> {
+        if !press.repeat {
+            self.pressed = Some((press.physical, self.machine.editing().is_some()));
+        }
+        let held_from_before = press.held && self.pressed == Some((press.physical, false));
+        self.key(
+            &press.key,
+            press.physical,
+            press.modifiers,
+            press.text.as_deref(),
+            press.repeat,
+            held_from_before,
         )
     }
 

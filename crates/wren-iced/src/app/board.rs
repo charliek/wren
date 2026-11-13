@@ -122,6 +122,19 @@ impl App {
                 let id = super::commands::CommandId::Board(*command);
                 return self.dispatch(super::commands::Command::Run(id)).task;
             }
+            // Read now, after the keys before it, and carried out as what
+            // it reads as, so a bound key still goes through `dispatch`.
+            Sent::Key(epoch, press) => {
+                if held || *epoch != view.epoch() {
+                    return Task::none();
+                }
+                let read = view.press(press).unwrap_or_default();
+                let tasks: Vec<Task<Message>> = read
+                    .into_iter()
+                    .map(|message| self.board_edit(message))
+                    .collect();
+                return Task::batch(tasks);
+            }
             Sent::Input(epoch, _) | Sent::Label(epoch, _) | Sent::Pasted(epoch, _)
                 if *epoch != view.epoch() =>
             {

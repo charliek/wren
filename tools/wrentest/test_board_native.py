@@ -339,13 +339,13 @@ def test_native_keys_build_the_first_four_nodes_of_the_acceptance_script(samples
             settled(app, lambda state: state["editing"] and state["editing"]["text"] == text,
                     f"{text!r} typed")
 
-        xdo("key", "u", "Tab")
+        xdo("key", "--delay", "0", "u", "Tab")
         typed("Start")
         xdo("key", "Tab")
         typed("Receive order")
-        xdo("key", "Escape", "d", "Tab")
+        xdo("key", "--delay", "0", "Escape", "d", "Tab")
         typed("Valid?")
-        xdo("key", "Escape", "ctrl+Right")
+        xdo("key", "--delay", "0", "Escape", "ctrl+Right")
         typed("Reject order")
         xdo("key", "Escape")
         state = settled(app, lambda state: state["state"] == "idle", "the last label committed")

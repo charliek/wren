@@ -31,7 +31,7 @@ use crate::label::LabelAction;
 use crate::machine::{Button, Input, Scroll};
 use crate::overlay;
 use crate::paint::{self, Cull};
-use crate::{BoardView, Labels, Message, Style, Viewport, REST};
+use crate::{BoardView, KeyPress, Labels, Message, Style, Viewport, REST};
 
 pub(crate) struct Canvas<'a> {
     view: &'a BoardView,
@@ -94,9 +94,11 @@ struct State {
     pointer: Option<Point>,
     /// The button whose press the widget sent, until its release.
     pressed: Option<mouse::Button>,
-    /// The key last pressed on the focused board, until its release, and
-    /// whether a label was open at that first press.
-    key_held: Option<(keyboard::key::Physical, bool)>,
+    /// The key last pressed on the focused board, until its release.
+    key_held: Option<keyboard::key::Physical>,
+    /// Whether a key was sent that the view may not have applied yet: from
+    /// then until the next redraw, which follows the batch's messages.
+    keys_unread: bool,
     motion: Motion,
     geometry: RefCell<Geometry>,
 }
@@ -111,6 +113,7 @@ impl State {
             pointer: None,
             pressed: None,
             key_held: None,
+            keys_unread: false,
             motion: Motion::default(),
             geometry: RefCell::default(),
         }
@@ -405,15 +408,13 @@ fn translate(
     let composing = view.label().is_some_and(|label| label.preedit().is_some());
     let edit = |action: LabelAction| Message::Label(view.epoch(), action);
     if let Event::Keyboard(keyboard::Event::KeyReleased { physical_key, .. }) = event {
-        if state
-            .key_held
-            .is_some_and(|(held, _)| held == *physical_key)
-        {
+        if state.key_held == Some(*physical_key) {
             state.key_held = None;
         }
     }
     match event {
         Event::Window(window::Event::RedrawRequested(now)) => {
+            state.keys_unread = false;
             if machine.deadline().is_some_and(|due| due <= *now) {
                 sent.messages.push(input(Input::Tick));
             }
@@ -552,22 +553,43 @@ fn translate(
             ..
         }) if state.focused => {
             if !*repeat {
-                state.key_held = Some((*physical_key, editing));
+                state.key_held = Some(*physical_key);
             }
-            let held_from_before = state.key_held == Some((*physical_key, false));
-            if let Some(messages) = view.key(
-                key,
-                *physical_key,
-                *modifiers,
-                text.as_deref(),
-                *repeat,
-                held_from_before,
-            ) {
+            // Whether the board takes the key is decided now, for iced; what
+            // it does is read when the view applies it, after the keys
+            // before it in this batch (`Message::Key`). Whether a key is the
+            // host's does not hang on the board's state, but whether an
+            // Escape has a rung to act on does: after a key not yet applied
+            // it is taken, and is nothing if no rung is left by then.
+            let escape = matches!(key, Key::Named(Named::Escape)) && state.keys_unread;
+            let taken = escape
+                || view
+                    .key(
+                        key,
+                        *physical_key,
+                        *modifiers,
+                        text.as_deref(),
+                        *repeat,
+                        false,
+                    )
+                    .is_some();
+            if taken {
                 #[cfg(feature = "test-support")]
                 if keys::is_arrow(key) {
                     view.probe.arrows.set(view.probe.arrows.get() + 1);
                 }
-                sent.messages.extend(messages);
+                sent.messages.push(Message::Key(
+                    view.epoch(),
+                    KeyPress {
+                        key: key.clone(),
+                        physical: *physical_key,
+                        modifiers: *modifiers,
+                        text: text.as_deref().map(str::to_owned),
+                        repeat: *repeat,
+                        held: state.key_held == Some(*physical_key),
+                    },
+                ));
+                state.keys_unread = true;
                 sent.captured = true;
             }
         }
@@ -876,14 +898,26 @@ mod tests {
     }
 
     /// What `event` sends with the pointer at `at` in the window, the view
-    /// then taking each message as the host would.
+    /// then taking each message as the host would; a key is what the view
+    /// read it as.
     fn send(view: &mut BoardView, state: &mut State, event: Event, at: Point) -> Sent {
         let cursor = mouse::Cursor::Available(at);
         let sent = translate(state, &event, BOUNDS, cursor, view, Style::default());
-        for message in &sent.messages {
-            view.update(message.clone(), Instant::now());
+        let mut messages = Vec::new();
+        for message in sent.messages {
+            let read = match &message {
+                Message::Key(_, press) => view.press(press).unwrap_or_default(),
+                _ => vec![message],
+            };
+            for message in read {
+                view.update(message.clone(), Instant::now());
+                messages.push(message);
+            }
         }
-        sent
+        Sent {
+            messages,
+            captured: sent.captured,
+        }
     }
 
     fn inputs(sent: &Sent) -> Vec<Input> {
@@ -1168,7 +1202,13 @@ mod tests {
         let sent = send(&mut view, &mut state, escape.clone(), ON_A);
         assert!(sent.captured);
         assert!(view.machine().selection().is_empty());
+        // Pressed again before the redraw that follows the first, it is
+        // taken, since the first may not have been applied yet, and is
+        // nothing once it is read.
+        let sent = send(&mut view, &mut state, escape.clone(), ON_A);
+        assert!(sent.captured && sent.messages.is_empty());
         // Nothing left to clear: the app's Escape keeps the board focused.
+        redraw(&mut view, &mut state, Instant::now());
         assert_eq!(send(&mut view, &mut state, escape, ON_A), Sent::default());
         assert!(state.focused);
     }
@@ -1751,5 +1791,91 @@ mod tests {
         assert!(send(&mut view, &mut state, release, on_b).captured);
         assert_eq!(view.machine().state(), Surface::Idle);
         assert_eq!(view.board().edges.len(), 2);
+    }
+
+    /// iced translates a whole batch of events before it applies any of
+    /// their messages, as it does with keys pressed quickly.
+    fn batch(view: &mut BoardView, state: &mut State, events: &[Event]) -> Vec<Sent> {
+        let cursor = mouse::Cursor::Available(ON_A);
+        let sent: Vec<Sent> = events
+            .iter()
+            .map(|event| translate(state, event, BOUNDS, cursor, view, Style::default()))
+            .collect();
+        for message in sent.iter().flat_map(|sent| &sent.messages) {
+            view.update(message.clone(), Instant::now());
+        }
+        sent
+    }
+
+    /// The review's blocker: each of a quick run of keys is read in the
+    /// state the keys before it leave, not the one the run began in.
+    #[test]
+    fn keys_in_one_batch_are_each_read_after_the_ones_before() {
+        let policy: crate::KeyPolicy = Arc::new(|key, _, _, _| match key {
+            Key::Character(c) if c.as_str() == "d" => KeyRoute::Command(Command::Tool(
+                crate::Tool::Shape(wren_board::Shape::Diamond),
+            )),
+            Key::Character(c) if c.as_str() == "c" => {
+                KeyRoute::Command(Command::Tool(crate::Tool::Connector))
+            }
+            Key::Character(c) if c.as_str() == "h" => {
+                KeyRoute::Command(Command::Tool(crate::Tool::Hand))
+            }
+            Key::Named(Named::Tab) => KeyRoute::Command(Command::ConnectNext),
+            _ => KeyRoute::Pass,
+        });
+        let plain = keyboard::Modifiers::default();
+        let letter = |c: &str| key(Key::Character(c.into()), plain, Some(c));
+        let escape = key(Key::Named(Named::Escape), plain, None);
+
+        // `Escape d` in an open label: the label commits, then D arms the
+        // diamond.
+        let (mut view, mut state) = labelling();
+        view.set_key_policy(policy.clone());
+        let sent = batch(&mut view, &mut state, &[escape.clone(), letter("d")]);
+        assert!(sent.iter().all(|sent| sent.captured));
+        assert_eq!(view.label(), None);
+        assert_eq!(text_of(&view), "A");
+        assert_eq!(
+            view.machine().tool(),
+            crate::Tool::Shape(wren_board::Shape::Diamond)
+        );
+
+        // `c h e` with one node selected: C enters keyboard Connecting,
+        // and the letters after it are its query, the tool letter too.
+        let mut view = open(fixtures::TWO);
+        view.set_key_policy(policy.clone());
+        let mut state = State::new();
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        send(&mut view, &mut state, press, ON_A);
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        send(&mut view, &mut state, release, ON_A);
+        assert_eq!(view.machine().selection().len(), 1);
+        batch(
+            &mut view,
+            &mut state,
+            &[letter("c"), letter("h"), letter("e")],
+        );
+        assert_eq!(view.machine().state(), Surface::Connecting);
+        assert_eq!(view.machine().tool(), crate::Tool::Select);
+        assert_eq!(
+            view.machine().seeking().map(|seeking| seeking.query),
+            Some("he")
+        );
+
+        // `Tab Escape` with nothing selected: Escape had no rung when the
+        // run began, but has the label Tab opens by the time it is read.
+        let mut view = open(fixtures::TWO);
+        view.set_key_policy(policy.clone());
+        let mut state = State::new();
+        focus(&mut view, &mut state);
+        redraw(&mut view, &mut state, Instant::now());
+        assert!(!view.machine().escapes());
+        let tab = key(Key::Named(Named::Tab), plain, Some("\t"));
+        let sent = batch(&mut view, &mut state, &[tab, escape.clone()]);
+        assert!(sent.iter().all(|sent| sent.captured));
+        assert_eq!(view.board().nodes.len(), 3);
+        assert_eq!(view.label(), None);
+        assert_eq!(view.machine().state(), Surface::Idle);
     }
 }

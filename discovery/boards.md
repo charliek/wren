@@ -190,7 +190,10 @@ impl BoardView {
     pub fn draft(&mut self) -> String;      // §3.4 rule 2; records what it returns as synced
     pub fn set_key_policy(&mut self, policy: KeyPolicy);
     pub fn key(&self, key: &Key, physical: Physical, mods: Modifiers, text: Option<&str>, repeat: bool, held_from_before: bool)
-        -> Option<Vec<Message>>;           // what the focused board sends for a key; None: the host's. The widget and board.key ask it
+        -> Option<Vec<Message>>;           // what the focused board sends for a key; None: the host's. The widget asks it whether
+                                           // it takes a key, board.key what a key does
+    pub fn press(&mut self, press: &KeyPress) -> Option<Vec<Message>>;   // [fix step, run 2b] key() for a Message::Key when it is
+                                           // applied, after the keys before it; the app asks it to send a command through dispatch
     pub fn apply(&mut self, intents: &[Intent], ids: &mut dyn Ids, now: Instant) -> Update;   // board.apply: settle, then one unit
     pub fn view(&self, id: &'static str, style: Style) -> iced::Element<'_, Message>;
     pub fn layers(&self) -> &layers::Plan;  pub fn palette(&self) -> &Palette;  pub fn epoch(&self) -> u64;   // unique across views
@@ -200,10 +203,13 @@ impl BoardView {
     pub fn label_box(&self) -> Option<Rect>;                         // around its lines, board units
     pub fn label_caret(&self) -> Option<(Rect, f32)>;                // caret in widget px and its text size on screen
     #[cfg(feature = "test-support")] pub fn set_layer_cap(&mut self, cap: usize);   // and, with that feature, the field `pub probe: Probe`
+    #[cfg(feature = "test-support")] pub fn seed_ids(&mut self, seed: u64);         // [X3] board.seed: new ids from a seed
 }
 pub fn revealing(viewport: Viewport, size: (f32, f32), bounds: Rect) -> Viewport;   // §5.7 rule 5
 pub enum Message { Input(u64 /* epoch */, Input), Resized { width: f32, height: f32 },
-                   Label(u64, LabelAction), Command(u64, Command), Pasted(u64, String) }
+                   Label(u64, LabelAction), Key(u64, KeyPress) /* read when applied */, Command(u64, Command), Pasted(u64, String) }
+pub struct KeyPress { pub key: Key, pub physical: key::Physical, pub modifiers: Modifiers, pub text: Option<String>, pub repeat: bool,
+                      pub held: bool /* the widget saw it go down and not come up */ }   // iced's key types
 pub struct Update { pub changed: bool, pub effects: Vec<Effect> }   // Default: unchanged, no effect
 pub enum Effect { Look(Viewport) /* applied by update itself */, ClipboardWrite(String), ClipboardRead, OpenActions, OpenJump, Notice(String) }
 pub enum KeyRoute { Host, Command(Command), Pass }
@@ -292,7 +298,7 @@ pub struct Probe { pub parses: Cell<u64>, pub scenes: Cell<u64>, pub builds: Cel
                                                                     // Probe::SAMPLES = 256, each ring's length
 ```
 
-`Message::Resized` is how the widget reports its size, which `fit` and the zoom stops need and a `BoardView` cannot ask for; it is not board input (§5.15 rule 1). The machine moves the view through `Effect::Look(Viewport)`, which `BoardView::update` applies itself, so in Phase 1 `Update` is always the default; Phase 2's contract commit keeps `Look` beside the host effects or replaces it with an equivalent. `update` drops input stamped with an older epoch. `reload` with the text the view already has does nothing; `set_viewport` clamps the zoom to 10 to 400 % and ignores a viewport that is not finite. The `wren-canvas` listing is the crate's public surface after the canvas chain of Phase 2 (`boards-p2-canvas`, its review's fix step), checked against `lib.rs` and its public modules; `clip.rs` (§3.8) is private and exposes nothing, since paint calls it. Phase 1's surface is kept whole; the wiring and connector chains start from this one.
+`Message::Resized` is how the widget reports its size, which `fit` and the zoom stops need and a `BoardView` cannot ask for; it is not board input (§5.15 rule 1). The machine moves the view through `Effect::Look(Viewport)`, which `BoardView::update` applies itself, so in Phase 1 `Update` is always the default; Phase 2's contract commit keeps `Look` beside the host effects or replaces it with an equivalent. `update` drops input stamped with an older epoch. A key reaches the view as `Message::Key`, read when it is applied and not when the widget sent it: iced translates a whole batch of events before it applies any of their messages, and each key of a quick run must be read in the state the keys before it leave (`Esc D`, `C che`). The widget decides at once only whether it takes the key, which hangs on the policy and not on the board's state, except for Escape, which it also takes after a key not yet applied. `reload` with the text the view already has does nothing; `set_viewport` clamps the zoom to 10 to 400 % and ignores a viewport that is not finite. The `wren-canvas` listing is the crate's public surface after the canvas chain of Phase 2 (`boards-p2-canvas`, its review's fix step), checked against `lib.rs` and its public modules; `clip.rs` (§3.8) is private and exposes nothing, since paint calls it. Phase 1's surface is kept whole; the wiring and connector chains start from this one.
 
 `BoardView` is defined in `wren-canvas` and owned by `App`, as `EditorView` is defined in `wren-editor`. It holds the committed model, the pristine pair, the synced text, the scene, the viewport, the machine and, from Phase 2, the history, the in-flight plan and the open label's text. None of that lives in widget tree state, so the harness drives and reads it with no window and a rebuilt widget tree loses nothing. Phase 1 ships `Message::Input(epoch, Input)` and the `Machine::step` signature with wheel and pan inputs only; Phase 2 extends both and replaces neither.
 
