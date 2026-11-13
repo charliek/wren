@@ -9,7 +9,8 @@ use crate::z::{self, Element};
 use crate::{placements, Board, Edge, End, Id, Node, Placed};
 
 /// The elements a selection carries into a copy (§5.10 rule 2): its
-/// nodes, the nodes drawn inside them, and every connector whose ends are
+/// nodes, their descendants (the [`super::delete::family`] that delete
+/// removes), and every connector whose ends are
 /// each one of those nodes or a free point, provided one end is such a node
 /// or the connector itself is selected. A selection with no node has none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,23 +39,13 @@ impl Fragment {
 
 /// The fragment of the selection `ids` on `board`.
 pub(crate) fn fragment(board: &Board, ids: &[Id]) -> Fragment {
-    let placed = placements(board);
-    let mut children: BTreeMap<&Id, Vec<&Id>> = BTreeMap::new();
-    for (id, place) in &placed {
-        if let Some(parent) = place.parent {
-            children.entry(parent).or_default().push(id);
-        }
-    }
-    let mut part = Fragment::default();
-    let mut queue: Vec<&Id> = ids
-        .iter()
-        .filter_map(|id| board.nodes.get_key_value(id).map(|(id, _)| id))
-        .collect();
-    while let Some(id) = queue.pop() {
-        if part.nodes.insert(id.clone()) {
-            queue.extend(children.get(id).into_iter().flatten());
-        }
-    }
+    let mut part = Fragment {
+        nodes: super::delete::family(board, ids)
+            .into_iter()
+            .cloned()
+            .collect(),
+        ..Fragment::default()
+    };
     if part.nodes.is_empty() {
         return part;
     }

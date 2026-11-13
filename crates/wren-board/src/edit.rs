@@ -931,6 +931,47 @@ z = "Y"
         assert!(check(&board).is_empty(), "{:?}", check(&board));
     }
 
+    /// A cut is copy then delete (§5.10 rule 5), so the copy must carry
+    /// every node the delete removes, even one a parent cycle or the depth
+    /// cap draws as a root elsewhere, each where it was drawn.
+    #[test]
+    fn a_cut_copies_every_node_it_deletes() {
+        let node = |id: &str, parent: Option<&str>, at: [i32; 2]| {
+            let parent = parent.map_or(String::new(), |p| format!("parent = \"{p}\"\n"));
+            format!(
+                "\n[node.{id}]\nkind = \"shape\"\nat = [{}, {}]\n{parent}size = [20, 20]\nz = \"V\"\n",
+                at[0], at[1]
+            )
+        };
+        let mut cycle = String::from("schema = 1\n");
+        cycle += &node("x", Some("y"), [0, 0]);
+        cycle += &node("y", Some("x"), [400, 400]);
+        let mut chain = String::from("schema = 1\n");
+        for k in 0..34 {
+            let parent = (k > 0).then(|| format!("n{:02}", k - 1));
+            chain += &node(&format!("n{k:02}"), parent.as_deref(), [10, 10]);
+        }
+        for (text, cut) in [(&cycle, "x"), (&chain, "n31")] {
+            let board = parse(text).unwrap();
+            let copied = crate::clip::copy(&board, &ids(&[cut])).unwrap();
+            let body = copied.strip_prefix(crate::clip::HEADER).unwrap();
+            let fragment = parse(body).unwrap();
+            let (_, after) = planned(text, &Intent::Delete { ids: ids(&[cut]) }, &[]);
+            let removed: Vec<&Id> = board
+                .nodes
+                .keys()
+                .filter(|id| !after.nodes.contains_key(*id))
+                .collect();
+            let carried: Vec<&Id> = fragment.nodes.keys().collect();
+            assert_eq!(carried, removed, "{cut}");
+            assert!(check(&fragment).is_empty(), "{:?}", check(&fragment));
+            let (drawn, copy) = (crate::placements(&board), crate::placements(&fragment));
+            for id in carried {
+                assert_eq!(copy[id].at, drawn[id].at, "{id:?}");
+            }
+        }
+    }
+
     #[test]
     fn duplicate_copies_the_fragment_on_top() {
         let duplicate = |names: &[&str]| Intent::Duplicate {
