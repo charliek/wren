@@ -452,7 +452,7 @@ fn a_change_routes_and_lays_out_only_what_it_can_affect() {
     let mut cache = Cache::default();
     let built = |cache: &mut Cache, board: &Board| {
         let scene = cache.build(board, &LIGHT, &FixedMeasure);
-        assert_eq!(scene, build(board, &LIGHT, &FixedMeasure));
+        assert_eq!(*scene, build(board, &LIGHT, &FixedMeasure));
         cache.rebuilt()
     };
     let opened = built(&mut cache, &board);

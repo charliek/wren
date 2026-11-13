@@ -374,14 +374,15 @@ pub struct BoardView {
     canonical: String,
     palette: Palette,
     measurer: Measurer,
-    /// What the last scene build keeps for the next, the committed
-    /// board's or a preview's, so a change routes and lays out only what
-    /// it can affect.
+    /// The committed board's scene and what its build keeps for the next,
+    /// so a change routes and lays out only what it can reach; and the
+    /// same for a gesture's preview, which starts from a copy of it and
+    /// becomes it when the gesture's release makes the board it showed.
     scenes: scene::Cache,
+    spare: scene::Cache,
     /// The widths the measurer may keep before the next build lays the
     /// whole board out again, which trims them.
     widths: usize,
-    scene: Scene,
     plan: layers::Plan,
     cap: usize,
     /// The board as a gesture in flight would leave it, shown in place of
@@ -432,11 +433,10 @@ pub struct BoardView {
 }
 
 /// A gesture's picture of the board: a scratch copy with the gesture's
-/// plan applied, and its scene. It is never the model, never a draft and
-/// never hit-tested.
+/// plan applied, whose scene the view's spare cache holds. It is never the
+/// model, never a draft and never hit-tested.
 struct Preview {
     board: Board,
-    scene: Scene,
     plan: layers::Plan,
     revision: u64,
 }
@@ -478,11 +478,8 @@ impl BoardView {
             palette,
             measurer: Measurer::new(font),
             scenes: scene::Cache::default(),
+            spare: scene::Cache::default(),
             widths: 0,
-            scene: Scene {
-                bounds: scene::Rect::default(),
-                items: Vec::new(),
-            },
             plan: layers::Plan::default(),
             cap: layers::CAP,
             preview: None,
@@ -532,6 +529,7 @@ impl BoardView {
         text.clone_into(&mut self.pristine);
         self.preview = None;
         self.scenes.clear();
+        self.spare.clear();
         self.label = None;
         self.history.clear();
         self.machine.reset();
@@ -569,15 +567,16 @@ impl BoardView {
 
     /// The committed board's scene.
     pub fn scene(&self) -> &Scene {
-        &self.scene
+        self.scenes.scene()
     }
 
     /// The scene the widget shows: a gesture's preview while one is in
     /// flight, else the board's own.
     pub fn shown(&self) -> &Scene {
-        self.preview
-            .as_ref()
-            .map_or(&self.scene, |preview| &preview.scene)
+        match &self.preview {
+            Some(_) => self.spare.scene(),
+            None => self.scenes.scene(),
+        }
     }
 
     /// What is wrong with the board that still lets it draw.
@@ -663,7 +662,7 @@ impl BoardView {
         match self.size {
             Some(size) => {
                 self.fit_pending = false;
-                self.jump(Viewport::fitting(self.scene.bounds, size));
+                self.jump(Viewport::fitting(self.scenes.scene().bounds, size));
             }
             None => self.fit_pending = true,
         }
@@ -683,7 +682,7 @@ impl BoardView {
                     viewport: self.viewport,
                     now,
                     board: &self.board,
-                    scene: &self.scene,
+                    scene: self.scenes.scene(),
                     writable: self.access == Access::Editable,
                     size: self.size,
                 };
@@ -755,7 +754,7 @@ impl BoardView {
             viewport: self.viewport,
             now,
             board: &self.board,
-            scene: &self.scene,
+            scene: self.scenes.scene(),
             writable: self.access == Access::Editable,
             size: self.size,
         };
@@ -1019,13 +1018,13 @@ impl BoardView {
         match &self.preview {
             Some(preview) => Picture {
                 board: &preview.board,
-                scene: &preview.scene,
+                scene: self.spare.scene(),
                 plan: &preview.plan,
                 revision: preview.revision,
             },
             None => Picture {
                 board: &self.board,
-                scene: &self.scene,
+                scene: self.scenes.scene(),
                 plan: &self.plan,
                 revision: self.revision,
             },
@@ -1070,7 +1069,7 @@ impl BoardView {
     /// takes the plan back, which is how a creation selects what it made.
     /// Returns whether the board changed.
     fn edit(&mut self, intent: &Intent, unit: Unit, now: Instant, update: &mut Update) -> bool {
-        self.preview = None;
+        let shown = self.preview.take();
         #[cfg(test)]
         self.intents.push(intent.clone());
         let plan = edit::plan(&self.board, intent, &mut self.ids);
@@ -1089,7 +1088,10 @@ impl BoardView {
             }
             self.board.apply(&plan.changes);
             self.issues = wren_board::check(&self.board);
-            self.build();
+            match shown {
+                Some(preview) if preview.board == self.board => self.adopt(preview),
+                _ => self.build(),
+            }
             update.changed = true;
         }
         if let Some(notice) = &plan.notice {
@@ -1325,7 +1327,7 @@ impl BoardView {
         let ink = style::resolve(&edge.style.color, Fill::None, &self.palette).stroke;
         let first = edge.labels.first();
         let centre = if first.is_some_and(|label| !label.text.trim().is_empty()) {
-            edge_label_point(&self.scene, id)?
+            edge_label_point(self.scenes.scene(), id)?
         } else {
             // The scene draws a blank label nowhere, so it is asked where
             // it would draw one: on a copy of the board whose label has
@@ -1355,23 +1357,29 @@ impl BoardView {
     /// of their source, so a release makes the very board its preview
     /// showed: a connector's route depends on where its id sorts (§3.7).
     fn show(&mut self, intent: Option<&Intent>) {
-        self.preview = intent.and_then(|intent| {
-            let plan = edit::plan(&self.board, intent, &mut self.ids.clone());
-            if plan.is_empty() {
-                return None;
-            }
-            let mut board = self.board.clone();
-            board.apply(&plan.changes);
-            Some(self.picture_of(board))
-        });
+        let plan = intent.map(|intent| edit::plan(&self.board, intent, &mut self.ids.clone()));
+        let Some(plan) = plan.filter(|plan| !plan.is_empty()) else {
+            self.preview = None;
+            return;
+        };
+        let mut board = self.board.clone();
+        board.apply(&plan.changes);
+        // A gesture's first picture starts from the committed board's
+        // cache, one change away, not from the last gesture's.
+        if self.preview.is_none() {
+            self.spare.clone_from(&self.scenes);
+        }
+        self.preview = Some(self.picture_of(board));
     }
 
-    /// A preview of `board`.
+    /// A preview of `board`, its scene built in the spare cache.
     fn picture_of(&mut self, board: Board) -> Preview {
         #[cfg(feature = "test-support")]
         let started = std::time::Instant::now();
+        let [shown, other] = [&mut self.spare, &mut self.scenes];
         let scene = scene_of(
-            &mut self.scenes,
+            shown,
+            other,
             &mut self.widths,
             &self.measurer,
             &self.palette,
@@ -1382,10 +1390,22 @@ impl BoardView {
         self.probe.built(started);
         Preview {
             board,
-            scene,
             plan,
             revision: revision(),
         }
+    }
+
+    /// The release that ends a gesture made the board its last preview
+    /// showed: that picture, its scene and its layers, becomes the board's,
+    /// with nothing built again.
+    fn adopt(&mut self, preview: Preview) {
+        #[cfg(feature = "test-support")]
+        let started = std::time::Instant::now();
+        std::mem::swap(&mut self.scenes, &mut self.spare);
+        self.plan = preview.plan;
+        self.revision = preview.revision;
+        #[cfg(feature = "test-support")]
+        self.probe.built(started);
     }
 
     /// A command the machine left to the view.
@@ -1436,7 +1456,7 @@ impl BoardView {
             Command::ZoomSelection => {
                 let bounds = ids
                     .iter()
-                    .filter_map(|id| bounds(&self.board, &self.scene, id))
+                    .filter_map(|id| bounds(&self.board, self.scenes.scene(), id))
                     .reduce(union);
                 if let (Some(bounds), Some(size)) = (bounds, self.size) {
                     self.jump(Viewport::fitting(bounds, size));
@@ -1451,7 +1471,7 @@ impl BoardView {
     /// was, by centre, ties by id; nothing is selected after.
     fn delete(&mut self, ids: Vec<Id>, now: Instant, update: &mut Update) {
         let cursor = self.machine.cursor();
-        let was = cursor.and_then(|id| bounds(&self.board, &self.scene, id));
+        let was = cursor.and_then(|id| bounds(&self.board, self.scenes.scene(), id));
         if !self.edit(&Intent::Delete { ids }, Unit::One, now, update) {
             return;
         }
@@ -1573,7 +1593,7 @@ impl BoardView {
         let Some(size) = self.size else {
             return;
         };
-        if let Some(bounds) = bounds(&self.board, &self.scene, id) {
+        if let Some(bounds) = bounds(&self.board, self.scenes.scene(), id) {
             self.jump(revealing(self.viewport, size, bounds));
         }
     }
@@ -1587,14 +1607,16 @@ impl BoardView {
     fn build(&mut self) {
         #[cfg(feature = "test-support")]
         let started = std::time::Instant::now();
-        self.scene = scene_of(
-            &mut self.scenes,
+        let [shown, other] = [&mut self.scenes, &mut self.spare];
+        let scene = scene_of(
+            shown,
+            other,
             &mut self.widths,
             &self.measurer,
             &self.palette,
             &self.board,
         );
-        self.plan = layers::split(&self.scene.items, self.cap);
+        self.plan = layers::split(&scene.items, self.cap);
         self.revision = revision();
         #[cfg(feature = "test-support")]
         self.probe.built(started);
@@ -1605,35 +1627,38 @@ impl BoardView {
     #[cfg(feature = "test-support")]
     pub fn set_layer_cap(&mut self, cap: usize) {
         self.cap = cap;
-        self.plan = layers::split(&self.scene.items, self.cap);
+        self.plan = layers::split(&self.scenes.scene().items, self.cap);
         self.revision = revision();
     }
 }
 
-/// The scene of `board`, from the cache of the last build: the same
+/// The scene of `board`, built in `cache` from its last build: the same
 /// display list a whole build gives, made again only where the change
 /// since can reach (§3.7, Routes). The whole board is laid out again, the
 /// measurer swept before and trimmed after, when the cache was cleared,
 /// the palette changed, fonts have loaded since the widths kept were
-/// shaped (they would no longer be the widths drawn), or the widths kept
-/// have grown past `widths`, twice what the last whole layout needed,
-/// which a long run of typing does, since a label is measured as each
-/// version of it is typed.
-fn scene_of(
-    scenes: &mut scene::Cache,
+/// shaped (they would no longer be the widths drawn, so `other`, the
+/// view's other cache, is laid out again too), or the widths kept have
+/// grown past `widths`, twice what the last whole layout needed, which a
+/// long run of typing does, since a label is measured as each version of
+/// it is typed.
+fn scene_of<'c>(
+    cache: &'c mut scene::Cache,
+    other: &mut scene::Cache,
     widths: &mut usize,
     measurer: &Measurer,
     palette: &Palette,
     board: &Board,
-) -> Scene {
+) -> &'c Scene {
     if measurer.stale() || measurer.kept() > *widths {
-        scenes.relayout();
+        cache.relayout();
+        other.relayout();
     }
-    let whole = scenes.lays_out_all(palette);
+    let whole = cache.lays_out_all(palette);
     if whole {
         measurer.sweep();
     }
-    let scene = scenes.build(board, palette, measurer);
+    let scene = cache.build(board, palette, measurer);
     if whole {
         measurer.trim();
         *widths = 2 * measurer.kept() + 4096;

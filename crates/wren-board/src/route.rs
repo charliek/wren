@@ -211,7 +211,12 @@ pub struct Connector {
 /// or needlessly crosses another. Last, middle segments that still lie on
 /// another connector's line move aside by [`NUDGE`] steps.
 pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
-    Pass::new(boxes, connectors, None).run()
+    let (routes, separated) = Pass::new(boxes, connectors, None).run();
+    routes
+        .into_iter()
+        .zip(separated)
+        .map(|(routed, moved)| moved.unwrap_or(routed))
+        .collect()
 }
 
 /// [`route_all`] for a board whose drawn nodes and connectors are named
@@ -219,16 +224,17 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
 /// keeping in `memo` what each connector's routing read. A connector whose
 /// inputs are those of the build `memo` holds, and none of whose lookups
 /// would read anything different now, takes the route it had; every other
-/// one is routed again. The result is always what [`route_all`] gives.
+/// one is routed again. [`Memo::routes`] then gives what [`route_all`]
+/// would.
 pub(crate) fn route_all_kept(
     boxes: &[Rect],
     box_ids: &[&Id],
     connectors: &[Connector],
     ids: &[&Id],
     memo: &mut Memo,
-) -> Vec<Routed> {
+) {
     let keep = Keep { box_ids, ids, memo };
-    Pass::new(boxes, connectors, Some(keep)).run()
+    Pass::new(boxes, connectors, Some(keep)).run();
 }
 
 /// What [`route_all_kept`] keeps between builds: the node boxes, and for
@@ -245,6 +251,13 @@ pub(crate) struct Memo {
 }
 
 impl Memo {
+    /// The routes of the last routing, in the order of its connectors.
+    pub(crate) fn routes(&self) -> impl Iterator<Item = &Routed> {
+        self.kept
+            .iter()
+            .map(|k| k.separated.as_ref().unwrap_or(&k.routed))
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.boxes.is_empty() && self.kept.is_empty()
     }
@@ -261,9 +274,9 @@ struct Kept {
     /// from the node boxes and from the lines already drawn.
     routed: Routed,
     reads: [Reads; 2],
-    /// The route after it, and what separating it read from the node
-    /// boxes and from the lines placed.
-    separated: Routed,
+    /// The route after it where the separation pass moved it, and what
+    /// separating it read from the node boxes and from the lines placed.
+    separated: Option<Routed>,
     apart: [Reads; 2],
 }
 
@@ -404,16 +417,20 @@ fn is_free(c: &Connector) -> bool {
 
 /// One routing of a board's connectors.
 struct Pass<'a> {
-    obstacles: Grid,
-    count: usize,
+    boxes: &'a [Rect],
+    /// The box lookup, made when a connector is first routed or separated
+    /// again.
+    obstacles: Option<Grid>,
     connectors: &'a [Connector],
     /// Each connector as the build before kept it, when there was one
-    /// with the same id; `same` when its inputs are the same too.
+    /// with the same id; `same` when its inputs are the same too, and
+    /// `reused` once its route is taken from it.
     prev: Vec<Option<Kept>>,
     same: Vec<bool>,
+    reused: Vec<bool>,
     /// Where the boxes changed, where the lines a free connector routes
     /// against changed, and where those the separation pass places.
-    boxes: Dirty,
+    moved: Dirty,
     lines: Dirty,
     placed: Dirty,
     keep: Option<Keep<'a, 'a>>,
@@ -426,15 +443,16 @@ struct Pass<'a> {
 }
 
 impl<'a> Pass<'a> {
-    fn new(boxes: &[Rect], connectors: &'a [Connector], keep: Option<Keep<'a, 'a>>) -> Self {
+    fn new(boxes: &'a [Rect], connectors: &'a [Connector], keep: Option<Keep<'a, 'a>>) -> Self {
         let n = connectors.len();
         let mut pass = Self {
-            obstacles: Grid::new(boxes.iter().copied()),
-            count: boxes.len(),
+            boxes,
+            obstacles: None,
             connectors,
             prev: (0..n).map(|_| None).collect(),
             same: vec![false; n],
-            boxes: Dirty::default(),
+            reused: vec![false; n],
+            moved: Dirty::default(),
             lines: Dirty::default(),
             placed: Dirty::default(),
             keep: None,
@@ -447,7 +465,7 @@ impl<'a> Pass<'a> {
         if let Some(mut keep) = keep {
             pass.reads.resize_with(n, Default::default);
             pass.apart.resize_with(n, Default::default);
-            pass.match_memo(&mut keep, boxes);
+            pass.match_memo(&mut keep);
             pass.keep = Some(keep);
         }
         pass
@@ -456,30 +474,30 @@ impl<'a> Pass<'a> {
     /// Takes each connector of the memo for the connector of this build
     /// with its id, and marks what changed since: the boxes added, removed
     /// or moved, and every line of a connector that is gone.
-    fn match_memo(&mut self, keep: &mut Keep<'_, '_>, boxes: &[Rect]) {
+    fn match_memo(&mut self, keep: &mut Keep<'_, '_>) {
         let mut old = std::mem::take(&mut keep.memo.boxes).into_iter().peekable();
-        let mut now = Vec::with_capacity(boxes.len());
-        for (&id, &r) in keep.box_ids.iter().zip(boxes) {
+        let mut now = Vec::with_capacity(self.boxes.len());
+        for (&id, &r) in keep.box_ids.iter().zip(self.boxes) {
             while let Some((_, gone)) = old.next_if(|(k, _)| k < id) {
-                self.boxes.rect(gone);
+                self.moved.rect(gone);
             }
             let name = match old.next_if(|(k, _)| k == id) {
                 Some((name, was)) => {
                     if was != r {
-                        self.boxes.rect(was);
-                        self.boxes.rect(r);
+                        self.moved.rect(was);
+                        self.moved.rect(r);
                     }
                     name
                 }
                 None => {
-                    self.boxes.rect(r);
+                    self.moved.rect(r);
                     id.clone()
                 }
             };
             now.push((name, r));
         }
         for (_, gone) in old {
-            self.boxes.rect(gone);
+            self.moved.rect(gone);
         }
         keep.memo.boxes = now;
         let mut old = std::mem::take(&mut keep.memo.kept).into_iter().peekable();
@@ -503,15 +521,19 @@ impl<'a> Pass<'a> {
         // all of them, as a gone connector's are.
         let changed = self.prev.iter().zip(&self.same).filter(|(_, &same)| !same);
         for k in gone.iter().chain(changed.filter_map(|(k, _)| k.as_ref())) {
-            for points in [&k.routed.points, &k.separated.points] {
-                self.lines.segments(points);
-                self.placed.segments(points);
+            for routed in [Some(&k.routed), k.separated.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                self.lines.segments(&routed.points);
+                self.placed.segments(&routed.points);
             }
         }
     }
 
-    /// The routes, in the order of the connectors.
-    fn run(mut self) -> Vec<Routed> {
+    /// The routes, in the order of the connectors: each one's route before
+    /// the separation pass, and its route after it where that differs.
+    fn run(mut self) -> (Vec<Routed>, Vec<Option<Routed>>) {
         let n = self.connectors.len();
         let free: Vec<bool> = self.connectors.iter().map(is_free).collect();
         let mut routes: Vec<Option<Routed>> = vec![None; n];
@@ -533,10 +555,9 @@ impl<'a> Pass<'a> {
             }
             routes[i] = Some(routed);
         }
-        let mut routes: Vec<Routed> = routes.into_iter().flatten().collect();
-        let before = self.keep.is_some().then(|| routes.clone());
-        self.separate(&mut routes);
-        if let (Some(keep), Some(before)) = (self.keep.take(), before) {
+        let routes: Vec<Routed> = routes.into_iter().flatten().collect();
+        let separated = self.separate(&routes);
+        if let Some(keep) = self.keep.take() {
             let connectors = self.connectors;
             // The names of a connector the memo held are taken from it.
             let names = |i: usize, prev: Option<Kept>| match prev {
@@ -549,9 +570,9 @@ impl<'a> Pass<'a> {
                     (id, connectors[i].nodes.map(node))
                 }
             };
-            keep.memo.kept = before
+            keep.memo.kept = routes
                 .into_iter()
-                .zip(&routes)
+                .zip(separated)
                 .zip(self.reads.into_iter().zip(self.apart))
                 .zip(self.prev)
                 .enumerate()
@@ -564,15 +585,16 @@ impl<'a> Pass<'a> {
                         nodes,
                         routed,
                         reads,
-                        separated: separated.clone(),
+                        separated,
                         apart,
                     }
                 })
                 .collect();
             keep.memo.rerouted = self.rerouted;
             keep.memo.reseparated = self.reseparated;
+            return (Vec::new(), Vec::new());
         }
-        routes
+        (routes, separated)
     }
 
     /// The route of connector `i`, against `lines` when it has a side to
@@ -582,17 +604,21 @@ impl<'a> Pass<'a> {
     fn route(&mut self, i: usize, lines: Option<&Lines>) -> Routed {
         let len = lines.map_or(0, |l| l.segments.len());
         if let Some(prev) = self.prev[i].as_mut().filter(|_| self.same[i]) {
-            if !prev.reads[0].changed(&self.boxes, self.count)
+            if !prev.reads[0].changed(&self.moved, self.boxes.len())
                 && !prev.reads[1].changed(&self.lines, len)
             {
                 self.reads[i] = std::mem::take(&mut prev.reads);
-                return prev.routed.clone();
+                self.reused[i] = true;
+                return std::mem::replace(&mut prev.routed, Routed::empty());
             }
         }
         let connector = &self.connectors[i];
         let record = self.keep.is_some();
         let scratch = std::mem::take(&mut self.scratch);
-        let mut router = Router::new(&self.obstacles, connector.nodes, lines, BUDGET, scratch);
+        let obstacles = self
+            .obstacles
+            .get_or_insert_with(|| Grid::new(self.boxes.iter().copied()));
+        let mut router = Router::new(obstacles, connector.nodes, lines, BUDGET, scratch);
         router.reads = [Reads::kept(record), Reads::kept(record)];
         let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
         let Router { scratch, reads, .. } = router;
@@ -619,13 +645,15 @@ impl<'a> Pass<'a> {
     /// more boxes and keeps every segment's direction, preferring fewer
     /// crossings and then the longer of its neighbours; where there is
     /// none it stays. A connector whose route and reading are those of the
-    /// build before takes its separated route from the memo.
-    fn separate(&mut self, routes: &mut [Routed]) {
+    /// build before takes its separated route from the memo. Returns each
+    /// route moved, `None` where nothing moved.
+    fn separate(&mut self, routes: &[Routed]) -> Vec<Option<Routed>> {
         let connectors = self.connectors;
+        let mut separated: Vec<Option<Routed>> = vec![None; routes.len()];
         // Only a middle segment moves.
         let middle = |(c, r): (&Connector, &Routed)| c.kind == Route::Elbow && r.points.len() > 3;
-        if !connectors.iter().zip(routes.iter()).any(middle) {
-            return;
+        if !connectors.iter().zip(routes).any(middle) {
+            return separated;
         }
         let ends = |i: usize, j: usize| {
             let last = routes[i].points.len().saturating_sub(2);
@@ -638,25 +666,25 @@ impl<'a> Pass<'a> {
                 continue;
             }
             let len = placed.segments.len();
-            let points = &mut routes[i].points;
+            let before = &routes[i];
+            let reused = self.reused[i];
             let prev = self.prev[i].as_mut().filter(|_| self.same[i]);
             let reuse = prev.filter(|prev| {
-                same_points(&prev.routed.points, points)
-                    && !prev.apart[0].changed(&self.boxes, self.count)
+                (reused || same_points(&prev.routed.points, &before.points))
+                    && !prev.apart[0].changed(&self.moved, self.boxes.len())
                     && !prev.apart[1].changed(&self.placed, len)
             });
             if let Some(prev) = reuse {
                 self.apart[i] = std::mem::take(&mut prev.apart);
-                points.clone_from(&prev.separated.points);
+                separated[i] = prev.separated.take();
             } else {
+                let mut points = before.points.clone();
                 let scratch = std::mem::take(&mut self.scratch);
-                let mut router = Router::new(
-                    &self.obstacles,
-                    connector.nodes,
-                    None,
-                    SEPARATE_BUDGET,
-                    scratch,
-                );
+                let obstacles = self
+                    .obstacles
+                    .get_or_insert_with(|| Grid::new(self.boxes.iter().copied()));
+                let mut router =
+                    Router::new(obstacles, connector.nodes, None, SEPARATE_BUDGET, scratch);
                 router.reads = [Reads::kept(record), Reads::kept(record)];
                 let mut j = 1;
                 while j + 2 < points.len() {
@@ -669,8 +697,8 @@ impl<'a> Pass<'a> {
                     );
                     match shares {
                         Some(true) => {
-                            if let Some(moved) = nudge(&mut router, &mut placed, points, j, i) {
-                                *points = moved;
+                            if let Some(moved) = nudge(&mut router, &mut placed, &points, j, i) {
+                                points = moved;
                             }
                         }
                         Some(false) => {}
@@ -680,21 +708,36 @@ impl<'a> Pass<'a> {
                 }
                 let Router { scratch, reads, .. } = router;
                 self.scratch = scratch;
+                if !same_points(&points, &before.points) {
+                    separated[i] = Some(Routed {
+                        points,
+                        ..before.clone_ends()
+                    });
+                }
                 if record {
                     self.apart[i] = reads;
                     self.reseparated += 1;
-                    let old = self.prev[i].as_ref().map(|k| &k.separated.points);
-                    if !old.is_some_and(|old| same_points(old, points)) {
-                        for points in old.into_iter().chain([&*points]) {
+                    // What the build before placed: its separated route,
+                    // or its route when separation left it as it was.
+                    let old = self.prev[i].as_ref().map(|k| match (&k.separated, reused) {
+                        (Some(moved), _) => &moved.points,
+                        (None, true) => &before.points,
+                        (None, false) => &k.routed.points,
+                    });
+                    let now = separated[i].as_ref().map_or(&before.points, |r| &r.points);
+                    if !old.is_some_and(|old| same_points(old, now)) {
+                        for points in old.into_iter().chain([now]) {
                             self.placed.segments(points);
                         }
                     }
                 }
             }
+            let points = separated[i].as_ref().map_or(&before.points, |r| &r.points);
             for j in 1..points.len().saturating_sub(2) {
                 placed.insert(points[j], points[j + 1], i);
             }
         }
+        separated
     }
 }
 
@@ -2105,6 +2148,24 @@ fn same_points(a: &[Point], b: &[Point]) -> bool {
 }
 
 impl Routed {
+    /// A stand-in for a route taken from the memo.
+    fn empty() -> Self {
+        Self {
+            points: Vec::new(),
+            sides: [None; 2],
+            outward: [Side::Top; 2],
+        }
+    }
+
+    /// The route's sides and directions, with no points.
+    fn clone_ends(&self) -> Self {
+        Self {
+            points: Vec::new(),
+            sides: self.sides,
+            outward: self.outward,
+        }
+    }
+
     /// Whether two routes are the same to the bit: a route kept from an
     /// earlier build stands for a new one only then.
     pub(crate) fn same(&self, other: &Self) -> bool {
