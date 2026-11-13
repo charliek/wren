@@ -187,7 +187,7 @@ pub fn route_among(
     obstacles: &Obstacles,
     ends: [Option<usize>; 2],
 ) -> Routed {
-    Router::new(&obstacles.0, ends, None, BUDGET).route(kind, from, to)
+    Router::new(&obstacles.0, ends, None, BUDGET, Scratch::default()).route(kind, from, to)
 }
 
 /// One connector of a board, for [`route_all`].
@@ -217,22 +217,30 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
         .map(|c| c.kind == Route::Elbow && has_choice(&c.ends[0], &c.ends[1]))
         .collect();
     let mut routes: Vec<Option<Routed>> = vec![None; connectors.len()];
-    let mut drawn = Lines::default();
+    let mut scratch = Scratch::default();
     for (i, connector) in connectors.iter().enumerate() {
         if free[i] {
             continue;
         }
-        let mut router = Router::new(&obstacles, connector.nodes, None, BUDGET);
+        let mut router = Router::new(&obstacles, connector.nodes, None, BUDGET, scratch);
         let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
-        for pair in routed.points.windows(2) {
-            drawn.insert(pair[0], pair[1], i);
-        }
+        scratch = router.scratch;
         routes[i] = Some(routed);
+    }
+    // Only a free connector looks at the lines drawn.
+    let mut drawn = Lines::default();
+    if free.contains(&true) {
+        drawn = Lines::new(segments(
+            routes.iter().map(Option::as_ref).enumerate(),
+            |_, _| true,
+        ));
     }
     for (i, connector) in connectors.iter().enumerate() {
         if free[i] {
-            let mut router = Router::new(&obstacles, connector.nodes, Some(&drawn), BUDGET);
+            let mut router =
+                Router::new(&obstacles, connector.nodes, Some(&drawn), BUDGET, scratch);
             let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
+            scratch = router.scratch;
             for pair in routed.points.windows(2) {
                 drawn.insert(pair[0], pair[1], i);
             }
@@ -240,7 +248,7 @@ pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
         }
     }
     let mut routes: Vec<Routed> = routes.into_iter().flatten().collect();
-    separate(&obstacles, connectors, &mut routes);
+    separate(&obstacles, connectors, &mut routes, scratch);
     routes
 }
 
@@ -301,8 +309,9 @@ fn has_choice(from: &Terminal, to: &Terminal) -> bool {
     (floating(from) || floating(to)) && apart_on_both_axes(from.bounds(), to.bounds())
 }
 
-/// The sides an end may take, `nominal` first.
-fn choices(terminal: &Terminal, nominal: Side, free: bool) -> Vec<Side> {
+/// The sides an end may take, `nominal` first: the first `n` of the
+/// array.
+fn choices(terminal: &Terminal, nominal: Side, free: bool) -> ([Side; 4], usize) {
     let floating = matches!(
         terminal,
         Terminal::Node {
@@ -310,11 +319,17 @@ fn choices(terminal: &Terminal, nominal: Side, free: bool) -> Vec<Side> {
             ..
         }
     );
-    let mut sides = vec![nominal];
-    if free && floating {
-        sides.extend(Side::ALL.iter().copied().filter(|&s| s != nominal));
+    let mut sides = [nominal; 4];
+    if !(free && floating) {
+        return (sides, 1);
     }
-    sides
+    for (slot, &side) in sides[1..]
+        .iter_mut()
+        .zip(Side::ALL.iter().filter(|&&s| s != nominal))
+    {
+        *slot = side;
+    }
+    (sides, 4)
 }
 
 /// The side an anchor faces: the side of the box nearest to it, the
@@ -437,16 +452,20 @@ fn between(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
 /// Drops repeated points and the middle of three in a straight run, so a
 /// route has no zero-length segment and no needless bend. A point where
 /// the route turns back is kept.
-fn simplify(points: Vec<Point>) -> Vec<Point> {
+fn simplify(mut points: Vec<Point>) -> Vec<Point> {
     let (Some(&first), Some(&last)) = (points.first(), points.last()) else {
         return points;
     };
-    let mut out: Vec<Point> = Vec::with_capacity(points.len());
-    for p in points {
-        if out.last() == Some(&p) {
+    // In place: the points kept are a prefix that never passes the point
+    // being read.
+    let mut kept = 0;
+    for read in 0..points.len() {
+        let p = points[read];
+        if kept > 0 && points[kept - 1] == p {
             continue;
         }
-        if let [.., before, middle] = out.as_slice() {
+        if kept >= 2 {
+            let (before, middle) = (points[kept - 2], points[kept - 1]);
             let straight = (before.x == middle.x
                 && middle.x == p.x
                 && (middle.y - before.y) * (p.y - middle.y) >= 0.0)
@@ -454,15 +473,17 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
                     && middle.y == p.y
                     && (middle.x - before.x) * (p.x - middle.x) >= 0.0);
             if straight {
-                out.pop();
+                kept -= 1;
             }
         }
-        out.push(p);
+        points[kept] = p;
+        kept += 1;
     }
-    if out.len() < 2 {
+    if kept < 2 {
         return vec![first, last];
     }
-    out
+    points.truncate(kept);
+    points
 }
 
 fn distance(a: Point, b: Point) -> f32 {
@@ -484,26 +505,140 @@ impl Obstacles {
 /// near its area. A rectangle over too many cells is kept in a list every
 /// query checks, and a query over too many cells checks every rectangle,
 /// so neither a huge box nor a huge query costs more than a scan.
+///
+/// A cell's list holds each rectangle's index, marked with
+/// [`FIRST_COLUMN`] in the cells of its first column and [`FIRST_ROW`] in
+/// those of its first row, ascending.
 #[derive(Clone, Debug, Default)]
 struct Grid {
     rects: Vec<Rect>,
-    cells: HashMap<(i32, i32), Vec<u32>>,
+    /// The cells of the rectangles the grid was made with, when they lie
+    /// close enough together.
+    array: Array,
+    /// The cells of the others and of rectangles added later.
+    map: HashMap<(i32, i32), Vec<u32>>,
     large: Vec<u32>,
 }
+
+/// The marks of a cell entry; the index is in the bits below them. A
+/// board is far from 2^30 boxes or line segments within the 64 MiB a
+/// note may hold.
+const FIRST_COLUMN: u32 = 1 << 31;
+const FIRST_ROW: u32 = 1 << 30;
+const INDEX: u32 = FIRST_ROW - 1;
 
 const CELL: f32 = 256.0;
 const MAX_CELLS: i64 = 64;
 
-impl Grid {
-    fn new(rects: impl IntoIterator<Item = Rect>) -> Self {
-        let mut grid = Self::default();
-        for rect in rects {
-            grid.insert(rect);
+/// Every cell of a block, row by row, a query reading one without
+/// hashing: cell `k`'s list is `entries[starts[k]..starts[k + 1]]`.
+#[derive(Clone, Debug, Default)]
+struct Array {
+    /// The block's first cell, and its cells across and down.
+    origin: [i32; 2],
+    size: [usize; 2],
+    starts: Vec<u32>,
+    entries: Vec<u32>,
+}
+
+impl Array {
+    fn index(&self, cx: i32, cy: i32) -> Option<usize> {
+        let dx = usize::try_from(i64::from(cx) - i64::from(self.origin[0])).ok()?;
+        let dy = usize::try_from(i64::from(cy) - i64::from(self.origin[1])).ok()?;
+        (dx < self.size[0] && dy < self.size[1]).then(|| dy * self.size[0] + dx)
+    }
+
+    fn get(&self, cx: i32, cy: i32) -> &[u32] {
+        match self.index(cx, cy) {
+            Some(k) => &self.entries[self.starts[k] as usize..self.starts[k + 1] as usize],
+            None => &[],
         }
+    }
+}
+
+/// The cells of a rectangle, as first and last column, first and last
+/// row, and their number.
+type Span = ([i32; 2], [i32; 2], i64);
+
+/// The entries of a rectangle's cells, each with its marks.
+fn entries(index: u32, (x, y, _): Span) -> impl Iterator<Item = ((i32, i32), u32)> {
+    (x[0]..=x[1]).flat_map(move |cx| {
+        (y[0]..=y[1]).map(move |cy| {
+            let column = if cx == x[0] { FIRST_COLUMN } else { 0 };
+            let row = if cy == y[0] { FIRST_ROW } else { 0 };
+            ((cx, cy), index | column | row)
+        })
+    })
+}
+
+impl Grid {
+    /// A grid of `rects`: in an array when the block of cells they fill
+    /// holds no more than four for each entry (with some to spare for a
+    /// small board), else in the map.
+    fn new(rects: impl IntoIterator<Item = Rect>) -> Self {
+        let rects: Vec<Rect> = rects.into_iter().collect();
+        let spans: Vec<Span> = rects.iter().map(|&r| Self::cells_of(r)).collect();
+        let mut grid = Self {
+            rects,
+            ..Self::default()
+        };
+        let (mut low, mut high, mut count) = ([i32::MAX; 2], [i32::MIN; 2], 0u64);
+        for (index, &(x, y, cells)) in spans.iter().enumerate() {
+            if cells > MAX_CELLS {
+                grid.large.push(index as u32);
+                continue;
+            }
+            low = [low[0].min(x[0]), low[1].min(y[0])];
+            high = [high[0].max(x[1]), high[1].max(y[1])];
+            count += cells as u64;
+        }
+        if count == 0 {
+            return grid;
+        }
+        let across = |k: usize| (i64::from(high[k]) - i64::from(low[k]) + 1) as u64;
+        if across(0).saturating_mul(across(1)) > 4 * count + 1024 {
+            for (index, &span) in spans.iter().enumerate() {
+                if span.2 <= MAX_CELLS {
+                    for (cell, entry) in entries(index as u32, span) {
+                        grid.map.entry(cell).or_default().push(entry);
+                    }
+                }
+            }
+            return grid;
+        }
+        let mut array = Array {
+            origin: low,
+            size: [across(0) as usize, across(1) as usize],
+            starts: vec![0; (across(0) * across(1)) as usize + 1],
+            entries: vec![0; count as usize],
+        };
+        let small = || {
+            spans
+                .iter()
+                .enumerate()
+                .filter(|(_, span)| span.2 <= MAX_CELLS)
+                .flat_map(|(index, &span)| entries(index as u32, span))
+        };
+        for ((cx, cy), _) in small() {
+            if let Some(k) = array.index(cx, cy) {
+                array.starts[k + 1] += 1;
+            }
+        }
+        for k in 1..array.starts.len() {
+            array.starts[k] += array.starts[k - 1];
+        }
+        let mut next = array.starts.clone();
+        for ((cx, cy), entry) in small() {
+            if let Some(k) = array.index(cx, cy) {
+                array.entries[next[k] as usize] = entry;
+                next[k] += 1;
+            }
+        }
+        grid.array = array;
         grid
     }
 
-    fn cells_of(r: Rect) -> ([i32; 2], [i32; 2], i64) {
+    fn cells_of(r: Rect) -> Span {
         // A saturating cast: coordinates are clamped far inside i32 anyway.
         let cell = |v: f32| (v / CELL).floor() as i32;
         let (x, y) = ([cell(r.x), cell(r.right())], [cell(r.y), cell(r.bottom())]);
@@ -515,54 +650,57 @@ impl Grid {
     fn insert(&mut self, rect: Rect) {
         let index = self.rects.len() as u32;
         self.rects.push(rect);
-        let (x, y, count) = Self::cells_of(rect);
-        if count > MAX_CELLS {
+        let span = Self::cells_of(rect);
+        if span.2 > MAX_CELLS {
             self.large.push(index);
             return;
         }
-        for cx in x[0]..=x[1] {
-            for cy in y[0]..=y[1] {
-                self.cells.entry((cx, cy)).or_default().push(index);
-            }
+        for (cell, entry) in entries(index, span) {
+            self.map.entry(cell).or_default().push(entry);
         }
     }
 
-    /// The indices of the rectangles touching `area`, ascending, each cell
-    /// visited and each rectangle looked at taken from `budget`. When the
-    /// budget runs out the query stops, leaves it at 0 and returns false;
-    /// `out` is then incomplete.
+    /// The indices of the rectangles touching `area`, each once, in no
+    /// particular order; each cell visited and each rectangle looked at is
+    /// taken from `budget`. When the budget runs out the query stops,
+    /// leaves it at 0 and returns false; `out` is then incomplete.
     fn query(&self, area: Rect, out: &mut Vec<u32>, budget: &mut u32) -> bool {
         out.clear();
         let (x, y, count) = Self::cells_of(area);
-        // Each list is ascending, so only a merge of two needs sorting.
-        let mut lists = 0;
+        let touching = |&i: &u32| touches(self.rects[i as usize], area);
         if count > self.rects.len() as i64 {
             if !spend(budget, self.rects.len()) {
                 return false;
             }
-            out.extend(0..self.rects.len() as u32);
-        } else {
-            for cx in x[0]..=x[1] {
-                for cy in y[0]..=y[1] {
-                    let found = self.cells.get(&(cx, cy)).map_or(&[][..], Vec::as_slice);
-                    if !spend(budget, 1 + found.len()) {
-                        return false;
-                    }
-                    lists += usize::from(!found.is_empty());
-                    out.extend_from_slice(found);
+            out.extend((0..self.rects.len() as u32).filter(touching));
+            return true;
+        }
+        // A rectangle over several of these cells is taken from the first
+        // of them, where its first column or the query's meets its first
+        // row or the query's, so no sort is needed to drop the repeats.
+        for cx in x[0]..=x[1] {
+            for cy in y[0]..=y[1] {
+                let made = self.array.get(cx, cy);
+                let added = match self.map.is_empty() {
+                    true => &[][..],
+                    false => self.map.get(&(cx, cy)).map_or(&[][..], Vec::as_slice),
+                };
+                if !spend(budget, 1 + made.len() + added.len()) {
+                    return false;
                 }
+                let (column, row) = (cx == x[0], cy == y[0]);
+                out.extend(made.iter().chain(added).filter_map(|&entry| {
+                    let first =
+                        (column || entry & FIRST_COLUMN != 0) && (row || entry & FIRST_ROW != 0);
+                    let i = entry & INDEX;
+                    (first && touching(&i)).then_some(i)
+                }));
             }
-            if !spend(budget, self.large.len()) {
-                return false;
-            }
-            lists += usize::from(!self.large.is_empty());
-            out.extend_from_slice(&self.large);
         }
-        out.retain(|&i| touches(self.rects[i as usize], area));
-        if lists > 1 {
-            out.sort_unstable();
-            out.dedup();
+        if !spend(budget, self.large.len()) {
+            return false;
         }
+        out.extend(self.large.iter().filter(|i| touching(i)));
         true
     }
 }
@@ -624,6 +762,18 @@ struct Lines {
 }
 
 impl Lines {
+    /// The lines of `segments`, each with its connector.
+    fn new(segments: Vec<(Point, Point, usize)>) -> Self {
+        let boxes = segments
+            .iter()
+            .map(|&(p, q, _)| grow(segment_box(p, q), LINE_TOLERANCE));
+        Self {
+            grid: Grid::new(boxes),
+            segments,
+            found: Vec::new(),
+        }
+    }
+
     fn insert(&mut self, p: Point, q: Point, owner: usize) {
         self.segments.push((p, q, owner));
         self.grid.insert(grow(segment_box(p, q), LINE_TOLERANCE));
@@ -862,6 +1012,18 @@ fn length_of(points: &[Point]) -> f32 {
     points.windows(2).map(|w| distance(w[0], w[1])).sum()
 }
 
+/// Working memory one connector's routing leaves for the next.
+#[derive(Default)]
+struct Scratch {
+    found: Vec<u32>,
+    hits: Vec<u32>,
+    candidates: Vec<Vec<Point>>,
+    /// For each box, the last [`Router::hits`] call that counted it, so
+    /// a box entered by several segments is counted once without a sort.
+    seen: Vec<u32>,
+    call: u32,
+}
+
 /// Routes one connector among the node boxes and, for a connector with a
 /// side to choose, the lines already drawn: the fixed connectors' and
 /// those of the free connectors before it.
@@ -870,7 +1032,7 @@ struct Router<'a> {
     /// The index of each end's node among the obstacles.
     own: [Option<usize>; 2],
     lines: Option<&'a Lines>,
-    found: Vec<u32>,
+    scratch: Scratch,
     /// What lookup this connector may still do ([`BUDGET`]).
     budget: u32,
 }
@@ -881,12 +1043,13 @@ impl<'a> Router<'a> {
         own: [Option<usize>; 2],
         lines: Option<&'a Lines>,
         budget: u32,
+        scratch: Scratch,
     ) -> Self {
         Self {
             obstacles,
             own,
             lines,
-            found: Vec::new(),
+            scratch,
             budget,
         }
     }
@@ -905,16 +1068,18 @@ impl<'a> Router<'a> {
             };
         }
         let free = apart_on_both_axes(ra, rb);
-        let from_sides = choices(from, exit, free);
-        let to_sides = choices(to, entry, free);
+        let (from_sides, n) = choices(from, exit, free);
+        let from_sides = &from_sides[..n];
+        let (to_sides, n) = choices(to, entry, free);
+        let to_sides = &to_sides[..n];
         let single = from_sides.len() == 1 && to_sides.len() == 1;
         let mut near: Option<Vec<Rect>> = None;
         let mut best: Option<(Score, Routed)> = None;
-        let mut hits = Vec::new();
-        let mut candidates: Vec<Vec<Point>> = Vec::new();
+        let mut hits = std::mem::take(&mut self.scratch.hits);
+        let mut candidates = std::mem::take(&mut self.scratch.candidates);
         let mut first = true;
-        'pairs: for &sa in &from_sides {
-            for &sb in &to_sides {
+        'pairs: for &sa in from_sides {
+            for &sb in to_sides {
                 if self.budget == 0 {
                     break 'pairs;
                 }
@@ -983,6 +1148,8 @@ impl<'a> Router<'a> {
                 }
             }
         }
+        self.scratch.hits = hits;
+        self.scratch.candidates = candidates;
         match best {
             Some((_, routed)) => routed,
             None => {
@@ -1019,12 +1186,13 @@ impl<'a> Router<'a> {
         for area in areas {
             if !self
                 .obstacles
-                .query(area, &mut self.found, &mut self.budget)
+                .query(area, &mut self.scratch.found, &mut self.budget)
             {
                 return Vec::new();
             }
             picked.extend(
-                self.found
+                self.scratch
+                    .found
                     .iter()
                     .filter(|&&i| !self.own.contains(&Some(i as usize))),
             );
@@ -1217,33 +1385,43 @@ impl<'a> Router<'a> {
         (c != start).then_some(c)
     }
 
-    /// The node boxes the route enters, ascending: any but its own, and
+    /// The node boxes the route enters, each once: any but its own, and
     /// its own except by the segment that leaves or arrives at it. False,
     /// with `out` incomplete, when the budget runs out.
     fn hits(&mut self, points: &[Point], out: &mut Vec<u32>) -> bool {
         out.clear();
         let last = points.len().saturating_sub(2);
         let grid = self.obstacles;
+        let Scratch {
+            found, seen, call, ..
+        } = &mut self.scratch;
+        if seen.len() < grid.rects.len() {
+            seen.resize(grid.rects.len(), 0);
+        }
+        *call = call.wrapping_add(1);
+        if *call == 0 {
+            seen.fill(0);
+            *call = 1;
+        }
         for (i, pair) in points.windows(2).enumerate() {
             let (p, q) = (pair[0], pair[1]);
             let area = grow(segment_box(p, q), CLEARANCE);
-            if !grid.query(area, &mut self.found, &mut self.budget) {
+            if !grid.query(area, found, &mut self.budget) {
                 return false;
             }
-            for &k in &self.found {
+            for &k in found.iter() {
                 let from = self.own[0] == Some(k as usize);
                 let to = self.own[1] == Some(k as usize);
-                if (from && i == 0) || (to && i == last) {
+                if (from && i == 0) || (to && i == last) || seen[k as usize] == *call {
                     continue;
                 }
                 let clearance = if from || to { 0.0 } else { CLEARANCE };
                 if enters(p, q, grid.rects[k as usize], clearance) {
+                    seen[k as usize] = *call;
                     out.push(k);
                 }
             }
         }
-        out.sort_unstable();
-        out.dedup();
         true
     }
 
@@ -1280,10 +1458,10 @@ impl<'a> Router<'a> {
                     s.height + 2.0 * REACH,
                 )
             };
-            if !grid.query(area, &mut self.found, &mut self.budget) {
+            if !grid.query(area, &mut self.scratch.found, &mut self.budget) {
                 return None;
             }
-            let on_centre = self.found.iter().any(|&k| {
+            let on_centre = self.scratch.found.iter().any(|&k| {
                 let c = grid.rects[k as usize].center();
                 !self.own.contains(&Some(k as usize))
                     && if horizontal {
@@ -1298,11 +1476,11 @@ impl<'a> Router<'a> {
         if let Some(lines) = self.lines {
             for pair in points.windows(2) {
                 let (p, q) = (pair[0], pair[1]);
-                if !lines.near(p, q, None, &mut self.found, &mut self.budget) {
+                if !lines.near(p, q, None, &mut self.scratch.found, &mut self.budget) {
                     return None;
                 }
                 let mut on_line = false;
-                for &k in &self.found {
+                for &k in &self.scratch.found {
                     let (a, b, _) = lines.segments[k as usize];
                     if collinear_overlap(p, q, a, b) > SHARED_LENGTH {
                         on_line = true;
@@ -1344,6 +1522,26 @@ impl<'a> Router<'a> {
     }
 }
 
+/// The segments of the routes, in order, each with its connector's index;
+/// `keep` is given that index and the segment's.
+fn segments<'a>(
+    routes: impl Iterator<Item = (usize, Option<&'a Routed>)>,
+    keep: impl Fn(usize, usize) -> bool,
+) -> Vec<(Point, Point, usize)> {
+    let mut out = Vec::new();
+    for (i, routed) in routes {
+        let Some(routed) = routed else {
+            continue;
+        };
+        for (j, pair) in routed.points.windows(2).enumerate() {
+            if keep(i, j) {
+                out.push((pair[0], pair[1], i));
+            }
+        }
+    }
+    out
+}
+
 /// Moves aside, in connector order, each middle segment of an elbow route
 /// that lies on a line already drawn: a straight connector's, the first or
 /// last segment of any connector's, or an earlier connector's middle
@@ -1351,21 +1549,27 @@ impl<'a> Router<'a> {
 /// to the first place that is on no other line, enters no more boxes and
 /// keeps every segment's direction, preferring fewer crossings and then
 /// the longer of its neighbours; where there is none it stays.
-fn separate(obstacles: &Grid, connectors: &[Connector], routes: &mut [Routed]) {
-    let mut placed = Lines::default();
-    for (i, (connector, routed)) in connectors.iter().zip(routes.iter()).enumerate() {
-        let last = routed.points.len().saturating_sub(2);
-        for (j, pair) in routed.points.windows(2).enumerate() {
-            if connector.kind != Route::Elbow || j == 0 || j == last {
-                placed.insert(pair[0], pair[1], i);
-            }
-        }
+fn separate(
+    obstacles: &Grid,
+    connectors: &[Connector],
+    routes: &mut [Routed],
+    mut scratch: Scratch,
+) {
+    // Only a middle segment moves.
+    let middle = |(c, r): (&Connector, &Routed)| c.kind == Route::Elbow && r.points.len() > 3;
+    if !connectors.iter().zip(routes.iter()).any(middle) {
+        return;
     }
+    let ends = |i: usize, j: usize| {
+        let last = routes[i].points.len().saturating_sub(2);
+        connectors[i].kind != Route::Elbow || j == 0 || j == last
+    };
+    let mut placed = Lines::new(segments(routes.iter().map(Some).enumerate(), ends));
     for (i, connector) in connectors.iter().enumerate() {
         if connector.kind != Route::Elbow {
             continue;
         }
-        let mut router = Router::new(obstacles, connector.nodes, None, SEPARATE_BUDGET);
+        let mut router = Router::new(obstacles, connector.nodes, None, SEPARATE_BUDGET, scratch);
         let points = &mut routes[i].points;
         let mut j = 1;
         while j + 2 < points.len() {
@@ -1383,6 +1587,7 @@ fn separate(obstacles: &Grid, connectors: &[Connector], routes: &mut [Routed]) {
         for j in 1..points.len().saturating_sub(2) {
             placed.insert(points[j], points[j + 1], i);
         }
+        scratch = router.scratch;
     }
 }
 
@@ -1884,6 +2089,73 @@ mod tests {
                 }],
             );
             assert_eq!(all, [routed]);
+        }
+    }
+
+    /// A query of the box lookup, against its definition: every box
+    /// touching the area once, and a cost of one per cell visited plus one
+    /// per box listed in it and per box too large for cells (or one per box
+    /// when the area covers more cells than there are boxes), all of it
+    /// spent or, when it is more than the budget holds, the budget emptied.
+    /// Boxes close together (kept in an array), far apart (in the map),
+    /// large, and added after the lookup was made.
+    #[test]
+    fn a_lookup_finds_each_touching_box_once_at_its_cost() {
+        let mut rng = Rng(5);
+        for round in 0..400 {
+            let spread = *rng.pick(&[600, 3_000, 40_000, 4_000_000]);
+            let rect = |rng: &mut Rng| {
+                let wide = if rng.one_in(12) { 20_000 } else { 400 };
+                Rect::new(
+                    rng.below(spread) as f32 - 300.0,
+                    rng.below(spread) as f32 - 300.0,
+                    rng.below(wide) as f32,
+                    rng.below(400) as f32,
+                )
+            };
+            let made: Vec<Rect> = (0..rng.below(60)).map(|_| rect(&mut rng)).collect();
+            let mut grid = Grid::new(made.iter().copied());
+            let mut all = made;
+            for _ in 0..rng.below(20) {
+                let added = rect(&mut rng);
+                grid.insert(added);
+                all.push(added);
+            }
+            let spans: Vec<Span> = all.iter().map(|&r| Grid::cells_of(r)).collect();
+            for _ in 0..30 {
+                let area = rect(&mut rng);
+                let (x, y, count) = Grid::cells_of(area);
+                let cost = if count > all.len() as i64 {
+                    all.len() as u64
+                } else {
+                    let listed = |(sx, sy, n): Span| {
+                        let across = (sx[1].min(x[1]) - sx[0].max(x[0]) + 1).max(0);
+                        let down = (sy[1].min(y[1]) - sy[0].max(y[0]) + 1).max(0);
+                        if n > MAX_CELLS {
+                            1
+                        } else {
+                            (across * down) as u64
+                        }
+                    };
+                    count as u64 + spans.iter().map(|&span| listed(span)).sum::<u64>()
+                };
+                let start = rng.below(cost as usize * 2 + 2) as u32;
+                let mut budget = start;
+                let mut found = Vec::new();
+                let complete = grid.query(area, &mut found, &mut budget);
+                let case = format!("{round}: {area:?} with {start} of {cost}");
+                if cost > u64::from(start) {
+                    assert!(!complete && budget == 0, "{case}");
+                    continue;
+                }
+                assert!(complete, "{case}");
+                assert_eq!(u64::from(start - budget), cost, "{case}");
+                found.sort_unstable();
+                let touching: Vec<u32> = (0..all.len() as u32)
+                    .filter(|&i| touches(all[i as usize], area))
+                    .collect();
+                assert_eq!(found, touching, "{case}");
+            }
         }
     }
 
