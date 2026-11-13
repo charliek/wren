@@ -1002,13 +1002,15 @@ impl App {
         self.settle_resize();
         self.cancel_gestures();
         self.editor.break_group();
-        self.put_board_away()?;
+        // Whatever the board's settling came to, the draft the Session
+        // already holds is still flushed.
+        let settled = self.put_board_away();
         if self.loading.is_some() {
             self.flush_on_load = true;
         } else if self.session.is_some() {
             let _ = self.apply_core(Op::Flush)?;
         }
-        Ok(())
+        settled
     }
 
     pub(super) fn request_quit(&mut self) -> Result<Task<Message>, String> {
