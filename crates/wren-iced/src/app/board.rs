@@ -205,9 +205,16 @@ impl App {
         let (Some(view), Some(note)) = (&mut self.board, self.editor_note) else {
             return Ok(());
         };
+        #[cfg(feature = "smoke-test")]
+        let started = Instant::now();
         let contents = view.draft();
+        #[cfg(feature = "smoke-test")]
+        let written = Instant::now();
         self.board_revision += 1;
-        self.apply_core(Op::EditDraft { note, contents }).map(drop)
+        let sent = self.apply_core(Op::EditDraft { note, contents }).map(drop);
+        #[cfg(feature = "smoke-test")]
+        self.board_perf.drafted(started, written, Instant::now());
+        sent
     }
 
     /// Before anything that is not passive (§3.4 rule 3): the open label

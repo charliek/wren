@@ -154,6 +154,11 @@ mod harness {
     #[derive(Default)]
     pub struct Perf {
         frame_micros: VecDeque<u64>,
+        /// Each draft of the open board (§3.4 rule 7): the canonical write
+        /// alone, and that write with the Session's op, which re-indexes
+        /// the document.
+        write_micros: VecDeque<u64>,
+        draft_micros: VecDeque<u64>,
         open_micros: Option<u64>,
         /// When the board on screen began to open; launch for the first.
         opened: Option<Instant>,
@@ -168,6 +173,13 @@ mod harness {
     }
 
     impl Perf {
+        /// A draft began at `started`, its text was written by `written`,
+        /// and the Session had taken it by `ended`.
+        pub fn drafted(&mut self, started: Instant, written: Instant, ended: Instant) {
+            push(&mut self.write_micros, started, written);
+            push(&mut self.draft_micros, started, ended);
+        }
+
         /// A board began to open at `at`: `open_micros` times it afresh.
         pub fn opened(&mut self, at: Instant) {
             self.opened = Some(at);
@@ -292,6 +304,8 @@ mod harness {
                 request.respond(Ok(self.perf_board_rings()));
                 if params.get("clear").and_then(Value::as_bool) == Some(true) {
                     self.board_perf.frame_micros.clear();
+                    self.board_perf.write_micros.clear();
+                    self.board_perf.draft_micros.clear();
                     if let Some(view) = self.shown_board() {
                         view.probe.scene_micros.borrow_mut().clear();
                         view.probe.draw_micros.borrow_mut().clear();
@@ -413,6 +427,8 @@ mod harness {
                 "scene_micros": scenes,
                 "draw_micros": draws,
                 "frame_micros": ring(&self.board_perf.frame_micros),
+                "write_micros": ring(&self.board_perf.write_micros),
+                "draft_micros": ring(&self.board_perf.draft_micros),
                 "open_micros": self.board_perf.open_micros,
                 "parses": counts[0],
                 "scenes": counts[1],

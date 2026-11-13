@@ -39,6 +39,9 @@ DRAW = 8
 OPEN_1K = 150 if RELEASE else 5000
 OPEN_10K = 1000 if RELEASE else 5000
 VIEW = 1 if RELEASE else 5
+# One label keystroke's draft at 1,000 nodes, the canonical write and the
+# Session's op with its index parse (§3.4 rule 7): release only.
+KEYSTROKE = 8
 
 # Whole-scene changes left out before the timed ones, and those timed.
 WARM = 3
@@ -177,5 +180,27 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
                 else:
                     assert median_ms(result["frame_micros"]) <= FRAME, measured[name]
             assert app.client.call("navigation.get")["selected_note"] == notes[f"{GROUP}/Grid.wren-board"]
+
+            # One label keystroke at 1,000 nodes (§3.4 rule 7): each typed
+            # character is one draft, the canonical write of the board and
+            # the Session's op, which re-indexes the document. The scene
+            # the change rebuilds is recorded beside it.
+            app.client.call("command.run", {"id": "font.reset"})
+            app.client.call("board.pointer", {"kind": "click", "button": "left", "at": {"node": "n0"}})
+            wait_for(lambda: app.client.call("focus.get")["named"] == ["note-editor"],
+                     timeout=5, interval=0.02, description="the board focused")
+            assert app.client.call("board.key", {"key": "enter"})["state"] == "editing"
+            rings(app, clear=True)
+            typed = "keystroke timing"
+            for character in typed:
+                assert app.client.call("board.type", {"text": character})["handled"]
+            keys = rings(app)
+            measured["keystroke"] = {"draft_micros": keys["draft_micros"],
+                                     "write_micros": keys["write_micros"],
+                                     "scene_micros": keys["scene_micros"]}
+            assert len(keys["draft_micros"]) == len(typed), measured["keystroke"]
+            app.client.call("board.key", {"key": "escape"})
+            if RELEASE:
+                assert median_ms(keys["draft_micros"]) <= KEYSTROKE, measured["keystroke"]
     finally:
         (artifacts / "measurements.json").write_text(json.dumps(measured, indent=2), encoding="utf-8")
