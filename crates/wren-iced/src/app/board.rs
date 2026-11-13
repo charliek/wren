@@ -176,13 +176,13 @@ impl App {
                     self.banner_kind = WarningKind::General;
                     did.notice = Some(notice);
                 }
-                Effect::ClipboardWrite(text) => tasks.push(iced::clipboard::write(text)),
+                Effect::ClipboardWrite(text) => tasks.push(self.clipboard_write(text)),
                 // The text comes back stamped for the board that asked, so
                 // it is dropped if the board is another by then. A
                 // clipboard with no text pastes nothing.
                 Effect::ClipboardRead => {
                     if let Some(epoch) = self.board.as_ref().map(BoardView::epoch) {
-                        tasks.push(iced::clipboard::read().map(move |text| {
+                        tasks.push(self.clipboard_read().map(move |text| {
                             let text = text.unwrap_or_default();
                             Message::Board(wren_canvas::Message::Pasted(epoch, text))
                         }));
@@ -194,6 +194,26 @@ impl App {
         }
         did.task = Task::batch(tasks);
         did
+    }
+
+    /// Put `text` on the clipboard: the system's, or under the harness the
+    /// app's own when it asked for that.
+    pub(super) fn clipboard_write(&mut self, text: String) -> Task<Message> {
+        #[cfg(feature = "smoke-test")]
+        if let Some(own) = &mut self.test_clipboard {
+            *own = text;
+            return Task::none();
+        }
+        iced::clipboard::write(text)
+    }
+
+    /// Read the clipboard [`App::clipboard_write`] writes.
+    pub(super) fn clipboard_read(&self) -> Task<Option<String>> {
+        #[cfg(feature = "smoke-test")]
+        if let Some(own) = &self.test_clipboard {
+            return Task::done(Some(own.clone()));
+        }
+        iced::clipboard::read()
     }
 
     /// The board changed: its draft goes to the Session, which autosave

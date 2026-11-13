@@ -134,6 +134,11 @@ pub struct App {
     view_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
     #[cfg(feature = "smoke-test")]
     board_perf: board_spike::Perf,
+    /// A clipboard of the app's own, which the harness turns on where the
+    /// display server gives the app none (headless Weston): its text, or
+    /// `None` for the system clipboard.
+    #[cfg(feature = "smoke-test")]
+    test_clipboard: Option<String>,
     /// When the app was built, which `perf.board` times a board's opening from.
     #[cfg(feature = "smoke-test")]
     launched: Instant,
@@ -384,6 +389,8 @@ impl App {
             view_micros: Default::default(),
             #[cfg(feature = "smoke-test")]
             board_perf: Default::default(),
+            #[cfg(feature = "smoke-test")]
+            test_clipboard: None,
             #[cfg(feature = "smoke-test")]
             launched,
         };

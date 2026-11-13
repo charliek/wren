@@ -216,13 +216,14 @@ def test_copy_and_paste_make_new_ids_one_cell_on_and_survive_a_restart(samples: 
     with board_app(samples, "board-edit-paste") as app:
         ready(app)
         # Headless Weston gives the app no clipboard: what it writes there
-        # reads back as nothing.
+        # reads back as nothing. There the app keeps one of its own, so the
+        # copy and paste path is tested and only the system clipboard is not.
         app.client.call("clipboard.write", {"text": "probe"})
         try:
             wait_for(lambda: app.client.call("clipboard.read") == "probe", timeout=2,
                      interval=0.05, description="the clipboard")
         except TimeoutError:
-            pytest.skip("this display server gives the app no clipboard")
+            app.client.call("test.clipboard", {"own": True})
         original = flow.read_bytes()
         click(app, {"node": START})
         assert click(app, {"node": RECEIVE}, mods=("shift",))["selection"] == sorted([START, RECEIVE])

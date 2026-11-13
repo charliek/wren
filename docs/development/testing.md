@@ -143,6 +143,12 @@ The board requests:
 Every board request but `board.get` fails when the open note is not shown
 as a board.
 
+`test.clipboard` `{"own": true}` gives the app a clipboard of its own, which
+`clipboard.write`, `clipboard.read` and the board's copy, cut and paste then
+use. Headless Weston gives the app no clipboard, so the paste case turns it
+on there and still tests the board's copy and paste; `{"own": false}` goes
+back to the system clipboard.
+
 ## Looking at real screens
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`
