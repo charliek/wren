@@ -330,7 +330,8 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
 
 /// Whether `issue`, found after a step, is one the board had before it:
 /// the same issue on an element that was there (a dangling connector may
-/// dangle at fewer ends), or, on a new element, a missing `kind` copied
+/// dangle at no more ends, and reversing it moves which end that is), or,
+/// on a new element, a missing `kind` copied
 /// from an element that had none.
 fn had(issue: &Issue, before: &[Issue], old: &Board) -> bool {
     let existed = match &issue.element {
@@ -350,7 +351,7 @@ fn had(issue: &Issue, before: &[Issue], old: &Board) -> bool {
                         from: now_from,
                         to: now_to,
                     },
-                ) => (from || !now_from) && (to || !now_to),
+                ) => u8::from(now_from) + u8::from(now_to) <= u8::from(from) + u8::from(to),
                 (old, now) => old == now,
             }
     })

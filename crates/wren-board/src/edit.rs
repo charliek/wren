@@ -20,6 +20,7 @@ use crate::{
     NodeKind, Reason, Route, Shape, Side,
 };
 
+mod connect;
 mod copy;
 mod delete;
 mod node;
@@ -78,23 +79,27 @@ pub enum Intent {
         view: Area,
         nth: u32,
     },
-    /// A connector, with no label, on top of the stacking order (§5.12
-    /// rules 1 and 5).
+    /// A connector, with no label, on top of the stacking order, selected
+    /// (§5.12 rules 1 and 5). Nothing is made when an end names a node that
+    /// is not there or both ends name one node.
     AddEdge { from: Endpoint, to: Endpoint },
-    /// Move one end of a connector (§5.12 rule 6).
+    /// Move one end of a connector (§5.12 rule 6): onto a node, or, for an
+    /// end that is a free point, to another point.
     Rebind { id: Id, end: EdgeEnd, to: Endpoint },
     /// Set one style field of each connector (§5.12 rule 9).
     SetEdge { ids: Vec<Id>, field: EdgeField },
-    /// Swap each connector's ends, with their heads (§5.12 rule 9).
+    /// Swap each connector's ends, with their heads, mirroring its labels'
+    /// places so they stay where they are drawn (§5.12 rule 9).
     Reverse { ids: Vec<Id> },
     /// A connector's first label; an empty text removes it (§5.12 rule 8,
     /// §5.9 rule 8).
     SetEdgeLabel { id: Id, text: String },
-    /// Keyboard building from the node `from` (§5.6). `dir` is `None` for
-    /// `board.connect.next`, which takes the flow direction and always
-    /// creates; `Some` for `board.connect.<dir>`, which connects to a node
-    /// in the ideal slot when there is one. `shape` is the armed shape
-    /// tool, if any, which always creates.
+    /// Keyboard building from the node `from`, or from the `to` node of the
+    /// connector `from` (§5.6). `dir` is `None` for `board.connect.next`,
+    /// which takes the flow direction and always creates; `Some` for
+    /// `board.connect.<dir>`, which connects to a node in the ideal slot
+    /// when there is one. `shape` is the armed shape tool, if any, which
+    /// always creates.
     Extend {
         from: Id,
         dir: Option<Dir>,
@@ -204,7 +209,12 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
             view,
             nth,
         } => crate::clip::paste(board, text, *size, *view, *nth, ids),
-        _ => Plan::default(),
+        Intent::AddEdge { from, to } => connect::add(board, from, to, ids),
+        Intent::Rebind { id, end, to } => connect::rebind(board, id, *end, to),
+        Intent::SetEdge { ids: chosen, field } => connect::set_field(board, chosen, *field),
+        Intent::Reverse { ids: chosen } => connect::reverse(board, chosen),
+        Intent::SetEdgeLabel { id, text } => connect::set_label(board, id, text),
+        Intent::Extend { from, dir, shape } => connect::extend(board, from, *dir, *shape, ids),
     }
 }
 
