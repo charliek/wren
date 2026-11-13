@@ -68,9 +68,6 @@ pub enum Motion {
     End,
 }
 
-/// The first line of a board fragment on the clipboard (§5.10 rule 4).
-const FRAGMENT: &str = "# wren-board fragment 1";
-
 /// A measured width at most this much over its box still fits, as in the
 /// scene's wrap.
 const SLACK: f32 = 0.001;
@@ -183,7 +180,8 @@ pub struct Label {
     rows: Vec<Row>,
     /// The node's size when the edit began, which undo puts back.
     pub(crate) size: Option<[i32; 2]>,
-    /// Whether this edit's own creation made the element (§5.9 rule 8).
+    /// Whether this edit's own creation made the element, or for a
+    /// connector its label (§5.9 rule 8).
     pub(crate) made: bool,
     /// The colour the label is drawn in, for the caret.
     pub(crate) ink: Rgba,
@@ -395,7 +393,7 @@ impl Label {
     /// labels, one to a line (§5.9 rule 3), or the text itself.
     pub(crate) fn paste(&mut self, text: &str, measure: &dyn Measure) -> Outcome {
         let fragment = text
-            .strip_prefix(FRAGMENT)
+            .strip_prefix(wren_board::clip::HEADER)
             .and_then(|rest| {
                 rest.strip_prefix("\r\n")
                     .or_else(|| rest.strip_prefix('\n'))

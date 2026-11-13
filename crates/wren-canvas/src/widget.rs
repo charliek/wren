@@ -1452,7 +1452,11 @@ mod tests {
         let tab = key(Key::Named(Named::Tab), plain, Some("\t"));
         let sent = send(&mut view, &mut state, tab, ON_A);
         assert_eq!(sent.messages, [Message::Command(Command::ConnectNext)]);
-        assert_eq!(view.label(), None);
+        // It commits the label and builds the next shape, whose own label
+        // opens empty (§5.9 rules 1 and 4).
+        assert!(view.board().nodes.values().any(|node| node.text == "A日本"));
+        assert_eq!(view.board().nodes.len(), 3);
+        assert_eq!(view.label().map(crate::Label::text), Some(""));
     }
 
     #[test]

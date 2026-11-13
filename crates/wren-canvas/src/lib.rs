@@ -38,13 +38,12 @@
 //! and geometry builds (`Probe`).
 
 use std::collections::BTreeSet;
-use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use iced::{Element, Font};
 use wren_board::edit::{self, Intent};
-use wren_board::ids::Ids;
+use wren_board::ids::Random;
 use wren_board::scene::{self, Draw, Rect, Scene, Source};
 use wren_board::{
     style, walk, Access, Board, Dir, Fill, Id, Issue, Named, NodeKind, Palette, ParseError, Rgba,
@@ -316,7 +315,7 @@ pub struct BoardView {
     /// The board as a gesture in flight would leave it, shown in place of
     /// the board until the gesture ends (§3.4 rule 4).
     preview: Option<Preview>,
-    ids: Fresh,
+    ids: Random,
     viewport: Viewport,
     revision: u64,
     machine: Machine,
@@ -362,30 +361,6 @@ pub(crate) struct Picture<'a> {
     pub(crate) revision: u64,
 }
 
-/// Candidate ids for what an edit creates (§4.2): the process's random
-/// hash keys applied to a counter, spelt in the id alphabet. The plan
-/// draws again while a candidate is taken.
-#[derive(Default)]
-struct Fresh {
-    keys: RandomState,
-    count: u64,
-}
-
-impl Ids for Fresh {
-    fn draw(&mut self) -> Id {
-        const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
-        let mut hasher = self.keys.build_hasher();
-        hasher.write_u64(self.count);
-        self.count = self.count.wrapping_add(1);
-        let bits = hasher.finish();
-        let text: String = (0..8)
-            .rev()
-            .map(|k| char::from(ALPHABET[((bits >> (5 * k)) & 31) as usize]))
-            .collect();
-        Id::new(&text).expect("eight characters of the id alphabet are an id")
-    }
-}
-
 impl BoardView {
     /// A view of the board `text` holds, at 100 % with the board's origin
     /// at the widget's corner. Labels are measured in `font`, which the
@@ -412,7 +387,7 @@ impl BoardView {
             plan: layers::Plan::default(),
             cap: layers::CAP,
             preview: None,
-            ids: Fresh::default(),
+            ids: Random::new(),
             viewport: Viewport::default(),
             revision: 0,
             machine: Machine::default(),
@@ -859,7 +834,12 @@ impl BoardView {
         let mut label = Label::open(id.clone(), text, place, &self.measurer);
         label.ink = ink;
         label.size = self.board.nodes.get(&id).map(|node| node.size);
-        label.made = self.making.as_ref() == Some(&id);
+        label.made = self.making.as_ref() == Some(&id)
+            || self
+                .board
+                .edges
+                .get(&id)
+                .is_some_and(|edge| edge.labels.is_empty());
         // What has to be in view: the label, and with it the node it is on.
         let lines = label.bounds(&self.measurer);
         let node = hit::Frames::new(&self.board).get(&id);
@@ -887,19 +867,35 @@ impl BoardView {
 
     /// Close the label editor (§5.9 rules 4 and 8). Its text is the
     /// board's already, so an unchanged label changes nothing; what is left
-    /// to do is to delete free text that ends empty, when this edit
-    /// emptied it or made it.
+    /// to do is to delete free text or a connector label that ends empty,
+    /// when this edit emptied it or made it.
     fn commit_label(&mut self, now: Instant, update: &mut Update) {
         let Some(label) = self.label.take() else {
             return;
         };
+        if !label.stored().is_empty() || !(label.changed() || label.made) {
+            return;
+        }
+        let id = label.id().clone();
         let free =
-            self.board.nodes.get(label.id()).is_some_and(|node| {
+            self.board.nodes.get(&id).is_some_and(|node| {
                 node.kind.as_ref().and_then(Named::known) == Some(NodeKind::Text)
             });
-        if free && label.stored().is_empty() && (label.changed() || label.made) {
-            let ids = vec![label.id().clone()];
-            self.edit(&Intent::Delete { ids }, now, update);
+        let labelled = !self.board.nodes.contains_key(&id)
+            && self
+                .board
+                .edges
+                .get(&id)
+                .is_some_and(|edge| !edge.labels.is_empty());
+        if free {
+            self.edit(&Intent::Delete { ids: vec![id] }, now, update);
+        } else if labelled {
+            let intent = Intent::SetEdgeLabel {
+                id,
+                text: String::new(),
+                commit: true,
+            };
+            self.edit(&intent, now, update);
         }
     }
 
@@ -939,7 +935,11 @@ impl BoardView {
                 };
                 Intent::SetText { id, text, size }
             }
-            None => Intent::SetEdgeLabel { id, text },
+            None => Intent::SetEdgeLabel {
+                id,
+                text,
+                commit: false,
+            },
         };
         self.edit(&intent, now, update);
         self.place_label();
@@ -2181,20 +2181,6 @@ mod tests {
     }
 
     #[test]
-    fn new_ids_are_eight_characters_of_the_alphabet_and_differ() {
-        let mut ids = Fresh::default();
-        let drawn: BTreeSet<Id> = (0..2000).map(|_| ids.draw()).collect();
-        assert_eq!(drawn.len(), 2000);
-        for id in &drawn {
-            assert_eq!(id.as_str().len(), 8);
-            assert!(id
-                .as_str()
-                .bytes()
-                .all(|byte| b"0123456789abcdefghjkmnpqrstvwxyz".contains(&byte)));
-        }
-    }
-
-    #[test]
     fn the_renderer_names_its_label_rule() {
         assert_eq!(Labels::for_renderer("tiny-skia"), Labels::SOFTWARE);
         assert_eq!(Labels::for_renderer("wgpu"), Labels::ALWAYS);
@@ -2633,13 +2619,29 @@ mod tests {
     }
 
     #[test]
+    fn a_text_tool_click_left_empty_leaves_no_node() {
+        let now = Instant::now();
+        let mut view = sized(wren_board::EMPTY);
+        view.command(Command::Tool(Tool::Text), now);
+        click(&mut view, (200.0, 200.0), now);
+        assert_eq!(view.board().nodes.len(), 1);
+        assert!(view.label().is_some());
+        key(&mut view, Key::Escape, now);
+        assert_eq!(view.label(), None);
+        assert!(view.board().nodes.is_empty());
+        assert!(view.machine().selection().is_empty());
+        assert_eq!(view.draft(), wren_board::EMPTY);
+    }
+
+    #[test]
     fn free_text_left_empty_is_deleted_when_this_edit_emptied_or_made_it() {
         let now = Instant::now();
         let deleted = |view: &BoardView, name: &str| {
-            view.intents.last()
+            let asked = view.intents.last()
                 == Some(&Intent::Delete {
                     ids: vec![id(name)],
-                })
+                });
+            asked && !view.board().nodes.contains_key(&id(name))
         };
         // Emptied by this edit.
         let mut view = sized(fixtures::HAND_WRITTEN);
@@ -2703,20 +2705,24 @@ mod tests {
         let next = Intent::SetEdgeLabel {
             id: id("flow"),
             text: "next".to_owned(),
+            commit: false,
         };
         assert_eq!(view.intents, [next.clone(), next]);
-        // Erased, the label is asked away: an empty text removes it.
+        // Erased, the label keeps its item while it is edited, and the
+        // commit asks it away.
         edit(&mut view, LabelAction::SelectAll, now);
         edit(&mut view, LabelAction::Backspace, now);
-        assert_eq!(
-            view.intents.last(),
-            Some(&Intent::SetEdgeLabel {
-                id: id("flow"),
-                text: String::new()
-            })
-        );
+        let erased = |commit| Intent::SetEdgeLabel {
+            id: id("flow"),
+            text: String::new(),
+            commit,
+        };
+        assert_eq!(view.intents.last(), Some(&erased(false)));
+        assert_eq!(view.board().edges[&id("flow")].labels.len(), 1);
         key(&mut view, Key::Escape, now);
         assert_eq!(view.label(), None);
+        assert_eq!(view.intents.last(), Some(&erased(true)));
+        assert!(view.board().edges[&id("flow")].labels.is_empty());
 
         // One with none: the caret is at the middle of the route, which
         // runs from (120, 30) to (300, 30).
@@ -2729,6 +2735,14 @@ mod tests {
         assert_eq!(size, scene::SMALL_SIZE);
         key(&mut view, Key::Escape, now);
         assert!(view.intents.is_empty());
+        assert!(view.pristine());
+        // A label typed and erased in one edit leaves no item behind.
+        open_label(&mut view, "e", now);
+        typed(&mut view, "x", now);
+        edit(&mut view, LabelAction::Backspace, now);
+        assert_eq!(view.board().edges[&id("e")].labels.len(), 1);
+        key(&mut view, Key::Escape, now);
+        assert!(view.board().edges[&id("e")].labels.is_empty());
         assert!(view.pristine());
     }
 
