@@ -314,7 +314,7 @@ def board_scenes(client, shot_here, out: Path) -> None:
 def board_edit_scenes(client, shot_here, open_board) -> None:
     """discovery/boards.md §6.3, Phase 2: what editing draws over a board.
     These change the board, so they come last."""
-    pack, receive, into_receive = "3qrg4kv1", "12axfsny", "4x2tte9d"
+    pack, receive, reject, into_receive = "3qrg4kv1", "12axfsny", "pa6md7qp", "4x2tte9d"
 
     def key(name: str, *mods: str) -> dict:
         return client.call("board.key", {"key": name, "mods": list(mods)})
@@ -367,10 +367,12 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
     shot_here("board-connect-handles")
     # A connector dragged from one: over a node, which is outlined and
     # shows its side handles, the one in reach taken; and over empty
-    # canvas, where a release would make a node.
+    # canvas, where a release would make a node. Both routes run clear of
+    # every other connector: where a new one would share a line, which of
+    # the two moves aside follows its id, which is drawn at random.
     pointer("press", {"node": receive, "handle": "connect_right"})
-    pointer("move", {"node": pack})
-    pointer("move", {"node": pack, "handle": "side_right"})
+    pointer("move", {"node": reject})
+    pointer("move", {"node": reject, "handle": "side_top"})
     shot_here("board-connect-target")
     pointer("move", {"canvas": [420, 300]})
     shot_here("board-connect-new")
