@@ -7,6 +7,8 @@
 //! opaque, and Wren never generates one ending in `0`, because no key sorts
 //! between `X` and `X0`.
 
+use std::collections::BTreeMap;
+
 use crate::{placements, Board, Id};
 
 /// The longest key: a longer one is flagged and stacked by its first
@@ -63,6 +65,43 @@ pub fn scope<'a>(board: &'a Board, parent: Option<&Id>) -> Vec<(Element<'a>, Opt
             matches!(b, Element::Edge(_)),
         ))
     });
+    out
+}
+
+/// Every element of the board in drawing order, back to front: the root
+/// scope in order, each node followed directly by its own scope's elements,
+/// recursively, as [`crate::scene::build`] stacks them.
+pub fn drawn(board: &Board) -> Vec<Element<'_>> {
+    let placed = placements(board);
+    fn key<'a>(board: &'a Board, element: Element<'a>) -> (&'a [u8], &'a str, bool) {
+        match element {
+            Element::Node(id) => order(board.nodes[id].z.as_deref(), id, false),
+            Element::Edge(id) => order(board.edges[id].z.as_deref(), id, true),
+        }
+    }
+    let mut roots: Vec<Element<'_>> = board.edges.keys().map(Element::Edge).collect();
+    let mut children: BTreeMap<&Id, Vec<Element<'_>>> = BTreeMap::new();
+    for id in board.nodes.keys() {
+        match placed.get(id).and_then(|p| p.parent) {
+            Some(parent) => children.entry(parent).or_default().push(Element::Node(id)),
+            None => roots.push(Element::Node(id)),
+        }
+    }
+    roots.sort_by(|a, b| key(board, *a).cmp(&key(board, *b)));
+    for scope in children.values_mut() {
+        scope.sort_by(|a, b| key(board, *a).cmp(&key(board, *b)));
+    }
+    // The drawn tree is acyclic, so each node's scope is taken once.
+    let mut out = Vec::with_capacity(board.nodes.len() + board.edges.len());
+    let mut stack: Vec<Element<'_>> = roots.into_iter().rev().collect();
+    while let Some(element) = stack.pop() {
+        out.push(element);
+        if let Element::Node(id) = element {
+            if let Some(inner) = children.remove(id) {
+                stack.extend(inner.into_iter().rev());
+            }
+        }
+    }
     out
 }
 
@@ -636,6 +675,18 @@ z = "U"
         let before = again.clone();
         again.sort();
         assert_eq!(again, before);
+    }
+
+    #[test]
+    fn the_whole_board_is_drawn_with_each_scope_above_its_node() {
+        let board = parse(SCOPES).unwrap();
+        let all: Vec<(Element<'_>, Option<&str>)> =
+            drawn(&board).into_iter().map(|e| (e, None)).collect();
+        assert_eq!(
+            spelled(&all),
+            ["node.e", "edge.c", "node.a", "node.d", "node.c", "edge.a", "node.b", "node.f"]
+        );
+        assert!(drawn(&Board::default()).is_empty());
     }
 
     #[test]
