@@ -275,7 +275,7 @@ Not negotiable in any phase: a write on open; a second writer to the Session; a 
 
 ### 3.6 Search
 
-`index::Content` (`index.rs:73`) keeps the raw source for change detection and the extracted text for searching: `source: Arc<str>` beside the searchable `text`; `set_content` (`:390-399`) compares `source` first; `content_snapshot` (`:347`) returns `source`. A private `searchable(kind, source)` returns `None` for Markdown (search the source itself: one shared allocation, byte for byte what it was) and, for a board, `wren_board::search_text` (node labels in reading order, top then left by absolute position, ties by id, then connector labels, connectors in id order, one label per line with its own line breaks kept; a label of only white space and a placeholder's caption are left out, and labels are indexed whole, not cut at what the scene draws). An unparseable board, and from Phase 3 one over the limits, indexes its raw text, in the one allocation of its source. The index keeps each entry's kind and drops a content whose kind changed. A hit's range is in the searched text, not the file. Board previews and snippets skip `body_line` (`:557`) and `plain_markdown` (`:754`); the notes-list preview is the first label (empty when there is none), and a snippet shows each line break as ` · `. A hit reveals the first matching label (§5.18 rule 4).
+`index::Content` (`index.rs:73`) keeps the raw source for change detection and the extracted text for searching: `source: Arc<str>` beside the searchable `text`; `set_content` (`:390-399`) compares `source` first; `content_snapshot` (`:347`) returns `source`. A private `searchable(kind, source)` returns `None` for Markdown (search the source itself: one shared allocation, byte for byte what it was) and, for a board, `wren_board::search_text` (node labels in reading order, top then left by absolute position, ties by id, then connector labels, connectors in id order, one label per line with its own line breaks kept; a label of only white space and a placeholder's caption are left out, and labels are indexed whole, not cut at what the scene draws). An unparseable board, and from Phase 3 one over the limits, indexes its raw text, in the one allocation of its source. The index keeps each entry's kind and drops a content whose kind changed. A hit's range is in the searched text, not the file. Board previews and snippets skip `body_line` (`:557`) and `plain_markdown` (`:754`); the notes-list preview is the first label (empty when there is none), and a snippet shows each line break as ` · `. A hit reveals the first matching label (§5.18 rule 4). The index extracts each board's labels as it ingests the board, at workspace open too, on the workspace thread. That costs about 0.33 ms per board of 101 elements. With the setting on, a workspace of 200 such boards therefore opens 66 to 80 ms slower than on `main`. §6.7 records this as a miss of the workspace-open row, not fixed in Phase 1. Extracting on the first query or in the background reconcile job would remove the cost from the open.
 
 ### 3.7 Scene rules and constants
 
@@ -1979,10 +1979,16 @@ Run 1c, from `1a06c6b` (the merge of `boards-p1-route`) to `6732183`. The settin
 *Waiting for the owner.*
 - **The tag.** `boards-p1` is not tagged: the release edit budget (Not fixed, item 1) fails the release run. Either accept the recorded number for Phase 1 and tag, or hold the tag for Phase 2's cut. The severity of finding 3 (major or blocker) changes nothing now that it is fixed.
   - *Updated 2026-11-12 (`boards-p1-tune`).* The release run now passes on both renderers under the ceilings the owner relaxed for the MVP (Not fixed, item 1, its correction), so the tag waits only on the owner's acceptance of this record and on the Mac step.
+  - *Updated 2026-11-13 (finish run).* No longer waiting on the owner. The owner's "Tune, then tag" of 2026-11-12 (§2.4) is the acceptance, the Mac step is done, and the finish run's gates pass. The orchestrating session tags `boards-p1` after this record. By the owner's decision of 2026-11-12 the tag stays local.
 - **The Mac step** (§6.6): sync the tree without `target/`, `.venv/` and `.claude/`; `make build fmt-check clippy test check-patches`; the smoke build; `capture_scenes.py --only boards`; copy the scenes back.
+  - *Done 2026-11-12, at `77d6f7f`* (the finish run below).
 - **Mac console checks** of §6.4 due after Phase 1: 5 (trackpad: two fingers pan, ⌘+scroll zooms at the pointer, momentum stays a pan) and 7 (Retina sharpness; pan and zoom of the 1,000-element sample smooth on Metal). The spike's wanted numbers (Metal, a desktop GPU) wait with them. They do not block the tag.
+  - *Still waiting, 2026-11-13.* The Mac step ran over ssh and could not do them, or native key input, because both need a person at the console.
 - **The push and CI**, after deciding the commit trailers (Not fixed, item 5). CI runs on every push of `boards`.
+  - *Updated 2026-11-13.* No longer waiting on the owner for Phase 1. By the owner's decision of 2026-11-12, the orchestrating session pushes `boards` to origin at the end of each phase, after the tag. The orchestrator reports CI's result after the push; it was not known when this was written.
+- **The commit trailers** (Not fixed, item 5), added 2026-11-13. Whether the `Claude-Session:` lines are stripped from the commit messages is still the owner's open question. The push no longer waits on the answer. Once `boards` is pushed, stripping them means rewriting pushed history.
 - **The hand trials** of §6.4's Phase 1 row, by the recipe of §6.5: open the sample workspace; see shapes, labels and connectors; pan with the wheel, a middle drag and a Space drag; zoom with Ctrl+wheel and Alt+=; switch themes; open the raw fallback; search for a label; export SVG and open it in a browser; with the setting off, the boards are absent.
+  - *Still waiting, 2026-11-13.* They need a person at the console and were not part of the Mac step.
 - **Optional before the tag:** the live v0.1.1 state-file case at this head, with `WRENTEST_RELEASED_BIN` naming a v0.1.1 smoke build.
   - *Done 2026-11-13, at `77d6f7f`.* A v0.1.1 smoke-test build made from `git archive v0.1.1` in a directory outside the repository, with its own target directory (kept for later phases), and `make build-smoke` of the head: `test_board_gate.py` on X11 tiny-skia, 7 passed, `test_a_released_wren_and_this_one_share_a_workspace` among them. To repeat it, with `RELEASED` a new directory outside the repository:
 
@@ -1996,6 +2002,62 @@ Run 1c, from `1a06c6b` (the merge of `boards-p1-route`) to `6732183`. The settin
     ```
 
 *Carried items closed 2026-11-13* (this document only, no code): the live mixed-version case above passes; §6.7 records workspace open with the setting off and on (unchanged on the sample workspace and with the setting off; 66 to 80 ms over `main` with 200 boards of 101 elements and the setting on, recorded with its reason, not fixed); §3.2 lists `wren-canvas`'s whole public surface; §2.4 holds the owner's answers of 2026-11-12; §7.3's cost check measures the drag preview on the routing-heavy boards. §3.7's last paragraph already named the cylinder as the one shape `Notify customer` does not fit, as the test `notify_customer_fits_every_shape_but_the_cylinder` (`wren-canvas/src/measure.rs`) asserts.
+
+*Finish run, 2026-11-13.* Run 1c's second pass, on `boards` at `77d6f7f` (the merge of `boards-p1-tune`, whose record is its own subsection below). The review, triage and fixes were done in the first pass above, so this run had no lens, no Codex pass, no triage queue, no fix session and no verify session. It ran the final gates of §8.2 step 4 once, with no file changed, and one extra session. The orchestrating session did the Mac step. Raw output is under `.claude/board-notes/workflow-results/` (not committed).
+
+*Final gates*, at `77d6f7f`, with the worktree clean. The lanes ran one at a time with `WRENTEST_ENGINE=classic,advanced`, `WGPU_BACKEND=vulkan` and `LIBGL_ALWAYS_SOFTWARE=1`. The loop of §8.2 ran without its `break`, so every lane reported, and none failed:
+
+| Lane | Setting off | Setting on |
+|---|---|---|
+| X11 tiny-skia | 264 passed, 2 skipped | 264 passed, 2 skipped |
+| Wayland tiny-skia | 204 passed, 2 skipped, 60 deselected | 204 passed, 2 skipped, 60 deselected |
+| X11 wgpu (lavapipe) | 264 passed, 2 skipped | 264 passed, 2 skipped |
+| Wayland wgpu (lavapipe) | 204 passed, 2 skipped, 60 deselected | 204 passed, 2 skipped, 60 deselected |
+
+- `make check`: 42 Rust suites, 2,845 tests passed, 0 failed, 30 ignored; 294 Python units. Formatting, clippy and `check-patches` all passed.
+- The two skips in every lane are the same as in the first pass: the live v0.1.1 case (no `WRENTEST_RELEASED_BIN` given) and the classic engine's hanging indent. The 60 deselected are the native X11 cases.
+- The acceptance tests of §6.8, Phase 1, ran in those lanes. Each X11 lane gave `test_board_gate` 6 passed and 1 skipped, `test_board_native` 4, `test_board_perf` 1 and `test_board_view` 12. Wayland ran the same files without the native X11 cases. Items 1 to 8, 10 and 11 pass there and in `make check`. Item 9's live half passed separately at this head (carried item 3, below).
+- `make fuzz-board`: 7 passed, 0 failed, in about 19 s (release).
+- `make perf-board`: passed.
+  - 500 shapes: parse 2.98 ms, write 0.46, scene 1.74.
+  - 1,000 shapes (1,975 elements): parse 5.35, write 0.42, scene 2.34.
+  - 5,100 shapes (10,072 elements): parse 48.5, write 2.46, scene 17.9.
+  - Routing at 1,000 shapes: diagonal 9.1 ms, long random 52.9, fan-in 23.5, stacked 16.3. At about 10,200 elements: 291.6, 96.2 and 103.3.
+  - 50 labels of 8,000 words: 97 ms.
+- The release performance run of §6.7 passed twice on each renderer (build: `cargo build --locked --release -p wren-iced --features smoke-test --target-dir target/perf`). Each run waited until five one-second samples of `vmstat` all showed the machine more than 90 % idle. The runs were unpinned, and none was discarded. The load figures below are the 1-, 5- and 15-minute averages the test wrote into `measurements.json`. They are about 3 because the lane runs had just finished, and they fall from run to run. The medians are in ms.
+
+| X11, release | Run 1 | Run 2 |
+|---|---|---|
+| tiny-skia (ceiling 12 ms): edit, scene + draw | 6.26 (scene 5.21, draw 1.05); load 3.59, 2.49, 2.14 | 6.41 (scene 5.36, draw 1.12); load 3.04, 2.41, 2.12 |
+| tiny-skia: open at 1,002 and 10,020 elements | 17.3 and 115.7 | 26.1 and 125.3 |
+| tiny-skia: pan and zoom frames | 2.9 and 3.0 | 2.9 and 3.0 |
+| wgpu, lavapipe (ceiling 16 ms): edit, scene + draw | 11.66 (scene 8.95, draw 2.78); load 2.88, 2.39, 2.11 | 12.05 (scene 9.31, draw 2.85); load 3.48, 2.55, 2.17 |
+| wgpu: open at 1,002 and 10,020 elements | 50.5 and 164 | 73.0 and 172 |
+| wgpu: pan frame (draw) and zoom frame | 8.0 (0.24) and 8.5 | 7.6 (0.28) and 9.3 |
+
+On both renderers the idle view took 0.13 to 0.17 ms. Every median is under its ceiling and its §6.7 budget. The `measurements.json` files are in the worktree's `target/wrentest/x11-*/board-perf-release-*`.
+- The strict docs build: no issues. It ran because `git diff main...HEAD -- docs` shows `docs/development/testing.md` changed.
+
+*The Mac step*, 2026-11-12, at `77d6f7f`. The orchestrating session ran it on an Apple-silicon Mac reached over ssh.
+- `cargo test --workspace --locked --no-fail-fast`: 1,404 passed, 0 failed, 15 ignored. The first pass, on `2ad7a29`, gave 1,400 passed and 4 failed. Those four were the `wren-core` test faults that `boards-p1-tune`'s T1 fixed.
+- The smoke-test build succeeds.
+- `tools/capture_scenes.py --only boards` ran on a real Metal window in `wren-dark` and `wren-light` and wrote 18 PNG files and 2 SVG files. Every PNG is byte-identical to the first pass on `2ad7a29`.
+- Two scenes were looked at:
+  - Checkout flow, dark: the three loop connectors run outside the main column, with their arrowheads and Yes/No labels drawn.
+  - Shapes, light: the eight shapes, the Hebrew line under `Rectangle`, the dashed arrow, the frame and its child, and `1 issue` in the footer.
+- Not done: native key input and the hand trials of §6.4 and §6.5, because they need a person at the console.
+
+*The extra session: carried items* (`e752964`, a change to this document only). It handled all six items carried from the first pass, listed above under "Carried items closed". In short:
+- The cylinder needed no change.
+- §3.2 lists `wren-canvas`'s whole public surface.
+- The live v0.1.1 case passes: `test_board_gate.py` on X11 tiny-skia gave 7 passed. The v0.1.1 build is kept outside the repository for later phases.
+- §6.7 records workspace open.
+- §2.4 holds the owner's four answers of 2026-11-12.
+- §7.3's cost item measures the drag preview on the routing-heavy boards.
+
+One finding was left unfixed: with the setting on, a workspace of 200 boards of 101 elements opens 66 to 67 ms slower than `main` pinned (70 to 80 ms unpinned), 91 to 96 ms against about 25 ms. The cause is the label extraction at open (§3.6, §6.7). It is recorded and not fixed. At `e752964` `make check` passed with the counts above, and the docs build was not needed.
+
+*Folded in this run:* §3.6 now states the cost of extraction at workspace open and points to §6.7, which already held the measurement. Nothing else in the data was missing from §3 to §5.
 
 #### boards-p1-tune
 Run 1c-tune, from `2ad7a29`, one session: items T1 to T3, from the Phase 1 end record above and the owner's decision of 2026-11-12, "Tune, then tag": profile the router and take only savings that leave every drawing unchanged, make the measurement independent of the processor's idle clock, and set the ceiling at the measured number. §7.2 has no row for them. Commits: `9634c4d` (T1), `a5426c4` and `ef067e7` (T2), `f3166ac` (T3).
