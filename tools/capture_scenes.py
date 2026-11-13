@@ -314,7 +314,7 @@ def board_scenes(client, shot_here, out: Path) -> None:
 def board_edit_scenes(client, shot_here, open_board) -> None:
     """discovery/boards.md §6.3, Phase 2: what editing draws over a board.
     These change the board, so they come last."""
-    pack, receive = "3qrg4kv1", "12axfsny"
+    pack, receive, into_receive = "3qrg4kv1", "12axfsny", "4x2tte9d"
 
     def key(name: str, *mods: str) -> dict:
         return client.call("board.key", {"key": name, "mods": list(mods)})
@@ -359,6 +359,29 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
     # An armed tool's mode chip.
     key("d")
     shot_here("board-armed")
+    key("escape")
+    # The connect handles of the node the pointer has rested on.
+    pointer("move", {"node": receive})
+    wait_for(lambda: len(client.call("board.bounds")["handles"]) == 4, timeout=5,
+             description="the connect handles shown")
+    shot_here("board-connect-handles")
+    # A connector dragged from one: over a node, which is outlined and
+    # shows its side handles, the one in reach taken; and over empty
+    # canvas, where a release would make a node.
+    pointer("press", {"node": receive, "handle": "connect_right"})
+    pointer("move", {"node": pack})
+    pointer("move", {"node": pack, "handle": "side_right"})
+    shot_here("board-connect-target")
+    pointer("move", {"canvas": [420, 300]})
+    shot_here("board-connect-new")
+    key("escape")
+    # An end of a connector dragged off its node, where a release would
+    # leave it as it was.
+    pointer("click", {"edge": into_receive})
+    pointer("press", {"edge": into_receive, "handle": "to"})
+    pointer("move", {"canvas": [420, 300]})
+    shot_here("board-connect-end")
+    key("escape")
     key("escape")
     # A label open, its text replaced and the caret after it.
     pointer("double_click", {"node": pack})
