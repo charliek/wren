@@ -1243,10 +1243,13 @@ impl BoardView {
         Some((label::Place::Connector(centre), ink))
     }
 
-    /// Show the board as `intent` would leave it, or as it is.
+    /// Show the board as `intent` would leave it, or as it is. The plan
+    /// draws the ids the edit that ends the gesture will draw, from a copy
+    /// of their source, so a release makes the very board its preview
+    /// showed: a connector's route depends on where its id sorts (§3.7).
     fn show(&mut self, intent: Option<&Intent>) {
         self.preview = intent.and_then(|intent| {
-            let plan = edit::plan(&self.board, intent, &mut self.ids);
+            let plan = edit::plan(&self.board, intent, &mut self.ids.clone());
             if plan.is_empty() {
                 return None;
             }
@@ -4190,6 +4193,43 @@ z = "c"
         assert_eq!(view.board().nodes[&id(&made)].text, "Next");
         travel(&mut view, Command::Undo, now);
         assert!(view.pristine() && !view.can_undo());
+    }
+
+    #[test]
+    fn a_release_makes_the_board_its_preview_showed() {
+        // A new connector's route depends on where its id sorts, so the
+        // preview draws the ids the release will.
+        let ends: [(f32, f32); 2] = [(360.0, 30.0), (363.0, 247.0)];
+        for to in ends {
+            let mut view = sized(TWO);
+            let now = hover(&mut view, "a", Instant::now());
+            let from = connect_handle(&view, "a", Side::Bottom);
+            input(&mut view, press(from), now);
+            // Each step of the drag plans afresh, with the same ids.
+            input(&mut view, Input::Move { at: (200.0, 200.0) }, now);
+            input(&mut view, Input::Move { at: to }, now);
+            let shown = view.picture().board.clone();
+            assert_ne!(shown, *view.board());
+            assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+            assert_eq!(*view.board(), shown);
+        }
+        // Copies dragged out of their originals keep their ids as well.
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        view.command(Command::SelectAll, now);
+        let duplicate = Input::Modifiers(Mods {
+            shift: false,
+            duplicate: true,
+        });
+        input(&mut view, duplicate, now);
+        let (x, y) = middle(&view, "a");
+        input(&mut view, press((x, y)), now);
+        input(&mut view, Input::Move { at: (x, y + 100.0) }, now);
+        input(&mut view, Input::Move { at: (x, y + 200.0) }, now);
+        let shown = view.picture().board.clone();
+        assert_eq!(shown.edges.len(), 2);
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        assert_eq!(*view.board(), shown);
     }
 
     #[test]
