@@ -751,7 +751,7 @@ All of this subsection is *modelled*. Geometry is in absolute board units; child
 
 1. History is whole-model snapshots (§3.4 rule 6), in memory, for the open board only. Each snapshot also holds the selection and cursor from before the unit; undo restores all three and leaves the viewport alone.
 2. **One unit each:** a creation (node and connector together); a label commit that changed text, with its auto-grow; a pointer move, resize, new connector, endpoint drag or duplicate-drag, on release; a run of `board.move.*` or of `board.resize.*`; delete; duplicate; cut; paste; and each shape, colour, fill, connector-style, stacking, align and distribute command.
-3. A run of move or resize keys is one unit while the selection is unchanged and no other command, pointer input or 1 s pause intervenes.
+3. A run of move or resize keys is one unit while the selection is unchanged and no other command, button press, drag, wheel step or 1 s pause intervenes. The pointer passing over the board with no button down does not end it (`boards-p2-preview`, P3).
 4. Selection, cursor, tool, zoom and pan changes make no unit and no draft. A command that changes nothing (align already aligned, front already in front) makes none either.
 5. Every unit ends with exactly one `Op::EditDraft`, chosen by the pristine rule. The undo floor is the opening text: undoing to it sends the original bytes, and the document is clean again.
 6. `board.undo` and `board.redo` run in Idle and Armed. A new unit clears the redo side. History is dropped when another note opens and on any Session-driven text change.

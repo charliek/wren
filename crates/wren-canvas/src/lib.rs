@@ -3830,6 +3830,43 @@ z = "c"
         assert!(!view.can_redo());
     }
 
+    /// §5.11 rule 3: the pointer passing over the board between two key
+    /// moves leaves them one undo unit, where a wheel step makes two.
+    #[test]
+    fn a_hover_between_key_moves_keeps_them_one_undo_step() {
+        let now = Instant::now();
+        for (between, units) in [
+            (Input::Move { at: (5.0, 5.0) }, 1),
+            (Input::Leave, 1),
+            (
+                Input::Wheel {
+                    delta: Scroll::Lines { x: 0.0, y: -1.0 },
+                    at: (5.0, 5.0),
+                    zoom: false,
+                    sideways: false,
+                    scale_factor: 1.0,
+                },
+                2,
+            ),
+        ] {
+            let mut view = sized(TWO);
+            let before = view.board().clone();
+            click_node(&mut view, "a", now);
+            assert_eq!(view.command(Command::Move(Dir::Right), now), CHANGED);
+            // Over the other node, and off the board's nodes.
+            let over = middle(&view, "b");
+            input(&mut view, Input::Move { at: over }, now);
+            input(&mut view, between, now);
+            assert_eq!(view.command(Command::Move(Dir::Right), now), CHANGED);
+            assert_eq!(view.board().nodes[&id("a")].at, [40, 0], "{between:?}");
+            for _ in 0..units {
+                travel(&mut view, Command::Undo, now);
+            }
+            assert_eq!(*view.board(), before, "{between:?}");
+            assert!(!view.can_undo(), "{between:?}");
+        }
+    }
+
     #[test]
     fn undo_puts_the_selection_and_the_cursor_back() {
         let mut view = sized(TWO);

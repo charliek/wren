@@ -111,6 +111,34 @@ def test_a_move_is_one_line_and_its_inverse_or_undo_none(samples: Path) -> None:
         assert state["pristine"] and not dirty(app)
 
 
+def test_a_pointer_passing_over_leaves_key_moves_one_undo_step(samples: Path) -> None:
+    """§5.11 rule 3: the pointer passing over the board, no button down,
+    between two key moves leaves them one undo step; a wheel step between
+    them makes two."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-run-hover") as app:
+        ready(app)
+        original = flow.read_bytes()
+        click(app, {"node": RECEIVE})
+        key(app, "right", "alt")
+        pointer(app, "move", {"node": PACK})
+        pointer(app, "move", {"canvas": [600, 300]})
+        key(app, "right", "alt")
+        flushed(app)
+        assert line_diff(original, flow.read_bytes()) == ["- at = [0, 120]", "+ at = [40, 120]"]
+        state = key(app, "z", "mod")
+        flushed(app)
+        assert flow.read_bytes() == original and state["pristine"] and not state["can_undo"]
+
+        key(app, "right", "alt")
+        app.client.call("board.pointer", {"kind": "wheel", "at": {"node": PACK},
+                                          "delta": {"y": -1}})
+        key(app, "right", "alt")
+        key(app, "z", "mod")
+        flushed(app)
+        assert line_diff(original, flow.read_bytes()) == ["- at = [0, 120]", "+ at = [20, 120]"]
+
+
 def test_a_hand_written_board_comes_back_byte_for_byte_after_undo(samples: Path) -> None:
     """Item 2: move then undo on `Hand written`, waiting past the
     debounce, saves the original non-canonical file."""
