@@ -17,26 +17,13 @@ import pytest
 
 from tools import board_format
 from tools.wrentest.boards import (
-    GROUP, NOTES, ROOT, board, board_app, copy_samples, flushed, key, open_note,
+    ACCEPTANCE, GROUP, NOTES, ROOT, board, board_app, copy_samples, flushed, key, open_note,
     script_steps, stamp, type_text,
 )
 from tools.wrentest.test_board_view import wait_focus
 from tools.wrentest.ui import WrenApp, wait_for
 
 GOLDEN = ROOT / "crates" / "wren-board" / "golden" / "accept" / "checkout-flow.toml"
-
-# §5.20, as the plan writes it.
-SCRIPT = """
-`U Tab` Start, `Tab` Receive order, `Esc D Tab` Valid?
-`Esc ⌘→` Reject order, `Esc ⇧⌘← ↵` No `Esc ←`
-`Tab` Check stock, `Esc ⇧⌘↑ ↵` Yes, `Esc D Tab` In stock?
-`Esc ⌘→` Backorder, `Esc ⇧⌘← ↵` No, `Tab` Notify customer, `Esc C` che `↵`, `← ↓`
-`Tab` Charge card, `Esc ⇧⌘↑ ↵` Yes, `Esc D Tab` Payment ok?
-`Esc ⌘→` Retry payment, `Esc ⇧⌘← ↵` No, `Esc → C` cha `↵`, `← ↓`
-`Tab` Pack, `Esc ⇧⌘↑ ↵` Yes, `Tab` Ship, `Tab` Send receipt, `Esc U Tab` End
-`Esc`, `↑` eight times, `→`, `C` end `↵`
-"""
-
 EMPTY = b"schema = 1\n"
 
 
@@ -82,7 +69,7 @@ def saved(app: WrenApp) -> None:
 
 
 def test_the_scripts_notation_is_the_golden_script() -> None:
-    assert script_steps(SCRIPT) == golden_steps(golden())
+    assert script_steps(ACCEPTANCE) == golden_steps(golden())
 
 
 def test_the_keyboard_builds_the_flowchart(samples: Path) -> None:
@@ -96,7 +83,7 @@ def test_the_keyboard_builds_the_flowchart(samples: Path) -> None:
         # connect query is counted apart.
         count = {"label": 0, "query": 0, "chords": 0}
         state = board(app)
-        for step in script_steps(SCRIPT):
+        for step in script_steps(ACCEPTANCE):
             if step[0] == "key":
                 count["chords"] += 1
                 state = key(app, step[1], *step[2:])

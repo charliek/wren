@@ -317,6 +317,19 @@ NUMBERS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "ei
            "nine": 9, "ten": 10}
 
 
+# The acceptance script of §5.20, as the plan writes it.
+ACCEPTANCE = """
+`U Tab` Start, `Tab` Receive order, `Esc D Tab` Valid?
+`Esc ⌘→` Reject order, `Esc ⇧⌘← ↵` No `Esc ←`
+`Tab` Check stock, `Esc ⇧⌘↑ ↵` Yes, `Esc D Tab` In stock?
+`Esc ⌘→` Backorder, `Esc ⇧⌘← ↵` No, `Tab` Notify customer, `Esc C` che `↵`, `← ↓`
+`Tab` Charge card, `Esc ⇧⌘↑ ↵` Yes, `Esc D Tab` Payment ok?
+`Esc ⌘→` Retry payment, `Esc ⇧⌘← ↵` No, `Esc → C` cha `↵`, `← ↓`
+`Tab` Pack, `Esc ⇧⌘↑ ↵` Yes, `Tab` Ship, `Tab` Send receipt, `Esc U Tab` End
+`Esc`, `↑` eight times, `→`, `C` end `↵`
+"""
+
+
 def script_steps(text: str) -> list[tuple[str, ...]]:
     """The steps of a script written as §5.20 writes one: key presses in
     backticks, separated by spaces (``⇧⌘←``, ``Esc``, ``D``: a capital is
