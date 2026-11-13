@@ -86,6 +86,54 @@ def grid_elements(shapes: int) -> int:
     return shapes + right + down
 
 
+ROUTED = ("long random connectors", "a fan-in", "stacked shapes to one far shape")
+
+
+def routed_board(kind: str, shapes: int) -> str:
+    """One of the boards ``make perf-board`` times on which every connector
+    spends its whole routing budget (``perf_parse_write_and_scene`` in
+    ``crates/wren-board/src/lib.rs``), written as that test writes it, with
+    the same seeded targets: ``kind`` is one of :data:`ROUTED`."""
+    state = 3
+    mask = (1 << 64) - 1
+
+    def below(n: int) -> int:
+        nonlocal state
+        state = (state + 0x9E3779B97F4A7C15) & mask
+        z = state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask
+        return (z ^ (z >> 31)) % max(n, 1)
+
+    targets = [below(5100) for _ in range(5100)]
+    grid = (lambda i: (i % 40 * 200, i // 40 * 100))
+    if kind == ROUTED[0]:
+        count, at, size = shapes, grid, (160, 64)
+        edges = [(i, targets[i] % shapes) for i in range(shapes)]
+    elif kind == ROUTED[1]:
+        count, at, size = shapes, grid, (160, 64)
+        edges = [(i, 0) for i in range(1, shapes)]
+    elif kind == ROUTED[2]:
+        count, size = shapes + 1, (100, 60)
+        at = (lambda i: (5000, 5000) if i == shapes else (i % 7, i % 5))
+        edges = [(i, shapes) for i in range(shapes)]
+    else:
+        raise ValueError(kind)
+    names = ("rect", "rounded", "pill", "ellipse", "diamond", "parallelogram", "cylinder",
+             "document")
+    parts = ["schema = 1\n"]
+    for i in range(count):
+        x, y = at(i)
+        parts.append(f'\n[node.n{i}]\ntext = "Step {i}\\nchecks the order"\nkind = "shape"\n'
+                     f'at = [{x}, {y}]\nshape = "{names[i % len(names)]}"\n'
+                     f'size = [{size[0]}, {size[1]}]\nz = "V{i}"\n')
+    for k, (start, end) in enumerate(edges):
+        parts.append(f'\n[edge.e{k}]\nkind = "edge"\nfrom = {{ node = "n{start}" }}\n'
+                     f'to = {{ node = "n{end}" }}\nlabels = [\n  {{ text = "next" }},\n]\n'
+                     f'z = "W{k}"\n')
+    return "".join(parts)
+
+
 def board_app(workspace: Path, case: str, setting: str = "on", **kwargs) -> WrenApp:
     from tools.wrentest.test_setup import artifact_directory
 
