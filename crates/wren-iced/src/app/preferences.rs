@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
-use wren_core::keybind::{self, Accel, Keymap, Platform};
+use wren_core::keybind::{self, Accel, Keymap, Layer, Platform};
 use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
@@ -74,6 +74,11 @@ pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool)
     }
 }
 
+/// The keymap layer of a command key; `None` for a key that names none.
+fn layer_of(action: &str) -> Option<Layer> {
+    CommandId::parse(action).map(|_| Layer::Base)
+}
+
 /// The theme for a picker row: `None` follows the system.
 fn theme_for(id: Option<&str>, mode: SystemMode) -> Theme {
     let appearance = appearance(mode);
@@ -131,7 +136,7 @@ impl Preferences {
         let (keymap, warnings) = Keymap::build(
             keybind::default_bindings(Platform::current()),
             &self.settings.keybinds,
-            |action| CommandId::parse(action).is_some(),
+            layer_of,
         );
         self.keymap = keymap;
         self.settings.warnings.extend(warnings);
@@ -665,6 +670,31 @@ mod tests {
     }
 
     #[test]
+    fn no_default_board_key_shadows_an_app_command() {
+        // The base layer is read first, so a board default on a trigger the
+        // base layer gives to an App command could never run; one it gives
+        // to an Editor command is inert while a board has the keyboard.
+        for platform in [Platform::Mac, Platform::Linux] {
+            let (keymap, _) = Keymap::build(keybind::default_bindings(platform), &[], layer_of);
+            for (trigger, action) in keybind::default_board_bindings(platform) {
+                assert!(
+                    wren_canvas::Command::parse(action).is_some(),
+                    "{trigger} → {action} is not a board command"
+                );
+                let accel = keybind::parse_trigger(&trigger).unwrap();
+                if let Some(base) = keymap.action(&accel).and_then(CommandId::parse) {
+                    assert_eq!(
+                        base.scope(),
+                        Scope::Editor,
+                        "{trigger} is {} in the base layer",
+                        base.key()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn missing_settings_use_platform_defaults_and_follow_the_system() {
         let preferences = Preferences::load(None);
         assert!(preferences.settings.warnings.is_empty());
@@ -887,7 +917,7 @@ mod tests {
         let (keymap, warnings) = Keymap::build(
             keybind::default_bindings(Platform::current()),
             &user,
-            |action| CommandId::parse(action).is_some(),
+            layer_of,
         );
         assert!(warnings.is_empty());
         let policy = key_policy(&keymap, true);
