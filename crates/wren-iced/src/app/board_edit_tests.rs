@@ -1,8 +1,9 @@
 //! A board's edits on their way to the Session (§3.4 of the board plan):
-//! one writer, with no window, through the messages the board widget and
-//! the command paths send.
+//! one writer, and settling before anything that is not passive; with no
+//! window, through the messages the board widget and the command paths
+//! send.
 
-use wren_canvas::{Button, Command as C, Input, Message as Sent};
+use wren_canvas::{Button, Command as C, Input, LabelAction, Message as Sent, Tool};
 use wren_core::ops::Op;
 
 use super::board::tests::{
@@ -11,7 +12,7 @@ use super::board::tests::{
 };
 use super::board::Surface;
 use super::columns::Column;
-use super::commands::Disposition;
+use super::commands::{Command, CommandId, Disposition};
 use super::{App, Message};
 use wren_board::Dir;
 
@@ -33,12 +34,52 @@ fn dirty(app: &App) -> bool {
     session.document().unwrap().dirty()
 }
 
-/// Give the board its widget's size, as its first frame does.
+/// Give the board its widget's size and the keyboard, as its first frame
+/// and a click do.
 fn lay_out(app: &mut App) {
     let _ = app.update(Message::Board(Sent::Resized {
         width: 800.0,
         height: 600.0,
     }));
+    input(app, Input::Focus(true));
+}
+
+fn state(app: &App) -> &'static str {
+    view(app).machine().state().name()
+}
+
+const PRESS: Button = Button::Left;
+
+/// A click at a point of the widget.
+fn click_at(app: &mut App, at: (f32, f32)) {
+    input(app, Input::Press { button: PRESS, at });
+    input(app, Input::Release { button: PRESS });
+}
+
+/// An action on the open label, as its keys send it.
+fn label(app: &mut App, action: LabelAction) {
+    let epoch = view(app).epoch();
+    let _ = app.update(Message::Board(Sent::Label(epoch, action)));
+}
+
+/// Open the label of the node `name` and type `text` over it.
+fn relabel(app: &mut App, name: &str, text: &str) {
+    click_at(app, middle(app, name));
+    assert_eq!(key(app, C::EditLabel), Disposition::Completed);
+    assert_eq!(state(app), "editing");
+    label(app, LabelAction::Insert(text.to_owned()));
+}
+
+/// A point of the fitted widget that no element is under.
+const EMPTY: (f32, f32) = (6.0, 6.0);
+
+/// Click the text tool on empty canvas: free text with no text yet, its
+/// label open. Committed as it is, the node is deleted again.
+fn start_free_text(app: &mut App) {
+    assert_eq!(key(app, C::Tool(Tool::Text)), Disposition::Completed);
+    click_at(app, EMPTY);
+    assert_eq!(state(app), "editing");
+    assert_eq!(view(app).board().nodes.len(), 3);
 }
 
 /// A key the board layer binds, as the focused widget publishes it. What
@@ -437,4 +478,198 @@ fn a_draft_is_built_only_by_the_editor_s_writer_and_the_board_s() {
         found,
         [("app.rs".to_owned(), 1), ("app/board.rs".to_owned(), 1)]
     );
+}
+
+/// Each way of leaving a board that is not passive, by what the user does.
+type Leave = (&'static str, fn(&mut App));
+
+const LEAVES: [Leave; 9] = [
+    ("another note", |app| {
+        open_markdown(app, "Note");
+        open_board(app, "Flow");
+    }),
+    ("a flush", |app| {
+        let _ = app.apply_core(Op::Flush).unwrap();
+    }),
+    ("back and forward", |app| {
+        let _ = app.dispatch(Command::Run(CommandId::Back));
+        assert_eq!(app.surface(), Surface::Text);
+        let _ = app.dispatch(Command::Run(CommandId::Forward));
+    }),
+    ("a rename dialog", |app| {
+        let _ = app.dispatch(Command::Run(CommandId::RenameNote));
+        assert!(app.dialog.take().is_some());
+    }),
+    ("the palette", |app| {
+        let _ = app.dispatch(Command::Run(CommandId::CommandPalette));
+        assert!(app.palette.take().is_some());
+    }),
+    ("the window losing focus", |app| {
+        app.window_unfocused().unwrap();
+    }),
+    ("quitting", |app| {
+        let _ = app.request_quit().unwrap();
+    }),
+    ("a pane width", |app| {
+        let _ = app.dispatch(Command::Width {
+            pane: crate::panes::Pane::Notes,
+            width: 300.0,
+        });
+    }),
+    ("a reconcile asked for", |app| {
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+    }),
+];
+
+#[test]
+fn the_board_settles_before_anything_that_is_not_passive() {
+    for (name, leave) in LEAVES {
+        let (directory, mut app) = fixture();
+        let path = file(&directory, "Flow.wren-board");
+        let saved = modified(&path);
+        open_markdown(&mut app, "Note");
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+
+        // An open label is committed: free text left empty is deleted, the
+        // board is as it was opened, and nothing was written.
+        start_free_text(&mut app);
+        assert_eq!(app.board_revision, 1, "{name}");
+        assert!(dirty(&app), "{name}");
+        // What is passive leaves the label open.
+        let _ = app.update(Message::Tick);
+        assert_eq!(state(&app), "editing", "{name}");
+        leave(&mut app);
+        assert_ne!(state(&app), "editing", "{name}");
+        assert!(view(&app).label().is_none(), "{name}");
+        assert_eq!(view(&app).board().nodes.len(), 2, "{name}");
+        assert_eq!(session_text(&app), FLOW, "{name}");
+        assert!(!dirty(&app), "{name}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW, "{name}");
+        assert_eq!(modified(&path), saved, "{name}");
+        assert_in_step(&app, Surface::Board);
+
+        // A drag in flight is cancelled with the board as it was pressed,
+        // and its release afterwards does nothing.
+        let from = middle(&app, "pack");
+        input(
+            &mut app,
+            Input::Press {
+                button: PRESS,
+                at: from,
+            },
+        );
+        input(
+            &mut app,
+            Input::Move {
+                at: (from.0 + 80.0, from.1),
+            },
+        );
+        assert_eq!(state(&app), "moving", "{name}");
+        let revision = app.board_revision;
+        leave(&mut app);
+        assert!(!view(&app).machine().dragging(), "{name}");
+        input(&mut app, Input::Release { button: PRESS });
+        assert_eq!(at(&app, "pack"), [0, 200], "{name}");
+        assert_eq!(session_text(&app), FLOW, "{name}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW, "{name}");
+        // Reopening the note made a new view, whose count starts again.
+        if !matches!(name, "another note" | "back and forward") {
+            assert_eq!(app.board_revision, revision, "{name}");
+        }
+    }
+}
+
+#[test]
+fn a_label_typed_a_moment_ago_is_saved_by_whatever_comes_next() {
+    for (name, leave) in LEAVES {
+        let (directory, mut app) = fixture();
+        let path = file(&directory, "Flow.wren-board");
+        open_markdown(&mut app, "Note");
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        relabel(&mut app, "pack", "Ship");
+        // Each change of the text is the draft at once.
+        assert!(session_text(&app).contains("text = \"Ship\""), "{name}");
+        leave(&mut app);
+        assert_ne!(state(&app), "editing", "{name}");
+        let flushes = !matches!(
+            name,
+            "a rename dialog" | "the palette" | "a pane width" | "a reconcile asked for"
+        );
+        if flushes {
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                line_diff(FLOW, &on_disk),
+                (vec!["text = \"Pack\""], vec!["text = \"Ship\""]),
+                "{name}"
+            );
+        } else {
+            assert!(dirty(&app), "{name}");
+        }
+        assert!(session_text(&app).contains("text = \"Ship\""), "{name}");
+    }
+}
+
+#[test]
+fn a_failed_flush_blocks_the_note_switch_with_the_label_committed_and_the_draft_kept() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    let note = super::board::tests::note_id(&app, "Note", wren_core::kind::NoteKind::Markdown);
+    let flow = open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    relabel(&mut app, "pack", "Ship");
+    let typed = session_text(&app);
+
+    app.session
+        .as_mut()
+        .unwrap()
+        .fail_next(wren_core::fs_store::Fault::Write);
+    let blocked = app.apply_core(Op::OpenNote { note: Some(note) });
+    assert!(blocked.is_err());
+    assert_eq!(app.editor_note, Some(flow));
+    assert_in_step(&app, Surface::Board);
+    assert_ne!(state(&app), "editing", "the label was committed");
+    assert_eq!(session_text(&app), typed);
+    assert!(dirty(&app));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW);
+
+    // The next try saves it.
+    let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
+    assert_in_step(&app, Surface::Text);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), typed);
+}
+
+#[test]
+fn an_overlay_or_a_blur_puts_the_tool_away_and_an_operation_does_not() {
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    let diamond = C::Tool(Tool::Shape(wren_board::Shape::Diamond));
+    let armed = |app: &mut App| {
+        assert_eq!(key(app, diamond), Disposition::Completed);
+        assert_eq!(state(app), "armed");
+    };
+
+    armed(&mut app);
+    let _ = app.apply_core(Op::Flush).unwrap();
+    let _ = app.update(Message::Tick);
+    assert_eq!(
+        view(&app).machine().tool(),
+        Tool::Shape(wren_board::Shape::Diamond)
+    );
+
+    let _ = app.open_palette(super::palette::Mode::Commands);
+    assert_eq!(view(&app).machine().tool(), Tool::Select);
+    let _ = app.close_palette();
+
+    armed(&mut app);
+    let _ = app.show_dialog(super::workspace::DialogKind::CreateSection);
+    assert_eq!(view(&app).machine().tool(), Tool::Select);
+    app.dialog = None;
+
+    armed(&mut app);
+    app.window_unfocused().unwrap();
+    assert_eq!(view(&app).machine().tool(), Tool::Select);
+    assert_eq!((app.board_revision, session_text(&app).as_str()), (0, FLOW));
 }

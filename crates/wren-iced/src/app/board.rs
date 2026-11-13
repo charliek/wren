@@ -200,6 +200,31 @@ impl App {
         self.board_revision += 1;
         self.apply_core(Op::EditDraft { note, contents }).map(drop)
     }
+
+    /// Before anything that is not passive (§3.4 rule 3): the open label
+    /// is committed and a pointer gesture cancelled, and what that changed
+    /// is drafted, so the operation flushes it with the rest. An error is
+    /// a draft that did not reach the Session, which blocks the operation.
+    pub(super) fn settle_board(&mut self) -> Result<(), String> {
+        let Some(view) = &mut self.board else {
+            return Ok(());
+        };
+        let update = view.settle(Instant::now());
+        self.board_did(update).failed.map_or(Ok(()), Err)
+    }
+
+    /// Something else takes the keyboard: a palette or a dialog opens, or
+    /// the window loses its focus (§5.15 rule 4). The board settles and
+    /// its armed tool is put away.
+    pub(super) fn put_board_away(&mut self) -> Result<(), String> {
+        self.settle_board()?;
+        let Some(view) = &mut self.board else {
+            return Ok(());
+        };
+        let select = wren_canvas::Command::Tool(wren_canvas::Tool::Select);
+        let update = view.command(select, Instant::now());
+        self.board_did(update).failed.map_or(Ok(()), Err)
+    }
 }
 
 /// What the app did with a board view's answer.

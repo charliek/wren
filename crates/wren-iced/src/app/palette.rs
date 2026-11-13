@@ -333,6 +333,9 @@ impl App {
         if matches!(mode, Mode::Reorder(ItemRef::Note(_))) {
             return self.blocked("Only sections and groups can be reordered");
         }
+        if let Err(error) = self.put_board_away() {
+            return self.blocked(error);
+        }
         self.settle_resize();
         self.cancel_gestures();
         self.editor.break_group();

@@ -323,6 +323,14 @@ impl App {
         if self.loading.is_some() {
             return self.blocked("A workspace is already loading; wait for it to finish");
         }
+        // The op flushes, moves or replaces the document, so the board's
+        // pending input becomes its draft first. That draft is passive and
+        // settles nothing in turn.
+        if !passive {
+            if let Err(error) = self.settle_board() {
+                return self.blocked(error);
+            }
+        }
         if let Op::OpenWorkspace { path } = op {
             return match self.begin_workspace(path) {
                 Ok(task) => {
@@ -987,6 +995,7 @@ impl App {
         self.settle_resize();
         self.cancel_gestures();
         self.editor.break_group();
+        self.put_board_away()?;
         if self.loading.is_some() {
             self.flush_on_load = true;
         } else if self.session.is_some() {
@@ -1017,6 +1026,11 @@ impl App {
 
     pub(super) fn show_dialog(&mut self, kind: DialogKind) -> Task<Message> {
         if self.session.is_none() || self.loading.is_some() {
+            return Task::none();
+        }
+        // A draft that did not reach the Session is on the banner, and the
+        // dialog stays shut.
+        if self.put_board_away().is_err() {
             return Task::none();
         }
         self.editor.break_group();
