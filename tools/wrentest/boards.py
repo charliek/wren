@@ -256,6 +256,25 @@ def click(app: WrenApp, at: dict, *, mods: tuple[str, ...] = (), double: bool = 
     return pointer(app, "double_click" if double else "click", at, mods=mods)
 
 
+def hover(app: WrenApp, node: str) -> list[dict]:
+    """Rest the pointer on a node until it shows its four connect handles
+    (§5.5 rule 8), which the widget's own redraw brings up once the
+    machine's 120 ms have passed. Returns them."""
+    pointer(app, "move", {"node": node})
+
+    def shown():
+        handles = [h for h in bounds(app)["handles"]
+                   if h["id"] == node and h["handle"].startswith("connect_")]
+        return handles if len(handles) == 4 else None
+
+    return wait_for(shown, timeout=5, interval=0.02, description="the connect handles shown")
+
+
+def edge(app: WrenApp, id_: str) -> dict:
+    """A connector's schema-1 fields."""
+    return next(e for e in board(app, elements=True)["edges"] if e["id"] == id_)
+
+
 def canvas_point(app: WrenApp, at: dict) -> tuple[float, float]:
     """Where ``at`` is in board units, as ``board.pointer`` reads it: a
     node's middle, one of the handles the board shows, a board point or a
