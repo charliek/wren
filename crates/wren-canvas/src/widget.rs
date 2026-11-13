@@ -414,6 +414,9 @@ fn translate(
             if holding {
                 sent.messages.push(input(Input::Cancel));
             }
+            // The button's release may now go to another window; waiting
+            // for it would swallow every later press.
+            state.pressed = None;
         }
         // The input method's own events, which iced hands to every widget:
         // only the board with a label open reads them.
@@ -470,7 +473,11 @@ fn translate(
         Event::Mouse(mouse::Event::ButtonPressed(button)) => match pointer(state, cursor, bounds) {
             Some(at) => {
                 state.focused = true;
-                if state.pressed.is_none() {
+                // The same button pressed again means its release was lost
+                // (a pointer grab broken by another client), so the press
+                // starts over; another button's is not the board's during
+                // a drag.
+                if state.pressed.is_none_or(|held| held == *button) {
                     state.pressed = Some(*button);
                     // A Shift-click or a duplicate-drag reads the modifiers
                     // held at its press.
@@ -485,6 +492,7 @@ fn translate(
             None => {
                 if state.focused && holding {
                     sent.messages.push(input(Input::Cancel));
+                    state.pressed = None;
                 }
                 state.focused = false;
             }
@@ -909,6 +917,53 @@ mod tests {
         // With no button held a move is nobody's business.
         let moved = mouse(mouse::Event::CursorMoved { position: ON_A });
         assert_eq!(send(&mut view, &mut state, moved, ON_A), Sent::default());
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_is_the_board_s() {
+        let empty = Point::new(700.0, 550.0);
+        let press = || mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let drag = |view: &mut BoardView, state: &mut State| {
+            send(view, state, press(), ON_A);
+            let away = Point::new(300.0, 300.0);
+            let moved = mouse(mouse::Event::CursorMoved { position: away });
+            send(view, state, moved, away);
+            assert_eq!(view.machine().state(), Surface::Moving);
+        };
+        let click_empty = |view: &mut BoardView, state: &mut State| {
+            let moved = mouse(mouse::Event::CursorMoved { position: empty });
+            send(view, state, moved, empty);
+            let sent = send(view, state, press(), empty);
+            assert_eq!(
+                inputs(&sent),
+                [Input::Press {
+                    button: Button::Left,
+                    at: (600.0, 500.0)
+                }]
+            );
+            let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+            send(view, state, release, empty);
+            assert!(view.machine().selection().is_empty());
+            assert_eq!(view.machine().state(), Surface::Idle);
+        };
+        // The window blurs mid-drag and the release goes elsewhere.
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        drag(&mut view, &mut state);
+        let blur = Event::Window(window::Event::Unfocused);
+        assert_eq!(
+            inputs(&send(&mut view, &mut state, blur, AWAY)),
+            [Input::Cancel]
+        );
+        assert_eq!(state.pressed, None);
+        click_empty(&mut view, &mut state);
+        // No blur at all: the release simply never came.
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        drag(&mut view, &mut state);
+        click_empty(&mut view, &mut state);
+        assert_eq!(view.board().nodes.len(), 2);
+        assert!(view.pristine());
     }
 
     #[test]
