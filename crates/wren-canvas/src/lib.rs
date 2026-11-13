@@ -29,15 +29,22 @@
 //! state, never the board's. The machine also keeps the selection, the
 //! armed tool and the pointer gesture in flight, finds what a press lands
 //! on with [`hit`] and [`handles`], and answers with [`machine::Act`]s for
-//! the view to carry out. With the `test-support` feature a view counts its
-//! scene and geometry builds (`Probe`).
+//! the view to carry out: it plans and applies each edit the machine asks
+//! for, shows a gesture's preview on a scratch copy of the board, and keeps
+//! the pristine text a draft falls back to (§3.4 of the plan). With the
+//! `test-support` feature a view counts its scene and geometry builds
+//! (`Probe`).
 
+use std::collections::BTreeSet;
+use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use iced::{Element, Font};
-use wren_board::scene::{self, Scene};
-use wren_board::{Access, Board, Issue, Palette, ParseError};
+use wren_board::edit::{self, Intent};
+use wren_board::ids::Ids;
+use wren_board::scene::{self, Rect, Scene, Source};
+use wren_board::{walk, Access, Board, Dir, Id, Issue, Palette, ParseError, GRID};
 
 mod clip;
 mod command;
@@ -49,6 +56,7 @@ pub mod label;
 pub mod layers;
 pub mod machine;
 mod measure;
+mod overlay;
 mod paint;
 mod widget;
 
@@ -66,6 +74,10 @@ pub const FIT_MARGIN: f32 = 40.0;
 
 /// The zooms the keyboard steps through.
 pub const ZOOM_STOPS: [f32; 9] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+
+/// Room kept around the cursor element when a keyboard selection change
+/// brings it into view, in screen pixels (§5.7 rule 5).
+pub const REVEAL_MARGIN: f32 = 40.0;
 
 /// Where a board sits in the widget: the board point at the widget's
 /// top-left corner, and how many screen pixels a board unit takes.
@@ -276,11 +288,20 @@ pub struct BoardView {
     issues: Vec<Issue>,
     access: Access,
     synced: String,
+    /// The text the board was loaded or last saved from, which a draft is
+    /// while the board still writes as `canonical` (§3.4 rule 2).
+    pristine: String,
+    /// What the canonical writer makes of the pristine text's board.
+    canonical: String,
     palette: Palette,
     measurer: Measurer,
     scene: Scene,
     plan: layers::Plan,
     cap: usize,
+    /// The board as a gesture in flight would leave it, shown in place of
+    /// the board until the gesture ends (§3.4 rule 4).
+    preview: Option<Preview>,
+    ids: Fresh,
     viewport: Viewport,
     revision: u64,
     machine: Machine,
@@ -298,6 +319,48 @@ pub struct BoardView {
     pub probe: Probe,
 }
 
+/// A gesture's picture of the board: a scratch copy with the gesture's
+/// plan applied, and its scene. It is never the model, never a draft and
+/// never hit-tested.
+struct Preview {
+    board: Board,
+    scene: Scene,
+    plan: layers::Plan,
+    revision: u64,
+}
+
+/// What the widget paints: the board, or a gesture's preview of it.
+pub(crate) struct Picture<'a> {
+    pub(crate) board: &'a Board,
+    pub(crate) scene: &'a Scene,
+    pub(crate) plan: &'a layers::Plan,
+    pub(crate) revision: u64,
+}
+
+/// Candidate ids for what an edit creates (§4.2): the process's random
+/// hash keys applied to a counter, spelt in the id alphabet. The plan
+/// draws again while a candidate is taken.
+#[derive(Default)]
+struct Fresh {
+    keys: RandomState,
+    count: u64,
+}
+
+impl Ids for Fresh {
+    fn draw(&mut self) -> Id {
+        const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+        let mut hasher = self.keys.build_hasher();
+        hasher.write_u64(self.count);
+        self.count = self.count.wrapping_add(1);
+        let bits = hasher.finish();
+        let text: String = (0..8)
+            .rev()
+            .map(|k| char::from(ALPHABET[((bits >> (5 * k)) & 31) as usize]))
+            .collect();
+        Id::new(&text).expect("eight characters of the id alphabet are an id")
+    }
+}
+
 impl BoardView {
     /// A view of the board `text` holds, at 100 % with the board's origin
     /// at the widget's corner. Labels are measured in `font`, which the
@@ -311,8 +374,10 @@ impl BoardView {
         let mut view = Self {
             issues: wren_board::check(&board),
             access: wren_board::access(&board),
+            canonical: wren_board::write(&board),
             board,
             synced: text.to_owned(),
+            pristine: text.to_owned(),
             palette,
             measurer: Measurer::new(font),
             scene: Scene {
@@ -321,6 +386,8 @@ impl BoardView {
             },
             plan: layers::Plan::default(),
             cap: layers::CAP,
+            preview: None,
+            ids: Fresh::default(),
             viewport: Viewport::default(),
             revision: 0,
             machine: Machine::default(),
@@ -335,9 +402,11 @@ impl BoardView {
         Ok(view)
     }
 
-    /// The text changed underneath the view. It parses first and changes
-    /// nothing if that fails; otherwise the board is replaced, the viewport
-    /// kept, a drag in flight dropped and the epoch moved on.
+    /// The text changed underneath the view (§3.4 rule 5). It parses first
+    /// and changes nothing if that fails; otherwise the board is replaced
+    /// and becomes the pristine one, the viewport is kept, a gesture in
+    /// flight and an open label are dropped without a commit, the
+    /// selection keeps what still exists, and the epoch moves on.
     pub fn reload(&mut self, text: &str) -> Result<(), ParseError> {
         if text == self.synced {
             return Ok(());
@@ -347,8 +416,11 @@ impl BoardView {
         let board = wren_board::parse(text)?;
         self.issues = wren_board::check(&board);
         self.access = wren_board::access(&board);
+        self.canonical = wren_board::write(&board);
         self.board = board;
         text.clone_into(&mut self.synced);
+        text.clone_into(&mut self.pristine);
+        self.preview = None;
         self.machine.reset();
         self.machine.retain(&self.board);
         self.epoch += 1;
@@ -356,7 +428,7 @@ impl BoardView {
         Ok(())
     }
 
-    /// The text this view last took.
+    /// The Session text this view last took or sent.
     pub fn synced(&self) -> &str {
         &self.synced
     }
@@ -366,6 +438,9 @@ impl BoardView {
         if palette != self.palette {
             self.palette = palette;
             self.build();
+            if let Some(preview) = self.preview.take() {
+                self.preview = Some(self.picture_of(preview.board));
+            }
         }
     }
 
@@ -373,12 +448,22 @@ impl BoardView {
         &self.palette
     }
 
+    /// The board as committed: never a gesture's preview.
     pub fn board(&self) -> &Board {
         &self.board
     }
 
+    /// The committed board's scene.
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    /// The scene the widget shows: a gesture's preview while one is in
+    /// flight, else the board's own.
+    pub fn shown(&self) -> &Scene {
+        self.preview
+            .as_ref()
+            .map_or(&self.scene, |preview| &preview.scene)
     }
 
     /// What is wrong with the board that still lets it draw.
@@ -388,6 +473,18 @@ impl BoardView {
 
     pub fn access(&self) -> &Access {
         &self.access
+    }
+
+    /// Whether the board may be edited: a read-only one still selects,
+    /// pans and zooms (§5.2).
+    pub fn writable(&self) -> bool {
+        self.access == Access::Editable
+    }
+
+    /// Whether the board writes as the pristine text's board does, so a
+    /// draft now would be the pristine text itself.
+    pub fn pristine(&self) -> bool {
+        wren_board::write(&self.board) == self.canonical
     }
 
     /// The renderer layer of each scene item.
@@ -456,27 +553,22 @@ impl BoardView {
     /// Apply a message from the widget at `now`. Input stamped with an
     /// earlier epoch is dropped.
     pub fn update(&mut self, message: Message, now: Instant) -> Update {
-        let update = Update::default();
+        let mut update = Update::default();
         match message {
             Message::Input(epoch, input) if epoch == self.epoch => {
                 #[cfg(feature = "test-support")]
                 if let Input::Wheel { delta, .. } = input {
                     self.probe.wheeled(delta);
                 }
-                // The view carries out no edit yet, so the machine is shown
-                // a board it may not change: it selects, pans and zooms.
                 let view = machine::View {
                     viewport: self.viewport,
                     now,
                     board: &self.board,
                     scene: &self.scene,
-                    writable: false,
+                    writable: self.access == Access::Editable,
                 };
-                for act in self.machine.step(input, &view) {
-                    if let machine::Act::Look(viewport) = act {
-                        self.set_viewport(viewport);
-                    }
-                }
+                let acts = self.machine.step(input, &view);
+                self.carry(acts, now, &mut update);
             }
             Message::Resized { width, height } => {
                 if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
@@ -494,31 +586,67 @@ impl BoardView {
 
     /// Run a board command at `now`, from a key, a palette row, a menu
     /// item or the harness (§5.1 rule 5). An open label is committed
-    /// first.
+    /// first. A command that moves the cursor, or selects it, brings it
+    /// into view (§5.7 rule 5).
     pub fn command(&mut self, command: Command, now: Instant) -> Update {
-        let _ = (command, now);
-        Update::default()
+        let mut update = Update::default();
+        let cursor = self.machine.cursor().cloned();
+        let selection = self.machine.selection().clone();
+        let view = machine::View {
+            viewport: self.viewport,
+            now,
+            board: &self.board,
+            scene: &self.scene,
+            writable: self.access == Access::Editable,
+        };
+        let acts = self.machine.command(command, &view);
+        self.carry(acts, now, &mut update);
+        let machine = &self.machine;
+        let selects = machine
+            .cursor()
+            .is_some_and(|cursor| machine.selection().contains(cursor));
+        if machine.cursor() != cursor.as_ref() || (selects && *machine.selection() != selection) {
+            self.reveal();
+        }
+        update
     }
 
     /// Before any operation that is not passive (§3.4 rule 3): commit an
     /// open label, cancel a pointer gesture and keyboard Connecting, and
     /// drop a preview.
     pub fn settle(&mut self, now: Instant) -> Update {
-        let _ = now;
-        Update::default()
+        let mut update = Update::default();
+        let acts = self.machine.settle();
+        self.carry(acts, now, &mut update);
+        self.preview = None;
+        update
     }
 
     /// The Session saved `text`, which is now the pristine text (§3.4
     /// rule 2).
     pub fn saved(&mut self, text: &str) {
-        let _ = text;
+        if text != self.pristine {
+            // Every text this view drafts, other than the pristine text,
+            // is the canonical writer's own output, which writes again to
+            // itself; so the saved text is its own canonical form, with no
+            // parse.
+            text.clone_into(&mut self.pristine);
+            text.clone_into(&mut self.canonical);
+        }
     }
 
     /// The text to send as the board's draft, by the pristine rule (§3.4
-    /// rule 2): the pristine text while the board equals the board it
+    /// rule 2): the pristine text while the board writes as the board it
     /// holds, otherwise the canonical text. It becomes the synced text.
     pub fn draft(&mut self) -> String {
-        self.synced.clone()
+        let out = wren_board::write(&self.board);
+        let text = if out == self.canonical {
+            self.pristine.clone()
+        } else {
+            out
+        };
+        self.synced.clone_from(&text);
+        text
     }
 
     /// Which board the view's input is for; see [`Message::Input`].
@@ -565,12 +693,167 @@ impl BoardView {
     }
 
     /// Changes whenever the scene or its layers do.
+    #[cfg(test)]
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 
+    /// What the widget paints.
+    pub(crate) fn picture(&self) -> Picture<'_> {
+        match &self.preview {
+            Some(preview) => Picture {
+                board: &preview.board,
+                scene: &preview.scene,
+                plan: &preview.plan,
+                revision: preview.revision,
+            },
+            None => Picture {
+                board: &self.board,
+                scene: &self.scene,
+                plan: &self.plan,
+                revision: self.revision,
+            },
+        }
+    }
+
     pub(crate) fn measurer(&self) -> &Measurer {
         &self.measurer
+    }
+
+    /// Carry out what the machine asked for, in order.
+    fn carry(&mut self, acts: Vec<machine::Act>, now: Instant, update: &mut Update) {
+        use machine::Act;
+        for act in acts {
+            match act {
+                Act::Look(viewport) => self.set_viewport(viewport),
+                // The undo history tells an edit from one that continues
+                // a run; each is planned and applied alike.
+                Act::Edit(intent) | Act::Continue(intent) => self.edit(&intent, now, update),
+                Act::Preview(intent) => self.show(intent.as_ref()),
+                // The label editor's.
+                Act::OpenLabel(_) | Act::CommitLabel => {}
+                Act::Run(command) => self.run(command, now, update),
+            }
+        }
+    }
+
+    /// Plan `intent` on the board and apply it, once (§3.4 rule 4). A
+    /// preview on show is over. The machine takes the plan back, which is
+    /// how a creation selects what it made.
+    fn edit(&mut self, intent: &Intent, now: Instant, update: &mut Update) {
+        self.preview = None;
+        let plan = edit::plan(&self.board, intent, &mut self.ids);
+        if !plan.is_empty() {
+            self.board.apply(&plan.changes);
+            self.issues = wren_board::check(&self.board);
+            self.build();
+            update.changed = true;
+        }
+        if let Some(notice) = &plan.notice {
+            update.effects.push(Effect::Notice(notice.clone()));
+        }
+        let acts = self.machine.applied(&plan, &self.board);
+        self.carry(acts, now, update);
+    }
+
+    /// Show the board as `intent` would leave it, or as it is.
+    fn show(&mut self, intent: Option<&Intent>) {
+        self.preview = intent.and_then(|intent| {
+            let plan = edit::plan(&self.board, intent, &mut self.ids);
+            if plan.is_empty() {
+                return None;
+            }
+            let mut board = self.board.clone();
+            board.apply(&plan.changes);
+            Some(self.picture_of(board))
+        });
+    }
+
+    /// A preview of `board`.
+    fn picture_of(&mut self, board: Board) -> Preview {
+        #[cfg(feature = "test-support")]
+        let started = std::time::Instant::now();
+        let scene = scene::build(&board, &self.palette, &self.measurer);
+        let plan = layers::split(&scene.items, self.cap);
+        #[cfg(feature = "test-support")]
+        self.probe.built(started);
+        Preview {
+            board,
+            scene,
+            plan,
+            revision: revision(),
+        }
+    }
+
+    /// A command the machine left to the view.
+    fn run(&mut self, command: Command, now: Instant, update: &mut Update) {
+        let ids: Vec<Id> = self.machine.selection().iter().cloned().collect();
+        let editable = self.writable() && !ids.is_empty();
+        match command {
+            Command::Delete if editable => self.edit(&Intent::Delete { ids }, now, update),
+            Command::Duplicate if editable => {
+                let by = [GRID, GRID];
+                self.edit(&Intent::Duplicate { ids, by }, now, update);
+            }
+            Command::Select(dir) => self.walk(dir, false),
+            Command::ExtendSelection(dir) => self.walk(dir, true),
+            Command::ZoomFit => self.fit(),
+            Command::ZoomSelection => {
+                let bounds = ids
+                    .iter()
+                    .filter_map(|id| bounds(&self.board, &self.scene, id))
+                    .reduce(union);
+                if let (Some(bounds), Some(size)) = (bounds, self.size) {
+                    self.jump(Viewport::fitting(bounds, size));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// An arrow key's walk (§5.7 rules 1 to 3). With nothing selected it
+    /// selects the cursor, or with no cursor the node nearest the top,
+    /// then the left; otherwise it walks from the cursor, or from the
+    /// first selected element when the cursor is gone. Extending adds the
+    /// element walked to and never removes.
+    fn walk(&mut self, dir: Dir, extend: bool) {
+        let selection = self.machine.selection();
+        let cursor = self.machine.cursor().cloned();
+        let target = if selection.is_empty() {
+            cursor.or_else(|| {
+                let frames = hit::Frames::new(&self.board);
+                let corners = self.board.nodes.keys().filter_map(|id| {
+                    let [x, y] = frames.corner(id)?;
+                    Some(((y, x), id))
+                });
+                corners.min().map(|(_, id)| id.clone())
+            })
+        } else {
+            let from = cursor.or_else(|| selection.iter().next().cloned());
+            from.and_then(|from| walk::next(&self.board, &from, dir))
+        };
+        let Some(target) = target else {
+            return;
+        };
+        let mut selection = if extend {
+            selection.clone()
+        } else {
+            BTreeSet::new()
+        };
+        selection.insert(target.clone());
+        self.machine.select(selection, Some(target));
+    }
+
+    /// Pan by the least amount that shows the cursor element with
+    /// [`REVEAL_MARGIN`] around it (§5.7 rule 5).
+    fn reveal(&mut self) {
+        let Some(size) = self.size else {
+            return;
+        };
+        let cursor = self.machine.cursor();
+        if let Some(bounds) = cursor.and_then(|id| bounds(&self.board, &self.scene, id)) {
+            self.jump(revealing(self.viewport, size, bounds));
+        }
     }
 
     /// The model to the display list and its layers.
@@ -592,6 +875,52 @@ impl BoardView {
         self.cap = cap;
         self.plan = layers::split(&self.scene.items, self.cap);
         self.revision = revision();
+    }
+}
+
+/// Where an element is drawn, in board units: a node's box, or the union
+/// of what the scene draws for a connector.
+pub(crate) fn bounds(board: &Board, scene: &Scene, id: &Id) -> Option<Rect> {
+    if board.nodes.contains_key(id) {
+        return hit::Frames::new(board).get(id);
+    }
+    scene
+        .items
+        .iter()
+        .filter(|item| matches!(&item.source, Source::Edge(edge) if edge == id))
+        .map(|item| item.bounds)
+        .reduce(union)
+}
+
+pub(crate) fn union(a: Rect, b: Rect) -> Rect {
+    let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+    Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
+}
+
+/// `viewport` panned by the least amount that shows `bounds` in a widget
+/// of `size` with [`REVEAL_MARGIN`] around it; where that does not fit, its
+/// top-left corner is shown.
+pub fn revealing(viewport: Viewport, size: (f32, f32), bounds: Rect) -> Viewport {
+    let margin = REVEAL_MARGIN / viewport.zoom;
+    let axis = |start: f32, length: f32, from: f32, room: f32| {
+        let (low, high) = (start - margin, start + length + margin);
+        if low < from {
+            low
+        } else if high > from + room {
+            (high - room).min(low)
+        } else {
+            from
+        }
+    };
+    Viewport {
+        x: axis(bounds.x, bounds.width, viewport.x, size.0 / viewport.zoom),
+        y: axis(bounds.y, bounds.height, viewport.y, size.1 / viewport.zoom),
+        ..viewport
     }
 }
 
@@ -662,7 +991,7 @@ impl Probe {
 
 #[cfg(test)]
 mod tests {
-    use wren_board::scene::{Draw, Source};
+    use wren_board::scene::Draw;
     use wren_board::{Reason, Rgba};
 
     use super::*;
@@ -1230,6 +1559,352 @@ mod tests {
         }
         assert_eq!((view.viewport().x, view.viewport().y), (30.0, 40.0));
         assert!(!view.machine().space());
+    }
+
+    use fixtures::TWO;
+
+    fn id(name: &str) -> Id {
+        Id::new(name).expect("an id")
+    }
+
+    /// The middle of a node on screen.
+    fn middle(view: &BoardView, name: &str) -> (f32, f32) {
+        let bounds = hit::Frames::new(view.board())
+            .get(&id(name))
+            .expect("a node");
+        let centre = bounds.center();
+        view.viewport().to_screen((centre.x, centre.y))
+    }
+
+    fn press(at: (f32, f32)) -> Input {
+        Input::Press {
+            button: Button::Left,
+            at,
+        }
+    }
+
+    const RELEASE: Input = Input::Release {
+        button: Button::Left,
+    };
+
+    /// A left click at `at`, with the updates its press and release gave.
+    fn click(view: &mut BoardView, at: (f32, f32), now: Instant) -> Update {
+        let mut update = input(view, press(at), now);
+        let released = input(view, RELEASE, now);
+        update.changed |= released.changed;
+        update.effects.extend(released.effects);
+        update
+    }
+
+    fn click_node(view: &mut BoardView, name: &str, now: Instant) -> Update {
+        let at = middle(view, name);
+        click(view, at, now)
+    }
+
+    fn selected(view: &BoardView) -> Vec<&str> {
+        view.machine().selection().iter().map(Id::as_str).collect()
+    }
+
+    #[test]
+    fn a_drag_shows_a_preview_and_applies_one_move_on_release() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        let before = view.board().clone();
+        let (x, y) = middle(&view, "a");
+        assert_eq!(input(&mut view, press((x, y)), now), Update::default());
+        let moved = input(&mut view, Input::Move { at: (x + 43.0, y) }, now);
+        // The model is untouched while the gesture shows its preview.
+        assert_eq!(moved, Update::default());
+        assert_eq!(*view.board(), before);
+        assert_ne!(view.shown(), view.scene());
+        let preview = view.picture();
+        assert_eq!(preview.board.nodes[&id("a")].at, [40, 0]);
+        assert_eq!(view.machine().state(), machine::State::Moving);
+
+        let released = input(&mut view, RELEASE, now);
+        assert_eq!(
+            released,
+            Update {
+                changed: true,
+                effects: Vec::new()
+            }
+        );
+        assert_eq!(view.board().nodes[&id("a")].at, [40, 0]);
+        assert_eq!(view.board().nodes[&id("b")].at, [300, 0]);
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(
+            *view.scene(),
+            scene::build(view.board(), view.palette(), view.measurer())
+        );
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        assert_eq!(selected(&view), ["a"]);
+        // The draft is the canonical text of the moved board.
+        let draft = view.draft();
+        assert_eq!(draft, wren_board::write(view.board()));
+        assert_eq!(view.synced(), draft);
+        assert!(draft.contains("at = [40, 0]"), "{draft}");
+    }
+
+    #[test]
+    fn a_gesture_cancelled_or_settled_changes_nothing() {
+        let now = Instant::now();
+        let ends: [fn(&mut BoardView, Instant) -> Update; 3] = [
+            |view, now| {
+                input(
+                    view,
+                    Input::Key {
+                        key: Key::Escape,
+                        repeat: false,
+                    },
+                    now,
+                )
+            },
+            |view, now| view.settle(now),
+            |view, now| input(view, Input::Focus(false), now),
+        ];
+        for (index, end) in ends.into_iter().enumerate() {
+            let mut view = sized(TWO);
+            let before = view.board().clone();
+            let (x, y) = middle(&view, "b");
+            input(&mut view, press((x, y)), now);
+            input(&mut view, Input::Move { at: (x, y + 61.0) }, now);
+            assert_ne!(view.shown(), view.scene(), "{index}");
+            assert_eq!(end(&mut view, now), Update::default(), "{index}");
+            assert_eq!(view.shown(), view.scene(), "{index}");
+            // The release that follows finds no gesture.
+            assert_eq!(input(&mut view, RELEASE, now), Update::default(), "{index}");
+            assert_eq!(*view.board(), before, "{index}");
+            assert!(view.pristine(), "{index}");
+            assert_eq!(view.draft(), TWO, "{index}");
+        }
+    }
+
+    #[test]
+    fn a_click_selects_and_a_click_on_the_canvas_keeps_the_cursor() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        assert_eq!(click_node(&mut view, "b", now), Update::default());
+        assert_eq!(selected(&view), ["b"]);
+        // The connector between them.
+        assert_eq!(click(&mut view, (210.0, 30.0), now), Update::default());
+        assert_eq!(selected(&view), ["e"]);
+        click(&mut view, (600.0, 400.0), now);
+        assert!(selected(&view).is_empty());
+        assert_eq!(view.machine().cursor(), Some(&id("e")));
+        assert!(view.pristine());
+    }
+
+    #[test]
+    fn key_moves_go_back_to_the_pristine_text_verbatim() {
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        let now = Instant::now();
+        view.command(Command::SelectAll, now);
+        let moved = view.command(Command::Move(Dir::Right), now);
+        assert!(moved.changed);
+        assert!(!view.pristine());
+        let draft = view.draft();
+        assert_eq!(draft, wren_board::write(view.board()));
+        assert_ne!(draft, fixtures::HAND_WRITTEN);
+
+        let back = view.command(Command::Move(Dir::Left), now);
+        assert!(back.changed);
+        assert!(view.pristine());
+        // Not the canonical text: the hand-written file, byte for byte.
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+        assert_eq!(view.synced(), fixtures::HAND_WRITTEN);
+    }
+
+    #[test]
+    fn a_saved_text_is_the_new_pristine_text() {
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        let now = Instant::now();
+        view.command(Command::SelectAll, now);
+        view.command(Command::Move(Dir::Down), now);
+        let saved = view.draft();
+        view.saved(&saved);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), saved);
+        // Back where the file began is now an edit of the saved text, and
+        // drafts canonically.
+        view.command(Command::Move(Dir::Up), now);
+        assert!(!view.pristine());
+        let original = wren_board::parse(fixtures::HAND_WRITTEN).expect("a board");
+        assert_eq!(view.draft(), wren_board::write(&original));
+        // The pristine text saved again changes nothing.
+        let pristine = view.pristine.clone();
+        view.saved(&pristine);
+        assert_eq!(view.canonical, saved);
+    }
+
+    #[test]
+    fn a_reload_mid_drag_drops_the_gesture_and_takes_the_new_text_as_pristine() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click_node(&mut view, "a", now);
+        let (x, y) = middle(&view, "a");
+        input(&mut view, press((x, y)), now);
+        input(&mut view, Input::Move { at: (x + 80.0, y) }, now);
+        assert_ne!(view.shown(), view.scene());
+
+        view.reload(fixtures::HAND_WRITTEN).expect("a board");
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        // Stale input, and the release, change nothing.
+        view.update(Message::Input(view.epoch() - 1, RELEASE), now);
+        input(&mut view, RELEASE, now);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+    }
+
+    #[test]
+    fn a_read_only_board_selects_and_never_changes() {
+        let mut view = sized(fixtures::FUTURE);
+        assert!(!view.writable());
+        let now = Instant::now();
+        let before = view.board().clone();
+        let first = view.board().nodes.keys().next().expect("a node").clone();
+        let (x, y) = middle(&view, first.as_str());
+        click(&mut view, (x, y), now);
+        assert_eq!(selected(&view), [first.as_str()]);
+        input(&mut view, press((x, y)), now);
+        input(
+            &mut view,
+            Input::Move {
+                at: (x + 60.0, y + 60.0),
+            },
+            now,
+        );
+        assert_eq!(view.shown(), view.scene());
+        input(&mut view, RELEASE, now);
+        for command in [
+            Command::Move(Dir::Right),
+            Command::Resize(Grow::Wider),
+            Command::Delete,
+            Command::Duplicate,
+            Command::Tool(Tool::Shape(wren_board::Shape::Diamond)),
+        ] {
+            assert_eq!(view.command(command, now), Update::default(), "{command:?}");
+        }
+        assert_eq!(view.machine().tool(), Tool::Select);
+        view.command(Command::SelectAll, now);
+        assert_eq!(view.machine().selection().len(), {
+            let board = view.board();
+            board
+                .nodes
+                .keys()
+                .chain(board.edges.keys())
+                .collect::<BTreeSet<_>>()
+                .len()
+        });
+        assert_eq!(*view.board(), before);
+        assert_eq!(view.draft(), fixtures::FUTURE);
+    }
+
+    #[test]
+    fn an_arrow_with_nothing_selected_selects_the_cursor_or_the_top_left_node_and_shows_it() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        let far = Viewport {
+            x: 5000.0,
+            y: 5000.0,
+            zoom: 1.0,
+        };
+        view.set_viewport(far);
+        view.command(Command::Select(Dir::Right), now);
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        // Panned the least that shows `a` with the margin.
+        assert_eq!(
+            view.viewport(),
+            Viewport {
+                x: -REVEAL_MARGIN,
+                y: -REVEAL_MARGIN,
+                zoom: 1.0
+            }
+        );
+
+        // With the selection cleared, the cursor is selected again; and
+        // extending from nothing does the same.
+        view.command(Command::SelectNone, now);
+        view.set_viewport(far);
+        view.command(Command::ExtendSelection(Dir::Down), now);
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.viewport().x, -REVEAL_MARGIN);
+        // A click on `b` moves the cursor; a pointer never reveals.
+        view.set_viewport(Viewport {
+            x: 200.0,
+            ..Viewport::default()
+        });
+        let shown = view.viewport();
+        click_node(&mut view, "b", now);
+        assert_eq!(view.viewport(), shown);
+        view.command(Command::SelectNone, now);
+        view.set_viewport(far);
+        view.command(Command::Select(Dir::Left), now);
+        assert_eq!(selected(&view), ["b"]);
+
+        // An empty board has nothing to walk to.
+        let mut empty = sized(wren_board::EMPTY);
+        let kept = empty.viewport();
+        empty.command(Command::Select(Dir::Up), now);
+        assert!(empty.machine().selection().is_empty());
+        assert_eq!(empty.viewport(), kept);
+    }
+
+    #[test]
+    fn revealing_pans_the_least_that_shows_the_element() {
+        let at = |x: f32, y: f32, zoom: f32| Viewport { x, y, zoom };
+        let size = (400.0, 300.0);
+        let node = Rect::new(100.0, 100.0, 120.0, 60.0);
+        for (viewport, expected) in [
+            // In view with room: no pan.
+            (at(0.0, 0.0, 1.0), at(0.0, 0.0, 1.0)),
+            // Too far right and down: its far edges come in by the margin.
+            (at(-200.0, -200.0, 1.0), at(-140.0, -100.0, 1.0)),
+            // Too far left and up.
+            (at(150.0, 150.0, 1.0), at(60.0, 60.0, 1.0)),
+            // The margin is screen pixels: at 200 % it is 20 units.
+            (at(300.0, 0.0, 2.0), at(80.0, 30.0, 2.0)),
+            // Larger than the view: its top-left corner, with the margin.
+            (at(0.0, 0.0, 4.0), at(90.0, 90.0, 4.0)),
+        ] {
+            assert_eq!(revealing(viewport, size, node), expected, "{viewport:?}");
+        }
+    }
+
+    #[test]
+    fn the_fit_commands_fit_the_board_and_the_selection() {
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        let now = Instant::now();
+        view.command(Command::ZoomFit, now);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, SIZE)
+        );
+        // With nothing selected there is no selection to fit.
+        let fitted = view.viewport();
+        view.command(Command::ZoomSelection, now);
+        assert_eq!(view.viewport(), fitted);
+        let first = view.board().nodes.keys().next().expect("a node").clone();
+        click_node(&mut view, first.as_str(), now);
+        view.command(Command::ZoomSelection, now);
+        let bounds = hit::Frames::new(view.board()).get(&first).expect("a node");
+        assert_eq!(view.viewport(), Viewport::fitting(bounds, SIZE));
+        assert_eq!(view.viewport().zoom, 1.0);
+    }
+
+    #[test]
+    fn new_ids_are_eight_characters_of_the_alphabet_and_differ() {
+        let mut ids = Fresh::default();
+        let drawn: BTreeSet<Id> = (0..2000).map(|_| ids.draw()).collect();
+        assert_eq!(drawn.len(), 2000);
+        for id in &drawn {
+            assert_eq!(id.as_str().len(), 8);
+            assert!(id
+                .as_str()
+                .bytes()
+                .all(|byte| b"0123456789abcdefghjkmnpqrstvwxyz".contains(&byte)));
+        }
     }
 
     #[test]

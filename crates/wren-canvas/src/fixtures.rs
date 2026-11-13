@@ -94,6 +94,31 @@ pub const OVERLAP: &str = sample!("Overlap");
 pub const FUTURE: &str = sample!("Future");
 pub const HAND_WRITTEN: &str = sample!("Hand written");
 
+/// Two shapes and a connector between them, at 100 % from the origin:
+/// `a`'s middle is at (60, 30) on screen and `b`'s at (360, 30).
+pub const TWO: &str = r#"schema = 1
+
+[node.a]
+text = "A"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "a"
+
+[node.b]
+text = "B"
+kind = "shape"
+at = [300, 0]
+size = [120, 60]
+z = "b"
+
+[edge.e]
+kind = "edge"
+from = { node = "a" }
+to = { node = "b" }
+z = "c"
+"#;
+
 pub fn palette() -> Palette {
     Palette {
         canvas: Rgba::rgb(20, 20, 24),

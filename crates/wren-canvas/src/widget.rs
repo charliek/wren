@@ -19,6 +19,7 @@ use iced::widget::canvas;
 use iced::{window, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 
 use crate::machine::{Button, Input, Scroll};
+use crate::overlay;
 use crate::paint::{self, Cull};
 use crate::{BoardView, Labels, Message, Style, Viewport, REST};
 
@@ -191,9 +192,10 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
                 // A fit waiting for the size draws nothing, so it is not
                 // seen and its viewport is no move.
                 if !view.fit_pending() {
+                    let revision = view.picture().revision;
                     state
                         .motion
-                        .redraw(view.revision(), view.jumps(), view.viewport(), *now);
+                        .redraw(revision, view.jumps(), view.viewport(), *now);
                 }
                 // Labels left out of a moving frame come back at rest.
                 if !self.labels(renderer).moving && state.motion.moving(*now) {
@@ -317,7 +319,8 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             return;
         }
         let view = self.view;
-        let scene = view.scene();
+        let picture = view.picture();
+        let scene = picture.scene;
 
         renderer.fill_quad(
             renderer::Quad {
@@ -340,10 +343,10 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             moving,
         );
         let mut geometry = state.geometry.borrow_mut();
-        let of = Some((view.revision(), cull));
+        let of = Some((picture.revision, cull));
         if geometry.of != of {
             geometry.of = of;
-            geometry.shown = paint::shown(scene, view.layers(), &cull);
+            geometry.shown = paint::shown(scene, picture.plan, &cull);
             let layers = geometry.shown.len();
             geometry.caches.resize_with(layers, canvas::Cache::new);
             geometry.caches.iter().for_each(canvas::Cache::clear);
@@ -377,6 +380,20 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             {
                 painted_layers += 1;
             }
+        }
+
+        // Over every layer of the scene, and rebuilt with each frame: a
+        // handful of paths.
+        let overlay = overlay::marks(view);
+        if !overlay.marks.is_empty() {
+            let mut frame = canvas::Frame::new(renderer, bounds.size());
+            overlay::paint(&mut frame, &overlay, view, &cull);
+            let drawn = frame.into_geometry();
+            renderer.with_layer(bounds, |renderer| {
+                renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+                    renderer.draw_geometry(drawn);
+                });
+            });
         }
 
         #[cfg(feature = "test-support")]
