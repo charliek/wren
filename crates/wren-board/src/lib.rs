@@ -29,7 +29,7 @@
 //! - [`edit::plan`] turns an [`edit::Intent`] into the changes
 //!   [`Board::apply`] makes, with [`ids`], [`z`], [`snap`], [`place`] and
 //!   [`walk`] for new ids, stacking keys, the grid, keyboard building and
-//!   walking.
+//!   walking; [`clip`] writes and reads the clipboard text.
 //!
 //! The format, the scene rules and their constants are specified in the
 //! plan, `discovery/boards.md`, §3.7 and §4. Golden files under `golden/`
@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 mod check;
+pub mod clip;
 pub mod edit;
 #[cfg(test)]
 mod fixtures;

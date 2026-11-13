@@ -24,6 +24,8 @@ mod copy;
 mod delete;
 mod node;
 
+pub(crate) use copy::{copies, fragment, Fragment, Layout};
+
 /// What someone asked a board to do. Coordinates are absolute board
 /// units, already snapped where a rule snaps them ([`crate::snap`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -194,6 +196,12 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::SetShape { ids: chosen, shape } => node::set_shape(board, chosen, *shape),
         Intent::Delete { ids: chosen } => delete::delete(board, chosen),
         Intent::Duplicate { ids: chosen, by } => copy::duplicate(board, chosen, *by, ids),
+        Intent::Paste {
+            text,
+            size,
+            view,
+            nth,
+        } => crate::clip::paste(board, text, *size, *view, *nth, ids),
         _ => Plan::default(),
     }
 }
