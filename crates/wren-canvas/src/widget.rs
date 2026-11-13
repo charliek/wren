@@ -243,6 +243,11 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             }
             let focused = state.focused && state.window_focused;
             shell.request_input_method(&input_method(view, focused, bounds));
+            // The machine's deadline is met by the redraw at or after it
+            // (`translate` sends the tick).
+            if let Some(due) = view.machine().deadline().filter(|due| due > now) {
+                shell.request_redraw_at(due);
+            }
         }
         let sent = translate(state, event, bounds, cursor, view, self.style);
         for message in sent.messages {
@@ -408,6 +413,11 @@ fn translate(
         }
     }
     match event {
+        Event::Window(window::Event::RedrawRequested(now)) => {
+            if machine.deadline().is_some_and(|due| due <= *now) {
+                sent.messages.push(input(Input::Tick));
+            }
+        }
         Event::Window(window::Event::Focused) => state.window_focused = true,
         Event::Window(window::Event::Unfocused) => {
             state.window_focused = false;
@@ -446,6 +456,9 @@ fn translate(
         // The pointer left the window with no button held.
         Event::Mouse(mouse::Event::CursorLeft) if holding && state.pressed.is_none() => {
             sent.messages.push(input(Input::Cancel));
+        }
+        Event::Mouse(mouse::Event::CursorLeft) if machine.hovering() && state.pressed.is_none() => {
+            sent.messages.push(input(Input::Leave));
         }
         Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
             state.modifiers = *modifiers;
@@ -506,6 +519,19 @@ fn translate(
                     at: local(*position),
                 }));
                 sent.captured = true;
+            } else if state.focused {
+                // With no button down the pointer is the board's only where
+                // it may come to rest on a node (§5.5 rule 8), and the
+                // machine hears when a pointer it saw there has gone. The
+                // event stays everyone's.
+                let over = bounds.contains(*position) && cursor.position_over(bounds).is_some();
+                if over && machine.hovers(view.writable()) {
+                    sent.messages.push(input(Input::Move {
+                        at: local(*position),
+                    }));
+                } else if machine.hovering() {
+                    sent.messages.push(input(Input::Leave));
+                }
             }
         }
         Event::Mouse(mouse::Event::ButtonReleased(button)) => {
@@ -930,9 +956,12 @@ mod tests {
             view.board().nodes.values().next().map(|node| node.at),
             Some([-120, -60])
         );
-        // With no button held a move is nobody's business.
+        // With no button held the pointer only passes over: the board
+        // hears where (§5.5 rule 8) and takes the event from nobody.
         let moved = mouse(mouse::Event::CursorMoved { position: ON_A });
-        assert_eq!(send(&mut view, &mut state, moved, ON_A), Sent::default());
+        let sent = send(&mut view, &mut state, moved, ON_A);
+        assert!(!sent.captured);
+        assert_eq!(inputs(&sent), [Input::Move { at: (60.0, 30.0) }]);
     }
 
     #[test]
@@ -1575,5 +1604,151 @@ mod tests {
         assert_eq!(view.machine().state(), Surface::Editing);
         assert!(view.pristine());
         assert_eq!(view.shown(), view.scene());
+    }
+
+    fn over(position: Point) -> Event {
+        mouse(mouse::Event::CursorMoved { position })
+    }
+
+    /// Give the board the keyboard by a click on empty canvas.
+    fn focus(view: &mut BoardView, state: &mut State) {
+        let empty = Point::new(700.0, 550.0);
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        send(view, state, press, empty);
+        send(view, state, release, empty);
+        assert!(state.focused && view.machine().focused());
+    }
+
+    /// A redraw at `now`, with the view taking what it sends at that time.
+    fn redraw(view: &mut BoardView, state: &mut State, now: Instant) -> Sent {
+        let event = Event::Window(window::Event::RedrawRequested(now));
+        let cursor = mouse::Cursor::Available(ON_A);
+        let sent = translate(state, &event, BOUNDS, cursor, view, Style::default());
+        for message in &sent.messages {
+            view.update(message.clone(), now);
+        }
+        sent
+    }
+
+    #[test]
+    fn the_pointer_passing_over_a_focused_board_may_rest_on_a_node() {
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        // Without the keyboard the pointer passing over is nobody's.
+        assert_eq!(
+            send(&mut view, &mut state, over(ON_A), ON_A),
+            Sent::default()
+        );
+        focus(&mut view, &mut state);
+        let sent = send(&mut view, &mut state, over(ON_A), ON_A);
+        assert!(!sent.captured);
+        assert_eq!(inputs(&sent), [Input::Move { at: (60.0, 30.0) }]);
+        assert!(view.machine().hovering());
+
+        // The machine's deadline is met by the first redraw at or after it.
+        let due = view.machine().deadline().expect("a rest begun");
+        let early = due - std::time::Duration::from_millis(1);
+        assert_eq!(redraw(&mut view, &mut state, early), Sent::default());
+        let sent = redraw(&mut view, &mut state, due);
+        assert!(!sent.captured);
+        assert_eq!(inputs(&sent), [Input::Tick]);
+        assert_eq!(view.machine().deadline(), None);
+        assert_eq!(redraw(&mut view, &mut state, due), Sent::default());
+        let overlay = overlay::marks(&view);
+        let handles = overlay.marks.iter();
+        assert_eq!(
+            handles
+                .filter(|mark| matches!(mark, overlay::Mark::Connect(_)))
+                .count(),
+            4
+        );
+
+        // Off the widget, the machine hears once that the pointer has gone.
+        let sent = send(&mut view, &mut state, over(AWAY), AWAY);
+        assert!(!sent.captured);
+        assert_eq!(inputs(&sent), [Input::Leave]);
+        assert!(!view.machine().hovering());
+        assert_eq!(
+            send(&mut view, &mut state, over(AWAY), AWAY),
+            Sent::default()
+        );
+        // Out of the window.
+        send(&mut view, &mut state, over(ON_A), ON_A);
+        assert!(view.machine().hovering());
+        let left = mouse(mouse::Event::CursorLeft);
+        assert_eq!(
+            inputs(&send(&mut view, &mut state, left, ON_A)),
+            [Input::Leave]
+        );
+        // Under an overlay drawn above the board.
+        send(&mut view, &mut state, over(ON_A), ON_A);
+        let covered = mouse::Cursor::Levitating(ON_A);
+        let sent = translate(
+            &mut state,
+            &over(ON_A),
+            BOUNDS,
+            covered,
+            &view,
+            Style::default(),
+        );
+        assert_eq!(inputs(&sent), [Input::Leave]);
+    }
+
+    #[test]
+    fn the_pointer_passing_over_is_nothing_where_no_node_shows_handles() {
+        // A tool that makes no connector from a handle, an open label, and
+        // a board that cannot be edited.
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        focus(&mut view, &mut state);
+        view.command(Command::Tool(crate::Tool::Text), Instant::now());
+        assert_eq!(
+            send(&mut view, &mut state, over(ON_A), ON_A),
+            Sent::default()
+        );
+        view.command(Command::Tool(crate::Tool::Select), Instant::now());
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        send(&mut view, &mut state, press, ON_A);
+        send(&mut view, &mut state, release, ON_A);
+        view.command(Command::EditLabel, Instant::now());
+        assert_eq!(view.machine().state(), Surface::Editing);
+        assert_eq!(
+            send(&mut view, &mut state, over(ON_A), ON_A),
+            Sent::default()
+        );
+
+        let mut view = open(fixtures::FUTURE);
+        let mut state = State::new();
+        focus(&mut view, &mut state);
+        let anywhere = Point::new(400.0, 300.0);
+        assert_eq!(
+            send(&mut view, &mut state, over(anywhere), anywhere),
+            Sent::default()
+        );
+    }
+
+    #[test]
+    fn a_drag_from_a_connect_handle_onto_a_node_connects_them() {
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        focus(&mut view, &mut state);
+        send(&mut view, &mut state, over(ON_A), ON_A);
+        let due = view.machine().deadline().expect("a rest begun");
+        redraw(&mut view, &mut state, due);
+        // The handle below `a`, sixteen pixels outside its bottom side.
+        let handle = Point::new(ON_A.x, ON_A.y + 30.0 + 16.0);
+        send(&mut view, &mut state, over(handle), handle);
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        assert!(send(&mut view, &mut state, press, handle).captured);
+        let on_b = Point::new(BOUNDS.x + 360.0, BOUNDS.y + 30.0);
+        let sent = send(&mut view, &mut state, over(on_b), on_b);
+        assert!(sent.captured);
+        assert_eq!(view.machine().state(), Surface::Connecting);
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        assert!(send(&mut view, &mut state, release, on_b).captured);
+        assert_eq!(view.machine().state(), Surface::Idle);
+        assert_eq!(view.board().edges.len(), 2);
     }
 }

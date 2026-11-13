@@ -1,8 +1,9 @@
 //! What the widget draws over a board's scene (the plan's §5.2, §5.3,
-//! §5.8 and §5.9): the selection, the cursor ring, the handles, the
-//! marquee, the open label's caret and selected text, the mode chip and
-//! the empty board's hint. None of it is the board's, so none of it is in
-//! the scene, an export or a draft.
+//! §5.8, §5.9 and §5.12): the selection, the cursor ring, the handles, the
+//! marquee, the node a dragged connector end would attach to, the open
+//! label's caret and selected text, the mode chip and the empty board's
+//! hint. None of it is the board's, so none of it is in the scene, an
+//! export or a draft.
 //!
 //! [`marks`] decides what is drawn, in widget-local pixels, as a pure
 //! function of the view; [`paint`] draws it.
@@ -12,6 +13,7 @@ use std::time::Instant;
 use iced::advanced::text::{LineHeight, Shaping};
 use iced::widget::canvas::{self, Frame, LineDash, Path, Stroke};
 use iced::{alignment, Pixels, Size};
+use wren_board::edit::EdgeEnd;
 use wren_board::scene::{self, Draw, Face, Measure as _, Rect, Source};
 use wren_board::Rgba;
 
@@ -58,6 +60,12 @@ pub(crate) enum Mark {
     Connect((f32, f32)),
     /// A connector end's handle.
     End((f32, f32)),
+    /// A side handle of the node a connector end is dragged over, and
+    /// whether a release here pins the end to that side (§5.12 rule 5).
+    Side((f32, f32), bool),
+    /// From where a connector's end is to the pointer dragging it, while a
+    /// release would leave the end there (§5.12 rule 6).
+    Band((f32, f32), (f32, f32)),
     Marquee(Rect),
     /// Behind the caret of a connector's label that has no text yet: the
     /// scene backs a label only once it has some, and the caret would be
@@ -156,6 +164,35 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
             .and_then(|id| handles::ends(picture.board, picture.scene, id));
         for end in ends.into_iter().flatten() {
             marks.push(Mark::End(viewport.to_screen((end.x, end.y))));
+        }
+    }
+
+    if let Some(connecting) = machine.connecting() {
+        let target = connecting.target.and_then(|(id, pinned)| {
+            Some((id, picture.board.nodes.get(id)?, frames.get(id)?, pinned))
+        });
+        if let Some((id, node, bounds, pinned)) = target {
+            if !selection.contains(id) {
+                marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
+            }
+            let sides = handles::sides(node, bounds, viewport);
+            marks.extend(
+                sides
+                    .into_iter()
+                    .map(|(side, at)| Mark::Side(at, pinned == Some(side))),
+            );
+        }
+        let home = connecting.loose.and_then(|(id, end)| {
+            let [from, to] = handles::ends(picture.board, picture.scene, id)?;
+            Some(match end {
+                EdgeEnd::From => from,
+                EdgeEnd::To => to,
+            })
+        });
+        if let Some(home) = home {
+            let to = viewport.to_screen(connecting.at);
+            marks.push(Mark::Band(viewport.to_screen((home.x, home.y)), to));
+            marks.push(Mark::End(to));
         }
     }
 
@@ -294,7 +331,25 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
                 frame.fill(&path, canvas_colour);
                 frame.stroke(&path, solid(1.5));
             }
-            Mark::End(at) => frame.fill(&dot(*at), colour),
+            Mark::End(at) | Mark::Side(at, true) => frame.fill(&dot(*at), colour),
+            Mark::Side(at, false) => {
+                let path = dot(*at);
+                frame.fill(&path, canvas_colour);
+                frame.stroke(&path, solid(1.5));
+            }
+            Mark::Band(from, to) => frame.stroke(
+                &Path::line(
+                    iced::Point::new(from.0, from.1),
+                    iced::Point::new(to.0, to.1),
+                ),
+                Stroke {
+                    line_dash: LineDash {
+                        segments: &[4.0, 3.0],
+                        offset: 0,
+                    },
+                    ..solid(1.5)
+                },
+            ),
             Mark::Marquee(bounds) => {
                 let path = rect(*bounds);
                 frame.fill(&path, colour.scale_alpha(0.12));
@@ -759,5 +814,145 @@ mod tests {
         assert!(!overlay.focused);
         assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Selected(_))), 1);
         assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 0);
+    }
+
+    /// Rest the pointer on a widget-local point until the node there shows
+    /// its connect handles.
+    fn rest(view: &mut BoardView, at: (f32, f32)) {
+        input(view, Input::Focus(true));
+        input(view, Input::Move { at });
+        let rested = Instant::now() + crate::machine::HOVER_DELAY;
+        view.update(Message::Input(view.epoch(), Input::Tick), rested);
+    }
+
+    fn press(view: &mut BoardView, at: (f32, f32)) {
+        input(
+            view,
+            Input::Press {
+                button: Button::Left,
+                at,
+            },
+        );
+    }
+
+    #[test]
+    fn a_node_the_pointer_rests_on_shows_four_connect_handles() {
+        let mut view = open(fixtures::TWO);
+        input(&mut view, Input::Focus(true));
+        input(&mut view, Input::Move { at: (60.0, 30.0) });
+        let connects = |view: &BoardView| -> Vec<(f32, f32)> {
+            let marks = marks(view).marks.into_iter();
+            marks
+                .filter_map(|mark| match mark {
+                    Mark::Connect(at) => Some(at),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Not before it has rested there.
+        assert!(connects(&view).is_empty());
+        rest(&mut view, (60.0, 30.0));
+        // Sixteen pixels outside the middle of each side, clockwise from
+        // the top; the node is not selected, so it has no outline.
+        assert_eq!(
+            connects(&view),
+            [(60.0, -16.0), (136.0, 30.0), (60.0, 76.0), (-16.0, 30.0)]
+        );
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Outline(_))), 0);
+        // Selected, it shows them outside its resize handles.
+        click(&mut view, (60.0, 30.0));
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Handle(_))), 8);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Connect(_))), 4);
+        // Gone once the pointer has left.
+        input(&mut view, Input::Leave);
+        assert!(connects(&view).is_empty());
+    }
+
+    #[test]
+    fn a_dragged_connector_marks_the_node_it_would_end_on() {
+        let mut view = open(fixtures::TWO);
+        rest(&mut view, (60.0, 30.0));
+        press(&mut view, (60.0, 76.0));
+        // Over `b`, which is 120 by 60 at 300,0: its outline and the four
+        // handles on its sides, none taken.
+        input(&mut view, Input::Move { at: (360.0, 30.0) });
+        assert_eq!(view.machine().state(), State::Connecting);
+        let overlay = marks(&view);
+        let sides = |overlay: &Overlay| -> Vec<((f32, f32), bool)> {
+            let marks = overlay.marks.iter();
+            marks
+                .filter_map(|mark| match mark {
+                    Mark::Side(at, pinned) => Some((*at, *pinned)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(overlay
+            .marks
+            .contains(&Mark::Outline(Rect::new(297.0, -3.0, 126.0, 66.0))));
+        assert_eq!(
+            sides(&overlay),
+            [
+                ((360.0, 0.0), false),
+                ((420.0, 30.0), false),
+                ((360.0, 60.0), false),
+                ((300.0, 30.0), false)
+            ]
+        );
+        // The source's connect handles went when the drag began.
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Connect(_))), 0);
+        // Near a handle, that one is taken.
+        input(&mut view, Input::Move { at: (414.0, 33.0) });
+        let taken: Vec<bool> = sides(&marks(&view))
+            .into_iter()
+            .map(|side| side.1)
+            .collect();
+        assert_eq!(taken, [false, true, false, false]);
+        // Over empty canvas there is no node to mark.
+        input(&mut view, Input::Move { at: (500.0, 300.0) });
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Outline(_))), 0);
+        assert!(sides(&overlay).is_empty());
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Band(..))), 0);
+    }
+
+    #[test]
+    fn an_end_that_would_go_back_trails_a_band_to_the_pointer() {
+        let mut view = open(fixtures::TWO);
+        click(&mut view, (210.0, 30.0));
+        // The `to` end of `e`, on `b`'s left side.
+        press(&mut view, (300.0, 30.0));
+        input(&mut view, Input::Move { at: (500.0, 300.0) });
+        let overlay = marks(&view);
+        assert!(overlay
+            .marks
+            .contains(&Mark::Band((300.0, 30.0), (500.0, 300.0))));
+        // The connector's two ends where they are, and the one in hand.
+        let ends: Vec<&Mark> = overlay
+            .marks
+            .iter()
+            .filter(|mark| matches!(mark, Mark::End(_)))
+            .collect();
+        assert_eq!(
+            ends,
+            [
+                &Mark::End((120.0, 30.0)),
+                &Mark::End((300.0, 30.0)),
+                &Mark::End((500.0, 300.0))
+            ]
+        );
+        // Over a node it may take, the preview shows where it would go
+        // and the band is gone; a selected node is not outlined twice.
+        input(&mut view, Input::Move { at: (360.0, 58.0) });
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Band(..))), 0);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Outline(_))), 1);
+        assert_eq!(
+            count(&overlay, |mark| matches!(mark, Mark::Side(_, true))),
+            1
+        );
+        assert!(overlay.marks.contains(&Mark::End((360.0, 60.0))));
     }
 }

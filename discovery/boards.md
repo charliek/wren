@@ -229,16 +229,19 @@ pub mod machine {
     pub const LINE: f32 = 40.0;  pub const ZOOM_PER_LINE: f32 = 1.1;  pub const BURST: Duration /* 150 ms */;  pub const THRESHOLD: f32 = 4.0;
     pub const DOUBLE_CLICK: Duration /* 300 ms */;  pub const DOUBLE_REACH: f32 = 6.0;  pub const NODE_SIZE: [i32; 2] = [120, 60];
     pub const TEXT_SIZE: [i32; 2] = [120, 20];  pub const RUN_PAUSE: Duration /* 1 s, §5.11 rule 3 */;
+    pub const HOVER_DELAY: Duration /* 120 ms, §5.5 rule 8 */;
     pub enum Scroll { Lines { x: f32, y: f32 }, Pixels { x: f32, y: f32 } }   pub enum Button { Left, Middle, Right, Other }
     pub struct Mods { pub shift: bool, pub duplicate: bool }   // duplicate: ⌥ on macOS, Ctrl elsewhere, resolved by the widget
     pub enum Key { Escape, Enter, Backspace, Arrow(Dir) }
     pub enum Input { Wheel { delta: Scroll, at: (f32, f32), zoom: bool, sideways: bool, scale_factor: f32 },
-                     Press { button: Button, at: (f32, f32) }, Move { at: (f32, f32) }, Release { button: Button },
+                     Press { button: Button, at: (f32, f32) }, Move { at: (f32, f32) } /* no button down: the pointer passing over */,
+                     Release { button: Button }, Leave /* the pointer is over the board no longer */,
                      Space { held: bool }, Cancel, Modifiers(Mods), Key { key: Key, repeat: bool }, Char(char), Focus(bool), Tick }
     pub struct View<'a> { pub viewport: Viewport, pub now: Instant, pub board: &'a Board, pub scene: &'a Scene, pub writable: bool }
     pub enum Act { Look(Viewport), Edit(Intent), Continue(Intent) /* joins the previous undo step */, Preview(Option<Intent>),
                    OpenLabel(Id), CommitLabel, Caret { at: (f32, f32), select: bool }, Run(Command) /* the view's to carry out */ }
-    pub enum State { Unfocused, Idle, Armed, Pressed, Moving, Marquee, Resizing, Creating, Editing, Panning }   // name() is §6.2's
+    pub enum State { Unfocused, Idle, Armed, Pressed, Moving, Marquee, Resizing, Creating, Connecting, Editing, Panning }   // name() is §6.2's
+    pub struct Connecting<'a> { pub target: Option<(&'a Id, Option<Side>)>, pub loose: Option<(&'a Id, EdgeEnd)>, pub at: (f32, f32) }   // [X1] a dragged end
     impl Machine { pub fn step(&mut self, input: Input, view: &View) -> Vec<Act>;  pub fn command(&mut self, c: Command, view: &View) -> Vec<Act>;
                    pub fn applied(&mut self, plan: &Plan, board: &Board) -> Vec<Act>;   // takes the plan's select and edit
                    pub fn settle(&mut self) -> Vec<Act>;  pub fn reset(&mut self);  pub fn abandon(&mut self);  pub fn retain(&mut self, board: &Board);
@@ -246,7 +249,9 @@ pub mod machine {
                    pub fn state(&self) -> State;  pub fn tool(&self) -> Tool;  pub fn selection(&self) -> &BTreeSet<Id>;  pub fn cursor(&self) -> Option<&Id>;
                    pub fn editing(&self) -> Option<&Id>;  pub fn marquee(&self) -> Option<Rect>;  pub fn focused(&self) -> bool;  pub fn panning(&self) -> bool;
                    pub fn dragging(&self) -> bool;  pub fn mods(&self) -> Mods;  pub fn space(&self) -> bool;  pub fn escapes(&self) -> bool;
-                   pub fn handles(&self, view: &View) -> hit::Shown; }
+                   pub fn handles(&self, view: &View) -> hit::Shown;
+                   pub fn deadline(&self) -> Option<Instant>;   // [X1] when to send Tick: the hover handles' delay
+                   pub fn hovers(&self, writable: bool) -> bool;  pub fn hovering(&self) -> bool;  pub fn connecting(&self) -> Option<Connecting>; }
 }
 pub mod hit {   // §5.3 rules 4 and 5
     pub const EDGE_REACH: f32 = 6.0;
@@ -255,11 +260,14 @@ pub mod hit {   // §5.3 rules 4 and 5
     pub struct Frames<'a>;   // new(&Board), corner(&Id) -> Option<[i64; 2]>, get(&Id) -> Option<Rect>: absolute boxes through placements
     pub fn hit(board: &Board, scene: &Scene, viewport: Viewport, at: (f32, f32), shown: Shown) -> Hit;
     pub fn inside(board: &Board, scene: &Scene, area: Rect) -> BTreeSet<Id>;
+    pub fn attach(board: &Board, scene: &Scene, viewport: Viewport, at: (f32, f32)) -> Option<(Id, Option<Side>)>;   // [X1] §5.12 rules 1 and 5
 }
 pub mod handles {
     pub const SIZE: f32 = 8.0;  pub const REACH: f32 = 6.0;  pub const CONNECT_GAP: f32 = 16.0;  pub const MIDDLE_MIN: f32 = 32.0;
+    pub const PIN_REACH: f32 = 10.0;   // [X1]
     pub enum Handle { /* nw, n, ne, e, se, s, sw, w */ }   // ALL, name() -> &str (§6.2's names), sides() -> [Option<Side>; 2]
     pub fn resize(bounds: Rect, viewport: Viewport) -> Vec<(Handle, (f32, f32))>;  pub fn connect(bounds: Rect, viewport: Viewport) -> [(Side, (f32, f32)); 4];
+    pub fn sides(node: &Node, bounds: Rect, viewport: Viewport) -> [(Side, (f32, f32)); 4];  pub fn pin_reach(bounds: Rect, viewport: Viewport) -> f32;   // [X1]
     pub fn ends(board: &Board, scene: &Scene, id: &Id) -> Option<[Point; 2]>;
 }
 pub mod label {
@@ -666,7 +674,7 @@ A mode chip in a canvas corner names the state when it is not plain Idle ("Diamo
 5. Double-click on a node or connector: edit its label.
 6. Every creation lands in Editing with the new node selected and an empty label. The node goes on top of the stacking order, with the neutral colour, the default fill and a generated id. A colour or fill command with nothing selected does nothing: there is no sticky style for the next node.
 7. Hand tool: a drag pans; nothing is selected or created.
-8. Hover connect handles: resting the pointer on a node for 120 ms in Idle shows four handles 16 screen px outside the midpoints of its sides (a deadline from the machine, as `Drag::next_deadline`, `drag.rs:525`). A click on one runs `board.connect.<side>`; a drag from one starts Connecting. Resize handles sit on the bounds, so the two never overlap.
+8. Hover connect handles: resting the pointer on a node for 120 ms in Idle shows four handles 16 screen px outside the midpoints of its sides (a deadline from the machine, `Machine::deadline`, as `Drag::next_deadline`, `drag.rs:525`: the widget asks for a redraw then and sends `Tick`). A click on one runs `board.connect.<side>` from that node, whatever was selected; a drag from one starts Connecting. Resize handles sit on the bounds, so the two never overlap. The rest is counted from when the pointer came onto the node. Once the handles show they stay while the pointer is on the node or within 22 screen px of its box, which is the gap to a handle and the handle's reach; they go when the pointer leaves that, the view moves under it, or any command runs. They also show with a shape tool armed, when a press on one is the handle's and not the tool's, so the tool's shape is the one a click or a drag from the handle makes (§5.6 rule 7, §5.12 rule 1); they do not show with the text, connector or hand tool, in a label, without the keyboard, or on a read-only board.
 9. `board.shape.<shape>` sets the shape of every selected node, keeping `at`, `size` and label, as one undo unit.
 
 ### 5.6 Keyboard building: Tab and quick-connect [P2]
@@ -737,12 +745,12 @@ All of this subsection is *modelled*. Geometry is in absolute board units; child
 
 ### 5.12 Connectors [P2]
 
-1. **By pointer.** Drag from a hover connect handle, or arm the connector tool and drag from a node. Over a node the target is outlined and shows four side handles. Release on a node: connect to it. Release on empty canvas: create a default node centred there (the armed shape, else a rectangle), connect, Editing. Release on the source: cancel. A press on empty canvas with the connector tool does nothing.
+1. **By pointer.** Drag from a hover connect handle, or arm the connector tool and drag from a node. Over a node the target is outlined and shows four side handles, at the middle of each side on the shape's outline, where an end pinned to that side meets it (§3.7). Release on a node: connect to it. Release on empty canvas: create a default node centred there (the armed shape, else a rectangle), connect, Editing. Release on the source: cancel. A press on empty canvas with the connector tool does nothing, and neither does a click on a node with it. The new connector floats at its `from` end whichever handle it was drawn from. During the drag the preview is the board as a release would leave it (§3.4 rule 4): the connector routed to the node under the pointer, or the new node and its connector, following by whole cells; over the source it is the board itself. A drawn connector spends the tool; one given up leaves it armed.
 2. **By keyboard, near:** `board.connect.next` and `board.connect.<dir>` (§5.6).
 3. **By keyboard, far** (*modelled*; a loop edge takes five keys). `board.tool.connector` (C or A) with exactly one node selected enters Connecting. Arrows move a highlighted target by the walking rules, from the current target or, at first, from the source. A printable key appends to a query shown in the mode chip, Backspace removes its last character, and the target becomes the best match: labels containing the query, case-insensitive, prefix matches first, then by `(y, x)`. An arrow clears the query. Enter connects the source to the target, selects the new connector, and returns to Idle; with no target, the source as target, or an existing connector from this source to this target, it only returns to Idle. Esc returns to Idle. The query lives in the machine: there is no palette, so the whole script replays as a unit test. The input method is off, so non-Latin labels are reached by arrows or by pointer.
 4. **Ends and sides.** An end is attached to a node, floating (the UI's default: no `side`) or pinned (`side` set), or is a free point. The **nominal exit side** of a connector at its `from` node is down when the `to` node lies wholly below the `from` node's bottom edge, up when wholly above its top edge, and otherwise right or left by centre; the nominal entry side is the opposite one. The **side of a connector at a node**, which `board.select.connector_<dir>` uses, is the pinned side, else the side the router draws. The router must draw a floating end on its nominal side whenever the two nodes overlap on one axis and are apart on the other (the acceptance script depends on it). Where they are apart on both axes, an elbow route's floating end may take any side, nominal first, so a diagonal with nothing in the way is one turn rather than a Z (owner decision 16; §3.7, Routes); a straight route keeps the nominal sides.
-5. **Pinning.** An end released within 10 screen px of one of the target's side handles is pinned to that side; released anywhere else on the node it floats. Nothing else in ring 0 writes `side`, and nothing writes `anchor`.
-6. **Endpoint drag.** A single selected connector shows a handle at each end. Dragging one onto a node re-attaches it (rule 5). Released on empty canvas, an end that was already a free point moves there, snapped; an attached end returns to where it was. The UI never creates a free end; they come only from files.
+5. **Pinning.** An end released within 10 screen px of one of the target's side handles is pinned to that side; released anywhere else on the node it floats. Nothing else in ring 0 writes `side`, and nothing writes `anchor`. The reach is never more than a quarter of the node's shorter side on screen, so the middle of a node floats however small it is drawn. A handle lies on the outline, so half of its reach is outside its node: there too the end is that node's, pinned, unless another node in front lies under the pointer. Of two handles in reach the nearer is taken, then the node in front. The handle that would take the end is drawn filled.
+6. **Endpoint drag.** A single selected connector shows a handle at each end. Dragging one onto a node re-attaches it (rule 5), and an anchor it had goes. Released on empty canvas, an end that was already a free point moves there, snapped; an attached end returns to where it was. The UI never creates a free end; they come only from files. An end may not join the node its other end is on. While a release would leave the end where it was, the connector is drawn as it is and a dashed line runs from that end to the pointer. A click on an end handle is a click on its connector.
 7. **Re-routing.** Routes are recomputed from current geometry whenever an attached node moves or resizes, during the drag as well as after it. A floating end may change side; a pinned end does not. Moving a node changes no edge line in the file.
 8. **Label.** One label per connector in the ring 0 UI: the first entry of `labels`, at the middle of the route. `board.label.edit` or a double-click edits it (§5.9). Further labels in a file are drawn and kept.
 9. **Style commands** act on every selected connector, one undo unit each: `board.edge.routing` switches straight and elbow; `board.edge.start` and `board.edge.end` cycle that end's head through none, arrow; `board.edge.reverse` swaps `from` and `to` with their heads; `board.stroke.dashed` switches solid and dashed. In Phase 2 they are reached from the Commands palette.

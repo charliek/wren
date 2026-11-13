@@ -113,22 +113,8 @@ pub fn hit(board: &Board, scene: &Scene, viewport: Viewport, at: (f32, f32), sho
     }
     let (x, y) = viewport.to_board(at);
     let point = Point::new(x, y);
-    for id in stacking(scene).into_iter().rev() {
-        let (Some(node), Some(bounds)) = (board.nodes.get(id), frames.get(id)) else {
-            continue;
-        };
-        if !holds(bounds, point) {
-            continue;
-        }
-        let inside = match node.kind.as_ref().and_then(Named::known) {
-            Some(NodeKind::Shape) => {
-                within(&shape::outline(shape::drawn(&node.shape), bounds), point)
-            }
-            _ => true,
-        };
-        if inside {
-            return Hit::Node(id.clone());
-        }
+    if let Some(id) = node_at(board, scene, &frames, point) {
+        return Hit::Node(id.clone());
     }
     let reach = EDGE_REACH / viewport.zoom;
     for item in scene.items.iter().rev() {
@@ -149,6 +135,70 @@ pub fn hit(board: &Board, scene: &Scene, viewport: Viewport, at: (f32, f32), sho
         }
     }
     Hit::Canvas
+}
+
+/// The topmost node that takes the board point `point`.
+fn node_at<'a>(
+    board: &Board,
+    scene: &'a Scene,
+    frames: &Frames<'_>,
+    point: Point,
+) -> Option<&'a Id> {
+    stacking(scene).into_iter().rev().find(|&id| {
+        let (Some(node), Some(bounds)) = (board.nodes.get(id), frames.get(id)) else {
+            return false;
+        };
+        holds(bounds, point)
+            && match node.kind.as_ref().and_then(Named::known) {
+                Some(NodeKind::Shape) => {
+                    within(&shape::outline(shape::drawn(&node.shape), bounds), point)
+                }
+                _ => true,
+            }
+    })
+}
+
+/// Where a connector end dropped at the widget-local point `at` attaches
+/// (§5.12 rules 1 and 5): pinned to a side of the node whose side handle
+/// the point is within reach of ([`handles::pin_reach`]), else floating on
+/// the node under the point. The handles lie on the outline, so half of
+/// each one's reach is outside its node, on the canvas or on a node behind
+/// it; a node in front of the point hides the handles of those it covers.
+/// Of several handles in reach the nearest is taken, then the node in
+/// front. `None` anywhere else: a connector and a handle of the selection
+/// are canvas to a dragged end.
+pub fn attach(
+    board: &Board,
+    scene: &Scene,
+    viewport: Viewport,
+    at: (f32, f32),
+) -> Option<(Id, Option<Side>)> {
+    let frames = Frames::new(board);
+    // The side of `id` whose handle is nearest within reach, and how near.
+    let pinned = |id: &Id| {
+        let (node, bounds) = (board.nodes.get(id)?, frames.get(id)?);
+        let reach = handles::pin_reach(bounds, viewport);
+        handles::sides(node, bounds, viewport)
+            .into_iter()
+            .map(|(side, centre)| ((centre.0 - at.0).hypot(centre.1 - at.1), side))
+            .filter(|(apart, _)| *apart <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    };
+    let (x, y) = viewport.to_board(at);
+    let under = node_at(board, scene, &frames, Point::new(x, y));
+    // From the front down to the node under the point; `min_by` keeps the
+    // first of equals.
+    let mut covered = false;
+    let front = stacking(scene).into_iter().rev().take_while(|&id| {
+        let shown = !covered;
+        covered |= Some(id) == under;
+        shown
+    });
+    let near = front.filter_map(|id| Some((pinned(id)?, id)));
+    match near.min_by(|a, b| a.0 .0.total_cmp(&b.0 .0)) {
+        Some(((_, side), id)) => Some((id.clone(), Some(side))),
+        None => Some((under?.clone(), None)),
+    }
 }
 
 /// The nodes whose boxes, and the connectors whose drawn bounds, lie
@@ -542,6 +592,101 @@ z = "J"
                 assert_eq!(world.at(viewport, x, y), want, "({x}, {y}) at {viewport:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_dragged_end_attaches_to_the_node_under_it_and_to_nothing_else() {
+        let world = World::new(BOARD);
+        for viewport in viewports() {
+            let over = |x: f32, y: f32| {
+                let at = viewport.to_screen((x, y));
+                attach(&world.board, &world.scene, viewport, at)
+            };
+            let floating = |name: &str| Some((id(name), None));
+            // The middle of a node, the one in front where two overlap, a
+            // child where its parents put it.
+            assert_eq!(over(50.0, 60.0), floating("back"));
+            assert_eq!(over(200.0, 120.0), floating("front"));
+            assert_eq!(over(460.0, 340.0), floating("inner"));
+            // Free text and a placeholder by their boxes; text the scene
+            // draws nothing for, not at all.
+            assert_eq!(over(60.0, 520.0), floating("note"));
+            assert_eq!(over(460.0, 530.0), floating("odd"));
+            assert_eq!(over(260.0, 520.0), None);
+            // The corner of an ellipse's box, a connector, a connector's
+            // label and the canvas are nothing to attach to.
+            assert_eq!(over(3.0, 303.0), None);
+            assert_eq!(over(-50.0, 30.0), None);
+            assert_eq!(over(60.0, 410.0), None);
+            assert_eq!(over(700.0, 100.0), None);
+        }
+    }
+
+    #[test]
+    fn a_dragged_end_is_pinned_by_the_side_handle_it_is_near() {
+        let world = World::new(BOARD);
+        // Screen pixels are board units at 100 %.
+        let viewport = Viewport::default();
+        let over = |x: f32, y: f32| attach(&world.board, &world.scene, viewport, (x, y));
+        let pinned = |name: &str, side| Some((id(name), Some(side)));
+        let floating = |name: &str| Some((id(name), None));
+        // `back` is 200 by 120 at the origin.
+        assert_eq!(over(100.0, 0.0), pinned("back", Side::Top));
+        assert_eq!(over(106.0, 8.0), pinned("back", Side::Top));
+        assert_eq!(over(107.0, 8.0), floating("back"));
+        assert_eq!(over(0.0, 60.0), pinned("back", Side::Left));
+        assert_eq!(over(4.0, 64.0), pinned("back", Side::Left));
+        // Half of a handle's reach is outside the outline, on the canvas.
+        assert_eq!(over(100.0, -6.0), pinned("back", Side::Top));
+        assert_eq!(over(94.0, -8.0), pinned("back", Side::Top));
+        assert_eq!(over(100.0, -11.0), None);
+        assert_eq!(over(-9.0, 60.0), pinned("back", Side::Left));
+        // A node in front hides the handles it covers: `front` lies over
+        // the middle of `back`'s right side, which is the middle of its own
+        // top side, and its left side's middle is where `back`'s bottom
+        // side's is.
+        assert_eq!(over(203.0, 62.0), pinned("front", Side::Top));
+        assert_eq!(over(204.0, 80.0), floating("front"));
+        assert_eq!(over(104.0, 122.0), pinned("front", Side::Left));
+        // Of two handles as near, the node in front, wherever the point
+        // is; and from behind, a handle of the node in front still reaches.
+        assert_eq!(over(96.0, 118.0), pinned("front", Side::Left));
+        assert_eq!(over(97.0, 124.0), pinned("front", Side::Left));
+        assert_eq!(over(196.0, 54.0), pinned("front", Side::Top));
+        // A child's handles reach onto its parent, whose own they are not.
+        assert_eq!(over(460.0, 322.0), pinned("inner", Side::Top));
+        assert_eq!(over(460.0, 316.0), pinned("inner", Side::Top));
+        assert_eq!(over(500.0, 340.0), pinned("inner", Side::Right));
+        assert_eq!(over(460.0, 309.0), floating("group"));
+
+        // A diamond's side handles are its corners; an ellipse's lie on
+        // its outline.
+        assert_eq!(over(260.0, 304.0), pinned("gem", Side::Top));
+        assert_eq!(over(204.0, 330.0), pinned("gem", Side::Left));
+        assert_eq!(over(196.0, 330.0), pinned("gem", Side::Left));
+        assert_eq!(over(60.0, 357.0), pinned("round", Side::Bottom));
+
+        // The reach is screen pixels: at 400 % it is two and a half board
+        // units, and at 25 % a node this size keeps a middle that floats.
+        let at = |viewport: Viewport, x: f32, y: f32| {
+            let at = viewport.to_screen((x, y));
+            attach(&world.board, &world.scene, viewport, at)
+        };
+        let close = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 4.0,
+        };
+        assert_eq!(at(close, 100.0, 2.0), pinned("back", Side::Top));
+        assert_eq!(at(close, 100.0, 3.0), floating("back"));
+        assert_eq!(at(close, 100.0, -3.0), None);
+        let far = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 0.25,
+        };
+        assert_eq!(at(far, 50.0, 60.0), floating("back"));
+        assert_eq!(at(far, 100.0, 20.0), pinned("back", Side::Top));
     }
 
     #[test]

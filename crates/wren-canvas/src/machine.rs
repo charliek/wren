@@ -5,9 +5,10 @@
 //! so every rule below runs in a unit test with no window.
 //!
 //! The machine holds what is the surface's and not the board's (the
-//! plan's §5.2 to §5.5, §5.8 and §5.14): whether the board has the
+//! plan's §5.2 to §5.5, §5.8, §5.12 and §5.14): whether the board has the
 //! keyboard, the armed tool, the selection and the cursor, which label is
-//! open, and the pointer gesture in flight. It never changes the board. A
+//! open, the node the pointer rests on, and the pointer gesture in flight.
+//! It never changes the board. A
 //! gesture shows itself as a preview and asks for one edit when it is
 //! released (§3.4 rule 4); the edit's plan comes back through
 //! [`Machine::applied`], which is how a creation selects what it made and
@@ -17,12 +18,12 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use wren_board::edit::{Area, Edges, Intent, Plan};
+use wren_board::edit::{Area, EdgeEnd, Edges, Endpoint, Intent, Plan};
 use wren_board::scene::{Rect, Scene};
 use wren_board::{snap, Board, Dir, End, Id, NodeKind, Shape, Side, GRID};
 
 use crate::command::{Command, Grow, Tool};
-use crate::handles::Handle;
+use crate::handles::{self, Handle};
 use crate::hit::{self, Frames, Hit, Shown};
 use crate::Viewport;
 
@@ -48,6 +49,9 @@ pub const TEXT_SIZE: [i32; 2] = [120, 20];
 /// A pause this long ends a run of key moves or key resizes, which is one
 /// undo step (§5.11 rule 3).
 pub const RUN_PAUSE: Duration = Duration::from_secs(1);
+/// How long the pointer rests on a node before the node shows its connect
+/// handles (§5.5 rule 8).
+pub const HOVER_DELAY: Duration = Duration::from_millis(120);
 
 /// A wheel delta as the toolkit reports it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,12 +110,16 @@ pub enum Input {
         button: Button,
         at: (f32, f32),
     },
+    /// The pointer moved: with a button down wherever it went, and with
+    /// none only over the board, where it may come to rest on a node.
     Move {
         at: (f32, f32),
     },
     Release {
         button: Button,
     },
+    /// The pointer is over the board no longer, with no button down.
+    Leave,
     /// Space went down or came up.
     Space {
         held: bool,
@@ -131,8 +139,8 @@ pub enum Input {
     Char(char),
     /// The widget took (`true`) or lost iced focus.
     Focus(bool),
-    /// Time passed with no other input, so a deadline the machine set,
-    /// such as the hover handles' (§5.5 rule 8), may be due.
+    /// Time passed with no other input, so the deadline the machine set
+    /// ([`Machine::deadline`]) may be due.
     Tick,
 }
 
@@ -193,6 +201,9 @@ pub enum State {
     Marquee,
     Resizing,
     Creating,
+    /// A connector is being drawn, or one of its ends moved (§5.12 rules 1
+    /// and 6).
+    Connecting,
     /// A label is open.
     Editing,
     Panning,
@@ -209,6 +220,7 @@ impl State {
             Self::Marquee => "marquee",
             Self::Resizing => "resizing",
             Self::Creating => "creating",
+            Self::Connecting => "connecting",
             Self::Editing => "editing",
             Self::Panning => "panning",
         }
@@ -221,9 +233,45 @@ enum Target {
     Node(Id),
     Edge(Id),
     Resize(Id, Handle),
+    /// A node a connector may be drawn from: by its connect handle on this
+    /// side, or with the connector tool anywhere on it.
+    Connect(Id, Option<Side>),
+    /// An endpoint handle of the selected connector.
+    End(Id, EdgeEnd),
     Canvas,
     /// Anywhere, with a shape or text tool armed.
     Create,
+}
+
+/// What a Connecting gesture drags.
+#[derive(Clone, Debug, PartialEq)]
+enum Link {
+    /// The `to` end of a new connector from this node.
+    New(Id),
+    /// One end of this connector.
+    End(Id, EdgeEnd),
+}
+
+/// The node the pointer rests on with no button down (§5.5 rule 8).
+#[derive(Clone, Debug, PartialEq)]
+struct Hover {
+    id: Id,
+    since: Instant,
+    /// Whether it has rested [`HOVER_DELAY`], so its connect handles show.
+    shown: bool,
+}
+
+/// A connector end being dragged, as the view draws it (§5.12 rule 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Connecting<'a> {
+    /// The node a release would attach the end to, and the side it would
+    /// pin it to.
+    pub target: Option<(&'a Id, Option<Side>)>,
+    /// The end of a connector that a release here would leave where it
+    /// was.
+    pub loose: Option<(&'a Id, EdgeEnd)>,
+    /// The board point under the pointer.
+    pub at: (f32, f32),
 }
 
 /// The pointer gesture in flight. `anchor` is the board point that was
@@ -269,6 +317,15 @@ enum Gesture {
         anchor: (f32, f32),
         area: Option<Area>,
     },
+    Connecting {
+        link: Link,
+        /// The board point under the pointer.
+        to: (f32, f32),
+        /// The node the end is over, and the side it would be pinned to.
+        target: Option<(Id, Option<Side>)>,
+        /// What a release would do, which is also what is shown.
+        plan: Option<Intent>,
+    },
     /// A drag moves the view; `from` is where the pointer was last seen.
     Panning { button: Button, from: (f32, f32) },
     /// A drag in the open label selects its text.
@@ -299,6 +356,7 @@ pub struct Machine {
     click: Option<(Instant, (f32, f32))>,
     /// The run the last command continued, and when.
     run: Option<(Run, Instant)>,
+    hover: Option<Hover>,
 }
 
 impl Machine {
@@ -319,6 +377,8 @@ impl Machine {
                 sideways,
                 scale_factor,
             } => {
+                // The board moves under the pointer.
+                self.hover = None;
                 let to = self.wheel(delta, at, zoom, sideways, scale_factor, view);
                 acts.extend(to.filter(|to| *to != view.viewport).map(Act::Look));
             }
@@ -333,7 +393,10 @@ impl Machine {
             Input::Cancel => {
                 self.cancel(&mut acts);
                 self.space = false;
+                self.hover = None;
             }
+            Input::Leave => self.hover = None,
+            Input::Tick => self.rest(view.now),
             Input::Modifiers(mods) => self.mods = mods,
             Input::Key {
                 key: Key::Escape,
@@ -348,8 +411,9 @@ impl Machine {
                 self.tool = Tool::Select;
                 self.space = false;
                 self.focused = false;
+                self.hover = None;
             }
-            Input::Key { .. } | Input::Char(_) | Input::Tick => {}
+            Input::Key { .. } | Input::Char(_) => {}
         }
         acts
     }
@@ -364,6 +428,8 @@ impl Machine {
             return acts;
         }
         let run = self.run.take();
+        // A command may change the board or the view under the pointer.
+        self.hover = None;
         self.commit(&mut acts);
         match command {
             Command::CommitLabel => {}
@@ -425,6 +491,9 @@ impl Machine {
     /// selected alone and its label opened (§5.5 rule 6).
     pub fn applied(&mut self, plan: &Plan, board: &Board) -> Vec<Act> {
         let mut acts = Vec::new();
+        if !plan.is_empty() {
+            self.hover = None;
+        }
         if let Some(select) = &plan.select {
             self.run = None;
             self.selection = select.iter().cloned().collect();
@@ -467,6 +536,7 @@ impl Machine {
         self.space = false;
         self.click = None;
         self.run = None;
+        self.hover = None;
     }
 
     /// The view has no label to open on the element it was asked to
@@ -481,12 +551,14 @@ impl Machine {
         self.selection.retain(|id| exists(board, id));
         self.cursor = self.cursor.take().filter(|id| exists(board, id));
         self.editing = self.editing.take().filter(|id| exists(board, id));
+        self.hover = self.hover.take().filter(|hover| exists(board, &hover.id));
     }
 
     /// Put a selection and a cursor back, as undo and redo do (§5.11 rule
     /// 1).
     pub fn select(&mut self, selection: BTreeSet<Id>, cursor: Option<Id>) {
         self.run = None;
+        self.hover = None;
         self.selection = selection;
         self.cursor = cursor;
     }
@@ -498,6 +570,7 @@ impl Machine {
             Gesture::Resizing { .. } => State::Resizing,
             Gesture::Marquee { .. } => State::Marquee,
             Gesture::Creating { .. } => State::Creating,
+            Gesture::Connecting { .. } => State::Connecting,
             Gesture::Panning { .. } => State::Panning,
             Gesture::Selecting => State::Editing,
             Gesture::None if self.editing.is_some() => State::Editing,
@@ -572,14 +645,66 @@ impl Machine {
             || !self.selection.is_empty()
     }
 
+    /// When the machine next has something to do with no input, which is
+    /// when the node the pointer rests on shows its connect handles (§5.5
+    /// rule 8). Whoever feeds the machine sends [`Input::Tick`] then.
+    pub fn deadline(&self) -> Option<Instant> {
+        let waiting = self.hover.as_ref().filter(|hover| !hover.shown);
+        waiting.map(|hover| hover.since + HOVER_DELAY)
+    }
+
+    /// Whether the pointer passing over the board with no button down
+    /// matters (§5.5 rule 8): the board has the keyboard and may be edited,
+    /// nothing is in flight, and no tool is armed, or a shape tool, whose
+    /// shape a connector drawn from a handle then ends in.
+    pub fn hovers(&self, writable: bool) -> bool {
+        self.focused
+            && writable
+            && self.editing.is_none()
+            && self.gesture == Gesture::None
+            && matches!(self.tool, Tool::Select | Tool::Shape(_))
+    }
+
+    /// Whether the pointer was last seen over a node, so the machine has to
+    /// hear when it leaves the board ([`Input::Leave`]).
+    pub fn hovering(&self) -> bool {
+        self.hover.is_some()
+    }
+
+    /// The connector end being dragged.
+    pub fn connecting(&self) -> Option<Connecting<'_>> {
+        let Gesture::Connecting {
+            link,
+            to,
+            target,
+            plan,
+        } = &self.gesture
+        else {
+            return None;
+        };
+        let loose = match link {
+            Link::End(id, end) if plan.is_none() => Some((id, *end)),
+            _ => None,
+        };
+        Some(Connecting {
+            target: target.as_ref().map(|(id, side)| (id, *side)),
+            loose,
+            at: *to,
+        })
+    }
+
     /// The handles on screen: the eight of the one selected node, or the
-    /// two of the one selected connector, while the board has the keyboard,
-    /// may be edited and has no label open (§5.3 rule 7, §5.8 rule 5).
+    /// two of the one selected connector, and the four connect handles of
+    /// the node the pointer has rested on, while the board has the
+    /// keyboard, may be edited and has no label open (§5.3 rule 7, §5.5
+    /// rule 8, §5.8 rule 5).
     pub fn handles(&self, view: &View<'_>) -> Shown<'_> {
         let mut shown = Shown::default();
         if !self.focused || !view.writable || self.editing.is_some() {
             return shown;
         }
+        let rested = self.hover.as_ref().filter(|hover| hover.shown);
+        shown.connect = rested.map(|hover| &hover.id);
         let mut selected = self.selection.iter();
         if let (Some(id), None) = (selected.next(), selected.next()) {
             if view.board.nodes.contains_key(id) {
@@ -614,6 +739,7 @@ impl Machine {
         });
         self.focused = true;
         if pans {
+            self.hover = None;
             self.gesture = Gesture::Panning { button, from: at };
             return;
         }
@@ -642,22 +768,37 @@ impl Machine {
             }
             return;
         }
-        let on = match self.tool {
-            Tool::Shape(_) | Tool::Text if view.writable => Target::Create,
-            Tool::Select => match hit {
+        let on = match (self.tool, hit) {
+            // A connect handle shows with no tool armed or a shape tool
+            // (`hovers`), and is taken before the tool makes its shape.
+            (Tool::Select | Tool::Shape(_), Hit::Connect(id, side)) if view.writable => {
+                Target::Connect(id, Some(side))
+            }
+            (Tool::Shape(_) | Tool::Text, _) if view.writable => Target::Create,
+            (Tool::Select, hit) => match hit {
                 Hit::Resize(id, handle) => Target::Resize(id, handle),
                 Hit::Node(id) | Hit::Connect(id, _) => Target::Node(id),
-                Hit::Edge(id) | Hit::End(id, _) => Target::Edge(id),
+                Hit::Edge(id) => Target::Edge(id),
+                Hit::End(id, end) => Target::End(id, end),
                 Hit::Canvas => Target::Canvas,
             },
+            // The connector tool draws from a node, a handle on its box
+            // included, and does nothing anywhere else (§5.12 rule 1).
+            (Tool::Connector, Hit::Node(id) | Hit::Resize(id, _) | Hit::Connect(id, _))
+                if view.writable =>
+            {
+                Target::Connect(id, None)
+            }
             _ => return,
         };
+        // What a click makes or runs, it does at each click.
+        let once = matches!(on, Target::Create | Target::Connect(..));
         let again = self.click.take().is_some_and(|(time, from)| {
             view.now.saturating_duration_since(time) <= DOUBLE_CLICK
                 && distance(from, at) < DOUBLE_REACH
         });
-        let double = again && on != Target::Create;
-        if !double && on != Target::Create {
+        let double = again && !once;
+        if !double && !once {
             self.click = Some((view.now, at));
         }
         self.gesture = Gesture::Pressed {
@@ -670,8 +811,9 @@ impl Machine {
 
     fn moved(&mut self, at: (f32, f32), view: &View<'_>, acts: &mut Vec<Act>) {
         let to = view.viewport.to_board(at);
+        let tool = self.tool;
         match &mut self.gesture {
-            Gesture::None => {}
+            Gesture::None => self.hover(at, view),
             Gesture::Pressed { at: from, .. } => {
                 if distance(*from, at) < THRESHOLD {
                     return;
@@ -755,6 +897,21 @@ impl Machine {
                     acts.extend(now.map(|area| Act::Preview(Some(creating(self.tool, area)))));
                 }
             }
+            Gesture::Connecting {
+                link,
+                to: pointer,
+                target,
+                plan,
+            } => {
+                *pointer = to;
+                let over = hit::attach(view.board, view.scene, view.viewport, at);
+                let (over, now) = connecting(link, over, to, tool, view.board);
+                *target = over;
+                if now != *plan {
+                    plan.clone_from(&now);
+                    acts.push(Act::Preview(now));
+                }
+            }
             Gesture::Selecting => acts.push(Act::Caret {
                 at: to,
                 select: true,
@@ -762,10 +919,71 @@ impl Machine {
         }
     }
 
+    /// The pointer moved to the widget-local point `at` with no button
+    /// down (§5.5 rule 8). The node under it is the one it rests on, from
+    /// when it came there. Its connect handles sit outside it, so once they
+    /// show, the pointer may cross the gap to them without losing them.
+    fn hover(&mut self, at: (f32, f32), view: &View<'_>) {
+        if !self.hovers(view.writable) {
+            self.hover = None;
+            return;
+        }
+        let hit = hit::hit(
+            view.board,
+            view.scene,
+            view.viewport,
+            at,
+            self.handles(view),
+        );
+        let over = match hit {
+            Hit::Node(id) | Hit::Resize(id, _) | Hit::Connect(id, _) => Some(id),
+            Hit::Edge(_) | Hit::End(..) | Hit::Canvas => None,
+        };
+        self.hover = match (over, self.hover.take()) {
+            (Some(id), Some(hover)) if hover.id == id => Some(hover),
+            (Some(id), _) => Some(Hover {
+                id,
+                since: view.now,
+                shown: false,
+            }),
+            (None, Some(hover)) if hover.shown => {
+                let reach = handles::CONNECT_GAP + handles::REACH;
+                let around = Frames::new(view.board).get(&hover.id).map(|bounds| {
+                    let (left, top) = view.viewport.to_screen((bounds.x, bounds.y));
+                    let (right, bottom) =
+                        view.viewport.to_screen((bounds.right(), bounds.bottom()));
+                    (left - reach..=right + reach, top - reach..=bottom + reach)
+                });
+                around
+                    .is_some_and(|(across, down)| across.contains(&at.0) && down.contains(&at.1))
+                    .then_some(hover)
+            }
+            (None, _) => None,
+        };
+        self.rest(view.now);
+    }
+
+    /// The node the pointer rests on shows its connect handles once it has
+    /// rested there [`HOVER_DELAY`].
+    fn rest(&mut self, now: Instant) {
+        if let Some(hover) = &mut self.hover {
+            hover.shown |= now.saturating_duration_since(hover.since) >= HOVER_DELAY;
+        }
+    }
+
     /// The gesture a press on `on` becomes once the pointer has moved
     /// [`THRESHOLD`].
     fn drag(&mut self, on: Target, anchor: (f32, f32), view: &View<'_>) -> Gesture {
+        self.hover = None;
+        let connecting = |link| Gesture::Connecting {
+            link,
+            to: anchor,
+            target: None,
+            plan: None,
+        };
         match on {
+            Target::Connect(id, _) if view.writable => connecting(Link::New(id)),
+            Target::End(id, end) if view.writable => connecting(Link::End(id, end)),
             Target::Node(id) | Target::Edge(id) if view.writable => {
                 // A drag moves the selection; a press outside it selects
                 // what it pressed first, alone unless Shift adds it.
@@ -849,6 +1067,15 @@ impl Machine {
                 acts.push(Act::Edit(creating(self.tool, area)));
                 self.tool = Tool::Select;
             }
+            // Released where it changes nothing, on the node a new
+            // connector came from or where an end may not go, the gesture
+            // is over and the tool stays for another try.
+            Gesture::Connecting { plan, .. } => {
+                if let Some(intent) = plan {
+                    acts.push(Act::Edit(intent));
+                    self.tool = Tool::Select;
+                }
+            }
         }
     }
 
@@ -863,7 +1090,7 @@ impl Machine {
         acts: &mut Vec<Act>,
     ) {
         match on {
-            Target::Node(id) | Target::Edge(id) => {
+            Target::Node(id) | Target::Edge(id) | Target::End(id, _) => {
                 if double && view.writable {
                     self.select_only(id.clone());
                     self.open(id, acts);
@@ -874,7 +1101,20 @@ impl Machine {
                     self.cursor = Some(id);
                 }
             }
-            Target::Resize(..) => {}
+            Target::Resize(..) | Target::Connect(_, None) => {}
+            // A connect handle clicked is `board.connect.<side>` from its
+            // node (§5.5 rule 8).
+            Target::Connect(id, Some(side)) => {
+                self.hover = None;
+                self.select_only(id);
+                let dir = match side {
+                    Side::Top => Dir::Up,
+                    Side::Right => Dir::Right,
+                    Side::Bottom => Dir::Down,
+                    Side::Left => Dir::Left,
+                };
+                self.extend(Some(dir), view, acts);
+            }
             Target::Canvas => {
                 if double && view.writable {
                     let (kind, shape, size) = made(Tool::Select);
@@ -922,6 +1162,7 @@ impl Machine {
             Gesture::Moving { by, .. } => by != [0, 0],
             Gesture::Resizing { edges, .. } => edges != Edges::default(),
             Gesture::Creating { area, .. } => area.is_some(),
+            Gesture::Connecting { plan, .. } => plan.is_some(),
             Gesture::Marquee { before, .. } => {
                 self.selection = before;
                 false
@@ -1170,6 +1411,86 @@ fn creating(tool: Tool, area: Area) -> Intent {
     }
 }
 
+/// What releasing a dragged connector end at the board point `to` would
+/// do (§5.12 rules 1, 5 and 6), with `over` the node it would attach to
+/// and the side it would be pinned to: that target, where it is one the
+/// end may take, and the edit.
+///
+/// A new connector ends on the node, or on empty canvas in a new node
+/// centred there, in the armed shape; over the node it came from it is
+/// nothing. An end of a connector moves to the node, unless the other end
+/// is there already; on empty canvas an end that is a free point moves
+/// there, on the grid, and an attached one stays where it was.
+fn connecting(
+    link: &Link,
+    over: Option<(Id, Option<Side>)>,
+    to: (f32, f32),
+    tool: Tool,
+    board: &Board,
+) -> (Option<(Id, Option<Side>)>, Option<Intent>) {
+    let attached = |(node, side): &(Id, Option<Side>)| Endpoint::Node {
+        node: node.clone(),
+        side: *side,
+    };
+    match link {
+        Link::New(from) => {
+            let source = Endpoint::Node {
+                node: from.clone(),
+                side: None,
+            };
+            match over {
+                Some((node, _)) if node == *from => (None, None),
+                Some(target) => {
+                    let intent = Intent::AddEdge {
+                        from: source,
+                        to: attached(&target),
+                    };
+                    (Some(target), Some(intent))
+                }
+                None => {
+                    let (kind, shape, size) = made(tool);
+                    let intent = Intent::AddNode {
+                        kind,
+                        shape,
+                        at: centred(to, size),
+                        size,
+                        from: Some(source),
+                    };
+                    (None, Some(intent))
+                }
+            }
+        }
+        Link::End(id, end) => {
+            let Some(edge) = board.edges.get(id) else {
+                return (None, None);
+            };
+            let (own, other) = match end {
+                EdgeEnd::From => (&edge.from, &edge.to),
+                EdgeEnd::To => (&edge.to, &edge.from),
+            };
+            let rebind = |to| Intent::Rebind {
+                id: id.clone(),
+                end: *end,
+                to,
+            };
+            match over {
+                Some((node, _)) if matches!(other, End::Node { node: there, .. } if *there == node.as_str()) => {
+                    (None, None)
+                }
+                Some(target) => {
+                    let intent = rebind(attached(&target));
+                    (Some(target), Some(intent))
+                }
+                None if matches!(own, End::Free { .. }) => {
+                    let at = [snap::grid(to.0), snap::grid(to.1)];
+                    (None, Some(rebind(Endpoint::Free { at })))
+                }
+                None => (None, None),
+            }
+        }
+    }
+}
+
 /// The corner of a box of `size` centred on `point`, on the grid (§5.5
 /// rule 3).
 fn centred(point: (f32, f32), size: [i32; 2]) -> [i32; 2] {
@@ -1202,7 +1523,7 @@ fn dragged(anchor: (f32, f32), to: (f32, f32)) -> Area {
 #[cfg(test)]
 mod tests {
     use wren_board::edit::{self, Change};
-    use wren_board::ids::Ids;
+    use wren_board::ids::{Ids, Seeded};
     use wren_board::scene::{self, FixedMeasure};
     use wren_board::{parse, Extra, Named, Node, NodeStyle};
 
@@ -1779,6 +2100,10 @@ z = "F"
     const FREE: (f32, f32) = (100.0, 400.0);
     const CANVAS: (f32, f32) = (300.0, 150.0);
     const A_CORNER: (f32, f32) = (120.0, 60.0);
+    /// The connect handle outside the right side of `a`, at 100 %.
+    const A_RIGHT: (f32, f32) = (136.0, 30.0);
+    /// The middle of the left side of `b`, where `e` ends.
+    const B_LEFT: (f32, f32) = (200.0, 30.0);
 
     fn id(name: &str) -> Id {
         Id::new(name).expect("an id")
@@ -1908,6 +2233,33 @@ z = "F"
             self.now += Duration::from_millis(millis);
         }
 
+        /// Rest the pointer on a board point until the node there shows
+        /// its connect handles.
+        fn hover(&mut self, point: (f32, f32)) {
+            self.to(point);
+            self.wait(120);
+            self.step(Input::Tick);
+        }
+
+        /// The node showing its connect handles.
+        fn connect_handles(&self) -> Option<&str> {
+            let view = View {
+                viewport: self.viewport,
+                now: self.now,
+                board: &self.board,
+                scene: &self.scene,
+                writable: self.writable,
+            };
+            self.machine.handles(&view).connect.map(Id::as_str)
+        }
+
+        /// The node a dragged connector end would attach to, and the side
+        /// it would be pinned to.
+        fn target(&self) -> Option<(&str, Option<Side>)> {
+            let connecting = self.machine.connecting().expect("a connector end dragged");
+            connecting.target.map(|(id, side)| (id.as_str(), side))
+        }
+
         /// Press `button` on a board point.
         fn press_with(&mut self, button: Button, point: (f32, f32)) -> Vec<Act> {
             self.down = point;
@@ -1998,7 +2350,13 @@ z = "F"
         /// keyboard building, somewhere free.
         fn apply(&mut self, intent: &Intent) -> Vec<Act> {
             let plan = match intent {
-                Intent::Move { .. } => edit::plan(&self.board, intent, &mut NoIds),
+                Intent::Move { .. } | Intent::Rebind { .. } => {
+                    edit::plan(&self.board, intent, &mut NoIds)
+                }
+                Intent::AddEdge { .. } => {
+                    self.made += 1;
+                    edit::plan(&self.board, intent, &mut Seeded::new(u64::from(self.made)))
+                }
                 Intent::AddNode {
                     kind,
                     shape,
@@ -2057,6 +2415,18 @@ z = "F"
         Resizing,
         Marquee,
         Creating,
+        /// On the right connect handle of `a`, shown by the pointer's rest.
+        PressedConnect,
+        /// On `a`, with the connector tool armed.
+        PressedTool,
+        /// On the `to` end of the selected `e`.
+        PressedEnd,
+        /// A new connector dragged from a connect handle of `a`.
+        Connecting,
+        /// A new connector dragged from `a` with the connector tool.
+        ConnectingTool,
+        /// The `to` end of `e` dragged.
+        ConnectingEnd,
         /// The label of `a` open.
         Editing,
         /// The label of `a` open and the left button down in it.
@@ -2171,6 +2541,37 @@ z = "F"
                 rig.by(40.0, 40.0);
                 State::Creating
             }
+            From::PressedConnect | From::Connecting => {
+                rig.hover(A);
+                rig.press(A_RIGHT);
+                if matches!(from, From::Connecting) {
+                    rig.by(40.0, 40.0);
+                    State::Connecting
+                } else {
+                    State::Pressed
+                }
+            }
+            From::PressedTool | From::ConnectingTool => {
+                rig.run(Command::Tool(Tool::Connector));
+                rig.press(A);
+                if matches!(from, From::ConnectingTool) {
+                    rig.by(0.0, 100.0);
+                    State::Connecting
+                } else {
+                    State::Pressed
+                }
+            }
+            From::PressedEnd | From::ConnectingEnd => {
+                rig.click(E);
+                rig.wait(400);
+                rig.press(B_LEFT);
+                if matches!(from, From::ConnectingEnd) {
+                    rig.by(40.0, 40.0);
+                    State::Connecting
+                } else {
+                    State::Pressed
+                }
+            }
             From::Editing => {
                 rig.click(A);
                 rig.run(Command::EditLabel);
@@ -2245,8 +2646,9 @@ z = "F"
         }
     }
 
-    /// Every transition of the plan's §5.2 table but Connecting's, one row
-    /// each: where it starts, what happens, and the state it leaves.
+    /// Every transition of the plan's §5.2 table but keyboard Connecting's,
+    /// one row each: where it starts, what happens, and the state it
+    /// leaves.
     #[test]
     fn every_transition_leaves_the_state_the_table_says() {
         use Button::{Left, Middle, Right};
@@ -2336,8 +2738,9 @@ z = "F"
                 State::Editing,
             ),
             (From::Armed(Tool::Hand), T::Press(Left), State::Panning),
+            // The connector tool takes a press on a node and no other.
             (From::Armed(Tool::Connector), T::Press(Left), State::Armed),
-            (From::Armed(Tool::Connector), T::PressNode, State::Armed),
+            (From::Armed(Tool::Connector), T::PressNode, State::Pressed),
             // Pressed: four pixels make it a drag, and what was pressed
             // says which.
             (From::PressedNode, T::Near, State::Pressed),
@@ -2346,6 +2749,18 @@ z = "F"
             (From::PressedArmed, T::Far, State::Creating),
             (From::PressedCanvas, T::Far, State::Marquee),
             (From::PressedTwiceNode, T::Far, State::Moving),
+            (From::PressedConnect, T::Near, State::Pressed),
+            (From::PressedConnect, T::Far, State::Connecting),
+            (From::PressedTool, T::Far, State::Connecting),
+            (From::PressedEnd, T::Far, State::Connecting),
+            // A connect handle clicked is `board.connect.<side>`; a node
+            // clicked with the connector tool is nothing.
+            (From::PressedConnect, T::Release(Left), State::Idle),
+            (From::PressedConnect, T::ReleaseMade, State::Editing),
+            (From::PressedConnect, escape, State::Idle),
+            (From::PressedTool, T::Release(Left), State::Armed),
+            (From::PressedTool, escape, State::Armed),
+            (From::PressedEnd, T::Release(Left), State::Idle),
             (From::PressedNode, T::Release(Left), State::Idle),
             (From::PressedCanvas, T::Release(Left), State::Idle),
             (From::PressedHandle, T::Release(Left), State::Idle),
@@ -2372,6 +2787,34 @@ z = "F"
             (From::Creating, T::Settle, State::Armed),
             (From::Creating, focus(false), State::Unfocused),
             (From::Creating, hand, State::Creating),
+            // Connecting by pointer: released on empty canvas it makes a
+            // node and opens its label; the tool is spent only by what it
+            // makes; an end of a connector goes back to Idle either way.
+            (From::Connecting, T::Far, State::Connecting),
+            (From::Connecting, T::Release(Left), State::Idle),
+            (From::Connecting, T::ReleaseMade, State::Editing),
+            (From::Connecting, T::Release(Right), State::Connecting),
+            (From::Connecting, escape, State::Idle),
+            (From::Connecting, cancel, State::Idle),
+            (From::Connecting, T::Settle, State::Idle),
+            (From::Connecting, focus(false), State::Unfocused),
+            (From::Connecting, hand, State::Connecting),
+            (
+                From::Connecting,
+                T::Command(C::EditLabel),
+                State::Connecting,
+            ),
+            (From::Connecting, T::Press(Left), State::Pressed),
+            (From::ConnectingTool, T::Release(Left), State::Idle),
+            (From::ConnectingTool, T::ReleaseMade, State::Editing),
+            (From::ConnectingTool, escape, State::Armed),
+            (From::ConnectingTool, cancel, State::Armed),
+            (From::ConnectingTool, T::Settle, State::Armed),
+            (From::ConnectingTool, focus(false), State::Unfocused),
+            (From::ConnectingEnd, T::Far, State::Connecting),
+            (From::ConnectingEnd, T::Release(Left), State::Idle),
+            (From::ConnectingEnd, escape, State::Idle),
+            (From::ConnectingEnd, T::Settle, State::Idle),
             // Editing: every way out but the label's own press commits.
             (From::Editing, T::Command(C::CommitLabel), State::Idle),
             (From::Editing, escape, State::Idle),
@@ -2455,6 +2898,7 @@ z = "F"
             State::Marquee,
             State::Resizing,
             State::Creating,
+            State::Connecting,
             State::Editing,
             State::Panning,
         ];
@@ -2980,6 +3424,569 @@ z = "F"
         rig.writable = true;
         rig.step(Input::Focus(false));
         assert_eq!(shown(&rig), (None, None, None));
+    }
+
+    #[test]
+    fn a_node_shows_its_connect_handles_once_the_pointer_has_rested_on_it() {
+        let mut rig = Rig::new();
+        assert!(rig.to(A).is_empty());
+        assert!(rig.machine.hovering());
+        assert_eq!(rig.connect_handles(), None);
+        assert_eq!(rig.machine.deadline(), Some(rig.now + HOVER_DELAY));
+        rig.wait(119);
+        rig.step(Input::Tick);
+        assert_eq!(rig.connect_handles(), None);
+        rig.wait(1);
+        assert!(rig.step(Input::Tick).is_empty());
+        assert_eq!(rig.connect_handles(), Some("a"));
+        assert_eq!(rig.machine.deadline(), None);
+        // Moving about on the node keeps them, and nothing is selected.
+        rig.to((100.0, 50.0));
+        assert_eq!(rig.connect_handles(), Some("a"));
+        assert!(rig.selected().is_empty());
+        assert_eq!(rig.state(), State::Idle);
+
+        // Another node starts its own rest, which a later move ends as a
+        // tick does.
+        rig.to(B);
+        assert_eq!(rig.connect_handles(), None);
+        assert_eq!(rig.machine.deadline(), Some(rig.now + HOVER_DELAY));
+        rig.wait(120);
+        rig.to(B);
+        assert_eq!(rig.connect_handles(), Some("b"));
+        // A selected node shows them beside its resize handles.
+        rig.click(B);
+        assert_eq!(rig.connect_handles(), Some("b"));
+
+        // Gone when the pointer leaves, when the view moves under it, and
+        // with any command.
+        rig.step(Input::Leave);
+        assert!(!rig.machine.hovering());
+        rig.hover(A);
+        rig.step(wheel(lines(-1.0), false));
+        assert_eq!(rig.connect_handles(), None);
+        rig.hover(A);
+        assert_eq!(rig.connect_handles(), Some("a"));
+        rig.run(Command::SelectNone);
+        assert_eq!(rig.connect_handles(), None);
+    }
+
+    #[test]
+    fn the_pointer_rests_only_on_a_board_that_is_idle_or_has_a_shape_armed() {
+        // Without the keyboard, on a board that cannot be edited, and with
+        // a label open, the pointer passing over is nothing.
+        let mut rig = Rig::new();
+        rig.step(Input::Focus(false));
+        rig.hover(A);
+        assert!(!rig.machine.hovering());
+        let mut rig = Rig::new();
+        rig.writable = false;
+        rig.hover(A);
+        assert!(!rig.machine.hovering());
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::EditLabel);
+        rig.hover(B);
+        assert!(!rig.machine.hovering());
+
+        for tool in [Tool::Text, Tool::Connector, Tool::Hand] {
+            let mut rig = Rig::new();
+            rig.run(Command::Tool(tool));
+            rig.hover(A);
+            assert_eq!(rig.connect_handles(), None, "{tool:?}");
+        }
+        let mut rig = Rig::new();
+        rig.run(Command::Tool(DIAMOND));
+        rig.hover(A);
+        assert_eq!(rig.connect_handles(), Some("a"));
+        // Losing the keyboard puts them away.
+        rig.step(Input::Focus(false));
+        assert!(!rig.machine.hovering());
+    }
+
+    #[test]
+    fn the_connect_handles_stay_while_the_pointer_crosses_to_them() {
+        let mut rig = Rig::new();
+        // Before they show, leaving the node ends the rest.
+        rig.to(A);
+        rig.to(CANVAS);
+        assert!(!rig.machine.hovering());
+
+        rig.hover(A);
+        // The gap between the node and its handle, which here is on `e`.
+        rig.to((128.0, 30.0));
+        assert_eq!(rig.connect_handles(), Some("a"));
+        rig.to(A_RIGHT);
+        assert_eq!(rig.connect_handles(), Some("a"));
+        // Below the node, out to where the bottom handle reaches.
+        rig.to((60.0, 82.0));
+        assert_eq!(rig.connect_handles(), Some("a"));
+        rig.to((60.0, 83.0));
+        assert_eq!(rig.connect_handles(), None);
+        assert!(!rig.machine.hovering());
+
+        // At another zoom the gap is the same on screen.
+        let mut rig = Rig::new();
+        rig.viewport = Viewport {
+            x: -50.0,
+            y: -50.0,
+            zoom: 0.5,
+        };
+        rig.hover(A);
+        let handle = rig
+            .viewport
+            .to_board((50.0 * 0.5 + 60.0 + 16.0, 80.0 * 0.5));
+        rig.to(handle);
+        assert_eq!(rig.connect_handles(), Some("a"));
+        rig.press(handle);
+        rig.by(0.0, 300.0);
+        assert_eq!(rig.state(), State::Connecting);
+    }
+
+    fn extend(from: &str, dir: Dir, shape: Option<Shape>) -> Intent {
+        Intent::Extend {
+            from: id(from),
+            dir: Some(dir),
+            shape,
+        }
+    }
+
+    fn floating(node: &str) -> Endpoint {
+        pinned(node, None)
+    }
+
+    fn pinned(node: &str, side: Option<Side>) -> Endpoint {
+        Endpoint::Node {
+            node: id(node),
+            side,
+        }
+    }
+
+    fn joined(from: &str, to: Endpoint) -> Intent {
+        Intent::AddEdge {
+            from: floating(from),
+            to,
+        }
+    }
+
+    fn rebound(edge: &str, end: EdgeEnd, to: Endpoint) -> Intent {
+        Intent::Rebind {
+            id: id(edge),
+            end,
+            to,
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_connect_handle_connects_that_way() {
+        let mut rig = Rig::new();
+        rig.click(B);
+        rig.hover(A);
+        // The handle's node is the one connected from, whatever was
+        // selected.
+        assert_eq!(
+            rig.click(A_RIGHT),
+            [Act::Edit(extend("a", Dir::Right, None))]
+        );
+        assert_eq!((rig.selected(), rig.cursor()), (vec!["a"], Some("a")));
+        assert_eq!(rig.connect_handles(), None);
+        // Each side its own way.
+        for (point, dir) in [
+            ((60.0, -16.0), Dir::Up),
+            ((60.0, 76.0), Dir::Down),
+            ((-16.0, 30.0), Dir::Left),
+        ] {
+            rig.hover(A);
+            assert_eq!(rig.click(point), [Act::Edit(extend("a", dir, None))]);
+        }
+        // With a shape armed, the handle is taken before the tool makes
+        // its shape there, and the new node is that shape (§5.6 rule 7).
+        rig.run(Command::Tool(DIAMOND));
+        rig.hover(A);
+        assert_eq!(
+            rig.click(A_RIGHT),
+            [Act::Edit(extend("a", Dir::Right, Some(Shape::Diamond)))]
+        );
+        assert_eq!(rig.machine.tool(), Tool::Select);
+        // Two clicks in a row are two commands, never a double-click.
+        rig.hover(A);
+        rig.click(A_RIGHT);
+        rig.hover(A);
+        rig.wait(100);
+        rig.press(A_RIGHT);
+        assert_eq!(rig.release(), [Act::Edit(extend("a", Dir::Right, None))]);
+    }
+
+    #[test]
+    fn a_handle_nobody_saw_is_not_pressed() {
+        let mut rig = Rig::new();
+        // No rest: the point outside `a` is `e`, which runs through it.
+        rig.click(A_RIGHT);
+        assert_eq!(rig.selected(), ["e"]);
+        // Rested on, but not for long enough.
+        let mut rig = Rig::new();
+        rig.to(A);
+        rig.wait(50);
+        rig.press(A_RIGHT);
+        rig.by(40.0, 40.0);
+        assert_eq!(rig.state(), State::Moving);
+    }
+
+    #[test]
+    fn a_drag_from_a_connect_handle_draws_a_connector_to_a_node() {
+        let mut rig = Rig::new();
+        rig.hover(A);
+        assert!(rig.press(A_RIGHT).is_empty());
+        // The handles stay until the drag begins.
+        assert_eq!(rig.connect_handles(), Some("a"));
+        let to_kid = joined("a", floating("kid"));
+        assert_eq!(rig.to(KID), [Act::Preview(Some(to_kid.clone()))]);
+        assert_eq!(rig.state(), State::Connecting);
+        assert_eq!(rig.connect_handles(), None);
+        assert_eq!(rig.target(), Some(("kid", None)));
+        // Nothing more is asked for while the plan stays the same.
+        assert!(rig.to((470.0, 245.0)).is_empty());
+        // The end floats, and so does the one it was drawn from, whichever
+        // handle that was (§5.12 rule 5).
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(to_kid)]);
+        assert!(rig.selected().is_empty());
+        rig.play(&acts);
+        assert_eq!(rig.state(), State::Idle);
+        // The new connector is selected, and is the cursor.
+        let made: Vec<&Id> = rig.board.edges.keys().collect();
+        assert_eq!(made.len(), 3);
+        assert_eq!(rig.selected().len(), 1);
+        assert!(!["e", "free"].contains(&rig.selected()[0]));
+        assert_eq!(rig.cursor(), Some(rig.selected()[0]));
+
+        // A second connector between the same pair may be drawn (§5.12
+        // rule 10).
+        rig.hover(A);
+        rig.press(A_RIGHT);
+        assert_eq!(rig.to(B), [Act::Preview(Some(joined("a", floating("b"))))]);
+        let acts = rig.release();
+        rig.play(&acts);
+        assert_eq!(rig.board.edges.len(), 4);
+    }
+
+    #[test]
+    fn a_connector_released_on_empty_canvas_ends_in_a_new_node() {
+        let mut rig = Rig::new();
+        rig.hover(A);
+        rig.press(A_RIGHT);
+        // A default rectangle centred on the pointer, on the grid.
+        let made = Intent::AddNode {
+            kind: NodeKind::Shape,
+            shape: Shape::Rect,
+            at: [240, 120],
+            size: NODE_SIZE,
+            from: Some(floating("a")),
+        };
+        assert_eq!(rig.to(CANVAS), [Act::Preview(Some(made.clone()))]);
+        assert_eq!(rig.target(), None);
+        // The preview follows by whole cells.
+        assert!(rig.to((304.0, 153.0)).is_empty());
+        assert_eq!(rig.to((310.0, 150.0)).len(), 1);
+        rig.to(CANVAS);
+        // A connector's line is canvas to a dragged end.
+        assert!(matches!(
+            rig.to(FREE).as_slice(),
+            [Act::Preview(Some(Intent::AddNode { .. }))]
+        ));
+        rig.to(CANVAS);
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(made)]);
+        let answers = rig.play(&acts);
+        assert_eq!(answers, [Act::OpenLabel(id("new1"))]);
+        assert_eq!(rig.state(), State::Editing);
+        assert_eq!(rig.selected(), ["new1"]);
+
+        // With a shape armed, the new node is that shape, and the tool is
+        // spent.
+        let mut rig = Rig::new();
+        rig.run(Command::Tool(DIAMOND));
+        rig.hover(A);
+        rig.press(A_RIGHT);
+        rig.to(CANVAS);
+        assert!(matches!(
+            rig.release().as_slice(),
+            [Act::Edit(Intent::AddNode {
+                shape: Shape::Diamond,
+                from: Some(_),
+                ..
+            })]
+        ));
+        assert_eq!(rig.machine.tool(), Tool::Select);
+    }
+
+    #[test]
+    fn a_connector_released_on_its_source_is_cancelled() {
+        let mut rig = Rig::new();
+        rig.hover(A);
+        rig.press(A_RIGHT);
+        rig.to(B);
+        // Back over the node it came from, there is nothing to show.
+        assert_eq!(rig.to(A), [Act::Preview(None)]);
+        assert_eq!(rig.target(), None);
+        assert!(rig.release().is_empty());
+        assert_eq!(rig.state(), State::Idle);
+        assert!(rig.selected().is_empty());
+        assert_eq!(rig.board.edges.len(), 2);
+
+        // Escape and a lost pointer cancel it too, putting the board back
+        // on show; the release that follows finds nothing.
+        for end in [ESCAPE, Input::Cancel] {
+            let mut rig = Rig::new();
+            rig.hover(A);
+            rig.press(A_RIGHT);
+            rig.to(B);
+            assert_eq!(rig.step(end), [Act::Preview(None)]);
+            assert_eq!(rig.state(), State::Idle);
+            assert!(rig.release().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_connector_tool_draws_from_a_node_and_only_from_one() {
+        let mut rig = Rig::new();
+        rig.run(Command::Tool(Tool::Connector));
+        // A press on empty canvas or on a connector does nothing.
+        rig.press(CANVAS);
+        assert_eq!(rig.state(), State::Armed);
+        rig.press(E);
+        assert_eq!(rig.state(), State::Armed);
+        // A click on a node does nothing and keeps the tool.
+        assert!(rig.click(A).is_empty());
+        assert_eq!(rig.state(), State::Armed);
+        assert!(rig.selected().is_empty());
+
+        rig.press(A);
+        assert_eq!(rig.to(B), [Act::Preview(Some(joined("a", floating("b"))))]);
+        // Released on its source it is cancelled and the tool stays for
+        // another try.
+        rig.to(A);
+        assert!(rig.release().is_empty());
+        assert_eq!(rig.state(), State::Armed);
+
+        rig.press(A);
+        rig.to(B);
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(joined("a", floating("b")))]);
+        assert_eq!(rig.machine.tool(), Tool::Select);
+        rig.play(&acts);
+        assert_eq!(rig.state(), State::Idle);
+
+        // Released on empty canvas it makes a rectangle.
+        rig.run(Command::Tool(Tool::Connector));
+        rig.press(B);
+        rig.to(CANVAS);
+        assert!(matches!(
+            rig.release().as_slice(),
+            [Act::Edit(Intent::AddNode {
+                shape: Shape::Rect,
+                kind: NodeKind::Shape,
+                from: Some(_),
+                ..
+            })]
+        ));
+
+        // A selected node's resize handle is on its box, so the tool
+        // draws from there as well.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::Tool(Tool::Connector));
+        rig.press(A_CORNER);
+        rig.to(B);
+        assert_eq!(rig.state(), State::Connecting);
+
+        // A board that cannot be edited arms no connector tool.
+        let mut rig = Rig::new();
+        rig.writable = false;
+        rig.run(Command::Tool(Tool::Connector));
+        rig.press(A);
+        rig.to(B);
+        assert_ne!(rig.state(), State::Connecting);
+    }
+
+    #[test]
+    fn an_end_released_near_a_side_handle_is_pinned_to_that_side() {
+        let mut rig = Rig::new();
+        rig.hover(A);
+        rig.press(A_RIGHT);
+        // The middle of the node: floating.
+        rig.to(KID);
+        assert_eq!(rig.target(), Some(("kid", None)));
+        // `kid` is 80 by 40 at 420,220. On the middle of its top side.
+        assert_eq!(
+            rig.to((460.0, 220.0)),
+            [Act::Preview(Some(joined(
+                "a",
+                pinned("kid", Some(Side::Top))
+            )))]
+        );
+        assert_eq!(rig.target(), Some(("kid", Some(Side::Top))));
+        // Within ten pixels of it, inside the node.
+        rig.to((466.0, 228.0));
+        assert_eq!(rig.target(), Some(("kid", Some(Side::Top))));
+        // Just outside it too, though the point is on the node it is
+        // drawn in, which is the target only past the handle's reach.
+        rig.to((460.0, 213.0));
+        assert_eq!(rig.target(), Some(("kid", Some(Side::Top))));
+        rig.to((460.0, 209.0));
+        assert_eq!(rig.target(), Some(("box", None)));
+        // Outside a node on the canvas the handle still reaches, and no
+        // further than its ten pixels.
+        rig.to((260.0, -7.0));
+        assert_eq!(rig.target(), Some(("b", Some(Side::Top))));
+        rig.to((260.0, -11.0));
+        assert_eq!(rig.target(), None);
+        // Further than that from every handle, on the node: floating.
+        rig.to((440.0, 240.0));
+        assert_eq!(rig.target(), Some(("kid", None)));
+        // Each side has its handle.
+        for (point, side) in [
+            ((500.0, 240.0), Side::Right),
+            ((460.0, 260.0), Side::Bottom),
+            ((420.0, 240.0), Side::Left),
+        ] {
+            rig.to(point);
+            assert_eq!(rig.target(), Some(("kid", Some(side))), "{side:?}");
+        }
+        assert_eq!(
+            rig.release(),
+            [Act::Edit(joined("a", pinned("kid", Some(Side::Left))))]
+        );
+
+        // Within reach of a side handle of the node it came from, a new
+        // connector is as over that node: nothing.
+        let mut rig = Rig::new();
+        rig.hover(A);
+        rig.press(A_RIGHT);
+        rig.to(B);
+        assert_eq!(rig.to((127.0, 33.0)), [Act::Preview(None)]);
+        assert_eq!(rig.target(), None);
+        assert!(rig.release().is_empty());
+    }
+
+    #[test]
+    fn the_middle_of_a_node_floats_however_small_it_is_drawn() {
+        let mut rig = Rig::new();
+        rig.viewport = Viewport {
+            x: -100.0,
+            y: -100.0,
+            zoom: 0.25,
+        };
+        // `b` is 30 by 15 pixels here: every point of it is within ten
+        // pixels of a side's middle.
+        rig.hover(A);
+        rig.press(rig.viewport.to_board((25.0 + 30.0 + 16.0, 25.0 + 7.5)));
+        rig.to(B);
+        assert_eq!(rig.target(), Some(("b", None)));
+        rig.to((260.0, 4.0));
+        assert_eq!(rig.target(), Some(("b", Some(Side::Top))));
+    }
+
+    #[test]
+    fn dragging_an_end_of_a_connector_attaches_it_elsewhere() {
+        let mut rig = Rig::new();
+        rig.click(E);
+        rig.wait(400);
+        // The handle at the `to` end of `e` is taken before `b`, whose
+        // side it lies on.
+        assert!(rig.press(B_LEFT).is_empty());
+        let to_kid = rebound("e", EdgeEnd::To, floating("kid"));
+        assert_eq!(rig.to(KID), [Act::Preview(Some(to_kid.clone()))]);
+        assert_eq!(rig.state(), State::Connecting);
+        assert_eq!(rig.target(), Some(("kid", None)));
+        assert_eq!(rig.machine.connecting().unwrap().loose, None);
+        // Pinned by a side handle, as a new connector's end is.
+        let on_top = rebound("e", EdgeEnd::To, pinned("kid", Some(Side::Top)));
+        assert_eq!(rig.to((460.0, 221.0)), [Act::Preview(Some(on_top.clone()))]);
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(on_top)]);
+        rig.play(&acts);
+        assert_eq!(rig.state(), State::Idle);
+        // The connector stays selected.
+        assert_eq!(rig.selected(), ["e"]);
+        assert!(matches!(
+            &rig.board.edges[&id("e")].to,
+            End::Node { node, side: Some(_), .. } if node == "kid"
+        ));
+    }
+
+    #[test]
+    fn an_attached_end_released_on_empty_canvas_goes_back() {
+        let mut rig = Rig::new();
+        rig.click(E);
+        rig.wait(400);
+        rig.press(B_LEFT);
+        // Nothing to show: the connector stays as it is, and the view is
+        // told which end is loose.
+        assert!(rig.to(CANVAS).is_empty());
+        assert_eq!(rig.state(), State::Connecting);
+        let connecting = rig.machine.connecting().unwrap();
+        assert_eq!(connecting.loose, Some((&id("e"), EdgeEnd::To)));
+        assert_eq!((connecting.target, connecting.at), (None, CANVAS));
+        // Nor may it join the node its other end is on.
+        rig.to(KID);
+        assert_eq!(rig.to(A), [Act::Preview(None)]);
+        assert_eq!(rig.target(), None);
+        assert!(rig.machine.connecting().unwrap().loose.is_some());
+        rig.to(CANVAS);
+        assert!(rig.release().is_empty());
+        assert_eq!(rig.state(), State::Idle);
+        assert_eq!(rig.selected(), ["e"]);
+
+        // Onto the node it is on already, floating as it was: an edit
+        // that plans nothing.
+        rig.wait(400);
+        rig.press(B_LEFT);
+        rig.to(B);
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(rebound("e", EdgeEnd::To, floating("b")))]);
+        let before = rig.board.clone();
+        rig.play(&acts);
+        assert_eq!(rig.board, before);
+    }
+
+    #[test]
+    fn a_free_end_moves_to_the_grid_or_onto_a_node() {
+        let mut rig = Rig::new();
+        rig.click(FREE);
+        rig.wait(400);
+        // The `to` end of `free`, at 200,400.
+        rig.press((200.0, 400.0));
+        let moved = rebound("free", EdgeEnd::To, Endpoint::Free { at: [340, 440] });
+        assert_eq!(rig.to((333.0, 444.0)), [Act::Preview(Some(moved.clone()))]);
+        assert_eq!(rig.machine.connecting().unwrap().loose, None);
+        // Within the cell nothing more is shown.
+        assert!(rig.to((338.0, 436.0)).is_empty());
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(moved)]);
+        rig.play(&acts);
+        assert!(matches!(
+            rig.board.edges[&id("free")].to,
+            End::Free { at: [340, 440], .. }
+        ));
+
+        // The other end, onto a node.
+        rig.wait(400);
+        rig.press((0.0, 400.0));
+        let on_off = rebound("free", EdgeEnd::From, floating("off"));
+        assert_eq!(rig.to(OFF), [Act::Preview(Some(on_off.clone()))]);
+        assert_eq!(rig.release(), [Act::Edit(on_off)]);
+    }
+
+    #[test]
+    fn an_end_handle_clicked_is_its_connector_clicked() {
+        let mut rig = Rig::new();
+        rig.click(E);
+        assert!(rig.click(B_LEFT).is_empty());
+        assert_eq!(rig.selected(), ["e"]);
+        // And a double-click there edits the connector's label.
+        assert_eq!(rig.double_click(B_LEFT), [Act::OpenLabel(id("e"))]);
+        assert_eq!(rig.editing(), Some("e"));
     }
 
     #[test]

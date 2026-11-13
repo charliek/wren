@@ -1593,7 +1593,7 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use wren_board::scene::{Draw, Measure as _};
-    use wren_board::{Reason, Rgba};
+    use wren_board::{Reason, Rgba, Side};
 
     use super::*;
 
@@ -4059,5 +4059,363 @@ z = "c"
                 LabelAction::Insert("r".to_owned())
             )])
         );
+    }
+
+    /// Rest the pointer on the node `name` until it shows its connect
+    /// handles, and say when that was.
+    fn hover(view: &mut BoardView, name: &str, now: Instant) -> Instant {
+        let at = middle(view, name);
+        input(view, Input::Focus(true), now);
+        input(view, Input::Move { at }, now);
+        let rested = now + machine::HOVER_DELAY;
+        input(view, Input::Tick, rested);
+        rested
+    }
+
+    /// The centre of the connect handle outside `side` of the node `name`.
+    fn connect_handle(view: &BoardView, name: &str, side: Side) -> (f32, f32) {
+        let bounds = hit::Frames::new(view.board())
+            .get(&id(name))
+            .expect("a node");
+        let handles = handles::connect(bounds, view.viewport());
+        let found = handles.into_iter().find(|(of, _)| *of == side);
+        found.expect("four handles").1
+    }
+
+    /// The lines `new` has that `old` has not, and those `old` has that
+    /// `new` has not, each counted as often as it occurs.
+    fn line_diff(old: &str, new: &str) -> (Vec<String>, Vec<String>) {
+        let extra = |of: &str, than: &str| {
+            let mut left: Vec<&str> = than.lines().collect();
+            let mut extra = Vec::new();
+            for line in of.lines() {
+                match left.iter().position(|other| *other == line) {
+                    Some(index) => {
+                        left.swap_remove(index);
+                    }
+                    None => extra.push(line.to_owned()),
+                }
+            }
+            extra
+        };
+        (extra(new, old), extra(old, new))
+    }
+
+    #[test]
+    fn a_connector_drawn_by_pointer_is_one_block_and_one_undo_step() {
+        let mut view = sized(TWO);
+        let now = hover(&mut view, "a", Instant::now());
+        assert_eq!(wren_board::write(view.board()), TWO);
+        let before = view.board().clone();
+        let from = connect_handle(&view, "a", Side::Bottom);
+        assert_eq!(input(&mut view, press(from), now), Update::default());
+        // Over `b` the preview is the board as a release would leave it;
+        // the model waits for the release.
+        let over = Input::Move {
+            at: middle(&view, "b"),
+        };
+        assert_eq!(input(&mut view, over, now), Update::default());
+        assert_eq!(view.machine().state(), machine::State::Connecting);
+        assert_eq!(*view.board(), before);
+        assert_eq!(view.picture().board.edges.len(), 2);
+        assert_ne!(view.shown(), view.scene());
+
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        // A second connector between the pair (§5.12 rule 10), selected.
+        assert_eq!(view.board().edges.len(), 2);
+        let made = selected(&view)[0].to_owned();
+        assert_ne!(made, "e");
+        let edge = view.board().edges[&id(&made)].clone();
+        let floats = |end: &wren_board::End, name: &str| matches!(end, wren_board::End::Node { node, side: None, anchor: None, .. } if node == name);
+        assert!(floats(&edge.from, "a") && floats(&edge.to, "b"));
+        // One new block in the file, and nothing else. Its id is drawn at
+        // random, so where the block sorts is not known: the lines are
+        // compared in order of their text.
+        let (mut added, removed) = line_diff(TWO, &view.draft());
+        let z = edge.z.expect("a stacking key");
+        let mut block = [
+            String::new(),
+            format!("[edge.{made}]"),
+            "kind = \"edge\"".to_owned(),
+            "from = { node = \"a\" }".to_owned(),
+            "to = { node = \"b\" }".to_owned(),
+            format!("z = \"{z}\""),
+        ];
+        added.sort();
+        block.sort();
+        assert_eq!(added, block);
+        assert!(removed.is_empty(), "{removed:?}");
+
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!(view.draft(), TWO);
+        assert!(selected(&view).is_empty());
+    }
+
+    #[test]
+    fn a_connector_released_on_empty_canvas_makes_a_node_and_opens_its_label() {
+        let mut view = sized(TWO);
+        let now = hover(&mut view, "b", Instant::now());
+        let from = connect_handle(&view, "b", Side::Bottom);
+        input(&mut view, press(from), now);
+        input(&mut view, Input::Move { at: (363.0, 247.0) }, now);
+        // The preview is the node and its connector; the board has neither.
+        let preview = view.picture();
+        assert_eq!(
+            (preview.board.nodes.len(), preview.board.edges.len()),
+            (3, 2)
+        );
+        assert_eq!((view.board().nodes.len(), view.board().edges.len()), (2, 1));
+
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        assert_eq!(view.machine().state(), machine::State::Editing);
+        let made = selected(&view)[0].to_owned();
+        let node = &view.board().nodes[&id(&made)];
+        // A default rectangle centred on the pointer, on the grid.
+        assert_eq!((node.at, node.size), ([300, 220], machine::NODE_SIZE));
+        assert_eq!(node.shape, Named::Known(Shape::Rect));
+        assert_eq!(label(&view).id().as_str(), made);
+        let joins = view.board().edges.values().any(|edge| {
+            matches!(&edge.from, wren_board::End::Node { node, side: None, .. } if node == "b")
+                && matches!(&edge.to, wren_board::End::Node { node, side: None, .. } if *node == made)
+        });
+        assert!(joins);
+
+        // The node, its connector and its label are one undo step.
+        typed(&mut view, "Next", now);
+        key(&mut view, Key::Escape, now);
+        assert!(view.label().is_none());
+        assert_eq!(view.board().nodes[&id(&made)].text, "Next");
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine() && !view.can_undo());
+    }
+
+    #[test]
+    fn a_connector_given_up_changes_nothing() {
+        let now = Instant::now();
+        let escape = Input::Key {
+            key: Key::Escape,
+            repeat: false,
+        };
+        let ends: [fn(&mut BoardView, Input, Instant) -> Update; 3] = [
+            // Released on the node it came from.
+            |view, _, now| {
+                let at = middle(view, "a");
+                input(view, Input::Move { at }, now);
+                input(view, RELEASE, now)
+            },
+            |view, escape, now| input(view, escape, now),
+            |view, _, now| view.settle(now),
+        ];
+        for (index, end) in ends.into_iter().enumerate() {
+            let mut view = sized(TWO);
+            let now = hover(&mut view, "a", now);
+            let from = connect_handle(&view, "a", Side::Top);
+            input(&mut view, press(from), now);
+            input(&mut view, Input::Move { at: (500.0, 300.0) }, now);
+            assert_ne!(view.shown(), view.scene(), "{index}");
+            assert_eq!(end(&mut view, escape, now), Update::default(), "{index}");
+            assert_eq!(view.shown(), view.scene(), "{index}");
+            assert_eq!(input(&mut view, RELEASE, now), Update::default(), "{index}");
+            assert_eq!(view.machine().state(), machine::State::Idle, "{index}");
+            assert!(view.pristine() && !view.can_undo(), "{index}");
+            assert_eq!(view.draft(), TWO, "{index}");
+        }
+    }
+
+    #[test]
+    fn a_reload_under_a_dragged_connector_drops_it() {
+        // §3.4 rule 5: the board changed on disk while a connector was
+        // being drawn, and while an end was being moved.
+        let other = TWO.replace("at = [300, 0]", "at = [300, 100]");
+        let drags: [fn(&mut BoardView, Instant); 2] = [
+            |view, now| {
+                let now = hover(view, "a", now);
+                let from = connect_handle(view, "a", Side::Bottom);
+                input(view, press(from), now);
+                let over = Input::Move {
+                    at: middle(view, "b"),
+                };
+                input(view, over, now);
+            },
+            |view, now| {
+                click(view, (210.0, 30.0), now);
+                input(view, press((300.0, 30.0)), now);
+                input(view, Input::Move { at: (362.0, 3.0) }, now);
+            },
+        ];
+        for (index, drag) in drags.into_iter().enumerate() {
+            let mut view = sized(TWO);
+            let now = Instant::now();
+            drag(&mut view, now);
+            assert_eq!(view.machine().state(), machine::State::Connecting);
+            assert_ne!(view.shown(), view.scene(), "{index}");
+            let stale = view.epoch();
+            view.reload(&other).expect("a board");
+            assert_eq!(view.machine().state(), machine::State::Idle, "{index}");
+            assert_eq!(view.shown(), view.scene(), "{index}");
+            // The release meant for the board before is dropped, and one
+            // for this board finds no gesture.
+            let late = view.update(Message::Input(stale, RELEASE), now);
+            assert_eq!(late, Update::default(), "{index}");
+            assert_eq!(input(&mut view, RELEASE, now), Update::default(), "{index}");
+            assert!(view.pristine() && !view.can_undo(), "{index}");
+            assert_eq!(view.draft(), other, "{index}");
+        }
+    }
+
+    #[test]
+    fn an_end_dragged_to_a_side_handle_is_pinned_and_dragged_off_it_floats() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click(&mut view, (210.0, 30.0), now);
+        assert_eq!(selected(&view), ["e"]);
+        // The `to` end of `e` is the middle of `b`'s left side; the middle
+        // of its top side is a side handle.
+        input(&mut view, press((300.0, 30.0)), now);
+        input(&mut view, Input::Move { at: (362.0, 3.0) }, now);
+        assert_eq!(view.machine().state(), machine::State::Connecting);
+        assert_ne!(view.shown(), view.scene());
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        assert_eq!(selected(&view), ["e"]);
+        let (added, removed) = line_diff(TWO, &view.draft());
+        assert_eq!(added, ["to = { node = \"b\", side = \"top\" }"]);
+        assert_eq!(removed, ["to = { node = \"b\" }"]);
+        // The end is drawn there now, and so is its handle.
+        let [_, to] = handles::ends(view.board(), view.scene(), &id("e")).expect("a route");
+        assert_eq!((to.x, to.y), (360.0, 0.0));
+
+        // Onto the node away from every handle it floats again, which is
+        // the board as it was opened.
+        input(&mut view, press((360.0, 0.0)), now);
+        input(&mut view, Input::Move { at: (360.0, 30.0) }, now);
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), TWO);
+        // Each drag was its own step.
+        travel(&mut view, Command::Undo, now);
+        travel(&mut view, Command::Undo, now);
+        assert!(!view.can_undo());
+    }
+
+    #[test]
+    fn an_attached_end_released_on_empty_canvas_stays_where_it_was() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click(&mut view, (210.0, 30.0), now);
+        input(&mut view, press((300.0, 30.0)), now);
+        assert_eq!(
+            input(&mut view, Input::Move { at: (500.0, 300.0) }, now),
+            Update::default()
+        );
+        // Nothing is shown but the board: the UI makes no free end.
+        assert_eq!(view.machine().state(), machine::State::Connecting);
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(input(&mut view, RELEASE, now), Update::default());
+        assert!(view.pristine() && !view.can_undo());
+        // Nor onto the node its other end is on.
+        input(&mut view, press((300.0, 30.0)), now);
+        input(&mut view, Input::Move { at: (60.0, 30.0) }, now);
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(input(&mut view, RELEASE, now), Update::default());
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!(selected(&view), ["e"]);
+    }
+
+    #[test]
+    fn a_free_end_from_a_file_moves_on_the_grid_and_attaches() {
+        let text = format!(
+            "{TWO}\n[edge.loose]\nkind = \"edge\"\nfrom = {{ at = [0, 200] }}\nto = {{ at = [200, 200] }}\nz = \"d\"\n"
+        );
+        let mut view = sized(&text);
+        let now = Instant::now();
+        click(&mut view, (100.0, 200.0), now);
+        assert_eq!(selected(&view), ["loose"]);
+        input(&mut view, press((200.0, 200.0)), now);
+        input(&mut view, Input::Move { at: (247.0, 329.0) }, now);
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        let (added, removed) = line_diff(&text, &view.draft());
+        assert_eq!(added, ["to = { at = [240, 320] }"]);
+        assert_eq!(removed, ["to = { at = [200, 200] }"]);
+        // Its other end, onto `a`.
+        input(&mut view, press((0.0, 200.0)), now);
+        let over = Input::Move {
+            at: middle(&view, "a"),
+        };
+        input(&mut view, over, now);
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        let (added, removed) = line_diff(&text, &view.draft());
+        assert_eq!(
+            added,
+            ["from = { node = \"a\" }", "to = { at = [240, 320] }"]
+        );
+        assert_eq!(removed.len(), 2);
+    }
+
+    #[test]
+    fn connectors_follow_a_dragged_node_and_a_pinned_end_keeps_its_side() {
+        // §5.12 rule 7: `e` floats at both ends; `p` leaves `a` by its
+        // right side whatever happens.
+        let text = format!(
+            "{TWO}\n[edge.p]\nkind = \"edge\"\nfrom = {{ node = \"a\", side = \"right\" }}\nto = {{ node = \"b\" }}\nz = \"d\"\n"
+        );
+        let mut view = sized(&text);
+        let now = Instant::now();
+        let leaves = |view: &BoardView, name: &str| {
+            let picture = view.picture();
+            let [from, _] =
+                handles::ends(picture.board, picture.scene, &id(name)).expect("a route");
+            (from.x, from.y)
+        };
+        assert_eq!(leaves(&view, "e"), (120.0, 30.0));
+        assert_eq!(leaves(&view, "p"), (120.0, 30.0));
+        // `b` dragged to below `a`.
+        let (x, y) = middle(&view, "b");
+        input(&mut view, press((x, y)), now);
+        let below = Input::Move {
+            at: (x - 300.0, y + 200.0),
+        };
+        input(&mut view, below, now);
+        // During the drag, before anything is applied: the floating end
+        // has changed side and the pinned one has not.
+        assert_eq!(view.board().nodes[&id("b")].at, [300, 0]);
+        assert_eq!(leaves(&view, "e"), (60.0, 60.0));
+        assert_eq!(leaves(&view, "p"), (120.0, 30.0));
+        assert_eq!(input(&mut view, RELEASE, now), CHANGED);
+        assert_eq!(leaves(&view, "e"), (60.0, 60.0));
+        assert_eq!(leaves(&view, "p"), (120.0, 30.0));
+        // Moving a node changes no connector's line in the file.
+        let (added, removed) = line_diff(&text, &view.draft());
+        assert_eq!(added, ["at = [0, 200]"]);
+        assert_eq!(removed, ["at = [300, 0]"]);
+    }
+
+    #[test]
+    fn a_connector_s_label_is_edited_at_the_middle_of_its_route() {
+        // §5.12 rule 8: a double-click opens the first label, which is new
+        // here, and typing writes it in the middle of the route.
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click(&mut view, (210.0, 30.0), now);
+        let later = now + Duration::from_millis(100);
+        click(&mut view, (210.0, 30.0), later);
+        assert_eq!(view.machine().state(), machine::State::Editing);
+        assert_eq!(label(&view).id(), &id("e"));
+        typed(&mut view, "Yes", later);
+        key(&mut view, Key::Escape, later);
+        let (added, removed) = line_diff(TWO, &view.draft());
+        assert_eq!(added, ["labels = [", "  { text = \"Yes\" },", "]"]);
+        assert!(removed.is_empty());
+        // Drawn half way along: `e` runs from 120,30 to 300,30.
+        let centre = edge_label_point(view.scene(), &id("e")).expect("a label drawn");
+        assert_eq!((centre.x, centre.y), (210.0, 30.0));
+        // Emptied again, the label is gone and the board is as it opened.
+        click(&mut view, (210.0, 30.0), later + Duration::from_secs(1));
+        view.command(Command::EditLabel, later);
+        edit(&mut view, LabelAction::Backspace, later);
+        key(&mut view, Key::Escape, later);
+        assert!(view.pristine());
     }
 }
