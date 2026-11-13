@@ -88,8 +88,9 @@ pub enum Intent {
     Rebind { id: Id, end: EdgeEnd, to: Endpoint },
     /// Set one style field of each connector (§5.12 rule 9).
     SetEdge { ids: Vec<Id>, field: EdgeField },
-    /// Swap each connector's ends, with their heads, mirroring its labels'
-    /// places so they stay where they are drawn (§5.12 rule 9).
+    /// Swap each connector's ends, mirroring its labels' places so they
+    /// stay where they are drawn (§5.12 rule 9). The heads stay by
+    /// position, so the arrow turns round with the direction.
     Reverse { ids: Vec<Id> },
     /// A connector's first label (§5.12 rule 8), sent on each change of
     /// its text with `commit` false (§5.9 rule 6) and, when it ends empty,

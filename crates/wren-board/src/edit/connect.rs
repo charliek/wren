@@ -139,9 +139,11 @@ fn replace<T: PartialEq>(slot: &mut T, value: T) -> bool {
 /// The whole route's length in a label's per-mille `at`.
 const WHOLE: i32 = 1000;
 
-/// Swaps each connector's ends with their heads (§5.12 rule 9). A label's
-/// place is measured from the `from` end, so it is mirrored and stays
-/// where it was drawn.
+/// Swaps each connector's ends (§5.12 rule 9). The heads stay by
+/// position: swapped with the ends they would draw the same arrow, and the
+/// command would change only what the flow vote and walking read. A
+/// label's place is measured from the `from` end, so it is mirrored and
+/// stays where it was drawn.
 pub(super) fn reverse(board: &Board, ids: &[Id]) -> Plan {
     let chosen: BTreeSet<&Id> = ids.iter().collect();
     let mut changes = Vec::new();
@@ -151,7 +153,6 @@ pub(super) fn reverse(board: &Board, ids: &[Id]) -> Plan {
         };
         let mirrored = |at: i32| WHOLE.saturating_sub(at);
         let unchanged = edge.from == edge.to
-            && edge.heads[0] == edge.heads[1]
             && edge
                 .labels
                 .iter()
@@ -159,11 +160,9 @@ pub(super) fn reverse(board: &Board, ids: &[Id]) -> Plan {
         if unchanged {
             continue;
         }
-        let [start, end] = edge.heads.clone();
         let edge = Edge {
             from: edge.to.clone(),
             to: edge.from.clone(),
-            heads: [end, start],
             labels: edge
                 .labels
                 .iter()
@@ -555,7 +554,8 @@ z = "Z"
     }
 
     #[test]
-    fn reversing_swaps_the_ends_heads_and_label_places() {
+    fn reversing_swaps_the_ends_and_label_places_and_turns_the_arrow() {
+        // The default heads stay by position, so the arrow now ends at a.
         assert_lines(
             Intent::Reverse { ids: ids(&["e"]) },
             &[],
@@ -564,7 +564,6 @@ z = "Z"
                 "-to = { node = \"b\", port = 2 }",
                 "+from = { node = \"b\", port = 2 }",
                 "+to = { node = \"a\" }",
-                "+heads = [\"arrow\", \"none\"]",
                 "-  { at = 250, text = \"Yes\" },",
                 "+  { at = 750, text = \"Yes\" },",
             ],
@@ -582,10 +581,11 @@ z = "Z"
             board.apply(&reverse.changes);
         }
         assert_eq!(write(&board), EDGES);
-        // A loop with matching heads and a middle label is unchanged.
-        let text = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [20, 20]\nz = \"V\"\n\n\
+        // A loop with a middle label is unchanged, whatever its heads.
+        let text =
+            "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [20, 20]\nz = \"V\"\n\n\
                     [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"a\" }\n\
-                    heads = [\"arrow\", \"arrow\"]\nlabels = [\n  { text = \"x\" },\n]\nz = \"X\"\n";
+                    heads = [\"arrow\", \"none\"]\nlabels = [\n  { text = \"x\" },\n]\nz = \"X\"\n";
         assert_empty(text, Intent::Reverse { ids: ids(&["e"]) });
     }
 
