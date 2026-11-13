@@ -152,6 +152,11 @@ pub(super) fn board_route(keymap: &Keymap, trigger: &Accel, repeat: bool) -> Boa
     }
 }
 
+/// Escape with any modifiers, which a focused board never routes.
+fn is_escape(trigger: &Accel) -> bool {
+    trigger.key == "escape"
+}
+
 /// The theme for a picker row: `None` follows the system.
 fn theme_for(id: Option<&str>, mode: SystemMode) -> Theme {
     let appearance = appearance(mode);
@@ -215,11 +220,14 @@ impl Preferences {
             layer_of,
         );
         // A board binding on a trigger the base layer gives an App command
-        // could never run, since the app's shortcut wins; drop it, and say
-        // so when the user wrote it.
+        // could never run, since the app's shortcut wins, and neither could
+        // one on Escape, which `board_policy` keeps for the ladder; drop
+        // it, and say so when the user wrote it.
         let shadowed: Vec<Accel> = keymap
             .board_bindings()
-            .filter(|(accel, _)| board_route(&keymap, accel, false) == BoardRoute::Host)
+            .filter(|(accel, _)| {
+                is_escape(accel) || board_route(&keymap, accel, false) == BoardRoute::Host
+            })
             .map(|(accel, _)| accel.clone())
             .collect();
         for (trigger, action) in &self.settings.keybinds {
@@ -228,10 +236,14 @@ impl Preferences {
                 .filter(|accel| shadowed.contains(accel))
                 .filter(|accel| keymap.board_action(accel) == Some(action))
             {
-                warnings.push(format!(
-                    "keybind: {trigger:?} is {} everywhere, so it cannot be {action} on a board",
-                    keymap.action(&accel).unwrap_or_default()
-                ));
+                warnings.push(if is_escape(&accel) {
+                    format!("keybind: {trigger:?} is the board's Escape ladder, so it cannot be {action}")
+                } else {
+                    format!(
+                        "keybind: {trigger:?} is {} everywhere, so it cannot be {action} on a board",
+                        keymap.action(&accel).unwrap_or_default()
+                    )
+                });
             }
         }
         keymap.retain_board(|accel, _| !shadowed.contains(accel));
@@ -970,18 +982,27 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "keybind = {p}+n = board.delete\nkeybind = {m}+b = board.duplicate\nkeybind = {m}+d = note.rename\nkeybind = x = board.delete\n"
+                "keybind = {p}+n = board.delete\nkeybind = {m}+b = board.duplicate\nkeybind = {m}+d = note.rename\nkeybind = x = board.delete\nkeybind = escape = board.select.all\nkeybind = shift+escape = board.copy\n"
             ),
         )
         .unwrap();
         let preferences = Preferences::load(Some(path));
         let keymap = &preferences.keymap;
         let warnings = &preferences.settings.warnings;
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
         assert!(
             warnings[0].contains("note.new") && warnings[0].contains("board.delete"),
             "{warnings:?}"
         );
+        // Escape is the ladder's with any modifiers, so these never run.
+        assert!(
+            warnings[1].contains("\"escape\" is the board's Escape ladder")
+                && warnings[1].contains("board.select.all"),
+            "{warnings:?}"
+        );
+        assert!(warnings[2].contains("\"shift+escape\""), "{warnings:?}");
+        assert_eq!(keymap.board_action(&trigger("escape")), None);
+        assert_eq!(keymap.board_action(&trigger("shift+escape")), None);
         assert_eq!(keymap.board_action(&trigger(&format!("{p}+n"))), None);
         assert_eq!(keymap.action(&trigger(&format!("{p}+n"))), Some("note.new"));
         // An editor command's key is free on a board.
