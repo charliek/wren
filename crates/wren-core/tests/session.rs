@@ -3209,7 +3209,7 @@ fn a_session_with_boards_lists_titles_kinds_and_warnings() {
             .model()
             .warnings
             .iter()
-            .find(|warning| warning.path == fixture.path().join(path))
+            .find(|warning| warning.path == session.model().root.join(path))
             .map(|warning| warning.message.clone())
     };
     assert_eq!(
