@@ -96,14 +96,16 @@ impl App {
     /// A message from the widget showing the open board. Input other than
     /// the wheel means the board has the keyboard, as an edit means the
     /// editor has it; the wheel reaches a board that does not, and a cancel
-    /// only says the window or the widget lost it.
+    /// or a focus change only says the window or the widget gained or lost
+    /// it.
     pub(super) fn board_input(&mut self, message: wren_canvas::Message) {
         let overlay = self.dialog.is_some() || self.palette.is_some();
         let Some(view) = &mut self.board else {
             return;
         };
         if let wren_canvas::Message::Input(_, input) = &message {
-            if !overlay && !matches!(input, Input::Wheel { .. } | Input::Cancel) {
+            let passive = matches!(input, Input::Wheel { .. } | Input::Cancel | Input::Focus(_));
+            if !overlay && !passive {
                 self.column = Column::Editor;
             }
         }
@@ -1396,6 +1398,12 @@ z = "c"
         assert_eq!(app.column, Column::Notes);
         let _ = app.update(input(&app, Input::Cancel));
         assert_eq!(app.column, Column::Notes);
+        // The widget telling the board it lost or took the keyboard is not
+        // the user acting on it.
+        for focus in [false, true, false] {
+            let _ = app.update(input(&app, Input::Focus(focus)));
+            assert_eq!(app.column, Column::Notes);
+        }
 
         // A press is the board taking the keyboard.
         let press = Input::Press {

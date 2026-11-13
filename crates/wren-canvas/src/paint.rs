@@ -196,6 +196,22 @@ pub(crate) fn item(frame: &mut Frame, item: &Item, cull: &Cull, fonts: &Measurer
     }
 }
 
+/// Stroke the outline of a path item again with `stroke`, as `cull`
+/// frames it: a selected connector's highlight. Text draws nothing.
+pub(crate) fn trace(frame: &mut Frame, item: &Item, cull: &Cull, stroke: Stroke<'_>) {
+    let Draw::Path { segments, .. } = &item.draw else {
+        return;
+    };
+    let pieces = pieces(segments, cull.viewport);
+    let window = cull.window();
+    let path = if clip::inside(&pieces, &window) {
+        path(&pieces)
+    } else {
+        path(&clip::outline(&pieces, &window, None))
+    };
+    frame.stroke(&path, stroke);
+}
+
 /// `segments` in widget-local pixels at `viewport`, in double precision:
 /// a board coordinate millions of units out is cut against the window
 /// without losing where its line crosses into view.

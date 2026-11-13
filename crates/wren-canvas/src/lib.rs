@@ -26,29 +26,48 @@
 //! Input reaches the view as [`Message`]s, which [`BoardView::update`]
 //! runs through the pure [`Machine`]: the wheel pans, or zooms with ⌘ or
 //! Ctrl held, and a middle-button or Space drag pans. Zoom and pan are view
-//! state, never the board's. With the `test-support` feature a view counts
-//! its scene and geometry builds (`Probe`).
+//! state, never the board's. The machine also keeps the selection, the
+//! armed tool and the pointer gesture in flight, finds what a press lands
+//! on with [`hit`] and [`handles`], and answers with [`machine::Act`]s for
+//! the view to carry out: it plans and applies each edit the machine asks
+//! for, shows a gesture's preview on a scratch copy of the board, and keeps
+//! the pristine text a draft falls back to (§3.4 of the plan). The one
+//! label that is open is the view's too ([`Label`]): its keys arrive as
+//! [`LabelAction`]s, and each change of its text is an edit of the board
+//! at once (§5.9). With the `test-support` feature a view counts its scene
+//! and geometry builds (`Probe`).
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use iced::{Element, Font};
-use wren_board::scene::{self, Scene};
-use wren_board::{Access, Board, Issue, Palette, ParseError};
+use wren_board::edit::{self, Intent};
+use wren_board::ids::Random;
+use wren_board::scene::{self, Draw, Rect, Scene, Source};
+use wren_board::{
+    style, walk, Access, Board, Dir, Fill, Id, Issue, Named, NodeKind, Palette, ParseError, Rgba,
+    GRID,
+};
 
 mod clip;
 mod command;
 #[cfg(test)]
 mod fixtures;
+pub mod handles;
+pub mod hit;
+mod keys;
 pub mod label;
 pub mod layers;
 pub mod machine;
 mod measure;
+mod overlay;
 mod paint;
 mod widget;
 
 pub use command::{Command, Grow, Tool};
-pub use label::{LabelAction, Motion};
+pub use keys::{KeyPolicy, KeyRoute};
+pub use label::{Label, LabelAction, Motion, Preedit};
 pub use machine::{Button, Input, Key, Machine, Mods, Scroll};
 pub use measure::Measurer;
 
@@ -61,6 +80,17 @@ pub const FIT_MARGIN: f32 = 40.0;
 
 /// The zooms the keyboard steps through.
 pub const ZOOM_STOPS: [f32; 9] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+
+/// Room kept around the cursor element when a keyboard selection change
+/// brings it into view, in screen pixels (§5.7 rule 5).
+pub const REVEAL_MARGIN: f32 = 40.0;
+
+/// A label whose text would be smaller than this on screen, in logical
+/// pixels, is opened at 100 % instead (§5.9 rule 2).
+pub const MIN_LABEL_PX: f32 = 10.0;
+
+/// What the user is told when a label is full ([`scene::MAX_LABEL_BYTES`]).
+pub const LABEL_FULL: &str = "A label holds at most 16 KiB of text.";
 
 /// Where a board sits in the widget: the board point at the widget's
 /// top-left corner, and how many screen pixels a board unit takes.
@@ -271,11 +301,21 @@ pub struct BoardView {
     issues: Vec<Issue>,
     access: Access,
     synced: String,
+    /// The text the board was opened or last reloaded from, which a draft
+    /// is while the board still writes as `canonical` (§3.4 rule 2). A
+    /// save does not replace it: it is the undo floor (§5.11 rule 5).
+    pristine: String,
+    /// What the canonical writer makes of the pristine text's board.
+    canonical: String,
     palette: Palette,
     measurer: Measurer,
     scene: Scene,
     plan: layers::Plan,
     cap: usize,
+    /// The board as a gesture in flight would leave it, shown in place of
+    /// the board until the gesture ends (§3.4 rule 4).
+    preview: Option<Preview>,
+    ids: Random,
     viewport: Viewport,
     revision: u64,
     machine: Machine,
@@ -289,8 +329,36 @@ pub struct BoardView {
     /// Bumped by each discrete change of view (a zoom step, a reset, a
     /// fit), which the widget draws in full at once instead of as a move.
     jumps: u64,
+    key_policy: Option<KeyPolicy>,
+    /// The open label (§5.9): the machine says whose it is
+    /// ([`Machine::editing`]), the view holds its text.
+    label: Option<Label>,
+    /// The node an edit in progress made to be labelled.
+    making: Option<Id>,
+    /// Every intent planned, for tests that say what an input asked for
+    /// whatever the plan makes of it.
+    #[cfg(test)]
+    intents: Vec<Intent>,
     #[cfg(feature = "test-support")]
     pub probe: Probe,
+}
+
+/// A gesture's picture of the board: a scratch copy with the gesture's
+/// plan applied, and its scene. It is never the model, never a draft and
+/// never hit-tested.
+struct Preview {
+    board: Board,
+    scene: Scene,
+    plan: layers::Plan,
+    revision: u64,
+}
+
+/// What the widget paints: the board, or a gesture's preview of it.
+pub(crate) struct Picture<'a> {
+    pub(crate) board: &'a Board,
+    pub(crate) scene: &'a Scene,
+    pub(crate) plan: &'a layers::Plan,
+    pub(crate) revision: u64,
 }
 
 impl BoardView {
@@ -306,8 +374,10 @@ impl BoardView {
         let mut view = Self {
             issues: wren_board::check(&board),
             access: wren_board::access(&board),
+            canonical: wren_board::write(&board),
             board,
             synced: text.to_owned(),
+            pristine: text.to_owned(),
             palette,
             measurer: Measurer::new(font),
             scene: Scene {
@@ -316,6 +386,8 @@ impl BoardView {
             },
             plan: layers::Plan::default(),
             cap: layers::CAP,
+            preview: None,
+            ids: Random::new(),
             viewport: Viewport::default(),
             revision: 0,
             machine: Machine::default(),
@@ -323,6 +395,11 @@ impl BoardView {
             size: None,
             fit_pending: false,
             jumps: 0,
+            key_policy: None,
+            label: None,
+            making: None,
+            #[cfg(test)]
+            intents: Vec::new(),
             #[cfg(feature = "test-support")]
             probe,
         };
@@ -330,9 +407,11 @@ impl BoardView {
         Ok(view)
     }
 
-    /// The text changed underneath the view. It parses first and changes
-    /// nothing if that fails; otherwise the board is replaced, the viewport
-    /// kept, a drag in flight dropped and the epoch moved on.
+    /// The text changed underneath the view (§3.4 rule 5). It parses first
+    /// and changes nothing if that fails; otherwise the board is replaced
+    /// and becomes the pristine one, the viewport is kept, a gesture in
+    /// flight and an open label are dropped without a commit, the
+    /// selection keeps what still exists, and the epoch moves on.
     pub fn reload(&mut self, text: &str) -> Result<(), ParseError> {
         if text == self.synced {
             return Ok(());
@@ -342,15 +421,20 @@ impl BoardView {
         let board = wren_board::parse(text)?;
         self.issues = wren_board::check(&board);
         self.access = wren_board::access(&board);
+        self.canonical = wren_board::write(&board);
         self.board = board;
         text.clone_into(&mut self.synced);
+        text.clone_into(&mut self.pristine);
+        self.preview = None;
+        self.label = None;
         self.machine.reset();
+        self.machine.retain(&self.board);
         self.epoch += 1;
         self.build();
         Ok(())
     }
 
-    /// The text this view last took.
+    /// The Session text this view last took or sent.
     pub fn synced(&self) -> &str {
         &self.synced
     }
@@ -360,6 +444,10 @@ impl BoardView {
         if palette != self.palette {
             self.palette = palette;
             self.build();
+            if let Some(preview) = self.preview.take() {
+                self.preview = Some(self.picture_of(preview.board));
+            }
+            self.place_label();
         }
     }
 
@@ -367,12 +455,22 @@ impl BoardView {
         &self.palette
     }
 
+    /// The board as committed: never a gesture's preview.
     pub fn board(&self) -> &Board {
         &self.board
     }
 
+    /// The committed board's scene.
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    /// The scene the widget shows: a gesture's preview while one is in
+    /// flight, else the board's own.
+    pub fn shown(&self) -> &Scene {
+        self.preview
+            .as_ref()
+            .map_or(&self.scene, |preview| &preview.scene)
     }
 
     /// What is wrong with the board that still lets it draw.
@@ -382,6 +480,18 @@ impl BoardView {
 
     pub fn access(&self) -> &Access {
         &self.access
+    }
+
+    /// Whether the board may be edited: a read-only one still selects,
+    /// pans and zooms (§5.2).
+    pub fn writable(&self) -> bool {
+        self.access == Access::Editable
+    }
+
+    /// Whether the board writes as the pristine text's board does, so a
+    /// draft now would be the pristine text itself.
+    pub fn pristine(&self) -> bool {
+        wren_board::write(&self.board) == self.canonical
     }
 
     /// The renderer layer of each scene item.
@@ -460,12 +570,23 @@ impl BoardView {
                 let view = machine::View {
                     viewport: self.viewport,
                     now,
+                    board: &self.board,
+                    scene: &self.scene,
+                    writable: self.access == Access::Editable,
                 };
-                for effect in self.machine.step(input, &view) {
-                    match effect {
-                        Effect::Look(viewport) => self.set_viewport(viewport),
-                        effect => update.effects.push(effect),
-                    }
+                let acts = self.machine.step(input, &view);
+                self.carry(acts, now, &mut update);
+                self.keep_label();
+            }
+            Message::Label(epoch, action) if epoch == self.epoch => {
+                self.label_action(action, now, &mut update);
+            }
+            Message::Pasted(epoch, text) if epoch == self.epoch => {
+                // Outside a label a paste is the board's, which the host
+                // wires with the clipboard.
+                if let Some(label) = &mut self.label {
+                    let outcome = label.paste(&text, &self.measurer);
+                    self.label_did(&outcome, now, &mut update);
                 }
             }
             Message::Resized { width, height } => {
@@ -484,31 +605,74 @@ impl BoardView {
 
     /// Run a board command at `now`, from a key, a palette row, a menu
     /// item or the harness (§5.1 rule 5). An open label is committed
-    /// first.
+    /// first. A command that moves the cursor, or selects it, brings it
+    /// into view (§5.7 rule 5).
     pub fn command(&mut self, command: Command, now: Instant) -> Update {
-        let _ = (command, now);
-        Update::default()
+        let mut update = Update::default();
+        let cursor = self.machine.cursor().cloned();
+        let selection = self.machine.selection().clone();
+        let view = machine::View {
+            viewport: self.viewport,
+            now,
+            board: &self.board,
+            scene: &self.scene,
+            writable: self.access == Access::Editable,
+        };
+        let acts = self.machine.command(command, &view);
+        self.carry(acts, now, &mut update);
+        self.keep_label();
+        let machine = &self.machine;
+        let selects = machine
+            .cursor()
+            .is_some_and(|cursor| machine.selection().contains(cursor));
+        if machine.cursor() != cursor.as_ref() || (selects && *machine.selection() != selection) {
+            self.reveal();
+        }
+        update
     }
 
     /// Before any operation that is not passive (§3.4 rule 3): commit an
     /// open label, cancel a pointer gesture and keyboard Connecting, and
     /// drop a preview.
     pub fn settle(&mut self, now: Instant) -> Update {
-        let _ = now;
-        Update::default()
+        let mut update = Update::default();
+        let acts = self.machine.settle();
+        self.carry(acts, now, &mut update);
+        self.keep_label();
+        self.preview = None;
+        update
     }
 
-    /// The Session saved `text`, which is now the pristine text (§3.4
-    /// rule 2).
-    pub fn saved(&mut self, text: &str) {
-        let _ = text;
-    }
+    /// The Session saved `text`. The pristine text stays the one the board
+    /// was opened or reloaded from: it is the undo floor, so undoing to it
+    /// after a save drafts the original bytes again and the Session saves
+    /// them back (§5.11 rule 5). The Session marks a draft clean against
+    /// its own saved bytes, so nothing here needs the saved text.
+    pub fn saved(&mut self, _text: &str) {}
 
     /// The text to send as the board's draft, by the pristine rule (§3.4
-    /// rule 2): the pristine text while the board equals the board it
+    /// rule 2): the pristine text while the board writes as the board it
     /// holds, otherwise the canonical text. It becomes the synced text.
     pub fn draft(&mut self) -> String {
-        self.synced.clone()
+        let out = wren_board::write(&self.board);
+        let text = if out == self.canonical {
+            self.pristine.clone()
+        } else {
+            out
+        };
+        self.synced.clone_from(&text);
+        text
+    }
+
+    /// The host's say over each key the focused board is given (§5.1);
+    /// without one, a key with Ctrl, Alt or the logo key is the host's and
+    /// every other key the board's.
+    pub fn set_key_policy(&mut self, policy: KeyPolicy) {
+        self.key_policy = Some(policy);
+    }
+
+    pub(crate) fn key_policy(&self) -> Option<&KeyPolicy> {
+        self.key_policy.as_ref()
     }
 
     /// Which board the view's input is for; see [`Message::Input`].
@@ -523,6 +687,31 @@ impl BoardView {
 
     pub fn machine(&self) -> &Machine {
         &self.machine
+    }
+
+    /// The open label, while the machine is editing one (§5.9).
+    pub fn label(&self) -> Option<&Label> {
+        self.label.as_ref()
+    }
+
+    /// The box around the open label's lines, in board units.
+    pub fn label_box(&self) -> Option<Rect> {
+        let label = self.label.as_ref()?;
+        Some(label.bounds(&self.measurer))
+    }
+
+    /// The open label's caret in widget-local pixels, a box of no width,
+    /// and the size its text has there: where the input method puts its
+    /// candidates and how large it shows a composition (§5.9 rule 9).
+    pub fn label_caret(&self) -> Option<(Rect, f32)> {
+        let label = self.label.as_ref()?;
+        let caret = label.caret_box(&self.measurer);
+        let zoom = self.viewport.zoom;
+        let (x, y) = self.viewport.to_screen((caret.x, caret.y));
+        Some((
+            Rect::new(x, y, 0.0, caret.height * zoom),
+            label.text_size() * zoom,
+        ))
     }
 
     /// The widget for this view, focusable under the host's `id`.
@@ -555,12 +744,373 @@ impl BoardView {
     }
 
     /// Changes whenever the scene or its layers do.
+    #[cfg(test)]
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 
+    /// What the widget paints.
+    pub(crate) fn picture(&self) -> Picture<'_> {
+        match &self.preview {
+            Some(preview) => Picture {
+                board: &preview.board,
+                scene: &preview.scene,
+                plan: &preview.plan,
+                revision: preview.revision,
+            },
+            None => Picture {
+                board: &self.board,
+                scene: &self.scene,
+                plan: &self.plan,
+                revision: self.revision,
+            },
+        }
+    }
+
     pub(crate) fn measurer(&self) -> &Measurer {
         &self.measurer
+    }
+
+    /// Carry out what the machine asked for, in order.
+    fn carry(&mut self, acts: Vec<machine::Act>, now: Instant, update: &mut Update) {
+        use machine::Act;
+        for act in acts {
+            match act {
+                Act::Look(viewport) => self.set_viewport(viewport),
+                // The undo history tells an edit from one that continues
+                // a run; each is planned and applied alike.
+                Act::Edit(intent) | Act::Continue(intent) => self.edit(&intent, now, update),
+                Act::Preview(intent) => self.show(intent.as_ref()),
+                Act::OpenLabel(id) => self.open_label(id),
+                Act::CommitLabel => self.commit_label(now, update),
+                Act::Caret { at, select } => {
+                    if let Some(label) = &mut self.label {
+                        label.point(at, select, &self.measurer);
+                    }
+                }
+                Act::Run(command) => self.run(command, now, update),
+            }
+        }
+    }
+
+    /// Plan `intent` on the board and apply it, once (§3.4 rule 4). A
+    /// preview on show is over. The machine takes the plan back, which is
+    /// how a creation selects what it made.
+    fn edit(&mut self, intent: &Intent, now: Instant, update: &mut Update) {
+        self.preview = None;
+        #[cfg(test)]
+        self.intents.push(intent.clone());
+        let plan = edit::plan(&self.board, intent, &mut self.ids);
+        if !plan.is_empty() {
+            self.board.apply(&plan.changes);
+            self.issues = wren_board::check(&self.board);
+            self.build();
+            update.changed = true;
+        }
+        if let Some(notice) = &plan.notice {
+            update.effects.push(Effect::Notice(notice.clone()));
+        }
+        let acts = self.machine.applied(&plan, &self.board);
+        self.making.clone_from(&plan.edit);
+        self.carry(acts, now, update);
+        self.making = None;
+    }
+
+    /// Open the label editor on `id` (§5.9 rules 1 and 2): all of an
+    /// existing label selected, and the view brought to where the text can
+    /// be read. An element the scene gives no label a place, which is a
+    /// connector it does not route, is not edited.
+    fn open_label(&mut self, id: Id) {
+        let text = match (self.board.nodes.get(&id), self.board.edges.get(&id)) {
+            (Some(node), _) => Some(node.text.as_str()),
+            (None, Some(edge)) => Some(edge.labels.first().map_or("", |label| label.text.as_str())),
+            (None, None) => None,
+        };
+        let (Some(text), Some((place, ink))) = (text, self.label_place(&id)) else {
+            self.label = None;
+            self.machine.abandon();
+            return;
+        };
+        let mut label = Label::open(id.clone(), text, place, &self.measurer);
+        label.ink = ink;
+        label.size = self.board.nodes.get(&id).map(|node| node.size);
+        label.made = self.making.as_ref() == Some(&id)
+            || self
+                .board
+                .edges
+                .get(&id)
+                .is_some_and(|edge| edge.labels.is_empty());
+        // What has to be in view: the label, and with it the node it is on.
+        let lines = label.bounds(&self.measurer);
+        let node = hit::Frames::new(&self.board).get(&id);
+        let around = node.map_or(lines, |node| union(node, lines));
+        let small = label.text_size() * self.viewport.zoom < MIN_LABEL_PX;
+        self.label = Some(label);
+        let centre = around.center();
+        match self.size {
+            Some((width, height)) if small => self.jump(Viewport {
+                x: centre.x - width / 2.0,
+                y: centre.y - height / 2.0,
+                zoom: 1.0,
+            }),
+            // Before the widget has a size, the element stays where it is.
+            None if small => {
+                let about = self.viewport.to_screen((centre.x, centre.y));
+                self.jump(self.viewport.zoomed_to(1.0, about));
+            }
+            Some(size) if !shows(self.viewport, size, around) => {
+                self.jump(revealing(self.viewport, size, around));
+            }
+            _ => {}
+        }
+    }
+
+    /// Close the label editor (§5.9 rules 4 and 8). Its text is the
+    /// board's already, so an unchanged label changes nothing; what is left
+    /// to do is to delete free text or a connector label that ends empty,
+    /// when this edit emptied it or made it.
+    fn commit_label(&mut self, now: Instant, update: &mut Update) {
+        let Some(label) = self.label.take() else {
+            return;
+        };
+        if !label.stored().is_empty() || !(label.changed() || label.made) {
+            return;
+        }
+        let id = label.id().clone();
+        let free =
+            self.board.nodes.get(&id).is_some_and(|node| {
+                node.kind.as_ref().and_then(Named::known) == Some(NodeKind::Text)
+            });
+        let labelled = !self.board.nodes.contains_key(&id)
+            && self
+                .board
+                .edges
+                .get(&id)
+                .is_some_and(|edge| !edge.labels.is_empty());
+        if free {
+            self.edit(&Intent::Delete { ids: vec![id] }, now, update);
+        } else if labelled {
+            let intent = Intent::SetEdgeLabel {
+                id,
+                text: String::new(),
+                commit: true,
+            };
+            self.edit(&intent, now, update);
+        }
+    }
+
+    /// One action on the open label: its keys, the input method's events,
+    /// and what a harness types.
+    fn label_action(&mut self, action: LabelAction, now: Instant, update: &mut Update) {
+        if let Some(label) = &mut self.label {
+            let outcome = label.apply(action, &self.measurer);
+            self.label_did(&outcome, now, update);
+        }
+    }
+
+    /// Carry out what an action on the label asked for. A change of its
+    /// text is an edit of the board at once (§5.9 rule 6), with the size
+    /// the node needs for it (rule 7); undoing the typing puts the size
+    /// back as well.
+    fn label_did(&mut self, outcome: &label::Outcome, now: Instant, update: &mut Update) {
+        if let Some(text) = &outcome.copied {
+            update.effects.push(Effect::ClipboardWrite(text.clone()));
+        }
+        if outcome.paste {
+            update.effects.push(Effect::ClipboardRead);
+        }
+        if outcome.full {
+            update.effects.push(Effect::Notice(LABEL_FULL.to_owned()));
+        }
+        let Some(label) = self.label.as_ref().filter(|_| outcome.changed) else {
+            return;
+        };
+        let id = label.id().clone();
+        let text = label.stored().to_owned();
+        let intent = match self.board.nodes.get(&id) {
+            Some(node) => {
+                let size = match label.size {
+                    Some(size) if outcome.restored => size,
+                    _ => label::grown(node, node.size, &text, &self.measurer),
+                };
+                Intent::SetText { id, text, size }
+            }
+            None => Intent::SetEdgeLabel {
+                id,
+                text,
+                commit: false,
+            },
+        };
+        self.edit(&intent, now, update);
+        self.place_label();
+    }
+
+    /// Lay the open label out where the board now draws it.
+    fn place_label(&mut self) {
+        let Some(id) = self.label.as_ref().map(|label| label.id().clone()) else {
+            return;
+        };
+        let place = self.label_place(&id);
+        if let (Some(label), Some((place, ink))) = (&mut self.label, place) {
+            label.ink = ink;
+            label.place(place, &self.measurer);
+        }
+    }
+
+    /// The label is open only while the machine edits its element: an edit
+    /// that removed the element closed it.
+    fn keep_label(&mut self) {
+        let open = self.label.as_ref().map(Label::id);
+        if open != self.machine.editing() {
+            self.label = None;
+        }
+    }
+
+    /// Where the label of `id` is laid out, and the colour it is drawn in:
+    /// a node's label box, or the point a connector's first label is
+    /// centred on.
+    fn label_place(&self, id: &Id) -> Option<(label::Place, Rgba)> {
+        if let Some(node) = self.board.nodes.get(id) {
+            let bounds = hit::Frames::new(&self.board).get(id)?;
+            let ink = match node.kind.as_ref().and_then(Named::known) {
+                Some(NodeKind::Shape) => {
+                    let fill = node.style.fill.known().unwrap_or(Fill::Tint);
+                    style::resolve(&node.style.color, fill, &self.palette).label
+                }
+                Some(NodeKind::Text) => {
+                    style::resolve(&node.style.color, Fill::None, &self.palette).stroke
+                }
+                None => self.palette.ink,
+            };
+            return Some((label::Place::of_node(node, bounds), ink));
+        }
+        let edge = self.board.edges.get(id)?;
+        let ink = style::resolve(&edge.style.color, Fill::None, &self.palette).stroke;
+        let first = edge.labels.first();
+        let centre = if first.is_some_and(|label| !label.text.trim().is_empty()) {
+            edge_label_point(&self.scene, id)?
+        } else {
+            // The scene draws a blank label nowhere, so it is asked where
+            // it would draw one: on a copy of the board whose label has
+            // text. Routes do not depend on labels.
+            #[cfg(feature = "test-support")]
+            let started = std::time::Instant::now();
+            let mut board = self.board.clone();
+            let labels = &mut board.edges.get_mut(id)?.labels;
+            match labels.first_mut() {
+                Some(label) => "x".clone_into(&mut label.text),
+                None => labels.push(wren_board::Label {
+                    text: "x".to_owned(),
+                    at: wren_board::Label::DEFAULT_AT,
+                    extra: wren_board::Extra::new(),
+                }),
+            }
+            let scene = scene::build(&board, &self.palette, &self.measurer);
+            #[cfg(feature = "test-support")]
+            self.probe.built(started);
+            edge_label_point(&scene, id)?
+        };
+        Some((label::Place::Connector(centre), ink))
+    }
+
+    /// Show the board as `intent` would leave it, or as it is.
+    fn show(&mut self, intent: Option<&Intent>) {
+        self.preview = intent.and_then(|intent| {
+            let plan = edit::plan(&self.board, intent, &mut self.ids);
+            if plan.is_empty() {
+                return None;
+            }
+            let mut board = self.board.clone();
+            board.apply(&plan.changes);
+            Some(self.picture_of(board))
+        });
+    }
+
+    /// A preview of `board`.
+    fn picture_of(&mut self, board: Board) -> Preview {
+        #[cfg(feature = "test-support")]
+        let started = std::time::Instant::now();
+        let scene = scene::build(&board, &self.palette, &self.measurer);
+        let plan = layers::split(&scene.items, self.cap);
+        #[cfg(feature = "test-support")]
+        self.probe.built(started);
+        Preview {
+            board,
+            scene,
+            plan,
+            revision: revision(),
+        }
+    }
+
+    /// A command the machine left to the view.
+    fn run(&mut self, command: Command, now: Instant, update: &mut Update) {
+        let ids: Vec<Id> = self.machine.selection().iter().cloned().collect();
+        let editable = self.writable() && !ids.is_empty();
+        match command {
+            Command::Delete if editable => self.edit(&Intent::Delete { ids }, now, update),
+            Command::Duplicate if editable => {
+                let by = [GRID, GRID];
+                self.edit(&Intent::Duplicate { ids, by }, now, update);
+            }
+            Command::Select(dir) => self.walk(dir, false),
+            Command::ExtendSelection(dir) => self.walk(dir, true),
+            Command::ZoomFit => self.fit(),
+            Command::ZoomSelection => {
+                let bounds = ids
+                    .iter()
+                    .filter_map(|id| bounds(&self.board, &self.scene, id))
+                    .reduce(union);
+                if let (Some(bounds), Some(size)) = (bounds, self.size) {
+                    self.jump(Viewport::fitting(bounds, size));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// An arrow key's walk (§5.7 rules 1 to 3). With nothing selected it
+    /// selects the cursor, or with no cursor the node nearest the top,
+    /// then the left; otherwise it walks from the cursor, or from the
+    /// first selected element when the cursor is gone. Extending adds the
+    /// element walked to and never removes.
+    fn walk(&mut self, dir: Dir, extend: bool) {
+        let selection = self.machine.selection();
+        let cursor = self.machine.cursor().cloned();
+        let target = if selection.is_empty() {
+            cursor.or_else(|| {
+                let frames = hit::Frames::new(&self.board);
+                let corners = self.board.nodes.keys().filter_map(|id| {
+                    let [x, y] = frames.corner(id)?;
+                    Some(((y, x), id))
+                });
+                corners.min().map(|(_, id)| id.clone())
+            })
+        } else {
+            let from = cursor.or_else(|| selection.iter().next().cloned());
+            from.and_then(|from| walk::next(&self.board, &from, dir))
+        };
+        let Some(target) = target else {
+            return;
+        };
+        let mut selection = if extend {
+            selection.clone()
+        } else {
+            BTreeSet::new()
+        };
+        selection.insert(target.clone());
+        self.machine.select(selection, Some(target));
+    }
+
+    /// Pan by the least amount that shows the cursor element with
+    /// [`REVEAL_MARGIN`] around it (§5.7 rule 5).
+    fn reveal(&mut self) {
+        let Some(size) = self.size else {
+            return;
+        };
+        let cursor = self.machine.cursor();
+        if let Some(bounds) = cursor.and_then(|id| bounds(&self.board, &self.scene, id)) {
+            self.jump(revealing(self.viewport, size, bounds));
+        }
     }
 
     /// The model to the display list and its layers.
@@ -582,6 +1132,78 @@ impl BoardView {
         self.cap = cap;
         self.plan = layers::split(&self.scene.items, self.cap);
         self.revision = revision();
+    }
+}
+
+/// Where an element is drawn, in board units: a node's box, or the union
+/// of what the scene draws for a connector.
+pub(crate) fn bounds(board: &Board, scene: &Scene, id: &Id) -> Option<Rect> {
+    if board.nodes.contains_key(id) {
+        return hit::Frames::new(board).get(id);
+    }
+    scene
+        .items
+        .iter()
+        .filter(|item| matches!(&item.source, Source::Edge(edge) if edge == id))
+        .map(|item| item.bounds)
+        .reduce(union)
+}
+
+/// Where `scene` centres the first label it draws for the connector `id`
+/// (§3.7): the middle of the box it draws behind the label's text.
+fn edge_label_point(scene: &Scene, id: &Id) -> Option<scene::Point> {
+    let mut items = scene
+        .items
+        .iter()
+        .filter(|item| matches!(&item.source, Source::Edge(of) if of == id))
+        .peekable();
+    // Each label drawn is its backing, then its text.
+    while let Some(item) = items.next() {
+        let texts = |item: &&scene::Item| matches!(item.draw, Draw::Text { .. });
+        if items.peek().is_some_and(texts) {
+            return Some(item.bounds.center());
+        }
+    }
+    None
+}
+
+/// Whether all of `bounds` is in a widget of `size` looking from
+/// `viewport`.
+fn shows(viewport: Viewport, size: (f32, f32), bounds: Rect) -> bool {
+    let (left, top) = viewport.to_screen((bounds.x, bounds.y));
+    let (right, bottom) = viewport.to_screen((bounds.right(), bounds.bottom()));
+    left >= 0.0 && top >= 0.0 && right <= size.0 && bottom <= size.1
+}
+
+pub(crate) fn union(a: Rect, b: Rect) -> Rect {
+    let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+    Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
+}
+
+/// `viewport` panned by the least amount that shows `bounds` in a widget
+/// of `size` with [`REVEAL_MARGIN`] around it; where that does not fit, its
+/// top-left corner is shown.
+pub fn revealing(viewport: Viewport, size: (f32, f32), bounds: Rect) -> Viewport {
+    let margin = REVEAL_MARGIN / viewport.zoom;
+    let axis = |start: f32, length: f32, from: f32, room: f32| {
+        let (low, high) = (start - margin, start + length + margin);
+        if low < from {
+            low
+        } else if high > from + room {
+            (high - room).min(low)
+        } else {
+            from
+        }
+    };
+    Viewport {
+        x: axis(bounds.x, bounds.width, viewport.x, size.0 / viewport.zoom),
+        y: axis(bounds.y, bounds.height, viewport.y, size.1 / viewport.zoom),
+        ..viewport
     }
 }
 
@@ -607,7 +1229,7 @@ pub struct Probe {
     pub draw_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
     /// When the first `draw` returned.
     pub first_draw: std::cell::Cell<Option<std::time::Instant>>,
-    /// How many arrow keys the focused widget took and did nothing with.
+    /// How many arrow keys the focused widget took.
     pub arrows: std::cell::Cell<u64>,
     /// The recent wheel deltas, as the toolkit reported them.
     pub wheel: std::cell::RefCell<std::collections::VecDeque<Scroll>>,
@@ -652,7 +1274,7 @@ impl Probe {
 
 #[cfg(test)]
 mod tests {
-    use wren_board::scene::{Draw, Source};
+    use wren_board::scene::{Draw, Measure as _};
     use wren_board::{Reason, Rgba};
 
     use super::*;
@@ -1222,6 +1844,342 @@ mod tests {
         assert!(!view.machine().space());
     }
 
+    use fixtures::TWO;
+
+    fn id(name: &str) -> Id {
+        Id::new(name).expect("an id")
+    }
+
+    /// The middle of a node on screen.
+    fn middle(view: &BoardView, name: &str) -> (f32, f32) {
+        let bounds = hit::Frames::new(view.board())
+            .get(&id(name))
+            .expect("a node");
+        let centre = bounds.center();
+        view.viewport().to_screen((centre.x, centre.y))
+    }
+
+    fn press(at: (f32, f32)) -> Input {
+        Input::Press {
+            button: Button::Left,
+            at,
+        }
+    }
+
+    const RELEASE: Input = Input::Release {
+        button: Button::Left,
+    };
+
+    /// A left click at `at`, with the updates its press and release gave.
+    fn click(view: &mut BoardView, at: (f32, f32), now: Instant) -> Update {
+        let mut update = input(view, press(at), now);
+        let released = input(view, RELEASE, now);
+        update.changed |= released.changed;
+        update.effects.extend(released.effects);
+        update
+    }
+
+    fn click_node(view: &mut BoardView, name: &str, now: Instant) -> Update {
+        let at = middle(view, name);
+        click(view, at, now)
+    }
+
+    fn selected(view: &BoardView) -> Vec<&str> {
+        view.machine().selection().iter().map(Id::as_str).collect()
+    }
+
+    #[test]
+    fn a_drag_shows_a_preview_and_applies_one_move_on_release() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        let before = view.board().clone();
+        let (x, y) = middle(&view, "a");
+        assert_eq!(input(&mut view, press((x, y)), now), Update::default());
+        let moved = input(&mut view, Input::Move { at: (x + 43.0, y) }, now);
+        // The model is untouched while the gesture shows its preview.
+        assert_eq!(moved, Update::default());
+        assert_eq!(*view.board(), before);
+        assert_ne!(view.shown(), view.scene());
+        let preview = view.picture();
+        assert_eq!(preview.board.nodes[&id("a")].at, [40, 0]);
+        assert_eq!(view.machine().state(), machine::State::Moving);
+
+        let released = input(&mut view, RELEASE, now);
+        assert_eq!(
+            released,
+            Update {
+                changed: true,
+                effects: Vec::new()
+            }
+        );
+        assert_eq!(view.board().nodes[&id("a")].at, [40, 0]);
+        assert_eq!(view.board().nodes[&id("b")].at, [300, 0]);
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(
+            *view.scene(),
+            scene::build(view.board(), view.palette(), view.measurer())
+        );
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        assert_eq!(selected(&view), ["a"]);
+        // The draft is the canonical text of the moved board.
+        let draft = view.draft();
+        assert_eq!(draft, wren_board::write(view.board()));
+        assert_eq!(view.synced(), draft);
+        assert!(draft.contains("at = [40, 0]"), "{draft}");
+    }
+
+    #[test]
+    fn a_gesture_cancelled_or_settled_changes_nothing() {
+        let now = Instant::now();
+        let ends: [fn(&mut BoardView, Instant) -> Update; 3] = [
+            |view, now| {
+                input(
+                    view,
+                    Input::Key {
+                        key: Key::Escape,
+                        repeat: false,
+                    },
+                    now,
+                )
+            },
+            |view, now| view.settle(now),
+            |view, now| input(view, Input::Focus(false), now),
+        ];
+        for (index, end) in ends.into_iter().enumerate() {
+            let mut view = sized(TWO);
+            let before = view.board().clone();
+            let (x, y) = middle(&view, "b");
+            input(&mut view, press((x, y)), now);
+            input(&mut view, Input::Move { at: (x, y + 61.0) }, now);
+            assert_ne!(view.shown(), view.scene(), "{index}");
+            assert_eq!(end(&mut view, now), Update::default(), "{index}");
+            assert_eq!(view.shown(), view.scene(), "{index}");
+            // The release that follows finds no gesture.
+            assert_eq!(input(&mut view, RELEASE, now), Update::default(), "{index}");
+            assert_eq!(*view.board(), before, "{index}");
+            assert!(view.pristine(), "{index}");
+            assert_eq!(view.draft(), TWO, "{index}");
+        }
+    }
+
+    #[test]
+    fn a_click_selects_and_a_click_on_the_canvas_keeps_the_cursor() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        assert_eq!(click_node(&mut view, "b", now), Update::default());
+        assert_eq!(selected(&view), ["b"]);
+        // The connector between them.
+        assert_eq!(click(&mut view, (210.0, 30.0), now), Update::default());
+        assert_eq!(selected(&view), ["e"]);
+        click(&mut view, (600.0, 400.0), now);
+        assert!(selected(&view).is_empty());
+        assert_eq!(view.machine().cursor(), Some(&id("e")));
+        assert!(view.pristine());
+    }
+
+    #[test]
+    fn key_moves_go_back_to_the_pristine_text_verbatim() {
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        let now = Instant::now();
+        view.command(Command::SelectAll, now);
+        let moved = view.command(Command::Move(Dir::Right), now);
+        assert!(moved.changed);
+        assert!(!view.pristine());
+        let draft = view.draft();
+        assert_eq!(draft, wren_board::write(view.board()));
+        assert_ne!(draft, fixtures::HAND_WRITTEN);
+
+        let back = view.command(Command::Move(Dir::Left), now);
+        assert!(back.changed);
+        assert!(view.pristine());
+        // Not the canonical text: the hand-written file, byte for byte.
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+        assert_eq!(view.synced(), fixtures::HAND_WRITTEN);
+    }
+
+    #[test]
+    fn undoing_to_the_opening_board_after_a_save_drafts_the_original_bytes() {
+        // §5.11 rule 5 and §6.8's "move then undo on Hand written, waiting
+        // past the debounce": the save in between does not move the floor.
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        let now = Instant::now();
+        view.command(Command::SelectAll, now);
+        view.command(Command::Move(Dir::Down), now);
+        let saved = view.draft();
+        assert_ne!(saved, fixtures::HAND_WRITTEN);
+        view.saved(&saved);
+        assert!(!view.pristine());
+        assert_eq!(view.draft(), saved);
+        view.command(Command::Move(Dir::Up), now);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+        assert_eq!(view.synced(), fixtures::HAND_WRITTEN);
+        // The original saved again, then another edit and back: still the
+        // original.
+        view.saved(fixtures::HAND_WRITTEN);
+        view.command(Command::Move(Dir::Right), now);
+        assert_ne!(view.draft(), fixtures::HAND_WRITTEN);
+        view.command(Command::Move(Dir::Left), now);
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+    }
+
+    #[test]
+    fn a_reload_mid_drag_drops_the_gesture_and_takes_the_new_text_as_pristine() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click_node(&mut view, "a", now);
+        let (x, y) = middle(&view, "a");
+        input(&mut view, press((x, y)), now);
+        input(&mut view, Input::Move { at: (x + 80.0, y) }, now);
+        assert_ne!(view.shown(), view.scene());
+
+        view.reload(fixtures::HAND_WRITTEN).expect("a board");
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        // Stale input, and the release, change nothing.
+        view.update(Message::Input(view.epoch() - 1, RELEASE), now);
+        input(&mut view, RELEASE, now);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+    }
+
+    #[test]
+    fn a_read_only_board_selects_and_never_changes() {
+        let mut view = sized(fixtures::FUTURE);
+        assert!(!view.writable());
+        let now = Instant::now();
+        let before = view.board().clone();
+        let first = view.board().nodes.keys().next().expect("a node").clone();
+        let (x, y) = middle(&view, first.as_str());
+        click(&mut view, (x, y), now);
+        assert_eq!(selected(&view), [first.as_str()]);
+        input(&mut view, press((x, y)), now);
+        input(
+            &mut view,
+            Input::Move {
+                at: (x + 60.0, y + 60.0),
+            },
+            now,
+        );
+        assert_eq!(view.shown(), view.scene());
+        input(&mut view, RELEASE, now);
+        for command in [
+            Command::Move(Dir::Right),
+            Command::Resize(Grow::Wider),
+            Command::Delete,
+            Command::Duplicate,
+            Command::Tool(Tool::Shape(wren_board::Shape::Diamond)),
+        ] {
+            assert_eq!(view.command(command, now), Update::default(), "{command:?}");
+        }
+        assert_eq!(view.machine().tool(), Tool::Select);
+        view.command(Command::SelectAll, now);
+        assert_eq!(view.machine().selection().len(), {
+            let board = view.board();
+            board
+                .nodes
+                .keys()
+                .chain(board.edges.keys())
+                .collect::<BTreeSet<_>>()
+                .len()
+        });
+        assert_eq!(*view.board(), before);
+        assert_eq!(view.draft(), fixtures::FUTURE);
+    }
+
+    #[test]
+    fn an_arrow_with_nothing_selected_selects_the_cursor_or_the_top_left_node_and_shows_it() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        let far = Viewport {
+            x: 5000.0,
+            y: 5000.0,
+            zoom: 1.0,
+        };
+        view.set_viewport(far);
+        view.command(Command::Select(Dir::Right), now);
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        // Panned the least that shows `a` with the margin.
+        assert_eq!(
+            view.viewport(),
+            Viewport {
+                x: -REVEAL_MARGIN,
+                y: -REVEAL_MARGIN,
+                zoom: 1.0
+            }
+        );
+
+        // With the selection cleared, the cursor is selected again; and
+        // extending from nothing does the same.
+        view.command(Command::SelectNone, now);
+        view.set_viewport(far);
+        view.command(Command::ExtendSelection(Dir::Down), now);
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.viewport().x, -REVEAL_MARGIN);
+        // A click on `b` moves the cursor; a pointer never reveals.
+        view.set_viewport(Viewport {
+            x: 200.0,
+            ..Viewport::default()
+        });
+        let shown = view.viewport();
+        click_node(&mut view, "b", now);
+        assert_eq!(view.viewport(), shown);
+        view.command(Command::SelectNone, now);
+        view.set_viewport(far);
+        view.command(Command::Select(Dir::Left), now);
+        assert_eq!(selected(&view), ["b"]);
+
+        // An empty board has nothing to walk to.
+        let mut empty = sized(wren_board::EMPTY);
+        let kept = empty.viewport();
+        empty.command(Command::Select(Dir::Up), now);
+        assert!(empty.machine().selection().is_empty());
+        assert_eq!(empty.viewport(), kept);
+    }
+
+    #[test]
+    fn revealing_pans_the_least_that_shows_the_element() {
+        let at = |x: f32, y: f32, zoom: f32| Viewport { x, y, zoom };
+        let size = (400.0, 300.0);
+        let node = Rect::new(100.0, 100.0, 120.0, 60.0);
+        for (viewport, expected) in [
+            // In view with room: no pan.
+            (at(0.0, 0.0, 1.0), at(0.0, 0.0, 1.0)),
+            // Too far right and down: its far edges come in by the margin.
+            (at(-200.0, -200.0, 1.0), at(-140.0, -100.0, 1.0)),
+            // Too far left and up.
+            (at(150.0, 150.0, 1.0), at(60.0, 60.0, 1.0)),
+            // The margin is screen pixels: at 200 % it is 20 units.
+            (at(300.0, 0.0, 2.0), at(80.0, 30.0, 2.0)),
+            // Larger than the view: its top-left corner, with the margin.
+            (at(0.0, 0.0, 4.0), at(90.0, 90.0, 4.0)),
+        ] {
+            assert_eq!(revealing(viewport, size, node), expected, "{viewport:?}");
+        }
+    }
+
+    #[test]
+    fn the_fit_commands_fit_the_board_and_the_selection() {
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        let now = Instant::now();
+        view.command(Command::ZoomFit, now);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, SIZE)
+        );
+        // With nothing selected there is no selection to fit.
+        let fitted = view.viewport();
+        view.command(Command::ZoomSelection, now);
+        assert_eq!(view.viewport(), fitted);
+        let first = view.board().nodes.keys().next().expect("a node").clone();
+        click_node(&mut view, first.as_str(), now);
+        view.command(Command::ZoomSelection, now);
+        let bounds = hit::Frames::new(view.board()).get(&first).expect("a node");
+        assert_eq!(view.viewport(), Viewport::fitting(bounds, SIZE));
+        assert_eq!(view.viewport().zoom, 1.0);
+    }
+
     #[test]
     fn the_renderer_names_its_label_rule() {
         assert_eq!(Labels::for_renderer("tiny-skia"), Labels::SOFTWARE);
@@ -1276,5 +2234,863 @@ mod tests {
         assert_eq!(view.probe.scenes.get(), 1);
         view.set_layer_cap(layers::CAP);
         assert_eq!((view.layers().count, view.layers().overflow), (3, 0));
+    }
+    fn key(view: &mut BoardView, key: Key, now: Instant) -> Update {
+        input(view, Input::Key { key, repeat: false }, now)
+    }
+
+    fn edit(view: &mut BoardView, action: LabelAction, now: Instant) -> Update {
+        view.update(Message::Label(view.epoch(), action), now)
+    }
+
+    fn typed(view: &mut BoardView, text: &str, now: Instant) -> Update {
+        edit(view, LabelAction::Insert(text.to_owned()), now)
+    }
+
+    fn step(view: &mut BoardView, motion: Motion, select: bool, now: Instant) -> Update {
+        edit(view, LabelAction::Move { motion, select }, now)
+    }
+
+    /// Select `name` alone and open its label, as Enter does.
+    fn open_label(view: &mut BoardView, name: &str, now: Instant) -> Update {
+        view.machine
+            .select(BTreeSet::from([id(name)]), Some(id(name)));
+        input(view, Input::Focus(true), now);
+        view.command(Command::EditLabel, now)
+    }
+
+    fn label(view: &BoardView) -> &Label {
+        view.label().expect("an open label")
+    }
+
+    const CHANGED: Update = Update {
+        changed: true,
+        effects: Vec::new(),
+    };
+
+    /// One node of `shape` and the default size, unlabelled.
+    fn one(kind: &str, shape: &str) -> String {
+        format!(
+            "schema = 1\n\n[node.n]\nkind = \"{kind}\"\nat = [40, 40]\nshape = \"{shape}\"\nsize = [120, 60]\nz = \"V\"\n"
+        )
+    }
+
+    #[test]
+    fn a_label_opens_with_its_text_selected_and_changes_nothing() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        assert_eq!(view.label(), None);
+        assert_eq!(open_label(&mut view, "a", now), Update::default());
+        assert_eq!(view.machine().state(), machine::State::Editing);
+        let open = label(&view);
+        assert_eq!((open.id(), open.text()), (&id("a"), "A"));
+        assert_eq!((open.selection(), open.caret()), (0..1, 1));
+        assert!(view.pristine());
+        assert!(view.intents.is_empty());
+        // The caret is at the end of the scene's own line, on screen.
+        let Some(Draw::Text { lines, .. }) = view
+            .scene()
+            .items
+            .iter()
+            .filter(|item| item.source == Source::Node(id("a")))
+            .map(|item| &item.draw)
+            .find(|draw| matches!(draw, Draw::Text { .. }))
+        else {
+            panic!("a label");
+        };
+        let line = &lines[0];
+        let (caret, size) = view.label_caret().expect("a caret");
+        assert!((caret.x - (line.origin.x + line.width)).abs() < 0.01);
+        assert_eq!(
+            (caret.y, caret.width, caret.height),
+            (line.origin.y, 0.0, 20.0)
+        );
+        assert_eq!(size, scene::LABEL_SIZE);
+        assert_eq!(
+            view.label_box(),
+            Some(Rect::new(line.origin.x, line.origin.y, line.width, 20.0))
+        );
+    }
+
+    #[test]
+    fn every_change_of_a_label_is_an_edit_of_the_board_at_once() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        // Typing replaces the selected text.
+        assert_eq!(typed(&mut view, "S", now), CHANGED);
+        assert_eq!(view.board().nodes[&id("a")].text, "S");
+        assert_eq!(
+            *view.scene(),
+            scene::build(view.board(), view.palette(), view.measurer())
+        );
+        assert!(!view.pristine());
+        for letter in ["t", "a", "r", "t"] {
+            assert_eq!(typed(&mut view, letter, now), CHANGED);
+        }
+        assert_eq!(view.board().nodes[&id("a")].text, "Start");
+        let draft = view.draft();
+        assert!(draft.contains("text = \"Start\""), "{draft}");
+        // One intent a change, each with the node's size as it is.
+        assert_eq!(view.intents.len(), 5);
+        assert_eq!(
+            view.intents[4],
+            Intent::SetText {
+                id: id("a"),
+                text: "Start".to_owned(),
+                size: [120, 60]
+            }
+        );
+        // A caret move is no change, and a trailing line feed none of the
+        // board's: it is not stored.
+        assert_eq!(step(&mut view, Motion::Left, false, now), Update::default());
+        assert_eq!(step(&mut view, Motion::End, false, now), Update::default());
+        assert_eq!(typed(&mut view, "\n", now), Update::default());
+        assert_eq!((label(&view).text(), label(&view).caret()), ("Start\n", 6));
+        assert_eq!(view.board().nodes[&id("a")].text, "Start");
+        assert_eq!(
+            edit(&mut view, LabelAction::Backspace, now),
+            Update::default()
+        );
+        assert_eq!(edit(&mut view, LabelAction::Backspace, now), CHANGED);
+        assert_eq!(view.board().nodes[&id("a")].text, "Star");
+        // The label stays open through all of it, on the same element.
+        assert_eq!(view.machine().editing(), Some(&id("a")));
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.board().nodes[&id("b")].text, "B");
+    }
+
+    /// The plan's review attack 6: opening a label, moving about in it and
+    /// closing it, by every way out, leaves the hand-written text as it
+    /// was and asks the board for nothing.
+    #[test]
+    fn opening_and_closing_a_label_leaves_the_board_pristine() {
+        let now = Instant::now();
+        type Close = fn(&mut BoardView, Instant) -> Update;
+        let ways: [(&str, Close); 6] = [
+            ("escape", |view, now| key(view, Key::Escape, now)),
+            ("commit", |view, now| {
+                view.command(Command::CommitLabel, now)
+            }),
+            ("settle", |view, now| view.settle(now)),
+            ("blur", |view, now| input(view, Input::Focus(false), now)),
+            ("click", |view, now| click(view, (900.0, 500.0), now)),
+            ("select", |view, now| view.command(Command::SelectNone, now)),
+        ];
+        for element in ["first", "second", "caption", "flow"] {
+            for (name, close) in ways {
+                let mut view = sized(fixtures::HAND_WRITTEN);
+                open_label(&mut view, element, now);
+                assert_eq!(view.machine().editing(), Some(&id(element)), "{element}");
+                for action in [
+                    LabelAction::Move {
+                        motion: Motion::Start,
+                        select: false,
+                    },
+                    LabelAction::Move {
+                        motion: Motion::WordRight,
+                        select: true,
+                    },
+                    LabelAction::Move {
+                        motion: Motion::Down,
+                        select: false,
+                    },
+                    LabelAction::SelectAll,
+                    LabelAction::Undo,
+                    LabelAction::Redo,
+                ] {
+                    assert_eq!(edit(&mut view, action, now), Update::default());
+                }
+                let copied = edit(&mut view, LabelAction::Copy, now);
+                assert!(!copied.changed, "{element}, {name}");
+                assert_eq!(
+                    close(&mut view, now),
+                    Update::default(),
+                    "{element}, {name}"
+                );
+                assert_eq!(view.label(), None, "{element}, {name}");
+                assert_eq!(view.machine().editing(), None, "{element}, {name}");
+                assert!(view.intents.is_empty(), "{element}, {name}");
+                assert!(view.pristine(), "{element}, {name}");
+                assert_eq!(view.draft(), fixtures::HAND_WRITTEN, "{element}, {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn undoing_the_typing_makes_the_board_pristine_again() {
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        let now = Instant::now();
+        open_label(&mut view, "first", now);
+        step(&mut view, Motion::End, false, now);
+        // Enough lines to grow the node.
+        assert_eq!(typed(&mut view, "\nand\nthen\nmore", now), CHANGED);
+        let grown = view.board().nodes[&id("first")].size;
+        assert_eq!(grown, [120, 100]);
+        assert!(!view.pristine());
+        // The label's own undo puts back the text and the size, and the
+        // draft is the hand-written file again, byte for byte.
+        assert_eq!(edit(&mut view, LabelAction::Undo, now), CHANGED);
+        assert_eq!(label(&view).text(), "First step");
+        assert_eq!(view.board().nodes[&id("first")].size, [120, 60]);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+        // Redo is the typing again, grown as it was.
+        assert_eq!(edit(&mut view, LabelAction::Redo, now), CHANGED);
+        assert_eq!(
+            view.board().nodes[&id("first")].text,
+            "First step\nand\nthen\nmore"
+        );
+        assert_eq!(view.board().nodes[&id("first")].size, grown);
+        // Committed, the label is the board's and the editor is gone.
+        assert_eq!(key(&mut view, Key::Escape, now), Update::default());
+        assert_eq!(view.label(), None);
+        assert_eq!(
+            view.board().nodes[&id("first")].text,
+            "First step\nand\nthen\nmore"
+        );
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        assert_eq!(selected(&view), ["first"]);
+    }
+
+    #[test]
+    fn a_node_grows_as_its_label_is_typed_and_never_shrinks() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        let size = |view: &BoardView| view.board().nodes[&id("a")].size;
+        typed(&mut view, "one", now);
+        typed(&mut view, "\ntwo", now);
+        assert_eq!(size(&view), [120, 60]);
+        // A third line is taller than the 52 of the label box.
+        typed(&mut view, "\nthree", now);
+        assert_eq!(size(&view), [120, 80]);
+        assert_eq!(view.board().nodes[&id("a")].at, [0, 0]);
+        assert_eq!(
+            view.intents.last(),
+            Some(&Intent::SetText {
+                id: id("a"),
+                text: "one\ntwo\nthree".to_owned(),
+                size: [120, 80]
+            })
+        );
+        // The caret is where the scene now draws the last line's end.
+        let Some(Draw::Text { lines, .. }) = view
+            .scene()
+            .items
+            .iter()
+            .filter(|item| item.source == Source::Node(id("a")))
+            .map(|item| &item.draw)
+            .find(|draw| matches!(draw, Draw::Text { .. }))
+        else {
+            panic!("a label");
+        };
+        let last = &lines[2];
+        let (caret, _) = view.label_caret().expect("a caret");
+        assert!((caret.x - (last.origin.x + last.width)).abs() < 0.01);
+        assert_eq!(caret.y, last.origin.y);
+        // Erasing lines gives nothing back.
+        edit(&mut view, LabelAction::SelectAll, now);
+        typed(&mut view, "x", now);
+        assert_eq!(size(&view), [120, 80]);
+        // Only a word wider than the box widens the node.
+        typed(&mut view, " several words that wrap", now);
+        assert_eq!(size(&view)[0], 120);
+        edit(&mut view, LabelAction::SelectAll, now);
+        typed(&mut view, "Pneumonoultramicroscopic", now);
+        let [width, height] = size(&view);
+        assert!(width > 120 && width % 20 == 0, "{width}");
+        assert_eq!(height, 80);
+        let area = wren_board::shape::label_box(
+            wren_board::Shape::Rect,
+            Rect::new(0.0, 0.0, width as f32, height as f32),
+        );
+        let word = view
+            .measurer()
+            .width("Pneumonoultramicroscopic", scene::Face::Regular, 14.0);
+        assert!(
+            word <= area.width && word > area.width - 20.0,
+            "{word} in {area:?}"
+        );
+    }
+
+    /// §5.20: every label of the acceptance script, typed a key at a time
+    /// into the shape the script gives it, leaves the node 120 by 60.
+    #[test]
+    fn the_acceptance_labels_are_typed_without_growing_a_node() {
+        let now = Instant::now();
+        for (text, shape) in fixtures::SCRIPT {
+            let shape = match shape {
+                wren_board::Shape::Pill => "pill",
+                wren_board::Shape::Diamond => "diamond",
+                _ => "rect",
+            };
+            let mut view = sized(&one("shape", shape));
+            open_label(&mut view, "n", now);
+            for letter in text.chars() {
+                typed(&mut view, letter.encode_utf8(&mut [0; 4]), now);
+            }
+            key(&mut view, Key::Escape, now);
+            let node = &view.board().nodes[&id("n")];
+            assert_eq!(
+                (node.text.as_str(), node.size),
+                (text, [120, 60]),
+                "{shape}"
+            );
+        }
+    }
+
+    /// The editor lays a label out as the scene draws it: the same lines
+    /// in the same places, for every shape's box, free text and a
+    /// connector, so a caret is on its character and nothing moves when
+    /// the label closes.
+    #[test]
+    fn the_editor_s_lines_are_the_scene_s() {
+        let now = Instant::now();
+        let texts = fixtures::LABELS
+            .into_iter()
+            .chain(fixtures::SCRIPT.map(|(text, _)| text))
+            .chain(["a much longer label that wraps over several lines of its box"]);
+        let shapes = [
+            ("shape", "rect"),
+            ("shape", "rounded"),
+            ("shape", "pill"),
+            ("shape", "ellipse"),
+            ("shape", "diamond"),
+            ("shape", "parallelogram"),
+            ("shape", "cylinder"),
+            ("shape", "document"),
+            ("text", "rect"),
+            ("future", "rect"),
+        ];
+        let drawn = |view: &BoardView, source: &Source, size: f32| -> Vec<(String, f32, f32)> {
+            let texts = view
+                .scene()
+                .items
+                .iter()
+                .filter_map(|item| match &item.draw {
+                    Draw::Text {
+                        lines, size: of, ..
+                    } if item.source == *source && *of == size => Some(lines),
+                    _ => None,
+                });
+            texts
+                .flatten()
+                .map(|line| (line.text.clone(), line.origin.x, line.origin.y))
+                .collect()
+        };
+        let same = |view: &BoardView, source: &Source, size: f32, what: &str| {
+            let scene = drawn(view, source, size);
+            let editor = label(view).lines();
+            assert_eq!(editor.len(), scene.len(), "{what}");
+            for ((text, x, y), (drawn, at, down)) in editor.into_iter().zip(scene) {
+                assert_eq!(text, drawn, "{what}");
+                assert!((x - at).abs() < 0.01 && (y - down).abs() < 0.01, "{what}");
+            }
+        };
+        for text in texts {
+            for (kind, shape) in shapes {
+                let mut view = sized(&one(kind, shape));
+                open_label(&mut view, "n", now);
+                typed(&mut view, text, now);
+                let source = Source::Node(id("n"));
+                same(
+                    &view,
+                    &source,
+                    scene::LABEL_SIZE,
+                    &format!("{text:?} in {kind} {shape}"),
+                );
+                // And as it is opened again on the stored text.
+                key(&mut view, Key::Escape, now);
+                open_label(&mut view, "n", now);
+                same(
+                    &view,
+                    &source,
+                    scene::LABEL_SIZE,
+                    &format!("{text:?} in {kind} {shape}"),
+                );
+            }
+        }
+        // A connector's first label, where the scene centres it.
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        open_label(&mut view, "flow", now);
+        assert_eq!(label(&view).text(), "then");
+        same(&view, &Source::Edge(id("flow")), scene::SMALL_SIZE, "then");
+    }
+
+    #[test]
+    fn a_text_tool_click_left_empty_leaves_no_node() {
+        let now = Instant::now();
+        let mut view = sized(wren_board::EMPTY);
+        view.command(Command::Tool(Tool::Text), now);
+        click(&mut view, (200.0, 200.0), now);
+        assert_eq!(view.board().nodes.len(), 1);
+        assert!(view.label().is_some());
+        key(&mut view, Key::Escape, now);
+        assert_eq!(view.label(), None);
+        assert!(view.board().nodes.is_empty());
+        assert!(view.machine().selection().is_empty());
+        assert_eq!(view.draft(), wren_board::EMPTY);
+    }
+
+    #[test]
+    fn free_text_left_empty_is_deleted_when_this_edit_emptied_or_made_it() {
+        let now = Instant::now();
+        let deleted = |view: &BoardView, name: &str| {
+            let asked = view.intents.last()
+                == Some(&Intent::Delete {
+                    ids: vec![id(name)],
+                });
+            asked && !view.board().nodes.contains_key(&id(name))
+        };
+        // Emptied by this edit.
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        open_label(&mut view, "caption", now);
+        assert_eq!(edit(&mut view, LabelAction::Backspace, now), CHANGED);
+        assert_eq!(view.board().nodes[&id("caption")].text, "");
+        assert!(!deleted(&view, "caption"));
+        key(&mut view, Key::Escape, now);
+        assert!(deleted(&view, "caption"));
+        assert_eq!(view.label(), None);
+        // Only white space is empty too.
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        open_label(&mut view, "caption", now);
+        typed(&mut view, " \n ", now);
+        view.settle(now);
+        assert!(deleted(&view, "caption"));
+        // A shape may have an empty label.
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        open_label(&mut view, "first", now);
+        edit(&mut view, LabelAction::Backspace, now);
+        key(&mut view, Key::Escape, now);
+        assert!(!deleted(&view, "first"));
+        assert_eq!(view.board().nodes[&id("first")].text, "");
+        // Free text that was empty before, opened and closed, is left.
+        let empty = one("text", "rect");
+        let mut view = sized(&empty);
+        open_label(&mut view, "n", now);
+        key(&mut view, Key::Escape, now);
+        assert!(view.intents.is_empty());
+        assert_eq!(view.draft(), empty);
+        // Unless this edit's own creation made it, as a plan that makes a
+        // node to be labelled says while its acts are carried out.
+        let mut view = sized(&empty);
+        view.making = Some(id("n"));
+        open_label(&mut view, "n", now);
+        view.making = None;
+        assert!(label(&view).made);
+        key(&mut view, Key::Escape, now);
+        assert!(deleted(&view, "n"));
+        // A made node that was given a label is kept.
+        let mut view = sized(&empty);
+        view.making = Some(id("n"));
+        open_label(&mut view, "n", now);
+        typed(&mut view, "Note", now);
+        key(&mut view, Key::Escape, now);
+        assert!(!deleted(&view, "n"));
+        assert_eq!(view.board().nodes[&id("n")].text, "Note");
+    }
+
+    #[test]
+    fn a_connector_s_label_is_edited_where_the_scene_centres_it() {
+        let now = Instant::now();
+        // One with a label: each change is the connector's own intent.
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        open_label(&mut view, "flow", now);
+        assert_eq!(label(&view).text(), "then");
+        assert_eq!(label(&view).selection(), 0..4);
+        typed(&mut view, "next", now);
+        typed(&mut view, "\n", now);
+        // The text as it is stored, without the trailing line feed.
+        let next = Intent::SetEdgeLabel {
+            id: id("flow"),
+            text: "next".to_owned(),
+            commit: false,
+        };
+        assert_eq!(view.intents, [next.clone(), next]);
+        // Erased, the label keeps its item while it is edited, and the
+        // commit asks it away.
+        edit(&mut view, LabelAction::SelectAll, now);
+        edit(&mut view, LabelAction::Backspace, now);
+        let erased = |commit| Intent::SetEdgeLabel {
+            id: id("flow"),
+            text: String::new(),
+            commit,
+        };
+        assert_eq!(view.intents.last(), Some(&erased(false)));
+        assert_eq!(view.board().edges[&id("flow")].labels.len(), 1);
+        key(&mut view, Key::Escape, now);
+        assert_eq!(view.label(), None);
+        assert_eq!(view.intents.last(), Some(&erased(true)));
+        assert!(view.board().edges[&id("flow")].labels.is_empty());
+
+        // One with none: the caret is at the middle of the route, which
+        // runs from (120, 30) to (300, 30).
+        let mut view = sized(TWO);
+        open_label(&mut view, "e", now);
+        assert_eq!(label(&view).text(), "");
+        let (caret, size) = view.label_caret().expect("a caret");
+        assert!((caret.x - 210.0).abs() < 0.01, "{caret:?}");
+        assert_eq!((caret.y, caret.height), (30.0 - 8.0, 16.0));
+        assert_eq!(size, scene::SMALL_SIZE);
+        key(&mut view, Key::Escape, now);
+        assert!(view.intents.is_empty());
+        assert!(view.pristine());
+        // A label typed and erased in one edit leaves no item behind.
+        open_label(&mut view, "e", now);
+        typed(&mut view, "x", now);
+        edit(&mut view, LabelAction::Backspace, now);
+        assert_eq!(view.board().edges[&id("e")].labels.len(), 1);
+        key(&mut view, Key::Escape, now);
+        assert!(view.board().edges[&id("e")].labels.is_empty());
+        assert!(view.pristine());
+    }
+
+    /// A route whose last corner is under its arrowhead: the scene's line
+    /// leaves the corner out, so the label's place is read from the box
+    /// the scene draws behind it, never worked out again from the line.
+    #[test]
+    fn a_connector_s_label_is_where_the_scene_drew_it_whatever_the_route() {
+        let board = r#"schema = 1
+
+[node.a]
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "a"
+
+[node.b]
+kind = "shape"
+at = [136, 200]
+size = [120, 60]
+z = "b"
+
+[edge.e]
+kind = "edge"
+from = { node = "a", side = "right" }
+to = { node = "b", side = "left" }
+labels = [{ text = "Yes" }]
+z = "c"
+"#;
+        let mut view = sized(board);
+        let now = Instant::now();
+        open_label(&mut view, "e", now);
+        let Some(Draw::Text { lines, .. }) = view
+            .scene()
+            .items
+            .iter()
+            .filter(|item| item.source == Source::Edge(id("e")))
+            .map(|item| &item.draw)
+            .find(|draw| matches!(draw, Draw::Text { .. }))
+        else {
+            panic!("a label");
+        };
+        let (text, x, y) = label(&view).lines()[0];
+        assert_eq!(text, "Yes");
+        assert!((x - lines[0].origin.x).abs() < 0.01 && (y - lines[0].origin.y).abs() < 0.01);
+        let centre = (
+            lines[0].origin.x + lines[0].width / 2.0,
+            lines[0].origin.y + 8.0,
+        );
+        // With no label yet, the caret is where the first character's line
+        // will be centred, so nothing moves when it is typed.
+        let mut blank = sized(&board.replace("labels = [{ text = \"Yes\" }]\n", ""));
+        open_label(&mut blank, "e", now);
+        let caret = blank.label().expect("a label").caret_box(blank.measurer());
+        assert!(
+            (caret.x - centre.0).abs() < 0.01,
+            "{caret:?} for {centre:?}"
+        );
+        assert!(
+            (caret.y + 8.0 - centre.1).abs() < 0.01,
+            "{caret:?} for {centre:?}"
+        );
+        assert!(blank.pristine());
+        assert_eq!(blank.board().edges[&id("e")].labels, []);
+    }
+
+    #[test]
+    fn a_connector_the_scene_does_not_route_opens_no_label() {
+        let dangling = format!("{TWO}\n[edge.stub]\nkind = \"edge\"\nfrom = {{ node = \"a\" }}\nto = {{ node = \"gone\" }}\nz = \"d\"\n");
+        let mut view = sized(&dangling);
+        let now = Instant::now();
+        assert_eq!(open_label(&mut view, "stub", now), Update::default());
+        assert_eq!(view.label(), None);
+        assert_eq!(view.machine().editing(), None);
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        assert_eq!(selected(&view), ["stub"]);
+    }
+
+    #[test]
+    fn the_pointer_places_the_caret_and_drags_a_selection() {
+        let mut view = sized(fixtures::HAND_WRITTEN);
+        let now = Instant::now();
+        open_label(&mut view, "first", now);
+        let lines = label(&view).lines();
+        let (text, x, y) = lines[0];
+        assert_eq!(text, "First step");
+        let width = |text: &str| view.measurer().width(text, scene::Face::Regular, 14.0);
+        let screen = |board: (f32, f32)| view.viewport().to_screen(board);
+        // Between "First" and " step", and at the end of the line.
+        let middle = screen((x + width("First") + 0.5, y + 10.0));
+        let end = screen((x + width("First step") + 0.5, y + 10.0));
+        assert_eq!(input(&mut view, press(middle), now), Update::default());
+        assert_eq!((label(&view).caret(), label(&view).selection()), (5, 5..5));
+        assert_eq!(view.machine().state(), machine::State::Editing);
+        assert_eq!(
+            input(&mut view, Input::Move { at: end }, now),
+            Update::default()
+        );
+        assert_eq!(
+            (label(&view).caret(), label(&view).selection()),
+            (10, 5..10)
+        );
+        assert_eq!(input(&mut view, RELEASE, now), Update::default());
+        assert_eq!(view.machine().editing(), Some(&id("first")));
+        assert!(view.pristine());
+        // What is typed replaces what the drag selected.
+        typed(&mut view, "!", now);
+        assert_eq!(view.board().nodes[&id("first")].text, "First!");
+        // A press on another node commits, and is that node's press.
+        let other = self::middle(&view, "second");
+        input(&mut view, press(other), now);
+        assert_eq!(view.label(), None);
+        input(&mut view, RELEASE, now);
+        assert_eq!(selected(&view), ["second"]);
+        assert_eq!(view.board().nodes[&id("first")].text, "First!");
+    }
+
+    #[test]
+    fn a_label_too_small_to_read_opens_at_one_hundred_percent() {
+        let now = Instant::now();
+        let at = |zoom| Viewport {
+            x: -200.0,
+            y: -100.0,
+            zoom,
+        };
+        // 14 px text at 50 % is 7 px: the view goes to 100 % with the
+        // node, whose middle is at (60, 30), in the middle of the widget.
+        let mut view = sized(TWO);
+        view.set_viewport(at(0.5));
+        let jumps = view.jumps();
+        open_label(&mut view, "a", now);
+        assert_eq!(
+            view.viewport(),
+            Viewport {
+                x: 60.0 - SIZE.0 / 2.0,
+                y: 30.0 - SIZE.1 / 2.0,
+                zoom: 1.0
+            }
+        );
+        assert_eq!(view.jumps(), jumps + 1);
+        // At 75 % it is 10.5 px and the view stays.
+        let mut view = sized(TWO);
+        view.set_viewport(at(0.75));
+        open_label(&mut view, "a", now);
+        assert_eq!(view.viewport(), at(0.75));
+        // A connector's 12 px label is 9 px there.
+        let mut view = sized(TWO);
+        view.set_viewport(at(0.75));
+        open_label(&mut view, "e", now);
+        assert_eq!(view.viewport().zoom, 1.0);
+        let (caret, _) = view.label_caret().expect("a caret");
+        assert!((caret.x - SIZE.0 / 2.0).abs() < 0.01);
+        // Before the widget has a size, the node stays where it is.
+        let mut view = open(TWO);
+        view.set_viewport(at(0.5));
+        let before = view.viewport().to_screen((60.0, 30.0));
+        open_label(&mut view, "a", now);
+        assert_eq!(view.viewport().zoom, 1.0);
+        let after = view.viewport().to_screen((60.0, 30.0));
+        assert!((after.0 - before.0).abs() < 0.01 && (after.1 - before.1).abs() < 0.01);
+        // A node out of view is brought into it, at the zoom it has.
+        let mut view = sized(TWO);
+        view.set_viewport(Viewport {
+            x: 2000.0,
+            y: 2000.0,
+            zoom: 1.0,
+        });
+        open_label(&mut view, "b", now);
+        let bounds = Rect::new(300.0, 0.0, 120.0, 60.0);
+        assert_eq!(view.viewport(), revealing(view.viewport(), SIZE, bounds));
+        assert!(shows(view.viewport(), SIZE, bounds));
+        // One in view is left where it is.
+        let mut view = sized(TWO);
+        open_label(&mut view, "b", now);
+        assert_eq!(view.viewport(), Viewport::default());
+    }
+
+    #[test]
+    fn a_reload_closes_the_label_without_committing_it() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        typed(&mut view, "Typed", now);
+        let epoch = view.epoch();
+        view.reload(fixtures::HAND_WRITTEN).expect("a board");
+        assert_eq!(view.label(), None);
+        assert_eq!(view.machine().state(), machine::State::Idle);
+        let count = view.intents.len();
+        // What the widget sent for the board before is dropped.
+        for message in [
+            Message::Label(epoch, LabelAction::Insert("x".to_owned())),
+            Message::Pasted(epoch, "x".to_owned()),
+        ] {
+            assert_eq!(view.update(message, now), Update::default());
+        }
+        assert_eq!(view.intents.len(), count);
+        // Even with a label open on the board that replaced it.
+        open_label(&mut view, "first", now);
+        let stale = Message::Label(epoch, LabelAction::Insert("x".to_owned()));
+        assert_eq!(view.update(stale, now), Update::default());
+        let stale = Message::Pasted(epoch, "x".to_owned());
+        assert_eq!(view.update(stale, now), Update::default());
+        assert_eq!(label(&view).text(), "First step");
+        assert!(view.pristine());
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+    }
+
+    #[test]
+    fn label_input_with_no_label_open_is_dropped() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click_node(&mut view, "a", now);
+        assert_eq!(typed(&mut view, "x", now), Update::default());
+        assert_eq!(
+            view.update(Message::Pasted(view.epoch(), "x".to_owned()), now),
+            Update::default()
+        );
+        assert!(view.pristine());
+        // Nor does a board that may not be edited open one.
+        let mut view = sized(fixtures::FUTURE);
+        let node = view.board().nodes.keys().next().expect("a node").clone();
+        view.machine
+            .select(BTreeSet::from([node.clone()]), Some(node));
+        view.command(Command::EditLabel, now);
+        assert_eq!(view.label(), None);
+        assert_eq!(typed(&mut view, "x", now), Update::default());
+        assert!(view.pristine());
+    }
+
+    #[test]
+    fn the_clipboard_and_a_full_label_are_the_host_s_to_act_on() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        typed(&mut view, "copy me", now);
+        edit(&mut view, LabelAction::SelectAll, now);
+        let effects = |effects: &[Effect]| Update {
+            changed: false,
+            effects: effects.to_vec(),
+        };
+        assert_eq!(
+            edit(&mut view, LabelAction::Copy, now),
+            effects(&[Effect::ClipboardWrite("copy me".to_owned())])
+        );
+        let cut = edit(&mut view, LabelAction::Cut, now);
+        assert!(cut.changed);
+        assert_eq!(cut.effects, [Effect::ClipboardWrite("copy me".to_owned())]);
+        assert_eq!(view.board().nodes[&id("a")].text, "");
+        // A paste asks for the clipboard, and its text comes back.
+        assert_eq!(
+            edit(&mut view, LabelAction::Paste, now),
+            effects(&[Effect::ClipboardRead])
+        );
+        let pasted = Message::Pasted(view.epoch(), "from\r\noutside".to_owned());
+        assert_eq!(view.update(pasted, now), CHANGED);
+        assert_eq!(view.board().nodes[&id("a")].text, "from\noutside");
+        // A board fragment pastes its labels.
+        edit(&mut view, LabelAction::SelectAll, now);
+        let fragment = format!("# wren-board fragment 1\n{TWO}");
+        view.update(Message::Pasted(view.epoch(), fragment), now);
+        assert_eq!(view.board().nodes[&id("a")].text, "A\nB");
+        // More than a label holds is refused whole, and said.
+        let long = "x".repeat(scene::MAX_LABEL_BYTES);
+        let refused = view.update(Message::Pasted(view.epoch(), long), now);
+        assert_eq!(refused, effects(&[Effect::Notice(LABEL_FULL.to_owned())]));
+        assert_eq!(view.board().nodes[&id("a")].text, "A\nB");
+    }
+
+    #[test]
+    fn a_command_commits_the_label_and_then_runs() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        typed(&mut view, "Moved", now);
+        assert_eq!(view.command(Command::Move(Dir::Right), now), CHANGED);
+        assert_eq!(view.label(), None);
+        let node = &view.board().nodes[&id("a")];
+        assert_eq!((node.text.as_str(), node.at), ("Moved", [20, 0]));
+        // Tab commits, then extends from the node.
+        open_label(&mut view, "a", now);
+        typed(&mut view, "Next", now);
+        view.command(Command::ConnectNext, now);
+        assert_eq!(
+            view.intents.last(),
+            Some(&Intent::Extend {
+                from: id("a"),
+                dir: None,
+                shape: None
+            })
+        );
+        assert_eq!(view.board().nodes[&id("a")].text, "Next");
+    }
+
+    #[test]
+    fn a_composition_is_never_committed_with_the_label() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        step(&mut view, Motion::End, false, now);
+        let composing = LabelAction::Preedit {
+            text: "にほ".to_owned(),
+            selection: None,
+        };
+        assert_eq!(edit(&mut view, composing.clone(), now), Update::default());
+        assert!(label(&view).preedit().is_some());
+        assert!(view.pristine());
+        // Closing the label mid-composition takes none of it.
+        assert_eq!(view.settle(now), Update::default());
+        assert_eq!(view.label(), None);
+        assert_eq!(view.board().nodes[&id("a")].text, "A");
+        assert!(view.pristine());
+        // The commit, when it comes, is text like any other.
+        open_label(&mut view, "a", now);
+        step(&mut view, Motion::End, false, now);
+        edit(&mut view, composing, now);
+        assert_eq!(typed(&mut view, "日本", now), CHANGED);
+        assert_eq!(label(&view).preedit(), None);
+        assert_eq!(view.board().nodes[&id("a")].text, "A日本");
+    }
+
+    /// The caret is placed by measuring what is before it on its line,
+    /// white space at the end included, which the scene's line leaves out.
+    #[test]
+    fn a_typed_space_moves_the_caret() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        step(&mut view, Motion::End, false, now);
+        let (before, _) = view.label_caret().expect("a caret");
+        assert_eq!(typed(&mut view, " ", now), CHANGED);
+        let (after, _) = view.label_caret().expect("a caret");
+        assert!(after.x > before.x + 2.0, "{before:?} then {after:?}");
+        assert_eq!(after.y, before.y);
+        // The line the scene draws has not moved.
+        assert_eq!(label(&view).lines()[0].0, "A");
+        assert_eq!(view.board().nodes[&id("a")].text, "A ");
+    }
+
+    #[test]
+    fn a_new_theme_recolours_the_caret() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        let before = label(&view).ink;
+        let mut palette = fixtures::palette();
+        palette.ink = Rgba::rgb(1, 2, 3);
+        view.set_palette(palette);
+        assert_ne!(label(&view).ink, before);
+        assert_eq!(label(&view).ink, Rgba::rgb(1, 2, 3));
     }
 }
