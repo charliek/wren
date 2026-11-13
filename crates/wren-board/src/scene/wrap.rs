@@ -1,6 +1,8 @@
 //! Label text broken into lines that fit a width, with the host's
 //! measurer.
 
+use std::ops::Range;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{Face, Measure};
@@ -9,32 +11,49 @@ use super::{Face, Measure};
 /// measured at exactly the box's width is not broken by rounding.
 const SLACK: f32 = 0.001;
 
-/// `text` broken at its line feeds and wrapped at `width`: a line breaks
-/// after a run of spaces, and inside a word only when the word alone is
-/// wider than `width`, then between graphemes. Every line comes back with
-/// trailing white space dropped and with its measured width; a blank line
-/// is kept, empty, because it still takes its height. `None` for `width`
-/// breaks at line feeds only.
-pub(super) fn wrap(
+/// One line of a wrapped label: the bytes of the label it draws, with the
+/// white space the break dropped left out, and their measured width.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wrapped {
+    pub range: Range<usize>,
+    pub width: f32,
+}
+
+/// `text` broken at its line feeds and wrapped at `width`, as [`build`]
+/// breaks every label: a line breaks after a run of spaces, and inside a
+/// word only when the word alone is wider than `width`, then between
+/// graphemes. Every line comes back with trailing white space dropped and
+/// with its measured width; a blank line is kept, empty, because it still
+/// takes its height. `None` for `width` breaks at line feeds only.
+///
+/// [`build`]: super::build
+pub fn wrap(
     text: &str,
     width: Option<f32>,
     face: Face,
     size: f32,
     measure: &dyn Measure,
-) -> Vec<(String, f32)> {
+) -> Vec<Wrapped> {
     let mut lines = Vec::new();
-    let mut emit = |line: &str| {
+    // `line` begins at byte `start` of the text.
+    let mut emit = |start: usize, line: &str| {
         let line = line.trim_end();
         let measured = if line.is_empty() {
             0.0
         } else {
             measure.width(line, face, size)
         };
-        lines.push((line.to_owned(), measured));
+        lines.push(Wrapped {
+            range: start..start + line.len(),
+            width: measured,
+        });
     };
+    let mut next = 0;
     for hard in text.split('\n') {
+        let base = next;
+        next += hard.len() + 1;
         let Some(width) = width else {
-            emit(hard);
+            emit(base, hard);
             continue;
         };
         let fits = |candidate: &str| {
@@ -42,7 +61,7 @@ pub(super) fn wrap(
             candidate.is_empty() || measure.width(candidate, face, size) <= width + SLACK
         };
         if fits(hard) {
-            emit(hard);
+            emit(base, hard);
             continue;
         }
         // Each line is the longest run of whole words from `start` that
@@ -64,7 +83,8 @@ pub(super) fn wrap(
                 let mut parts = split_word(word, &fits);
                 let last = parts.pop().unwrap_or(word);
                 for part in parts {
-                    emit(part);
+                    emit(base + start, part);
+                    start += part.len();
                 }
                 word = last;
                 start = word_end - last.len();
@@ -80,7 +100,7 @@ pub(super) fn wrap(
                 hard.get(start..ends[first + count - 1]).is_some_and(&fits)
             });
             let end = ends[first + count - 1];
-            emit(hard.get(start..end).unwrap_or_default());
+            emit(base + start, hard.get(start..end).unwrap_or_default());
             start = end;
             first += count;
         }
@@ -88,9 +108,16 @@ pub(super) fn wrap(
     lines
 }
 
+/// The graphemes of `text`: what a label breaks between when a word alone
+/// is wider than its box, and so what a caret in it steps over.
+pub fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
+    text.graphemes(true)
+}
+
 /// The words of one line, each with the spaces that follow it; spaces at
-/// the start belong to the first word. A no-break space joins.
-fn words(line: &str) -> impl Iterator<Item = &str> {
+/// the start belong to the first word. A no-break space joins. A label
+/// breaks only between them, unless one alone is wider than its box.
+pub fn words(line: &str) -> impl Iterator<Item = &str> {
     let mut rest = line;
     std::iter::from_fn(move || {
         if rest.is_empty() {
@@ -180,9 +207,11 @@ mod tests {
     fn lines(text: &str, width: f32) -> Vec<String> {
         wrap(text, Some(width), Face::Regular, 14.0, &FixedMeasure)
             .into_iter()
-            .map(|(line, measured)| {
-                assert_eq!(measured, FixedMeasure.width(&line, Face::Regular, 14.0));
-                line
+            .map(|wrapped| {
+                let line = &text[wrapped.range];
+                assert_eq!(line, line.trim_end(), "{text:?} at {width}");
+                assert_eq!(wrapped.width, FixedMeasure.width(line, Face::Regular, 14.0));
+                line.to_owned()
             })
             .collect()
     }
@@ -234,10 +263,55 @@ mod tests {
     #[test]
     fn no_width_breaks_at_line_feeds_only() {
         let got = wrap("one two\nthree  ", None, Face::Regular, 12.0, &FixedMeasure);
+        let line = |range, width| Wrapped { range, width };
+        assert_eq!(got, [line(0..7, 42.0), line(8..13, 30.0)]);
+    }
+
+    /// Each line says which bytes of the label it draws: in order, never
+    /// overlapping, with only white space between one and the next.
+    #[test]
+    fn every_line_names_its_bytes_of_the_label() {
+        let ranges = |text: &str, width| -> Vec<Range<usize>> {
+            wrap(text, Some(width), Face::Regular, 14.0, &FixedMeasure)
+                .into_iter()
+                .map(|wrapped| wrapped.range)
+                .collect()
+        };
+        assert_eq!(ranges("", 100.0), vec![0..0]);
+        assert_eq!(ranges("a\n\nb", 100.0), [0..1, 2..2, 3..4]);
+        assert_eq!(ranges("wrap   here", 28.0), [0..4, 7..11]);
+        assert_eq!(ranges("  indent  ", 100.0), vec![0..8]);
         assert_eq!(
-            got,
-            [("one two".to_owned(), 42.0), ("three".to_owned(), 30.0)]
+            ranges("x unbreakable y", 21.0),
+            [0..1, 2..5, 5..8, 8..11, 11..13, 14..15]
         );
+        assert_eq!(ranges("ab\ncd ef", 14.0), [0..2, 3..5, 6..8]);
+        let pieces = [
+            "a",
+            "bb",
+            "ccccc",
+            "dddddddddddd",
+            " ",
+            "  ",
+            "\n",
+            "é",
+            "漢字",
+        ];
+        let mut rng = crate::fixtures::Rng(11);
+        for _ in 0..500 {
+            let text: String = (0..rng.below(24)).map(|_| *rng.pick(&pieces)).collect();
+            let width = *rng.pick(&[0.0, 7.0, 21.0, 35.0, 100.0]);
+            let mut end = 0;
+            for range in ranges(&text, width) {
+                assert!(end <= range.start, "{text:?} at {width}");
+                assert!(
+                    text[end..range.start].trim().is_empty(),
+                    "{text:?} at {width}"
+                );
+                end = range.end;
+            }
+            assert!(text[end..].trim().is_empty(), "{text:?} at {width}");
+        }
     }
 
     #[test]

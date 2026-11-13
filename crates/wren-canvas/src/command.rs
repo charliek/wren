@@ -67,8 +67,9 @@ pub enum Command {
 }
 
 /// What the pointer does on a board.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Tool {
+    #[default]
     Select,
     Hand,
     Shape(Shape),

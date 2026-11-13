@@ -13,10 +13,12 @@ use crate::route::{self, Attach, Connector, Routed, Terminal, STROKE_WIDTH};
 use crate::style::{self, Resolved};
 use crate::{
     check, placements, shape, Board, Dash, Edge, End, Fill, Id, Named, Node, NodeKind, Palette,
-    Rgba, Shape, Side,
+    Placed, Rgba, Shape, Side,
 };
 
 mod wrap;
+
+pub use wrap::{graphemes, words, wrap, Wrapped};
 
 /// A node's label: Inter Regular at a fixed logical size, whatever the
 /// editor's font settings.
@@ -44,7 +46,7 @@ pub const MAX_LABEL_BYTES: usize = 16 * 1024;
 /// Only this many of a connector's labels are drawn.
 pub const MAX_LABELS: usize = 16;
 /// Elements are stacked by at most this many bytes of their `z`.
-pub const MAX_Z: usize = 64;
+pub const MAX_Z: usize = crate::z::MAX_LEN;
 
 /// The height of one line of text at `size`: §3.7's line heights, which
 /// the scene lays out with and every painter and writer places text by.
@@ -210,14 +212,7 @@ impl Measure for FixedMeasure {
 /// issue markers, and clamped drawing of out-of-range values.
 pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
     let placed = placements(board);
-    let boxes: BTreeMap<&Id, Rect> = board
-        .nodes
-        .iter()
-        .filter_map(|(id, node)| {
-            let corner = placed.get(id)?.at;
-            Some((id, node_box(corner, node.size)))
-        })
-        .collect();
+    let boxes = boxes(board, &placed);
     let mut children: BTreeMap<&Id, Vec<Element<'_>>> = BTreeMap::new();
     let mut roots: Vec<Element<'_>> = board
         .edges
@@ -289,6 +284,44 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         .reduce(union)
         .unwrap_or_default();
     Scene { bounds, items }
+}
+
+/// The side each connector meets its nodes on as [`build`] draws it,
+/// the `from` end then the `to` end: the sides of its route when both ends
+/// are drawn, else the side the stub leaves the end that is by. `None` at a
+/// free end and at an end that names no node.
+pub fn sides(board: &Board) -> BTreeMap<&Id, [Option<Side>; 2]> {
+    let placed = placements(board);
+    let boxes = boxes(board, &placed);
+    let places = places(board, &boxes);
+    let routes = routes(board, &boxes, &places);
+    let mut out = BTreeMap::new();
+    for ((id, edge), routed) in board.edges.iter().zip(routes) {
+        let terminal = |end: &End| terminal(end, &places).map(|(t, _)| t);
+        let stub = |valid: &Terminal, nominal| {
+            matches!(valid, Terminal::Node { .. }).then(|| route::leave(valid, nominal).1)
+        };
+        let sides = match (routed, terminal(&edge.from), terminal(&edge.to)) {
+            (Some(routed), _, _) => routed.sides,
+            (None, Some(valid), None) => [stub(&valid, Side::Right), None],
+            (None, None, Some(valid)) => [None, stub(&valid, Side::Left)],
+            _ => [None, None],
+        };
+        out.insert(id, sides);
+    }
+    out
+}
+
+/// Each drawn node's box, by id.
+fn boxes<'a>(board: &'a Board, placed: &BTreeMap<&Id, Placed<'_>>) -> BTreeMap<&'a Id, Rect> {
+    board
+        .nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            let corner = placed.get(id)?.at;
+            Some((id, node_box(corner, node.size)))
+        })
+        .collect()
 }
 
 /// A drawn node as a connector end finds it: its index among the boxes
@@ -393,13 +426,11 @@ enum Element<'a> {
 impl<'a> Element<'a> {
     /// Ascending `z` bytewise (a missing one as empty, a long one by its
     /// first [`MAX_Z`] bytes), then id, then a node before a connector.
-    fn order(&self) -> (&'a [u8], &'a str, u8) {
-        let (z, id, rank) = match *self {
-            Self::Node(id, node) => (node.z.as_deref(), id, 0),
-            Self::Edge(id, edge, _) => (edge.z.as_deref(), id, 1),
-        };
-        let z = z.unwrap_or("").as_bytes();
-        (&z[..z.len().min(MAX_Z)], id.as_str(), rank)
+    fn order(&self) -> (&'a [u8], &'a str, bool) {
+        match *self {
+            Self::Node(id, node) => crate::z::order(node.z.as_deref(), id, false),
+            Self::Edge(id, edge, _) => crate::z::order(edge.z.as_deref(), id, true),
+        }
     }
 }
 
@@ -547,15 +578,15 @@ impl Painter<'_> {
         let lines: Vec<Line> = wrapped
             .into_iter()
             .enumerate()
-            .filter(|(_, (line, _))| !line.is_empty())
-            .map(|(row, (text, width))| {
+            .filter(|(_, line)| !line.range.is_empty())
+            .map(|(row, Wrapped { range, width })| {
                 let x = if layout.centred() {
                     area.x + (area.width - width) / 2.0
                 } else {
                     area.x
                 };
                 Line {
-                    text,
+                    text: text.get(range).unwrap_or_default().to_owned(),
                     origin: Point::new(x, top + row as f32 * height),
                     width,
                 }
@@ -703,7 +734,7 @@ impl Painter<'_> {
             return;
         }
         let lines = wrap::wrap(text, None, Face::Regular, SMALL_SIZE, self.measure);
-        let width = lines.iter().map(|(_, w)| *w).fold(0.0, f32::max);
+        let width = lines.iter().map(|line| line.width).fold(0.0, f32::max);
         let height = lines.len() as f32 * line_height(SMALL_SIZE);
         let area = Rect::new(
             center.x - width / 2.0,
