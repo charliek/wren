@@ -26,9 +26,10 @@ pub const CAP: usize = 4;
 /// The side of a cell of the overlap index, in board units.
 const CELL: f32 = 256.0;
 
-/// Footprints spanning more cells than this on a side are checked against
-/// every later item instead of being indexed.
-const WIDE: i64 = 16;
+/// Footprints spanning more cells than this are checked against every
+/// later item instead of being indexed. It counts cells, not a side, so a
+/// long thin line, a connector's run across the board, is indexed.
+const WIDE: i64 = 256;
 
 /// How far a footprint is drawn in from an item's bounds: half the widest
 /// stroke and a little more, so outlines that meet do not overlap.
@@ -74,16 +75,18 @@ pub fn split(items: &[Item], cap: usize) -> Plan {
         footprints(item, &mut footprint);
         for area in &footprint {
             index.overlapping(*area, |earlier, earlier_area| {
-                if !intersects(earlier_area, *area) {
-                    return;
+                if intersects(earlier_area, *area) {
+                    let below = plan.of[earlier];
+                    if covers && matches!(&items[earlier].draw, Draw::Text { .. }) {
+                        overflowed |= below == last;
+                        layer = layer.max(below.saturating_add(1).min(last));
+                    } else {
+                        layer = layer.max(below);
+                    }
                 }
-                let below = plan.of[earlier];
-                if covers && matches!(&items[earlier].draw, Draw::Text { .. }) {
-                    overflowed |= below == last;
-                    layer = layer.max(below.saturating_add(1).min(last));
-                } else {
-                    layer = layer.max(below);
-                }
+                // Nothing more can raise the layer or the overflow, which
+                // in a stack past the cap is soon.
+                layer < last || (covers && !overflowed)
             });
         }
         plan.overflow += usize::from(overflowed);
@@ -205,22 +208,29 @@ impl Index {
         }
     }
 
-    /// Every earlier footprint that may overlap `area`; one in several
-    /// shared cells is reported once per cell.
-    fn overlapping(&self, area: Rect, mut each: impl FnMut(usize, Rect)) {
+    /// Every earlier footprint that may overlap `area`, until `each`
+    /// returns false; one in several shared cells is reported once per
+    /// cell.
+    fn overlapping(&self, area: Rect, mut each: impl FnMut(usize, Rect) -> bool) {
         let mut each = |entry: &(usize, Rect)| each(entry.0, entry.1);
-        self.wide.iter().for_each(&mut each);
+        if !self.wide.iter().all(&mut each) {
+            return;
+        }
         match span(area) {
             Some((columns, rows)) => {
                 for column in columns.0..=columns.1 {
                     for row in rows.0..=rows.1 {
                         if let Some(cell) = self.cells.get(&(column, row)) {
-                            cell.iter().for_each(&mut each);
+                            if !cell.iter().all(&mut each) {
+                                return;
+                            }
                         }
                     }
                 }
             }
-            None => self.cells.values().flatten().for_each(&mut each),
+            None => {
+                let _ = self.cells.values().flatten().all(&mut each);
+            }
         }
     }
 }
@@ -234,7 +244,9 @@ fn span(area: Rect) -> Option<((i64, i64), (i64, i64))> {
     };
     let columns = (cell(area.x)?, cell(area.x + area.width)?);
     let rows = (cell(area.y)?, cell(area.y + area.height)?);
-    (columns.1 - columns.0 < WIDE && rows.1 - rows.0 < WIDE).then_some((columns, rows))
+    let across = |(low, high): (i64, i64)| high.saturating_sub(low).saturating_add(1);
+    let count = across(columns).saturating_mul(across(rows));
+    (count <= WIDE).then_some((columns, rows))
 }
 
 #[cfg(test)]
@@ -463,27 +475,10 @@ mod tests {
         assert_eq!(plan.of, [0, 1, 1, 2, 0]);
     }
 
-    #[test]
-    fn the_index_agrees_with_checking_every_pair() {
-        // A seeded scatter of shapes, labels and lines, dense enough to stack.
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let mut next = move |range: f32| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed % 10_000) as f32 / 10_000.0 * range
-        };
-        let mut items = Vec::new();
-        for index in 0..400 {
-            let (x, y) = (next(1200.0), next(1200.0));
-            let (width, height) = (20.0 + next(300.0), 10.0 + next(90.0));
-            items.push(match index % 3 {
-                0 => fill(rect(x, y, width, height)),
-                1 => label(rect(x, y, width, height)),
-                _ => stroke(&[(x, y), (x + width, y), (x + width, y + height)]),
-            });
-        }
-        let cap = 6;
+    /// The plan by its definition, every earlier item checked: each
+    /// item's layer, and how many fills shared the last layer with a label
+    /// they cover.
+    fn every_pair(items: &[Item], cap: u8) -> (Vec<u8>, usize) {
         let areas: Vec<Vec<Rect>> = items
             .iter()
             .map(|item| {
@@ -492,10 +487,10 @@ mod tests {
                 areas
             })
             .collect();
-        let mut expected: Vec<u8> = Vec::new();
+        let (mut layers, mut overflow): (Vec<u8>, usize) = (Vec::new(), 0);
         for (position, item) in items.iter().enumerate() {
             let covers = matches!(&item.draw, Draw::Path { fill: Some(_), .. });
-            let mut layer = 0;
+            let (mut layer, mut overflowed) = (0, false);
             for earlier in 0..position {
                 let overlap = areas[earlier]
                     .iter()
@@ -504,13 +499,54 @@ mod tests {
                     continue;
                 }
                 let label = matches!(&items[earlier].draw, Draw::Text { .. });
+                overflowed |= covers && label && layers[earlier] == cap - 1;
                 let above = u8::from(covers && label);
-                layer = layer.max((expected[earlier] + above).min(cap - 1));
+                layer = layer.max((layers[earlier] + above).min(cap - 1));
             }
-            expected.push(layer);
+            overflow += usize::from(overflowed);
+            layers.push(layer);
         }
-        let plan = split(&items, usize::from(cap));
-        assert_eq!(plan.of, expected);
-        assert!(plan.count > 2, "the scatter should stack");
+        (layers, overflow)
+    }
+
+    #[test]
+    fn the_index_agrees_with_checking_every_pair() {
+        // Seeded scatters of shapes, labels and lines, dense enough to
+        // stack past the cap, with stacks on one spot and lines long and
+        // thin enough to span many cells one way.
+        for round in 0..12u64 {
+            let mut seed = 0x2545_f491_4f6c_dd1du64 ^ round.wrapping_mul(0x9e37_79b9);
+            let mut next = move |range: f32| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % 10_000) as f32 / 10_000.0 * range
+            };
+            let spread = [1200.0, 9000.0, 300.0][round as usize % 3];
+            let mut items = Vec::new();
+            for index in 0..400 {
+                let (x, y) = (next(spread), next(spread));
+                let (width, height) = (20.0 + next(300.0), 10.0 + next(90.0));
+                items.push(match index % 5 {
+                    0 => fill(rect(x, y, width, height)),
+                    1 => label(rect(x, y, width, height)),
+                    2 => stroke(&[(x, y), (x + width, y), (x + width, y + height)]),
+                    3 => stroke(&[(x, y), (x + 9000.0, y), (x + 9000.0, y + next(6000.0))]),
+                    _ => [
+                        fill(rect(5.0, 5.0, 100.0, 60.0)),
+                        label(rect(20.0, 20.0, 60.0, 20.0)),
+                    ][index % 2]
+                        .clone(),
+                });
+            }
+            for cap in [1, 2, 4, 6] {
+                let (layers, overflow) = every_pair(&items, cap);
+                let plan = split(&items, usize::from(cap));
+                assert_eq!(plan.of, layers, "round {round}, cap {cap}");
+                assert_eq!(plan.overflow, overflow, "round {round}, cap {cap}");
+                let count = layers.iter().max().map_or(0, |&l| usize::from(l) + 1);
+                assert_eq!(plan.count, count, "round {round}, cap {cap}");
+            }
+        }
     }
 }

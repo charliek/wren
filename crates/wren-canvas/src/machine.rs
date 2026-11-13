@@ -397,11 +397,18 @@ pub struct Machine {
 impl Machine {
     pub fn step(&mut self, input: Input, view: &View<'_>) -> Vec<Act> {
         let mut acts = Vec::new();
-        // Pointer input of any kind ends a run of key moves (§5.11 rule 3).
-        if matches!(
-            input,
-            Input::Wheel { .. } | Input::Press { .. } | Input::Move { .. } | Input::Release { .. }
-        ) {
+        // Pointer input ends a run of key moves (§5.11 rule 3), except a
+        // move with no button down: the pointer passing over the board.
+        let passing = matches!(input, Input::Move { .. }) && self.gesture == Gesture::None;
+        if !passing
+            && matches!(
+                input,
+                Input::Wheel { .. }
+                    | Input::Press { .. }
+                    | Input::Move { .. }
+                    | Input::Release { .. }
+            )
+        {
             self.run = None;
         }
         match input {
@@ -4465,13 +4472,12 @@ z = "F"
     }
 
     #[test]
-    fn any_pointer_input_ends_a_run_of_key_moves() {
+    fn pointer_input_but_a_pass_over_ends_a_run_of_key_moves() {
         let right = moved(&["a"], [20, 0]);
         let go = Command::Move(Dir::Right);
         // A press is in the table above.
-        let pointer: [(&str, Input); 3] = [
+        let pointer: [(&str, Input); 2] = [
             ("a wheel step", wheel(lines(-1.0), false)),
-            ("a pointer move", Input::Move { at: AT }),
             (
                 "a release",
                 Input::Release {
@@ -4487,10 +4493,23 @@ z = "F"
             rig.step(input);
             assert_eq!(rig.run(go), [Act::Edit(right.clone())], "{name}");
         }
-        // Keys that are not pointer input leave it open.
+        // A drag: its press ends the run, and its moves and release keep
+        // it ended.
         let mut rig = Rig::new();
         rig.click(A);
         rig.run(go);
+        rig.press(A);
+        rig.by(80.0, 0.0);
+        rig.release();
+        assert_eq!(rig.run(go), [Act::Edit(right.clone())]);
+        // The pointer passing over the board with no button down, over a
+        // node or not, and keys that are not pointer input, leave it open.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(go);
+        rig.step(Input::Move { at: AT });
+        rig.step(Input::Move { at: (900.0, 700.0) });
+        rig.step(Input::Leave);
         rig.step(plain());
         assert_eq!(rig.run(go), [Act::Continue(right)]);
     }

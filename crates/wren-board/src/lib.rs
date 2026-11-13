@@ -726,4 +726,94 @@ mod tests {
         println!("50 wide labels of 8,000 words: scene {wide_ms:.2} ms");
         assert!(wide_ms <= 250.0, "scene of wide labels: {wide_ms:.2} ms");
     }
+
+    /// What a change costs once a scene cache holds the build before, at
+    /// 1,000 shapes on the grid and on the three boards whose every
+    /// connector spends its routing budget: each step of a drag of `n1`
+    /// (four steps across the board, as the app's perf case drags it) and
+    /// each keystroke of a label. Printed, with what was routed again.
+    #[test]
+    #[ignore = "timings; run by make perf-board in release"]
+    fn perf_a_change_rebuilds_what_it_can_affect() {
+        let palette = style::tests::LIGHT;
+        let measure = scene::FixedMeasure;
+        let grid = |i: usize| [(i % 40) as i64 * 200, (i / 40) as i64 * 100];
+        let mut rng = fixtures::Rng(3);
+        let targets: Vec<usize> = (0..5_100).map(|_| rng.below(5_100)).collect();
+        let nodes = 1_000;
+        let stacked = |i: usize| {
+            if i == nodes {
+                [5_000, 5_000]
+            } else {
+                [(i % 7) as i64, (i % 5) as i64]
+            }
+        };
+        let boards = [
+            ("grid", grid_board(nodes)),
+            (
+                "long random",
+                board_text(
+                    nodes,
+                    grid,
+                    |_| [160, 64],
+                    (0..nodes).map(|i| (i, targets[i] % nodes)),
+                ),
+            ),
+            (
+                "fan-in",
+                board_text(nodes, grid, |_| [160, 64], (1..nodes).map(|i| (i, 0))),
+            ),
+            (
+                "stacked",
+                board_text(
+                    nodes + 1,
+                    stacked,
+                    |_| [100, 60],
+                    (0..nodes).map(|i| (i, nodes)),
+                ),
+            ),
+        ];
+        for (name, text) in boards {
+            let mut board = parse(&text).unwrap();
+            let whole_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+            let mut cache = scene::Cache::default();
+            cache.build(&board, &palette, &measure);
+            let id = Id::new("n1").unwrap();
+            let start = board.nodes[&id].at;
+            let mut drag = Vec::new();
+            let mut routed = Vec::new();
+            for step in 1..=4 {
+                board.nodes.get_mut(&id).unwrap().at =
+                    [start[0] + step * 1_700, start[1] + step * 850];
+                let began = std::time::Instant::now();
+                cache.build(&board, &palette, &measure);
+                drag.push(began.elapsed().as_secs_f64() * 1000.0);
+                routed.push(cache.rebuilt().routed);
+            }
+            let mut typed = Vec::new();
+            for text in ["k", "ke", "key", "keys"] {
+                board.nodes.get_mut(&id).unwrap().text = text.into();
+                let began = std::time::Instant::now();
+                cache.build(&board, &palette, &measure);
+                typed.push(began.elapsed().as_secs_f64() * 1000.0);
+            }
+            let median = |mut v: Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v[v.len() / 2]
+            };
+            let (drag_ms, typed_ms) = (median(drag), median(typed));
+            println!(
+                "{name}, 1000 shapes: whole build {whole_ms:.2} ms; with the cache, a drag step \
+                 {drag_ms:.2} ms (connectors routed again: {routed:?}), a keystroke {typed_ms:.2} ms"
+            );
+            // A keystroke routes nothing again, and on the grid a drag step
+            // routes only the connectors near the node: both within the 5 ms
+            // of a whole build of the grid (§6.7).
+            assert!(typed_ms <= 5.0, "{name}: a keystroke {typed_ms:.2} ms");
+            if name == "grid" {
+                assert!(drag_ms <= 5.0, "{name}: a drag step {drag_ms:.2} ms");
+                assert!(routed.iter().all(|&n| n <= 16), "{name}: {routed:?}");
+            }
+        }
+    }
 }

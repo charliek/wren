@@ -6,6 +6,7 @@
 //! placed and measured, so a painter never lays text out itself.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -16,6 +17,8 @@ use crate::{
     Placed, Rgba, Shape, Side,
 };
 
+#[cfg(test)]
+mod incremental;
 mod wrap;
 
 pub use wrap::{graphemes, words, wrap, Wrapped};
@@ -116,7 +119,7 @@ impl Rect {
 }
 
 /// A board's display list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     /// The union of the items' bounds.
     pub bounds: Rect,
@@ -211,6 +214,171 @@ impl Measure for FixedMeasure {
 /// placeholder of an unknown kind, the stub of a dangling connector, the
 /// issue markers, and clamped drawing of out-of-range values.
 pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
+    layout(board, palette, measure, None)
+}
+
+/// What one build of a board keeps for the next, so that a change costs
+/// what it can affect: each connector's route with what its routing read
+/// (the boxes and lines its lookups visited, [`route`]), and each
+/// element's items with what they were made from. [`Cache::build`] always
+/// gives the scene [`build`] gives; it routes again only the connectors
+/// whose reading changed, in order, so a re-routed connector passes the
+/// change on to those after it that read its lines, and it lays out again
+/// only the elements whose own fields, box, route or palette changed.
+///
+/// It trusts the measurer to measure as it did: a host whose widths can
+/// change (a font loaded since) calls [`Cache::relayout`] first.
+#[derive(Clone, Debug, Default)]
+pub struct Cache {
+    palette: Option<Palette>,
+    routes: route::Memo,
+    /// By id, ascending.
+    nodes: Vec<(Id, KeptNode)>,
+    edges: Vec<(Id, KeptEdge)>,
+    /// The last build's scene, whose items the next build moves rather
+    /// than copies.
+    scene: Scene,
+    /// How many elements the last build laid out again.
+    painted: usize,
+}
+
+/// A node's items, by their place in the cache's scene, and what they
+/// were made from.
+#[derive(Clone, Debug)]
+struct KeptNode {
+    node: Node,
+    bounds: Rect,
+    items: Range<usize>,
+}
+
+/// A connector's items, by their place in the cache's scene, and what
+/// they were made from: its route, or the ends a stub is drawn from.
+#[derive(Clone, Debug)]
+struct KeptEdge {
+    edge: Edge,
+    routed: Option<Routed>,
+    ends: [Option<Terminal>; 2],
+    items: Range<usize>,
+    corner: Option<Point>,
+}
+
+/// What a build takes from a cache and gives back to it: the routes, and
+/// what [`Laid`] holds.
+struct Keeping<'c> {
+    routes: &'c mut route::Memo,
+    laid: Laid<'c>,
+}
+
+/// The elements a cache keeps laid out.
+struct Laid<'c> {
+    palette: &'c mut Option<Palette>,
+    nodes: &'c mut Vec<(Id, KeptNode)>,
+    edges: &'c mut Vec<(Id, KeptEdge)>,
+    /// The last scene's items, each taken once a kept element moves it.
+    items: Vec<Option<Item>>,
+    painted: &'c mut usize,
+}
+
+/// How much of the last [`Cache::build`] was made again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rebuilt {
+    /// Connectors routed again, and separated again.
+    pub routed: usize,
+    pub separated: usize,
+    /// Nodes and connectors laid out again.
+    pub painted: usize,
+}
+
+impl Cache {
+    /// The scene of `board`, as [`build`] gives it, made from what the
+    /// build before kept wherever that still holds. The cache keeps it
+    /// until the next build.
+    pub fn build(&mut self, board: &Board, palette: &Palette, measure: &dyn Measure) -> &Scene {
+        let items = std::mem::take(&mut self.scene.items);
+        let keeping = Keeping {
+            routes: &mut self.routes,
+            laid: Laid {
+                palette: &mut self.palette,
+                nodes: &mut self.nodes,
+                edges: &mut self.edges,
+                items: items.into_iter().map(Some).collect(),
+                painted: &mut self.painted,
+            },
+        };
+        self.scene = layout(board, palette, measure, Some(keeping));
+        &self.scene
+    }
+
+    /// The scene of the last build.
+    pub fn scene(&self) -> &Scene {
+        &self.scene
+    }
+
+    /// Forgets everything: the next build routes and lays out the whole
+    /// board.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Forgets every element's layout and keeps the routes, which no
+    /// measurement reaches: the next build lays out the whole board again.
+    pub fn relayout(&mut self) {
+        self.palette = None;
+        self.nodes.clear();
+        self.edges.clear();
+    }
+
+    /// Whether the next build in `palette` lays out every element: nothing
+    /// is kept, or it was laid out in another palette.
+    pub fn lays_out_all(&self, palette: &Palette) -> bool {
+        self.palette != Some(*palette)
+    }
+
+    /// Whether nothing is kept.
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty() && self.nodes.is_empty() && self.edges.is_empty()
+    }
+
+    /// How much the last build made again.
+    pub fn rebuilt(&self) -> Rebuilt {
+        Rebuilt {
+            routed: self.routes.rerouted,
+            separated: self.routes.reseparated,
+            painted: self.painted,
+        }
+    }
+}
+
+/// Whether two connectors' routes are the same to the bit, or both
+/// missing.
+fn same_route(a: Option<&Routed>, b: Option<&Routed>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same(b),
+        (a, b) => a.is_none() && b.is_none(),
+    }
+}
+
+/// The kept values of `old` (by id, ascending) lined up with `ids`
+/// (ascending): the one with the same id, else `None`.
+fn line_up<'a, T>(old: Vec<(Id, T)>, ids: impl Iterator<Item = &'a Id>) -> Vec<Option<(Id, T)>> {
+    let mut old = old.into_iter().peekable();
+    ids.map(|id| {
+        while old.next_if(|(k, _)| k < id).is_some() {}
+        old.next_if(|(k, _)| k == id)
+    })
+    .collect()
+}
+
+fn layout(
+    board: &Board,
+    palette: &Palette,
+    measure: &dyn Measure,
+    keeping: Option<Keeping<'_>>,
+) -> Scene {
+    let (memo, mut laid) = match keeping {
+        Some(Keeping { routes, laid }) => (Some(routes), Some(laid)),
+        None => (None, None),
+    };
     let placed = placements(board);
     let boxes = boxes(board, &placed);
     let mut children: BTreeMap<&Id, Vec<Element<'_>>> = BTreeMap::new();
@@ -220,23 +388,74 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         .enumerate()
         .map(|(k, (id, edge))| Element::Edge(id, edge, k))
         .collect();
-    for (id, node) in &board.nodes {
+    for (k, (id, node)) in board.nodes.iter().enumerate() {
         match placed.get(id).and_then(|p| p.parent) {
             Some(parent) => children
                 .entry(parent)
                 .or_default()
-                .push(Element::Node(id, node)),
-            None => roots.push(Element::Node(id, node)),
+                .push(Element::Node(id, node, k)),
+            None => roots.push(Element::Node(id, node, k)),
         }
     }
 
     let places = places(board, &boxes);
-    let routes = routes(board, &boxes, &places);
+    let (positions, ids, connectors) = connectors(board, &places);
+    let rects: Vec<Rect> = boxes.values().copied().collect();
+    let owned: Vec<Routed>;
+    let mut routes: Vec<Option<&Routed>> = vec![None; board.edges.len()];
+    let routed: Box<dyn Iterator<Item = &Routed>> = match memo {
+        Some(memo) => {
+            let box_ids: Vec<&Id> = boxes.keys().copied().collect();
+            route::route_all_kept(&rects, &box_ids, &connectors, &ids, memo);
+            Box::new(memo.routes())
+        }
+        None => {
+            owned = route::route_all(&rects, &connectors);
+            Box::new(owned.iter())
+        }
+    };
+    for (&k, routed) in positions.iter().zip(routed) {
+        if let Some(slot) = routes.get_mut(k) {
+            *slot = Some(routed);
+        }
+    }
+    // What the build before laid out, by each element's place among the
+    // board's nodes or connectors; nothing when it drew another palette.
+    let mut was_nodes: Vec<Option<(Id, KeptNode)>> = Vec::new();
+    let mut was_edges: Vec<Option<(Id, KeptEdge)>> = Vec::new();
+    let mut kept_nodes: Vec<Option<(Id, KeptNode)>> = Vec::new();
+    let mut kept_edges: Vec<Option<(Id, KeptEdge)>> = Vec::new();
+    let mut old_items: Vec<Option<Item>> = Vec::new();
+    if let Some(laid) = laid.as_mut() {
+        if *laid.palette == Some(*palette) {
+            was_nodes = line_up(std::mem::take(laid.nodes), board.nodes.keys());
+            was_edges = line_up(std::mem::take(laid.edges), board.edges.keys());
+            old_items = std::mem::take(&mut laid.items);
+        } else {
+            was_nodes.resize_with(board.nodes.len(), || None);
+            was_edges.resize_with(board.edges.len(), || None);
+        }
+        kept_nodes.resize_with(board.nodes.len(), || None);
+        kept_edges.resize_with(board.edges.len(), || None);
+    }
+    let kept = laid.is_some();
+    // Moves a kept element's items into the new scene, and gives their
+    // place there; `None`, moving nothing, if any is gone.
+    let mut take = |range: &Range<usize>, items: &mut Vec<Item>| {
+        let slots = old_items.get_mut(range.clone())?;
+        if slots.iter().any(Option::is_none) {
+            return None;
+        }
+        let start = items.len();
+        items.extend(slots.iter_mut().filter_map(Option::take));
+        Some(start..items.len())
+    };
+    let mut painted = 0;
     let mut painter = Painter {
         palette,
         measure,
         items: Vec::new(),
-        corners: BTreeMap::new(),
+        corners: HashMap::new(),
     };
     roots.sort_by(|a, b| a.order().cmp(&b.order()));
     let mut scopes = vec![roots.into_iter()];
@@ -246,9 +465,36 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
             continue;
         };
         match element {
-            Element::Node(id, node) => {
+            Element::Node(id, node, k) => {
                 if let Some(&bounds) = boxes.get(id) {
-                    painter.node(id, node, bounds);
+                    let was = was_nodes.get_mut(k).and_then(Option::take);
+                    let moved = was.and_then(|(key, mut was)| {
+                        if was.bounds != bounds || was.node != *node {
+                            return None;
+                        }
+                        was.items = take(&was.items, &mut painter.items)?;
+                        Some((key, was))
+                    });
+                    match moved {
+                        Some(moved) => kept_nodes[k] = Some(moved),
+                        None => {
+                            let start = painter.items.len();
+                            painter.node(id, node, bounds);
+                            painted += 1;
+                            if kept {
+                                let items = start..painter.items.len();
+                                let node = node.clone();
+                                kept_nodes[k] = Some((
+                                    id.clone(),
+                                    KeptNode {
+                                        node,
+                                        bounds,
+                                        items,
+                                    },
+                                ));
+                            }
+                        }
+                    }
                 }
                 if let Some(mut inner) = children.remove(id) {
                     inner.sort_by(|a, b| a.order().cmp(&b.order()));
@@ -256,7 +502,47 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
                 }
             }
             Element::Edge(id, edge, k) => {
-                painter.edge(id, edge, &places, routes.get(k).and_then(Option::as_ref));
+                let routed = routes.get(k).copied().flatten();
+                let ends = match routed {
+                    Some(_) => [None, None],
+                    None => {
+                        [&edge.from, &edge.to].map(|end| terminal(end, &places).map(|(t, _)| t))
+                    }
+                };
+                let was = was_edges.get_mut(k).and_then(Option::take);
+                let moved = was.and_then(|(key, mut was)| {
+                    let same = same_route(was.routed.as_ref(), routed)
+                        && was.ends == ends
+                        && was.edge == *edge;
+                    if !same {
+                        return None;
+                    }
+                    was.items = take(&was.items, &mut painter.items)?;
+                    Some((key, was))
+                });
+                match moved {
+                    Some((key, was)) => {
+                        if let Some(corner) = was.corner {
+                            painter.corners.insert(id, corner);
+                        }
+                        kept_edges[k] = Some((key, was));
+                    }
+                    None => {
+                        let start = painter.items.len();
+                        painter.edge(id, edge, &places, routed);
+                        painted += 1;
+                        if kept {
+                            let edge = KeptEdge {
+                                edge: edge.clone(),
+                                routed: routed.cloned(),
+                                ends,
+                                items: start..painter.items.len(),
+                                corner: painter.corners.get(id).copied(),
+                            };
+                            kept_edges[k] = Some((id.clone(), edge));
+                        }
+                    }
+                }
             }
         }
     }
@@ -277,6 +563,12 @@ pub fn build(board: &Board, palette: &Palette, measure: &dyn Measure) -> Scene {
         }
     }
 
+    if let Some(laid) = laid {
+        *laid.palette = Some(*palette);
+        *laid.nodes = kept_nodes.into_iter().flatten().collect();
+        *laid.edges = kept_edges.into_iter().flatten().collect();
+        *laid.painted = painted;
+    }
     let items = painter.items;
     let bounds = items
         .iter()
@@ -379,6 +671,33 @@ fn terminal(end: &End, places: &HashMap<&str, Place<'_>>) -> Option<(Terminal, O
     }
 }
 
+/// The connectors whose two ends are drawn, in id order: each one's
+/// position in `board.edges`, its id, and its ends as the router takes
+/// them.
+fn connectors<'a>(
+    board: &'a Board,
+    places: &HashMap<&str, Place<'_>>,
+) -> (Vec<usize>, Vec<&'a Id>, Vec<Connector>) {
+    let mut positions = Vec::new();
+    let mut ids = Vec::new();
+    let mut connectors = Vec::new();
+    for (k, (id, edge)) in board.edges.iter().enumerate() {
+        let (Some((from, a)), Some((to, b))) =
+            (terminal(&edge.from, places), terminal(&edge.to, places))
+        else {
+            continue;
+        };
+        positions.push(k);
+        ids.push(id);
+        connectors.push(Connector {
+            kind: route::drawn(&edge.route),
+            ends: [from, to],
+            nodes: [a, b],
+        });
+    }
+    (positions, ids, connectors)
+}
+
 /// The route of every connector whose two ends are drawn, routed among
 /// all the node boxes in id order (§3.7), by the connector's position in
 /// `board.edges`.
@@ -388,21 +707,7 @@ fn routes(
     places: &HashMap<&str, Place<'_>>,
 ) -> Vec<Option<Routed>> {
     let rects: Vec<Rect> = boxes.values().copied().collect();
-    let mut positions = Vec::new();
-    let mut connectors = Vec::new();
-    for (k, edge) in board.edges.values().enumerate() {
-        let (Some((from, a)), Some((to, b))) =
-            (terminal(&edge.from, places), terminal(&edge.to, places))
-        else {
-            continue;
-        };
-        positions.push(k);
-        connectors.push(Connector {
-            kind: route::drawn(&edge.route),
-            ends: [from, to],
-            nodes: [a, b],
-        });
-    }
+    let (positions, _, connectors) = connectors(board, places);
     let mut out = vec![None; board.edges.len()];
     for (k, routed) in positions
         .into_iter()
@@ -415,11 +720,11 @@ fn routes(
     out
 }
 
-/// One element in stacking order.
+/// One element in stacking order, with its position among the board's
+/// nodes or connectors.
 #[derive(Clone, Copy)]
 enum Element<'a> {
-    Node(&'a Id, &'a Node),
-    /// A connector, with its position in `board.edges`.
+    Node(&'a Id, &'a Node, usize),
     Edge(&'a Id, &'a Edge, usize),
 }
 
@@ -428,7 +733,7 @@ impl<'a> Element<'a> {
     /// first [`MAX_Z`] bytes), then id, then a node before a connector.
     fn order(&self) -> (&'a [u8], &'a str, bool) {
         match *self {
-            Self::Node(id, node) => crate::z::order(node.z.as_deref(), id, false),
+            Self::Node(id, node, _) => crate::z::order(node.z.as_deref(), id, false),
             Self::Edge(id, edge, _) => crate::z::order(edge.z.as_deref(), id, true),
         }
     }
@@ -524,15 +829,15 @@ impl Layout {
     }
 }
 
-struct Painter<'a> {
+struct Painter<'a, 'b> {
     palette: &'a Palette,
     measure: &'a dyn Measure,
     items: Vec<Item>,
     /// The top-left corner of each connector drawn, for its issue marker.
-    corners: BTreeMap<Id, Point>,
+    corners: HashMap<&'b Id, Point>,
 }
 
-impl Painter<'_> {
+impl<'b> Painter<'_, 'b> {
     fn path(
         &mut self,
         source: &Source,
@@ -689,7 +994,7 @@ impl Painter<'_> {
     /// the end that is.
     fn edge(
         &mut self,
-        id: &Id,
+        id: &'b Id,
         edge: &Edge,
         places: &HashMap<&str, Place<'_>>,
         routed: Option<&Routed>,
@@ -713,8 +1018,7 @@ impl Painter<'_> {
         let heads = edge.heads.each_ref().map(route::has_arrow);
         let drawn = routed.draw(heads);
         let line_box = grow(path_box(&drawn.line), STROKE_WIDTH / 2.0);
-        self.corners
-            .insert(id.clone(), Point::new(line_box.x, line_box.y));
+        self.corners.insert(id, Point::new(line_box.x, line_box.y));
         self.path(&source, drawn.line, None, Some(stroke), line_box);
         let arrows: Vec<Segment> = drawn.heads.into_iter().flatten().collect();
         if !arrows.is_empty() {
@@ -761,7 +1065,7 @@ impl Painter<'_> {
 
     /// A stub out of the end that names a node, ending in a cross stroke,
     /// in the issue colour.
-    fn stub(&mut self, id: &Id, valid: &Terminal, nominal: Side) {
+    fn stub(&mut self, id: &'b Id, valid: &Terminal, nominal: Side) {
         let source = Source::Edge(id.clone());
         let (start, side) = route::leave(valid, nominal);
         let (dx, dy) = match side {
@@ -779,8 +1083,7 @@ impl Painter<'_> {
             Segment::LineTo(Point::new(tip.x + dy * half, tip.y - dx * half)),
         ];
         let bounds = grow(path_box(&segments), STROKE_WIDTH / 2.0);
-        self.corners
-            .insert(id.clone(), Point::new(bounds.x, bounds.y));
+        self.corners.insert(id, Point::new(bounds.x, bounds.y));
         let stroke = Stroke {
             color: self.palette.issue,
             width: STROKE_WIDTH,
