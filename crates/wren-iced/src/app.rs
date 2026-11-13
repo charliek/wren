@@ -171,6 +171,11 @@ pub enum Message {
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
     Reconciled(wren_core::reconcile::ReconcileResult),
     DialogName(String),
+    /// A kind pill of the New note dialog was clicked.
+    DialogNoteKind(wren_core::kind::NoteKind),
+    /// Tab (`false`) or Shift+Tab (`true`) that no widget took: the New
+    /// note dialog steps its kind pills.
+    DialogTab(bool),
     SubmitDialog,
     ConfirmTrash,
     CancelDialog,
@@ -218,6 +223,13 @@ pub enum Message {
     EditorShortcut(
         std::sync::Arc<crate::test_ipc::Request>,
         Option<wren_editor::Intent>,
+    ),
+    /// A board command's shortcut, as the board widget publishes it:
+    /// `Some` only while a board has the keyboard.
+    #[cfg(feature = "smoke-test")]
+    BoardShortcut(
+        std::sync::Arc<crate::test_ipc::Request>,
+        Option<wren_canvas::Command>,
     ),
 }
 
@@ -432,6 +444,14 @@ impl App {
                 request.respond(Ok(self.navigation_snapshot()));
                 return task;
             }
+            #[cfg(feature = "smoke-test")]
+            Message::BoardShortcut(request, command) => {
+                let task = command.map_or_else(Task::none, |command| {
+                    self.update(Message::Board(wren_canvas::Message::Command(command)))
+                });
+                request.respond(Ok(self.navigation_snapshot()));
+                return task;
+            }
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
                 self.apply_theme();
@@ -508,6 +528,8 @@ impl App {
                     dialog.name = name;
                 }
             }
+            Message::DialogNoteKind(kind) => return self.choose_note_kind(kind),
+            Message::DialogTab(reverse) => self.step_note_kind(reverse),
             Message::SubmitDialog => return self.submit_dialog(false),
             Message::ConfirmTrash => return self.submit_dialog(true),
             Message::CancelDialog => {
@@ -877,7 +899,13 @@ impl App {
             iced::event::listen_with(|event, status, _| match event {
                 iced::Event::Keyboard(event) => crate::keys::input(&event)
                     .filter(|input| crate::keys::reaches_app(input, status))
-                    .map(|input| Message::Key(crate::keys::with_status(input, status))),
+                    .map(|input| Message::Key(crate::keys::with_status(input, status)))
+                    .or_else(|| {
+                        (status == iced::event::Status::Ignored)
+                            .then(|| workspace::tab(&event))
+                            .flatten()
+                            .map(Message::DialogTab)
+                    }),
                 _ => None,
             }),
         ];

@@ -13,8 +13,8 @@ use wren_editor::{Placement, Viewport};
 
 use super::board::Surface;
 use super::commands::{
-    item_commands, Command, CommandId, Disposition, Gateway, ItemTarget, ReorderTarget,
-    DEFINITIONS, GROUPS,
+    definitions, item_commands, Command, CommandId, Disposition, Gateway, ItemTarget,
+    ReorderTarget, Scope as CommandScope, GROUPS,
 };
 use super::{App, Message};
 use crate::ellipsis::ellipsis;
@@ -427,10 +427,17 @@ impl App {
         let mut rows = Vec::new();
         match mode {
             Mode::Commands => {
+                // A board's commands are listed only while one is open, and
+                // the Markdown ones are not then (§5.1 rule 8).
+                let board = self.surface() == Surface::Board;
                 for group in GROUPS {
-                    for definition in DEFINITIONS.iter().filter(|definition| {
+                    if board && group == "Markdown" {
+                        continue;
+                    }
+                    for definition in definitions().filter(|definition| {
                         definition.group == group
                             && (self.preferences.boards || !definition.id.boards())
+                            && (board || definition.scope != CommandScope::Board)
                     }) {
                         if fuzzy_score(&query, definition.label).is_none() {
                             continue;
@@ -650,8 +657,7 @@ impl App {
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
                     for id in item_commands(item) {
-                        let definition = DEFINITIONS
-                            .iter()
+                        let definition = definitions()
                             .find(|entry| entry.id == *id)
                             .expect("item command definition");
                         if fuzzy_score(&query, definition.label).is_some() {

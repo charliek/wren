@@ -3,6 +3,7 @@ use std::sync::Arc;
 use iced::widget::text_editor::{Action, Edit, Motion};
 use wren_core::config::Config;
 use wren_core::fs_store::Fault;
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent};
 use wren_core::ops::{Op, Session};
 
@@ -271,7 +272,7 @@ fn a_section_without_groups_is_selectable_but_blocks_note_creation_and_sorting()
     let _ = app.dispatch(Command::Run(CommandId::NewNote));
     assert!(matches!(
         app.dialog.as_ref().unwrap().kind,
-        DialogKind::CreateNote(id) if id == group(&app, "Inbox")
+        DialogKind::CreateNote(id, NoteKind::Markdown) if id == group(&app, "Inbox")
     ));
 }
 
@@ -1591,12 +1592,12 @@ mod columns {
         for (column, create, rename) in [
             (
                 Column::Editor,
-                DialogKind::CreateNote(inbox),
+                DialogKind::CreateNote(inbox, NoteKind::Markdown),
                 ItemRef::Note(first),
             ),
             (
                 Column::Notes,
-                DialogKind::CreateNote(inbox),
+                DialogKind::CreateNote(inbox, NoteKind::Markdown),
                 ItemRef::Note(first),
             ),
             (

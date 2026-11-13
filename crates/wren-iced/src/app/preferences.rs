@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
-use wren_core::keybind::{self, Accel, Keymap, Platform};
+use wren_core::keybind::{self, Accel, Keymap, Layer, Platform};
 use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
@@ -74,6 +74,89 @@ pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool)
     }
 }
 
+/// The keymap layer of a command key; `None` for a key that names none.
+fn layer_of(action: &str) -> Option<Layer> {
+    CommandId::parse(action).map(|id| match id.scope() {
+        Scope::Board => Layer::Board,
+        Scope::App | Scope::Editor => Layer::Base,
+    })
+}
+
+/// Where a focused board sends a key press (§5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoardRoute {
+    /// An app shortcut: the board leaves the key to `App::key_input`.
+    Host,
+    /// A board command: captured and published as the command.
+    Command(wren_canvas::Command),
+    /// Anything else: captured, so it never reaches the columns. It is
+    /// text while a label or the connect query is open, and dropped
+    /// otherwise.
+    Pass,
+}
+
+/// The board's say over its keys, from the same keymap and key reading as
+/// the app's shortcuts. Escape always runs the board's ladder; an input
+/// method's preedit and a held Space are the widget's to see first.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the board widget's key handling takes it")
+)]
+pub(super) type BoardPolicy = std::sync::Arc<
+    dyn Fn(
+            &iced::keyboard::Key,
+            iced::keyboard::key::Physical,
+            iced::keyboard::Modifiers,
+            bool,
+        ) -> BoardRoute
+        + Send
+        + Sync,
+>;
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the board widget's key handling takes it")
+)]
+pub(super) fn board_policy(keymap: &Keymap) -> BoardPolicy {
+    use iced::keyboard::{key::Named, Key};
+    let keymap = keymap.clone();
+    std::sync::Arc::new(move |key, physical, modifiers, repeat| {
+        if matches!(key, Key::Named(Named::Escape)) {
+            return BoardRoute::Pass;
+        }
+        // Bare keys are board triggers, so read the press as `accel` does,
+        // not as `shortcut`, which drops them.
+        crate::keys::accel(key, physical, modifiers).map_or(BoardRoute::Pass, |trigger| {
+            board_route(&keymap, &trigger, repeat)
+        })
+    })
+}
+
+/// Where a focused board sends a press of `trigger`: the base layer's App
+/// commands first, then the board layer. A held key repeats only the
+/// commands that step (§5.1 rule 4).
+pub(super) fn board_route(keymap: &Keymap, trigger: &Accel, repeat: bool) -> BoardRoute {
+    let app = |action: &str| CommandId::parse(action).is_some_and(|id| id.scope() == Scope::App);
+    if keymap.action(trigger).is_some_and(app) {
+        return BoardRoute::Host;
+    }
+    match keymap
+        .board_action(trigger)
+        .and_then(CommandId::parse)
+        .and_then(CommandId::board_command)
+    {
+        Some(command) if !repeat || super::commands::board_repeats(command) => {
+            BoardRoute::Command(command)
+        }
+        _ => BoardRoute::Pass,
+    }
+}
+
+/// Escape with any modifiers, which a focused board never routes.
+fn is_escape(trigger: &Accel) -> bool {
+    trigger.key == "escape"
+}
+
 /// The theme for a picker row: `None` follows the system.
 fn theme_for(id: Option<&str>, mode: SystemMode) -> Theme {
     let appearance = appearance(mode);
@@ -128,11 +211,42 @@ impl Preferences {
     }
 
     fn rebuild_keymap(&mut self) {
-        let (keymap, warnings) = Keymap::build(
-            keybind::default_bindings(Platform::current()),
+        let platform = Platform::current();
+        let (mut keymap, mut warnings) = Keymap::build(
+            keybind::default_bindings(platform)
+                .into_iter()
+                .chain(keybind::default_board_bindings(platform)),
             &self.settings.keybinds,
-            |action| CommandId::parse(action).is_some(),
+            layer_of,
         );
+        // A board binding on a trigger the base layer gives an App command
+        // could never run, since the app's shortcut wins, and neither could
+        // one on Escape, which `board_policy` keeps for the ladder; drop
+        // it, and say so when the user wrote it.
+        let shadowed: Vec<Accel> = keymap
+            .board_bindings()
+            .filter(|(accel, _)| {
+                is_escape(accel) || board_route(&keymap, accel, false) == BoardRoute::Host
+            })
+            .map(|(accel, _)| accel.clone())
+            .collect();
+        for (trigger, action) in &self.settings.keybinds {
+            let action = action.trim();
+            if let Some(accel) = keybind::parse_trigger(trigger)
+                .filter(|accel| shadowed.contains(accel))
+                .filter(|accel| keymap.board_action(accel) == Some(action))
+            {
+                warnings.push(if is_escape(&accel) {
+                    format!("keybind: {trigger:?} is the board's Escape ladder, so it cannot be {action}")
+                } else {
+                    format!(
+                        "keybind: {trigger:?} is {} everywhere, so it cannot be {action} on a board",
+                        keymap.action(&accel).unwrap_or_default()
+                    )
+                });
+            }
+        }
+        keymap.retain_board(|accel, _| !shadowed.contains(accel));
         self.keymap = keymap;
         self.settings.warnings.extend(warnings);
     }
@@ -630,9 +744,7 @@ impl App {
 /// Every bindable action name, for documentation and validation.
 #[cfg(test)]
 pub fn action_names() -> impl Iterator<Item = &'static str> {
-    super::commands::DEFINITIONS
-        .iter()
-        .map(|definition| definition.key)
+    super::commands::definitions().map(|definition| definition.key)
 }
 
 /// The message a default shortcut for `id` produces.
@@ -655,13 +767,257 @@ mod tests {
     #[test]
     fn every_default_binding_names_a_real_command() {
         for platform in [Platform::Mac, Platform::Linux] {
-            for (trigger, action) in keybind::default_bindings(platform) {
+            for (trigger, action) in keybind::default_bindings(platform)
+                .into_iter()
+                .chain(keybind::default_board_bindings(platform))
+            {
                 assert!(
                     action_names().any(|name| name == action),
                     "{trigger} → {action} is not a command"
                 );
             }
         }
+    }
+
+    #[test]
+    fn no_default_board_key_shadows_an_app_command() {
+        // The base layer is read first, so a board default on a trigger the
+        // base layer gives to an App command could never run; one it gives
+        // to an Editor command is inert while a board has the keyboard.
+        for platform in [Platform::Mac, Platform::Linux] {
+            let (keymap, _) = Keymap::build(keybind::default_bindings(platform), &[], layer_of);
+            for (trigger, action) in keybind::default_board_bindings(platform) {
+                assert!(
+                    wren_canvas::Command::parse(action).is_some(),
+                    "{trigger} → {action} is not a board command"
+                );
+                let accel = keybind::parse_trigger(&trigger).unwrap();
+                if let Some(base) = keymap.action(&accel).and_then(CommandId::parse) {
+                    assert_eq!(
+                        base.scope(),
+                        Scope::Editor,
+                        "{trigger} is {} in the base layer",
+                        base.key()
+                    );
+                }
+            }
+        }
+    }
+
+    fn trigger(trigger: &str) -> Accel {
+        keybind::parse_trigger(trigger).unwrap()
+    }
+
+    /// `p` is the app modifier and `m` the editing one, for the platform
+    /// the tests run on.
+    fn modifiers() -> (&'static str, &'static str) {
+        match Platform::current() {
+            Platform::Mac => ("super", "super"),
+            Platform::Linux => ("alt", "ctrl"),
+        }
+    }
+
+    #[test]
+    fn the_app_keymap_keeps_the_0_1_1_base_layer_and_every_board_default() {
+        for platform in [Platform::Mac, Platform::Linux] {
+            let (keymap, warnings) = Keymap::build(
+                keybind::default_bindings(platform)
+                    .into_iter()
+                    .chain(keybind::default_board_bindings(platform)),
+                &[],
+                layer_of,
+            );
+            assert!(warnings.is_empty());
+            let (base, _) = Keymap::build(keybind::default_bindings(platform), &[], |_| {
+                Some(Layer::Base)
+            });
+            assert!(keymap.bindings().eq(base.bindings()), "{platform:?}");
+            let defaults = keybind::default_board_bindings(platform);
+            assert!(keymap
+                .board_bindings()
+                .map(|(accel, action)| (accel.to_string(), action))
+                .eq(defaults
+                    .iter()
+                    .map(|(bound, action)| (trigger(bound).to_string(), *action))));
+        }
+        // What the app loads is that keymap, with nothing dropped.
+        let preferences = Preferences::load(None);
+        assert!(preferences.settings.warnings.is_empty());
+        assert_eq!(
+            preferences.keymap.board_bindings().count(),
+            keybind::default_board_bindings(Platform::current()).len()
+        );
+    }
+
+    #[test]
+    fn a_board_key_goes_to_the_app_the_board_or_the_text_in_that_order() {
+        use wren_board::Dir;
+        use wren_canvas::{Command as C, Grow, Tool};
+        let keymap = Preferences::load(None).keymap;
+        let (p, m) = modifiers();
+        let route = |key: &str, repeat| board_route(&keymap, &trigger(key), repeat);
+        assert_eq!(
+            route("v", false),
+            BoardRoute::Command(C::Tool(Tool::Select))
+        );
+        assert_eq!(route("tab", false), BoardRoute::Command(C::ConnectNext));
+        assert_eq!(route("shift+1", false), BoardRoute::Command(C::ZoomFit));
+        assert_eq!(route("f2", false), BoardRoute::Command(C::EditLabel));
+        // The base layer gives these to editor commands, inert on a board.
+        assert_eq!(
+            route(&format!("{m}+enter"), false),
+            BoardRoute::Command(C::CommitLabel)
+        );
+        assert_eq!(
+            route("alt+up", false),
+            BoardRoute::Command(C::Move(Dir::Up))
+        );
+        // App shortcuts stay the app's.
+        for key in ["p", "n", "shift+p", "bracketleft", "y", "0"] {
+            assert_eq!(
+                route(&format!("{p}+{key}"), false),
+                BoardRoute::Host,
+                "{key}"
+            );
+        }
+        if Platform::current() == Platform::Linux {
+            assert_eq!(route("ctrl+f", false), BoardRoute::Host);
+            assert_eq!(route("ctrl+y", false), BoardRoute::Command(C::Redo));
+        }
+        // Unbound keys are captured as text.
+        assert_eq!(route("k", false), BoardRoute::Pass);
+        assert_eq!(route("shift+k", false), BoardRoute::Pass);
+        assert_eq!(route(&format!("{m}+b"), false), BoardRoute::Pass);
+        // Held keys repeat stepping only.
+        assert_eq!(
+            route("left", true),
+            BoardRoute::Command(C::Select(Dir::Left))
+        );
+        assert_eq!(
+            route("shift+down", true),
+            BoardRoute::Command(C::ExtendSelection(Dir::Down))
+        );
+        assert_eq!(
+            route("alt+right", true),
+            BoardRoute::Command(C::Move(Dir::Right))
+        );
+        assert_eq!(
+            route("alt+shift+right", true),
+            BoardRoute::Command(C::Resize(Grow::Wider))
+        );
+        for key in ["tab", "delete", "backspace", "enter", "v"] {
+            assert_eq!(route(key, true), BoardRoute::Pass, "{key}");
+        }
+    }
+
+    #[test]
+    fn the_board_policy_reads_bare_keys_and_keeps_escape_for_the_ladder() {
+        use iced::keyboard::key::{Code, Named, Physical};
+        use iced::keyboard::{Key, Modifiers};
+        use wren_canvas::{Command as C, Tool};
+        let policy = board_policy(&Preferences::load(None).keymap);
+        let app = match Platform::current() {
+            Platform::Mac => Modifiers::LOGO,
+            Platform::Linux => Modifiers::ALT,
+        };
+        let character = |c: &str, code, modifiers| {
+            policy(
+                &Key::Character(c.into()),
+                Physical::Code(code),
+                modifiers,
+                false,
+            )
+        };
+        let named = |named, code, modifiers| {
+            policy(&Key::Named(named), Physical::Code(code), modifiers, false)
+        };
+        assert_eq!(
+            character("v", Code::KeyV, Modifiers::empty()),
+            BoardRoute::Command(C::Tool(Tool::Select))
+        );
+        assert_eq!(
+            character("a", Code::KeyA, Modifiers::empty()),
+            BoardRoute::Command(C::Tool(Tool::Connector))
+        );
+        // Shift+1 types `!`; the binding names the key.
+        assert_eq!(
+            character("!", Code::Digit1, Modifiers::SHIFT),
+            BoardRoute::Command(C::ZoomFit)
+        );
+        assert_eq!(
+            named(Named::Tab, Code::Tab, Modifiers::empty()),
+            BoardRoute::Command(C::ConnectNext)
+        );
+        assert_eq!(
+            named(Named::Delete, Code::Delete, Modifiers::empty()),
+            BoardRoute::Command(C::Delete)
+        );
+        assert_eq!(character("p", Code::KeyP, app), BoardRoute::Host);
+        assert_eq!(
+            character("k", Code::KeyK, Modifiers::empty()),
+            BoardRoute::Pass
+        );
+        for modifiers in [Modifiers::empty(), Modifiers::CTRL, app] {
+            assert_eq!(
+                named(Named::Escape, Code::Escape, modifiers),
+                BoardRoute::Pass
+            );
+        }
+        assert_eq!(
+            policy(
+                &Key::Named(Named::Tab),
+                Physical::Code(Code::Tab),
+                Modifiers::empty(),
+                true
+            ),
+            BoardRoute::Pass
+        );
+    }
+
+    #[test]
+    fn a_board_binding_on_an_app_key_is_dropped_and_a_user_one_warns() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let (p, m) = modifiers();
+        std::fs::write(
+            &path,
+            format!(
+                "keybind = {p}+n = board.delete\nkeybind = {m}+b = board.duplicate\nkeybind = {m}+d = note.rename\nkeybind = x = board.delete\nkeybind = escape = board.select.all\nkeybind = shift+escape = board.copy\n"
+            ),
+        )
+        .unwrap();
+        let preferences = Preferences::load(Some(path));
+        let keymap = &preferences.keymap;
+        let warnings = &preferences.settings.warnings;
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(
+            warnings[0].contains("note.new") && warnings[0].contains("board.delete"),
+            "{warnings:?}"
+        );
+        // Escape is the ladder's with any modifiers, so these never run.
+        assert!(
+            warnings[1].contains("\"escape\" is the board's Escape ladder")
+                && warnings[1].contains("board.select.all"),
+            "{warnings:?}"
+        );
+        assert!(warnings[2].contains("\"shift+escape\""), "{warnings:?}");
+        assert_eq!(keymap.board_action(&trigger("escape")), None);
+        assert_eq!(keymap.board_action(&trigger("shift+escape")), None);
+        assert_eq!(keymap.board_action(&trigger(&format!("{p}+n"))), None);
+        assert_eq!(keymap.action(&trigger(&format!("{p}+n"))), Some("note.new"));
+        // An editor command's key is free on a board.
+        assert_eq!(
+            keymap.board_action(&trigger(&format!("{m}+b"))),
+            Some("board.duplicate")
+        );
+        // A default the user's own app binding covers goes quietly.
+        assert_eq!(keymap.board_action(&trigger(&format!("{m}+d"))), None);
+        assert_eq!(
+            keymap.accel("board.duplicate"),
+            Some(&trigger(&format!("{m}+b")))
+        );
+        assert_eq!(keymap.board_action(&trigger("x")), Some("board.delete"));
+        assert_eq!(keymap.accel("board.delete"), Some(&trigger("x")));
     }
 
     #[test]
@@ -887,7 +1243,7 @@ mod tests {
         let (keymap, warnings) = Keymap::build(
             keybind::default_bindings(Platform::current()),
             &user,
-            |action| CommandId::parse(action).is_some(),
+            layer_of,
         );
         assert!(warnings.is_empty());
         let policy = key_policy(&keymap, true);

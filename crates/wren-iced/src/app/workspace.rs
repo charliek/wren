@@ -140,11 +140,28 @@ impl EffectBefore {
     }
 }
 
+/// Whether `event` presses Tab (`Some(false)`) or Shift+Tab
+/// (`Some(true)`) with no other modifier.
+pub(super) fn tab(event: &iced::keyboard::Event) -> Option<bool> {
+    use iced::keyboard::{key::Named, Event, Key};
+    match event {
+        Event::KeyPressed {
+            key: Key::Named(Named::Tab),
+            modifiers,
+            ..
+        } if !(modifiers.control() || modifiers.alt() || modifiers.logo()) => {
+            Some(modifiers.shift())
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogKind {
     CreateSection,
     CreateGroup(SectionId),
-    CreateNote(GroupId),
+    /// A note of the kind the dialog's pills choose, which it opens on.
+    CreateNote(GroupId, NoteKind),
     Rename(ItemRef),
     Delete(ItemRef),
 }
@@ -375,10 +392,10 @@ impl App {
                     Event::Created(ItemRef::Group(_)),
                 ) => expected == section,
                 (
-                    DialogKind::CreateNote(expected),
-                    Op::CreateNote { group, .. },
+                    DialogKind::CreateNote(expected, expected_kind),
+                    Op::CreateNote { group, kind, .. },
                     Event::Created(ItemRef::Note(_)),
-                ) => expected == group,
+                ) => expected == group && expected_kind == kind,
                 _ => false,
             })
         });
@@ -1000,7 +1017,7 @@ impl App {
         self.cancel_gestures();
         self.palette = None;
         let name = match kind {
-            DialogKind::CreateNote(_) => wren_core::ops::dated_title(),
+            DialogKind::CreateNote(..) => wren_core::ops::dated_title(),
             DialogKind::Rename(target) => self.item_name(target).unwrap_or_default().into(),
             _ => String::new(),
         };
@@ -1008,7 +1025,7 @@ impl App {
             kind,
             DialogKind::CreateSection
                 | DialogKind::CreateGroup(_)
-                | DialogKind::CreateNote(_)
+                | DialogKind::CreateNote(..)
                 | DialogKind::Rename(_)
         );
         self.dialog = Some(Dialog {
@@ -1023,6 +1040,43 @@ impl App {
         }
     }
 
+    /// The New note dialog's kind, when it offers the choice: only with
+    /// the `boards` setting on (§5.4).
+    fn note_kind_mut(&mut self) -> Option<&mut NoteKind> {
+        if !self.preferences.boards {
+            return None;
+        }
+        match &mut self.dialog {
+            Some(Dialog {
+                kind: DialogKind::CreateNote(_, kind),
+                ..
+            }) => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// A kind pill was clicked. The click took the keyboard from the name
+    /// field, so hand it back.
+    pub(super) fn choose_note_kind(&mut self, chosen: NoteKind) -> Task<Message> {
+        let Some(kind) = self.note_kind_mut() else {
+            return Task::none();
+        };
+        *kind = chosen;
+        iced::widget::operation::focus("item-name")
+    }
+
+    /// Tab or Shift+Tab in the New note dialog: the next or previous kind,
+    /// wrapping. Anywhere else such a Tab does nothing.
+    pub(super) fn step_note_kind(&mut self, reverse: bool) {
+        let Some(kind) = self.note_kind_mut() else {
+            return;
+        };
+        let kinds = NoteKind::ALL;
+        let at = kinds.iter().position(|each| each == kind).unwrap_or(0);
+        let step = if reverse { kinds.len() - 1 } else { 1 };
+        *kind = kinds[(at + step) % kinds.len()];
+    }
+
     pub(super) fn submit_dialog(&mut self, confirm_trash: bool) -> Task<Message> {
         let Some(dialog) = &self.dialog else {
             return Task::none();
@@ -1034,10 +1088,10 @@ impl App {
         let op = match dialog.kind {
             DialogKind::CreateSection => Op::CreateSection { name },
             DialogKind::CreateGroup(section) => Op::CreateGroup { section, name },
-            DialogKind::CreateNote(group) => Op::CreateNote {
+            DialogKind::CreateNote(group, kind) => Op::CreateNote {
                 group,
                 title: name,
-                kind: NoteKind::Markdown,
+                kind,
             },
             DialogKind::Rename(target) => Op::Rename {
                 target,
@@ -1511,7 +1565,7 @@ mod tests {
             let dialog = match kind {
                 0 => DialogKind::CreateSection,
                 1 => DialogKind::CreateGroup(section),
-                _ => DialogKind::CreateNote(group),
+                _ => DialogKind::CreateNote(group, NoteKind::Markdown),
             };
             let _ = app.show_dialog(dialog);
             app.dialog.as_mut().unwrap().name = "Created".into();
@@ -1563,7 +1617,7 @@ mod tests {
             let dialog = match kind {
                 0 => DialogKind::CreateSection,
                 1 => DialogKind::CreateGroup(app.selected_section.unwrap()),
-                _ => DialogKind::CreateNote(app.selected_group.unwrap()),
+                _ => DialogKind::CreateNote(app.selected_group.unwrap(), NoteKind::Markdown),
             };
             let _ = app.show_dialog(dialog);
             app.dialog.as_mut().unwrap().name = "Created".into();
