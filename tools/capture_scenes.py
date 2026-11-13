@@ -14,7 +14,9 @@ just the editor scenes: the Markdown tour, the headings note, the long list
 items, and all three again with the browser columns folded so the editor is
 wider than its column. `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
-scenes, writing `board-flow.svg` beside them.
+scenes, writing `board-flow.svg` beside them; the last of them select, drag
+a marquee, arm a tool, open a label and make an empty board, through the
+harness's `board.*` requests.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -305,7 +307,70 @@ def board_scenes(client, shot_here, out: Path) -> None:
     client.call("dialog.name", {"name": "Release plan"})
     shot_here("board-new-dialog")
     client.call("dialog.close")
+    board_edit_scenes(client, shot_here, open_board)
     client.call("column.open", {"column": "sections"})
+
+
+def board_edit_scenes(client, shot_here, open_board) -> None:
+    """discovery/boards.md §6.3, Phase 2: what editing draws over a board.
+    These change the board, so they come last."""
+    pack, receive = "3qrg4kv1", "12axfsny"
+
+    def key(name: str, *mods: str) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods)})
+
+    def pointer(kind: str, at: dict | None = None, mods: tuple[str, ...] = ()) -> dict:
+        params = {"kind": kind, "button": "left", "mods": list(mods)}
+        if at is not None:
+            params["at"] = at
+        return client.call("board.pointer", params)
+
+    def focused():
+        wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+                 description="the board focused")
+
+    open_board("Checkout flow")
+    focused()
+    client.call("command.run", {"id": "board.zoom.fit"})
+    # One node selected: its outline and eight handles.
+    pointer("click", {"node": pack})
+    focused()
+    shot_here("board-selected")
+    # The cursor ring: the selection cleared, the cursor kept, and then
+    # two selected with the cursor on the second.
+    key("escape")
+    shot_here("board-cursor")
+    pointer("click", {"node": receive})
+    pointer("click", {"node": pack}, ("shift",))
+    shot_here("board-multiple")
+    key("escape")
+    # A marquee being dragged from empty canvas.
+    placed = client.call("board.bounds")
+    box = next(node["bounds"] for node in placed["nodes"] if node["id"] == receive)
+    view, root = placed["viewport"], placed["root"]
+    corner = [view["x"] + (box["x"] - 30 - root["x"]) / view["zoom"],
+              view["y"] + (box["y"] - 30 - root["y"]) / view["zoom"]]
+    pointer("press", {"canvas": corner})
+    pointer("move", {"canvas": [corner[0] + 120, corner[1] + 200]})
+    pointer("move", {"canvas": [corner[0] + 260, corner[1] + 330]})
+    shot_here("board-marquee")
+    pointer("release")
+    key("escape")
+    # An armed tool's mode chip.
+    key("d")
+    shot_here("board-armed")
+    key("escape")
+    # A label open, its text replaced and the caret after it.
+    pointer("double_click", {"node": pack})
+    client.call("board.type", {"text": "Pack the order"})
+    shot_here("board-editing")
+    key("escape")
+    # A new board: empty, with the hint.
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Empty board"})
+    client.call("dialog.submit")
+    focused()
+    shot_here("board-empty-hint")
 
 
 def main() -> int:

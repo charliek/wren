@@ -171,9 +171,15 @@ ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
 board scenes: `board-flow` (fitted), `board-zoom-in` (200 %),
 `board-zoom-out` (25 %), `board-shapes`, `board-overlap`, `board-raw` (a
 board with conflict markers, shown as text under its banner),
-`board-notes-list` (the kind icon), `board-search` (a label hit) and
-`board-wide` (columns folded), with `board-flow.svg` beside them. Shoot
-them on both renderers in both themes:
+`board-notes-list` (the kind icon), `board-search` (a label hit),
+`board-wide` (columns folded) and `board-new-dialog` (the kind pills), with
+`board-flow.svg` beside them; then what editing draws over a board:
+`board-selected` (one node and its handles), `board-cursor` (the cursor
+ring with nothing selected), `board-multiple` (two selected, the ring on
+the second), `board-marquee` (a marquee being dragged), `board-armed` (the
+mode chip), `board-editing` (a label open, with its caret) and
+`board-empty-hint` (a new board). Shoot them on both renderers in both
+themes:
 
 ```bash
 for r in tiny-skia wgpu; do for t in dark light; do

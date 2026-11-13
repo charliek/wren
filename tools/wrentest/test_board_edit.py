@@ -419,3 +419,22 @@ def test_reloading_saved_bytes_and_a_no_op_writes_nothing(samples: Path) -> None
         time.sleep(1.0)
         flushed(app)
         assert stamp(flow) == before and not dirty(app)
+
+
+def test_a_label_being_typed_is_found_by_search(samples: Path) -> None:
+    """§3.4 rule 7: the index takes the open board's labels once its draft
+    rests, and an open search refreshes by itself."""
+    with board_app(samples, "board-edit-search") as app:
+        ready(app)
+        click(app, {"node": PACK})
+        key(app, "enter")
+        type_text(app, "Quokka")
+        app.client.call("palette.open", {"mode": "search"})
+
+        def found():
+            modal = app.client.call("palette.query", {"query": "quokka"})["navigation"]["modal"]
+            return [row for row in modal["results"] if row["path"] == FLOW]
+
+        rows = wait_for(found, timeout=5, interval=0.1, description="the typed label found")
+        assert "Quokka" in rows[0]["snippet"], rows
+        app.client.call("palette.close")

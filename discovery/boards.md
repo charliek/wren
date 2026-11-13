@@ -918,7 +918,7 @@ SNAPSHOT = {"enabled": true, "surface": "board|raw|text"|null, "note": 7, "read_
 | Phase | Scenes |
 |---|---|
 | 1 | `board-flow` (fit to view), `board-zoom-in` (200 %), `board-zoom-out` (25 %), `board-shapes` (placeholder and stub visible), `board-overlap`, `board-raw` (conflict markers, banner), `board-notes-list` (kind icon), `board-search` (label hit), `board-wide` (columns folded), and `board-flow.svg` written beside the PNG |
-| 2 | `board-new-dialog` (kind pills), `board-selected` (handles and cursor ring), `board-marquee`, `board-editing` (label editor open), `board-armed` (mode chip), `board-connecting` (keyboard target and query), `board-edges` (arrowheads, dashes, labels, both routes), `board-built` (the flowchart the acceptance script produced) |
+| 2 | `board-new-dialog` (kind pills), `board-selected` (handles), `board-cursor` (the cursor ring alone), `board-multiple` (two selected, the ring on the cursor), `board-marquee`, `board-editing` (label editor open), `board-armed` (mode chip), `board-empty-hint`, `board-connecting` (keyboard target and query), `board-edges` (arrowheads, dashes, labels, both routes), `board-built` (the flowchart the acceptance script produced) |
 | 3 | `board-colors` (every colour at every fill level), `board-stacking`, `board-actions`, `board-jump`, and `board-flow.png` from the PNG exporter beside the window capture |
 
 ### 6.4 What is tested and what can be seen, by phase
