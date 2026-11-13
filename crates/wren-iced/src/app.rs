@@ -449,8 +449,11 @@ impl App {
             }
             #[cfg(feature = "smoke-test")]
             Message::BoardShortcut(request, command) => {
+                let epoch = self.board.as_ref().map_or(0, wren_canvas::BoardView::epoch);
                 let task = command.map_or_else(Task::none, |command| {
-                    self.update(Message::Board(wren_canvas::Message::Command(command)))
+                    self.update(Message::Board(wren_canvas::Message::Command(
+                        epoch, command,
+                    )))
                 });
                 request.respond(Ok(self.navigation_snapshot()));
                 return task;

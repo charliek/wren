@@ -114,8 +114,8 @@ impl App {
         };
         match &message {
             Sent::Resized { .. } => {}
-            Sent::Command(command) => {
-                if held {
+            Sent::Command(epoch, command) => {
+                if held || *epoch != view.epoch() {
                     return Task::none();
                 }
                 let id = super::commands::CommandId::Board(*command);

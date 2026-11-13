@@ -1095,7 +1095,7 @@ mod tests {
         assert_eq!(
             sent.messages,
             [
-                Message::Command(Command::Delete),
+                Message::Command(view.epoch(), Command::Delete),
                 Message::Input(view.epoch(), Input::Focus(true))
             ]
         );
@@ -1215,7 +1215,10 @@ mod tests {
             })
         };
         let sent = send(&mut view, &mut state, enter(false), ON_A);
-        assert_eq!(sent.messages, [Message::Command(Command::EditLabel)]);
+        assert_eq!(
+            sent.messages,
+            [Message::Command(view.epoch(), Command::EditLabel)]
+        );
         assert_eq!(view.machine().state(), Surface::Editing);
         // Held: its repeats are taken and do nothing to the label.
         for _ in 0..3 {
@@ -1440,7 +1443,10 @@ mod tests {
         // With the composition over, Tab is the board's again.
         let tab = key(Key::Named(Named::Tab), plain, Some("\t"));
         let sent = send(&mut view, &mut state, tab, ON_A);
-        assert_eq!(sent.messages, [Message::Command(Command::ConnectNext)]);
+        assert_eq!(
+            sent.messages,
+            [Message::Command(view.epoch(), Command::ConnectNext)]
+        );
         // It commits the label and builds the next shape, whose own label
         // opens empty (§5.9 rules 1 and 4).
         assert!(view.board().nodes.values().any(|node| node.text == "A日本"));

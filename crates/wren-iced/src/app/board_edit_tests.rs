@@ -92,7 +92,8 @@ fn start_free_text(app: &mut App) {
 /// `dispatch` made of it is the disposition.
 fn key(app: &mut App, command: C) -> Disposition {
     let serial = app.action_serial;
-    let _ = app.update(Message::Board(Sent::Command(command)));
+    let epoch = view(app).epoch();
+    let _ = app.update(Message::Board(Sent::Command(epoch, command)));
     assert_ne!(app.action_serial, serial, "the key went through dispatch");
     app.last_processed.as_ref().unwrap().disposition
 }
@@ -283,8 +284,8 @@ fn a_board_under_an_overlay_takes_only_what_looks_or_ends() {
         let epoch = view(app).epoch();
         let before = view(app).viewport();
         for message in [
-            Sent::Command(C::Move(Dir::Right)),
-            Sent::Command(C::SelectNone),
+            Sent::Command(epoch, C::Move(Dir::Right)),
+            Sent::Command(epoch, C::SelectNone),
             Sent::Input(epoch, press),
             Sent::Input(epoch, Input::Space { held: true }),
             Sent::Label(epoch, wren_canvas::LabelAction::Insert("x".into())),
@@ -365,6 +366,10 @@ fn input_for_another_board_or_an_earlier_one_is_dropped() {
         let _ = app.update(Message::Board(Sent::Input(flow, step)));
     }
     let _ = app.update(Message::Board(Sent::Pasted(flow, "stale".into())));
+    // A key meant for the first board, pasting into this one.
+    let serial = app.action_serial;
+    let _ = app.update(Message::Board(Sent::Command(flow, C::Paste)));
+    assert_eq!(app.action_serial, serial, "a stale key reaches no command");
     assert!(view(&app).board().nodes.is_empty());
     assert_eq!(app.column, Column::Notes);
     assert_eq!(app.board_revision, 0);
@@ -395,7 +400,7 @@ fn input_for_another_board_or_an_earlier_one_is_dropped() {
     // With no board open a message has nowhere to go.
     open_markdown(&mut app, "Note");
     let serial = app.action_serial;
-    let _ = app.update(Message::Board(Sent::Command(C::SelectAll)));
+    let _ = app.update(Message::Board(Sent::Command(1, C::SelectAll)));
     assert_eq!(app.action_serial, serial);
     assert_in_step(&app, Surface::Text);
 }
@@ -894,7 +899,7 @@ fn what_a_board_may_do_is_decided_again_whenever_its_text_changes_underneath() {
     assert_in_step(&app, Surface::Raw);
     assert!(!app.command_enabled(moves));
     let serial = app.action_serial;
-    let _ = app.update(Message::Board(Sent::Command(C::SelectAll)));
+    let _ = app.update(Message::Board(Sent::Command(epoch, C::SelectAll)));
     let _ = app.update(Message::Board(Sent::Pasted(epoch, "pasted".into())));
     assert_eq!(app.action_serial, serial);
     assert_eq!(session_text(&app), broken);

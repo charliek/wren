@@ -203,7 +203,7 @@ impl BoardView {
 }
 pub fn revealing(viewport: Viewport, size: (f32, f32), bounds: Rect) -> Viewport;   // §5.7 rule 5
 pub enum Message { Input(u64 /* epoch */, Input), Resized { width: f32, height: f32 },
-                   Label(u64, LabelAction), Command(Command), Pasted(u64, String) }
+                   Label(u64, LabelAction), Command(u64, Command), Pasted(u64, String) }
 pub struct Update { pub changed: bool, pub effects: Vec<Effect> }   // Default: unchanged, no effect
 pub enum Effect { Look(Viewport) /* applied by update itself */, ClipboardWrite(String), ClipboardRead, OpenActions, OpenJump, Notice(String) }
 pub enum KeyRoute { Host, Command(Command), Pass }

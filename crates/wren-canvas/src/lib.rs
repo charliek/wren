@@ -255,9 +255,10 @@ pub enum Message {
     Resized { width: f32, height: f32 },
     /// An edit of the open label, stamped with the epoch it was meant for.
     Label(u64, LabelAction),
-    /// A key the board layer binds. The host runs it through its own
-    /// command path, which reaches [`BoardView::command`].
-    Command(Command),
+    /// A key the board layer binds, stamped with the epoch it was meant
+    /// for. The host runs it through its own command path, which reaches
+    /// [`BoardView::command`], unless the board has changed since.
+    Command(u64, Command),
     /// The clipboard's text, read for an [`Effect::ClipboardRead`] and
     /// stamped with the epoch of the view that asked. It goes to what asked,
     /// the open label or the board, and is dropped if that has gone.
@@ -656,8 +657,13 @@ impl BoardView {
                     }
                 }
             }
-            Message::Command(command) => return self.command(command, now),
-            Message::Input(..) | Message::Label(..) | Message::Pasted(..) => {}
+            Message::Command(epoch, command) if epoch == self.epoch => {
+                return self.command(command, now);
+            }
+            Message::Input(..)
+            | Message::Label(..)
+            | Message::Command(..)
+            | Message::Pasted(..) => {}
         }
         update
     }
@@ -782,7 +788,7 @@ impl BoardView {
             outs.into_iter()
                 .map(|out| match out {
                     keys::Out::Input(input) => Message::Input(epoch, input),
-                    keys::Out::Command(command) => Message::Command(command),
+                    keys::Out::Command(command) => Message::Command(epoch, command),
                     keys::Out::Label(action) => Message::Label(epoch, action),
                 })
                 .collect(),
@@ -4024,9 +4030,10 @@ z = "c"
         assert_eq!(press(&view, r(), Modifiers::ALT, None), None);
         assert_eq!(
             press(&view, r(), Modifiers::empty(), Some("r")),
-            Some(vec![Message::Command(Command::Tool(Tool::Shape(
-                Shape::Rect
-            )))])
+            Some(vec![Message::Command(
+                view.epoch(),
+                Command::Tool(Tool::Shape(Shape::Rect))
+            )])
         );
         // Escape has no rung to act on yet, so it is the host's.
         let escape = || Pressed::Named(Named::Escape);
