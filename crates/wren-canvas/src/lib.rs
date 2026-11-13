@@ -712,8 +712,83 @@ impl BoardView {
         self.key_policy = Some(policy);
     }
 
-    pub(crate) fn key_policy(&self) -> Option<&KeyPolicy> {
-        self.key_policy.as_ref()
+    /// What the focused board makes of a press of `key`, which typed
+    /// `text` (§5.1): `None` when the key is the host's, else what the
+    /// board sends for it in order, which is nothing for a key that only
+    /// must not reach the host. `held_from_before` is whether the key went
+    /// down before the open label opened, as the Enter that opens one did.
+    /// The widget asks this for every key it is given; a host that delivers
+    /// keys itself, as a test harness does, asks the same.
+    pub fn key(
+        &self,
+        key: &iced::keyboard::Key,
+        physical: iced::keyboard::key::Physical,
+        modifiers: iced::keyboard::Modifiers,
+        text: Option<&str>,
+        repeat: bool,
+        held_from_before: bool,
+    ) -> Option<Vec<Message>> {
+        let context = keys::Context {
+            editing: self.machine.editing().is_some(),
+            composing: self
+                .label
+                .as_ref()
+                .is_some_and(|label| label.preedit().is_some()),
+            escapes: self.machine.escapes(),
+            held_from_before,
+            policy: self.key_policy.as_ref(),
+        };
+        let keys::Keyed::Take(outs) = keys::route(key, physical, modifiers, text, repeat, context)
+        else {
+            return None;
+        };
+        let epoch = self.epoch;
+        Some(
+            outs.into_iter()
+                .map(|out| match out {
+                    keys::Out::Input(input) => Message::Input(epoch, input),
+                    keys::Out::Command(command) => Message::Command(command),
+                    keys::Out::Label(action) => Message::Label(epoch, action),
+                })
+                .collect(),
+        )
+    }
+
+    /// Apply `intents` in order as one undo unit, each planned on the board
+    /// the ones before it left, with new ids drawn from `ids`: how a host
+    /// arranges a board without the pointer or the keys (the test harness's
+    /// `board.apply`, §6.2). A label open or a gesture in flight is settled
+    /// first, as its own unit. Nothing is selected or opened by it, and
+    /// what it removes leaves the selection. An intent the board refuses
+    /// refuses them all, with its notice among the effects, and changes
+    /// nothing.
+    pub fn apply(
+        &mut self,
+        intents: &[Intent],
+        ids: &mut dyn wren_board::ids::Ids,
+        now: Instant,
+    ) -> Update {
+        let mut update = self.settle(now);
+        let mut board = self.board.clone();
+        for intent in intents {
+            let plan = edit::plan(&board, intent, ids);
+            if let (true, Some(notice)) = (plan.is_empty(), plan.notice) {
+                update.effects.push(Effect::Notice(notice));
+                return update;
+            }
+            board.apply(&plan.changes);
+        }
+        if wren_board::write(&board) == wren_board::write(&self.board) {
+            return update;
+        }
+        self.history.break_run();
+        self.history.record(self.snapshot(), Unit::One, now);
+        self.board = board;
+        self.issues = wren_board::check(&self.board);
+        self.build();
+        self.machine.retain(&self.board);
+        update.changed = true;
+        update
     }
 
     /// Which board the view's input is for; see [`Message::Input`]. No two
@@ -3737,5 +3812,162 @@ z = "c"
         );
         input(&mut view, RELEASE, now);
         assert!(view.pristine());
+    }
+
+    /// A source that hands out the ids it is given, in order.
+    struct Given(Vec<&'static str>);
+
+    impl wren_board::ids::Ids for Given {
+        fn draw(&mut self) -> Id {
+            id(self.0.remove(0))
+        }
+    }
+
+    #[test]
+    fn applied_intents_are_one_step_with_the_given_ids_and_select_nothing() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click_node(&mut view, "a", now);
+        let intents = [
+            Intent::AddNode {
+                kind: NodeKind::Shape,
+                shape: Shape::Diamond,
+                at: [0, 200],
+                size: [120, 60],
+                from: None,
+            },
+            Intent::SetText {
+                id: id("n9"),
+                text: "Nine".to_owned(),
+                size: [120, 60],
+            },
+            Intent::AddEdge {
+                from: edit::Endpoint::Node {
+                    node: id("a"),
+                    side: None,
+                },
+                to: edit::Endpoint::Node {
+                    node: id("n9"),
+                    side: None,
+                },
+            },
+            Intent::Delete { ids: vec![id("b")] },
+        ];
+        let update = view.apply(&intents, &mut Given(vec!["n9", "e9"]), now);
+        assert_eq!(update, CHANGED);
+        let board = view.board();
+        assert_eq!(board.nodes[&id("n9")].text, "Nine");
+        assert_eq!(board.nodes[&id("n9")].shape, Named::Known(Shape::Diamond));
+        assert!(board.edges.contains_key(&id("e9")));
+        // The connector from `a` to `b` went with `b`.
+        assert!(!board.nodes.contains_key(&id("b")) && !board.edges.contains_key(&id("e")));
+        // The selection is the user's: nothing new is in it, and no label
+        // opened.
+        assert_eq!(selected(&view), ["a"]);
+        assert!(view.label().is_none());
+        assert_eq!(view.machine().state(), machine::State::Idle);
+
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine());
+        assert_eq!(view.draft(), TWO);
+        assert!(!view.can_undo());
+    }
+
+    #[test]
+    fn applying_settles_first_and_a_refused_intent_changes_nothing() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        click_node(&mut view, "a", now);
+        view.command(Command::EditLabel, now);
+        view.update(
+            Message::Label(view.epoch(), LabelAction::Insert("Typed".to_owned())),
+            now,
+        );
+        let moved = [Intent::Move {
+            ids: vec![id("b")],
+            by: [20, 0],
+        }];
+        assert_eq!(view.apply(&moved, &mut Given(Vec::new()), now), CHANGED);
+        // The label was committed as a step of its own.
+        assert!(view.label().is_none());
+        assert_eq!(view.board().nodes[&id("a")].text, "Typed");
+        assert_eq!(view.board().nodes[&id("b")].at, [320, 0]);
+        travel(&mut view, Command::Undo, now);
+        assert_eq!(view.board().nodes[&id("a")].text, "Typed");
+        assert_eq!(view.board().nodes[&id("b")].at, [300, 0]);
+
+        // Nothing to change is no step.
+        let still = [Intent::Move {
+            ids: vec![id("b")],
+            by: [0, 0],
+        }];
+        assert_eq!(
+            view.apply(&still, &mut Given(Vec::new()), now),
+            Update::default()
+        );
+
+        // A read-only board refuses every intent, and says why.
+        let mut future = sized(fixtures::FUTURE);
+        let update = future.apply(&moved, &mut Given(Vec::new()), now);
+        assert!(!update.changed);
+        assert!(
+            matches!(update.effects.as_slice(), [Effect::Notice(_)]),
+            "{update:?}"
+        );
+        assert!(future.pristine() && !future.can_undo());
+    }
+
+    #[test]
+    fn a_key_is_what_the_widget_would_send_for_it() {
+        use iced::keyboard::key::{Code, Named, Physical};
+        use iced::keyboard::{Key as Pressed, Modifiers};
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        view.set_key_policy(std::sync::Arc::new(|key, _, modifiers, _| {
+            match key.as_ref() {
+                _ if modifiers.alt() => KeyRoute::Host,
+                Pressed::Character("r") => {
+                    KeyRoute::Command(Command::Tool(Tool::Shape(Shape::Rect)))
+                }
+                Pressed::Named(Named::Enter) => KeyRoute::Command(Command::EditLabel),
+                _ => KeyRoute::Pass,
+            }
+        }));
+        let physical = Physical::Code(Code::KeyR);
+        let press = |view: &BoardView, key: Pressed, modifiers, text| {
+            view.key(&key, physical, modifiers, text, false, false)
+        };
+        let r = || Pressed::Character("r".into());
+        assert_eq!(press(&view, r(), Modifiers::ALT, None), None);
+        assert_eq!(
+            press(&view, r(), Modifiers::empty(), Some("r")),
+            Some(vec![Message::Command(Command::Tool(Tool::Shape(
+                Shape::Rect
+            )))])
+        );
+        // Escape has no rung to act on yet, so it is the host's.
+        let escape = || Pressed::Named(Named::Escape);
+        assert_eq!(press(&view, escape(), Modifiers::empty(), None), None);
+        click_node(&mut view, "a", now);
+        let epoch = view.epoch();
+        assert_eq!(
+            press(&view, escape(), Modifiers::empty(), None),
+            Some(vec![Message::Input(
+                epoch,
+                Input::Key {
+                    key: Key::Escape,
+                    repeat: false
+                }
+            )])
+        );
+        // In a label the same letter is text.
+        view.command(Command::EditLabel, now);
+        assert_eq!(
+            press(&view, r(), Modifiers::empty(), Some("r")),
+            Some(vec![Message::Label(
+                epoch,
+                LabelAction::Insert("r".to_owned())
+            )])
+        );
     }
 }
