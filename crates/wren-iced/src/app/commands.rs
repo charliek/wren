@@ -22,6 +22,7 @@ pub enum CommandId {
     NewGroup,
     NewNote,
     NewDatedNote,
+    NewBoard,
     RenameNote,
     RenameGroup,
     RenameSection,
@@ -135,6 +136,7 @@ definitions![
         "This note",
         App
     ),
+    (NewBoard, "note.new_board", "New board…", "This note", App),
     (RenameNote, "note.rename", "Rename note…", "This note", App),
     (DeleteNote, "note.delete", "Delete note…", "This note", App),
     (RevealNote, "note.reveal", REVEAL_NOTE, "This note", App),
@@ -643,7 +645,7 @@ impl CommandId {
     /// Whether the command exists only while the `boards` setting is on:
     /// with it off it is not listed anywhere.
     pub fn boards(self) -> bool {
-        matches!(self, Self::ExportSvg | Self::Board(_))
+        matches!(self, Self::ExportSvg | Self::NewBoard | Self::Board(_))
     }
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -788,6 +790,9 @@ impl App {
             | RevealGroup | MoveGroup | ReorderGroup => {
                 self.selected_group.is_some() && self.session.is_some()
             }
+            NewBoard => {
+                self.preferences.boards && self.selected_group.is_some() && self.session.is_some()
+            }
             RenameNote | DeleteNote | RevealNote | MoveNote => self.selected_note.is_some(),
             // The find bar searches the editor's text and the outline reads
             // its Markdown headings: neither has anything to show for a
@@ -834,8 +839,11 @@ impl App {
         match command {
             Command::Run(id) => {
                 if !self.command_enabled(id) {
-                    let needs_group = matches!(id, CommandId::NewNote | CommandId::NewDatedNote)
-                        && self.selected_section.is_some();
+                    let needs_group = matches!(
+                        id,
+                        CommandId::NewNote | CommandId::NewDatedNote | CommandId::NewBoard
+                    ) && self.selected_section.is_some()
+                        && self.selected_group.is_none();
                     return self.blocked(if needs_group {
                         "Create a group first; notes live in groups"
                     } else {
@@ -952,8 +960,13 @@ impl App {
             NewGroup => self.command_dialog(DialogKind::CreateGroup(
                 self.selected_section.expect("enabled section"),
             )),
-            NewNote => self.command_dialog(DialogKind::CreateNote(
+            NewNote | NewBoard => self.command_dialog(DialogKind::CreateNote(
                 self.selected_group.expect("enabled group"),
+                if id == NewBoard {
+                    NoteKind::Board
+                } else {
+                    NoteKind::Markdown
+                },
             )),
             NewDatedNote => {
                 let outcome = self.process_core(Op::CreateNote {

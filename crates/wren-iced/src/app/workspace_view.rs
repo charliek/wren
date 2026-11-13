@@ -1097,6 +1097,33 @@ impl App {
         row.into()
     }
 
+    /// The New note dialog's choice of kind, which Tab steps through
+    /// while the name field keeps the keyboard.
+    fn kind_pills(&self, chosen: NoteKind) -> Element<'_, Message> {
+        let definition = self.definition;
+        let mut pills = row![].spacing(6).align_y(iced::Center);
+        for (kind, label) in [(NoteKind::Markdown, "Markdown"), (NoteKind::Board, "Board")] {
+            let selected = kind == chosen;
+            pills = pills.push(
+                button(text(label).size(12))
+                    .on_press(Message::DialogNoteKind(kind))
+                    .padding([4, 12])
+                    .style(move |_, status| button::Style {
+                        border: Border {
+                            radius: 999.0.into(),
+                            ..chrome::control(definition, status, selected, false).border
+                        },
+                        ..chrome::control(definition, status, selected, false)
+                    }),
+            );
+        }
+        pills
+            .push(iced::widget::space::horizontal())
+            .push(chrome::keycap("Tab", definition))
+            .push(chrome::label("to switch", 11, definition.colors.muted))
+            .into()
+    }
+
     fn small_button<'a>(&'a self, label: &'a str, message: Message) -> button::Button<'a, Message> {
         button(text(label).size(12))
             .on_press(message)
@@ -1135,7 +1162,7 @@ impl App {
         let (heading, submit) = match dialog.kind {
             DialogKind::CreateSection => ("New section".into(), "Create"),
             DialogKind::CreateGroup(_) => ("New group".into(), "Create"),
-            DialogKind::CreateNote(_) => ("New note".into(), "Create"),
+            DialogKind::CreateNote(..) => ("New note".into(), "Create"),
             DialogKind::Rename(_) => ("Rename item".into(), "Rename"),
             DialogKind::Delete(target) => (
                 format!(
@@ -1166,6 +1193,11 @@ impl App {
                     .padding(9)
                     .style(move |_, status| chrome::input(self.definition, status, true)),
             );
+            if let DialogKind::CreateNote(_, chosen) = dialog.kind {
+                if self.preferences.boards {
+                    content = content.push(self.kind_pills(chosen));
+                }
+            }
         }
         if let Some(error) = &dialog.error {
             content = content.push(text(error).size(12).color(theme::color(colors.danger)));

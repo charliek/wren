@@ -300,6 +300,11 @@ def board_scenes(client, shot_here, out: Path) -> None:
     client.call("command.run", {"id": "font.decrease"})
     client.call("command.run", {"id": "font.decrease"})
     shot_here("board-wide")
+    # The New note dialog with its kind pills, opened on Board.
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Release plan"})
+    shot_here("board-new-dialog")
+    client.call("dialog.close")
     client.call("column.open", {"column": "sections"})
 
 

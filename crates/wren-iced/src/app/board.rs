@@ -1619,6 +1619,143 @@ z = "c"
         assert_eq!(app.action_serial, serial.wrapping_add(1));
     }
 
+    fn dialog_kind(app: &App) -> Option<super::super::workspace::DialogKind> {
+        app.dialog.as_ref().map(|dialog| dialog.kind.clone())
+    }
+
+    #[test]
+    fn the_new_note_dialog_opens_on_markdown_and_tab_steps_its_kind() {
+        use super::super::workspace::DialogKind;
+        let (directory, mut app) = fixture();
+        open_markdown(&mut app, "Note");
+        let group = app.selected_group.unwrap();
+        let create = |kind| Some(DialogKind::CreateNote(group, kind));
+
+        let _ = app.dispatch(Command::Run(CommandId::NewNote));
+        assert_eq!(dialog_kind(&app), create(NoteKind::Markdown));
+        for (reverse, kind) in [
+            (false, NoteKind::Board),
+            (false, NoteKind::Markdown),
+            (true, NoteKind::Board),
+            (true, NoteKind::Markdown),
+        ] {
+            let _ = app.update(Message::DialogTab(reverse));
+            assert_eq!(dialog_kind(&app), create(kind));
+        }
+        // A click picks a pill and hands the keyboard back to the name.
+        let task = app.update(Message::DialogNoteKind(NoteKind::Board));
+        assert!(task.units() > 0);
+        assert_eq!(dialog_kind(&app), create(NoteKind::Board));
+
+        // The last choice is never remembered.
+        let _ = app.update(Message::CancelDialog);
+        let _ = app.dispatch(Command::Run(CommandId::NewNote));
+        assert_eq!(dialog_kind(&app), create(NoteKind::Markdown));
+        let _ = app.update(Message::CancelDialog);
+
+        // New board… opens it on Board, and Enter makes an empty board,
+        // shown at 100 % with the keyboard.
+        assert!(app.command_enabled(CommandId::NewBoard));
+        let _ = app.dispatch(Command::Run(CommandId::NewBoard));
+        assert_eq!(dialog_kind(&app), create(NoteKind::Board));
+        app.column = Column::Notes;
+        let _ = app.update(Message::DialogName("Fresh".into()));
+        let task = app.update(Message::SubmitDialog);
+        assert!(app.dialog.is_none());
+        assert!(task.units() > 0);
+        assert_eq!(app.column, Column::Editor);
+        assert_in_step(&app, Surface::Board);
+        assert_eq!(session_text(&app), wren_board::EMPTY);
+        assert_eq!(app.board.as_ref().unwrap().viewport().zoom, 1.0);
+        let fresh = note_id(&app, "Fresh", NoteKind::Board);
+        assert_eq!(app.selected_note, Some(fresh));
+        assert_eq!(
+            std::fs::read_to_string(file(&directory, "Fresh.wren-board")).unwrap(),
+            wren_board::EMPTY
+        );
+        assert!(!file(&directory, "Fresh.md").exists());
+
+        // Markdown is still ⌘N, type, Enter.
+        let _ = app.dispatch(Command::Run(CommandId::NewNote));
+        let _ = app.update(Message::DialogName("Plain".into()));
+        let _ = app.update(Message::SubmitDialog);
+        assert_in_step(&app, Surface::Text);
+        assert!(file(&directory, "Plain.md").exists());
+
+        // A name a board already has is numbered, as a Markdown note's is,
+        // and the board that has it is left alone.
+        let flow = std::fs::read(file(&directory, "Flow.wren-board")).unwrap();
+        let _ = app.dispatch(Command::Run(CommandId::NewBoard));
+        let _ = app.update(Message::DialogName("Flow".into()));
+        let _ = app.update(Message::SubmitDialog);
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.selected_note,
+            Some(note_id(&app, "Flow 2", NoteKind::Board))
+        );
+        assert_eq!(
+            std::fs::read(file(&directory, "Flow.wren-board")).unwrap(),
+            flow
+        );
+
+        // Rename has no kind, and Tab leaves it alone.
+        let _ = app.dispatch(Command::Run(CommandId::RenameNote));
+        let rename = dialog_kind(&app);
+        assert!(matches!(rename, Some(DialogKind::Rename(_))));
+        let _ = app.update(Message::DialogTab(false));
+        let _ = app.update(Message::DialogNoteKind(NoteKind::Board));
+        assert_eq!(dialog_kind(&app), rename);
+    }
+
+    #[test]
+    fn with_the_setting_off_the_new_note_dialog_offers_no_kind() {
+        use super::super::workspace::DialogKind;
+        let (_directory, mut app) = fixture();
+        open_markdown(&mut app, "Note");
+        app.preferences.boards = false;
+        let group = app.selected_group.unwrap();
+        assert!(!app.command_enabled(CommandId::NewBoard));
+        let outcome = app.dispatch(Command::Run(CommandId::NewBoard));
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        assert!(app.dialog.is_none());
+        assert!(command_rows(&mut app)
+            .iter()
+            .all(|(_, id, _)| *id != CommandId::NewBoard));
+        let _ = app.dispatch(Command::Run(CommandId::NewNote));
+        let _ = app.update(Message::DialogTab(false));
+        let _ = app.update(Message::DialogNoteKind(NoteKind::Board));
+        assert_eq!(
+            dialog_kind(&app),
+            Some(DialogKind::CreateNote(group, NoteKind::Markdown))
+        );
+    }
+
+    #[test]
+    fn only_a_plain_tab_or_shift_tab_steps_the_dialog() {
+        use iced::keyboard::key::{Code, Named, Physical};
+        use iced::keyboard::{Event, Key, Location, Modifiers};
+        let press = |key: Key, modifiers| Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: Physical::Code(Code::Tab),
+            location: Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        let tab = || Key::Named(Named::Tab);
+        let step = super::super::workspace::tab;
+        assert_eq!(step(&press(tab(), Modifiers::empty())), Some(false));
+        assert_eq!(step(&press(tab(), Modifiers::SHIFT)), Some(true));
+        for modifiers in [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO] {
+            assert_eq!(step(&press(tab(), modifiers)), None);
+        }
+        assert_eq!(
+            step(&press(Key::Named(Named::Enter), Modifiers::empty())),
+            None
+        );
+    }
+
     /// The export command's row in the Commands palette, if it is listed.
     fn export_row(app: &mut App) -> Option<bool> {
         let _ = app.open_palette(super::super::palette::Mode::Commands);
@@ -1661,7 +1798,7 @@ z = "c"
         for definition in super::super::commands::definitions() {
             assert_eq!(
                 definition.id.boards(),
-                definition.id == CommandId::ExportSvg
+                matches!(definition.id, CommandId::ExportSvg | CommandId::NewBoard)
                     || definition.scope == super::super::commands::Scope::Board,
                 "{}",
                 definition.key
