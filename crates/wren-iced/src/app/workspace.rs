@@ -806,6 +806,13 @@ impl App {
                     created = Some(*item);
                 }
                 Event::Warning(message) => self.banner = Some(message.clone()),
+                Event::NoteSaved { note, .. } => {
+                    let document = self.session.as_ref().and_then(Session::document);
+                    let saved = document.filter(|document| document.note == *note);
+                    if let (Some(view), Some(document)) = (&mut self.board, saved) {
+                        view.saved(&document.text);
+                    }
+                }
                 Event::ExternalChange { kind, .. } => match kind {
                     ExternalChangeKind::Reloaded => {}
                     ExternalChangeKind::Conflict { copy } => {

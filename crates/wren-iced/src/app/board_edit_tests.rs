@@ -1,14 +1,14 @@
 //! A board's edits on their way to the Session (§3.4 of the board plan):
-//! one writer, and settling before anything that is not passive; with no
-//! window, through the messages the board widget and the command paths
-//! send.
+//! one writer, settling before anything that is not passive, and the
+//! text changing underneath the board; with no window, through the
+//! messages the board widget and the command paths send.
 
 use wren_canvas::{Button, Command as C, Input, LabelAction, Message as Sent, Tool};
 use wren_core::ops::Op;
 
 use super::board::tests::{
-    assert_in_step, file, fixture, modified, open_board, open_markdown, parses, session_text,
-    tick_to, FLOW,
+    assert_in_step, file, fixture, flow_and, modified, open_board, open_markdown, parses,
+    session_text, tick_to, FLOW,
 };
 use super::board::Surface;
 use super::columns::Column;
@@ -56,6 +56,12 @@ fn click_at(app: &mut App, at: (f32, f32)) {
     input(app, Input::Release { button: PRESS });
 }
 
+/// A click on the middle of the node `name`.
+fn click(app: &mut App, name: &str) {
+    let at = middle(app, name);
+    click_at(app, at);
+}
+
 /// An action on the open label, as its keys send it.
 fn label(app: &mut App, action: LabelAction) {
     let epoch = view(app).epoch();
@@ -64,7 +70,7 @@ fn label(app: &mut App, action: LabelAction) {
 
 /// Open the label of the node `name` and type `text` over it.
 fn relabel(app: &mut App, name: &str, text: &str) {
-    click_at(app, middle(app, name));
+    click(app, name);
     assert_eq!(key(app, C::EditLabel), Disposition::Completed);
     assert_eq!(state(app), "editing");
     label(app, LabelAction::Insert(text.to_owned()));
@@ -373,11 +379,7 @@ fn input_for_another_board_or_an_earlier_one_is_dropped() {
     open_board(&mut app, "Flow");
     lay_out(&mut app);
     let before = view(&app).epoch();
-    std::fs::write(
-        file(&directory, "Flow.wren-board"),
-        super::board::tests::flow_and("New"),
-    )
-    .unwrap();
+    std::fs::write(file(&directory, "Flow.wren-board"), flow_and("New")).unwrap();
     let _ = app.apply_core(Op::Reconcile).unwrap();
     assert_ne!(view(&app).epoch(), before);
     let from = middle(&app, "pack");
@@ -672,4 +674,240 @@ fn an_overlay_or_a_blur_puts_the_tool_away_and_an_operation_does_not() {
     app.window_unfocused().unwrap();
     assert_eq!(view(&app).machine().tool(), Tool::Select);
     assert_eq!((app.board_revision, session_text(&app).as_str()), (0, FLOW));
+}
+
+/// Write `contents` to `path` from outside and let the app find out as it
+/// does in a window: ticks, a scan off the app, and its result, all of
+/// them passive, so nothing settles the board first.
+fn change_on_disk(app: &mut App, path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    let session = app.session.as_mut().unwrap();
+    session.set_background_reconcile(true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while session_text(app) != contents {
+        // `Message::Tick` would start the scan on a thread of its own.
+        let _ = app.process_core(Op::Tick);
+        let job = app.session.as_mut().unwrap().take_reconcile_job();
+        if let Some(job) = job {
+            let _ = app.update(Message::Reconciled(job.run()));
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the change on disk never reached the Session"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn selected(app: &App) -> Vec<&str> {
+    let selection = view(app).machine().selection();
+    selection.iter().map(wren_board::Id::as_str).collect()
+}
+
+fn wheel() -> Input {
+    Input::Wheel {
+        delta: wren_canvas::Scroll::Lines { x: 0.0, y: -3.0 },
+        at: (100.0, 100.0),
+        zoom: false,
+        sideways: false,
+        scale_factor: 1.0,
+    }
+}
+
+#[test]
+fn a_change_on_disk_reloads_a_clean_board_and_keeps_the_selection_and_the_view() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    key(&mut app, C::ExtendSelection(Dir::Up));
+    input(&mut app, wheel());
+    let (viewport, epoch) = (view(&app).viewport(), view(&app).epoch());
+    assert_eq!(selected(&app), ["pack", "receive"]);
+
+    change_on_disk(&mut app, &path, &flow_and("New"));
+    assert_in_step(&app, Surface::Board);
+    assert_eq!(view(&app).board().nodes.len(), 3);
+    assert_eq!(selected(&app), ["pack", "receive"]);
+    assert_eq!(view(&app).viewport(), viewport);
+    assert_ne!(view(&app).epoch(), epoch);
+    assert_eq!(app.board_revision, 1, "a reload counts");
+    assert_eq!(state(&app), "idle");
+    assert!(!dirty(&app));
+    assert!(view(&app).pristine());
+
+    // What is no longer on the board leaves the selection.
+    let without_pack = "schema = 1\n\n[node.receive]\ntext = \"Receive order\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n";
+    change_on_disk(&mut app, &path, without_pack);
+    assert_eq!(selected(&app), ["receive"]);
+    assert_eq!(view(&app).viewport(), viewport);
+    assert_eq!(app.board_revision, 2);
+}
+
+#[test]
+fn a_change_on_disk_under_a_dirty_board_keeps_the_draft_in_a_copy_of_its_kind() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    // A label typed a moment ago, its editor still open.
+    relabel(&mut app, "pack", "Ship");
+    let draft = session_text(&app);
+    assert!(dirty(&app));
+
+    let external = flow_and("External");
+    change_on_disk(&mut app, &path, &external);
+    let copy = app.conflict_copy.clone().expect("a conflict copy").1;
+    assert!(copy
+        .as_path()
+        .to_string_lossy()
+        .ends_with(wren_core::kind::NoteKind::Board.extension()));
+    let copy = directory.path().join(copy.as_path());
+    assert_eq!(std::fs::read_to_string(copy).unwrap(), draft);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+
+    // The board is the one on disk. The label closed without a commit and
+    // is not typed again over the reloaded board.
+    assert_in_step(&app, Surface::Board);
+    assert!(view(&app).label().is_none());
+    assert_eq!(state(&app), "idle");
+    let pack = wren_board::Id::new("pack").unwrap();
+    assert_eq!(view(&app).board().nodes[&pack].text, "Pack");
+    assert_eq!(view(&app).board().nodes.len(), 3);
+    assert!(!dirty(&app));
+    assert_eq!(selected(&app), ["pack"]);
+    // What the label's keys sent for the board before is dropped.
+    label(&mut app, LabelAction::Insert("late".into()));
+    assert_eq!(session_text(&app), external);
+}
+
+#[test]
+fn a_change_on_disk_cancels_a_gesture_in_flight() {
+    for was_dirty in [false, true] {
+        let (directory, mut app) = fixture();
+        let path = file(&directory, "Flow.wren-board");
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        if was_dirty {
+            click(&mut app, "receive");
+            key(&mut app, C::Move(Dir::Right));
+            assert!(dirty(&app));
+        }
+        let draft = session_text(&app);
+        let from = middle(&app, "pack");
+        input(
+            &mut app,
+            Input::Press {
+                button: PRESS,
+                at: from,
+            },
+        );
+        input(
+            &mut app,
+            Input::Move {
+                at: (from.0 + 90.0, from.1 + 40.0),
+            },
+        );
+        assert_eq!(state(&app), "moving");
+        let revision = app.board_revision;
+
+        let external = flow_and("External");
+        change_on_disk(&mut app, &path, &external);
+        assert_eq!(state(&app), "idle", "dirty: {was_dirty}");
+        assert!(!view(&app).machine().dragging());
+        // The button comes up afterwards, on a board that holds no drag.
+        input(&mut app, Input::Release { button: PRESS });
+        assert_eq!(at(&app, "pack"), [0, 200]);
+        assert_eq!(session_text(&app), external);
+        assert_eq!(app.board_revision, revision + 1, "only the reload");
+        assert!(!dirty(&app));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        match &app.conflict_copy {
+            // The copy is the draft as it was before the drag began.
+            Some((_, copy)) => {
+                assert!(was_dirty);
+                let copy = directory.path().join(copy.as_path());
+                assert_eq!(std::fs::read_to_string(copy).unwrap(), draft);
+            }
+            None => assert!(!was_dirty),
+        }
+    }
+}
+
+#[test]
+fn what_a_board_may_do_is_decided_again_whenever_its_text_changes_underneath() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    let moves = CommandId::Board(C::Move(Dir::Right));
+    let drag = |app: &mut App| {
+        let from = middle(app, "pack");
+        let to = (from.0 + 90.0, from.1);
+        input(
+            app,
+            Input::Press {
+                button: PRESS,
+                at: from,
+            },
+        );
+        input(app, Input::Move { at: to });
+        input(app, Input::Release { button: PRESS });
+    };
+    assert!(app.command_enabled(moves));
+
+    // Read-only: a format this build does not know. It selects, walks,
+    // zooms, pans and exports, and nothing changes it.
+    let locked = FLOW.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1);
+    change_on_disk(&mut app, &path, &locked);
+    assert_in_step(&app, Surface::Board);
+    assert!(!view(&app).writable());
+    assert!(!app.command_enabled(moves));
+    click(&mut app, "pack");
+    assert_eq!(selected(&app), ["pack"]);
+    assert_eq!(key(&mut app, C::Select(Dir::Up)), Disposition::Completed);
+    assert_eq!(selected(&app), ["receive"]);
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    assert_eq!(key(&mut app, C::ZoomSelection), Disposition::Completed);
+    assert_eq!(key(&mut app, C::ZoomFit), Disposition::Completed);
+    let before = view(&app).viewport();
+    input(&mut app, wheel());
+    assert_ne!(view(&app).viewport(), before);
+    assert!(app.command_enabled(CommandId::ExportSvg));
+    for command in [C::Move(Dir::Right), C::Delete, C::EditLabel, C::ConnectNext] {
+        assert_eq!(key(&mut app, command), Disposition::Blocked, "{command:?}");
+    }
+    drag(&mut app);
+    label(&mut app, LabelAction::Insert("x".into()));
+    let epoch = view(&app).epoch();
+    let _ = app.update(Message::Board(Sent::Pasted(epoch, "pasted".into())));
+    assert_eq!(session_text(&app), locked);
+    assert_eq!(at(&app, "pack"), [0, 200]);
+    assert_eq!(view(&app).board().nodes.len(), 2);
+    assert!(!dirty(&app));
+
+    // Raw: text that is not a board. No board command runs and the
+    // board's messages have nowhere to go.
+    let broken = super::board::tests::conflicted();
+    change_on_disk(&mut app, &path, &broken);
+    assert_in_step(&app, Surface::Raw);
+    assert!(!app.command_enabled(moves));
+    let serial = app.action_serial;
+    let _ = app.update(Message::Board(Sent::Command(C::SelectAll)));
+    let _ = app.update(Message::Board(Sent::Pasted(epoch, "pasted".into())));
+    assert_eq!(app.action_serial, serial);
+    assert_eq!(session_text(&app), broken);
+
+    // Writable again: the same drag is one draft.
+    change_on_disk(&mut app, &path, FLOW);
+    assert_in_step(&app, Surface::Board);
+    lay_out(&mut app);
+    assert!(view(&app).writable());
+    assert!(app.command_enabled(moves));
+    assert_eq!(app.board_revision, 0, "a new view");
+    drag(&mut app);
+    assert_ne!(at(&app, "pack"), [0, 200]);
+    assert_eq!(app.board_revision, 1);
+    assert!(dirty(&app));
 }
