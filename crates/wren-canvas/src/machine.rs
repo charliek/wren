@@ -531,6 +531,11 @@ impl Machine {
         self.gesture != Gesture::None
     }
 
+    /// The modifiers as last reported.
+    pub fn mods(&self) -> Mods {
+        self.mods
+    }
+
     /// Whether Space is held, so a left drag pans.
     pub fn space(&self) -> bool {
         self.space

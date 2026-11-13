@@ -52,6 +52,7 @@ mod command;
 mod fixtures;
 pub mod handles;
 pub mod hit;
+mod keys;
 pub mod label;
 pub mod layers;
 pub mod machine;
@@ -61,6 +62,7 @@ mod paint;
 mod widget;
 
 pub use command::{Command, Grow, Tool};
+pub use keys::{KeyPolicy, KeyRoute};
 pub use label::{LabelAction, Motion};
 pub use machine::{Button, Input, Key, Machine, Mods, Scroll};
 pub use measure::Measurer;
@@ -315,6 +317,7 @@ pub struct BoardView {
     /// Bumped by each discrete change of view (a zoom step, a reset, a
     /// fit), which the widget draws in full at once instead of as a move.
     jumps: u64,
+    key_policy: Option<KeyPolicy>,
     #[cfg(feature = "test-support")]
     pub probe: Probe,
 }
@@ -395,6 +398,7 @@ impl BoardView {
             size: None,
             fit_pending: false,
             jumps: 0,
+            key_policy: None,
             #[cfg(feature = "test-support")]
             probe,
         };
@@ -647,6 +651,17 @@ impl BoardView {
         };
         self.synced.clone_from(&text);
         text
+    }
+
+    /// The host's say over each key the focused board is given (§5.1);
+    /// without one, a key with Ctrl, Alt or the logo key is the host's and
+    /// every other key the board's.
+    pub fn set_key_policy(&mut self, policy: KeyPolicy) {
+        self.key_policy = Some(policy);
+    }
+
+    pub(crate) fn key_policy(&self) -> Option<&KeyPolicy> {
+        self.key_policy.as_ref()
     }
 
     /// Which board the view's input is for; see [`Message::Input`].
@@ -946,7 +961,7 @@ pub struct Probe {
     pub draw_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
     /// When the first `draw` returned.
     pub first_draw: std::cell::Cell<Option<std::time::Instant>>,
-    /// How many arrow keys the focused widget took and did nothing with.
+    /// How many arrow keys the focused widget took.
     pub arrows: std::cell::Cell<u64>,
     /// The recent wheel deltas, as the toolkit reported them.
     pub wheel: std::cell::RefCell<std::collections::VecDeque<Scroll>>,
