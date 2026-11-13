@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::scene::{Point, Rect, Segment};
 use crate::shape;
-use crate::{Head, Named, Route, Shape, Side, Vocabulary};
+use crate::{Head, Id, Named, Route, Shape, Side, Vocabulary};
 
 /// The width of a connector's line and of every shape's outline.
 pub const STROKE_WIDTH: f32 = 1.5;
@@ -211,45 +211,491 @@ pub struct Connector {
 /// or needlessly crosses another. Last, middle segments that still lie on
 /// another connector's line move aside by [`NUDGE`] steps.
 pub fn route_all(boxes: &[Rect], connectors: &[Connector]) -> Vec<Routed> {
-    let obstacles = Grid::new(boxes.iter().copied());
-    let free: Vec<bool> = connectors
-        .iter()
-        .map(|c| c.kind == Route::Elbow && has_choice(&c.ends[0], &c.ends[1]))
-        .collect();
-    let mut routes: Vec<Option<Routed>> = vec![None; connectors.len()];
-    let mut scratch = Scratch::default();
-    for (i, connector) in connectors.iter().enumerate() {
-        if free[i] {
-            continue;
+    Pass::new(boxes, connectors, None).run()
+}
+
+/// [`route_all`] for a board whose drawn nodes and connectors are named
+/// by `box_ids` and `ids` (each ascending, as the board keeps them),
+/// keeping in `memo` what each connector's routing read. A connector whose
+/// inputs are those of the build `memo` holds, and none of whose lookups
+/// would read anything different now, takes the route it had; every other
+/// one is routed again. The result is always what [`route_all`] gives.
+pub(crate) fn route_all_kept(
+    boxes: &[Rect],
+    box_ids: &[&Id],
+    connectors: &[Connector],
+    ids: &[&Id],
+    memo: &mut Memo,
+) -> Vec<Routed> {
+    let keep = Keep { box_ids, ids, memo };
+    Pass::new(boxes, connectors, Some(keep)).run()
+}
+
+/// What [`route_all_kept`] keeps between builds: the node boxes, and for
+/// each connector its inputs, its route before and after the separation
+/// pass, and what each of the two read.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Memo {
+    boxes: Vec<(Id, Rect)>,
+    kept: Vec<Kept>,
+    /// How many connectors the last build routed again, and how many it
+    /// separated again, instead of taking them from the memo.
+    pub(crate) rerouted: usize,
+    pub(crate) reseparated: usize,
+}
+
+impl Memo {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.boxes.is_empty() && self.kept.is_empty()
+    }
+}
+
+/// One connector as the build before routed it.
+#[derive(Clone, Debug)]
+struct Kept {
+    id: Id,
+    kind: Route,
+    ends: [Terminal; 2],
+    nodes: [Option<Id>; 2],
+    /// The route before the separation pass, and what routing it read
+    /// from the node boxes and from the lines already drawn.
+    routed: Routed,
+    reads: [Reads; 2],
+    /// The route after it, and what separating it read from the node
+    /// boxes and from the lines placed.
+    separated: Routed,
+    apart: [Reads; 2],
+}
+
+/// The names [`route_all_kept`] keeps its memo by.
+struct Keep<'a, 'm> {
+    box_ids: &'a [&'a Id],
+    ids: &'a [&'a Id],
+    memo: &'m mut Memo,
+}
+
+/// What a connector's lookups read from one grid, kept so that a later
+/// build can tell whether they would read the same. A query's result and
+/// its cost are made from the entries of the cells it visits, so the
+/// cells are what it read.
+#[derive(Clone, Debug, Default)]
+struct Reads {
+    /// Off when nothing is kept, as in [`route_all`].
+    on: bool,
+    /// The cells of each query, as first and last column and first and
+    /// last row; a query within the one before is not listed again.
+    spans: Vec<[i32; 4]>,
+    /// The cells of all of them, once there is one.
+    hull: [i32; 4],
+    /// The most cells one query visited one by one: it would have read
+    /// every rectangle instead in a grid holding fewer.
+    most: i64,
+    /// Whether a query read every rectangle.
+    every: bool,
+}
+
+impl Reads {
+    fn kept(on: bool) -> Self {
+        Self {
+            on,
+            ..Self::default()
         }
-        let mut router = Router::new(&obstacles, connector.nodes, None, BUDGET, scratch);
-        let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
-        scratch = router.scratch;
-        routes[i] = Some(routed);
     }
-    // Only a free connector looks at the lines drawn.
-    let mut drawn = Lines::default();
-    if free.contains(&true) {
-        drawn = Lines::new(segments(
-            routes.iter().map(Option::as_ref).enumerate(),
-            |_, _| true,
-        ));
+
+    fn cells(&mut self, (x, y, count): Span) {
+        if !self.on {
+            return;
+        }
+        let span = [x[0], x[1], y[0], y[1]];
+        self.most = self.most.max(count);
+        match self.spans.last() {
+            Some(&last) if within(span, last) => {}
+            Some(_) => {
+                self.hull = hull_of(self.hull, span);
+                self.spans.push(span);
+            }
+            None => {
+                self.hull = span;
+                self.spans.push(span);
+            }
+        }
     }
-    for (i, connector) in connectors.iter().enumerate() {
-        if free[i] {
-            let mut router =
-                Router::new(&obstacles, connector.nodes, Some(&drawn), BUDGET, scratch);
-            let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
-            scratch = router.scratch;
+
+    fn every(&mut self) {
+        self.every |= self.on;
+    }
+
+    /// Whether these lookups might read something else from a grid that
+    /// now holds `len` rectangles and has changed in `dirty`.
+    fn changed(&self, dirty: &Dirty, len: usize) -> bool {
+        if self.every {
+            // A grid that changed nowhere holds as many as before.
+            return !dirty.is_empty();
+        }
+        if self.spans.is_empty() {
+            return false;
+        }
+        if self.most > len as i64 || dirty.all {
+            return true;
+        }
+        dirty
+            .cells
+            .iter()
+            .any(|&d| meets(self.hull, d) && self.spans.iter().any(|&s| meets(s, d)))
+    }
+}
+
+/// Whether two blocks of cells share one.
+fn meets(a: [i32; 4], b: [i32; 4]) -> bool {
+    a[0] <= b[1] && b[0] <= a[1] && a[2] <= b[3] && b[2] <= a[3]
+}
+
+/// Whether block `a` lies within block `b`.
+fn within(a: [i32; 4], b: [i32; 4]) -> bool {
+    b[0] <= a[0] && a[1] <= b[1] && b[2] <= a[2] && a[3] <= b[3]
+}
+
+fn hull_of(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].max(b[3]),
+    ]
+}
+
+/// Where one grid changed since the build before: the cells of every
+/// rectangle added, removed or moved, at its old place and its new, and
+/// `all` when one of them was too large for cells, since every query
+/// reads those.
+#[derive(Clone, Debug, Default)]
+struct Dirty {
+    all: bool,
+    cells: Vec<[i32; 4]>,
+}
+
+impl Dirty {
+    fn rect(&mut self, r: Rect) {
+        let (x, y, count) = Grid::cells_of(r);
+        if count > MAX_CELLS {
+            self.all = true;
+        } else {
+            self.cells.push([x[0], x[1], y[0], y[1]]);
+        }
+    }
+
+    /// The segments of a route, as a line lookup holds them.
+    fn segments(&mut self, points: &[Point]) {
+        for pair in points.windows(2) {
+            self.rect(grow(segment_box(pair[0], pair[1]), LINE_TOLERANCE));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.all && self.cells.is_empty()
+    }
+}
+
+/// Whether a connector is routed with a side to choose, and so after the
+/// fixed ones and against their lines.
+fn is_free(c: &Connector) -> bool {
+    c.kind == Route::Elbow && has_choice(&c.ends[0], &c.ends[1])
+}
+
+/// One routing of a board's connectors.
+struct Pass<'a> {
+    obstacles: Grid,
+    count: usize,
+    connectors: &'a [Connector],
+    /// Each connector as the build before kept it, when there was one
+    /// with the same id; `same` when its inputs are the same too.
+    prev: Vec<Option<Kept>>,
+    same: Vec<bool>,
+    /// Where the boxes changed, where the lines a free connector routes
+    /// against changed, and where those the separation pass places.
+    boxes: Dirty,
+    lines: Dirty,
+    placed: Dirty,
+    keep: Option<Keep<'a, 'a>>,
+    /// What each connector read, routing and separating, while kept.
+    reads: Vec<[Reads; 2]>,
+    apart: Vec<[Reads; 2]>,
+    scratch: Scratch,
+    rerouted: usize,
+    reseparated: usize,
+}
+
+impl<'a> Pass<'a> {
+    fn new(boxes: &[Rect], connectors: &'a [Connector], keep: Option<Keep<'a, 'a>>) -> Self {
+        let n = connectors.len();
+        let mut pass = Self {
+            obstacles: Grid::new(boxes.iter().copied()),
+            count: boxes.len(),
+            connectors,
+            prev: (0..n).map(|_| None).collect(),
+            same: vec![false; n],
+            boxes: Dirty::default(),
+            lines: Dirty::default(),
+            placed: Dirty::default(),
+            keep: None,
+            reads: Vec::new(),
+            apart: Vec::new(),
+            scratch: Scratch::default(),
+            rerouted: 0,
+            reseparated: 0,
+        };
+        if let Some(mut keep) = keep {
+            pass.reads.resize_with(n, Default::default);
+            pass.apart.resize_with(n, Default::default);
+            pass.match_memo(&mut keep, boxes);
+            pass.keep = Some(keep);
+        }
+        pass
+    }
+
+    /// Takes each connector of the memo for the connector of this build
+    /// with its id, and marks what changed since: the boxes added, removed
+    /// or moved, and every line of a connector that is gone.
+    fn match_memo(&mut self, keep: &mut Keep<'_, '_>, boxes: &[Rect]) {
+        let mut old = std::mem::take(&mut keep.memo.boxes).into_iter().peekable();
+        let mut now = Vec::with_capacity(boxes.len());
+        for (&id, &r) in keep.box_ids.iter().zip(boxes) {
+            while let Some((_, gone)) = old.next_if(|(k, _)| k < id) {
+                self.boxes.rect(gone);
+            }
+            let name = match old.next_if(|(k, _)| k == id) {
+                Some((name, was)) => {
+                    if was != r {
+                        self.boxes.rect(was);
+                        self.boxes.rect(r);
+                    }
+                    name
+                }
+                None => {
+                    self.boxes.rect(r);
+                    id.clone()
+                }
+            };
+            now.push((name, r));
+        }
+        for (_, gone) in old {
+            self.boxes.rect(gone);
+        }
+        keep.memo.boxes = now;
+        let mut old = std::mem::take(&mut keep.memo.kept).into_iter().peekable();
+        let mut gone = Vec::new();
+        for (i, (&id, c)) in keep.ids.iter().zip(self.connectors).enumerate() {
+            gone.extend(std::iter::from_fn(|| old.next_if(|k| k.id < *id)));
+            if let Some(k) = old.next_if(|k| k.id == *id) {
+                let names = c
+                    .nodes
+                    .map(|n| n.and_then(|n| keep.box_ids.get(n).copied()));
+                self.same[i] = k.kind == c.kind
+                    && k.ends == c.ends
+                    && k.nodes.iter().zip(names).all(|(a, b)| a.as_ref() == b);
+                self.prev[i] = Some(k);
+            }
+        }
+        gone.extend(old);
+        // A connector whose inputs changed may change class, fixed to free
+        // or elbow to straight, and then stop being in the lines of
+        // connectors routed before it is: its old lines are changed for
+        // all of them, as a gone connector's are.
+        let changed = self.prev.iter().zip(&self.same).filter(|(_, &same)| !same);
+        for k in gone.iter().chain(changed.filter_map(|(k, _)| k.as_ref())) {
+            for points in [&k.routed.points, &k.separated.points] {
+                self.lines.segments(points);
+                self.placed.segments(points);
+            }
+        }
+    }
+
+    /// The routes, in the order of the connectors.
+    fn run(mut self) -> Vec<Routed> {
+        let n = self.connectors.len();
+        let free: Vec<bool> = self.connectors.iter().map(is_free).collect();
+        let mut routes: Vec<Option<Routed>> = vec![None; n];
+        for i in (0..n).filter(|&i| !free[i]) {
+            routes[i] = Some(self.route(i, None));
+        }
+        // Only a free connector looks at the lines drawn.
+        let mut drawn = Lines::default();
+        if free.contains(&true) {
+            drawn = Lines::new(segments(
+                routes.iter().map(Option::as_ref).enumerate(),
+                |_, _| true,
+            ));
+        }
+        for i in (0..n).filter(|&i| free[i]) {
+            let routed = self.route(i, Some(&drawn));
             for pair in routed.points.windows(2) {
                 drawn.insert(pair[0], pair[1], i);
             }
             routes[i] = Some(routed);
         }
+        let mut routes: Vec<Routed> = routes.into_iter().flatten().collect();
+        let before = self.keep.is_some().then(|| routes.clone());
+        self.separate(&mut routes);
+        if let (Some(keep), Some(before)) = (self.keep.take(), before) {
+            let connectors = self.connectors;
+            // The names of a connector the memo held are taken from it.
+            let names = |i: usize, prev: Option<Kept>| match prev {
+                Some(prev) if self.same[i] => (prev.id, prev.nodes),
+                prev => {
+                    let id = prev.map_or_else(|| keep.ids[i].clone(), |prev| prev.id);
+                    let node = |n: Option<usize>| {
+                        n.and_then(|n| keep.box_ids.get(n)).map(|&id| id.clone())
+                    };
+                    (id, connectors[i].nodes.map(node))
+                }
+            };
+            keep.memo.kept = before
+                .into_iter()
+                .zip(&routes)
+                .zip(self.reads.into_iter().zip(self.apart))
+                .zip(self.prev)
+                .enumerate()
+                .map(|(i, (((routed, separated), (reads, apart)), prev))| {
+                    let (id, nodes) = names(i, prev);
+                    Kept {
+                        id,
+                        kind: connectors[i].kind,
+                        ends: connectors[i].ends,
+                        nodes,
+                        routed,
+                        reads,
+                        separated: separated.clone(),
+                        apart,
+                    }
+                })
+                .collect();
+            keep.memo.rerouted = self.rerouted;
+            keep.memo.reseparated = self.reseparated;
+        }
+        routes
     }
-    let mut routes: Vec<Routed> = routes.into_iter().flatten().collect();
-    separate(&obstacles, connectors, &mut routes, scratch);
-    routes
+
+    /// The route of connector `i`, against `lines` when it has a side to
+    /// choose: the one the memo holds when nothing it read has changed,
+    /// else routed again. A route that differs from the one before marks
+    /// its old and new lines changed for the connectors after it.
+    fn route(&mut self, i: usize, lines: Option<&Lines>) -> Routed {
+        let len = lines.map_or(0, |l| l.segments.len());
+        if let Some(prev) = self.prev[i].as_mut().filter(|_| self.same[i]) {
+            if !prev.reads[0].changed(&self.boxes, self.count)
+                && !prev.reads[1].changed(&self.lines, len)
+            {
+                self.reads[i] = std::mem::take(&mut prev.reads);
+                return prev.routed.clone();
+            }
+        }
+        let connector = &self.connectors[i];
+        let record = self.keep.is_some();
+        let scratch = std::mem::take(&mut self.scratch);
+        let mut router = Router::new(&self.obstacles, connector.nodes, lines, BUDGET, scratch);
+        router.reads = [Reads::kept(record), Reads::kept(record)];
+        let routed = router.route(connector.kind, &connector.ends[0], &connector.ends[1]);
+        let Router { scratch, reads, .. } = router;
+        self.scratch = scratch;
+        if record {
+            self.reads[i] = reads;
+            self.rerouted += 1;
+            let old = self.prev[i].as_ref().map(|k| &k.routed);
+            if !old.is_some_and(|old| old.same(&routed)) {
+                for points in old.map(|r| &r.points).into_iter().chain([&routed.points]) {
+                    self.lines.segments(points);
+                    self.placed.segments(points);
+                }
+            }
+        }
+        routed
+    }
+
+    /// Moves aside, in connector order, each middle segment of an elbow
+    /// route that lies on a line already drawn: a straight connector's, the
+    /// first or last segment of any connector's, or an earlier connector's
+    /// middle segment. It moves by [`NUDGE`], twice that or three times,
+    /// either way, to the first place that is on no other line, enters no
+    /// more boxes and keeps every segment's direction, preferring fewer
+    /// crossings and then the longer of its neighbours; where there is
+    /// none it stays. A connector whose route and reading are those of the
+    /// build before takes its separated route from the memo.
+    fn separate(&mut self, routes: &mut [Routed]) {
+        let connectors = self.connectors;
+        // Only a middle segment moves.
+        let middle = |(c, r): (&Connector, &Routed)| c.kind == Route::Elbow && r.points.len() > 3;
+        if !connectors.iter().zip(routes.iter()).any(middle) {
+            return;
+        }
+        let ends = |i: usize, j: usize| {
+            let last = routes[i].points.len().saturating_sub(2);
+            connectors[i].kind != Route::Elbow || j == 0 || j == last
+        };
+        let mut placed = Lines::new(segments(routes.iter().map(Some).enumerate(), ends));
+        let record = self.keep.is_some();
+        for (i, connector) in connectors.iter().enumerate() {
+            if connector.kind != Route::Elbow {
+                continue;
+            }
+            let len = placed.segments.len();
+            let points = &mut routes[i].points;
+            let prev = self.prev[i].as_mut().filter(|_| self.same[i]);
+            let reuse = prev.filter(|prev| {
+                same_points(&prev.routed.points, points)
+                    && !prev.apart[0].changed(&self.boxes, self.count)
+                    && !prev.apart[1].changed(&self.placed, len)
+            });
+            if let Some(prev) = reuse {
+                self.apart[i] = std::mem::take(&mut prev.apart);
+                points.clone_from(&prev.separated.points);
+            } else {
+                let scratch = std::mem::take(&mut self.scratch);
+                let mut router = Router::new(
+                    &self.obstacles,
+                    connector.nodes,
+                    None,
+                    SEPARATE_BUDGET,
+                    scratch,
+                );
+                router.reads = [Reads::kept(record), Reads::kept(record)];
+                let mut j = 1;
+                while j + 2 < points.len() {
+                    let shares = placed.shares(
+                        points[j],
+                        points[j + 1],
+                        Some(i),
+                        &mut router.budget,
+                        &mut router.reads[1],
+                    );
+                    match shares {
+                        Some(true) => {
+                            if let Some(moved) = nudge(&mut router, &mut placed, points, j, i) {
+                                *points = moved;
+                            }
+                        }
+                        Some(false) => {}
+                        None => break,
+                    }
+                    j += 1;
+                }
+                let Router { scratch, reads, .. } = router;
+                self.scratch = scratch;
+                if record {
+                    self.apart[i] = reads;
+                    self.reseparated += 1;
+                    let old = self.prev[i].as_ref().map(|k| &k.separated.points);
+                    if !old.is_some_and(|old| same_points(old, points)) {
+                        for points in old.into_iter().chain([&*points]) {
+                            self.placed.segments(points);
+                        }
+                    }
+                }
+            }
+            for j in 1..points.len().saturating_sub(2) {
+                placed.insert(points[j], points[j + 1], i);
+            }
+        }
+    }
 }
 
 /// Where an end meets its node and the side it leaves by, a floating end
@@ -664,17 +1110,20 @@ impl Grid {
     /// particular order; each cell visited and each rectangle looked at is
     /// taken from `budget`. When the budget runs out the query stops,
     /// leaves it at 0 and returns false; `out` is then incomplete.
-    fn query(&self, area: Rect, out: &mut Vec<u32>, budget: &mut u32) -> bool {
+    fn query(&self, area: Rect, out: &mut Vec<u32>, budget: &mut u32, reads: &mut Reads) -> bool {
         out.clear();
-        let (x, y, count) = Self::cells_of(area);
+        let span = Self::cells_of(area);
+        let (x, y, count) = span;
         let touching = |&i: &u32| touches(self.rects[i as usize], area);
         if count > self.rects.len() as i64 {
+            reads.every();
             if !spend(budget, self.rects.len()) {
                 return false;
             }
             out.extend((0..self.rects.len() as u32).filter(touching));
             return true;
         }
+        reads.cells(span);
         // A rectangle over several of these cells is taken from the first
         // of them, where its first column or the query's meets its first
         // row or the query's, so no sort is needed to drop the repeats.
@@ -788,8 +1237,9 @@ impl Lines {
         owner: Option<usize>,
         found: &mut Vec<u32>,
         budget: &mut u32,
+        reads: &mut Reads,
     ) -> bool {
-        let complete = self.grid.query(segment_box(p, q), found, budget);
+        let complete = self.grid.query(segment_box(p, q), found, budget, reads);
         found.retain(|&i| Some(self.segments[i as usize].2) != owner);
         complete
     }
@@ -802,9 +1252,10 @@ impl Lines {
         q: Point,
         owner: Option<usize>,
         budget: &mut u32,
+        reads: &mut Reads,
     ) -> Option<bool> {
         let mut found = std::mem::take(&mut self.found);
-        let complete = self.near(p, q, owner, &mut found, budget);
+        let complete = self.near(p, q, owner, &mut found, budget, reads);
         let shared = found.iter().any(|&i| {
             let (a, b, _) = self.segments[i as usize];
             collinear_overlap(p, q, a, b) > SHARED_LENGTH
@@ -820,11 +1271,12 @@ impl Lines {
         points: &[Point],
         owner: Option<usize>,
         budget: &mut u32,
+        reads: &mut Reads,
     ) -> Option<u32> {
         let mut found = std::mem::take(&mut self.found);
         let (mut count, mut complete) = (0, true);
         for pair in points.windows(2) {
-            if !self.near(pair[0], pair[1], owner, &mut found, budget) {
+            if !self.near(pair[0], pair[1], owner, &mut found, budget, reads) {
                 complete = false;
                 break;
             }
@@ -1035,6 +1487,9 @@ struct Router<'a> {
     scratch: Scratch,
     /// What lookup this connector may still do ([`BUDGET`]).
     budget: u32,
+    /// What its lookups read from the boxes and from the lines, while a
+    /// memo keeps it.
+    reads: [Reads; 2],
 }
 
 impl<'a> Router<'a> {
@@ -1051,6 +1506,7 @@ impl<'a> Router<'a> {
             lines,
             scratch,
             budget,
+            reads: Default::default(),
         }
     }
 
@@ -1184,10 +1640,12 @@ impl<'a> Router<'a> {
         };
         let mut picked: Vec<u32> = Vec::new();
         for area in areas {
-            if !self
-                .obstacles
-                .query(area, &mut self.scratch.found, &mut self.budget)
-            {
+            if !self.obstacles.query(
+                area,
+                &mut self.scratch.found,
+                &mut self.budget,
+                &mut self.reads[0],
+            ) {
                 return Vec::new();
             }
             picked.extend(
@@ -1406,7 +1864,7 @@ impl<'a> Router<'a> {
         for (i, pair) in points.windows(2).enumerate() {
             let (p, q) = (pair[0], pair[1]);
             let area = grow(segment_box(p, q), CLEARANCE);
-            if !grid.query(area, found, &mut self.budget) {
+            if !grid.query(area, found, &mut self.budget, &mut self.reads[0]) {
                 return false;
             }
             for &k in found.iter() {
@@ -1458,7 +1916,12 @@ impl<'a> Router<'a> {
                     s.height + 2.0 * REACH,
                 )
             };
-            if !grid.query(area, &mut self.scratch.found, &mut self.budget) {
+            if !grid.query(
+                area,
+                &mut self.scratch.found,
+                &mut self.budget,
+                &mut self.reads[0],
+            ) {
                 return None;
             }
             let on_centre = self.scratch.found.iter().any(|&k| {
@@ -1476,7 +1939,14 @@ impl<'a> Router<'a> {
         if let Some(lines) = self.lines {
             for pair in points.windows(2) {
                 let (p, q) = (pair[0], pair[1]);
-                if !lines.near(p, q, None, &mut self.scratch.found, &mut self.budget) {
+                if !lines.near(
+                    p,
+                    q,
+                    None,
+                    &mut self.scratch.found,
+                    &mut self.budget,
+                    &mut self.reads[1],
+                ) {
                     return None;
                 }
                 let mut on_line = false;
@@ -1542,55 +2012,6 @@ fn segments<'a>(
     out
 }
 
-/// Moves aside, in connector order, each middle segment of an elbow route
-/// that lies on a line already drawn: a straight connector's, the first or
-/// last segment of any connector's, or an earlier connector's middle
-/// segment. It moves by [`NUDGE`], twice that or three times, either way,
-/// to the first place that is on no other line, enters no more boxes and
-/// keeps every segment's direction, preferring fewer crossings and then
-/// the longer of its neighbours; where there is none it stays.
-fn separate(
-    obstacles: &Grid,
-    connectors: &[Connector],
-    routes: &mut [Routed],
-    mut scratch: Scratch,
-) {
-    // Only a middle segment moves.
-    let middle = |(c, r): (&Connector, &Routed)| c.kind == Route::Elbow && r.points.len() > 3;
-    if !connectors.iter().zip(routes.iter()).any(middle) {
-        return;
-    }
-    let ends = |i: usize, j: usize| {
-        let last = routes[i].points.len().saturating_sub(2);
-        connectors[i].kind != Route::Elbow || j == 0 || j == last
-    };
-    let mut placed = Lines::new(segments(routes.iter().map(Some).enumerate(), ends));
-    for (i, connector) in connectors.iter().enumerate() {
-        if connector.kind != Route::Elbow {
-            continue;
-        }
-        let mut router = Router::new(obstacles, connector.nodes, None, SEPARATE_BUDGET, scratch);
-        let points = &mut routes[i].points;
-        let mut j = 1;
-        while j + 2 < points.len() {
-            match placed.shares(points[j], points[j + 1], Some(i), &mut router.budget) {
-                Some(true) => {
-                    if let Some(moved) = nudge(&mut router, &mut placed, points, j, i) {
-                        *points = moved;
-                    }
-                }
-                Some(false) => {}
-                None => break,
-            }
-            j += 1;
-        }
-        for j in 1..points.len().saturating_sub(2) {
-            placed.insert(points[j], points[j + 1], i);
-        }
-        scratch = router.scratch;
-    }
-}
-
 /// The route with middle segment `j` moved aside, as [`separate`] says.
 fn nudge(
     router: &mut Router<'_>,
@@ -1612,9 +2033,10 @@ fn nudge(
         return None;
     }
     let entered = hits.len();
-    let shares = |placed: &mut Lines, budget: &mut u32, a: Point, b: Point| {
-        placed.shares(a, b, Some(owner), budget)
-    };
+    let shares = |placed: &mut Lines,
+                  (budget, reads): (&mut u32, &mut Reads),
+                  a: Point,
+                  b: Point| { placed.shares(a, b, Some(owner), budget, reads) };
     let shortest = |index: usize| {
         if index == 0 || index + 2 == points.len() {
             ARROW_LENGTH
@@ -1641,12 +2063,12 @@ fn nudge(
                 moved[at].x += d;
             }
         }
-        let budget = &mut router.budget;
-        if shares(placed, budget, moved[j], moved[j + 1])?
-            || (shares(placed, budget, moved[j - 1], moved[j])?
-                && !shares(placed, budget, points[j - 1], points[j])?)
-            || (shares(placed, budget, moved[j + 1], moved[j + 2])?
-                && !shares(placed, budget, points[j + 1], points[j + 2])?)
+        let (budget, reads) = (&mut router.budget, &mut router.reads[1]);
+        if shares(placed, (budget, reads), moved[j], moved[j + 1])?
+            || (shares(placed, (budget, reads), moved[j - 1], moved[j])?
+                && !shares(placed, (budget, reads), points[j - 1], points[j])?)
+            || (shares(placed, (budget, reads), moved[j + 1], moved[j + 2])?
+                && !shares(placed, (budget, reads), points[j + 1], points[j + 2])?)
         {
             continue;
         }
@@ -1657,7 +2079,12 @@ fn nudge(
             continue;
         }
         let key = (
-            placed.crossings(&moved, Some(owner), &mut router.budget)?,
+            placed.crossings(
+                &moved,
+                Some(owner),
+                &mut router.budget,
+                &mut router.reads[1],
+            )?,
             d.abs(),
             -new_lead.abs().min(new_trail.abs()),
         );
@@ -1668,7 +2095,24 @@ fn nudge(
     best.map(|(_, moved)| moved)
 }
 
+/// Whether two polylines are the same to the bit, so that `-0.0` and
+/// `0.0`, which compare equal, are not taken for one another.
+fn same_points(a: &[Point], b: &[Point]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(p, q)| p.x.to_bits() == q.x.to_bits() && p.y.to_bits() == q.y.to_bits())
+}
+
 impl Routed {
+    /// Whether two routes are the same to the bit: a route kept from an
+    /// earlier build stands for a new one only then.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        same_points(&self.points, &other.points)
+            && self.sides == other.sides
+            && self.outward == other.outward
+    }
+
     /// The length along the route.
     pub fn length(&self) -> f32 {
         self.points.windows(2).map(|w| distance(w[0], w[1])).sum()
@@ -2142,7 +2586,7 @@ mod tests {
                 let start = rng.below(cost as usize * 2 + 2) as u32;
                 let mut budget = start;
                 let mut found = Vec::new();
-                let complete = grid.query(area, &mut found, &mut budget);
+                let complete = grid.query(area, &mut found, &mut budget, &mut Reads::default());
                 let case = format!("{round}: {area:?} with {start} of {cost}");
                 if cost > u64::from(start) {
                     assert!(!complete && budget == 0, "{case}");
