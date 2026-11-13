@@ -2531,6 +2531,60 @@ mod tests {
         whole(&view);
     }
 
+    /// A 20 by 20 grid of labelled shapes, each joined to its right and
+    /// lower neighbour: 400 nodes and 760 connectors.
+    fn grid_of_400() -> String {
+        let mut board = String::from("schema = 1\n");
+        for index in 0..400 {
+            let (x, y) = ((index % 20) * 220, (index / 20) * 120);
+            board.push_str(&format!(
+                "\n[node.n{index:03}]\ntext = \"Step {index}\"\nkind = \"shape\"\n\
+                 at = [{x}, {y}]\nshape = \"rounded\"\nsize = [160, 64]\n"
+            ));
+            let mut connect = |id: char, to: usize, sides: [&str; 2]| {
+                board.push_str(&format!(
+                    "\n[edge.{id}{index:03}]\nkind = \"edge\"\n\
+                     from = {{ node = \"n{index:03}\", side = \"{}\" }}\n\
+                     to = {{ node = \"n{to:03}\", side = \"{}\" }}\n",
+                    sides[0], sides[1]
+                ));
+            };
+            if index % 20 != 19 {
+                connect('r', index + 1, ["right", "left"]);
+            }
+            if index < 380 {
+                connect('d', index + 20, ["bottom", "top"]);
+            }
+        }
+        board
+    }
+
+    /// A drag's preview steps are built from the step before, so each
+    /// routes and lays out again only what is near the moved node, and the
+    /// release adopts the last one with nothing built.
+    #[test]
+    fn a_drag_preview_step_rebuilds_only_what_the_moved_node_reaches() {
+        let mut view = sized(&grid_of_400());
+        let now = Instant::now();
+        assert_eq!(view.board().edges.len(), 760);
+        let (x, y) = middle(&view, "n022");
+        input(&mut view, press((x, y)), now);
+        let mut shown = None;
+        for step in 1..=4 {
+            let at = (x + step as f32 * 23.0, y + step as f32 * 11.0);
+            input(&mut view, Input::Move { at }, now);
+            assert!(view.preview.is_some(), "step {step}");
+            let rebuilt = view.spare.rebuilt();
+            assert!(rebuilt.routed <= 16, "step {step}: {rebuilt:?}");
+            assert!(rebuilt.painted <= 16, "step {step}: {rebuilt:?}");
+            shown = Some(view.picture().revision);
+        }
+        let last = view.spare.scene().clone();
+        assert!(input(&mut view, RELEASE, now).changed);
+        assert_eq!(Some(view.revision()), shown);
+        assert_eq!(*view.scene(), last);
+    }
+
     #[test]
     fn a_drag_shows_a_preview_and_applies_one_move_on_release() {
         let mut view = sized(TWO);
