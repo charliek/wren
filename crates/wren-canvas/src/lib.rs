@@ -259,7 +259,8 @@ pub enum Message {
     /// command path, which reaches [`BoardView::command`].
     Command(Command),
     /// The clipboard's text, read for an [`Effect::ClipboardRead`] and
-    /// stamped with the epoch of the view that asked.
+    /// stamped with the epoch of the view that asked. It goes to what asked,
+    /// the open label or the board, and is dropped if that has gone.
     Pasted(u64, String),
 }
 
@@ -365,6 +366,12 @@ pub struct BoardView {
     /// The clipboard text last pasted into this board and how many times,
     /// which sets each paste one cell further (§5.10 rule 8).
     pasted: Option<(String, u32)>,
+    /// How many labels have opened, which tells one open label from the
+    /// next.
+    labels_opened: u64,
+    /// Whom the last clipboard read was for: its text goes there or
+    /// nowhere.
+    paste_for: Option<PasteFor>,
     /// Every intent planned, for tests that say what an input asked for
     /// whatever the plan makes of it.
     #[cfg(test)]
@@ -381,6 +388,15 @@ struct Preview {
     scene: Scene,
     plan: layers::Plan,
     revision: u64,
+}
+
+/// Whom a clipboard read was for, by the count of labels opened when it
+/// was asked: the label open then, or the board while no label was. The
+/// text comes back later, and by then a label may have opened or closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteFor {
+    Label(u64),
+    Board(u64),
 }
 
 /// What the widget paints: the board, or a gesture's preview of it.
@@ -430,6 +446,8 @@ impl BoardView {
             making: None,
             history: History::new(),
             pasted: None,
+            labels_opened: 0,
+            paste_for: None,
             #[cfg(test)]
             intents: Vec::new(),
             #[cfg(feature = "test-support")]
@@ -616,11 +634,18 @@ impl BoardView {
                 self.label_action(action, now, &mut update);
             }
             Message::Pasted(epoch, text) if epoch == self.epoch => {
-                if let Some(label) = &mut self.label {
-                    let outcome = label.paste(&text, &self.measurer);
-                    self.label_did(&outcome, now, &mut update);
-                } else {
-                    self.paste(text, now, &mut update);
+                let opened = self.labels_opened;
+                match (self.paste_for, &mut self.label) {
+                    (Some(PasteFor::Label(n)), Some(label)) if n == opened => {
+                        let outcome = label.paste(&text, &self.measurer);
+                        self.label_did(&outcome, now, &mut update);
+                    }
+                    (Some(PasteFor::Board(n)), None) if n == opened => {
+                        self.paste(text, now, &mut update);
+                    }
+                    // Asked for by a label that has closed since, or by the
+                    // board before a label opened.
+                    _ => {}
                 }
             }
             Message::Resized { width, height } => {
@@ -1014,6 +1039,7 @@ impl BoardView {
             self.machine.abandon();
             return;
         };
+        self.labels_opened += 1;
         let mut label = Label::open(id.clone(), text, place, &self.measurer);
         label.ink = ink;
         label.size = self.board.nodes.get(&id).map(|node| node.size);
@@ -1109,6 +1135,7 @@ impl BoardView {
             update.effects.push(Effect::ClipboardWrite(text.clone()));
         }
         if outcome.paste {
+            self.paste_for = Some(PasteFor::Label(self.labels_opened));
             update.effects.push(Effect::ClipboardRead);
         }
         if outcome.full {
@@ -1266,7 +1293,10 @@ impl BoardView {
                 }
             }
             // The text comes back as `Message::Pasted`.
-            Command::Paste if self.writable() => update.effects.push(Effect::ClipboardRead),
+            Command::Paste if self.writable() && self.label.is_none() => {
+                self.paste_for = Some(PasteFor::Board(self.labels_opened));
+                update.effects.push(Effect::ClipboardRead);
+            }
             Command::Undo => self.travel(false, update),
             Command::Redo => self.travel(true, update),
             Command::Select(dir) => self.walk(dir, false),
@@ -3295,6 +3325,49 @@ z = "c"
     }
 
     #[test]
+    fn the_clipboard_s_text_goes_only_where_it_was_asked_for() {
+        let now = Instant::now();
+        let escape = Input::Key {
+            key: Key::Escape,
+            repeat: false,
+        };
+        // Asked for by a label that closed before the text came back.
+        let mut view = sized(TWO);
+        open_label(&mut view, "a", now);
+        assert_eq!(
+            edit(&mut view, LabelAction::Paste, now).effects,
+            [Effect::ClipboardRead]
+        );
+        input(&mut view, escape, now);
+        assert_eq!(view.label(), None);
+        let late = Message::Pasted(view.epoch(), "meant for the label".to_owned());
+        assert_eq!(view.update(late, now), Update::default());
+        assert_eq!(view.board().nodes.len(), 2);
+        assert!(view.pristine());
+
+        // Asked for by the board before a label opened.
+        let mut view = sized(TWO);
+        click_node(&mut view, "a", now);
+        assert_eq!(
+            view.command(Command::Paste, now).effects,
+            [Effect::ClipboardRead]
+        );
+        view.command(Command::EditLabel, now);
+        assert_eq!(label(&view).text(), "A");
+        let fragment = format!("# wren-board fragment 1\n{TWO}");
+        let late = Message::Pasted(view.epoch(), fragment);
+        assert_eq!(view.update(late, now), Update::default());
+        assert_eq!(label(&view).text(), "A");
+        // Nor by a label that has closed and another that opened since.
+        edit(&mut view, LabelAction::Paste, now);
+        input(&mut view, escape, now);
+        open_label(&mut view, "a", now);
+        let late = Message::Pasted(view.epoch(), "x".to_owned());
+        assert_eq!(view.update(late, now), Update::default());
+        assert!(view.pristine());
+    }
+
+    #[test]
     fn a_command_commits_the_label_and_then_runs() {
         let mut view = sized(TWO);
         let now = Instant::now();
@@ -3623,7 +3696,9 @@ z = "c"
         }
     }
 
+    /// The board asks for the clipboard, and `text` comes back.
     fn pasted(view: &mut BoardView, text: &str, now: Instant) -> Update {
+        view.command(Command::Paste, now);
         view.update(Message::Pasted(view.epoch(), text.to_owned()), now)
     }
 
