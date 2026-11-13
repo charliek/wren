@@ -753,6 +753,13 @@ impl Machine {
         self.hover.is_some()
     }
 
+    /// The view moved by a path that is not the machine's own (a zoom
+    /// step, a fit, a viewport the host set): the board moved under the
+    /// pointer, which rests on nothing until it next moves (§5.5 rule 8).
+    pub(crate) fn unhover(&mut self) {
+        self.hover = None;
+    }
+
     /// The connector end being dragged.
     pub fn connecting(&self) -> Option<Connecting<'_>> {
         let Gesture::Connecting {

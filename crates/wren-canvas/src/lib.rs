@@ -602,13 +602,18 @@ impl BoardView {
 
     /// Look at the board from `viewport`, its zoom brought within 10 % to
     /// 400 %. A viewport that is not finite is not taken. It replaces a fit
-    /// still waiting for the widget's size.
+    /// still waiting for the widget's size. A move puts the hover connect
+    /// handles away.
     pub fn set_viewport(&mut self, viewport: Viewport) {
         if viewport.x.is_finite() && viewport.y.is_finite() && viewport.zoom.is_finite() {
-            self.viewport = Viewport {
+            let viewport = Viewport {
                 zoom: viewport.zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
                 ..viewport
             };
+            if viewport != self.viewport {
+                self.machine.unhover();
+            }
+            self.viewport = viewport;
             self.fit_pending = false;
         }
     }
@@ -4289,6 +4294,43 @@ z = "c"
             extra
         };
         (extra(new, old), extra(old, new))
+    }
+
+    /// How many connect handles the overlay draws.
+    fn connect_handles(view: &BoardView) -> usize {
+        let marks = overlay::marks(view).marks;
+        let connect = |mark: &&overlay::Mark| matches!(mark, overlay::Mark::Connect(_));
+        marks.iter().filter(connect).count()
+    }
+
+    /// §5.5 rule 8: the handles go when the view moves under the pointer,
+    /// by the keyboard's zoom or a fit as by the wheel.
+    #[test]
+    fn the_hover_handles_go_when_the_view_moves_by_any_path() {
+        let moves: [fn(&mut BoardView); 5] = [
+            |view| view.zoom_step(1),
+            |view| view.zoom_step(-1),
+            |view| view.fit(),
+            |view| {
+                view.zoom_step(1);
+                view.zoom_reset();
+            },
+            |view| view.set_viewport(view.viewport().panned(30.0, 0.0)),
+        ];
+        for (n, moved) in moves.into_iter().enumerate() {
+            let mut view = sized(TWO);
+            view.set_viewport(Viewport::default());
+            hover(&mut view, "a", Instant::now());
+            assert_eq!(connect_handles(&view), 4, "{n}");
+            moved(&mut view);
+            assert_eq!(connect_handles(&view), 0, "{n}");
+            assert!(!view.machine().hovering(), "{n}");
+        }
+        // A viewport set to where it is moves nothing.
+        let mut view = sized(TWO);
+        hover(&mut view, "a", Instant::now());
+        view.set_viewport(view.viewport());
+        assert_eq!(connect_handles(&view), 4);
     }
 
     #[test]
