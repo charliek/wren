@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use wren_board::edit::EdgeEnd;
 use wren_board::scene::{self, Draw, Point, Rect, Scene, Segment, Source};
-use wren_board::{placements, shape, Board, Id, Named, NodeKind, Placed, Side};
+use wren_board::{placements, shape, Board, Id, Named, Node, NodeKind, Placed, Side};
 
 use crate::handles::{self, Handle};
 use crate::Viewport;
@@ -148,14 +148,20 @@ fn node_at<'a>(
         let (Some(node), Some(bounds)) = (board.nodes.get(id), frames.get(id)) else {
             return false;
         };
-        holds(bounds, point)
-            && match node.kind.as_ref().and_then(Named::known) {
-                Some(NodeKind::Shape) => {
-                    within(&shape::outline(shape::drawn(&node.shape), bounds), point)
-                }
-                _ => true,
-            }
+        takes(node, bounds, point)
     })
+}
+
+/// Whether the node drawn in `bounds` takes the board point `point`: inside
+/// a shape's outline, or anywhere in the box of free text or a placeholder.
+fn takes(node: &Node, bounds: Rect, point: Point) -> bool {
+    holds(bounds, point)
+        && match node.kind.as_ref().and_then(Named::known) {
+            Some(NodeKind::Shape) => {
+                within(&shape::outline(shape::drawn(&node.shape), bounds), point)
+            }
+            _ => true,
+        }
 }
 
 /// Where a connector end dropped at the widget-local point `at` attaches
@@ -174,31 +180,30 @@ pub fn attach(
     at: (f32, f32),
 ) -> Option<(Id, Option<Side>)> {
     let frames = Frames::new(board);
-    // The side of `id` whose handle is nearest within reach, and how near.
-    let pinned = |id: &Id| {
-        let (node, bounds) = (board.nodes.get(id)?, frames.get(id)?);
-        let reach = handles::pin_reach(bounds, viewport);
-        handles::sides(node, bounds, viewport)
-            .into_iter()
-            .map(|(side, centre)| ((centre.0 - at.0).hypot(centre.1 - at.1), side))
-            .filter(|(apart, _)| *apart <= reach)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-    };
     let (x, y) = viewport.to_board(at);
-    let under = node_at(board, scene, &frames, Point::new(x, y));
-    // From the front down to the node under the point; `min_by` keeps the
-    // first of equals.
-    let mut covered = false;
-    let front = stacking(scene).into_iter().rev().take_while(|&id| {
-        let shown = !covered;
-        covered |= Some(id) == under;
-        shown
-    });
-    let near = front.filter_map(|id| Some((pinned(id)?, id)));
-    match near.min_by(|a, b| a.0 .0.total_cmp(&b.0 .0)) {
-        Some(((_, side), id)) => Some((id.clone(), Some(side))),
-        None => Some((under?.clone(), None)),
+    let point = Point::new(x, y);
+    let mut pinned: Option<(f32, Side, &Id)> = None;
+    // From the front down to the node under the point, once.
+    for id in stacking(scene).into_iter().rev() {
+        let (Some(node), Some(bounds)) = (board.nodes.get(id), frames.get(id)) else {
+            continue;
+        };
+        let reach = handles::pin_reach(bounds, viewport);
+        if holds(grown(bounds, reach / viewport.zoom), point) {
+            for (side, centre) in handles::sides(node, bounds, viewport) {
+                let apart = (centre.0 - at.0).hypot(centre.1 - at.1);
+                // Of two as near, the one found first is in front.
+                if apart <= reach && pinned.is_none_or(|(least, ..)| apart < least) {
+                    pinned = Some((apart, side, id));
+                }
+            }
+        }
+        if takes(node, bounds, point) {
+            let (id, side) = pinned.map_or((id, None), |(_, side, id)| (id, Some(side)));
+            return Some((id.clone(), side));
+        }
     }
+    pinned.map(|(_, side, id)| (id.clone(), Some(side)))
 }
 
 /// The nodes whose boxes, and the connectors whose drawn bounds, lie
