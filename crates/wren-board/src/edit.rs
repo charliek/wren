@@ -91,9 +91,12 @@ pub enum Intent {
     /// Swap each connector's ends, with their heads, mirroring its labels'
     /// places so they stay where they are drawn (§5.12 rule 9).
     Reverse { ids: Vec<Id> },
-    /// A connector's first label; an empty text removes it (§5.12 rule 8,
-    /// §5.9 rule 8).
-    SetEdgeLabel { id: Id, text: String },
+    /// A connector's first label (§5.12 rule 8), sent on each change of
+    /// its text with `commit` false (§5.9 rule 6) and, when it ends empty,
+    /// once more at the commit with `commit` true. While it is edited an
+    /// empty text keeps the item, with its place and unknown keys, so
+    /// retyping fills it again; committed empty it is removed (§5.9 rule 8).
+    SetEdgeLabel { id: Id, text: String, commit: bool },
     /// Keyboard building from the node `from`, or from the `to` node of the
     /// connector `from` (§5.6). `dir` is `None` for `board.connect.next`,
     /// which takes the flow direction and always creates; `Some` for
@@ -213,7 +216,7 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::Rebind { id, end, to } => connect::rebind(board, id, *end, to),
         Intent::SetEdge { ids: chosen, field } => connect::set_field(board, chosen, *field),
         Intent::Reverse { ids: chosen } => connect::reverse(board, chosen),
-        Intent::SetEdgeLabel { id, text } => connect::set_label(board, id, text),
+        Intent::SetEdgeLabel { id, text, commit } => connect::set_label(board, id, text, *commit),
         Intent::Extend { from, dir, shape } => connect::extend(board, from, *dir, *shape, ids),
     }
 }

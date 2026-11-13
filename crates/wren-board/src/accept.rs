@@ -246,6 +246,7 @@ impl Driver {
                         Intent::SetEdgeLabel {
                             id: id.clone(),
                             text: format!("{text}{c}"),
+                            commit: false,
                         }
                     }
                 };

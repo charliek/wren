@@ -319,6 +319,7 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
         12 => Intent::SetEdgeLabel {
             id: edge_id(board, rng),
             text: (*rng.pick(TEXTS)).to_owned(),
+            commit: rng.one_in(2),
         },
         _ => Intent::Extend {
             from: node_id(board, rng),

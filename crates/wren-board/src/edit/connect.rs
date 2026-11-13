@@ -182,10 +182,13 @@ pub(super) fn reverse(board: &Board, ids: &[Id]) -> Plan {
     }
 }
 
-/// A connector's first label, trimmed as a node's is (§5.9 rule 4). An
-/// empty text removes that label; a new one goes in the middle of the
-/// route (§5.12 rule 8). Further labels are kept as they are.
-pub(super) fn set_label(board: &Board, id: &Id, text: &str) -> Plan {
+/// A connector's first label, trimmed as a node's is (§5.9 rule 4); a new
+/// one goes in the middle of the route (§5.12 rule 8). An empty text
+/// removes that label only at the commit: the label editor sends one
+/// intent per change, so removing it on the way to retyping would write
+/// the next keystroke into the second label. Further labels are kept as
+/// they are.
+pub(super) fn set_label(board: &Board, id: &Id, text: &str, commit: bool) -> Plan {
     let Some(edge) = board.edges.get(id) else {
         return Plan::default();
     };
@@ -198,7 +201,7 @@ pub(super) fn set_label(board: &Board, id: &Id, text: &str) -> Plan {
             at: Label::DEFAULT_AT,
             extra: crate::Extra::new(),
         }),
-        Some(_) if text.is_empty() => {
+        Some(_) if text.is_empty() && commit => {
             labels.remove(0);
         }
         Some(first) if first.text == text => return Plan::default(),
@@ -607,6 +610,12 @@ z = "Z"
         let label = |edge: &str, text: &str| Intent::SetEdgeLabel {
             id: id(edge),
             text: text.into(),
+            commit: false,
+        };
+        let commit = |edge: &str, text: &str| Intent::SetEdgeLabel {
+            id: id(edge),
+            text: text.into(),
+            commit: true,
         };
         let table: Vec<(Intent, &[&str])> = vec![
             // A relabel, even to several lines, is one line; the place and
@@ -618,8 +627,24 @@ z = "Z"
                     "+  { at = 250, text = \"Yes,\\nshipped\" },",
                 ],
             ),
-            // An empty text removes the first label only.
-            (label("e", " \n"), &["-  { at = 250, text = \"Yes\" },"]),
+            // While editing, an empty text keeps the item and its place.
+            (
+                label("e", " \n"),
+                &[
+                    "-  { at = 250, text = \"Yes\" },",
+                    "+  { at = 250, text = \"\" },",
+                ],
+            ),
+            // Committed empty, the first label alone is removed.
+            (commit("e", " \n"), &["-  { at = 250, text = \"Yes\" },"]),
+            // A commit with text is a relabel.
+            (
+                commit("e", "No"),
+                &[
+                    "-  { at = 250, text = \"Yes\" },",
+                    "+  { at = 250, text = \"No\" },",
+                ],
+            ),
             // The first label goes in the middle.
             (
                 label("f", "No"),
@@ -633,10 +658,53 @@ z = "Z"
             label("e", "Yes"),
             label("e", "Yes\r\n"),
             label("f", ""),
+            commit("f", ""),
             label("a", "x"),
         ] {
             assert_empty(EDGES, intent);
         }
+    }
+
+    /// The label editor sends one intent per change: backspacing a first
+    /// label away and typing a new one keeps its place, its unknown keys and
+    /// the second label.
+    #[test]
+    fn a_connector_label_erased_while_editing_keeps_its_item() {
+        let text = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [20, 20]\nz = \"V\"\n\n\
+                    [node.b]\nkind = \"shape\"\nat = [0, 100]\nsize = [20, 20]\nz = \"W\"\n\n\
+                    [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\nlabels = [\n  \
+                    { at = 250, note = \"kept\", text = \"Yes\" },\n  { text = \"second\" },\n]\nz = \"X\"\n";
+        let mut board = parse(text).unwrap();
+        assert_eq!(write(&board), text, "the fixture is canonical");
+        for typed in ["Ye", "Y", "", "N", "No"] {
+            let intent = Intent::SetEdgeLabel {
+                id: id("e"),
+                text: typed.to_owned(),
+                commit: false,
+            };
+            let step = plan(&board, &intent, &mut Listed(Vec::new()));
+            board.apply(&step.changes);
+        }
+        assert_eq!(
+            line_diff(text, &write(&board)),
+            [
+                "-  { at = 250, note = \"kept\", text = \"Yes\" },",
+                "+  { at = 250, note = \"kept\", text = \"No\" },",
+            ]
+        );
+        // Typed into a connector with no label and erased again, the
+        // commit leaves the file as it was.
+        let mut board = parse(EDGES).unwrap();
+        for (typed, commit) in [("N", false), ("", false), ("", true)] {
+            let intent = Intent::SetEdgeLabel {
+                id: id("f"),
+                text: typed.to_owned(),
+                commit,
+            };
+            let step = plan(&board, &intent, &mut Listed(Vec::new()));
+            board.apply(&step.changes);
+        }
+        assert_eq!(write(&board), EDGES);
     }
 
     /// A tidy board for keyboard building: `s` with `t` below it.
