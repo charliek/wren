@@ -163,11 +163,12 @@ impl App {
 
     /// Carry out what the board's view answered: its draft when the board
     /// changed, then what it asks of the app.
-    fn board_did(&mut self, update: wren_canvas::Update) -> BoardDid {
+    pub(super) fn board_did(&mut self, update: wren_canvas::Update) -> BoardDid {
         let mut did = BoardDid::default();
         if update.changed {
             did.failed = self.board_changed().err();
         }
+        let mut tasks = Vec::new();
         for effect in update.effects {
             match effect {
                 Effect::Notice(notice) => {
@@ -175,15 +176,23 @@ impl App {
                     self.banner_kind = WarningKind::General;
                     did.notice = Some(notice);
                 }
-                // The view moved itself; the clipboard and the two
-                // palettes are not wired yet.
-                Effect::Look(_)
-                | Effect::ClipboardWrite(_)
-                | Effect::ClipboardRead
-                | Effect::OpenActions
-                | Effect::OpenJump => {}
+                Effect::ClipboardWrite(text) => tasks.push(iced::clipboard::write(text)),
+                // The text comes back stamped for the board that asked, so
+                // it is dropped if the board is another by then. A
+                // clipboard with no text pastes nothing.
+                Effect::ClipboardRead => {
+                    if let Some(epoch) = self.board.as_ref().map(BoardView::epoch) {
+                        tasks.push(iced::clipboard::read().map(move |text| {
+                            let text = text.unwrap_or_default();
+                            Message::Board(wren_canvas::Message::Pasted(epoch, text))
+                        }));
+                    }
+                }
+                // The view moved itself, and the two palettes are Phase 3's.
+                Effect::Look(_) | Effect::OpenActions | Effect::OpenJump => {}
             }
         }
+        did.task = Task::batch(tasks);
         did
     }
 
@@ -1609,6 +1618,10 @@ z = "c"
         let is_board = |id: CommandId| id.board_command().is_some();
 
         open_board(&mut app, "Flow");
+        // With one node selected every board command is enabled.
+        let _ = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::Select(wren_board::Dir::Down),
+        )));
         let rows = command_rows(&mut app);
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
@@ -1656,7 +1669,77 @@ z = "c"
         open_board(&mut app, "Broken");
         assert!(board_ids().all(|id| !app.command_enabled(id)));
         open_board(&mut app, "Flow");
+        // With nothing selected, a command for one element is off, and so
+        // is one that needs a fragment.
+        let walk = Command::Run(CommandId::Board(wren_canvas::Command::Select(
+            wren_board::Dir::Down,
+        )));
+        let needs_one = |key: &str| {
+            key == "board.label.edit"
+                || key.starts_with("board.connect.") && key != "board.connect.next"
+                || key.starts_with("board.select.connector_")
+        };
+        let needs_a_node =
+            |key: &str| matches!(key, "board.copy" | "board.cut" | "board.duplicate");
+        for id in board_ids() {
+            let key = id.key();
+            assert_eq!(
+                app.command_enabled(id),
+                !needs_one(key) && !needs_a_node(key),
+                "{key}"
+            );
+        }
+        // One node selected: every board command.
+        let _ = app.dispatch(walk.clone());
+        assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 1);
         assert!(board_ids().all(|id| app.command_enabled(id)));
+        // Several: the commands for one element are off again.
+        let _ = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::SelectAll,
+        )));
+        for id in board_ids() {
+            assert_eq!(app.command_enabled(id), !needs_one(id.key()), "{id:?}");
+        }
+        // One connector: no fragment.
+        let _ = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::SelectNone,
+        )));
+        let view = app.board.as_ref().unwrap();
+        let (viewport, placed) = (view.viewport(), wren_board::placements(view.board()));
+        let middle = |name: &str| {
+            let id = wren_board::Id::new(name).unwrap();
+            let (at, size) = (placed[&id].at, view.board().nodes[&id].size);
+            (
+                at[0] as f32 + size[0] as f32 / 2.0,
+                at[1] as f32 + size[1] as f32 / 2.0,
+            )
+        };
+        let (from, to) = (middle("receive"), middle("pack"));
+        let on_edge = viewport.to_screen(((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0));
+        let _ = app.update(input(
+            &app,
+            Input::Press {
+                button: wren_canvas::Button::Left,
+                at: on_edge,
+            },
+        ));
+        let _ = app.update(input(
+            &app,
+            Input::Release {
+                button: wren_canvas::Button::Left,
+            },
+        ));
+        let selection = app.board.as_ref().unwrap().machine().selection();
+        assert_eq!(
+            selection
+                .iter()
+                .map(wren_board::Id::as_str)
+                .collect::<Vec<_>>(),
+            ["then"]
+        );
+        for id in board_ids() {
+            assert_eq!(app.command_enabled(id), !needs_a_node(id.key()), "{id:?}");
+        }
 
         // A read-only board takes looking, selecting, copying and zooming.
         std::fs::write(
@@ -1670,6 +1753,7 @@ z = "c"
             app.board.as_ref().unwrap().access(),
             Access::ReadOnly(_)
         ));
+        let _ = app.dispatch(walk);
         let enabled: Vec<_> = board_ids()
             .filter(|id| app.command_enabled(*id))
             .map(CommandId::key)

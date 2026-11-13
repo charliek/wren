@@ -1,7 +1,7 @@
 //! A board's edits on their way to the Session (§3.4 of the board plan):
-//! one writer, settling before anything that is not passive, and the
-//! text changing underneath the board; with no window, through the
-//! messages the board widget and the command paths send.
+//! one writer, settling before anything that is not passive, the text
+//! changing underneath the board, undo and the clipboard; with no window,
+//! through the messages the board widget and the command paths send.
 
 use wren_canvas::{Button, Command as C, Input, LabelAction, Message as Sent, Tool};
 use wren_core::ops::Op;
@@ -910,4 +910,246 @@ fn what_a_board_may_do_is_decided_again_whenever_its_text_changes_underneath() {
     assert_ne!(at(&app, "pack"), [0, 200]);
     assert_eq!(app.board_revision, 1);
     assert!(dirty(&app));
+}
+
+/// Run a board command as a palette row does, and count what is left to
+/// run besides giving the board the keyboard, which a command that ran
+/// always does.
+fn run(app: &mut App, command: C) -> (Disposition, usize) {
+    let outcome = app.dispatch(Command::Run(CommandId::Board(command)));
+    let ran = outcome.processed.disposition != Disposition::Blocked;
+    let units = outcome.task.units();
+    assert!(units >= usize::from(ran));
+    (outcome.processed.disposition, units - usize::from(ran))
+}
+
+#[test]
+fn each_undo_is_one_draft_back_to_the_opening_bytes() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    assert!(!view(&app).can_undo());
+
+    // Three gestures: a drag, a run of key moves, a label.
+    let from = middle(&app, "pack");
+    let zoom = view(&app).viewport().zoom;
+    input(
+        &mut app,
+        Input::Press {
+            button: PRESS,
+            at: from,
+        },
+    );
+    input(
+        &mut app,
+        Input::Move {
+            at: (from.0 + 60.0 * zoom, from.1),
+        },
+    );
+    input(&mut app, Input::Release { button: PRESS });
+    let dragged = session_text(&app);
+    key(&mut app, C::Move(Dir::Down));
+    key(&mut app, C::Move(Dir::Down));
+    let moved = session_text(&app);
+    relabel(&mut app, "receive", "Take order");
+    input(
+        &mut app,
+        Input::Key {
+            key: wren_canvas::Key::Escape,
+            repeat: false,
+        },
+    );
+    let labelled = session_text(&app);
+    assert_eq!(app.board_revision, 4);
+    tick_to(&mut app, 2);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), labelled);
+
+    // Three undos, each one draft, the last the opening text.
+    for (step, text) in [moved.as_str(), dragged.as_str(), FLOW]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(view(&app).can_undo());
+        assert_eq!(key(&mut app, C::Undo), Disposition::Completed);
+        assert_eq!(session_text(&app), text);
+        assert_eq!(app.board_revision, 5 + step as u64);
+    }
+    assert!(!view(&app).can_undo() && view(&app).can_redo());
+    assert_eq!(key(&mut app, C::Undo), Disposition::Completed);
+    assert_eq!(app.board_revision, 7, "nothing left to undo, and no draft");
+    assert_in_step(&app, Surface::Board);
+    assert_eq!(parses(&app), 1, "undo is the view's own change");
+    tick_to(&mut app, 4);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW);
+    assert!(!dirty(&app));
+
+    // Redo, from the palette as from the key.
+    assert_eq!(run(&mut app, C::Redo), (Disposition::Completed, 0));
+    assert_eq!(session_text(&app), dragged);
+    assert_eq!(app.board_revision, 8);
+}
+
+#[test]
+fn undo_on_a_hand_written_board_after_a_save_restores_its_bytes() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Hand.wren-board");
+    let text = hand_written();
+    std::fs::write(&path, &text).unwrap();
+    let _ = app.apply_core(Op::Reconcile).unwrap();
+    open_board(&mut app, "Hand");
+    lay_out(&mut app);
+
+    click(&mut app, "pack");
+    key(&mut app, C::Move(Dir::Right));
+    // Past the autosave delay the canonical form is on disk.
+    tick_to(&mut app, 2);
+    let canonical = std::fs::read_to_string(&path).unwrap();
+    assert!(canonical != text && !canonical.contains('#'));
+    assert!(!dirty(&app));
+
+    // The save did not move the floor: undo drafts the file as it was
+    // written by hand, and that is what is saved.
+    key(&mut app, C::Undo);
+    assert_eq!(session_text(&app), text);
+    assert!(dirty(&app));
+    tick_to(&mut app, 4);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert!(!dirty(&app));
+    assert_in_step(&app, Surface::Board);
+}
+
+#[test]
+fn a_change_underneath_the_board_leaves_nothing_to_undo() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    key(&mut app, C::Move(Dir::Right));
+    key(&mut app, C::Undo);
+    tick_to(&mut app, 2);
+    assert!(view(&app).can_redo());
+
+    // A clean reload.
+    let external = flow_and("External");
+    change_on_disk(&mut app, &path, &external);
+    assert!(!view(&app).can_undo() && !view(&app).can_redo());
+    let revision = app.board_revision;
+    for command in [C::Undo, C::Redo] {
+        assert_eq!(key(&mut app, command), Disposition::Completed);
+    }
+    assert_eq!(
+        (app.board_revision, session_text(&app)),
+        (revision, external.clone())
+    );
+
+    // A conflict: the draft went to its copy, and undo does not bring it
+    // back over what is on disk.
+    key(&mut app, C::Move(Dir::Down));
+    assert!(view(&app).can_undo() && dirty(&app));
+    change_on_disk(&mut app, &path, FLOW);
+    assert!(app.conflict_copy.is_some());
+    assert!(!view(&app).can_undo());
+    key(&mut app, C::Undo);
+    assert_eq!(session_text(&app), FLOW);
+    assert!(!dirty(&app));
+
+    // Raw and back, and another note and back, begin with no history too.
+    key(&mut app, C::Move(Dir::Down));
+    tick_to(&mut app, 4);
+    let saved = session_text(&app);
+    open_markdown(&mut app, "Note");
+    open_board(&mut app, "Flow");
+    assert!(!view(&app).can_undo());
+    key(&mut app, C::Undo);
+    assert_eq!(session_text(&app), saved);
+}
+
+#[test]
+fn the_clipboard_is_written_and_read_through_the_app() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+
+    // With no node selected there is nothing to copy, cut or duplicate.
+    for command in [C::Copy, C::Cut, C::Duplicate] {
+        assert!(!app.command_enabled(CommandId::Board(command)));
+        assert_eq!(run(&mut app, command), (Disposition::Blocked, 0));
+    }
+    key(&mut app, C::SelectAll);
+    // Copy writes the clipboard and changes nothing; paste asks for it.
+    assert_eq!(run(&mut app, C::Copy), (Disposition::Completed, 1));
+    assert_eq!(run(&mut app, C::Paste), (Disposition::Completed, 1));
+    assert_eq!((app.board_revision, session_text(&app).as_str()), (0, FLOW));
+
+    // What the clipboard held comes back for this board: three new
+    // blocks, and the old ones as they were.
+    let fragment = wren_board::clip::copy(view(&app).board(), &{
+        let selection = view(&app).machine().selection();
+        selection.iter().cloned().collect::<Vec<_>>()
+    })
+    .expect("a fragment");
+    let paste = |app: &mut App| {
+        let epoch = view(app).epoch();
+        let _ = app.update(Message::Board(Sent::Pasted(epoch, fragment.clone())));
+    };
+    paste(&mut app);
+    assert_eq!(app.board_revision, 1);
+    let once = session_text(&app);
+    let (gone, new) = line_diff(FLOW, &once);
+    assert!(gone.is_empty(), "{gone:?}");
+    let blocks = |lines: &[&str]| lines.iter().filter(|line| line.starts_with('[')).count();
+    assert_eq!(blocks(&new), 3);
+    assert_eq!(view(&app).board().nodes.len(), 4);
+    paste(&mut app);
+    let twice = session_text(&app);
+    let (gone, new) = line_diff(&once, &twice);
+    assert!(gone.is_empty(), "{gone:?}");
+    assert_eq!(blocks(&new), 3);
+    assert_eq!(app.board_revision, 2);
+
+    // Cut is the clipboard and one draft, and one undo.
+    assert_eq!(run(&mut app, C::Cut), (Disposition::Completed, 1));
+    assert_eq!(session_text(&app), once);
+    key(&mut app, C::Undo);
+    assert_eq!(session_text(&app), twice);
+
+    // It is saved, and a new Session reads the same board.
+    tick_to(&mut app, 2);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), twice);
+    let reopened = wren_board::parse(&twice).expect("a board");
+    assert_eq!((reopened.nodes.len(), reopened.edges.len()), (6, 3));
+    assert!(wren_board::check(&reopened)
+        .iter()
+        .all(|issue| { wren_board::check(view(&app).board()).contains(issue) }));
+
+    // A paste that cannot be made is the banner, and nothing changes.
+    app.banner = None;
+    let epoch = view(&app).epoch();
+    let newer = "# wren-board fragment 1\nschema = 2\n".to_owned();
+    let _ = app.update(Message::Board(Sent::Pasted(epoch, newer)));
+    assert!(app
+        .banner
+        .as_deref()
+        .is_some_and(|text| text.starts_with("Cannot paste")));
+    assert_eq!((app.board_revision, session_text(&app)), (4, twice));
+}
+
+#[test]
+fn a_command_that_did_nothing_says_why() {
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Other");
+    lay_out(&mut app);
+    assert_eq!(run(&mut app, C::ZoomFit), (Disposition::Completed, 0));
+    assert!(app.banner.is_none());
+    let notice = wren_canvas::Update {
+        changed: false,
+        effects: vec![wren_canvas::Effect::Notice("No room.".into())],
+    };
+    let did = app.board_did(notice);
+    assert_eq!(did.notice.as_deref(), Some("No room."));
+    assert_eq!(app.banner.as_deref(), Some("No room."));
+    assert_eq!(app.board_revision, 0);
 }

@@ -595,6 +595,27 @@ fn board_mutates(command: BoardCommand) -> bool {
     )
 }
 
+/// Whether `view`'s board takes `command` as it stands. A read-only board
+/// takes only what does not change it (§5.2). A command for one element
+/// needs exactly one selected (§5.3 rule 7). Copy, cut and duplicate need
+/// a node selected, since a selection without one has no fragment (§5.10
+/// rule 2).
+fn board_enabled(view: &wren_canvas::BoardView, command: BoardCommand) -> bool {
+    use BoardCommand as C;
+    if board_mutates(command) && *view.access() != Access::Editable {
+        return false;
+    }
+    let selection = view.machine().selection();
+    match command {
+        C::EditLabel | C::Connect(_) | C::SelectConnector(_) => selection.len() == 1,
+        C::Copy | C::Cut | C::Duplicate => {
+            let nodes = &view.board().nodes;
+            selection.iter().any(|id| nodes.contains_key(id))
+        }
+        _ => true,
+    }
+}
+
 /// Whether a held key repeats the command (§5.1 rule 4): walking,
 /// extending, moving and resizing do; holding Tab or Delete does one thing.
 pub(super) fn board_repeats(command: BoardCommand) -> bool {
@@ -820,12 +841,11 @@ impl App {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.can_forward()),
-            // Only on a board, which exists only on the Board surface; a
-            // read-only one takes the commands that do not change it.
+            // Only on a board, which exists only on the Board surface.
             Board(command) => self
                 .board
                 .as_ref()
-                .is_some_and(|view| !board_mutates(command) || *view.access() == Access::Editable),
+                .is_some_and(|view| board_enabled(view, command)),
         }
     }
 
