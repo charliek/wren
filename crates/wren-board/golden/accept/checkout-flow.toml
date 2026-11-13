@@ -1,0 +1,173 @@
+# The keyboard model's result for the acceptance script of discovery/boards.md,
+# section 5.20, ported from the model's output as data.
+#
+# `script` is that script, a line of it to a line here or two. A key is its
+# name after any of the modifiers `shift` and `mod` (Cmd on macOS, Ctrl on
+# Linux); `type:` is text typed into a label or the connect query.
+#
+# Each `node` is 6 by 3 cells (120 by 60), `at` its top-left corner in cells
+# relative to Start's. Ids are random, so nodes are named by their labels,
+# which are unique, and connectors by the labels of their ends.
+
+script = [
+  "u", "tab", "type:Start", "tab", "type:Receive order", "escape", "d", "tab", "type:Valid?",
+  "escape", "mod+right", "type:Reject order", "escape", "shift+mod+left", "enter", "type:No", "escape", "left",
+  "tab", "type:Check stock", "escape", "shift+mod+up", "enter", "type:Yes", "escape", "d", "tab", "type:In stock?",
+  "escape", "mod+right", "type:Backorder", "escape", "shift+mod+left", "enter", "type:No",
+  "tab", "type:Notify customer", "escape", "c", "type:che", "enter", "left", "down",
+  "tab", "type:Charge card", "escape", "shift+mod+up", "enter", "type:Yes", "escape", "d", "tab", "type:Payment ok?",
+  "escape", "mod+right", "type:Retry payment", "escape", "shift+mod+left", "enter", "type:No",
+  "escape", "right", "c", "type:cha", "enter", "left", "down",
+  "tab", "type:Pack", "escape", "shift+mod+up", "enter", "type:Yes", "tab", "type:Ship", "tab", "type:Send receipt",
+  "escape", "u", "tab", "type:End",
+  "escape", "up", "up", "up", "up", "up", "up", "up", "up", "right", "c", "type:end", "enter",
+]
+
+[[node]]
+label = "Start"
+shape = "pill"
+at = [0, 0]
+
+[[node]]
+label = "Receive order"
+shape = "rect"
+at = [0, 6]
+
+[[node]]
+label = "Valid?"
+shape = "diamond"
+at = [0, 12]
+
+[[node]]
+label = "Reject order"
+shape = "rect"
+at = [10, 12]
+
+[[node]]
+label = "Check stock"
+shape = "rect"
+at = [0, 18]
+
+[[node]]
+label = "In stock?"
+shape = "diamond"
+at = [0, 24]
+
+[[node]]
+label = "Backorder"
+shape = "rect"
+at = [10, 24]
+
+[[node]]
+label = "Notify customer"
+shape = "rect"
+at = [10, 30]
+
+[[node]]
+label = "Charge card"
+shape = "rect"
+at = [0, 30]
+
+[[node]]
+label = "Payment ok?"
+shape = "diamond"
+at = [0, 36]
+
+[[node]]
+label = "Retry payment"
+shape = "rect"
+at = [10, 36]
+
+[[node]]
+label = "Pack"
+shape = "rect"
+at = [0, 42]
+
+[[node]]
+label = "Ship"
+shape = "rect"
+at = [0, 48]
+
+[[node]]
+label = "Send receipt"
+shape = "rect"
+at = [0, 54]
+
+[[node]]
+label = "End"
+shape = "pill"
+at = [0, 60]
+
+[[edge]]
+from = "Start"
+to = "Receive order"
+
+[[edge]]
+from = "Receive order"
+to = "Valid?"
+
+[[edge]]
+from = "Valid?"
+to = "Reject order"
+label = "No"
+
+[[edge]]
+from = "Valid?"
+to = "Check stock"
+label = "Yes"
+
+[[edge]]
+from = "Check stock"
+to = "In stock?"
+
+[[edge]]
+from = "In stock?"
+to = "Backorder"
+label = "No"
+
+[[edge]]
+from = "Backorder"
+to = "Notify customer"
+
+[[edge]]
+from = "Notify customer"
+to = "Check stock"
+
+[[edge]]
+from = "In stock?"
+to = "Charge card"
+label = "Yes"
+
+[[edge]]
+from = "Charge card"
+to = "Payment ok?"
+
+[[edge]]
+from = "Payment ok?"
+to = "Retry payment"
+label = "No"
+
+[[edge]]
+from = "Retry payment"
+to = "Charge card"
+
+[[edge]]
+from = "Payment ok?"
+to = "Pack"
+label = "Yes"
+
+[[edge]]
+from = "Pack"
+to = "Ship"
+
+[[edge]]
+from = "Ship"
+to = "Send receipt"
+
+[[edge]]
+from = "Send receipt"
+to = "End"
+
+[[edge]]
+from = "Reject order"
+to = "End"

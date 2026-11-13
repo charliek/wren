@@ -43,6 +43,8 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+#[cfg(test)]
+mod accept;
 mod check;
 pub mod clip;
 pub mod edit;
