@@ -385,6 +385,14 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
     shot_here("board-connect-end")
     key("escape")
     key("escape")
+    # Keyboard Connecting from Pack: the query in the mode chip and the
+    # node it found outlined.
+    pointer("click", {"node": pack})
+    key("c")
+    client.call("board.type", {"text": "che"})
+    shot_here("board-connecting")
+    key("escape")
+    key("escape")
     # A label open, its text replaced and the caret after it.
     pointer("double_click", {"node": pack})
     client.call("board.type", {"text": "Pack the order"})

@@ -190,6 +190,96 @@ def test_a_new_node_or_connector_is_one_block(samples: Path) -> None:
         assert all(line.startswith("+") for line in line_diff(before, after))
 
 
+def test_the_keyboard_builds_and_styles_connectors_one_block_or_line_at_a_time(samples: Path) -> None:
+    """Item 2 by keyboard (§5.6, §5.12 rules 3 and 9): Tab with nothing
+    selected adds one node block, keyboard Connecting one connector block,
+    and each connector style command one line."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-keyboard") as app:
+        ready(app)
+        original = flow.read_bytes()
+        state = key(app, "tab")
+        assert state["state"] == "editing" and state["counts"] == {"nodes": 16, "edges": 17}, state
+        made = state["selection"][0]
+        type_text(app, "Audit")
+        key(app, "escape")
+        flushed(app)
+        after = flow.read_bytes()
+        assert set(blocks(after)) - set(blocks(original)) == {f"[node.{made}]"}
+        assert all(line.startswith("+") for line in line_diff(original, after))
+
+        # From the new node to Valid? by its query: one connector block.
+        state = key(app, "c")
+        assert state["state"] == "connecting", state
+        type_text(app, "val")
+        state = key(app, "enter")
+        assert state["counts"]["edges"] == 18, state
+        connector = state["selection"][0]
+        flushed(app)
+        before, after = after, flow.read_bytes()
+        assert set(blocks(after)) - set(blocks(before)) == {f"[edge.{connector}]"}
+        assert all(line.startswith("+") for line in line_diff(before, after))
+        assert edge(app, connector)["to"]["node"] == VALID
+
+        # Each style command on the selected connector is one line.
+        for command, line in (
+            ("board.edge.routing", '+ route = "straight"'),
+            ("board.edge.start", '+ heads = ["arrow", "arrow"]'),
+            ("board.stroke.dashed", '+ style.stroke = "dashed"'),
+        ):
+            flushed(app)
+            before = flow.read_bytes()
+            app.client.call("command.run", {"id": command})
+            flushed(app)
+            assert line_diff(before, flow.read_bytes()) == [line], command
+            app.client.call("command.run", {"id": command})
+            flushed(app)
+            assert flow.read_bytes() == before, command
+        app.client.call("command.run", {"id": "board.edge.reverse"})
+        assert edge(app, connector)["from"]["node"] == VALID
+        # Every step undone gives the original bytes back.
+        while board(app)["can_undo"]:
+            key(app, "z", "mod")
+        flushed(app)
+        assert flow.read_bytes() == original
+
+
+def test_connectors_and_what_they_reach_are_selected_by_keyboard(samples: Path) -> None:
+    """§5.7 rule 4, §5.3 rule 6 and §5.10 rule 1's cursor: nothing here
+    changes the file but the delete."""
+    flow = samples / FLOW
+    with board_app(samples, "board-edit-select") as app:
+        ready(app)
+        original = flow.read_bytes()
+        click(app, {"node": RECEIVE})
+        assert key(app, "down", "mod", "shift")["selection"] == [FROM_RECEIVE]
+        # Up from that connector is its end further up, Receive order.
+        assert key(app, "up")["selection"] == [RECEIVE]
+        assert key(app, "up", "mod", "shift")["selection"] == [INTO_RECEIVE]
+        # From Pack: Ship, Send receipt and End, and the three connectors.
+        click(app, {"node": PACK})
+        state = key(app, "a", "mod", "shift")
+        assert len(state["selection"]) == 7 and state["cursor"] == PACK, state
+        # From Start, the whole chart.
+        click(app, {"node": START})
+        state = key(app, "a", "mod", "shift")
+        assert len(state["selection"]) == 32, state
+        flushed(app)
+        assert flow.read_bytes() == original and not dirty(app)
+
+        # Deleting Backorder leaves the cursor on Notify customer, the
+        # nearest node to it, and nothing selected.
+        backorder = next(n["id"] for n in board(app, elements=True)["nodes"]
+                         if n["text"] == "Backorder")
+        notify = next(n["id"] for n in board(app, elements=True)["nodes"]
+                      if n["text"] == "Notify customer")
+        click(app, {"node": backorder})
+        state = key(app, "delete")
+        assert state["selection"] == [] and state["cursor"] == notify, state
+        # An arrow then selects the cursor.
+        assert key(app, "down")["selection"] == [notify]
+
+
 def test_deleting_a_node_takes_its_two_connectors_and_nothing_else(samples: Path) -> None:
     flow = samples / FLOW
     with board_app(samples, "board-edit-delete") as app:
