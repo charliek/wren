@@ -29,11 +29,11 @@ RENDERER = os.environ.get("ICED_BACKEND", "")
 
 # Milliseconds. Release: the spike's budgets as §8.5 records them, the edit
 # budget replaced by the canvas chain's measured 12 ms with the whole board
-# in view, and on wgpu by 20 ms: above every median measured on lavapipe,
-# whose threads share the processor with the scene build, and below what
-# a 10 ms sleep in the scene build measures there (§6.7). Debug: §6.7's
-# ceilings.
-EDIT = (20 if RENDERER == "wgpu" else 12) if RELEASE else 100
+# in view, and on wgpu by 16 ms: a quarter over the worst median measured on
+# lavapipe on a quiet machine, whose threads share the processor with the
+# scene build, so that a doubled scene build still fails (§6.7). Debug:
+# §6.7's ceilings.
+EDIT = (16 if RENDERER == "wgpu" else 12) if RELEASE else 100
 FRAME = 33 if RELEASE else 400
 DRAW = 8
 OPEN_1K = 150 if RELEASE else 5000
@@ -92,7 +92,10 @@ def opened(app) -> dict:
 
 def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
     artifacts = artifact_directory(f"board-perf-{MODE}")
-    measured: dict = {"mode": MODE, "renderer": RENDERER, "shapes": SHAPES}
+    # The release budgets hold on a quiet machine only; the load tells a run
+    # made beside other work from a regression.
+    measured: dict = {"mode": MODE, "renderer": RENDERER, "shapes": SHAPES,
+                      "load_average": os.getloadavg()}
     try:
         with board_app(workspace, f"board-perf-{MODE}-app") as app:
             # Opening, from the note operation to the first redraw after the
