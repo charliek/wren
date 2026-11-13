@@ -40,6 +40,8 @@ mod clip;
 mod command;
 #[cfg(test)]
 mod fixtures;
+pub mod handles;
+pub mod hit;
 pub mod label;
 pub mod layers;
 pub mod machine;
