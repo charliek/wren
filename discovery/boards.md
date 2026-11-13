@@ -78,7 +78,7 @@ Where the section drafts disagreed, these answers were chosen; each is one place
 
 | # | Question | Default |
 |---|---|---|
-| 1 | Colour vocabulary: `neutral` plus seven hues (red, orange, yellow, green, cyan, purple, blue)? It is frozen at the Phase 2 schema lock. | Yes. |
+| 1 | Colour vocabulary: `neutral` plus seven hues (red, orange, yellow, green, cyan, purple, blue)? It is frozen at the Phase 2 schema lock. | Yes. Confirmed by the owner on 2026-11-12 (below). |
 | 2 | Zoom keys: Linux gets Alt+=, Alt+- and Alt+0 (the text-size shortcuts), not Ctrl; macOS gets Cmd. Ctrl zoom keys on Linux would need a second set of commands. | Accept Alt on Linux. |
 | 3 | Review weight at the end of Phases 1 and 2: the data-safety lens plus the Codex pass, or all four lenses and the full fuzz each time? | Data safety plus Codex; four lenses at the end of Phase 3. |
 | 4 | Mac console checks (trackpad, Cmd keys, input method, Board menu): do they block closing a phase? | No. Recorded as outstanding; required before the merge to `main`. |
@@ -86,7 +86,7 @@ Where the section drafts disagreed, these answers were chosen; each is one place
 | 6 | May `Flow.md` and `Flow.wren-board` sit in one group, told apart by the kind icon? | Yes (§3.5). |
 | 7 | Confirm the first two amendments of §2.3 (drag cancelled; dangling end as a stub). | Confirmed as written. |
 | 8 | Dashed outlines on shapes and the eight reshape commands are beyond the ring 0 list. Keep or cut? | Keep, as the first two cuts if a phase runs long (§7.3, §7.4). |
-| 9 | Will `boards` be pushed during the build? Without a push, macOS code is covered only by the Linux cross-target lint and the Mac over ssh. | The owner pushes at each phase end; no phase waits for it. |
+| 9 | Will `boards` be pushed during the build? Without a push, macOS code is covered only by the Linux cross-target lint and the Mac over ssh. | Answered on 2026-11-12 (below): pushed at each phase end, after the tag, by the orchestrating session. |
 | 10 | May the orchestrator use the Mac over ssh unattended, after the spike and at each phase end? May pytest be installed there? | Yes to ssh builds, Rust tests and scene capture. No pytest: the functional board tests stay Linux-only. |
 | 11 | Real-GPU numbers for the spike: are tiny-skia in release, lavapipe and Metal over ssh enough to pass it? | Yes. A desktop run on the Linux machine is wanted, not required. |
 | 12 | Nine workflow runs (three per phase, two to five hours each, a handoff note between them) rather than one run per phase? | Nine runs. |
@@ -94,6 +94,12 @@ Where the section drafts disagreed, these answers were chosen; each is one place
 | 14 | draw.io export: inside the MVP (the optional Phase 3 chain) or right after? The feasibility study is done and a one-way export works (§7.4): 6 to 9 working days by hand, after connectors, styling and the export command exist. | Right after. The optional chain runs only if the owner asks for it before run 3b. |
 | 15 | A macOS pinch side channel in the vendored `iced_winit` (iced 0.14 forwards no pinch event). | Not in the MVP. |
 | 16 | Decided 2026-11-12, after the owner saw the Checkout flow sample in the viewer: "we shouldn't have connectors running through the shapes like that". The router is fixed, not only the fixture. Amends the decision record's "no obstacle avoidance" and §3.7's Routes row, which M4 marked final. | Elbow routes avoid other shapes by a bounded choice among candidate routes and move off other connectors' lines where a cheap rule can (§3.7, Routes); routes stay computed, never stored; work item R1, chain `boards-p1-route`. |
+
+**The owner's answers of 2026-11-12**, given after the Phase 1 end record:
+- *The relaxed edit budget* (§6.7, the frame-build row) is accepted for the MVP: "ok for mvp and we can look into performance later". The release run asserts 12 ms on tiny-skia and 16 ms on wgpu; 8 ms waits for Phase 2's per-element rebuild.
+- *The three confirmations of §4.17* are yes: single-line labels with `\n` escapes (§4.9), per-mille integer fractions (§4.6), and `neutral` plus seven hues (§4.8, question 1). The schema lock of Phase 2 needs no further question to the owner; the colour-blindness check of §4.17 still runs before it.
+- *The failed phase-end performance gate:* the owner chose "Tune, then tag", done as `boards-p1-tune` (§8.5).
+- *Pushing* (question 9): the feature branch is pushed to the public remote at the end of each phase, after the tag, by the orchestrating session. Workflow sessions still never push (§6.6).
 
 ## 3. Architecture
 
@@ -159,7 +165,8 @@ pub mod svg { pub struct Options { pub background: Option<Rgba>, pub padding: f3
 // Phase 2: edit::{Intent, Change, Plan}, edit::plan(&Board, &Intent, &mut dyn Ids) -> Plan, Board::apply(&[Change]),
 //          clip::copy, history::History, walk::next, place::slot, z::key_between
 
-// wren-canvas
+// wren-canvas: the whole public surface at boards-p1 (clip, measure, paint and widget are private modules)
+pub use machine::{Button, Input, Machine, Scroll};  pub use measure::Measurer;
 impl BoardView {
     pub fn open(text: &str, palette: Palette, font: iced::Font) -> Result<Self, ParseError>;
     pub fn reload(&mut self, text: &str) -> Result<(), ParseError>;   // the Session's text changed underneath; keeps the viewport
@@ -173,18 +180,47 @@ impl BoardView {
     pub fn layers(&self) -> &layers::Plan;  pub fn palette(&self) -> &Palette;  pub fn epoch(&self) -> u64;
     pub fn size(&self) -> Option<(f32, f32)>;  pub fn machine(&self) -> &Machine;
     pub fn fit_pending(&self) -> bool;                               // a fit still waiting for the widget's size
+    #[cfg(feature = "test-support")] pub fn set_layer_cap(&mut self, cap: usize);   // and, with that feature, the field `pub probe: Probe`
     // Phase 2: command(Command, now) -> Update;  settle(now) -> Update;  saved(&mut self, text: &str);  draft(&mut self) -> String
 }
 pub enum Message { Input(u64 /* epoch */, Input), Resized { width: f32, height: f32 }
                    /* Phase 2: Label(u64, LabelAction), Command(Command), Pasted(u64, String) */ }
-pub struct Update { pub changed: bool, pub effects: Vec<Effect> }   // Effect: ClipboardWrite, ClipboardRead, OpenActions, OpenJump, Notice
-pub struct Style { pub labels: Option<Labels>, pub scale_factor: f32 }   // None: the renderer's own label rule (§5.13 rule 8)
-impl Viewport { pub fn fitting(content: Rect, size: (f32, f32)) -> Self; pub fn zoomed_to(self, zoom: f32, about: (f32, f32)) -> Self; }
-pub const FIT_MARGIN: f32 = 40.0;  pub const ZOOM_STOPS: [f32; 9];  pub const REST: Duration /* 150 ms */;  pub struct Measurer;
-impl Machine { pub fn step(&mut self, input: Input, view: &View) -> Vec<Effect>; }   // Phase 1 has Idle and Panning only
+pub struct Update { pub changed: bool, pub effects: Vec<Effect> }   // Default: unchanged, no effect
+pub enum Effect { Look(Viewport) }   // Phase 2 adds the host's: ClipboardWrite, ClipboardRead, OpenActions, OpenJump, Notice
+pub struct Style { pub labels: Option<Labels>, pub scale_factor: f32 }   // Default: None, 1.0. None: the renderer's own label rule (§5.13 rule 8)
+pub struct Labels { pub min_px: f32, pub moving: bool }   // ALWAYS; SOFTWARE (none under 4 px, none while moving); for_renderer(name: &str) -> Self
+pub struct Viewport { pub x: f32, pub y: f32, pub zoom: f32 }   // the board point at the widget's corner; Default: (0, 0) at 100 %
+impl Viewport {
+    pub const MIN_ZOOM: f32 = 0.1;  pub const MAX_ZOOM: f32 = 4.0;
+    pub fn to_board(self, screen: (f32, f32)) -> (f32, f32);  pub fn to_screen(self, board: (f32, f32)) -> (f32, f32);
+    pub fn panned(self, dx: f32, dy: f32) -> Self;  pub fn zoomed(self, factor: f32, about: (f32, f32)) -> Self;
+    pub fn zoomed_to(self, zoom: f32, about: (f32, f32)) -> Self;  pub fn fitting(content: Rect, size: (f32, f32)) -> Self;
+}
+pub const FIT_MARGIN: f32 = 40.0;  pub const ZOOM_STOPS: [f32; 9];  pub const REST: Duration /* 150 ms */;
+impl Measurer { pub fn new(font: Font) -> Self; pub fn font(&self, face: Face) -> Font; pub fn sweep(&self); }   // impl scene::Measure
+pub mod machine {
+    pub const LINE: f32 = 40.0;  pub const ZOOM_PER_LINE: f32 = 1.1;  pub const BURST: Duration /* 150 ms */;
+    pub enum Scroll { Lines { x: f32, y: f32 }, Pixels { x: f32, y: f32 } }   pub enum Button { Left, Middle, Right, Other }
+    pub enum Input { Wheel { delta: Scroll, at: (f32, f32), zoom: bool, sideways: bool, scale_factor: f32 },
+                     Press { button: Button, at: (f32, f32) }, Move { at: (f32, f32) }, Release { button: Button },
+                     Space { held: bool }, Cancel }
+    pub struct View { pub viewport: Viewport, pub now: Instant }
+    impl Machine { pub fn step(&mut self, input: Input, view: &View) -> Vec<Effect>;      // Phase 1 has Idle and Panning only
+                   pub fn panning(&self) -> bool;  pub fn space(&self) -> bool;  pub fn reset(&mut self); }
+}
+pub mod layers {
+    pub const CAP: usize = 4;
+    pub struct Plan { pub of: Vec<u8>, pub count: usize, pub overflow: usize }   // impl Plan { pub fn items(&self, layer: usize) -> impl Iterator<Item = usize> }
+    pub fn split(items: &[Item], cap: usize) -> Plan;
+}
+#[cfg(feature = "test-support")]
+pub struct Probe { pub parses: Cell<u64>, pub scenes: Cell<u64>, pub builds: Cell<u64>, pub painted: Cell<u64>, pub layers: Cell<usize>,
+                   pub moving: Cell<bool>, pub arrows: Cell<u64>, pub first_draw: Cell<Option<Instant>>,
+                   pub scene_micros: RefCell<VecDeque<u64>>, pub draw_micros: RefCell<VecDeque<u64>>, pub wheel: RefCell<VecDeque<Scroll>> }
+                                                                    // Probe::SAMPLES = 256, each ring's length
 ```
 
-`Message::Resized` is how the widget reports its size, which `fit` and the zoom stops need and a `BoardView` cannot ask for; it is not board input (§5.15 rule 1). The machine moves the view through `Effect::Look(Viewport)`, which `BoardView::update` applies itself, so in Phase 1 `Update` is always the default; Phase 2's contract commit keeps `Look` beside the host effects or replaces it with an equivalent. `update` drops input stamped with an older epoch. `reload` with the text the view already has does nothing; `set_viewport` clamps the zoom to 10 to 400 % and ignores a viewport that is not finite.
+`Message::Resized` is how the widget reports its size, which `fit` and the zoom stops need and a `BoardView` cannot ask for; it is not board input (§5.15 rule 1). The machine moves the view through `Effect::Look(Viewport)`, which `BoardView::update` applies itself, so in Phase 1 `Update` is always the default; Phase 2's contract commit keeps `Look` beside the host effects or replaces it with an equivalent. `update` drops input stamped with an older epoch. `reload` with the text the view already has does nothing; `set_viewport` clamps the zoom to 10 to 400 % and ignores a viewport that is not finite. The `wren-canvas` listing is the crate's public surface at the end of Phase 1, checked against `lib.rs` and its public modules; `clip.rs` (§3.8) is private and exposes nothing, since paint calls it. Phase 2's contract commit starts from this surface.
 
 `BoardView` is defined in `wren-canvas` and owned by `App`, as `EditorView` is defined in `wren-editor`. It holds the committed model, the pristine pair, the synced text, the scene, the viewport, the machine and, from Phase 2, the history, the in-flight plan and the open label's text. None of that lives in widget tree state, so the harness drives and reads it with no window and a rebuilt widget tree loses nothing. Phase 1 ships `Message::Input(epoch, Input)` and the `Machine::step` signature with wheel and pan inputs only; Phase 2 extends both and replaces neither.
 
@@ -483,7 +519,7 @@ Inline in `wren-board`; files under `crates/wren-board/golden/format/`, read wit
 
 ### 4.17 The schema lock (end of Phase 2)
 
-One commit, after the phase-end review and the owner's confirmation of the three things that cannot be undone: single-line labels (§4.9), per-mille fractions (§4.6) and the colour vocabulary (§4.8). Before it, the candidate palettes for the eleven themes are run through the colour-blindness script (`.claude/board-notes/research/critic/cvd.py`) as a short check that seven distinguishable hues exist in each; if one theme cannot supply them the vocabulary is revisited before the lock, not after.
+One commit, after the phase-end review and the owner's confirmation of the three things that cannot be undone: single-line labels (§4.9), per-mille fractions (§4.6) and the colour vocabulary (§4.8). The owner confirmed all three on 2026-11-12 (§2.4). Before it, the candidate palettes for the eleven themes are run through the colour-blindness script (`.claude/board-notes/research/critic/cvd.py`) as a short check that seven distinguishable hues exist in each; if one theme cannot supply them the vocabulary is revisited before the lock, not after.
 - `golden/format/` gains boards written through this phase's editor (the built flowchart, a pasted fragment, a connector with a label, heads and dashes) and, through `board.apply`, one with each colour, fill and stroke value, whose commands arrive in Phase 3.
 - A test pins a digest of every `.out.wren-board` in a table in the test module, so a `WREN_BLESS=1` rewrite fails until that table and `schema` change together; a stability test asserts `write(parse(x)) == x` for every frozen output.
 - This document gains a note "Schema 1 locked `<date>`, `<commit>`". Frozen: syntax and layout rules, key names and order, id and z-key alphabets, value sets, what the reader tolerates and preserves. Allowed without a bump: new optional keys, kinds, shapes and `ext.*`, all preserved by old builds. Needs a `requires` entry: anything an old build would draw misleadingly. Needs `schema = 2`: any change to the bytes written for an existing model.
@@ -923,6 +959,8 @@ WRENTEST_PERF=release WREN_TEST_BIN=$PWD/target/perf/release/wren ICED_BACKEND=t
 
 A missed budget is fixed or recorded with its number and reason; none is silently relaxed. Since the router of item R1, `make perf-board` also times boards on which every connector spends its whole routing budget (§3.7, Routes): long random connectors and a fan-in on the grid, and shapes stacked on one spot joined to one far shape. At 1,000 shapes they take 16 to 55 ms since `boards-p1-tune` (46 to 71 before it), asserted under 150 ms, missing the 5 ms row (about 1.3 ms before R1; the reason is in §8.5, `boards-p1-route`), and at about 10,200 elements 98 to 292 ms (110 to 428 before), asserted under 600 ms, within the 1 s open budget. Workspace open and `make perf-search` must be unchanged within noise against `main`, with the setting off and on.
 
+Workspace open, measured at the Phase 1 end (`77d6f7f`, release smoke-test builds of it and of `main` at `393ae14`, X11 tiny-skia, each run started after five seconds more than 90 % idle): the round trip of the harness's `workspace.open` from a one-note workspace, which flushes, scans and indexes on the workspace thread and answers when the new Session is in place; 15 opens after 3 left out, each after a 0.3 s pause, two rounds, unpinned and pinned to the performance cores. On the sample workspace (5 boards and a note) every configuration measures the same: medians of 15 to 26 ms for `main`, the setting off and the setting on alike, the spread being the cores' clock after the pause, not the build (pinned, 25.0 to 25.1 ms for `main`, 24.6 to 25.5 off and 25.3 to 25.6 on). On a workspace of 200 boards of 101 elements each (14 KB, the harness's 38-shape grid) and 10 notes, with the setting off it equals `main` (pinned 25.3 to 25.6 ms against 25.0 to 25.1; unpinned 15.7 and 23.3 against 25.1 and 15.3); with the setting on it measures 91 to 96 ms (ranges 83 to 113), **66 to 67 ms over `main` pinned and 70 to 80 ms unpinned, so with many boards the row is missed with the setting on.** The reason is §3.6: the index parses every board once at open to extract its labels (`Index::ingest` inside the scan, through `searchable`), about 0.33 ms per board of 101 elements, near the 0.28 ms `make perf-board`'s parse rate gives for that size, so the cost grows with the size of the boards and not with their count alone. It runs on the workspace thread, so the window stays responsive and only the new workspace appears later. Not fixed at the Phase 1 end; deferring the extraction (on the first query, or in the background reconcile job) would remove it from the open.
+
 The frame-build row is timed so that it measures the code and not the processor's power state. A sample taken after an idle pause runs on a core that has dropped to its idle clock: on the development machine (performance, efficiency and low-power efficiency cores under the powersave governor) one build measured 11.6 to 23.5 ms by where it landed when each change followed a 0.4 s sleep. `test_board_perf.py` therefore makes ten whole-scene changes back to back, polling for the draw that rebuilt the geometry instead of sleeping, leaves the first three out (the first is the cold one, about twice the rest), asserts one scene build per change, and writes the scene and draw halves and the left-out samples to `measurements.json`. Adding a 10 ms sleep to the scene build makes the release run fail on both renderers (18.5 to 19.1 ms on tiny-skia, 21.7 to 30.0 ms on wgpu). The ceilings follow the rule the owner set, keep 12 ms where every run's median is under it with room, else the smallest whole number of milliseconds about a quarter over the worst median, as far as a doubled cost still fails. The ceilings are set from medians measured on a quiet machine, and the release run needs one: a run beside other work is no measurement of the code (one tiny-skia run at a load of 13 measured 19.9 ms, and the next, quiet, 10.1), so `measurements.json` records the load average to tell such a run apart. On tiny-skia every quiet median was under 8.7 ms, so 12 ms stays; a doubled scene half (the measurer's sweep, `scene::build` and the layer split run twice) fails it on the efficiency and performance cores (12.3 to 15.8 ms) but passes it unpinned (10.4 to 10.9 ms), and no whole number the rule allows (11 ms) would catch that, so there the sleep is the check. On wgpu the quiet medians were 8.9 to 12.9 ms, so the ceiling is 16 ms, about a quarter over the worst. A doubled scene half then measures 17.7 to 20.9 ms unpinned and on the efficiency cores, and `scene::build` alone run twice 16.4 to 17.0 ms, and both fail; pinned to the performance cores both pass (12.7 to 14.0 ms), so on wgpu a doubling is caught unpinned and on the efficiency cores only. The 20 ms first set here, from a median of 17.4 ms taken while another process held about four cores, passed the doubled scene half unpinned (18.5 to 20.9 ms). The wgpu lanes run on lavapipe, a software renderer whose threads share the processor with the scene build, which is why the scene half is longer there and spreads more. Phase 2 should time with `taskset` on one core class or report both, on a machine with nothing else running.
 
 ### 6.8 Acceptance tests
@@ -938,7 +976,7 @@ Each item is one harness test unless it names another layer. A phase is done whe
 6. *Single writer.* With a board open, `editor.insert`, `editor.command {"intent":"bold"}`, `command.run markdown.bold` and an engine switch are refused or blocked, and one second later (past the 750 ms autosave debounce) the file is unchanged.
 7. *Raw fallback.* A conflict-marker board opens with `surface: raw` and an `error` naming a line; a text edit saves exactly what was typed; fixing the file on disk and reconciling returns `surface: board`. `Future` reports `read_only: true`. `Shapes` lists its issues.
 8. *Export SVG.* The output parses as XML, has one text run per wrapped label line, and escapes a label of `a < b & "c"`.
-9. *State file.* After open, back, forward, quit and restart, `history`, `recent` and `last_open_note` hold no board path, the board reopens, and the frozen validator (core test) accepts the file. *Live:* a v0.1.1 binary built with `--features smoke-test` in a temporary worktree and this build, driven in turn over the harness with `WREN_TEST_BIN`, each open the same workspace and keep its order, sort and widths (run at the phase end; skipped when no old binary is given).
+9. *State file.* After open, back, forward, quit and restart, `history`, `recent` and `last_open_note` hold no board path, the board reopens, and the frozen validator (core test) accepts the file. *Live:* a v0.1.1 binary built with `--features smoke-test` in a temporary worktree and this build, driven in turn over the harness with `WREN_TEST_BIN`, each open the same workspace and keep its order, sort and widths (run at the phase end; skipped when no old binary is given; the recipe is in §8.5, Phase 1 end).
 10. *Search.* Searching a label word returns the board with a label snippet; searching `schema` does not.
 11. *Core.* The op-by-kind table and the index counters pass (§6.1).
 
@@ -1125,7 +1163,7 @@ Two documentation pull-forwards happen in this phase and no others before Phase 
 
 ### 7.3 Phase 2, "Build a flowchart"
 
-**Goal.** Interactive editing. The keyboard-only flowchart test passes in the harness, a person can build and save a flowchart by mouse and by keyboard, and schema 1 is locked. Before run 2a the owner is asked the three lock confirmations of §4.17, so the answer is not waited for at the end.
+**Goal.** Interactive editing. The keyboard-only flowchart test passes in the harness, a person can build and save a flowchart by mouse and by keyboard, and schema 1 is locked. The owner gave the three lock confirmations of §4.17 on 2026-11-12 (§2.4), so nothing waits for an answer at the end.
 
 **The contract commit** on `boards` lets Wave A run in parallel. It defines the complete Phase 2 enums and nothing else: `wren_board::edit::{Intent, Change, Plan}` with every variant (`AddNode`, `SetText { id, text, size }`, `Move`, `Resize`, `SetShape`, `Delete`, `Duplicate`, `Paste { text, at, size }`, `AddEdge`, `Rebind`, `SetEdge`, `Reverse`, `SetEdgeLabel`, `Extend { from, dir, shape }`), `plan` and `Board::apply` implemented for `Move` only; the `Ids` trait; stub signatures for `walk::next`, `place::slot` and `z::key_between`; `wren_canvas::{Input, Command, Message, Update, Effect}` with all 64 Phase 2 commands, and `BoardView::command`, `settle`, `saved` and `draft` accepting and ignoring them. It passes `make check`. A chain that finds the contract wrong changes it in its own branch and says so in its report.
 
@@ -1193,7 +1231,7 @@ Merge order: edit, canvas, keys; then wiring, forked from that head, which is th
 8. *Keys in the wrong place.* Bare letters, digits, Tab, Delete and arrows typed in the palette, a dialog, a filter field, the find bar and the Notes column; Tab in the Rename dialog; a tool letter typed during keyboard Connecting.
 9. *Esc.* One rung per press from every state; never moves focus off the board, never folds columns, never commits a label through the refocus path.
 10. *Model integrity.* After any fuzzed sequence `check` reports nothing new; unknown fields, kinds, shapes and dangling connectors of a loaded file survive unrelated edits byte for byte.
-11. *Cost.* No scene rebuild or model clone per frame at idle; the per-keystroke measurement of §3.4 rule 7.
+11. *Cost.* No scene rebuild or model clone per frame at idle; the per-keystroke measurement of §3.4 rule 7. The drag preview, rebuilt at most once per pointer move (§3.4 rule 4), is measured on the three routing-heavy `make perf-board` boards (long random, fan-in, stacked) as well as on the grid, since a full scene build on them takes 16 to 55 ms at 1,000 shapes after `boards-p1-tune`, and the remedy §8.5 names (`boards-p1-route`, the second deviation) is to re-route only the connectors near the moved node.
 12. *Canvas and keys specifics.* A transition missing from the table; a gesture that mutates the committed model before release; pointer capture lost at the window edge; hit testing under zoom, pan and a parent transform; any iced type in `machine.rs`; the base keymap changing for existing users; a board command enabled on a text note, a raw board or a read-only board; `note.new_board` or the pills visible with the setting off; a self-loop or duplicate connector from quick-connect; placement overlapping a node on a hand-arranged board; walking that cannot reach some node of a connected chart.
 
 **Risks and cuts.** The phase is the largest of the three. Cuts allowed in this order, each recorded: the eight `board.shape.*` reshape commands; hover connect handles (keep handles on the selected node); `board.select.connected`; duplicate-drag; cut; re-attaching a connector end by drag. **Not cuttable:** undo with the first mutating gesture, settle-before-op, the pristine rule, external-change handling, the keyboard flowchart path, the injection seam, the New note dialog, the schema lock. **Allowed deviations:** flat `CommandId` variants instead of the nested one; a different split of files inside the two crates; where this document is wrong or silent, the most defensible behaviour, recorded. **Not allowed without the owner:** moving work across a phase boundary; anything in the last paragraph of §3.4; any change to schema 1 output after the lock.
@@ -1946,6 +1984,18 @@ Run 1c, from `1a06c6b` (the merge of `boards-p1-route`) to `6732183`. The settin
 - **The push and CI**, after deciding the commit trailers (Not fixed, item 5). CI runs on every push of `boards`.
 - **The hand trials** of §6.4's Phase 1 row, by the recipe of §6.5: open the sample workspace; see shapes, labels and connectors; pan with the wheel, a middle drag and a Space drag; zoom with Ctrl+wheel and Alt+=; switch themes; open the raw fallback; search for a label; export SVG and open it in a browser; with the setting off, the boards are absent.
 - **Optional before the tag:** the live v0.1.1 state-file case at this head, with `WRENTEST_RELEASED_BIN` naming a v0.1.1 smoke build.
+  - *Done 2026-11-13, at `77d6f7f`.* A v0.1.1 smoke-test build made from `git archive v0.1.1` in a directory outside the repository, with its own target directory (kept for later phases), and `make build-smoke` of the head: `test_board_gate.py` on X11 tiny-skia, 7 passed, `test_a_released_wren_and_this_one_share_a_workspace` among them. To repeat it, with `RELEASED` a new directory outside the repository:
+
+    ```sh
+    mkdir -p "$RELEASED/src" && git archive v0.1.1 | tar -x -C "$RELEASED/src"
+    (cd "$RELEASED/src" && cargo build --locked -p wren-iced --features smoke-test --target-dir "$RELEASED/target")
+    make build-smoke
+    WRENTEST_RELEASED_BIN="$RELEASED/target/debug/wren" ICED_BACKEND=tiny-skia \
+      uv run --locked --group test python tools/run_display.py x11 -- \
+      uv run --locked --group test pytest tools/wrentest/test_board_gate.py
+    ```
+
+*Carried items closed 2026-11-13* (this document only, no code): the live mixed-version case above passes; §6.7 records workspace open with the setting off and on (unchanged on the sample workspace and with the setting off; 66 to 80 ms over `main` with 200 boards of 101 elements and the setting on, recorded with its reason, not fixed); §3.2 lists `wren-canvas`'s whole public surface; §2.4 holds the owner's answers of 2026-11-12; §7.3's cost check measures the drag preview on the routing-heavy boards. §3.7's last paragraph already named the cylinder as the one shape `Notify customer` does not fit, as the test `notify_customer_fits_every_shape_but_the_cylinder` (`wren-canvas/src/measure.rs`) asserts.
 
 #### boards-p1-tune
 Run 1c-tune, from `2ad7a29`, one session: items T1 to T3, from the Phase 1 end record above and the owner's decision of 2026-11-12, "Tune, then tag": profile the router and take only savings that leave every drawing unchanged, make the measurement independent of the processor's idle clock, and set the ceiling at the measured number. §7.2 has no row for them. Commits: `9634c4d` (T1), `a5426c4` and `ef067e7` (T2), `f3166ac` (T3).
