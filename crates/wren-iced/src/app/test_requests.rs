@@ -138,6 +138,13 @@ impl App {
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }
+            "dialog.tab" => {
+                // A Tab no widget took, as the keyboard subscription sends it.
+                let reverse = params.get("reverse").and_then(Value::as_bool).unwrap_or(false);
+                let task = self.update(Message::DialogTab(reverse));
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
             "dialog.name" => { let task = self.update(Message::DialogName(string(params, "name")?.into())); request.respond(Ok(self.navigation_snapshot())); return Ok(task); }
             "dialog.submit" | "dialog.confirm_trash" | "dialog.close" => {
                 let task = self.update(match request.op.as_str() { "dialog.submit" => Message::SubmitDialog, "dialog.confirm_trash" => Message::ConfirmTrash, _ => Message::CancelDialog });
@@ -305,7 +312,8 @@ impl App {
                 }
                 request.respond(Ok(self.editor_snapshot()));
             }
-            "board.get" | "board.bounds" | "board.pointer" => return self.board_request(request),
+            "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
+            | "board.apply" => return self.board_request(request),
             "board.export" => {
                 // What `note.export_svg` writes once its save dialog closes.
                 if string(params, "format")? != "svg" {
@@ -344,16 +352,21 @@ impl App {
             }
             "clipboard.write" => {
                 return Ok(
-                    iced::clipboard::write(string(params, "text")?.into()).chain(Task::done(
+                    self.clipboard_write(string(params, "text")?.into()).chain(Task::done(
                         Message::Reply(Arc::clone(request), Ok(Value::Null)),
                     )),
                 );
             }
             "clipboard.read" => {
                 let request = Arc::clone(request);
-                return Ok(iced::clipboard::read().map(move |contents| {
+                return Ok(self.clipboard_read().map(move |contents| {
                     Message::Reply(Arc::clone(&request), Ok(json!(contents)))
                 }));
+            }
+            "test.clipboard" => {
+                let own = params.get("own").and_then(Value::as_bool).ok_or("own must be a boolean")?;
+                self.test_clipboard = own.then(String::new);
+                request.respond(Ok(Value::Null));
             }
             "app.screenshot" | "test.capture.after_layout" => {
                 let path = PathBuf::from(string(params, "path")?);

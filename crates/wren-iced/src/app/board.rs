@@ -12,9 +12,10 @@ use std::time::Instant;
 
 use iced::Task;
 use wren_board::{svg, Access, Palette, ParseError};
-use wren_canvas::{BoardView, Input, Viewport};
+use wren_canvas::{BoardView, Effect, Input, Viewport};
 use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
+use wren_core::ops::Op;
 
 use super::columns::Column;
 use super::commands::{Disposition, Gateway};
@@ -93,31 +94,184 @@ impl App {
         }
     }
 
-    /// A message from the widget showing the open board. Input other than
-    /// the wheel means the board has the keyboard, as an edit means the
-    /// editor has it; the wheel reaches a board that does not, and a cancel
-    /// or a focus change only says the window or the widget gained or lost
-    /// it.
-    pub(super) fn board_input(&mut self, message: wren_canvas::Message) {
-        let overlay = self.dialog.is_some() || self.palette.is_some();
+    /// A message from the widget showing the open board: the twin of
+    /// [`App::edit`], and with `dispatch` the only way to the board's draft
+    /// (§3.4 rule 1). A key the board layer binds goes on to `dispatch`, as
+    /// a palette row or a menu item does.
+    ///
+    /// Input other than the wheel means the board has the keyboard, as an
+    /// edit means the editor has it; the wheel reaches a board that does
+    /// not, and a cancel or a focus change only says the window or the
+    /// widget gained or lost it. Under a dialog or a palette, and while a
+    /// workspace loads, the board takes only what looks at it or ends
+    /// what was in flight. Input meant for the board as it was before a
+    /// reload, or for another board, is dropped.
+    pub(super) fn board_edit(&mut self, message: wren_canvas::Message) -> Task<Message> {
+        use wren_canvas::Message as Sent;
+        let held = self.dialog.is_some() || self.palette.is_some() || self.loading.is_some();
         let Some(view) = &mut self.board else {
-            return;
+            return Task::none();
         };
-        if let wren_canvas::Message::Input(_, input) = &message {
-            let passive = matches!(input, Input::Wheel { .. } | Input::Cancel | Input::Focus(_));
-            if !overlay && !passive {
+        match &message {
+            Sent::Resized { .. } => {}
+            Sent::Command(epoch, command) => {
+                if held || *epoch != view.epoch() {
+                    return Task::none();
+                }
+                let id = super::commands::CommandId::Board(*command);
+                return self.dispatch(super::commands::Command::Run(id)).task;
+            }
+            Sent::Input(epoch, _) | Sent::Label(epoch, _) | Sent::Pasted(epoch, _)
+                if *epoch != view.epoch() =>
+            {
+                return Task::none();
+            }
+            Sent::Input(_, input) => {
+                let passive =
+                    matches!(input, Input::Wheel { .. } | Input::Cancel | Input::Focus(_));
+                let ends = matches!(
+                    input,
+                    Input::Release { .. } | Input::Modifiers(_) | Input::Space { held: false }
+                );
+                if held && !(passive || ends) {
+                    return Task::none();
+                }
+                if !held && !passive {
+                    self.column = Column::Editor;
+                }
+            }
+            Sent::Label(..) | Sent::Pasted(..) => {
+                if held || !view.writable() {
+                    return Task::none();
+                }
                 self.column = Column::Editor;
             }
         }
-        view.update(message, Instant::now());
+        let update = view.update(message, Instant::now());
+        self.board_did(update).task
     }
 
-    /// Run a board command on the open board, as its key would.
-    pub(super) fn board_command(&mut self, command: wren_canvas::Command) {
-        if let Some(view) = &mut self.board {
-            view.command(command, Instant::now());
-        }
+    /// Run a board command on the open board, as its key would. Only
+    /// `run_command` calls it, so every command comes through `dispatch`.
+    pub(super) fn board_command(&mut self, command: wren_canvas::Command) -> BoardDid {
+        let Some(view) = &mut self.board else {
+            return BoardDid::default();
+        };
+        let update = view.command(command, Instant::now());
+        self.board_did(update)
     }
+
+    /// Carry out what the board's view answered: its draft when the board
+    /// changed, then what it asks of the app.
+    pub(super) fn board_did(&mut self, update: wren_canvas::Update) -> BoardDid {
+        let mut did = BoardDid::default();
+        if update.changed {
+            did.failed = self.board_changed().err();
+        }
+        let mut tasks = Vec::new();
+        for effect in update.effects {
+            match effect {
+                Effect::Notice(notice) => {
+                    self.banner = Some(notice.clone());
+                    self.banner_kind = WarningKind::General;
+                    did.notice = Some(notice);
+                }
+                Effect::ClipboardWrite(text) => tasks.push(self.clipboard_write(text)),
+                // The text comes back stamped for the board that asked, so
+                // it is dropped if the board is another by then. A
+                // clipboard with no text pastes nothing.
+                Effect::ClipboardRead => {
+                    if let Some(epoch) = self.board.as_ref().map(BoardView::epoch) {
+                        tasks.push(self.clipboard_read().map(move |text| {
+                            let text = text.unwrap_or_default();
+                            Message::Board(wren_canvas::Message::Pasted(epoch, text))
+                        }));
+                    }
+                }
+                // The view moved itself, and the two palettes are Phase 3's.
+                Effect::Look(_) | Effect::OpenActions | Effect::OpenJump => {}
+            }
+        }
+        did.task = Task::batch(tasks);
+        did
+    }
+
+    /// Put `text` on the clipboard: the system's, or under the harness the
+    /// app's own when it asked for that.
+    pub(super) fn clipboard_write(&mut self, text: String) -> Task<Message> {
+        #[cfg(feature = "smoke-test")]
+        if let Some(own) = &mut self.test_clipboard {
+            *own = text;
+            return Task::none();
+        }
+        iced::clipboard::write(text)
+    }
+
+    /// Read the clipboard [`App::clipboard_write`] writes.
+    pub(super) fn clipboard_read(&self) -> Task<Option<String>> {
+        #[cfg(feature = "smoke-test")]
+        if let Some(own) = &self.test_clipboard {
+            return Task::done(Some(own.clone()));
+        }
+        iced::clipboard::read()
+    }
+
+    /// The board changed: its draft goes to the Session, which autosave
+    /// saves. This is the only place a board sends `Op::EditDraft` (§3.4
+    /// rule 1). The view picks the text by the pristine rule and takes it
+    /// as synced before the op runs, so the `sync_editor` that follows
+    /// sees its own draft and reloads nothing.
+    fn board_changed(&mut self) -> Result<(), String> {
+        let (Some(view), Some(note)) = (&mut self.board, self.editor_note) else {
+            return Ok(());
+        };
+        #[cfg(feature = "smoke-test")]
+        let started = Instant::now();
+        let contents = view.draft();
+        #[cfg(feature = "smoke-test")]
+        let written = Instant::now();
+        self.board_revision += 1;
+        let sent = self.apply_core(Op::EditDraft { note, contents }).map(drop);
+        #[cfg(feature = "smoke-test")]
+        self.board_perf.drafted(started, written, Instant::now());
+        sent
+    }
+
+    /// Before anything that is not passive (§3.4 rule 3): the open label
+    /// is committed and a pointer gesture cancelled, and what that changed
+    /// is drafted, so the operation flushes it with the rest. An error is
+    /// a draft that did not reach the Session, which blocks the operation.
+    pub(super) fn settle_board(&mut self) -> Result<(), String> {
+        let Some(view) = &mut self.board else {
+            return Ok(());
+        };
+        let update = view.settle(Instant::now());
+        self.board_did(update).failed.map_or(Ok(()), Err)
+    }
+
+    /// Something else takes the keyboard: a palette or a dialog opens, or
+    /// the window loses its focus (§5.15 rule 4). The board settles and
+    /// its armed tool is put away.
+    pub(super) fn put_board_away(&mut self) -> Result<(), String> {
+        self.settle_board()?;
+        let Some(view) = &mut self.board else {
+            return Ok(());
+        };
+        let select = wren_canvas::Command::Tool(wren_canvas::Tool::Select);
+        let update = view.command(select, Instant::now());
+        self.board_did(update).failed.map_or(Ok(()), Err)
+    }
+}
+
+/// What the app did with a board view's answer.
+#[derive(Default)]
+pub(super) struct BoardDid {
+    /// What is left to run.
+    pub task: Task<Message>,
+    /// Why the board did not do what was asked, which is the banner now.
+    pub notice: Option<String>,
+    /// Why the board's draft did not reach the Session.
+    pub failed: Option<String>,
 }
 
 /// An SVG export of the open board, made when it was asked for and kept
@@ -452,26 +606,26 @@ z = "c"
         note
     }
 
-    fn open_markdown(app: &mut App, title: &str) -> NoteId {
+    pub fn open_markdown(app: &mut App, title: &str) -> NoteId {
         let note = note_id(app, title, NoteKind::Markdown);
         let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
         note
     }
 
-    fn session_text(app: &App) -> String {
+    pub fn session_text(app: &App) -> String {
         app.session
             .as_ref()
             .and_then(Session::document)
             .map_or_else(String::new, |document| document.text.clone())
     }
 
-    fn file(directory: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+    pub fn file(directory: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
         directory.path().join(GROUP).join(name)
     }
 
     /// The surface shows the Session's open document and nothing else.
     #[track_caller]
-    fn assert_in_step(app: &App, expected: Surface) {
+    pub fn assert_in_step(app: &App, expected: Surface) {
         assert_eq!(app.surface(), expected);
         let document = app.session.as_ref().unwrap().document();
         assert_eq!(app.editor_note, document.map(|document| document.note));
@@ -506,7 +660,7 @@ z = "c"
         );
     }
 
-    fn parses(app: &App) -> u64 {
+    pub fn parses(app: &App) -> u64 {
         app.board.as_ref().unwrap().probe.parses.get()
     }
 
@@ -938,13 +1092,13 @@ z = "c"
     use super::super::commands::{Command, CommandId, Disposition};
     use super::super::palette::SearchTarget;
 
-    fn modified(path: &Path) -> SystemTime {
+    pub fn modified(path: &Path) -> SystemTime {
         std::fs::metadata(path).unwrap().modified().unwrap()
     }
 
     /// Forty ticks that take the Session's clock to `seconds`, past the
     /// autosave delay, so a dirty draft would be on disk afterwards.
-    fn tick_to(app: &mut App, seconds: u64) {
+    pub fn tick_to(app: &mut App, seconds: u64) {
         for tick in 1..=40 {
             let _ = app.update(Message::Tick);
             let at = Duration::from_millis(seconds * 1000 * tick / 40);
@@ -1491,6 +1645,10 @@ z = "c"
         let is_board = |id: CommandId| id.board_command().is_some();
 
         open_board(&mut app, "Flow");
+        // With one node selected every board command is enabled.
+        let _ = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::Select(wren_board::Dir::Down),
+        )));
         let rows = command_rows(&mut app);
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
@@ -1538,7 +1696,77 @@ z = "c"
         open_board(&mut app, "Broken");
         assert!(board_ids().all(|id| !app.command_enabled(id)));
         open_board(&mut app, "Flow");
+        // With nothing selected, a command for one element is off, and so
+        // is one that needs a fragment.
+        let walk = Command::Run(CommandId::Board(wren_canvas::Command::Select(
+            wren_board::Dir::Down,
+        )));
+        let needs_one = |key: &str| {
+            key == "board.label.edit"
+                || key.starts_with("board.connect.") && key != "board.connect.next"
+                || key.starts_with("board.select.connector_")
+        };
+        let needs_a_node =
+            |key: &str| matches!(key, "board.copy" | "board.cut" | "board.duplicate");
+        for id in board_ids() {
+            let key = id.key();
+            assert_eq!(
+                app.command_enabled(id),
+                !needs_one(key) && !needs_a_node(key),
+                "{key}"
+            );
+        }
+        // One node selected: every board command.
+        let _ = app.dispatch(walk.clone());
+        assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 1);
         assert!(board_ids().all(|id| app.command_enabled(id)));
+        // Several: the commands for one element are off again.
+        let _ = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::SelectAll,
+        )));
+        for id in board_ids() {
+            assert_eq!(app.command_enabled(id), !needs_one(id.key()), "{id:?}");
+        }
+        // One connector: no fragment.
+        let _ = app.dispatch(Command::Run(CommandId::Board(
+            wren_canvas::Command::SelectNone,
+        )));
+        let view = app.board.as_ref().unwrap();
+        let (viewport, placed) = (view.viewport(), wren_board::placements(view.board()));
+        let middle = |name: &str| {
+            let id = wren_board::Id::new(name).unwrap();
+            let (at, size) = (placed[&id].at, view.board().nodes[&id].size);
+            (
+                at[0] as f32 + size[0] as f32 / 2.0,
+                at[1] as f32 + size[1] as f32 / 2.0,
+            )
+        };
+        let (from, to) = (middle("receive"), middle("pack"));
+        let on_edge = viewport.to_screen(((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0));
+        let _ = app.update(input(
+            &app,
+            Input::Press {
+                button: wren_canvas::Button::Left,
+                at: on_edge,
+            },
+        ));
+        let _ = app.update(input(
+            &app,
+            Input::Release {
+                button: wren_canvas::Button::Left,
+            },
+        ));
+        let selection = app.board.as_ref().unwrap().machine().selection();
+        assert_eq!(
+            selection
+                .iter()
+                .map(wren_board::Id::as_str)
+                .collect::<Vec<_>>(),
+            ["then"]
+        );
+        for id in board_ids() {
+            assert_eq!(app.command_enabled(id), !needs_a_node(id.key()), "{id:?}");
+        }
 
         // A read-only board takes looking, selecting, copying and zooming.
         std::fs::write(
@@ -1552,6 +1780,7 @@ z = "c"
             app.board.as_ref().unwrap().access(),
             Access::ReadOnly(_)
         ));
+        let _ = app.dispatch(walk);
         let enabled: Vec<_> = board_ids()
             .filter(|id| app.command_enabled(*id))
             .map(CommandId::key)

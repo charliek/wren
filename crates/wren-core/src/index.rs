@@ -116,6 +116,11 @@ pub struct Index {
     sequence: u64,
     revision: u64,
     warnings: Vec<String>,
+    /// The newest source of a note whose extraction waits for
+    /// [`Index::settle`]: the open board while its labels are typed, which
+    /// would otherwise be parsed whole on every keystroke (the board plan's
+    /// §3.4 rule 7). Until then search reads the source before it.
+    pending: Option<(NoteId, Arc<str>)>,
     /// Board sources handed to extraction, so tests can prove that unchanged
     /// boards are never extracted again.
     #[cfg(test)]
@@ -138,6 +143,7 @@ impl Index {
             sequence: 0,
             revision: 0,
             warnings: Vec::new(),
+            pending: None,
             #[cfg(test)]
             extractions: 0,
         }
@@ -279,6 +285,13 @@ impl Index {
             .collect();
         let ids: HashSet<_> = workspace.notes.iter().map(|note| note.id).collect();
         let old_len = self.entries.len();
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(note, _)| !ids.contains(note))
+        {
+            self.pending = None;
+        }
         self.entries.retain(|id, entry| {
             if ids.contains(id) {
                 true
@@ -374,10 +387,15 @@ impl Index {
     /// Exact retained source per note, shared rather than copied, so a
     /// background scan can send back only notes whose disk bytes differ.
     pub(crate) fn content_snapshot(&self) -> HashMap<NoteId, Arc<str>> {
-        self.entries
+        let mut snapshot: HashMap<NoteId, Arc<str>> = self
+            .entries
             .iter()
             .filter_map(|(id, entry)| Some((*id, Arc::clone(&entry.content.as_ref()?.source))))
-            .collect()
+            .collect();
+        if let Some((note, source)) = &self.pending {
+            snapshot.insert(*note, Arc::clone(source));
+        }
+        snapshot
     }
 
     /// Applies one background-scan content result to a note already present
@@ -416,9 +434,54 @@ impl Index {
         }
     }
 
+    /// Takes a note's newest source without extracting it yet: search goes
+    /// on reading the one before until [`Index::settle`] or another source
+    /// for any note arrives. Only a source that differs from the one kept
+    /// waits.
+    pub(crate) fn defer_content(&mut self, note: NoteId, source: &str) {
+        let Some(entry) = self.entries.get(&note) else {
+            return;
+        };
+        let kept = entry
+            .content
+            .as_ref()
+            .is_some_and(|content| &*content.source == source);
+        if self.pending.as_ref().is_some_and(|(of, _)| *of != note) {
+            self.settle();
+        }
+        self.pending = (!kept).then(|| (note, source.into()));
+    }
+
+    /// Takes the open document's source as [`Index::set_content`] does,
+    /// unless a source of the note already waits for [`Index::settle`]:
+    /// then this one waits in its place.
+    pub(crate) fn keep_content(&mut self, note: NoteId, source: &str) {
+        if self.pending.as_ref().is_some_and(|(of, _)| *of == note) {
+            self.defer_content(note, source);
+        } else {
+            self.set_content(note, source, true);
+        }
+    }
+
+    /// Whether a source waits for [`Index::settle`].
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Extract the source that waits, as the open document's.
+    pub(crate) fn settle(&mut self) {
+        if let Some((note, source)) = self.pending.take() {
+            self.set_content(note, &source, true);
+        }
+    }
+
     /// Takes a note's source. Only a source that differs from the one kept
-    /// is extracted and folded again.
+    /// is extracted and folded again; a source of the note that waited is
+    /// replaced by this one.
     pub(crate) fn set_content(&mut self, note: NoteId, source: &str, priority: bool) {
+        if self.pending.as_ref().is_some_and(|(of, _)| *of == note) {
+            self.pending = None;
+        }
         let Some(entry) = self.entries.get(&note) else {
             return;
         };
@@ -1607,6 +1670,49 @@ mod tests {
         let mut index = Index::default();
         index.sync_metadata(&workspace);
         index
+    }
+
+    #[test]
+    fn a_deferred_source_is_searched_once_it_is_settled() {
+        let mut index = board_index();
+        let source = |label: &str| {
+            format!(
+                "schema = 1\n\n[node.a]\ntext = \"{label}\"\nkind = \"shape\"\n\
+                 at = [0, 0]\nsize = [120, 60]\n"
+            )
+        };
+        let (first, typed) = (source("Receive order"), source("Receive orders"));
+        let (first, typed) = (first.as_str(), typed.as_str());
+        index.set_content(BOARD, first, true);
+        for _ in 0..5 {
+            index.defer_content(BOARD, typed);
+        }
+        assert_eq!(index.extractions, 1);
+        assert_eq!(index.content(BOARD), Some("Receive order"));
+        // A background scan compares the disk against the newest draft.
+        assert_eq!(&*index.content_snapshot()[&BOARD], typed);
+        index.settle();
+        assert_eq!(index.extractions, 2);
+        assert_eq!(index.content(BOARD), Some("Receive orders"));
+        assert!(!index.has_pending());
+
+        // The source already kept waits for nothing, and a set source of
+        // the same note replaces the one that waited.
+        index.defer_content(BOARD, typed);
+        assert!(!index.has_pending());
+        index.defer_content(BOARD, first);
+        index.set_content(BOARD, typed, true);
+        assert!(!index.has_pending());
+        assert_eq!(index.extractions, 2);
+        // Another note's source settles the one that waited.
+        index.defer_content(BOARD, first);
+        index.defer_content(NoteId(4), "other");
+        assert_eq!(index.content(BOARD), Some("Receive order"));
+        // A note that left the workspace leaves nothing waiting.
+        index.defer_content(BOARD, typed);
+        assert!(index.has_pending());
+        index.sync_metadata(&workspace());
+        assert!(!index.has_pending());
     }
 
     #[test]

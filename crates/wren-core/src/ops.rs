@@ -203,6 +203,12 @@ impl Document {
 
 const MAX_NAVIGATION_ENTRIES: usize = 100;
 
+/// How long the open board's draft rests before the index extracts its
+/// labels. A keystroke in a label sends the whole board as a draft, and
+/// extracting a large board's labels on each one cost more than the
+/// keystroke's budget (the board plan's §3.4 rule 7).
+pub const INDEX_REST: Duration = Duration::from_millis(250);
+
 /// How a Session lists a workspace, fixed for its life and inherited by a
 /// Session that `Op::OpenWorkspace` opens from it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -255,6 +261,9 @@ pub struct Session {
     // Notes whose model metadata or index text the owner refreshed while a job
     // was in flight. Their newer owner state wins over the job's snapshot read.
     touched: HashSet<NoteId>,
+    /// When the open board last sent a draft whose labels the index has
+    /// not extracted yet.
+    index_drafted: Option<Duration>,
 }
 
 impl std::fmt::Debug for Session {
@@ -383,6 +392,7 @@ impl Session {
             reconcile_job: None,
             tree_revision: 0,
             touched: HashSet::new(),
+            index_drafted: None,
         };
         session.sort_model();
         let selected = session
@@ -514,6 +524,8 @@ impl Session {
 
     pub fn apply_at(&mut self, op: Op, now: Duration) -> Result<Vec<Event>, OpError> {
         let mut events = Vec::new();
+        let drafted = matches!(op, Op::EditDraft { .. });
+        let passive = matches!(op, Op::Tick | Op::FinishReconcile(_));
         let mut result = self.execute(op, now, &mut events);
         // A conflict copy can be published before its directory sync fails.
         // Reconcile it after the active draft has been returned to the Session.
@@ -532,8 +544,30 @@ impl Session {
         for note in added {
             self.index.read_note(&self.store, note);
         }
+        // The open board's draft waits until it has rested, and any other
+        // operation takes it at once.
+        let board_draft = drafted
+            && self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.entry.kind == NoteKind::Board);
+        let waits = passive
+            && self.index.has_pending()
+            && self
+                .index_drafted
+                .is_some_and(|at| now.saturating_sub(at) < INDEX_REST);
+        if !board_draft && !waits {
+            self.index.settle();
+        }
         if let Some(document) = &self.document {
-            self.index.set_content(document.note, &document.text, true);
+            if board_draft || waits {
+                self.index.defer_content(document.note, &document.text);
+            } else {
+                self.index.set_content(document.note, &document.text, true);
+            }
+            if board_draft {
+                self.index_drafted = Some(now);
+            }
             self.selected_parent = Some(Parent::Group(document.entry.group));
         } else if self
             .selected_parent
@@ -1561,7 +1595,7 @@ impl Session {
     fn refresh_tree(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
         self.tree_revision += 1;
         let active = self.document.as_ref().map(|document| {
-            self.index.set_content(document.note, &document.text, true);
+            self.index.keep_content(document.note, &document.text);
             (document.note, document.entry.path.clone())
         });
         let scanned = scan::scan_with_contents(
@@ -1633,7 +1667,7 @@ impl Session {
         self.prune_history();
         self.index.sync_metadata(&self.model);
         if let Some(document) = &self.document {
-            self.index.set_content(document.note, &document.text, true);
+            self.index.keep_content(document.note, &document.text);
         }
         if changed {
             events.push(Event::TreeChanged);
@@ -1948,6 +1982,69 @@ mod tests {
         seconds: u64,
     ) -> Result<Vec<Event>, OpError> {
         session.apply_at(Op::FinishReconcile(result), secs(seconds))
+    }
+
+    #[test]
+    fn the_open_boards_draft_is_extracted_once_it_rests_or_before_any_other_op() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("S/G")).unwrap();
+        let text = |label: &str| {
+            format!(
+                "schema = 1\n\n[node.a]\ntext = \"{label}\"\nkind = \"shape\"\n\
+                 at = [0, 0]\nsize = [120, 60]\n"
+            )
+        };
+        fs::write(root.path().join("S/G/Flow.wren-board"), text("Start")).unwrap();
+        fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        let board = id_at(&session, "S/G/Flow.wren-board");
+        let ms = Duration::from_millis;
+        session
+            .apply_at(Op::OpenNote { note: Some(board) }, secs(1))
+            .unwrap();
+        // The first tick polls the disk, which is no draft's doing.
+        session.apply_at(Op::Tick, secs(1)).unwrap();
+        let extracted = session.index.extractions;
+        let draft = |session: &mut Session, label: &str, at: Duration| {
+            let contents = text(label);
+            session
+                .apply_at(
+                    Op::EditDraft {
+                        note: board,
+                        contents,
+                    },
+                    at,
+                )
+                .unwrap();
+        };
+        // Typing: a keystroke every 100 ms, ticks between them.
+        for (step, label) in ["R", "Re", "Rec"].into_iter().enumerate() {
+            let at = secs(1) + ms(100 * step as u64);
+            draft(&mut session, label, at);
+            session.apply_at(Op::Tick, at + ms(50)).unwrap();
+        }
+        assert_eq!(session.index.extractions, extracted);
+        assert_eq!(session.index.content(board), Some("Start"));
+        // Rested: once.
+        session
+            .apply_at(Op::Tick, secs(1) + ms(200) + INDEX_REST)
+            .unwrap();
+        assert_eq!(session.index.extractions, extracted + 1);
+        assert_eq!(session.index.content(board), Some("Rec"));
+        session.apply_at(Op::Tick, secs(2)).unwrap();
+        assert_eq!(session.index.extractions, extracted + 1);
+
+        // Any other operation takes a waiting draft at once, before it
+        // runs: here a note switch.
+        draft(&mut session, "Recv", secs(3));
+        assert_eq!(session.index.content(board), Some("Rec"));
+        let note = id_at(&session, "S/G/Note.md");
+        session
+            .apply_at(Op::OpenNote { note: Some(note) }, secs(3) + ms(1))
+            .unwrap();
+        assert_eq!(session.index.content(board), Some("Recv"));
+        assert_eq!(session.index.extractions, extracted + 2);
     }
 
     #[test]

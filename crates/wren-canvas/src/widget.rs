@@ -26,7 +26,7 @@ use iced::{
     window, Element, Event, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector,
 };
 
-use crate::keys::{self, Keyed, Out};
+use crate::keys;
 use crate::label::LabelAction;
 use crate::machine::{Button, Input, Scroll};
 use crate::overlay;
@@ -528,31 +528,20 @@ fn translate(
             if !*repeat {
                 state.key_held = Some((*physical_key, editing));
             }
-            let context = keys::Context {
-                editing,
-                composing,
-                escapes: machine.escapes(),
-                held_from_before: state.key_held == Some((*physical_key, false)),
-                policy: view.key_policy(),
-            };
-            let keyed = keys::route(
+            let held_from_before = state.key_held == Some((*physical_key, false));
+            if let Some(messages) = view.key(
                 key,
                 *physical_key,
                 *modifiers,
                 text.as_deref(),
                 *repeat,
-                context,
-            );
-            if let Keyed::Take(outs) = keyed {
+                held_from_before,
+            ) {
                 #[cfg(feature = "test-support")]
                 if keys::is_arrow(key) {
                     view.probe.arrows.set(view.probe.arrows.get() + 1);
                 }
-                sent.messages.extend(outs.into_iter().map(|out| match out {
-                    Out::Input(taken) => input(taken),
-                    Out::Command(command) => Message::Command(command),
-                    Out::Label(action) => edit(action),
-                }));
+                sent.messages.extend(messages);
                 sent.captured = true;
             }
         }
@@ -1106,7 +1095,7 @@ mod tests {
         assert_eq!(
             sent.messages,
             [
-                Message::Command(Command::Delete),
+                Message::Command(view.epoch(), Command::Delete),
                 Message::Input(view.epoch(), Input::Focus(true))
             ]
         );
@@ -1226,7 +1215,10 @@ mod tests {
             })
         };
         let sent = send(&mut view, &mut state, enter(false), ON_A);
-        assert_eq!(sent.messages, [Message::Command(Command::EditLabel)]);
+        assert_eq!(
+            sent.messages,
+            [Message::Command(view.epoch(), Command::EditLabel)]
+        );
         assert_eq!(view.machine().state(), Surface::Editing);
         // Held: its repeats are taken and do nothing to the label.
         for _ in 0..3 {
@@ -1451,7 +1443,10 @@ mod tests {
         // With the composition over, Tab is the board's again.
         let tab = key(Key::Named(Named::Tab), plain, Some("\t"));
         let sent = send(&mut view, &mut state, tab, ON_A);
-        assert_eq!(sent.messages, [Message::Command(Command::ConnectNext)]);
+        assert_eq!(
+            sent.messages,
+            [Message::Command(view.epoch(), Command::ConnectNext)]
+        );
         // It commits the label and builds the next shape, whose own label
         // opens empty (§5.9 rules 1 and 4).
         assert!(view.board().nodes.values().any(|node| node.text == "A日本"));

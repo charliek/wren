@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from tools.wrentest.boards import board, board_app, grid_board, grid_elements
+from tools.wrentest.boards import (ROUTED, board, board_app, drag, grid_board, grid_elements,
+                                   routed_board)
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import wait_for
 
@@ -39,6 +40,9 @@ DRAW = 8
 OPEN_1K = 150 if RELEASE else 5000
 OPEN_10K = 1000 if RELEASE else 5000
 VIEW = 1 if RELEASE else 5
+# One label keystroke's draft at 1,000 nodes, the canonical write and the
+# Session's op with its index parse (§3.4 rule 7): release only.
+KEYSTROKE = 8
 
 # Whole-scene changes left out before the timed ones, and those timed.
 WARM = 3
@@ -61,6 +65,9 @@ def workspace(tmp_path: Path) -> Path:
     (group / "Grid.wren-board").write_text(grid_board(SHAPES), encoding="utf-8")
     for name, shapes in OPENS.items():
         (group / f"Open {name}.wren-board").write_text(grid_board(shapes), encoding="utf-8")
+    for index, kind in enumerate(ROUTED):
+        (group / f"Routed {index}.wren-board").write_text(routed_board(kind, SHAPES),
+                                                          encoding="utf-8")
     (group / "Note.md").write_text("# Note\n", encoding="utf-8")
     return tmp_path / "work"
 
@@ -177,5 +184,57 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
                 else:
                     assert median_ms(result["frame_micros"]) <= FRAME, measured[name]
             assert app.client.call("navigation.get")["selected_note"] == notes[f"{GROUP}/Grid.wren-board"]
+
+            # One label keystroke at 1,000 nodes (§3.4 rule 7): each typed
+            # character is one draft, the canonical write of the board and
+            # the Session's op, which re-indexes the document. The scene
+            # the change rebuilds is recorded beside it.
+            app.client.call("command.run", {"id": "font.reset"})
+            app.client.call("board.pointer", {"kind": "click", "button": "left", "at": {"node": "n0"}})
+            wait_for(lambda: app.client.call("focus.get")["named"] == ["note-editor"],
+                     timeout=5, interval=0.02, description="the board focused")
+            assert app.client.call("board.key", {"key": "enter"})["state"] == "editing"
+            rings(app, clear=True)
+            typed = "keystroke timing"
+            for character in typed:
+                assert app.client.call("board.type", {"text": character})["handled"]
+            keys = rings(app)
+            measured["keystroke"] = {"draft_micros": keys["draft_micros"],
+                                     "write_micros": keys["write_micros"],
+                                     "scene_micros": keys["scene_micros"]}
+            assert len(keys["draft_micros"]) == len(typed), measured["keystroke"]
+            app.client.call("board.key", {"key": "escape"})
+            if RELEASE:
+                assert median_ms(keys["draft_micros"]) <= KEYSTROKE, measured["keystroke"]
+
+            # On the boards whose every connector spends its whole routing
+            # budget, a drag's preview, rebuilt once a pointer move, and a
+            # label keystroke each build the whole scene (§7.3 attack 11).
+            # Recorded, not asserted: the frame ceilings above are the
+            # grid's, and these miss them (§8.5, boards-p2-wire).
+            measured["routed"] = {}
+            for index, kind in enumerate(ROUTED):
+                open_row(app, notes[f"{GROUP}/Routed {index}.wren-board"])
+                opened(app)
+                rings(app, clear=True)
+                # Far enough at the fitted zoom that each move is past the
+                # 4 px a drag starts at.
+                drag(app, {"node": "n1"}, (800, 400))
+                dragged = rings(app)
+                wait_for(lambda: app.client.call("focus.get")["named"] == ["note-editor"],
+                         timeout=5, interval=0.02, description="the board focused")
+                assert app.client.call("board.key", {"key": "enter"})["state"] == "editing"
+                rings(app, clear=True)
+                for character in "keys":
+                    assert app.client.call("board.type", {"text": character})["handled"]
+                typed = rings(app)
+                app.client.call("board.key", {"key": "escape"})
+                measured["routed"][kind] = {
+                    "drag_scene_micros": dragged["scene_micros"],
+                    "keystroke_scene_micros": typed["scene_micros"],
+                    "keystroke_draft_micros": typed["draft_micros"]}
+                # Four preview steps and the release's own build.
+                assert len(dragged["scene_micros"]) == 5, measured["routed"][kind]
+                assert len(typed["draft_micros"]) == 4, measured["routed"][kind]
     finally:
         (artifacts / "measurements.json").write_text(json.dumps(measured, indent=2), encoding="utf-8")

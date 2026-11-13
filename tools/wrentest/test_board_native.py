@@ -134,3 +134,151 @@ def test_native_middle_drag_pans_by_the_pointers_motion(samples) -> None:
                  description="the release ended the pan")
         assert moved(before, bounds(app)) == {(60.0, -30.0)}
         assert column(app) == "editor"
+
+
+# Phase 2: real buttons and keys on the board (§6.1, §6.8 Phase 2 items 6
+# and 7). Each case proves the translation; what the board then does is
+# covered without a display.
+
+PACK, RECEIVE, START = "3qrg4kv1", "12axfsny", "ahj860xh"
+
+
+def screen_of(placed: dict, node: str) -> tuple[int, int]:
+    """A node's middle in the window, in whole logical pixels."""
+    rect = next(n["bounds"] for n in placed["nodes"] if n["id"] == node)
+    return point_in(rect)
+
+
+def native_drag(window: str, start: tuple[int, int], end: tuple[int, int]) -> None:
+    move(window, start)
+    xdo("mousedown", "1")
+    try:
+        for step in (1, 2, 3):
+            move(window, (start[0] + (end[0] - start[0]) * step // 3,
+                          start[1] + (end[1] - start[1]) * step // 3))
+    finally:
+        xdo("mouseup", "1")
+
+
+def at_of(app, node: str) -> list[int]:
+    return next(n for n in board(app, elements=True)["nodes"] if n["id"] == node)["at"]
+
+
+def settled(app, check, description: str):
+    return wait_for(lambda: (lambda state: state if check(state) else None)(board(app, elements=True)),
+                    timeout=5, interval=0.025, description=description)
+
+
+@pytest.mark.native_x11
+def test_native_drag_marquee_and_resize(samples) -> None:
+    with board_app(samples, "board-native-edit") as app:
+        window, placed = native_board(app)
+        zoom = placed["viewport"]["zoom"]
+        # A drag moves the shape by whole cells.
+        start = screen_of(placed, PACK)
+        native_drag(window, start, (start[0] + round(60 * zoom), start[1]))
+        settled(app, lambda state: state["state"] == "idle" and at_of(app, PACK) == [60, 840],
+                "the shape dragged")
+        # A marquee from empty canvas selects what it encloses.
+        start_box = next(n["bounds"] for n in placed["nodes"] if n["id"] == START)
+        receive = next(n["bounds"] for n in placed["nodes"] if n["id"] == RECEIVE)
+        corner = (round(start_box["x"] - 12), round(start_box["y"] - 12))
+        far = (round(receive["x"] + receive["width"] + 12), round(receive["y"] + receive["height"] + 12))
+        native_drag(window, corner, far)
+        state = settled(app, lambda state: state["state"] == "idle" and len(state["selection"]) == 3,
+                        "the marquee's selection")
+        assert set(state["selection"]) >= {START, RECEIVE}, state
+        # A click selects one node, and its south-east handle resizes it.
+        move(window, screen_of(bounds(app), PACK))
+        xdo("click", "1")
+        settled(app, lambda state: state["selection"] == [PACK], "the click's selection")
+        handle = next(h["bounds"] for h in bounds(app)["handles"] if h["handle"] == "se")
+        grip = (round(handle["x"] + handle["width"] / 2), round(handle["y"] + handle["height"] / 2))
+        native_drag(window, grip, (grip[0] + round(40 * zoom), grip[1] + round(20 * zoom)))
+        settled(app, lambda state: next(n for n in state["nodes"] if n["id"] == PACK)["size"] == [160, 80],
+                "the resize")
+
+
+@pytest.mark.native_x11
+def test_native_double_click_type_and_escape(samples) -> None:
+    flow = samples / FLOW
+    with board_app(samples, "board-native-label") as app:
+        window, placed = native_board(app)
+        move(window, screen_of(placed, PACK))
+        xdo("click", "--repeat", "2", "--delay", "80", "1")
+        settled(app, lambda state: state["state"] == "editing", "the label open")
+        xdo("type", "--delay", "20", "Boxed")
+        xdo("key", "Escape")
+        state = settled(app, lambda state: state["state"] == "idle", "the label committed")
+        assert next(n for n in state["nodes"] if n["id"] == PACK)["text"] == "Boxed"
+        assert column(app) == "editor"
+        app.client.call("core.apply", {"op": "flush"})
+        assert b'text = "Boxed"' in flow.read_bytes()
+
+
+@pytest.mark.native_x11
+def test_native_board_keys(samples) -> None:
+    """The real keys r, Tab, Ctrl+Right, Alt+Right, BackSpace, Ctrl+Z,
+    Ctrl+C and Ctrl+V on a focused board."""
+    with board_app(samples, "board-native-keys") as app:
+        window, placed = native_board(app)
+        move(window, screen_of(placed, RECEIVE))
+        xdo("click", "1")
+        settled(app, lambda state: state["selection"] == [RECEIVE], "the click's selection")
+
+        xdo("key", "r")
+        settled(app, lambda state: state["tool"] == "rectangle", "r armed the tool")
+        xdo("key", "Escape")
+        settled(app, lambda state: state["tool"] == "select", "Escape put it away")
+
+        xdo("key", "alt+Right")
+        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Alt+Right moved it")
+        xdo("key", "ctrl+z")
+        settled(app, lambda state: at_of(app, RECEIVE) == [0, 120], "Ctrl+Z undid it")
+
+        xdo("key", "Tab")
+        state = settled(app, lambda state: state["state"] == "editing", "Tab made the next shape")
+        assert state["counts"] == {"nodes": 16, "edges": 18}, state
+        xdo("key", "Escape")
+        settled(app, lambda state: state["state"] == "idle", "Escape committed it")
+        # The slot right of Start is free, so Ctrl+Right makes a shape there.
+        move(window, screen_of(bounds(app), START))
+        xdo("click", "1")
+        settled(app, lambda state: state["selection"] == [START], "Start selected")
+        xdo("key", "ctrl+Right")
+        state = settled(app, lambda state: state["state"] == "editing", "Ctrl+Right made a shape")
+        assert state["counts"] == {"nodes": 17, "edges": 19}, state
+        made = state["selection"]
+        xdo("key", "Escape")
+        settled(app, lambda state: state["state"] == "idle" and state["selection"] == made,
+                "Escape committed it")
+        xdo("key", "BackSpace")
+        settled(app, lambda state: state["counts"] == {"nodes": 16, "edges": 18}, "BackSpace deleted it")
+
+        move(window, screen_of(bounds(app), START))
+        xdo("click", "1")
+        settled(app, lambda state: state["selection"] == [START], "Start selected")
+        xdo("key", "ctrl+c")
+        wait_for(lambda: app.client.call("clipboard.read").startswith("# wren-board fragment 1"),
+                 timeout=5, interval=0.05, description="Ctrl+C copied")
+        xdo("key", "ctrl+v")
+        settled(app, lambda state: state["counts"]["nodes"] == 17, "Ctrl+V pasted")
+        assert column(app) == "editor"
+
+
+@pytest.mark.native_x11
+def test_native_a_letter_in_the_palette_arms_nothing(samples) -> None:
+    with board_app(samples, "board-native-palette") as app:
+        window, placed = native_board(app)
+        move(window, point_in(placed["root"]))
+        xdo("click", "1")
+        wait_focus(app, ["note-editor"])
+        xdo("key", "alt+shift+p")
+        wait_focus(app, ["palette-query"])
+        xdo("type", "--delay", "20", "rdo")
+        wait_for(lambda: app.client.call("navigation.get")["modal"]["query"] == "rdo", timeout=3,
+                 interval=0.025, description="the letters typed into the palette")
+        assert board(app)["tool"] == "select"
+        xdo("key", "Escape")
+        wait_focus(app, ["note-editor"])
+        assert board(app)["tool"] == "select"

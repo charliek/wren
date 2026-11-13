@@ -53,6 +53,8 @@ pub struct App {
     /// Why the open board is shown as raw text in the editor instead.
     board_error: Option<wren_board::ParseError>,
     board_viewports: board::Viewports,
+    /// How many drafts the open board has sent, plus its reloads.
+    board_revision: u64,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
     find_open: bool,
@@ -132,6 +134,11 @@ pub struct App {
     view_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
     #[cfg(feature = "smoke-test")]
     board_perf: board_spike::Perf,
+    /// A clipboard of the app's own, which the harness turns on where the
+    /// display server gives the app none (headless Weston): its text, or
+    /// `None` for the system clipboard.
+    #[cfg(feature = "smoke-test")]
+    test_clipboard: Option<String>,
     /// When the app was built, which `perf.board` times a board's opening from.
     #[cfg(feature = "smoke-test")]
     launched: Instant,
@@ -309,6 +316,7 @@ impl App {
             board: None,
             board_error: None,
             board_viewports: board::Viewports::new(),
+            board_revision: 0,
             board_spike: None,
             find_open: false,
             find_query: String::new(),
@@ -382,6 +390,8 @@ impl App {
             #[cfg(feature = "smoke-test")]
             board_perf: Default::default(),
             #[cfg(feature = "smoke-test")]
+            test_clipboard: None,
+            #[cfg(feature = "smoke-test")]
             launched,
         };
         app.apply_preferences();
@@ -446,8 +456,11 @@ impl App {
             }
             #[cfg(feature = "smoke-test")]
             Message::BoardShortcut(request, command) => {
+                let epoch = self.board.as_ref().map_or(0, wren_canvas::BoardView::epoch);
                 let task = command.map_or_else(Task::none, |command| {
-                    self.update(Message::Board(wren_canvas::Message::Command(command)))
+                    self.update(Message::Board(wren_canvas::Message::Command(
+                        epoch, command,
+                    )))
                 });
                 request.respond(Ok(self.navigation_snapshot()));
                 return task;
@@ -463,7 +476,7 @@ impl App {
                 self.retheme_board_spike();
             }
             Message::Editor(message) => return self.edit(message),
-            Message::Board(message) => self.board_input(message),
+            Message::Board(message) => return self.board_edit(message),
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
@@ -930,6 +943,9 @@ impl App {
 fn focus_editor() -> Task<Message> {
     iced::widget::operation::focus("note-editor")
 }
+
+#[cfg(test)]
+mod board_edit_tests;
 
 #[cfg(test)]
 mod navigation_tests;

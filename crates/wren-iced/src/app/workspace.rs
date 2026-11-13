@@ -323,6 +323,14 @@ impl App {
         if self.loading.is_some() {
             return self.blocked("A workspace is already loading; wait for it to finish");
         }
+        // The op flushes, moves or replaces the document, so the board's
+        // pending input becomes its draft first. That draft is passive and
+        // settles nothing in turn.
+        if !passive {
+            if let Err(error) = self.settle_board() {
+                return self.blocked(error);
+            }
+        }
         if let Op::OpenWorkspace { path } = op {
             return match self.begin_workspace(path) {
                 Ok(task) => {
@@ -798,6 +806,13 @@ impl App {
                     created = Some(*item);
                 }
                 Event::Warning(message) => self.banner = Some(message.clone()),
+                Event::NoteSaved { note, .. } => {
+                    let document = self.session.as_ref().and_then(Session::document);
+                    let saved = document.filter(|document| document.note == *note);
+                    if let (Some(view), Some(document)) = (&mut self.board, saved) {
+                        view.saved(&document.text);
+                    }
+                }
                 Event::ExternalChange { kind, .. } => match kind {
                     ExternalChangeKind::Reloaded => {}
                     ExternalChangeKind::Conflict { copy } => {
@@ -854,7 +869,10 @@ impl App {
                     .board
                     .as_mut()
                     .is_some_and(|view| match view.reload(text) {
-                        Ok(()) => true,
+                        Ok(()) => {
+                            self.board_revision += 1;
+                            true
+                        }
                         Err(reason) => {
                             error = Some(reason);
                             false
@@ -875,8 +893,12 @@ impl App {
                         .unwrap_or_else(std::time::Instant::now);
                     let palette = crate::theme::board_palette(self.definition);
                     match board::open(text, note, palette, &self.board_viewports) {
-                        Ok(view) => {
+                        Ok(mut view) => {
+                            view.set_key_policy(super::preferences::board_policy(
+                                &self.preferences.keymap,
+                            ));
                             self.board = Some(view);
+                            self.board_revision = 0;
                             #[cfg(feature = "smoke-test")]
                             self.board_perf.opened(started);
                         }
@@ -980,12 +1002,15 @@ impl App {
         self.settle_resize();
         self.cancel_gestures();
         self.editor.break_group();
+        // Whatever the board's settling came to, the draft the Session
+        // already holds is still flushed.
+        let settled = self.put_board_away();
         if self.loading.is_some() {
             self.flush_on_load = true;
         } else if self.session.is_some() {
             let _ = self.apply_core(Op::Flush)?;
         }
-        Ok(())
+        settled
     }
 
     pub(super) fn request_quit(&mut self) -> Result<Task<Message>, String> {
@@ -1010,6 +1035,11 @@ impl App {
 
     pub(super) fn show_dialog(&mut self, kind: DialogKind) -> Task<Message> {
         if self.session.is_none() || self.loading.is_some() {
+            return Task::none();
+        }
+        // A draft that did not reach the Session is on the banner, and the
+        // dialog stays shut.
+        if self.put_board_away().is_err() {
             return Task::none();
         }
         self.editor.break_group();

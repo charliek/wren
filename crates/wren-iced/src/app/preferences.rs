@@ -82,42 +82,17 @@ fn layer_of(action: &str) -> Option<Layer> {
     })
 }
 
-/// Where a focused board sends a key press (§5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BoardRoute {
-    /// An app shortcut: the board leaves the key to `App::key_input`.
-    Host,
-    /// A board command: captured and published as the command.
-    Command(wren_canvas::Command),
-    /// Anything else: captured, so it never reaches the columns. It is
-    /// text while a label or the connect query is open, and dropped
-    /// otherwise.
-    Pass,
-}
+/// Where a focused board sends a key press (§5.1): `Host` for an app
+/// shortcut, which the board leaves to `App::key_input`; `Command` for a
+/// board command, captured and published as the command; `Pass` for
+/// anything else, captured so it never reaches the columns, and text while
+/// a label or the connect query is open.
+pub(super) use wren_canvas::KeyRoute as BoardRoute;
 
 /// The board's say over its keys, from the same keymap and key reading as
 /// the app's shortcuts. Escape always runs the board's ladder; an input
 /// method's preedit and a held Space are the widget's to see first.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the board widget's key handling takes it")
-)]
-pub(super) type BoardPolicy = std::sync::Arc<
-    dyn Fn(
-            &iced::keyboard::Key,
-            iced::keyboard::key::Physical,
-            iced::keyboard::Modifiers,
-            bool,
-        ) -> BoardRoute
-        + Send
-        + Sync,
->;
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the board widget's key handling takes it")
-)]
-pub(super) fn board_policy(keymap: &Keymap) -> BoardPolicy {
+pub(super) fn board_policy(keymap: &Keymap) -> wren_canvas::KeyPolicy {
     use iced::keyboard::{key::Named, Key};
     let keymap = keymap.clone();
     std::sync::Arc::new(move |key, physical, modifiers, repeat| {
@@ -410,6 +385,9 @@ impl App {
         self.editor.set_markdown_assist(assist);
         self.editor
             .set_key_policy(key_policy(&self.preferences.keymap, assist));
+        if let Some(view) = &mut self.board {
+            view.set_key_policy(board_policy(&self.preferences.keymap));
+        }
         self.apply_editor_engine();
     }
 

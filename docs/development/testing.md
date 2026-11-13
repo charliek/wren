@@ -131,14 +131,23 @@ The board requests:
 
 | Request | What it does |
 |---|---|
-| `board.get` `{"elements": bool}` | The open note's surface (`board`, `raw`, `text` or none), whether the setting is on, and for a board its counts, issues, viewport, whether it is read-only and whether the widget is panning, idle or unfocused. With `elements` it lists every node and connector by their file fields. For raw text, `error` names the line, column and message. |
-| `board.bounds` | Where the widget and each node, label and connector are drawn in the window, in logical pixels, with each element's fill and stroke colour and the window's scale factor. |
-| `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`) or one step of a middle-button pan (`press`, `move`, `release` with `"button": "middle"`), through the path the widget's own input takes. `at` is `{"node": id}`, `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. |
+| `board.get` `{"elements": bool}` | The open note's surface (`board`, `raw`, `text` or none), whether the setting is on, and for a board its counts, issues, viewport, whether it is read-only, the machine's state (`unfocused`, `idle`, `armed`, `pressed`, `moving`, `marquee`, `resizing`, `creating`, `editing`, `panning`), the armed tool, the selection and cursor, the open label's text and caret, whether there is anything to undo or redo, whether the board still writes as it was opened (`pristine`) and `revision`, the count of its drafts and reloads. With `elements` it lists every node and connector by their file fields. For raw text, `error` names the line, column and message. |
+| `board.bounds` | Where the widget and each node, label and connector are drawn in the window, in logical pixels, with each element's fill and stroke colour and the window's scale factor; the handles shown (`nw` to `w` on the one selected node, `from` and `to` on the one selected connector) and the open label's box. |
+| `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`) or a button's `press`, `move`, `release`, `click` or `double_click` (`"button": "left"`, `"middle"` or `"right"`, `"mods": ["shift", "duplicate"]`), through the path the widget's own input takes. `at` is `{"node": id}`, `{"node": id, "handle": "se"}` (or `connect_right`, …), `{"edge": id}` (the middle of its line), `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. |
+| `board.key` `{"key": "tab", "mods": ["mod", "shift"], "repeat": false}` | A key pressed on the focused board, through the board's key policy and then the app's keyboard path, as a real key goes; `mod` is ⌘ on macOS and Ctrl elsewhere. Answers the snapshot with `handled`, whether the board took the key; with a palette or dialog open, or another widget focused, nothing happens. |
+| `board.type` `{"text": "…"}` | Text typed on the focused board: the open label's, else the connect query's. |
+| `board.apply` `{"edits": [...]}` | Edits with explicit ids (`add_node`, `move`, `set`, `connect`, `delete`), applied as one undo step and one draft, for arranging a board before what a test looks at. |
 | `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG writes, without the save dialog, and refuses the paths it refuses: a note's, and any but an `.svg` inside the workspace. |
-| `perf.board` | The board's scene, draw and frame timings, how long it took to open, and how many times the view has parsed, built its scene and built geometry, optionally after a pan or zoom run of one step a redraw. |
+| `perf.board` | The board's scene, draw and frame timings, how long it took to open, how long each draft took (the canonical write, and with the Session's op), and how many times the view has parsed, built its scene and built geometry, optionally after a pan or zoom run of one step a redraw. |
 
 Every board request but `board.get` fails when the open note is not shown
 as a board.
+
+`test.clipboard` `{"own": true}` gives the app a clipboard of its own, which
+`clipboard.write`, `clipboard.read` and the board's copy, cut and paste then
+use. Headless Weston gives the app no clipboard, so the paste case turns it
+on there and still tests the board's copy and paste; `{"own": false}` goes
+back to the system clipboard.
 
 ## Looking at real screens
 
@@ -168,9 +177,15 @@ ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
 board scenes: `board-flow` (fitted), `board-zoom-in` (200 %),
 `board-zoom-out` (25 %), `board-shapes`, `board-overlap`, `board-raw` (a
 board with conflict markers, shown as text under its banner),
-`board-notes-list` (the kind icon), `board-search` (a label hit) and
-`board-wide` (columns folded), with `board-flow.svg` beside them. Shoot
-them on both renderers in both themes:
+`board-notes-list` (the kind icon), `board-search` (a label hit),
+`board-wide` (columns folded) and `board-new-dialog` (the kind pills), with
+`board-flow.svg` beside them; then what editing draws over a board:
+`board-selected` (one node and its handles), `board-cursor` (the cursor
+ring with nothing selected), `board-multiple` (two selected, the ring on
+the second), `board-marquee` (a marquee being dragged), `board-armed` (the
+mode chip), `board-editing` (a label open, with its caret) and
+`board-empty-hint` (a new board). Shoot them on both renderers in both
+themes:
 
 ```bash
 for r in tiny-skia wgpu; do for t in dark light; do

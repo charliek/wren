@@ -304,6 +304,13 @@ pub struct Machine {
 impl Machine {
     pub fn step(&mut self, input: Input, view: &View<'_>) -> Vec<Act> {
         let mut acts = Vec::new();
+        // Pointer input of any kind ends a run of key moves (§5.11 rule 3).
+        if matches!(
+            input,
+            Input::Wheel { .. } | Input::Press { .. } | Input::Move { .. } | Input::Release { .. }
+        ) {
+            self.run = None;
+        }
         match input {
             Input::Wheel {
                 delta,
@@ -3153,6 +3160,37 @@ z = "F"
             interrupt(&mut rig);
             assert_eq!(rig.run(go), [Act::Edit(right.clone())], "{name}");
         }
+    }
+
+    #[test]
+    fn any_pointer_input_ends_a_run_of_key_moves() {
+        let right = moved(&["a"], [20, 0]);
+        let go = Command::Move(Dir::Right);
+        // A press is in the table above.
+        let pointer: [(&str, Input); 3] = [
+            ("a wheel step", wheel(lines(-1.0), false)),
+            ("a pointer move", Input::Move { at: AT }),
+            (
+                "a release",
+                Input::Release {
+                    button: Button::Left,
+                },
+            ),
+        ];
+        for (name, input) in pointer {
+            let mut rig = Rig::new();
+            rig.click(A);
+            rig.run(go);
+            assert_eq!(rig.run(go), [Act::Continue(right.clone())], "{name}");
+            rig.step(input);
+            assert_eq!(rig.run(go), [Act::Edit(right.clone())], "{name}");
+        }
+        // Keys that are not pointer input leave it open.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(go);
+        rig.step(plain());
+        assert_eq!(rig.run(go), [Act::Continue(right)]);
     }
 
     #[test]
