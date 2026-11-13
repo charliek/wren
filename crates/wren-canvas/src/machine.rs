@@ -7,6 +7,8 @@
 
 use std::time::{Duration, Instant};
 
+use wren_board::Dir;
+
 use crate::{Effect, Viewport};
 
 /// Logical pixels a wheel line pans by.
@@ -33,6 +35,28 @@ pub enum Button {
     Middle,
     Right,
     Other,
+}
+
+/// The modifiers the machine reads, as the widget resolves them for the
+/// platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Mods {
+    /// Shift: a click toggles, a marquee adds.
+    pub shift: bool,
+    /// ⌥ on macOS, Ctrl elsewhere: a drag past the threshold moves copies
+    /// (§5.8 rule 3).
+    pub duplicate: bool,
+}
+
+/// A key the board's state reads itself rather than as a command: Escape's
+/// ladder (§5.14), and Enter, the arrows and Backspace in keyboard
+/// Connecting (§5.1 rule 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Key {
+    Escape,
+    Enter,
+    Backspace,
+    Arrow(Dir),
 }
 
 /// One input to the machine. Points are widget-local logical pixels.
@@ -66,6 +90,20 @@ pub enum Input {
     /// The board lost the keyboard or the window its focus: a drag in
     /// flight ends where it is, and Space counts as up.
     Cancel,
+    /// The modifiers changed.
+    Modifiers(Mods),
+    /// A key from [`Key`]; `repeat` when it is held down.
+    Key {
+        key: Key,
+        repeat: bool,
+    },
+    /// A typed character outside a label: the connect query's text.
+    Char(char),
+    /// The widget took (`true`) or lost iced focus.
+    Focus(bool),
+    /// Time passed with no other input, so a deadline the machine set,
+    /// such as the hover handles' (§5.5 rule 8), may be due.
+    Tick,
 }
 
 /// What the machine reads of the view.
@@ -232,8 +270,9 @@ mod tests {
                     now,
                 },
             ) {
-                let Effect::Look(to) = effect;
-                *viewport = to;
+                if let Effect::Look(to) = effect {
+                    *viewport = to;
+                }
             }
             now += gap;
         }

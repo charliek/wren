@@ -37,15 +37,19 @@ use wren_board::scene::{self, Scene};
 use wren_board::{Access, Board, Issue, Palette, ParseError};
 
 mod clip;
+mod command;
 #[cfg(test)]
 mod fixtures;
+pub mod label;
 pub mod layers;
 pub mod machine;
 mod measure;
 mod paint;
 mod widget;
 
-pub use machine::{Button, Input, Machine, Scroll};
+pub use command::{Command, Grow, Tool};
+pub use label::{LabelAction, Motion};
+pub use machine::{Button, Input, Key, Machine, Mods, Scroll};
 pub use measure::Measurer;
 
 /// How long after its last pan or zoom step a view counts as at rest.
@@ -213,6 +217,14 @@ pub enum Message {
     /// The widget's size in logical pixels, sent when it differs from the
     /// one the view knows.
     Resized { width: f32, height: f32 },
+    /// An edit of the open label, stamped with the epoch it was meant for.
+    Label(u64, LabelAction),
+    /// A key the board layer binds. The host runs it through its own
+    /// command path, which reaches [`BoardView::command`].
+    Command(Command),
+    /// The clipboard's text, read for an [`Effect::ClipboardRead`] and
+    /// stamped with the epoch of the view that asked.
+    Pasted(u64, String),
 }
 
 /// What a message did.
@@ -225,12 +237,24 @@ pub struct Update {
     pub effects: Vec<Effect>,
 }
 
-/// What the [`Machine`] asks for. Phase 1 only moves the view, which
-/// [`BoardView::update`] does itself, so no effect reaches the host yet.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What a board asks for. [`BoardView::update`] applies [`Effect::Look`]
+/// itself; the rest reach the host in [`Update::effects`].
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// Look at the board from here.
     Look(Viewport),
+    /// Put this text on the system clipboard.
+    ClipboardWrite(String),
+    /// Read the system clipboard and send its text back as
+    /// [`Message::Pasted`], stamped with the view's epoch.
+    ClipboardRead,
+    /// Open the actions palette for the selection.
+    OpenActions,
+    /// Open the jump palette.
+    OpenJump,
+    /// Tell the user why something did not happen, such as a paste of a
+    /// newer board.
+    Notice(String),
 }
 
 /// A revision no view has had: geometry built for one scene is never
@@ -426,6 +450,7 @@ impl BoardView {
     /// Apply a message from the widget at `now`. Input stamped with an
     /// earlier epoch is dropped.
     pub fn update(&mut self, message: Message, now: Instant) -> Update {
+        let mut update = Update::default();
         match message {
             Message::Input(epoch, input) if epoch == self.epoch => {
                 #[cfg(feature = "test-support")]
@@ -439,10 +464,10 @@ impl BoardView {
                 for effect in self.machine.step(input, &view) {
                     match effect {
                         Effect::Look(viewport) => self.set_viewport(viewport),
+                        effect => update.effects.push(effect),
                     }
                 }
             }
-            Message::Input(..) => {}
             Message::Resized { width, height } => {
                 if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
                     self.size = Some((width, height));
@@ -451,8 +476,39 @@ impl BoardView {
                     }
                 }
             }
+            Message::Command(command) => return self.command(command, now),
+            Message::Input(..) | Message::Label(..) | Message::Pasted(..) => {}
         }
+        update
+    }
+
+    /// Run a board command at `now`, from a key, a palette row, a menu
+    /// item or the harness (§5.1 rule 5). An open label is committed
+    /// first.
+    pub fn command(&mut self, command: Command, now: Instant) -> Update {
+        let _ = (command, now);
         Update::default()
+    }
+
+    /// Before any operation that is not passive (§3.4 rule 3): commit an
+    /// open label, cancel a pointer gesture and keyboard Connecting, and
+    /// drop a preview.
+    pub fn settle(&mut self, now: Instant) -> Update {
+        let _ = now;
+        Update::default()
+    }
+
+    /// The Session saved `text`, which is now the pristine text (§3.4
+    /// rule 2).
+    pub fn saved(&mut self, text: &str) {
+        let _ = text;
+    }
+
+    /// The text to send as the board's draft, by the pristine rule (§3.4
+    /// rule 2): the pristine text while the board equals the board it
+    /// holds, otherwise the canonical text. It becomes the synced text.
+    pub fn draft(&mut self) -> String {
+        self.synced.clone()
     }
 
     /// Which board the view's input is for; see [`Message::Input`].
@@ -688,6 +744,14 @@ mod tests {
             })
             .count();
         assert_eq!(labels, 15);
+    }
+
+    #[test]
+    fn an_unedited_board_drafts_its_text_verbatim() {
+        let mut view = open(fixtures::HAND_WRITTEN);
+        assert_ne!(wren_board::write(view.board()), fixtures::HAND_WRITTEN);
+        assert_eq!(view.draft(), fixtures::HAND_WRITTEN);
+        assert_eq!(view.synced(), fixtures::HAND_WRITTEN);
     }
 
     #[test]

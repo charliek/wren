@@ -26,6 +26,10 @@
 //!   outlines and label boxes, [`route`] for connector paths and [`style`]
 //!   for colours. [`svg::write`] serialises a scene; [`search_text`]
 //!   gives the labels search indexes.
+//! - [`edit::plan`] turns an [`edit::Intent`] into the changes
+//!   [`Board::apply`] makes, with [`ids`], [`z`], [`snap`], [`place`] and
+//!   [`walk`] for new ids, stacking keys, the grid, keyboard building and
+//!   walking.
 //!
 //! The format, the scene rules and their constants are specified in the
 //! plan, `discovery/boards.md`, §3.7 and §4. Golden files under `golden/`
@@ -39,16 +43,22 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 mod check;
+pub mod edit;
 #[cfg(test)]
 mod fixtures;
+pub mod ids;
+pub mod place;
 mod read;
 pub mod route;
 pub mod scene;
 mod search;
 pub mod shape;
+pub mod snap;
 pub mod style;
 pub mod svg;
+pub mod walk;
 mod write;
+pub mod z;
 
 pub use check::{
     access, check, placements, Access, Issue, IssueKind, Placed, Reason, MAX_DEPTH, SCHEMA,
@@ -224,6 +234,16 @@ vocabulary! {
     }
     Fill { None => "none", Tint => "tint", Solid => "solid" }
     Dash { Solid => "solid", Dashed => "dashed" }
+}
+
+/// A direction on the board, for walking, keyboard building and moving by
+/// key. `Up` is towards smaller `y`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// `[node.<id>]`.
