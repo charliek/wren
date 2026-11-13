@@ -44,7 +44,7 @@ pub const MAX_LABEL_BYTES: usize = 16 * 1024;
 /// Only this many of a connector's labels are drawn.
 pub const MAX_LABELS: usize = 16;
 /// Elements are stacked by at most this many bytes of their `z`.
-pub const MAX_Z: usize = 64;
+pub const MAX_Z: usize = crate::z::MAX_LEN;
 
 /// The height of one line of text at `size`: §3.7's line heights, which
 /// the scene lays out with and every painter and writer places text by.
@@ -393,13 +393,11 @@ enum Element<'a> {
 impl<'a> Element<'a> {
     /// Ascending `z` bytewise (a missing one as empty, a long one by its
     /// first [`MAX_Z`] bytes), then id, then a node before a connector.
-    fn order(&self) -> (&'a [u8], &'a str, u8) {
-        let (z, id, rank) = match *self {
-            Self::Node(id, node) => (node.z.as_deref(), id, 0),
-            Self::Edge(id, edge, _) => (edge.z.as_deref(), id, 1),
-        };
-        let z = z.unwrap_or("").as_bytes();
-        (&z[..z.len().min(MAX_Z)], id.as_str(), rank)
+    fn order(&self) -> (&'a [u8], &'a str, bool) {
+        match *self {
+            Self::Node(id, node) => crate::z::order(node.z.as_deref(), id, false),
+            Self::Edge(id, edge, _) => crate::z::order(edge.z.as_deref(), id, true),
+        }
     }
 }
 
