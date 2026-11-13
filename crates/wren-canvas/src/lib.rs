@@ -374,6 +374,13 @@ pub struct BoardView {
     canonical: String,
     palette: Palette,
     measurer: Measurer,
+    /// What the last scene build keeps for the next, the committed
+    /// board's or a preview's, so a change routes and lays out only what
+    /// it can affect.
+    scenes: scene::Cache,
+    /// The widths the measurer may keep before the next build lays the
+    /// whole board out again, which trims them.
+    widths: usize,
     scene: Scene,
     plan: layers::Plan,
     cap: usize,
@@ -470,6 +477,8 @@ impl BoardView {
             pristine: text.to_owned(),
             palette,
             measurer: Measurer::new(font),
+            scenes: scene::Cache::default(),
+            widths: 0,
             scene: Scene {
                 bounds: scene::Rect::default(),
                 items: Vec::new(),
@@ -522,6 +531,7 @@ impl BoardView {
         text.clone_into(&mut self.synced);
         text.clone_into(&mut self.pristine);
         self.preview = None;
+        self.scenes.clear();
         self.label = None;
         self.history.clear();
         self.machine.reset();
@@ -1360,7 +1370,13 @@ impl BoardView {
     fn picture_of(&mut self, board: Board) -> Preview {
         #[cfg(feature = "test-support")]
         let started = std::time::Instant::now();
-        let scene = scene::build(&board, &self.palette, &self.measurer);
+        let scene = scene_of(
+            &mut self.scenes,
+            &mut self.widths,
+            &self.measurer,
+            &self.palette,
+            &board,
+        );
         let plan = layers::split(&scene.items, self.cap);
         #[cfg(feature = "test-support")]
         self.probe.built(started);
@@ -1571,8 +1587,13 @@ impl BoardView {
     fn build(&mut self) {
         #[cfg(feature = "test-support")]
         let started = std::time::Instant::now();
-        self.measurer.sweep();
-        self.scene = scene::build(&self.board, &self.palette, &self.measurer);
+        self.scene = scene_of(
+            &mut self.scenes,
+            &mut self.widths,
+            &self.measurer,
+            &self.palette,
+            &self.board,
+        );
         self.plan = layers::split(&self.scene.items, self.cap);
         self.revision = revision();
         #[cfg(feature = "test-support")]
@@ -1587,6 +1608,37 @@ impl BoardView {
         self.plan = layers::split(&self.scene.items, self.cap);
         self.revision = revision();
     }
+}
+
+/// The scene of `board`, from the cache of the last build: the same
+/// display list a whole build gives, made again only where the change
+/// since can reach (§3.7, Routes). The whole board is laid out again, the
+/// measurer swept before and trimmed after, when the cache was cleared,
+/// the palette changed, fonts have loaded since the widths kept were
+/// shaped (they would no longer be the widths drawn), or the widths kept
+/// have grown past `widths`, twice what the last whole layout needed,
+/// which a long run of typing does, since a label is measured as each
+/// version of it is typed.
+fn scene_of(
+    scenes: &mut scene::Cache,
+    widths: &mut usize,
+    measurer: &Measurer,
+    palette: &Palette,
+    board: &Board,
+) -> Scene {
+    if measurer.stale() || measurer.kept() > *widths {
+        scenes.relayout();
+    }
+    let whole = scenes.lays_out_all(palette);
+    if whole {
+        measurer.sweep();
+    }
+    let scene = scenes.build(board, palette, measurer);
+    if whole {
+        measurer.trim();
+        *widths = 2 * measurer.kept() + 4096;
+    }
+    scene
 }
 
 /// Where an element is drawn, in board units: a node's box, or the union
@@ -2399,6 +2451,59 @@ mod tests {
 
     fn selected(view: &BoardView) -> Vec<&str> {
         view.machine().selection().iter().map(Id::as_str).collect()
+    }
+
+    /// The view's scenes come from its cache, and each is the scene a
+    /// whole build of its board gives: through each step of a drag's
+    /// preview and its release, a label typed, undo and redo back and
+    /// forth, a palette change and a reload.
+    #[test]
+    fn every_scene_the_view_shows_is_a_whole_build_of_its_board() {
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        let now = Instant::now();
+        let whole = |view: &BoardView| {
+            let picture = view.picture();
+            let built = scene::build(picture.board, view.palette(), view.measurer());
+            assert_eq!(format!("{:?}", picture.scene), format!("{built:?}"));
+        };
+        whole(&view);
+        let names: Vec<String> = view.board().nodes.keys().map(Id::to_string).collect();
+        for (k, name) in names.iter().enumerate().step_by(3) {
+            let (x, y) = middle(&view, name);
+            input(&mut view, press((x, y)), now);
+            for step in 1..=4 {
+                let (dx, dy) = (step as f32 * (k as f32 - 6.0) * 13.0, step as f32 * 9.0);
+                input(
+                    &mut view,
+                    Input::Move {
+                        at: (x + dx, y + dy),
+                    },
+                    now,
+                );
+                whole(&view);
+            }
+            input(&mut view, RELEASE, now);
+            whole(&view);
+        }
+        open_label(&mut view, &names[0], now);
+        for text in ["P", "ay ", "now\n", "x"] {
+            typed(&mut view, text, now);
+            whole(&view);
+        }
+        key(&mut view, Key::Escape, now);
+        whole(&view);
+        while view.can_undo() {
+            view.command(Command::Undo, now);
+            whole(&view);
+        }
+        view.command(Command::Redo, now);
+        whole(&view);
+        let mut palette = fixtures::palette();
+        palette.ink = Rgba::rgb(1, 2, 3);
+        view.set_palette(palette);
+        whole(&view);
+        view.reload(fixtures::SHAPES).expect("a board");
+        whole(&view);
     }
 
     #[test]

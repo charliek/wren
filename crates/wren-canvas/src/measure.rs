@@ -19,7 +19,8 @@ use wren_board::scene::{self, Face, Measure};
 ///
 /// A scene asks for the same strings each time it is built, and shaping
 /// one costs microseconds, so widths are kept by face, size and text.
-/// [`Measurer::sweep`] bounds what is kept to what recent builds used.
+/// [`Measurer::sweep`] and [`Measurer::trim`] bound what is kept to what
+/// recent builds used.
 pub struct Measurer {
     font: Font,
     cache: RefCell<Cache>,
@@ -80,14 +81,36 @@ impl Measurer {
         cache.sweep = sweep + 1;
     }
 
-    #[cfg(test)]
-    fn shaped(&self) -> u64 {
-        self.cache.borrow().shaped
+    /// Call after a build that measured every label, following a
+    /// [`Measurer::sweep`]: forgets every width that build did not ask
+    /// for, so what is kept is what the board needs.
+    pub fn trim(&self) {
+        let mut cache = self.cache.borrow_mut();
+        let sweep = cache.sweep;
+        for widths in cache.widths.values_mut() {
+            widths.retain(|_, width| width.asked == sweep);
+        }
+    }
+
+    /// Whether fonts have been loaded since the widths kept were shaped,
+    /// or none have been yet: a width measured now may differ from one
+    /// measured before, until the next [`Measurer::sweep`].
+    pub fn stale(&self) -> bool {
+        let fonts = graphics::font_system()
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .version();
+        self.cache.borrow().fonts != Some(fonts)
+    }
+
+    /// How many widths are kept.
+    pub fn kept(&self) -> usize {
+        self.cache.borrow().widths.values().map(HashMap::len).sum()
     }
 
     #[cfg(test)]
-    fn kept(&self) -> usize {
-        self.cache.borrow().widths.values().map(HashMap::len).sum()
+    fn shaped(&self) -> u64 {
+        self.cache.borrow().shaped
     }
 }
 
@@ -298,6 +321,32 @@ mod tests {
         assert_eq!((measurer.kept(), measurer.shaped()), (3, 4));
         // Undo within one build of the change costs nothing.
         ask(&["one", "two", "three"]);
+        assert_eq!(measurer.shaped(), 5);
+    }
+
+    /// A build that measured every label trims what it did not ask for,
+    /// what builds since the sweep before asked included; a font loaded
+    /// makes the widths stale until the next sweep.
+    #[test]
+    fn a_trim_keeps_what_the_build_after_the_sweep_asked_for() {
+        fixtures::load_fonts();
+        let measurer = Measurer::new(fixtures::FONT);
+        assert!(measurer.stale());
+        measurer.sweep();
+        assert!(!measurer.stale());
+        let ask = |texts: &[&str]| {
+            for text in texts {
+                measurer.width(text, Face::Regular, LABEL_SIZE);
+            }
+        };
+        ask(&["one", "two"]);
+        // Builds of one changed label at a time, with no sweep between.
+        ask(&["t"]);
+        ask(&["th"]);
+        measurer.sweep();
+        ask(&["one", "two", "three"]);
+        measurer.trim();
+        assert_eq!(measurer.kept(), 3);
         assert_eq!(measurer.shaped(), 5);
     }
 
