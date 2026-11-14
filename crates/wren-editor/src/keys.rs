@@ -52,12 +52,13 @@ pub(crate) enum Routed {
 }
 
 /// Route a key press, with `menu` open (rule 4.4.4). Up and Down with no
-/// modifier move its selection and Enter with no modifier accepts it, or
-/// closes a menu with nothing to offer. Escape is the host's: the editor
-/// gives it no binding, so it neither drops focus nor captures the press,
-/// and the host closes the menu (rule 4.4.8). A modifier key alone does
-/// nothing. Any other press closes the menu and is then routed by
-/// [`key_binding`]. With no menu, routing is [`key_binding`]'s alone.
+/// modifier move its selection and Enter with no modifier accepts the row
+/// the host's menu has selected, or closes a menu with nothing to offer.
+/// Escape is the host's: the editor gives it no binding, so it neither drops
+/// focus nor captures the press, and the host closes the menu (rule 4.4.8).
+/// A modifier key alone does nothing. Any other press closes the menu and is
+/// then routed by [`key_binding`]. With no menu, routing is
+/// [`key_binding`]'s alone.
 pub(crate) fn route(
     key_press: KeyPress,
     context: Context,
@@ -66,18 +67,16 @@ pub(crate) fn route(
     if !matches!(key_press.status, text_editor::Status::Focused { .. }) {
         return None;
     }
-    let Some(menu) = menu else {
+    if menu.is_none() {
         return key_binding(key_press, context).map(Routed::Binding);
-    };
+    }
     let plain = key_press.modifiers.is_empty();
     let event = match key_press.key.as_ref() {
         Key::Named(Named::Escape) => return None,
         Key::Named(named) if is_modifier(named) => return None,
         Key::Named(Named::ArrowUp) if plain => SpellEvent::Move(-1),
         Key::Named(Named::ArrowDown) if plain => SpellEvent::Move(1),
-        Key::Named(Named::Enter) if plain => {
-            menu.selected.map_or(SpellEvent::Close, SpellEvent::Accept)
-        }
+        Key::Named(Named::Enter) if plain => SpellEvent::AcceptSelected,
         _ => return Some(Routed::Close(key_binding(key_press, context))),
     };
     Some(Routed::Binding(Binding::Custom(Message::Spell(event))))
@@ -615,10 +614,14 @@ mod tests {
             |named, selected| menu_event(routed(Key::Named(named), none, None, ASSIST, selected));
         assert_eq!(named(Named::ArrowUp, Some(1)), Some(SpellEvent::Move(-1)));
         assert_eq!(named(Named::ArrowDown, Some(1)), Some(SpellEvent::Move(1)));
-        assert_eq!(named(Named::Enter, Some(2)), Some(SpellEvent::Accept(2)));
-        // With only the inactive row, Enter closes and Up and Down are
-        // still the menu's, so neither reaches the text.
-        assert_eq!(named(Named::Enter, None), Some(SpellEvent::Close));
+        // Enter accepts whatever the host's menu has selected, which closes
+        // a menu with only the inactive row; Up and Down are still the
+        // menu's then, so neither reaches the text.
+        assert_eq!(
+            named(Named::Enter, Some(2)),
+            Some(SpellEvent::AcceptSelected)
+        );
+        assert_eq!(named(Named::Enter, None), Some(SpellEvent::AcceptSelected));
         assert_eq!(named(Named::ArrowDown, None), Some(SpellEvent::Move(1)));
         // The same without Markdown assist.
         assert_eq!(
@@ -629,7 +632,7 @@ mod tests {
                 PLAIN,
                 Some(0)
             )),
-            Some(SpellEvent::Accept(0))
+            Some(SpellEvent::AcceptSelected)
         );
     }
 

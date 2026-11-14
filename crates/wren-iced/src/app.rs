@@ -617,7 +617,10 @@ impl App {
                 // comes from a press elsewhere that may pick another column.
                 if matches!(
                     event,
-                    SpellEvent::OpenAtCaret | SpellEvent::OpenAt(_) | SpellEvent::Accept(_)
+                    SpellEvent::OpenAtCaret
+                        | SpellEvent::OpenAt(_)
+                        | SpellEvent::Accept(_)
+                        | SpellEvent::AcceptSelected
                 ) {
                     self.column = columns::Column::Editor;
                 }

@@ -825,6 +825,10 @@ impl EditorView {
                 }
             }
             SpellEvent::Accept(row) => return self.accept(row),
+            SpellEvent::AcceptSelected => match self.menu.as_ref().and_then(SpellMenu::selected) {
+                Some(row) => return self.accept(row),
+                None => self.menu = None,
+            },
             SpellEvent::Close => {
                 self.menu = None;
             }
@@ -1712,7 +1716,7 @@ mod tests {
             let up = ev.key_message(Key::Named(Named::ArrowUp), none);
             assert_eq!(spell_events(&up), [SpellEvent::Move(-1)]);
             let enter = ev.key_message(Key::Named(Named::Enter), none);
-            assert_eq!(spell_events(&enter), [SpellEvent::Accept(1)]);
+            assert_eq!(spell_events(&enter), [SpellEvent::AcceptSelected]);
             assert_eq!(ev.text(), "teh cat");
             assert_eq!(ev.cursor(), at(0, 1));
             assert_eq!(enter.len(), 1);
@@ -1756,7 +1760,7 @@ mod tests {
             }
             assert!(ev.spell_menu().is_some());
             let enter = ev.key_message(Key::Named(Named::Enter), Modifiers::empty());
-            assert_eq!(spell_events(&enter), [SpellEvent::Close]);
+            assert_eq!(spell_events(&enter), [SpellEvent::AcceptSelected]);
             assert_eq!(enter.len(), 1);
             for message in enter {
                 assert!(!handle(&mut ev, message));

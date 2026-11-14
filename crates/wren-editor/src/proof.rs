@@ -35,6 +35,11 @@ pub enum SpellEvent {
     Hover(usize),
     /// Replace the word with this row's suggestion.
     Accept(usize),
+    /// Replace the word with the selected row's suggestion, or close a menu
+    /// with nothing selected. Enter sends it, so it accepts the row the
+    /// host's menu holds even when keys of one batch were routed before the
+    /// host had opened it.
+    AcceptSelected,
     Close,
 }
 
@@ -148,12 +153,14 @@ impl OpenMenu {
     }
 
     /// The menu `message` leaves `menu` as, once the host applies it. An
-    /// opening is taken as the menu it opens when it finds a word, with as
-    /// many suggestions as there may be and the first selected: the host
-    /// clamps a move past its last row, and accepting a row past it, or the
-    /// inactive row, closes it. Every message but a move, a hover or an
-    /// opening closes the menu: the host closes it on any action, intent,
-    /// undo or redo (rule 4.4.8).
+    /// opening is taken as the menu it opens when it finds a word (the
+    /// widget clears the copy when the keyboard's opening finds none), with
+    /// as many suggestions as there may be and the first selected. The row
+    /// count is a guess, so the copy's selection can run past the host's
+    /// last row; Enter therefore accepts the host's own selection
+    /// ([`SpellEvent::AcceptSelected`]). Every message but a move, a hover
+    /// or an opening closes the menu: the host closes it on any action,
+    /// intent, undo or redo (rule 4.4.8).
     pub(crate) fn after(menu: Option<Self>, message: &crate::Message) -> Option<Self> {
         match message {
             crate::Message::Spell(SpellEvent::OpenAtCaret | SpellEvent::OpenAt(_)) => Some(Self {
@@ -390,6 +397,7 @@ mod tests {
         assert_eq!(after(open(Some(0)), SpellEvent::Hover(3)), open(Some(0)));
         assert_eq!(after(None, SpellEvent::Move(1)), None);
         assert_eq!(after(open(Some(1)), SpellEvent::Accept(1)), None);
+        assert_eq!(after(open(Some(1)), SpellEvent::AcceptSelected), None);
         assert_eq!(after(open(Some(1)), SpellEvent::Close), None);
         let opening = Some(OpenMenu {
             selected: Some(0),
