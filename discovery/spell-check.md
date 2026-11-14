@@ -682,6 +682,11 @@ Checked live as well as by the unit tests, on X11 with tiny-skia, through a temp
 
 Captured on X11 for all eleven themes on tiny-skia and for Wren Light and Wren Dark on wgpu (52 files under `target/scenes/advanced/<renderer>/<theme>/`). Looked at: Wren Light and Wren Dark on both renderers, Nord, Dracula and Solarized Light. In each, the eight marks show as zigzags in the theme's misspelling colour and `apear` has none, with no mark in the front matter, the code span, the link targets, the autolink, the e-mail address, `<kbd>`, the done task or the fence; the menu sits 4 px under `replacments` with five rows and the first selected, the word tinted with its zigzag over the tint; "No suggestions" shows one inactive row; and `wrogn`'s menu opens above its row. The two renderers differ only in antialiasing. Not opened: Gruvbox Dark, Rosé Pine, Everforest Dark, Tokyo Night, Catppuccin Mocha and Catppuccin Macchiato.
 
+*W6, the docs.* The pages W6 names, written from the code as built (W1 to W5's choices included), not from §4's text alone. Where W6's list left a case open:
+
+27. *Beyond the list:* `docs/index.md` links the new page under "Next steps"; `configuration.md` also says, under its opening paragraph, that `words.txt` lives in the same directory; `keybindings.md` gets a "Spell check" subsection under "Inside the editor" with the suggest key, adds the three commands to the bindable actions, and says Suggest spelling is, like the Markdown commands, a key the app leaves to the editor; `architecture.md` gains a "Spell check" section on the three crates' seams, the `danger` token's second use and the dictionary's thread; `testing.md` also documents `capture_scenes.py --only spell` (W5's open issue) and `WrenApp(words=…)`.
+28. *What the user pages leave out:* the zigzag's geometry, the menu's sizes, the batch rules of `spell-menu` items 18 to 20, and the item 22 cost on tiny-skia. They are contributor detail or not settled, and `architecture.md` names the zigzag's drawing only in outline.
+
 #### The end review
 
 #### The join

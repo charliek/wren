@@ -38,6 +38,7 @@ nav = [
   ] },
   { "Reference" = [
     { "Configuration" = "reference/configuration.md" },
+    { "Spell Check" = "reference/spell-check.md" },
     { "Workspace Folder" = "reference/workspace-folder.md" },
     { "Autosave and External Edits" = "reference/autosave.md" },
   ] },
