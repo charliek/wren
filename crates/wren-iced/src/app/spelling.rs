@@ -657,6 +657,96 @@ mod tests {
     }
 
     #[test]
+    fn one_escape_closes_only_the_menu_and_the_next_closes_the_find_bar() {
+        use crate::keys::{Input, Nav};
+
+        let (_directory, mut app) = spell_app(ADVANCED, "A mispelled word\n", None);
+        load(&mut app);
+        assert_eq!(run(&mut app, CommandId::Find), Disposition::Completed);
+        assert!(app.find_open);
+        for escape in [Nav::Escape, Nav::FieldEscape] {
+            let _ = caret(&mut app, 0, 4);
+            assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+            let task = app.update(Message::Key(Input::Nav(escape)));
+            assert!(app.editor.spell_menu().is_none());
+            assert!(app.find_open, "{escape:?}");
+            assert_eq!(app.column, Column::Editor);
+            // No focus change: the editor keeps the keyboard.
+            assert_eq!(task.units(), 0, "{escape:?}");
+        }
+        let _ = app.update(Message::Key(Input::Nav(Nav::Escape)));
+        assert!(!app.find_open);
+
+        // The Escape message itself closes the menu before anything else.
+        let _ = app.update(Message::Command(Command::Run(CommandId::Find)));
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+        let _ = app.update(Message::Escape);
+        assert!(app.editor.spell_menu().is_none());
+        assert!(app.find_open);
+    }
+
+    #[test]
+    fn the_app_closes_the_menu_for_the_palette_a_dialog_the_theme_settings_and_window_focus() {
+        let (directory, mut app) = spell_app(ADVANCED, "A mispelled word\n", None);
+        let config = directory.path().join("config/config.conf");
+        load(&mut app);
+        let _ = caret(&mut app, 0, 4);
+        let reopen = |app: &mut App| assert_eq!(open(app).as_deref(), Some("mispelled"));
+        let closes = |app: &mut App, message: Message| {
+            let _ = app.update(message);
+            assert!(app.editor.spell_menu().is_none());
+        };
+
+        reopen(&mut app);
+        closes(
+            &mut app,
+            Message::PaletteOpen(crate::app::palette::Mode::Commands),
+        );
+        closes(&mut app, Message::PaletteClose);
+        reopen(&mut app);
+        closes(
+            &mut app,
+            Message::Command(Command::Run(CommandId::RenameNote)),
+        );
+        assert!(app.dialog.is_some());
+        closes(&mut app, Message::CancelDialog);
+        reopen(&mut app);
+        let other = if app.definition == wren_core::theme::DARK {
+            wren_core::theme::LIGHT
+        } else {
+            wren_core::theme::DARK
+        };
+        closes(&mut app, Message::ChooseTheme(Some(other)));
+        reopen(&mut app);
+        // The same theme again is no change.
+        let _ = app.update(Message::ChooseTheme(Some(other)));
+        assert!(app.editor.spell_menu().is_some());
+        std::fs::write(&config, "editor-engine = advanced\nline-numbers = off\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert!(app.editor.spell_menu().is_none());
+        reopen(&mut app);
+        // A reload that finds nothing changed keeps it.
+        assert_eq!(app.reload_settings(false), None);
+        assert!(app.editor.spell_menu().is_some());
+        let window = iced::window::Id::unique();
+        closes(
+            &mut app,
+            Message::Window(window, iced::window::Event::Unfocused),
+        );
+        reopen(&mut app);
+        closes(
+            &mut app,
+            Message::Command(Command::Run(CommandId::SwitchEngine)),
+        );
+        assert_eq!(
+            run(&mut app, CommandId::SwitchEngine),
+            Disposition::Completed
+        );
+        reopen(&mut app);
+        closes(&mut app, Message::Core(Op::OpenNote { note: None }));
+    }
+
+    #[test]
     fn the_proofreader_comes_with_the_dictionary_and_follows_the_word_list() {
         let directory = crate::test_support::tempdir();
         let path = directory.path().join("words.txt");

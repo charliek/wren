@@ -353,6 +353,11 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        // The palette and the dialogs take the keyboard, so the suggestions
+        // menu never stays open under one (rule 4.4.8).
+        if self.palette.is_some() || self.dialog.is_some() {
+            self.editor.close_spell_menu();
+        }
         // The note, the loading state and the setting can each change on any
         // message, and the editor must see the proofreader before it draws.
         self.sync_proofreader();
@@ -500,6 +505,11 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
+                // An open suggestions menu is the topmost thing Escape
+                // closes; the editor keeps the keyboard and the find bar stays.
+                if self.editor.close_spell_menu() {
+                    return Task::none();
+                }
                 self.cancel_gestures();
                 // Esc closes the topmost overlay and keeps the active column;
                 // with none open, it returns the keyboard to the editor.

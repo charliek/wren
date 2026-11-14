@@ -657,6 +657,12 @@ Checked live as well as by the unit tests, on X11 with tiny-skia, through a temp
 11. *`config.conf`'s template documents `spell-check`* with the suggest key and `words.txt`.
 12. *`test_navigation.py` expects the toggle's state to be `on`*, the build's default, because the harness writes no `spell-check` line before W4; W4 makes it the lane's value.
 
+*W3, the theme and the Escape order.* Where §3.4 or rule 4.4.8 left a case open:
+
+13. *The theme mapping is step 0's*, unchanged; W3 adds a test that every built-in theme maps as §3.4 says and draws the zigzag, the menu's rows and its border in colours distinct from what they sit on.
+14. *Escape:* `key_input` closes the menu for a plain Escape and for a filter box's Escape before anything else, and the `Message::Escape` arm does too, before it cancels gestures, so a test or any other sender of the message gets the same order. Closing returns no task, so focus stays where it is.
+15. *The app's closing causes.* After every message, an open palette or dialog closes the menu, whatever path opened it. A theme that changes (a picker preview, the system appearance, a choice) closes it, as does any applied settings change (`apply_preferences`: a reload that changed `config.conf`, every saved toggle) and the window losing focus (which the widget also reports). A reload that finds both files unchanged keeps the menu; a changed `words.txt` replaces the proofreader, which closes it. The note, the workspace and the engine close it through the editor (`replace_text`, `set_backend`), and a workspace load withdraws the proofreader (§3.4), which closes it too.
+
 #### The end review
 
 #### The join

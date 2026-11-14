@@ -229,6 +229,7 @@ impl App {
                 .unwrap_or_else(|| self.preferences.theme(self.system_mode).0),
         };
         if theme != self.definition {
+            self.editor.close_spell_menu();
             self.definition = theme;
             self.toolkit_theme = crate::theme::from_definition(theme);
         }
@@ -284,8 +285,10 @@ impl App {
         warning
     }
 
-    /// Apply the settings to the theme and editor.
+    /// Apply the settings to the theme and editor. A change of settings
+    /// closes the suggestions menu (rule 4.4.8).
     pub(super) fn apply_preferences(&mut self) {
+        self.editor.close_spell_menu();
         self.apply_shown();
         let settings = &self.preferences.settings;
         self.editor.set_line_height(settings.editor_line_height);
@@ -552,6 +555,10 @@ impl App {
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
         let accel = match input {
+            // The editor leaves Escape to the app while its menu is open.
+            Input::Nav(Nav::Escape | Nav::FieldEscape) if self.editor.close_spell_menu() => {
+                return Task::none();
+            }
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),
             // A filter box handed back the keyboard: stay in its column. The
             // palette, a dialog, and the find bar still close as with Esc.
