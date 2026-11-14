@@ -1,6 +1,5 @@
 //! Judging the words of a line against the sources.
 
-use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::words;
@@ -47,11 +46,7 @@ impl Speller {
     /// Whether some source accepts `word`, read with straight apostrophes, or
     /// accepts the part before a final `'s`.
     fn correct(&self, word: &str) -> bool {
-        let word: Cow<'_, str> = if word.contains('’') {
-            Cow::Owned(word.replace('’', "'"))
-        } else {
-            Cow::Borrowed(word)
-        };
+        let word = words::straight(word);
         self.accepted(&word)
             || word
                 .strip_suffix("'s")
@@ -81,32 +76,13 @@ fn boundary_at_or_before(line: &str, mut at: usize) -> usize {
 #[allow(clippy::single_range_in_vec_init)] // an expected list of marks often holds one
 mod tests {
     use super::*;
-    use crate::Hunspell;
+    use crate::{Hunspell, WordList};
     use std::sync::OnceLock;
 
-    /// Words accepted as Hunspell would accept them from a `.dic` entry: an
-    /// all-lower-case one also capitalised and in upper case.
-    struct Listed(&'static [&'static str]);
-
-    impl WordSource for Listed {
-        fn accepts(&self, word: &str) -> bool {
-            self.0.iter().any(|entry| {
-                if word == *entry {
-                    return true;
-                }
-                if entry.chars().any(char::is_uppercase) {
-                    return false;
-                }
-                let mut chars = entry.chars();
-                let capitalised: String = chars
-                    .next()
-                    .map(|first| first.to_uppercase().chain(chars).collect())
-                    .unwrap_or_default();
-                word == capitalised || word == entry.to_uppercase()
-            })
-        }
-
-        fn suggest(&self, _word: &str, _out: &mut Vec<String>) {}
+    fn list(text: &str) -> Box<WordList> {
+        let (list, warnings) = WordList::parse(text);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        Box::new(list)
     }
 
     struct Shared(&'static Hunspell);
@@ -129,10 +105,7 @@ mod tests {
     /// The bundled dictionary and a word list holding `catppuccin`, as the
     /// acceptance note is checked.
     fn speller() -> Speller {
-        Speller::new(vec![
-            Box::new(Shared(en_us())),
-            Box::new(Listed(&["catppuccin"])),
-        ])
+        Speller::new(vec![Box::new(Shared(en_us())), list("catppuccin\n")])
     }
 
     fn marked<'a>(speller: &Speller, line: &'a str, prose: &[Range<usize>]) -> Vec<&'a str> {
@@ -281,7 +254,7 @@ mod tests {
 
     #[test]
     fn rule_3_a_curly_apostrophe_is_looked_up_as_straight() {
-        let speller = Speller::new(vec![Box::new(Listed(&["isn't"]))]);
+        let speller = Speller::new(vec![list("isn't")]);
         assert_eq!(marked_line(&speller, "isn’t isn't"), Vec::<&str>::new());
         assert_eq!(marked_line(&speller, "wasn’t"), ["wasn’t"]);
     }
@@ -315,10 +288,7 @@ mod tests {
             ["CommonMark", "hEllo", "wednesday"]
         );
 
-        let either = Speller::new(vec![
-            Box::new(Listed(&["alpha"])),
-            Box::new(Listed(&["beta"])),
-        ]);
+        let either = Speller::new(vec![list("alpha"), list("beta")]);
         assert_eq!(marked_line(&either, "alpha beta gamma"), ["gamma"]);
     }
 
@@ -330,6 +300,22 @@ mod tests {
             Vec::<&str>::new()
         );
         assert_eq!(marked_line(&speller, "Wren's Wrne's"), ["Wrne's"]);
+    }
+
+    #[test]
+    fn a_word_list_read_from_a_bom_crlf_file_vouches_for_its_words() {
+        let (words, warnings) =
+            WordList::parse("\u{feff}# my words\r\nzensical\r\no’kelly\r\nCommonMark\r\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let speller = Speller::new(vec![Box::new(Shared(en_us())), Box::new(words)]);
+        assert_eq!(
+            marked_line(
+                &speller,
+                "Zensical zensical’s O'Kelly o'kelly O’kelly CommonMark’s Commonmark"
+            ),
+            ["O'Kelly", "Commonmark"],
+            "a lower-case entry is not accepted with an inner capital; one with a capital is exact"
+        );
     }
 
     #[test]

@@ -1,12 +1,13 @@
 //! What a word is: the chunks of a prose range, the candidate words in them,
 //! and which of those are checked at all.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
 /// The longest word, in characters, that is checked.
-const MAX_CHARS: usize = 40;
+pub(crate) const MAX_CHARS: usize = 40;
 
 /// Calls `found` with the byte range, in `line`, of each word of the prose
 /// range `prose` that is checked. `prose` must lie on character boundaries.
@@ -90,6 +91,15 @@ fn continues(neighbour: Option<char>) -> bool {
 
 pub(crate) fn is_apostrophe(c: char) -> bool {
     c == '\'' || c == '’'
+}
+
+/// `text` with each `’` read as `'`, as words are looked up.
+pub(crate) fn straight(text: &str) -> Cow<'_, str> {
+    if text.contains('’') {
+        Cow::Owned(text.replace('’', "'"))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// Whether a candidate word is checked: Latin letters and apostrophes only,

@@ -8,12 +8,14 @@
 
 mod hunspell;
 mod speller;
+mod word_list;
 mod words;
 
 use std::fmt;
 
 pub use hunspell::Hunspell;
 pub use speller::Speller;
+pub use word_list::WordList;
 
 /// Why a source could not be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,24 +43,4 @@ pub trait WordSource: Send + Sync {
     fn accepts(&self, word: &str) -> bool;
     /// Corrections for `word`, best first, appended to `out`.
     fn suggest(&self, word: &str, out: &mut Vec<String>);
-}
-
-/// The words the user lists in `words.txt`, one per line.
-#[non_exhaustive]
-pub struct WordList {}
-
-impl WordList {
-    /// The list in `text`, and a warning for each line that is not one word.
-    pub fn parse(_text: &str) -> (Self, Vec<String>) {
-        (Self {}, Vec::new())
-    }
-}
-
-impl WordSource for WordList {
-    fn accepts(&self, _word: &str) -> bool {
-        false
-    }
-
-    /// A word list offers no corrections of its own.
-    fn suggest(&self, _word: &str, _out: &mut Vec<String>) {}
 }
