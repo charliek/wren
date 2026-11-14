@@ -30,6 +30,7 @@ mod node;
 mod property;
 mod style;
 
+pub use arrange::arranged_count;
 pub(crate) use copy::{copies, fragment, Fragment, Layout};
 pub use style::stroke_of;
 

@@ -1716,6 +1716,47 @@ z = "c"
         assert!(command_rows(&mut app).iter().all(|(_, id, _)| !id.boards()));
     }
 
+    /// A node inside another selected one moves with it and is not counted
+    /// toward the two that align needs or the three of distribute.
+    #[test]
+    fn align_and_distribute_count_a_container_and_its_child_once() {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join(GROUP);
+        std::fs::create_dir_all(&group).unwrap();
+        let nested = "schema = 1\n\n[node.box]\nkind = \"shape\"\nat = [0, 0]\nsize = [200, 200]\nz = \"a\"\n\n\
+                      [node.k]\nkind = \"shape\"\nat = [20, 20]\nparent = \"box\"\nsize = [40, 40]\nz = \"a\"\n";
+        let third = "\n[node.c]\nkind = \"shape\"\nat = [400, 0]\nsize = [40, 40]\nz = \"b\"\n";
+        std::fs::write(group.join("Nested.wren-board"), nested).unwrap();
+        std::fs::write(group.join("Three.wren-board"), format!("{nested}{third}")).unwrap();
+        let mut app = app_at(directory.path());
+        let select_all = Command::Run(CommandId::Board(wren_canvas::Command::SelectAll));
+        let arranging = |app: &App| {
+            board_ids()
+                .filter(|id| {
+                    let key = id.key();
+                    key.starts_with("board.align.") || key.starts_with("board.distribute.")
+                })
+                .filter(|id| app.command_enabled(*id))
+                .map(CommandId::key)
+                .collect::<Vec<_>>()
+        };
+
+        open_board(&mut app, "Nested");
+        let _ = app.dispatch(select_all.clone());
+        assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 2);
+        assert!(arranging(&app).is_empty(), "{:?}", arranging(&app));
+
+        open_board(&mut app, "Three");
+        let _ = app.dispatch(select_all);
+        assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 3);
+        let on = arranging(&app);
+        assert_eq!(on.len(), 6, "{on:?}");
+        assert!(
+            on.iter().all(|key| key.starts_with("board.align.")),
+            "{on:?}"
+        );
+    }
+
     #[test]
     fn board_commands_need_a_board_and_a_writable_one_to_change_it() {
         let (directory, mut app) = fixture();

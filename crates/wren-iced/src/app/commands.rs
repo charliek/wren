@@ -690,7 +690,8 @@ fn board_mutates(command: BoardCommand) -> bool {
 /// takes only what does not change it (§5.2). A command for one element
 /// needs exactly one selected (§5.3 rule 7). Copy, cut and duplicate need
 /// a node selected, since a selection without one has no fragment (§5.10
-/// rule 2). Align needs two nodes and distribute three (§5.16 rule 3).
+/// rule 2). Align needs two nodes and distribute three, a node carried by
+/// a selected ancestor not counting (§5.16 rule 3).
 fn board_enabled(view: &wren_canvas::BoardView, command: BoardCommand) -> bool {
     use BoardCommand as C;
     if board_mutates(command) && *view.access() != Access::Editable {
@@ -702,11 +703,19 @@ fn board_enabled(view: &wren_canvas::BoardView, command: BoardCommand) -> bool {
         let picked = selection.iter().filter_map(wren_board::scene::Source::node);
         picked.filter(|id| nodes.contains_key(*id)).count()
     };
+    let arranged = || {
+        let ids: Vec<wren_board::Id> = selection
+            .iter()
+            .filter_map(wren_board::scene::Source::node)
+            .cloned()
+            .collect();
+        wren_board::edit::arranged_count(view.board(), &ids)
+    };
     match command {
         C::EditLabel | C::Connect(_) | C::SelectConnector(_) => selection.len() == 1,
         C::Copy | C::Cut | C::Duplicate => nodes() >= 1,
-        C::Align(_) => nodes() >= 2,
-        C::Distribute(_) => nodes() >= 3,
+        C::Align(_) => arranged() >= 2,
+        C::Distribute(_) => arranged() >= 3,
         _ => true,
     }
 }

@@ -225,6 +225,26 @@ fn subjects<'a>(board: &'a Board, ids: &[Id]) -> Vec<Subject<'a>> {
         .collect()
 }
 
+/// How many nodes align and distribute would take from `ids`: those that
+/// exist and are not carried by another of them (§5.16 rule 3), so that
+/// what enables them and lists them counts what they move.
+pub fn arranged_count(board: &Board, ids: &[Id]) -> usize {
+    let nested = ids.iter().any(|id| {
+        board
+            .nodes
+            .get(id)
+            .is_some_and(|node| node.parent.is_some())
+    });
+    if nested {
+        subjects(board, ids).len()
+    } else {
+        ids.iter()
+            .filter(|id| board.nodes.contains_key(*id))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+}
+
 /// Puts each node at its new absolute position on one axis, written
 /// relative to the parent it is drawn inside; a node already there is
 /// left out.
@@ -1016,6 +1036,16 @@ z = "Z"
             moved(ROW, &align(&["p", "q", "c"], Alignment::Right)),
             at(&[("p", [181, 300])])
         );
+    }
+
+    #[test]
+    fn the_count_is_of_the_nodes_that_move() {
+        let board = parse(ROW).unwrap();
+        let count = |names: &[&str]| arranged_count(&board, &ids(names));
+        assert_eq!(count(&["a", "b", "gone", "e", "a"]), 2);
+        assert_eq!(count(&["p", "q"]), 1);
+        assert_eq!(count(&["q", "a"]), 2);
+        assert_eq!(count(&["p", "q", "a", "c"]), 3);
     }
 
     #[test]

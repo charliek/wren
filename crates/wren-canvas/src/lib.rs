@@ -897,6 +897,12 @@ impl BoardView {
             .iter()
             .filter(|element| edit::stroke_of(board, element).is_some())
             .count();
+        let node_ids: Vec<Id> = picked
+            .iter()
+            .filter_map(|element| element.node())
+            .cloned()
+            .collect();
+        let arranged = edit::arranged_count(board, &node_ids);
         let shape = shared(shapes.iter().map(|node| node.shape.known()));
         let colour = shared(colours.iter().copied());
         let fill = shared(shapes.iter().map(|node| node.style.fill.known()));
@@ -916,8 +922,8 @@ impl BoardView {
                 | Command::EdgeEnd
                 | Command::EdgeReverse => ("Connector", !edges.is_empty(), false),
                 Command::Arrange(_) => ("Arrange", true, false),
-                Command::Align(_) => ("Align", nodes.len() >= 2, false),
-                Command::Distribute(_) => ("Distribute", nodes.len() >= 3, false),
+                Command::Align(_) => ("Align", arranged >= 2, false),
+                Command::Distribute(_) => ("Distribute", arranged >= 3, false),
                 _ => continue,
             };
             if writable && applies {
@@ -6259,6 +6265,18 @@ z = "c"
             offered_in(&view, "Distribute"),
             ["board.distribute.horizontal", "board.distribute.vertical"]
         );
+        // A node inside another selected one moves with it, so a container
+        // and its child are one node to align, and with a third two to
+        // distribute (§5.16 rule 3).
+        let nested = format!(
+            "{TWO}\n[node.k]\nkind = \"shape\"\nat = [10, 10]\nparent = \"a\"\nsize = [20, 20]\nz = \"d\"\n"
+        );
+        let mut view = sized(&nested);
+        select(&mut view, &["a", "k"]);
+        assert!(!offered_groups(&view).contains(&"Align"));
+        select(&mut view, &["a", "k", "b"]);
+        assert_eq!(offered_in(&view, "Align").len(), 6);
+        assert!(!offered_groups(&view).contains(&"Distribute"));
 
         // A read-only board offers only what looks or copies.
         let future = TWO.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1);
