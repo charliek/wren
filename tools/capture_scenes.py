@@ -246,7 +246,7 @@ def build_board_workspace(root: Path) -> None:
         os.utime(root / BOARD_GROUP / name, (mtime, mtime))
 
 
-def board_scenes(client, shot_here, out: Path) -> None:
+def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
     """discovery/boards.md §6.3, Phase 1."""
 
     def open_board(name: str, fit: bool = False) -> None:
@@ -327,7 +327,54 @@ def board_scenes(client, shot_here, out: Path) -> None:
     client.call("palette.query", {"query": "pay"})
     shot_here("board-jump")
     client.call("palette.close")
+    board_limits_scene(client, shot_here, workspace)
     client.call("column.open", {"column": "sections"})
+
+
+# Values past the limits the scene draws within (§3.8, §4.12): a shape of
+# no height, an anchor and a label position outside 0 to 1000, seventeen
+# labels and a 65-character z on a connector, and a chain one level deeper
+# than a board draws inside its parents. Each is drawn clamped, with an
+# issue marker at its top-left corner.
+LIMITS_BOARD = "".join(
+    ["schema = 1\n",
+     '\n[node.base]\ntext = "Base"\nkind = "shape"\nat = [0, 0]\nsize = [160, 80]\nz = "V"\n',
+     '\n[node.flat]\ntext = "No height"\nkind = "shape"\nat = [320, 0]\nsize = [160, 0]\n'
+     'z = "V"\n',
+     '\n[node.right]\ntext = "Labels"\nkind = "shape"\nat = [320, 200]\nsize = [160, 80]\n'
+     'z = "V"\n',
+     '\n[node.c01]\ntext = "Chain"\nkind = "shape"\nat = [0, 360]\nsize = [200, 120]\n'
+     'z = "V"\n']
+    + [f'\n[node.c{level:02}]\nkind = "shape"\nat = [3, 3]\nparent = "c{level - 1:02}"\n'
+       f'size = [100, 60]\nz = "V"\n' for level in range(2, 34)]
+    + ['\n[edge.anchored]\nkind = "edge"\nfrom = { anchor = [2000, 500], node = "base" }\n'
+       'to = { node = "flat" }\nlabels = [\n  { at = 5000, text = "past the end" },\n]\n'
+       'z = "W"\n',
+       '\n[edge.many]\nkind = "edge"\nfrom = { node = "base" }\nto = { node = "right" }\n'
+       'labels = [\n' + "".join(f'  {{ at = {i * 60}, text = "{i}" }},\n' for i in range(17))
+       + f']\nz = "{"W" * 65}"\n'])
+
+
+def board_limits_scene(client, shot_here, workspace: Path) -> None:
+    """A board whose values pass the limits, added last so that no other
+    scene's notes list holds it."""
+    path = workspace / BOARD_GROUP / "Limits.wren-board"
+    path.write_text(LIMITS_BOARD, encoding="utf-8")
+
+    def listed() -> bool:
+        client.call("core.apply", {"op": "reconcile"})
+        return any(row["path"] == f"{BOARD_GROUP}/Limits.wren-board"
+                   for row in client.call("session.get")["notes"])
+
+    wait_for(listed, timeout=10, interval=0.2, description="the limits board listed")
+    # Not `open_board`: its fit check reads stored sizes, and a shape of no
+    # height never shows a whole box.
+    open_note(client, "Limits.wren-board")
+    client.call("editor.focus")
+    wait_for(lambda: client.call("board.get")["surface"] == "board", timeout=10,
+             description="the limits board shown")
+    client.call("command.run", {"id": "board.zoom.fit"})
+    shot_here("board-limits")
 
 
 def board_edit_scenes(client, shot_here, open_board) -> None:
@@ -592,7 +639,7 @@ def main() -> int:
                 def shot_board(name: str) -> None:
                     shot(app.client, name)
 
-                board_scenes(app.client, shot_board, out)
+                board_scenes(app.client, shot_board, out, workspace)
             return 0
         if args.only == "markdown":
             workspace = Path(temp).resolve() / "work"
