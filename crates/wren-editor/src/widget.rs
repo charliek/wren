@@ -872,7 +872,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             &editor,
             &state.highlighter.borrow(),
             self.proofreader,
-            hiding_caret(selection.as_ref().map(|(_, selection)| selection), cursor),
+            hiding_caret(state.focus.is_some(), cursor),
         );
 
         // Code bands start just left of the text so the gutter stays clear.
@@ -1329,10 +1329,12 @@ struct RowMark {
 type LineMark = (Range<usize>, bool);
 
 /// The caret that hides a mark ending at it (rule 4.3.3): the cursor's
-/// position when the widget draws a caret, not a selection. `selection` is
-/// what it draws, `None` while the editor does not have focus.
-fn hiding_caret(selection: Option<&Selection>, cursor: Cursor) -> Option<Position> {
-    matches!(selection, Some(Selection::Caret(_))).then_some(cursor.position)
+/// position while the editor has focus and nothing is selected. It is read
+/// from the cursor, not from the caret the widget draws, which is missing
+/// when the caret's row is out of view though the rest of a wrapped word
+/// is not.
+fn hiding_caret(focused: bool, cursor: Cursor) -> Option<Position> {
+    (focused && cursor.selection.is_none()).then_some(cursor.position)
 }
 
 /// Collects the visible rows of `editor`'s buffer (already scrolled by the
@@ -2261,12 +2263,47 @@ mod tests {
             position: Position { line: 2, column: 5 },
             selection: None,
         };
-        let caret = Selection::Caret(Point::ORIGIN);
-        assert_eq!(hiding_caret(Some(&caret), cursor), Some(cursor.position));
-        // Unfocused, the widget has no selection to draw.
-        assert_eq!(hiding_caret(None, cursor), None);
-        let selected = Selection::Range(vec![Rectangle::new(Point::ORIGIN, Size::new(8.0, 24.0))]);
-        assert_eq!(hiding_caret(Some(&selected), cursor), None);
+        assert_eq!(hiding_caret(true, cursor), Some(cursor.position));
+        assert_eq!(hiding_caret(false, cursor), None);
+        let selected = Cursor {
+            selection: Some(Position { line: 2, column: 1 }),
+            ..cursor
+        };
+        assert_eq!(hiding_caret(true, selected), None);
+    }
+
+    #[test]
+    fn a_caret_on_a_row_below_the_view_still_hides_its_wrapped_word() {
+        let proofreader = rejects();
+        let text = format!("ab {LONG_TYPO}");
+        // Two rows in view; the word wraps to at least three.
+        let size = Size::new(120.0, 2.0 * LINE_HEIGHT);
+        let mut content = Content::new(BackendKind::Owned, &text);
+        content.move_to(Cursor {
+            position: Position {
+                line: 0,
+                column: text.len(),
+            },
+            selection: None,
+        });
+        content.rows(size, None, Some(&proofreader), None);
+        content.perform(Action::Scroll { lines: -10 });
+        let rows = content.rows(size, None, Some(&proofreader), None);
+        assert_eq!(content.scroll().vertical, 0.0, "{:?}", content.scroll());
+        assert!(rows.iter().any(|row| !row.marks.is_empty()), "{rows:?}");
+        // The widget draws no caret for a row out of view.
+        assert!(content.selection_geometry().is_none());
+
+        let caret = hiding_caret(true, content.cursor());
+        let rows = content.rows(size, None, Some(&proofreader), caret);
+        let shown: Vec<bool> = rows
+            .iter()
+            .flat_map(|row| row.marks.iter().map(|mark| mark.shown))
+            .collect();
+        assert!(
+            !shown.is_empty() && shown.iter().all(|shown| !shown),
+            "{rows:?}"
+        );
     }
 
     #[test]
