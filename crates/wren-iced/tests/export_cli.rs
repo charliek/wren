@@ -405,6 +405,45 @@ fn a_device_is_refused_for_standard_output() {
     assert!(stderr(&output).contains("it is not a file; -o - writes to standard output"));
 }
 
+/// A named pipe or a device as the board is refused at once: opening a
+/// pipe would wait for a writer, and a device would be read to the limit.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_board_that_is_not_a_file_is_refused_without_reading_it() {
+    let directory = workspace();
+    let made = std::process::Command::new("mkfifo")
+        .arg(directory.path().join("pipe.wren-board"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let before = names(directory.path());
+    for board in ["pipe.wren-board", "/dev/zero"] {
+        // `timeout` ends a run that waits on the pipe with code 124.
+        let output = Command::new("timeout")
+            .arg("30")
+            .arg(env!("CARGO_BIN_EXE_wren"))
+            .args(["export", board, "-o", "out.svg"])
+            .current_dir(directory.path())
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WREN_TEST_MODE")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{board}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains(&format!("Could not read {board}: it is not a file")),
+            "{board}: {}",
+            stderr(&output)
+        );
+        assert_eq!(names(directory.path()), before, "{board} wrote something");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn an_unwritable_folder_fails_and_leaves_nothing() {

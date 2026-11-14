@@ -327,10 +327,23 @@ fn read_board(path: &Path) -> Result<String, Failure> {
             MAX_FILE_BYTES / (1024 * 1024)
         ),
     };
+    let not_a_file = |metadata: &std::fs::Metadata| {
+        if metadata.is_dir() {
+            Some(failed(format!("Could not read {board}: it is a folder")))
+        } else if !metadata.is_file() {
+            Some(failed(format!("Could not read {board}: it is not a file")))
+        } else {
+            None
+        }
+    };
+    // Checked before the open too: opening a named pipe waits for a writer.
+    if let Some(refused) = not_a_file(&std::fs::metadata(path).map_err(unreadable)?) {
+        return Err(refused);
+    }
     let mut file = std::fs::File::open(path).map_err(unreadable)?;
     let metadata = file.metadata().map_err(unreadable)?;
-    if metadata.is_dir() {
-        return Err(failed(format!("Could not read {board}: it is a folder")));
+    if let Some(refused) = not_a_file(&metadata) {
+        return Err(refused);
     }
     if metadata.len() > MAX_FILE_BYTES {
         return Err(too_large());
