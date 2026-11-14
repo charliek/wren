@@ -5,8 +5,8 @@
 //! drawn clamped or cut, and written back byte for byte.
 
 use crate::scene::{
-    self, Draw, FixedMeasure, Scene, Source, COORDINATE_LIMIT, MAX_LABELS, MAX_LABEL_BYTES,
-    MAX_LABEL_LINES, MAX_Z,
+    self, Draw, FixedMeasure, Scene, Source, COORDINATE_LIMIT, MAX_BOARD_LINES, MAX_LABELS,
+    MAX_LABEL_BYTES, MAX_LABEL_LINES, MAX_Z,
 };
 use crate::style::tests::LIGHT;
 use crate::{parse, write, Board, IssueKind, Limit, MAX_BOARD_BYTES, MAX_DEPTH, MAX_ELEMENTS};
@@ -25,10 +25,11 @@ pub(crate) enum Cap {
     Labels,
     ZLength,
     LabelLines,
+    BoardLines,
 }
 
 impl Cap {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::FileBytes,
         Self::Elements,
         Self::Depth,
@@ -40,6 +41,7 @@ impl Cap {
         Self::Labels,
         Self::ZLength,
         Self::LabelLines,
+        Self::BoardLines,
     ];
 
     /// Whether the whole file is refused past it, rather than flagged.
@@ -225,6 +227,24 @@ pub(crate) fn fixture(cap: Cap, past: bool) -> String {
                 &format!("{}z = \"W\"\n", labels([label(&text).as_str()])),
             );
         }
+        Cap::BoardLines => {
+            // Nodes of a grapheme a line, as above, that take all but one
+            // of the board's lines, then a connector drawn after them whose
+            // label takes the last line, or one more.
+            let nodes = MAX_BOARD_LINES / MAX_LABEL_LINES;
+            for i in 0..nodes {
+                let lines = MAX_LABEL_LINES - usize::from(i + 1 == nodes);
+                let fields = "at = [0, 0]\nsize = [10, 60]\nz = \"V\"\n";
+                out += &node(&format!("n{i:03}"), &"x".repeat(lines), fields);
+            }
+            let text = vec!["y"; 1 + over].join("\n");
+            out += &edge(
+                "e",
+                "{ at = [0, 100] }",
+                "{ at = [300, 100] }",
+                &format!("{}z = \"W\"\n", labels([label(&text).as_str()])),
+            );
+        }
     }
     out
 }
@@ -246,6 +266,7 @@ fn flagged(cap: Cap) -> Vec<(&'static str, IssueKind)> {
         Cap::Labels => vec![("e", out(Limit::Labels))],
         Cap::ZLength => vec![("a", out(Limit::ZLength)), ("e", out(Limit::ZLength))],
         Cap::LabelLines => vec![("a", out(Limit::LabelLines)), ("e", out(Limit::LabelLines))],
+        Cap::BoardLines => vec![("e", out(Limit::LabelLines))],
     }
 }
 
@@ -325,6 +346,17 @@ fn assert_drawn(cap: Cap, past: bool, board: &Board, scene: &Scene) {
                 assert_eq!(drawn[0].len(), MAX_LABEL_LINES, "{id}");
                 assert_eq!(cuts(scene, id), usize::from(past), "{id}");
             }
+        }
+        Cap::BoardLines => {
+            let lines: usize = (scene.items.iter())
+                .map(|item| match &item.draw {
+                    Draw::Text { lines, .. } => lines.len(),
+                    Draw::Path { .. } => 0,
+                })
+                .sum();
+            assert_eq!(lines, MAX_BOARD_LINES);
+            assert_eq!(texts(scene, "e"), [["y"]]);
+            assert_eq!(scene.cut.len(), usize::from(past));
         }
     }
 }
@@ -426,12 +458,43 @@ fn a_label_cut_after_only_blank_lines_is_listed() {
     assert_eq!(*cache.build(&board, &LIGHT, &FixedMeasure), scene);
 }
 
+/// A cache lays out again what the board's line budget changed for: a
+/// label cut to the lines left is drawn whole once an earlier one frees
+/// them, and cut again when they are taken back.
+#[test]
+fn a_cached_scene_follows_the_lines_left_on_the_board() {
+    let full = parse(&fixture(Cap::BoardLines, true)).unwrap();
+    let mut freed = full.clone();
+    let first = crate::Id::new("n000").unwrap();
+    freed.nodes.get_mut(&first).unwrap().text = "x".into();
+    let mut cache = scene::Cache::default();
+    for (board, cut) in [(&full, 1), (&freed, 0), (&full, 1), (&freed, 0)] {
+        let whole = scene::build(board, &LIGHT, &FixedMeasure);
+        assert_eq!(whole.cut.len(), cut);
+        assert_eq!(*cache.build(board, &LIGHT, &FixedMeasure), whole);
+    }
+    // With no line left, a later label is cut unmeasured and draws nothing.
+    let mut spent = full.clone();
+    let last = crate::Id::new("n255").unwrap();
+    spent.nodes.get_mut(&last).unwrap().text += "x";
+    let label = &mut spent.edges.get_mut("e").unwrap().labels[0].text;
+    *label = "y".into();
+    let scene = cache.build(&spent, &LIGHT, &FixedMeasure).clone();
+    assert_eq!(scene, scene::build(&spent, &LIGHT, &FixedMeasure));
+    assert!(texts(&scene, "e").is_empty());
+    let issues: Vec<String> = (scene::issues(&spent, &scene).iter())
+        .map(|issue| issue.id().to_string())
+        .collect();
+    assert_eq!(issues, ["e"]);
+}
+
 /// The small boards of every flagged limit, at and past it, for the
-/// mutation runs.
+/// mutation runs. The board's line budget takes a board of 280 KB, too
+/// large to mutate thousands of times.
 pub(crate) fn small() -> Vec<String> {
     Cap::ALL
         .into_iter()
-        .filter(|cap| !cap.refuses())
+        .filter(|cap| !cap.refuses() && *cap != Cap::BoardLines)
         .flat_map(|cap| [fixture(cap, false), fixture(cap, true)])
         .collect()
 }

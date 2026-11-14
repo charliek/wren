@@ -67,6 +67,12 @@ pub const MAX_LABELS: usize = 16;
 /// width, so a long word in a narrow box cannot become one line per
 /// grapheme.
 pub const MAX_LABEL_LINES: usize = 1024;
+/// Only this many lines of labels are drawn on a board, in drawing order,
+/// blank ones included: about five for each element a board may have, so
+/// that labels within [`MAX_LABEL_LINES`] each, many to a line's byte,
+/// cannot build a scene that grows with the file's size over box width.
+/// A text past it is cut, and listed, as one past [`MAX_LABEL_LINES`] is.
+pub const MAX_BOARD_LINES: usize = 1 << 18;
 /// Elements are stacked by at most this many bytes of their `z`.
 pub const MAX_Z: usize = crate::z::MAX_LEN;
 
@@ -144,8 +150,8 @@ pub struct Scene {
     pub bounds: Rect,
     /// Back to front.
     pub items: Vec<Item>,
-    /// Each element a text of which was cut at [`MAX_LABEL_LINES`], once
-    /// for each such text, in drawing order. Kept apart from the items,
+    /// Each element a text of which was cut at [`MAX_LABEL_LINES`] or at
+    /// [`MAX_BOARD_LINES`], once for each such text, in drawing order. Kept apart from the items,
     /// since a text whose kept lines are all blank draws none.
     pub cut: Vec<Source>,
 }
@@ -334,8 +340,7 @@ struct KeptNode {
     node: Node,
     bounds: Rect,
     items: Range<usize>,
-    /// How many of its texts were cut.
-    cuts: usize,
+    spent: Spent,
 }
 
 /// A connector's items, by their place in the cache's scene, and what
@@ -347,7 +352,30 @@ struct KeptEdge {
     ends: [Option<Terminal>; 2],
     items: Range<usize>,
     corner: Option<Point>,
+    spent: Spent,
+}
+
+/// What laying out an element's texts took from the board's
+/// [`MAX_BOARD_LINES`], and what it cut.
+#[derive(Clone, Copy, Debug)]
+struct Spent {
+    lines: usize,
     cuts: usize,
+    /// The lines the board had left when the element was laid out, if one
+    /// of its texts was cut to them rather than to [`MAX_LABEL_LINES`]:
+    /// then only that many left lays it out the same.
+    starved: Option<usize>,
+}
+
+impl Spent {
+    /// Whether laying the element out with `room` lines left gives what
+    /// it gave.
+    fn holds(self, room: usize) -> bool {
+        match self.starved {
+            Some(was) => room == was,
+            None => room >= self.lines,
+        }
+    }
 }
 
 /// What a build takes from a cache and gives back to it: the routes, and
@@ -545,6 +573,8 @@ fn layout(
         items: Vec::new(),
         corners: HashMap::new(),
         cut: Vec::new(),
+        room: MAX_BOARD_LINES,
+        starved: false,
     };
     roots.sort_by(|a, b| a.order().cmp(&b.order()));
     let mut scopes = vec![roots.into_iter()];
@@ -557,8 +587,9 @@ fn layout(
             Element::Node(id, node, k) => {
                 if let Some(&bounds) = boxes.get(id) {
                     let was = was_nodes.get_mut(k).and_then(Option::take);
+                    let room = painter.room;
                     let moved = was.and_then(|(key, mut was)| {
-                        if was.bounds != bounds || was.node != *node {
+                        if was.bounds != bounds || was.node != *node || !was.spent.holds(room) {
                             return None;
                         }
                         was.items = take(&was.items, &mut painter.items)?;
@@ -566,12 +597,12 @@ fn layout(
                     });
                     match moved {
                         Some(moved) => {
-                            painter.recut(Source::Node(id.clone()), moved.1.cuts);
+                            painter.keep(Source::Node(id.clone()), moved.1.spent);
                             kept_nodes[k] = Some(moved);
                         }
                         None => {
                             let start = painter.items.len();
-                            let cut = painter.cut.len();
+                            let mark = painter.mark();
                             painter.node(id, node, bounds);
                             painted += 1;
                             if kept {
@@ -583,7 +614,7 @@ fn layout(
                                         node,
                                         bounds,
                                         items,
-                                        cuts: painter.cut.len() - cut,
+                                        spent: painter.spent(mark),
                                     },
                                 ));
                             }
@@ -604,10 +635,12 @@ fn layout(
                     }
                 };
                 let was = was_edges.get_mut(k).and_then(Option::take);
+                let room = painter.room;
                 let moved = was.and_then(|(key, mut was)| {
                     let same = same_route(was.routed.as_ref(), routed)
                         && was.ends == ends
-                        && was.edge == *edge;
+                        && was.edge == *edge
+                        && was.spent.holds(room);
                     if !same {
                         return None;
                     }
@@ -619,12 +652,12 @@ fn layout(
                         if let Some(corner) = was.corner {
                             painter.corners.insert(id, corner);
                         }
-                        painter.recut(Source::Edge(id.clone()), was.cuts);
+                        painter.keep(Source::Edge(id.clone()), was.spent);
                         kept_edges[k] = Some((key, was));
                     }
                     None => {
                         let start = painter.items.len();
-                        let cut = painter.cut.len();
+                        let mark = painter.mark();
                         painter.edge(id, edge, &places, routed);
                         painted += 1;
                         if kept {
@@ -634,7 +667,7 @@ fn layout(
                                 ends,
                                 items: start..painter.items.len(),
                                 corner: painter.corners.get(id).copied(),
-                                cuts: painter.cut.len() - cut,
+                                spent: painter.spent(mark),
                             };
                             kept_edges[k] = Some((id.clone(), edge));
                         }
@@ -935,6 +968,17 @@ struct Painter<'a, 'b> {
     corners: HashMap<&'b Id, Point>,
     /// The scene's [`Scene::cut`].
     cut: Vec<Source>,
+    /// The lines of [`MAX_BOARD_LINES`] not yet laid out.
+    room: usize,
+    /// Whether a text of the element being laid out was cut to `room`.
+    starved: bool,
+}
+
+/// Where an element's layout began, for [`Painter::spent`].
+#[derive(Clone, Copy)]
+struct Mark {
+    room: usize,
+    cuts: usize,
 }
 
 impl<'b> Painter<'_, 'b> {
@@ -975,9 +1019,10 @@ impl<'b> Painter<'_, 'b> {
     }
 
     /// The part of `text` drawn, at most [`MAX_LABEL_BYTES`], and its
-    /// lines wrapped at `width`, at most [`MAX_LABEL_LINES`]; a text with
-    /// more is listed in [`Scene::cut`] under `source`. `None` for a text
-    /// of only white space, which draws nothing.
+    /// lines wrapped at `width`, at most [`MAX_LABEL_LINES`] and at most
+    /// what is left of [`MAX_BOARD_LINES`]; a text with more is listed in
+    /// [`Scene::cut`] under `source`. `None` for a text of only white
+    /// space, which draws nothing.
     fn wrap<'t>(
         &mut self,
         source: &Source,
@@ -989,19 +1034,44 @@ impl<'b> Painter<'_, 'b> {
         if text.trim().is_empty() {
             return None;
         }
-        let most = MAX_LABEL_LINES.saturating_add(1);
-        let mut lines = wrap::wrap_at_most(text, width, Face::Regular, size, self.measure, most);
-        if lines.len() > MAX_LABEL_LINES {
-            lines.truncate(MAX_LABEL_LINES);
+        let most = MAX_LABEL_LINES.min(self.room);
+        // Text that is not all white space wraps to at least one line, so
+        // with no room left it is cut unmeasured.
+        let mut lines = match most {
+            0 => Vec::new(),
+            _ => wrap::wrap_at_most(text, width, Face::Regular, size, self.measure, most + 1),
+        };
+        if most == 0 || lines.len() > most {
+            lines.truncate(most);
             self.cut.push(source.clone());
+            self.starved |= most < MAX_LABEL_LINES;
         }
+        self.room -= lines.len();
         Some((text, lines))
     }
 
-    /// `count` cuts of `source`'s texts, for an element whose items a
-    /// cache kept.
-    fn recut(&mut self, source: Source, count: usize) {
-        self.cut.extend(std::iter::repeat_n(source, count));
+    /// Starts laying out an element.
+    fn mark(&mut self) -> Mark {
+        self.starved = false;
+        Mark {
+            room: self.room,
+            cuts: self.cut.len(),
+        }
+    }
+
+    /// What the element laid out since `mark` spent.
+    fn spent(&self, mark: Mark) -> Spent {
+        Spent {
+            lines: mark.room - self.room,
+            cuts: self.cut.len() - mark.cuts,
+            starved: self.starved.then_some(mark.room),
+        }
+    }
+
+    /// Takes again what an element whose items a cache kept spent.
+    fn keep(&mut self, source: Source, spent: Spent) {
+        self.room -= spent.lines;
+        self.cut.extend(std::iter::repeat_n(source, spent.cuts));
     }
 
     /// `wrapped`, lines of `text`, placed in `area` as `layout` says.

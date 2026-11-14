@@ -460,8 +460,10 @@ fn past(limit: Limit) -> String {
             scene::MAX_Z
         ),
         Limit::LabelLines => format!(
-            "a label wraps to more than {0} lines; only the first {0} are drawn",
-            scene::MAX_LABEL_LINES
+            "a label has more lines than are drawn ({} a label, {} a board); \
+             only those are drawn",
+            scene::MAX_LABEL_LINES,
+            scene::MAX_BOARD_LINES
         ),
     }
 }

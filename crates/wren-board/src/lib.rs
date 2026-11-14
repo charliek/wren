@@ -764,6 +764,48 @@ mod tests {
             "200 labels of 16,000 characters 1 unit wide: scene {narrow_ms:.2} ms, {lines} lines"
         );
         assert_eq!(lines, 200 * scene::MAX_LABEL_LINES);
+
+        // The board within every cap with the largest scene: as many
+        // labels of a line's worth of graphemes, in boxes 1 unit wide, as
+        // 8 MiB holds. Without the board's line budget it drew a line per
+        // byte of the file, 7.8 million.
+        let label = "x".repeat(scene::MAX_LABEL_LINES);
+        let mut worst = String::from(EMPTY);
+        for i in 0.. {
+            let block = format!(
+                "\n[node.n{i:05}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [{}, 0]\n\
+                 size = [1, 60]\nz = \"V\"\n",
+                i * 10
+            );
+            if worst.len() + block.len() > MAX_BOARD_BYTES {
+                break;
+            }
+            worst += &block;
+        }
+        let board = parse(&worst).unwrap();
+        let worst_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+        let drawn = scene::build(&board, &palette, &measure);
+        let lines: usize = (drawn.items.iter())
+            .map(|item| match &item.draw {
+                scene::Draw::Text { lines, .. } => lines.len(),
+                scene::Draw::Path { .. } => 0,
+            })
+            .sum();
+        let svg_ms = median_ms(3, || drop(svg::write(&drawn, &svg::Options::default())));
+        let svg_bytes = svg::write(&drawn, &svg::Options::default()).len();
+        println!(
+            "{} labels of {} characters 1 unit wide in {} bytes: scene {worst_ms:.2} ms, \
+             {lines} lines, {} cut; svg {svg_ms:.2} ms, {svg_bytes} bytes",
+            board.nodes.len(),
+            scene::MAX_LABEL_LINES,
+            worst.len(),
+            drawn.cut.len(),
+        );
+        assert_eq!(lines, scene::MAX_BOARD_LINES);
+        let whole = scene::MAX_BOARD_LINES / scene::MAX_LABEL_LINES;
+        assert_eq!(drawn.cut.len(), board.nodes.len() - whole);
+        assert!(worst_ms <= 400.0, "scene at the size cap: {worst_ms:.2} ms");
+        assert!(svg_ms <= 400.0, "svg at the size cap: {svg_ms:.2} ms");
     }
 
     /// §6.7's Phase 3 row for styling and arranging: each command on

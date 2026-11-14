@@ -148,10 +148,12 @@ pub enum Limit {
     /// A `z` over [`MAX_Z`] bytes, which stacks by its first [`MAX_Z`].
     ZLength,
     /// A label, or a placeholder's caption, that wraps to more than
-    /// [`MAX_LABEL_LINES`] lines; only the first are drawn. Only a scene,
+    /// [`MAX_LABEL_LINES`] lines, or past the [`MAX_BOARD_LINES`] drawn on
+    /// a board; only the lines within both are drawn. Only a scene,
     /// which measures, can tell ([`crate::scene::issues`]).
     ///
     /// [`MAX_LABEL_LINES`]: crate::scene::MAX_LABEL_LINES
+    /// [`MAX_BOARD_LINES`]: crate::scene::MAX_BOARD_LINES
     LabelLines,
 }
 
