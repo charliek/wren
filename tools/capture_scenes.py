@@ -249,9 +249,13 @@ def build_board_workspace(root: Path) -> None:
 def board_scenes(client, shot_here, out: Path) -> None:
     """discovery/boards.md §6.3, Phase 1."""
 
-    def open_board(name: str) -> None:
+    def open_board(name: str, fit: bool = False) -> None:
         open_note(client, f"{name}.wren-board")
         client.call("editor.focus")
+        if fit:
+            # A board that is already open keeps the view it had, which on a
+            # small window need not show every node.
+            client.call("command.run", {"id": "board.zoom.fit"})
 
         def fitted():
             state = client.call("board.get")
@@ -331,7 +335,7 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
         wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
                  description="the board focused")
 
-    open_board("Checkout flow")
+    open_board("Checkout flow", fit=True)
     focused()
     client.call("command.run", {"id": "board.zoom.fit"})
     # One node selected: its outline and eight handles.
