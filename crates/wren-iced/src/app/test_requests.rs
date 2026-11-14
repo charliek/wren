@@ -441,6 +441,7 @@ impl App {
                     "themes" => Mode::Themes,
                     "fonts" => Mode::Fonts,
                     "outline" => Mode::Outline,
+                    "board_actions" => Mode::BoardActions,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),

@@ -312,6 +312,7 @@ def board_scenes(client, shot_here, out: Path) -> None:
     shot_here("board-new-dialog")
     client.call("dialog.close")
     board_edit_scenes(client, shot_here, open_board)
+    board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
     client.call("column.open", {"column": "sections"})
 
@@ -445,6 +446,31 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
             client.call("board.type", {"text": step[1]})
     client.call("command.run", {"id": "board.zoom.fit"})
     shot_here("board-built")
+
+
+def board_arrange_scenes(client, shot_here, open_board) -> None:
+    """discovery/boards.md §6.3, Phase 3: the stacking order changed. The
+    shape at the back of Overlap, picked where no other covers it, is
+    brought to the front, over the other two, and the selection cleared."""
+    open_board("Overlap", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "left", "mods": [],
+                                  "at": {"canvas": [20, 10]}})
+    client.call("board.key", {"key": "]", "mods": []})
+    client.call("board.key", {"key": "escape", "mods": []})
+    shot_here("board-stacking")
+
+    # §5.17: a right-click on Pack opens the actions palette on its shape,
+    # the current value; the highlight moved to blue previews it on the
+    # board, which nothing has written.
+    open_board("Checkout flow", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "right", "mods": [],
+                                  "at": {"node": "3qrg4kv1"}})
+    modal = client.call("navigation.get")["modal"]
+    keys = [row["key"]["command"] for row in modal["results"]]
+    client.call("palette.step",
+                {"delta": keys.index("board.color.blue") - modal["active_index"]})
+    shot_here("board-actions")
+    client.call("palette.close")
 
 
 # The colour tokens in the order of their keys, 0 to 7.
