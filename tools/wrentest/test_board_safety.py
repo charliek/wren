@@ -9,6 +9,7 @@ sequence that leaves nothing changed writes nothing.
 from __future__ import annotations
 
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from tools.wrentest.test_board_view import focused, wait_focus
 from tools.wrentest.ui import WrenApp, wait_for
 
 PACK = "3qrg4kv1"
+HEADER = "# wren-board fragment 1"
 
 
 @pytest.fixture
@@ -254,3 +256,76 @@ def test_a_connector_named_as_a_node_is_acted_on_alone(samples: Path) -> None:
         assert state["counts"] == {"nodes": 3, "edges": 0}, state
         flushed(app)
     assert blocks(path.read_bytes()) == ["[node.a]", "[node.kid]", "[node.shared]"]
+
+
+# A node beside a connector with two free ends, and a node that shares a
+# free-ended connector's id (§4.12).
+FREE_ENDS = (
+    'schema = 1\n\n[node.a]\ntext = "A"\nkind = "shape"\nat = [0, 0]\nsize = [120, 60]\nz = "V"\n\n'
+    '[node.shared]\ntext = "Node shared"\nkind = "shape"\nat = [0, 300]\nsize = [120, 60]\nz = "W"\n\n'
+    '[edge.shared]\nkind = "edge"\nfrom = { at = [400, 300] }\nto = { at = [400, 500] }\n'
+    'labels = [\n  { text = "Edge shared" },\n]\nz = "X"\n\n'
+    '[edge.x]\nkind = "edge"\nfrom = { at = [400, 0] }\nto = { at = [400, 200] }\n'
+    'labels = [\n  { text = "Free" },\n]\nz = "Y"\n'
+)
+
+
+def copied_fragment(app: WrenApp, after: str | None = None) -> dict:
+    """The fragment the board put on the clipboard, once it differs from *after*."""
+    text = wait_for(lambda: (lambda text: text if text.startswith(HEADER) and text != after else None)(
+        app.client.call("clipboard.read")), timeout=5, description="the fragment on the clipboard")
+    return {"text": text, **tomllib.loads(text.split("\n", 1)[1])}
+
+
+def test_a_selected_free_connector_is_cut_and_pasted_back(samples: Path) -> None:
+    """§5.10 rules 2, 3 and 5: a connector with two free ends selected beside
+    a node is in the fragment, so duplicate copies it and cut then paste
+    gives it back; a node that shares a free-ended connector's id carries
+    only itself."""
+    path = samples / GROUP / "Free.wren-board"
+    path.write_text(FREE_ENDS, encoding="utf-8")
+
+    def labels(state: dict) -> list[str]:
+        return sorted(label["text"] for edge in state["edges"] for label in edge["labels"])
+
+    with board_app(samples, "board-safety-free-ends") as app:
+        ready(app, f"{GROUP}/Free.wren-board")
+        # Headless Weston gives the app no clipboard; there it keeps its own.
+        app.client.call("clipboard.write", {"text": "probe"})
+        try:
+            wait_for(lambda: app.client.call("clipboard.read") == "probe", timeout=2,
+                     interval=0.05, description="the clipboard")
+        except TimeoutError:
+            app.client.call("test.clipboard", {"own": True})
+
+        def picked() -> None:
+            click(app, {"node": "a"})
+            assert click(app, {"edge": "x"}, mods=("shift",))["selection"] == ["a", "x"]
+
+        picked()
+        key(app, "d", "mod")
+        state = board(app, elements=True)
+        assert state["counts"] == {"nodes": 3, "edges": 3}, state
+        assert labels(state) == ["Edge shared", "Free", "Free"]
+        key(app, "z", "mod")
+        assert board(app)["pristine"]
+
+        picked()
+        state = key(app, "x", "mod")
+        assert state["counts"] == {"nodes": 1, "edges": 1}, state
+        fragment = copied_fragment(app)
+        assert (list(fragment["node"]), list(fragment["edge"])) == (["a"], ["x"]), fragment["text"]
+        key(app, "v", "mod")
+        state = wait_for(lambda: (lambda s: s if s["counts"] == {"nodes": 2, "edges": 2} else None)(
+            board(app, elements=True)), timeout=5, description="the paste")
+        assert labels(state) == ["Edge shared", "Free"]
+        flushed(app)
+        written = tomllib.loads(path.read_text(encoding="utf-8"))
+        assert sorted(label["text"] for e in written["edge"].values() for label in e["labels"]) == [
+            "Edge shared", "Free"]
+
+        # The node `shared` alone: the connector `shared` stays out.
+        click(app, {"node": "shared"})
+        key(app, "c", "mod")
+        fragment = copied_fragment(app, after=fragment["text"])
+        assert list(fragment["node"]) == ["shared"] and "edge" not in fragment, fragment["text"]

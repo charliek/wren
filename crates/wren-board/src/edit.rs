@@ -70,8 +70,10 @@ pub enum Intent {
     Delete { ids: Vec<Source> },
     /// Copy the fragment of `ids` (§5.10 rule 2) under new ids, offset by
     /// `by`, on top in the same relative order (§5.10 rule 3; a
-    /// duplicate-drag, §5.8 rule 3).
-    Duplicate { ids: Vec<Id>, by: [i32; 2] },
+    /// duplicate-drag, §5.8 rule 3). Each element is named with its kind,
+    /// as for [`Intent::Move`]: a connector is carried as selected only
+    /// when named as one.
+    Duplicate { ids: Vec<Source>, by: [i32; 2] },
     /// Paste clipboard text (§5.10 rules 6 to 9): a board fragment after
     /// its header line, or foreign text that becomes one text node of
     /// `size`, which the canvas measured. `view` is the board area in view
@@ -1012,7 +1014,7 @@ z = "Y"
         }
         for (text, cut) in [(&cycle, "x"), (&chain, "n31")] {
             let board = parse(text).unwrap();
-            let copied = crate::clip::copy(&board, &ids(&[cut])).unwrap();
+            let copied = crate::clip::copy(&board, &nodes(&[cut])).unwrap();
             let body = copied.strip_prefix(crate::clip::HEADER).unwrap();
             let fragment = parse(body).unwrap();
             let (_, after) = planned(text, &Intent::Delete { ids: nodes(&[cut]) }, &[]);
@@ -1034,7 +1036,7 @@ z = "Y"
     #[test]
     fn duplicate_copies_the_fragment_on_top() {
         let duplicate = |names: &[&str]| Intent::Duplicate {
-            ids: ids(names),
+            ids: nodes(names),
             by: [20, 20],
         };
         // `a` brings its child and the connector from it to a free point;
@@ -1118,8 +1120,99 @@ z = "Y"
         let (plan, _) = planned(BOARD, &duplicate(&["a"]), &["d1", "d2", "d3"]);
         assert_eq!(plan.select, Some(ids(&["d1", "d2", "d3"])));
         // A selection without a node has no fragment.
-        assert_empty(BOARD, duplicate(&["e", "f"]));
+        let unnoded = Intent::Duplicate {
+            ids: edges(&["e", "f"]),
+            by: [20, 20],
+        };
+        assert_empty(BOARD, unnoded);
         assert_empty(BOARD, duplicate(&["gone"]));
+    }
+
+    /// Two free-ended connectors, one sharing a node's id (§4.12).
+    pub(crate) const FREE_ENDS: &str = r#"schema = 1
+
+[node.a]
+text = "A"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V"
+
+[node.shared]
+text = "Node shared"
+kind = "shape"
+at = [0, 300]
+size = [120, 60]
+z = "W"
+
+[edge.shared]
+kind = "edge"
+from = { at = [400, 300] }
+to = { at = [400, 500] }
+labels = [
+  { text = "Edge shared" },
+]
+z = "X"
+
+[edge.x]
+kind = "edge"
+from = { at = [400, 0] }
+to = { at = [400, 200] }
+labels = [
+  { text = "Free" },
+]
+z = "Y"
+"#;
+
+    /// A connector with two free ends is copied when it is selected as a
+    /// connector, and never through a node of the same id (§5.10 rule 2).
+    #[test]
+    fn duplicate_takes_a_free_connector_only_when_it_is_selected() {
+        assert_eq!(write(&parse(FREE_ENDS).unwrap()), FREE_ENDS, "canonical");
+        let duplicate = |ids: Vec<Source>| Intent::Duplicate { ids, by: [20, 20] };
+        let lines = |intent: &Intent, fresh: &[&'static str]| {
+            let (_, board) = planned(FREE_ENDS, intent, fresh);
+            line_diff(FREE_ENDS, &write(&board))
+        };
+        let a = [
+            "+[node.d1]",
+            "+text = \"A\"",
+            "+kind = \"shape\"",
+            "+at = [20, 20]",
+            "+size = [120, 60]",
+        ];
+        // (a) A node and a selected free-ended connector: both.
+        let picked = [nodes(&["a"]), edges(&["x"])].concat();
+        let mut both = a.to_vec();
+        both.extend([
+            "+z = \"Y01\"",
+            "+[edge.d2]",
+            "+kind = \"edge\"",
+            "+from = { at = [420, 20] }",
+            "+to = { at = [420, 220] }",
+            "+labels = [",
+            "+  { text = \"Free\" },",
+            "+]",
+            "+z = \"Y02\"",
+        ]);
+        assert_eq!(lines(&duplicate(picked), &["d1", "d2"]), both);
+        // (b) The connector alone: no node, no fragment.
+        assert_empty(FREE_ENDS, duplicate(edges(&["x"])));
+        assert_empty(FREE_ENDS, duplicate(edges(&["shared"])));
+        // (c) The node `shared` alone leaves the connector `shared`.
+        let mut alone = a.to_vec();
+        alone[1] = "+text = \"Node shared\"";
+        alone[3] = "+at = [20, 320]";
+        alone.push("+z = \"Y01\"");
+        assert_eq!(lines(&duplicate(nodes(&["shared"])), &["d1"]), alone);
+        // And the connector `shared` picked as one comes with a node.
+        let picked = [nodes(&["a"]), edges(&["shared"])].concat();
+        let (plan, board) = planned(FREE_ENDS, &duplicate(picked), &["d1", "d2"]);
+        assert_eq!(plan.select, Some(ids(&["d1", "d2"])));
+        assert_eq!(
+            board.edges[&Id::new("d2").unwrap()].labels[0].text,
+            "Edge shared"
+        );
     }
 
     /// A copy never has a parent that names nothing, or a cycle: a node is
@@ -1135,7 +1228,7 @@ z = "Y"
         let plan = plan(
             &board,
             &Intent::Duplicate {
-                ids: ids(&["x", "y", "v"]),
+                ids: nodes(&["x", "y", "v"]),
                 by: [20, 0],
             },
             &mut Listed(vec!["d1", "d2", "d3"]),

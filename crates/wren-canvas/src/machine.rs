@@ -1647,12 +1647,10 @@ fn landing(from: i64, by: f32) -> i32 {
 
 /// What a pointer move asks for: the selection moved, or copies of it.
 fn moving(ids: &[Source], copy: bool, by: [i32; 2]) -> Intent {
+    let ids = ids.to_vec();
     if copy {
-        // The fragment is the nodes' (§5.10 rule 2).
-        let ids = ids.iter().filter_map(Source::node).cloned().collect();
         Intent::Duplicate { ids, by }
     } else {
-        let ids = ids.to_vec();
         Intent::Move { ids, by }
     }
 }
@@ -3611,7 +3609,7 @@ z = "F"
     #[test]
     fn a_drag_with_the_duplicate_key_moves_copies() {
         let copies = |by| Intent::Duplicate {
-            ids: ids(&["a"]),
+            ids: vec![element("a")],
             by,
         };
         let held = Input::Modifiers(Mods {

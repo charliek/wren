@@ -304,11 +304,11 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             ids: picked(board, rng),
         },
         6 => Intent::Duplicate {
-            ids: chosen(board, rng),
+            ids: picked(board, rng),
             by: [GRID, GRID],
         },
         7 => {
-            let copied = clip::copy(board, &chosen(board, rng));
+            let copied = clip::copy(board, &picked(board, rng));
             Intent::Paste {
                 text: copied.unwrap_or_else(|| (*rng.pick(TEXTS)).to_owned()),
                 size: [length(rng), length(rng)],

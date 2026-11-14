@@ -1143,8 +1143,7 @@ fn the_clipboard_is_written_and_read_through_the_app() {
     // blocks, and the old ones as they were.
     let fragment = wren_board::clip::copy(view(&app).board(), &{
         let selection = view(&app).machine().selection();
-        let nodes = selection.iter().filter_map(wren_board::scene::Source::node);
-        nodes.cloned().collect::<Vec<_>>()
+        selection.iter().cloned().collect::<Vec<_>>()
     })
     .expect("a fragment");
     let paste = |app: &mut App| {

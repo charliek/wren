@@ -1503,26 +1503,25 @@ impl BoardView {
         let picked: Vec<Source> = self.machine.selection().iter().cloned().collect();
         // A node and a connector may share an id (§4.12), so each command
         // takes only the kind it acts on.
-        let nodes: Vec<Id> = picked.iter().filter_map(Source::node).cloned().collect();
         let edges: Vec<Id> = picked.iter().filter_map(Source::edge).cloned().collect();
         let editable = self.writable() && !picked.is_empty();
         match command {
             Command::Delete if editable => self.delete(picked, now, update),
             Command::Duplicate if editable => {
                 let by = [GRID, GRID];
-                let intent = Intent::Duplicate { ids: nodes, by };
+                let intent = Intent::Duplicate { ids: picked, by };
                 self.edit(&intent, Unit::One, now, update);
             }
             // A selection with no node has no fragment and copies nothing
             // (§5.10 rule 2). A read-only board copies too.
             Command::Copy => {
-                if let Some(text) = wren_board::clip::copy(&self.board, &nodes) {
+                if let Some(text) = wren_board::clip::copy(&self.board, &picked) {
                     update.effects.push(Effect::ClipboardWrite(text));
                 }
             }
             // Copy, then delete what was selected: one unit (rule 5).
             Command::Cut if editable => {
-                if let Some(text) = wren_board::clip::copy(&self.board, &nodes) {
+                if let Some(text) = wren_board::clip::copy(&self.board, &picked) {
                     update.effects.push(Effect::ClipboardWrite(text));
                     self.delete(picked, now, update);
                 }
@@ -4402,6 +4401,91 @@ z = "c"
         ));
         assert_eq!(view.command(Command::Cut, now), Update::default());
         assert_eq!(view.command(Command::Paste, now), Update::default());
+    }
+
+    /// A connector with two free ends goes into the fragment when it is
+    /// selected as a connector, and never through a node of the same id
+    /// (§5.10 rule 2, §5.3 rule 1): for duplicate, copy and cut alike, and
+    /// cut then paste gives back all it took.
+    #[test]
+    fn the_fragment_takes_each_connector_by_its_kind() {
+        const FREE: &str = "schema = 1\n\n\
+            [node.a]\ntext = \"A\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n\n\
+            [node.shared]\ntext = \"Node shared\"\nkind = \"shape\"\nat = [0, 300]\nsize = [120, 60]\nz = \"W\"\n\n\
+            [edge.shared]\nkind = \"edge\"\nfrom = { at = [400, 300] }\nto = { at = [400, 500] }\n\
+            labels = [{ text = \"Edge shared\" }]\nz = \"X\"\n\n\
+            [edge.x]\nkind = \"edge\"\nfrom = { at = [400, 0] }\nto = { at = [400, 200] }\n\
+            labels = [{ text = \"Free\" }]\nz = \"Y\"\n";
+        let now = Instant::now();
+        // What a board holds, by text: its nodes' and its connectors'.
+        let texts = |board: &Board| {
+            let mut nodes: Vec<String> = board.nodes.values().map(|n| n.text.clone()).collect();
+            let edges = board.edges.values().flat_map(|edge| &edge.labels);
+            let mut edges: Vec<String> = edges.map(|label| label.text.clone()).collect();
+            nodes.sort();
+            edges.sort();
+            (nodes, edges)
+        };
+        let both = |nodes: &[&str], edges: &[&str]| {
+            let owned = |all: &[&str]| all.iter().map(|text| (*text).to_owned()).collect();
+            (owned(nodes), owned(edges))
+        };
+        let selected = |picked: &[Source]| {
+            let mut view = sized(FREE);
+            let cursor = picked.first().cloned();
+            view.machine
+                .select(picked.iter().cloned().collect(), cursor);
+            view
+        };
+        let start = texts(&sized(FREE).board);
+        let (a, x) = (Source::Node(id("a")), Source::Edge(id("x")));
+        let (node, edge) = (Source::Node(id("shared")), Source::Edge(id("shared")));
+        let cases = [
+            (vec![a.clone(), x], both(&["A"], &["Free"])),
+            (vec![node], both(&["Node shared"], &[])),
+            (vec![a, edge], both(&["A"], &["Edge shared"])),
+        ];
+        for (picked, fragment) in cases {
+            // Copy writes the fragment and nothing else.
+            let mut view = selected(&picked);
+            let copied = view.command(Command::Copy, now);
+            let [Effect::ClipboardWrite(text)] = copied.effects.as_slice() else {
+                panic!("{picked:?}: {copied:?}");
+            };
+            let (_, rest) = text.split_once('\n').expect("two lines");
+            let parsed = wren_board::parse(rest).expect("the fragment is a board");
+            assert_eq!(texts(&parsed), fragment, "{picked:?}");
+            // Cut takes what it copies, and a paste gives it back.
+            let cut = view.command(Command::Cut, now);
+            assert_eq!(cut.effects, [Effect::ClipboardWrite(text.clone())]);
+            let left = texts(&view.board);
+            for (all, gone) in [(&start.0, &fragment.0), (&start.1, &fragment.1)] {
+                let mut kept = all.clone();
+                kept.retain(|text| !gone.contains(text));
+                assert!(kept
+                    .iter()
+                    .all(|text| left.0.contains(text) || left.1.contains(text)));
+            }
+            assert_eq!(left.0.len() + fragment.0.len(), start.0.len(), "{picked:?}");
+            assert_eq!(left.1.len() + fragment.1.len(), start.1.len(), "{picked:?}");
+            pasted(&mut view, text, now);
+            assert_eq!(texts(&view.board), start, "{picked:?}");
+            // Duplicate copies the same elements.
+            let mut view = selected(&picked);
+            view.command(Command::Duplicate, now);
+            let (mut nodes, mut edges) = start.clone();
+            nodes.extend(fragment.0.iter().cloned());
+            edges.extend(fragment.1.iter().cloned());
+            nodes.sort();
+            edges.sort();
+            assert_eq!(texts(&view.board), (nodes, edges), "{picked:?}");
+        }
+        // A selected connector with no node has no fragment.
+        let mut view = selected(&[Source::Edge(id("x"))]);
+        for command in [Command::Copy, Command::Cut, Command::Duplicate] {
+            assert_eq!(view.command(command, now), Update::default(), "{command:?}");
+        }
+        assert_eq!(texts(&view.board), start);
     }
 
     #[test]
