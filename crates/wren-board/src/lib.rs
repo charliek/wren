@@ -53,6 +53,8 @@ mod fixtures;
 pub mod history;
 pub mod ids;
 #[cfg(test)]
+mod limits;
+#[cfg(test)]
 mod lock;
 pub mod place;
 mod read;
@@ -68,7 +70,7 @@ mod write;
 pub mod z;
 
 pub use check::{
-    access, check, placements, Access, Issue, IssueKind, Placed, Reason, MAX_DEPTH, SCHEMA,
+    access, check, placements, Access, Issue, IssueKind, Limit, Placed, Reason, MAX_DEPTH, SCHEMA,
 };
 pub use read::{parse, ParseError};
 pub use search::search_text;
@@ -81,6 +83,14 @@ pub const GRID: i32 = 20;
 /// The new-board template, which is also the canonical form of an empty
 /// board.
 pub const EMPTY: &str = "schema = 1\n";
+
+/// The largest board file, in bytes, that [`parse`] reads: 8 MiB. A larger
+/// one opens as raw text.
+pub const MAX_BOARD_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most nodes and connectors, together, that a board [`parse`] reads
+/// may have. A board with more opens as raw text.
+pub const MAX_ELEMENTS: usize = 50_000;
 
 /// Content kept as read and never interpreted: unknown keys, and
 /// everything under `ext`.
@@ -727,6 +737,33 @@ mod tests {
         let wide_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
         println!("50 wide labels of 8,000 words: scene {wide_ms:.2} ms");
         assert!(wide_ms <= 250.0, "scene of wide labels: {wide_ms:.2} ms");
+
+        // §3.8's case for the line cap: 200 labels of 16,000 characters in
+        // boxes 1 unit wide, a grapheme a line, 3.2 million lines without
+        // it.
+        let label = "x".repeat(16_000);
+        let mut narrow = String::from(EMPTY);
+        for i in 0..200 {
+            narrow += &format!(
+                "\n[node.n{i}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [{}, 0]\n\
+                 size = [1, 60]\nz = \"V\"\n",
+                i * 10
+            );
+        }
+        let board = parse(&narrow).unwrap();
+        let narrow_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+        let lines: usize = scene::build(&board, &palette, &measure)
+            .items
+            .iter()
+            .map(|item| match &item.draw {
+                scene::Draw::Text { lines, .. } => lines.len(),
+                scene::Draw::Path { .. } => 0,
+            })
+            .sum();
+        println!(
+            "200 labels of 16,000 characters 1 unit wide: scene {narrow_ms:.2} ms, {lines} lines"
+        );
+        assert_eq!(lines, 200 * scene::MAX_LABEL_LINES);
     }
 
     /// §6.7's Phase 3 row for arranging: each command on 1,000 selected

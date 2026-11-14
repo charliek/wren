@@ -11,7 +11,9 @@ use iced::{Rectangle, Task};
 use serde_json::{json, Value};
 use wren_board::edit::{Endpoint, Intent};
 use wren_board::scene::{self, Draw, Rect, Segment, Source};
-use wren_board::{Access, Color, Edge, End, Id, Node, NodeKind, Rgba, Shape, Side, Vocabulary};
+use wren_board::{
+    Access, Color, Edge, End, Id, IssueKind, Node, NodeKind, Rgba, Shape, Side, Vocabulary,
+};
 use wren_canvas::machine::{self, State};
 use wren_canvas::{handles, hit, BoardView, Button, Input, Mods, Scroll, Tool};
 
@@ -168,6 +170,10 @@ impl App {
             "read_only": *view.access() != Access::Editable,
             "issues": view.issues().iter().map(|issue| json!({
                 "kind": issue.kind.name(), "id": issue.id().as_str(),
+                "limit": match issue.kind {
+                    IssueKind::OutOfRange(limit) => Some(limit.name()),
+                    _ => None,
+                },
             })).collect::<Vec<_>>(),
             "state": state_name(machine, focused),
             "tool": tool_name(machine.tool()),

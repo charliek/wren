@@ -385,8 +385,13 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
 /// the same issue on an element that was there (a dangling connector may
 /// dangle at no more ends, and reversing it moves which end that is), or,
 /// on a new element, a missing `kind` copied
-/// from an element that had none.
+/// from an element that had none. An out-of-range value is not an
+/// integrity issue: the intents here reach `i32`'s ends on purpose, and an
+/// intent that asks for such a value gets it, flagged.
 fn had(issue: &Issue, before: &[Issue], old: &Board) -> bool {
+    if matches!(issue.kind, IssueKind::OutOfRange(_)) {
+        return true;
+    }
     let existed = match &issue.element {
         Source::Node(id) => old.nodes.contains_key(id),
         Source::Edge(id) => old.edges.contains_key(id),

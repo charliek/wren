@@ -5,15 +5,16 @@
 //! growing right and y growing down. Labels arrive wrapped into lines, each
 //! placed and measured, so a painter never lays text out itself.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::check::check_with;
 use crate::route::{self, Attach, Connector, Routed, Terminal, STROKE_WIDTH};
 use crate::style::{self, Resolved};
 use crate::{
-    check, placements, shape, Board, Dash, Edge, End, Fill, Id, Named, Node, NodeKind, Palette,
+    placements, shape, Board, Dash, Edge, End, Fill, Id, Issue, Named, Node, NodeKind, Palette,
     Placed, Rgba, Shape, Side,
 };
 
@@ -22,6 +23,29 @@ mod incremental;
 mod wrap;
 
 pub use wrap::{graphemes, words, wrap, Wrapped};
+
+/// What is wrong with `board` that still lets it draw, as `scene`, built
+/// from it, draws it: [`check`]'s issues, with [`Limit::LabelLines`] for
+/// each element whose text the scene cut at [`MAX_LABEL_LINES`].
+///
+/// [`check`]: crate::check
+/// [`Limit::LabelLines`]: crate::Limit::LabelLines
+pub fn issues(board: &Board, scene: &Scene) -> Vec<Issue> {
+    let cut = cut_sources(&scene.items);
+    check_with(board, |source| cut.contains(source))
+}
+
+/// The elements whose text an item of `items` cut.
+fn cut_sources(items: &[Item]) -> HashSet<&Source> {
+    cut_items(items).collect()
+}
+
+fn cut_items(items: &[Item]) -> impl Iterator<Item = &Source> {
+    items
+        .iter()
+        .filter(|item| matches!(item.draw, Draw::Text { cut: true, .. }))
+        .map(|item| &item.source)
+}
 
 /// A node's label: Inter Regular at a fixed logical size, whatever the
 /// editor's font settings.
@@ -50,6 +74,11 @@ pub const COORDINATE_LIMIT: i64 = 1 << 24;
 pub const MAX_LABEL_BYTES: usize = 16 * 1024;
 /// Only this many of a connector's labels are drawn.
 pub const MAX_LABELS: usize = 16;
+/// Only this many lines of a label are drawn, blank ones included: about
+/// what [`MAX_LABEL_BYTES`] of text wraps to in a node of the default
+/// width, so a long word in a narrow box cannot become one line per
+/// grapheme.
+pub const MAX_LABEL_LINES: usize = 1024;
 /// Elements are stacked by at most this many bytes of their `z`.
 pub const MAX_Z: usize = crate::z::MAX_LEN;
 
@@ -127,6 +156,14 @@ pub struct Scene {
     pub bounds: Rect,
     /// Back to front.
     pub items: Vec<Item>,
+}
+
+impl Scene {
+    /// Each element a text of which was cut at [`MAX_LABEL_LINES`], once
+    /// for each such text.
+    pub fn cut(&self) -> impl Iterator<Item = &Source> {
+        cut_items(&self.items)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -218,6 +255,9 @@ pub enum Draw {
         face: Face,
         size: f32,
         color: Rgba,
+        /// The text wrapped to more than [`MAX_LABEL_LINES`] lines, and
+        /// only those were laid out.
+        cut: bool,
     },
 }
 
@@ -611,8 +651,9 @@ fn layout(
         }
     }
 
+    let cut = cut_sources(&painter.items);
     let mut flagged: Vec<Source> = Vec::new();
-    for issue in check(board) {
+    for issue in check_with(board, |source| cut.contains(source)) {
         if !flagged.contains(&issue.element) {
             flagged.push(issue.element);
         }
@@ -937,7 +978,7 @@ impl<'b> Painter<'_, 'b> {
             return;
         }
         let width = layout.wraps().then_some(area.width);
-        let wrapped = wrap::wrap(text, width, Face::Regular, size, self.measure);
+        let (wrapped, cut) = self.wrap(text, width, size);
         let height = line_height(size);
         let top = if layout.centred() {
             area.y + (area.height - wrapped.len() as f32 * height) / 2.0
@@ -976,8 +1017,19 @@ impl<'b> Painter<'_, 'b> {
                 face: Face::Regular,
                 size,
                 color,
+                cut,
             },
         });
+    }
+
+    /// `text` wrapped at `width`, at most [`MAX_LABEL_LINES`] lines, and
+    /// whether it had more.
+    fn wrap(&self, text: &str, width: Option<f32>, size: f32) -> (Vec<Wrapped>, bool) {
+        let most = MAX_LABEL_LINES.saturating_add(1);
+        let mut lines = wrap::wrap_at_most(text, width, Face::Regular, size, self.measure, most);
+        let cut = lines.len() > MAX_LABEL_LINES;
+        lines.truncate(MAX_LABEL_LINES);
+        (lines, cut)
     }
 
     fn node(&mut self, id: &Id, node: &Node, bounds: Rect) {
@@ -1101,7 +1153,7 @@ impl<'b> Painter<'_, 'b> {
         if text.trim().is_empty() {
             return;
         }
-        let lines = wrap::wrap(text, None, Face::Regular, SMALL_SIZE, self.measure);
+        let (lines, _) = self.wrap(text, None, SMALL_SIZE);
         let width = lines.iter().map(|line| line.width).fold(0.0, f32::max);
         let height = lines.len() as f32 * line_height(SMALL_SIZE);
         let area = Rect::new(
@@ -1181,7 +1233,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::fixtures::{self, Rng};
     use crate::style::tests::{DARK, LIGHT};
-    use crate::{parse, Vocabulary};
+    use crate::{check, parse, Vocabulary};
 
     #[track_caller]
     fn read(text: &str) -> Board {
@@ -1259,12 +1311,14 @@ pub(crate) mod tests {
                     face,
                     size,
                     color,
+                    cut,
                 } => {
                     let _ = writeln!(
                         out,
-                        "{who} text in {} {face:?} {size} {}",
+                        "{who} text in {} {face:?} {size} {}{}",
                         rect(item.bounds),
-                        hex(*color)
+                        hex(*color),
+                        if *cut { " cut" } else { "" }
                     );
                     for line in lines {
                         let _ = writeln!(
@@ -1732,7 +1786,7 @@ edge e text in 85,9 30x32 Regular 12 #3060d0
         let labels: Vec<String> = (0..20).map(|i| format!("{{ text = \"L{i}\" }}")).collect();
         let long = "x".repeat(MAX_LABEL_BYTES + 100);
         let text = format!(
-            "schema = 1\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [100, 50]\ntext = \"{long}\"\n\
+            "schema = 1\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [1000, 50]\ntext = \"{long}\"\n\
              [edge.e]\nkind = \"edge\"\nfrom = {{ at = [0, 100] }}\nto = {{ at = [500, 100] }}\nlabels = [{}]\n",
             labels.join(", ")
         );

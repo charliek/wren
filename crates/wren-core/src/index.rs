@@ -1853,6 +1853,17 @@ labels = [{ text = "when paid" }]
         index.set_content(BOARD, LABELLED_BOARD, false);
         assert!(search(&index, "schema").is_empty());
         assert_eq!(search(&index, "parcel").len(), 1);
+
+        // A board over the size a board may have is not read as one: it is
+        // searched as written, as the app opens it as text.
+        let pad = "x".repeat(wren_board::MAX_BOARD_BYTES);
+        let large =
+            LABELLED_BOARD.replacen("schema = 1\n", &format!("schema = 1\npad = \"{pad}\"\n"), 1);
+        assert!(wren_board::parse(&large).is_err());
+        index.set_content(BOARD, &large, false);
+        let content = index.entries[&BOARD].content.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&content.source, &content.text));
+        assert_eq!(search(&index, "schema").len(), 1);
     }
 
     #[test]

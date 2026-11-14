@@ -172,6 +172,7 @@ pub(crate) fn item(frame: &mut Frame, item: &Item, cull: &Cull, fonts: &Measurer
             face,
             size,
             color: ink,
+            ..
         } => {
             let height = scene::line_height(*size);
             let font = fonts.font(*face);
@@ -319,6 +320,7 @@ mod tests {
                 face: Face::Regular,
                 size,
                 color: Rgba::rgb(7, 8, 9),
+                cut: false,
             },
         }
     }

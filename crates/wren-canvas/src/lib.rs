@@ -48,8 +48,8 @@ use wren_board::history::{History, Snapshot, Unit};
 use wren_board::ids::Random;
 use wren_board::scene::{self, Draw, Rect, Scene, Source};
 use wren_board::{
-    style, walk, Access, Board, Dir, Extra, Fill, Id, Issue, Named, Node, NodeKind, NodeStyle,
-    Palette, ParseError, Rgba, Shape, GRID,
+    style, walk, Access, Board, Dir, Extra, Fill, Id, Issue, IssueKind, Limit, Named, Node,
+    NodeKind, NodeStyle, Palette, ParseError, Rgba, Shape, GRID,
 };
 
 #[cfg(test)]
@@ -1784,6 +1784,7 @@ impl BoardView {
         self.revision = preview.revision;
         #[cfg(feature = "test-support")]
         self.probe.built(started);
+        self.reissue();
     }
 
     /// A command the machine left to the view.
@@ -2021,6 +2022,18 @@ impl BoardView {
         self.revision = revision();
         #[cfg(feature = "test-support")]
         self.probe.built(started);
+        self.reissue();
+    }
+
+    /// Adds to the board's issues the labels its scene cut at the line
+    /// cap, which only a measured scene can tell; each change of the board
+    /// has set them to `check`'s before its scene is built.
+    fn reissue(&mut self) {
+        let scene = self.scenes.scene();
+        let cut = IssueKind::OutOfRange(Limit::LabelLines);
+        if scene.cut().next().is_some() || self.issues.iter().any(|issue| issue.kind == cut) {
+            self.issues = scene::issues(&self.board, scene);
+        }
     }
 
     /// Paint in at most `cap` layers instead of [`layers::CAP`], to see
@@ -2417,6 +2430,39 @@ mod tests {
             Access::ReadOnly(Reason::Requires(vec!["frames".into()]))
         );
         assert!(!future.scene().items.is_empty());
+    }
+
+    /// A label cut at the line cap is an issue only a measured scene finds:
+    /// the view lists it, an edit that shortens the label clears it, undo
+    /// brings it back, and a theme change keeps it.
+    #[test]
+    fn a_label_cut_at_the_line_cap_is_listed_until_it_fits() {
+        let text = vec!["x"; scene::MAX_LABEL_LINES + 1].join("\\n");
+        let board = format!(
+            "schema = 1\n\n[node.a]\ntext = \"{text}\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n"
+        );
+        let mut view = open(&board);
+        let cut = IssueKind::OutOfRange(Limit::LabelLines);
+        let kinds = |view: &BoardView| -> Vec<IssueKind> {
+            view.issues().iter().map(|issue| issue.kind).collect()
+        };
+        assert_eq!(kinds(&view), [cut]);
+        assert_eq!(wren_board::check(view.board()), []);
+        let now = Instant::now();
+        let short = Intent::SetText {
+            id: id("a"),
+            text: "short".into(),
+            size: [120, 60],
+        };
+        let mut ids = wren_board::ids::Seeded::new(1);
+        assert!(view.apply(&[short], &mut ids, now).changed);
+        assert_eq!(kinds(&view), []);
+        view.command(Command::Undo, now);
+        assert_eq!(kinds(&view), [cut]);
+        let mut palette = fixtures::palette();
+        palette.ink = Rgba::rgb(1, 2, 3);
+        view.set_palette(palette);
+        assert_eq!(kinds(&view), [cut]);
     }
 
     #[test]
