@@ -303,6 +303,13 @@ impl App {
         }
         // The palette closes when the note changes, or stops being a board.
         if origin.note != self.editor_note || self.board.is_none() {
+            // The view was put away showing a preview: the board is to
+            // come back where it was before the palette opened.
+            if let (false, Some(note)) = (origin.at_origin, origin.note) {
+                if let Some(remembered) = self.board_viewports.get_mut(&note) {
+                    *remembered = origin.viewport;
+                }
+            }
             self.board_nodes = None;
             self.palette = None;
             return self.column_focus();
@@ -823,6 +830,47 @@ to = { node = "bare" }
                 "{title}"
             );
         }
+        assert!(!dirty(&app));
+    }
+
+    #[test]
+    fn a_note_change_under_a_preview_leaves_the_board_where_it_was() {
+        let (_directory, mut app, path) = workspace();
+        let mtime = modified(&path);
+        open_board(&mut app, "Find");
+        lay_out(&mut app);
+        let origin = view(&app).viewport();
+        let preview = |app: &mut App| {
+            jump(app);
+            key(app, Nav::Down);
+            key(app, Nav::Down);
+            assert_shown(app, &edge("go"));
+            assert_ne!(view(app).viewport(), origin);
+        };
+
+        preview(&mut app);
+        open_markdown(&mut app, "Note");
+        let _ = app.update(Message::Tick);
+        assert!(app.palette.is_none() && app.board_nodes.is_none());
+        open_board(&mut app, "Find");
+        lay_out(&mut app);
+        assert_eq!(view(&app).viewport(), origin);
+        assert!(selection(&app).is_empty());
+        assert_untouched(&app, &path, mtime);
+
+        // The board turning to raw text underneath, and back.
+        preview(&mut app);
+        std::fs::write(&path, "<<<<<<< ours\n").unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.surface(), Surface::Raw);
+        assert!(app.palette.is_none() && app.board_nodes.is_none());
+        std::fs::write(&path, FIND).unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.surface(), Surface::Board);
+        lay_out(&mut app);
+        assert_eq!(view(&app).viewport(), origin);
         assert!(!dirty(&app));
     }
 
