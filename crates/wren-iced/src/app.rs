@@ -58,6 +58,15 @@ pub struct App {
     board_revision: u64,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
+    /// What the Board menu's items were last enabled from; `None` until the
+    /// first sync and after the menu is built again.
+    #[cfg(any(target_os = "macos", test))]
+    menu_inputs: Option<preferences::MenuInputs>,
+    /// How many times the Board menu was recomputed, and what it showed.
+    #[cfg(test)]
+    menu_syncs: usize,
+    #[cfg(test)]
+    menu_synced: Vec<(&'static str, bool)>,
     find_open: bool,
     find_query: String,
     words: usize,
@@ -329,6 +338,12 @@ impl App {
             board_viewports: board::Viewports::new(),
             board_revision: 0,
             board_spike: None,
+            #[cfg(any(target_os = "macos", test))]
+            menu_inputs: None,
+            #[cfg(test)]
+            menu_syncs: 0,
+            #[cfg(test)]
+            menu_synced: Vec::new(),
             find_open: false,
             find_query: String::new(),
             words,
@@ -435,6 +450,8 @@ impl App {
         // Every way a picker row gets highlighted, or the picker closes,
         // arrives as a message, so the preview follows from here.
         let preview = self.sync_preview();
+        #[cfg(any(target_os = "macos", test))]
+        self.sync_menu();
         Task::batch([task, preview])
     }
 
@@ -611,7 +628,7 @@ impl App {
                     });
                     #[cfg(target_os = "macos")]
                     {
-                        crate::macos_menu::install(&self.preferences.keymap);
+                        self.install_menu();
                         // A missing framework (a bare binary, a bundle built
                         // without Sparkle) only leaves the menu item disabled.
                         let _ = wren_sparkle::start();

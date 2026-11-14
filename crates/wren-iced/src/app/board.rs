@@ -1207,6 +1207,7 @@ z = "c"
             editor: true,
             ..Options::default()
         });
+        app.preferences.boards = false;
         app.workspace_mode = true;
         app.session = Some(Session::open_with(directory.path(), app.session_options()).unwrap());
         app.sync_editor(true);

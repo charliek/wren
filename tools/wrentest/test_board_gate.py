@@ -21,6 +21,7 @@ from tools.wrentest.boards import (
 )
 from tools.wrentest.test_board_view import samples  # noqa: F401  (fixture)
 from tools.wrentest.client import RemoteError
+from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, wait_for
 
 # Past the 750 ms autosave debounce.
@@ -81,6 +82,18 @@ def test_the_setting_on_lists_the_board(small: Path) -> None:
     with board_app(small, "board-gate-on") as app:
         notes = {row["path"]: row["title"] for row in app.client.call("session.get")["notes"]}
         assert notes == {"Plans/Q1/Flow.wren-board": "Flow", "Plans/Q1/Note.md": "Note"}
+
+
+def test_with_no_settings_file_boards_are_on(small: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The setting's default, as a fresh install has it: no `config.conf`."""
+    monkeypatch.delenv("WRENTEST_BOARDS", raising=False)
+    with WrenApp(workspace=small, artifacts_dir=artifact_directory("board-gate-default")) as app:
+        assert not app.settings_path.exists()
+        notes = {row["path"] for row in app.client.call("session.get")["notes"]}
+        assert notes == {"Plans/Q1/Flow.wren-board", "Plans/Q1/Note.md"}
+        assert board(app)["enabled"] is True
+        open_note(app, "Plans/Q1/Flow.wren-board")
+        assert board(app)["surface"] == "board"
 
 
 @pytest.mark.parametrize("path", [FLOW, HAND_WRITTEN])

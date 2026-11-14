@@ -1478,3 +1478,193 @@ fn a_settle_drops_the_preview_until_the_highlight_moves() {
     assert!(app.palette.is_none());
     assert_eq!(app.board_revision, 0);
 }
+
+/// The keys of the Board menu that are enabled, each checked against the
+/// command it runs: the menu shares one count between the align items and
+/// one between the distribute items, and must still agree with each, except
+/// that a board command is greyed while the board takes text. What the
+/// last `sync_menu` left the items showing must be the same.
+fn board_menu(app: &App) -> Vec<&'static str> {
+    let menu = crate::menu::MENUS
+        .iter()
+        .find(|menu| menu.kind == crate::menu::Kind::Board)
+        .unwrap();
+    let machine = app.board.as_ref().map(wren_canvas::BoardView::machine);
+    let typing =
+        machine.is_some_and(|machine| machine.editing().is_some() || machine.seeking().is_some());
+    let mut enabled = app.menu_enabled();
+    let listed: Vec<(&'static str, bool)> = crate::menu::commands(menu.rows)
+        .into_iter()
+        .map(|(key, _)| {
+            let id = CommandId::parse(key).unwrap();
+            let on = enabled(key);
+            let runs = app.command_enabled(id) && !(typing && matches!(id, CommandId::Board(_)));
+            assert_eq!(on, runs, "{key}");
+            (key, on)
+        })
+        .collect();
+    // What the items were last set to, wherever the menu holds them as
+    // up to date, is what they would be set to now.
+    if app.menu_current() {
+        assert_eq!(app.menu_synced, listed, "the items as last synced");
+    }
+    listed
+        .into_iter()
+        .filter_map(|(key, on)| on.then_some(key))
+        .collect()
+}
+
+/// §5.19: the Board menu's items follow `command_enabled`, so New Board
+/// follows `note.new_board` and the rest are greyed unless a board is the
+/// surface; an item runs through the keyboard's path, and the View menu's
+/// text-size items zoom a board.
+#[test]
+fn the_board_menu_follows_its_commands_and_runs_them_as_the_keys_do() {
+    let (_directory, mut app) = fixture();
+    open_markdown(&mut app, "Note");
+    assert_eq!(board_menu(&app), ["note.new_board"]);
+
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    let idle = board_menu(&app);
+    for key in ["note.new_board", "note.export_svg", "note.export_png"] {
+        assert!(idle.contains(&key), "{key}");
+    }
+    for key in [
+        "board.duplicate",
+        "board.align.left",
+        "board.distribute.horizontal",
+    ] {
+        assert!(!idle.contains(&key), "{key} with nothing selected");
+    }
+
+    // Two nodes: align, not distribute, which needs three.
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    let both = board_menu(&app);
+    assert!(both.contains(&"board.duplicate") && both.contains(&"board.align.middle"));
+    assert!(!both.contains(&"board.distribute.vertical"));
+
+    // An item sends its key back, and it runs as the shortcut does.
+    click(&mut app, "pack");
+    let _ = app.menu_command("board.duplicate");
+    assert_eq!(app.board_revision, 1);
+    assert_eq!(view(&app).board().nodes.len(), 3);
+    let zoom = view(&app).viewport().zoom;
+    let _ = app.menu_command("font.increase");
+    assert!(view(&app).viewport().zoom > zoom);
+    assert_eq!(app.board_revision, 1, "a zoom drafts nothing");
+}
+
+/// §5.1 rule 3: while a label is open, or keyboard Connecting takes a
+/// query, the board runs no command a menu lists, so the Board menu's
+/// board items are greyed and choosing one, or pressing its ⌘ key
+/// equivalent, which AppKit gives the menu first, does nothing.
+#[test]
+fn the_board_menu_greys_its_board_items_while_the_board_takes_text() {
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    assert!(board_menu(&app).contains(&"board.duplicate"));
+
+    assert_eq!(key(&mut app, C::EditLabel), Disposition::Completed);
+    label(&mut app, LabelAction::Insert("zz".into()));
+    let editing = board_menu(&app);
+    assert!(
+        editing.iter().all(|key| !key.starts_with("board.")),
+        "{editing:?}"
+    );
+    for key in ["note.new_board", "note.export_svg", "note.export_png"] {
+        assert!(editing.contains(&key), "{key}");
+    }
+    let revision = app.board_revision;
+    for key in ["board.duplicate", "board.select.connected"] {
+        let _ = app.menu_command(key);
+        assert_eq!(state(&app), "editing", "{key}");
+        assert_eq!(view(&app).label().map(|label| label.text()), Some("zz"));
+        assert_eq!(view(&app).board().nodes.len(), 2, "{key}");
+        assert_eq!(app.board_revision, revision, "{key}");
+    }
+
+    // Committing the label gives the items back.
+    assert_eq!(key(&mut app, C::CommitLabel), Disposition::Completed);
+    assert_eq!(state(&app), "idle");
+    assert!(board_menu(&app).contains(&"board.duplicate"));
+    let revision = app.board_revision;
+
+    // Keyboard Connecting from the one selected node.
+    assert_eq!(
+        key(&mut app, C::Tool(Tool::Connector)),
+        Disposition::Completed
+    );
+    assert!(view(&app).machine().seeking().is_some());
+    let connecting = board_menu(&app);
+    assert!(
+        connecting.iter().all(|key| !key.starts_with("board.")),
+        "{connecting:?}"
+    );
+    let _ = app.menu_command("board.duplicate");
+    assert!(view(&app).machine().seeking().is_some());
+    assert_eq!(view(&app).board().nodes.len(), 2);
+    assert_eq!(app.board_revision, revision);
+}
+
+/// The Board menu is worked out again only when something it reads has
+/// changed: the autosave tick, forty times a second whenever a workspace
+/// is open, and a pointer passing over the board cost a compare, however
+/// large the selection. Every change it reads is still seen.
+#[test]
+fn the_board_menu_is_worked_out_only_when_what_it_reads_changes() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    let _ = board_menu(&app);
+    let syncs = app.menu_syncs;
+    for _ in 0..100 {
+        let _ = app.update(Message::Tick);
+    }
+    input(&mut app, Input::Move { at: EMPTY });
+    assert_eq!(app.menu_syncs, syncs, "nothing the menu reads changed");
+
+    // A selection, an edit, an undo, an open label, a change on disk and
+    // another note each bring the items up to date.
+    type Change<'a> = &'a dyn Fn(&mut App);
+    let changes: [(&str, Change); 7] = [
+        ("a selection", &|app| click(app, "pack")),
+        ("an edit", &|app| {
+            assert_eq!(key(app, C::Duplicate), Disposition::Completed);
+        }),
+        ("an undo", &|app| {
+            assert_eq!(key(app, C::Undo), Disposition::Completed);
+        }),
+        ("an open label", &|app| {
+            assert_eq!(key(app, C::EditLabel), Disposition::Completed);
+        }),
+        ("a committed label", &|app| {
+            label(app, LabelAction::Insert("zz".into()));
+            assert_eq!(key(app, C::CommitLabel), Disposition::Completed);
+        }),
+        ("a change on disk", &|app| {
+            change_on_disk(app, &path, &flow_and("External"));
+        }),
+        ("another note", &|app| {
+            open_markdown(app, "Note");
+        }),
+    ];
+    // A test helper may change the app without a message, so a tick
+    // stands for the message that follows in a window.
+    for (what, change) in changes {
+        let before = app.menu_syncs;
+        change(&mut app);
+        let _ = app.update(Message::Tick);
+        assert!(app.menu_syncs > before, "{what}");
+        assert!(app.menu_current(), "{what}");
+        let _ = board_menu(&app);
+        let synced = app.menu_syncs;
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.menu_syncs, synced, "a tick after {what}");
+    }
+    assert_eq!(board_menu(&app), ["note.new_board"]);
+}

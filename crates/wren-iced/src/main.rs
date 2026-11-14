@@ -9,6 +9,8 @@ mod fonts;
 mod keys;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+#[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+mod menu;
 mod palette_scroll;
 mod panes;
 mod theme;

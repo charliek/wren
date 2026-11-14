@@ -132,7 +132,7 @@ pub struct Settings {
     /// The Markdown-aware Enter, Tab, Backspace, and Home.
     pub markdown_assist: bool,
     /// Whether board notes are listed and opened, read when a workspace
-    /// opens. Left out of [`TEMPLATE`] until boards ship.
+    /// opens.
     pub boards: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
@@ -150,7 +150,7 @@ impl Default for Settings {
             line_numbers: true,
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
-            boards: false,
+            boards: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -430,6 +430,11 @@ pub const TEMPLATE: &str = "\
 # Off, the Markdown commands (toggle task, bold, move line, ...) are disabled.
 # markdown-assist = on
 
+# Boards: `.wren-board` notes of shapes and connectors, drawn on a canvas.
+# Off, boards are neither listed nor opened, and their files are left alone.
+# Applies when Wren restarts.
+# boards = on
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -571,8 +576,9 @@ mod tests {
     }
 
     #[test]
-    fn boards_default_off_and_parse_booleans() {
-        assert!(!Settings::default().boards);
+    fn boards_default_on_and_parse_booleans() {
+        assert!(Settings::default().boards);
+        assert!(Settings::parse("").boards);
         for (value, enabled) in [
             ("on", true),
             ("yes", true),
@@ -588,12 +594,15 @@ mod tests {
             assert!(settings.warnings.is_empty(), "{value}");
         }
         for bad in ["sometimes", "1", ""] {
-            let settings = Settings::parse(&format!("boards = on\nboards = {bad}\n"));
-            assert!(settings.boards, "{bad:?} keeps the earlier value");
+            let settings = Settings::parse(&format!("boards = off\nboards = {bad}\n"));
+            assert!(!settings.boards, "{bad:?} keeps the earlier value");
             assert_eq!(settings.warnings.len(), 1, "{bad:?}");
             assert!(settings.warnings[0].contains("line 2: invalid boards value"));
         }
-        assert!(!TEMPLATE.contains("boards"));
+        assert!(TEMPLATE.contains("\n# boards = on\n"));
+        let off = with_value(TEMPLATE, "boards", "off");
+        assert!(!Settings::parse(&off).boards);
+        assert!(off.contains("\n# boards = on\n") && off.ends_with("boards = off\n"));
     }
 
     #[test]

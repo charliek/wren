@@ -25,6 +25,32 @@ pub struct Preview {
     pub font: Option<&'static str>,
 }
 
+/// What the Board menu items were last enabled from; see `App::sync_menu`.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuInputs {
+    state: MenuState,
+    /// The open board's selection, which changes with neither its epoch
+    /// nor its revision.
+    selection: Option<std::collections::BTreeSet<wren_board::scene::Source>>,
+}
+
+/// Everything else the Board menu's enabling reads: the board by its epoch
+/// (a reload or another board) and its revision (an edit).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuState {
+    loading: bool,
+    boards: bool,
+    session: bool,
+    group: bool,
+    surface: Surface,
+    export: bool,
+    board: Option<(u64, u64)>,
+    writable: bool,
+    typing: bool,
+}
+
 /// Settings plus the derived keymap and the file they came from.
 pub struct Preferences {
     pub settings: Settings,
@@ -389,7 +415,7 @@ impl App {
         self.apply_preferences();
         #[cfg(target_os = "macos")]
         if self.window.is_some() && self.preferences.keymap != keymap {
-            crate::macos_menu::install(&self.preferences.keymap);
+            self.install_menu();
         }
         let warning = self.preferences.warning();
         // The restart notice is shown like a warning and retracted like one,
@@ -667,11 +693,141 @@ impl App {
         }
     }
 
-    /// Run a command chosen from the native menu bar, with the same rules
-    /// as its keyboard shortcut.
+    /// Build the menu bar for the keymap and the `boards` setting the app
+    /// runs with; the setting is fixed until a restart, so a reload that
+    /// rebuilds the menu keeps or leaves out the Board menu as before.
     #[cfg(target_os = "macos")]
+    pub(super) fn install_menu(&mut self) {
+        let installed =
+            crate::macos_menu::install(&self.preferences.keymap, self.preferences.boards);
+        // The new items start enabled, whatever the last sync set.
+        self.menu_inputs = None;
+        if let Err(error) = installed {
+            self.banner = Some(format!("Could not build the menu bar: {error}"));
+            self.banner_kind = workspace::WarningKind::General;
+        }
+    }
+
+    /// Whether the open board holds the keyboard as text: a label is open
+    /// (an input method's preedit lives only in one) or keyboard Connecting
+    /// takes a query. The board's own keys then run no command a menu
+    /// lists (§5.1 rules 2 and 3), and the menu must not either, since
+    /// AppKit gives a ⌘ key equivalent to the menu before the board sees it.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+    fn board_typing(&self) -> bool {
+        self.board.as_ref().is_some_and(|view| {
+            let machine = view.machine();
+            machine.editing().is_some() || machine.seeking().is_some()
+        })
+    }
+
+    /// Whether a menu item would be greyed for typing: a board command
+    /// while the board takes text.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+    fn menu_typing_blocks(&self, id: CommandId) -> bool {
+        matches!(id, CommandId::Board(_)) && self.board_typing()
+    }
+
+    /// Whether the menu item for a command key is enabled: exactly when its
+    /// command would run, except that a board command is greyed while the
+    /// board takes text. The align items, and the distribute items, which
+    /// each share one rule (§5.16 rule 3), count a large selection once
+    /// between them.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+    pub(super) fn menu_enabled(&self) -> impl FnMut(&str) -> bool + '_ {
+        use wren_canvas::Command as C;
+        let (mut align, mut distribute) = (None, None);
+        move |key| {
+            let Some(id) = CommandId::parse(key) else {
+                return false;
+            };
+            if self.menu_typing_blocks(id) {
+                return false;
+            }
+            let shared = match id {
+                CommandId::Board(C::Align(_)) => &mut align,
+                CommandId::Board(C::Distribute(_)) => &mut distribute,
+                _ => return self.command_enabled(id),
+            };
+            *shared.get_or_insert_with(|| self.command_enabled(id))
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn menu_state(&self) -> MenuState {
+        MenuState {
+            loading: self.loading.is_some(),
+            boards: self.preferences.boards,
+            session: self.session.is_some(),
+            group: self.selected_group.is_some(),
+            surface: self.surface(),
+            export: self.board_export.is_some(),
+            board: self
+                .board
+                .as_ref()
+                .map(|view| (view.epoch(), self.board_revision)),
+            writable: self
+                .board
+                .as_ref()
+                .is_some_and(wren_canvas::BoardView::writable),
+            typing: self.board_typing(),
+        }
+    }
+
+    /// Whether the Board menu's items were last enabled from what the app
+    /// holds now. The selection is compared where it lies, not copied.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn menu_current(&self) -> bool {
+        self.menu_inputs.as_ref().is_some_and(|inputs| {
+            inputs.state == self.menu_state()
+                && inputs.selection.as_ref()
+                    == self.board.as_ref().map(|view| view.machine().selection())
+        })
+    }
+
+    /// Bring the Board menu's items up to date, after every message. They
+    /// are worked out again only when something they read has changed, so
+    /// the autosave tick and a pointer passing over the board cost a
+    /// compare, not a count of the selection.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn sync_menu(&mut self) {
+        if self.menu_current() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        crate::macos_menu::sync_board(self.menu_enabled());
+        #[cfg(test)]
+        {
+            let board = crate::menu::MENUS
+                .iter()
+                .find(|menu| menu.kind == crate::menu::Kind::Board)
+                .map_or_else(Vec::new, |menu| crate::menu::commands(menu.rows));
+            let synced = {
+                let mut enabled = self.menu_enabled();
+                board.iter().map(|(key, _)| (*key, enabled(key))).collect()
+            };
+            self.menu_synced = synced;
+            self.menu_syncs += 1;
+        }
+        self.menu_inputs = Some(MenuInputs {
+            state: self.menu_state(),
+            selection: self
+                .board
+                .as_ref()
+                .map(|view| view.machine().selection().clone()),
+        });
+    }
+
+    /// Run a command chosen from the native menu bar, with the same rules
+    /// as its keyboard shortcut. A board command does nothing while the
+    /// board takes text, as its greyed item does on a Mac.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
     pub(super) fn menu_command(&mut self, key: &str) -> Task<Message> {
-        if key == crate::macos_menu::CHECK_FOR_UPDATES {
+        if CommandId::parse(key).is_some_and(|id| self.menu_typing_blocks(id)) {
+            return Task::none();
+        }
+        #[cfg(target_os = "macos")]
+        if key == crate::menu::CHECK_FOR_UPDATES {
             if let Err(error) = wren_sparkle::check_for_updates() {
                 self.banner = Some(format!("Could not check for updates: {error}"));
                 self.banner_kind = workspace::WarningKind::General;
@@ -1118,6 +1274,7 @@ mod tests {
     fn missing_settings_use_platform_defaults_and_follow_the_system() {
         let preferences = Preferences::load(None);
         assert!(preferences.settings.warnings.is_empty());
+        assert!(preferences.boards);
         assert_eq!(preferences.theme(SystemMode::Light).0, definitions::LIGHT);
         assert_eq!(preferences.theme(SystemMode::Dark).0, definitions::DARK);
         let palette = keybind::parse_trigger(match Platform::current() {
@@ -1176,20 +1333,20 @@ mod tests {
             ..Default::default()
         };
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
-        assert!(!app.preferences.boards);
+        assert!(app.preferences.boards, "on by default");
         assert!(app.banner.is_none());
 
-        std::fs::write(&path, "boards = on\n").unwrap();
+        std::fs::write(&path, "boards = off\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
         assert_eq!(
             app.banner.as_deref(),
             Some("Restart Wren to apply `boards`.")
         );
-        assert!(!app.preferences.boards);
-        assert!(app.preferences.settings.boards);
+        assert!(app.preferences.boards);
+        assert!(!app.preferences.settings.boards);
 
         // A settings warning is still returned, with the notice beside it.
-        std::fs::write(&path, "boards = on\nmystery = 1\n").unwrap();
+        std::fs::write(&path, "boards = off\nmystery = 1\n").unwrap();
         let warning = app.reload_settings(false).unwrap();
         assert!(warning.contains("mystery") && !warning.contains("Restart"));
         let banner = app.banner.clone().unwrap();
@@ -1198,14 +1355,15 @@ mod tests {
         );
 
         // Back at the launch value there is nothing to wait for.
-        std::fs::write(&path, "boards = off\n").unwrap();
+        std::fs::write(&path, "boards = on\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
         assert!(app.banner.is_none());
 
-        // A launch with the setting on runs with it, and turning it off waits.
-        std::fs::write(&path, "boards = on\n").unwrap();
+        // A launch with the setting off runs with it, and removing the line
+        // waits for the default.
+        std::fs::write(&path, "boards = off\n").unwrap();
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
-        assert!(app.preferences.boards);
+        assert!(!app.preferences.boards);
         assert!(app.banner.is_none());
         std::fs::write(&path, "").unwrap();
         assert_eq!(app.reload_settings(false), None);
@@ -1213,7 +1371,7 @@ mod tests {
             app.banner.as_deref(),
             Some("Restart Wren to apply `boards`.")
         );
-        assert!(app.preferences.boards);
+        assert!(!app.preferences.boards);
     }
 
     #[test]
