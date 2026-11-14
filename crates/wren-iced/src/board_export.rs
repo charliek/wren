@@ -165,6 +165,11 @@ fn has_char(faces: &fontdb::Database, id: fontdb::ID, character: char) -> bool {
 /// refused before anything is drawn. No image or other file the document
 /// names is read: a board's export names none, and this one never will.
 pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, String> {
+    // Reading the document lays every label out as paths, which on a large
+    // board takes seconds; the size the root declares is refused first.
+    if let Some((width, height)) = declared_size(svg) {
+        image_size(width, height, scale)?;
+    }
     let options = usvg::Options {
         font_family: "Inter".to_owned(),
         fontdb: faces(),
@@ -181,9 +186,34 @@ pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, String> {
     let tree = usvg::Tree::from_str(svg, &options)
         .map_err(|error| format!("the board's SVG could not be read: {error}"))?;
     let size = tree.size();
+    let (columns, rows) = image_size(size.width(), size.height(), scale)?;
+    let mut pixmap = Pixmap::new(columns, rows)
+        .ok_or_else(|| format!("{columns} by {rows} pixels could not be allocated"))?;
+    // The SVG's size scaled exactly to the whole pixels, so its background
+    // reaches every edge.
+    let transform =
+        Transform::from_scale(columns as f32 / size.width(), rows as f32 / size.height());
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    pixmap
+        .encode_png()
+        .map_err(|error| format!("the image could not be encoded: {error}"))
+}
+
+/// The `width` and `height` the document's root element gives in plain
+/// numbers, if it gives both.
+fn declared_size(svg: &str) -> Option<(f32, f32)> {
+    let document = usvg::roxmltree::Document::parse(svg).ok()?;
+    let root = document.root_element();
+    let number = |name: &str| root.attribute(name)?.trim().parse::<f32>().ok();
+    Some((number("width")?, number("height")?))
+}
+
+/// The whole pixels of an image `width` by `height` board units at
+/// `scale`, each side rounded up, or why there can be no such image.
+fn image_size(width: f32, height: f32, scale: f32) -> Result<(u32, u32), String> {
     let (width, height) = (
-        f64::from(size.width() * scale).ceil(),
-        f64::from(size.height() * scale).ceil(),
+        f64::from(width * scale).ceil(),
+        f64::from(height * scale).ceil(),
     );
     if !(width.is_finite() && height.is_finite() && width >= 1.0 && height >= 1.0) {
         return Err(format!("{width} by {height} pixels is no image"));
@@ -195,17 +225,7 @@ pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, String> {
         ));
     }
     // Both are whole numbers from 1 to 64 million here.
-    let (columns, rows) = (width as u32, height as u32);
-    let mut pixmap = Pixmap::new(columns, rows)
-        .ok_or_else(|| format!("{columns} by {rows} pixels could not be allocated"))?;
-    // The SVG's size scaled exactly to the whole pixels, so its background
-    // reaches every edge.
-    let transform =
-        Transform::from_scale(columns as f32 / size.width(), rows as f32 / size.height());
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    pixmap
-        .encode_png()
-        .map_err(|error| format!("the image could not be encoded: {error}"))
+    Ok((width as u32, height as u32))
 }
 
 /// Write `contents` to `path` whole or not at all: into a new file beside
@@ -475,6 +495,14 @@ mod tests {
         let error = png(&side(16_000_000), 4.0).unwrap_err();
         assert!(error.contains("megapixels"), "{error}");
         assert!(png("not an image", 2.0).is_err());
+        // The declared size is refused before the document is read: here
+        // reading it would fail, its root being outside the SVG namespace.
+        let unreadable = "<svg xmlns=\"urn:not-svg\" width=\"4000\" height=\"4000.5\">\
+                          <text>label</text></svg>";
+        let error = png(unreadable, 2.0).unwrap_err();
+        assert!(error.contains("over the 64 megapixels"), "{error}");
+        let error = png(&unreadable.replace("4000.5", "4000"), 2.0).unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
         let (width, height, _) = decode(&png(&side(1), 2.0).unwrap());
         assert_eq!((width, height), (2, 2));
     }
