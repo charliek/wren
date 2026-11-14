@@ -7,11 +7,13 @@
 //! source.
 
 mod hunspell;
+mod speller;
+mod words;
 
 use std::fmt;
-use std::ops::Range;
 
 pub use hunspell::Hunspell;
+pub use speller::Speller;
 
 /// Why a source could not be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,23 +61,4 @@ impl WordSource for WordList {
 
     /// A word list offers no corrections of its own.
     fn suggest(&self, _word: &str, _out: &mut Vec<String>) {}
-}
-
-/// Judges the words of a line against its sources, asked in order.
-#[non_exhaustive]
-pub struct Speller {}
-
-impl Speller {
-    pub fn new(_sources: Vec<Box<dyn WordSource>>) -> Self {
-        Self {}
-    }
-
-    /// The misspelled words of `line` that start and end inside `prose`, as byte
-    /// ranges of `line`: sorted, apart, on character boundaries. Appends to `out`.
-    pub fn marks(&self, _line: &str, _prose: &[Range<usize>], _out: &mut Vec<Range<usize>>) {}
-
-    /// Up to `limit` corrections for `word`, best first, without duplicates.
-    pub fn suggestions(&self, _word: &str, _limit: usize) -> Vec<String> {
-        Vec::new()
-    }
 }
