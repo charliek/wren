@@ -209,6 +209,10 @@ impl BoardView {
     pub fn update(&mut self, message: Message, now: Instant) -> Update;
     pub fn command(&mut self, command: Command, now: Instant) -> Update;   // after committing an open label (§5.1 rule 5)
     pub fn settle(&mut self, now: Instant) -> Update;                     // §3.4 rule 3
+    pub fn offers(&self) -> Vec<Offer>;     // [P3, AR4] the actions palette's rows for the selection (§5.17 rule 3);
+                                           // Offer { group: &'static str, command: Command, current: bool }
+    pub fn set_patch(&mut self, command: Option<Command>);  pub fn patch(&self) -> Option<Command>;   // [P3, AR4] the
+                                           // highlighted row's preview, drawn from a copy (§5.17 rule 4); settle drops it
     pub fn can_undo(&self) -> bool;  pub fn can_redo(&self) -> bool;       // §5.11; the history is the view's
     pub fn saved(&mut self, text: &str);    // changes nothing: the opening text stays the undo floor (§3.4 rule 2)
     pub fn draft(&mut self) -> String;      // §3.4 rule 2; records what it returns as synced
