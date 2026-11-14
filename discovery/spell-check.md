@@ -599,6 +599,25 @@ Not fixed: nothing.
 
 #### `spell-menu`
 
+*U1 and U2, opening the menu, drawing it, and its keys and pointer.* The menu's state lives in `EditorView`, which hands it to the widget each frame; the widget draws it as an overlay (`proof/menu.rs`) and routes keys and presses to it. Where §3.2 or §4.4 left a case open:
+
+1. *`key_message` returns `Vec<Message>`*, not `Option<Message>`: a key that closes the menu and is then handled as if it had not been open publishes two messages (`Spell(Close)`, then its own), and the harness must apply both, in order. The clipboard is not there without a window, so Copy and Paste give nothing and Cut only its delete; dropping focus (Escape with no menu) is no message. The physical key is unidentified, so routing falls back to the key's own character.
+2. *Opening replaces an open menu* with a fresh one (suggestions asked again, the first selected), and an opening that finds no word closes the open menu. The editor keeps at most five suggestions, whatever the proofreader returns.
+3. *A right-click that opens the menu ends a drag selection in progress*, as it takes the keyboard. A right-click on the classic engine, or with no proofreader, finds no word and changes nothing.
+4. *A click on the inactive "No suggestions" row closes the menu*, as Enter does on it; a click on the menu's padding does nothing. Any button pressed in the editor off the menu closes it and does nothing more; only the left button accepts a row.
+5. *With only the inactive row, Up and Down still route to the menu* (`Move`, which does nothing there), so they are captured and never reach the text.
+6. *Escape with any modifier is the host's while the menu is open*, as plain Escape is. *"A modifier key alone"* includes the lock keys (Caps, Num, Fn and Symbol Lock) besides Shift, Ctrl, Alt, AltGr, Super, Meta, Hyper, Fn and Symbol.
+7. *A key the editor ignores, or a host shortcut,* closes the menu without capturing the press, so the host still gets it. The suggest key on an open menu closes it and opens it again at the caret. The editor also drops `KeyRoute::Suggest` while an input method composes, as the host does (§3.4).
+8. *Place:* "fits under the row" and "fits above" are measured against the editor less its 8 px margin, so a menu that fits never needs moving; "more room" compares the space from the row's 4 px gap to that margin on each side. A menu taller or wider than the editor keeps its top and left edges 8 px inside. Edges are whole pixels. The word's first row is the first visible row holding any of its glyphs, so a word that wraps whole to the next row is placed under that row.
+9. *Sizes the plan did not name:* row text is inset 8 px inside a row (12 px from the menu's edge), so the width is the longest text plus 24 px, rounded up; the selected row's fill has 4 px corners. Text is cut between graphemes, and a space before the ellipsis is dropped.
+10. *When the word's first row is out of view, no menu is drawn*; it stays open and keys still reach it. Rule 4.4.2 scrolls the row into view on opening, and a later scroll closes the menu, so this is only a frame between the two.
+11. *Over the menu the pointer shows a hand on a suggestion and the default arrow elsewhere*, so the editor's text cursor does not show through.
+12. *The causes the editor closes the menu for itself* (rule 4.4.8): in `EditorView`, any `perform` (an edit, a motion, a click, a scroll), `intent`, `apply`, `undo`, `redo`, a changed text, `replace_text`, `set_backend`, `move_cursor` (and so `select_byte_range` and `reveal_literal`), `scroll_to_line`, `restore_viewport`, `find_next` and `find_previous`, and a changed font, text size, line height, gutter, Markdown assist or proofreader (another `Arc`, or `None`); setting one to its current value keeps the menu. In the widget, which publishes `SpellEvent::Close` so the host hears of it: the window losing focus, the editor losing focus (a change from focused, so a menu opened in an unfocused editor stays), a change of the widget's size, of its `Style`, palette, font, text size, gutter or measure, an input method starting to compose, and any press outside the menu. The palette, dialogs, the note, the workspace, settings and Escape remain the host's (W3).
+13. *`SpellEvent::Accept` closes the menu and changes nothing* until U3 gives it its replacement.
+14. The menu's word is tinted from the same glyph extents as its marks, after the selection rectangles and before the zigzag, so the zigzag shows on the tint.
+
+Checked in a real window as well as by the unit tests, on X11 with tiny-skia, through a temporary hook in the harness (not committed, since `spell-wire` hands the app its proofreader): the menu under a word, above a word on the last visible row, with "No suggestions", with an ellipsis, in Wren Dark and Wren Light; a native right-click opening it, a native pointer move selecting a row, a press in the editor closing it with the caret unmoved, and a press on the note list closing it and reaching the list.
+
 #### `spell-wire`
 
 #### The end review
