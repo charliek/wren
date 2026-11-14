@@ -312,6 +312,7 @@ def board_scenes(client, shot_here, out: Path) -> None:
     shot_here("board-new-dialog")
     client.call("dialog.close")
     board_edit_scenes(client, shot_here, open_board)
+    board_arrange_scenes(client, shot_here, open_board)
     client.call("column.open", {"column": "sections"})
 
 
@@ -444,6 +445,18 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
             client.call("board.type", {"text": step[1]})
     client.call("command.run", {"id": "board.zoom.fit"})
     shot_here("board-built")
+
+
+def board_arrange_scenes(client, shot_here, open_board) -> None:
+    """discovery/boards.md §6.3, Phase 3: the stacking order changed. The
+    shape at the back of Overlap, picked where no other covers it, is
+    brought to the front, over the other two, and the selection cleared."""
+    open_board("Overlap", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "left", "mods": [],
+                                  "at": {"canvas": [20, 10]}})
+    client.call("board.key", {"key": "]", "mods": []})
+    client.call("board.key", {"key": "escape", "mods": []})
+    shot_here("board-stacking")
 
 
 def main() -> int:
