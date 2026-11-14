@@ -248,7 +248,7 @@ impl App {
             .style(move |_, status| chrome::control(self.definition, status, false, false))
     }
 
-    fn warning_slot(&self) -> Element<'_, Message> {
+    pub(super) fn warning_slot(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
         let message = self
             .banner
@@ -275,9 +275,24 @@ impl App {
             ));
         }
         contents = contents.push(self.small_button("Dismiss", Message::DismissBanner));
+        // Hidden, the slot shrinks to nothing rather than taking a fixed
+        // height of 0: iced's column leaves a child of fixed size 0 out
+        // (`Size::is_void`), so a banner appearing would move the content
+        // after it to a new place in the widget tree, whose state, the
+        // editor's focus with it, would start again (§5.15 rule 4).
+        let height = if message.is_empty() {
+            iced::Length::Shrink
+        } else {
+            iced::Length::Fixed(40.0)
+        };
         container(contents)
             .padding([6, 14])
-            .height(if message.is_empty() { 0 } else { 40 })
+            .height(height)
+            .max_height(if message.is_empty() {
+                0.0
+            } else {
+                f32::INFINITY
+            })
             .width(Fill)
             .clip(true)
             .style(move |_| chrome::surface(self.definition, colors.raised, 0.0, false))

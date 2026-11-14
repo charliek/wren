@@ -363,3 +363,22 @@ def test_native_keys_build_the_first_four_nodes_of_the_acceptance_script(samples
         assert links == {("Start", "Receive order"), ("Receive order", "Valid?"),
                          ("Valid?", "Reject order")}
         assert state["selection"] == [nodes["Reject order"]["id"]]
+
+
+@pytest.mark.native_x11
+def test_native_a_refused_paste_leaves_the_board_the_keyboard(samples) -> None:
+    """§5.15 rule 4: the banner a refused paste raises does not take the
+    keyboard, so the next real key still reaches the board."""
+    with board_app(samples, "board-native-notice") as app:
+        window, placed = native_board(app)
+        app.client.call("test.clipboard", {"own": True})
+        app.client.call("clipboard.write", {"text": "# wren-board fragment 1\nschema = 2\n"})
+        move(window, screen_of(placed, RECEIVE))
+        xdo("click", "1")
+        settled(app, lambda state: state["selection"] == [RECEIVE], "the click's selection")
+        xdo("key", "ctrl+v")
+        wait_for(lambda: app.client.call("session.get")["banner"], timeout=5, interval=0.025,
+                 description="the refused paste's notice")
+        xdo("key", "alt+Right")
+        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Alt+Right moved it")
+        wait_focus(app, ["note-editor"])

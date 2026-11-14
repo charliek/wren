@@ -969,6 +969,24 @@ mod tests {
         assert_eq!(app.definition, definitions::LIGHT);
     }
 
+    /// iced's column leaves out a child whose size is fixed at 0, so a
+    /// banner slot of that size would move the editor to a new place in
+    /// the widget tree when a banner appears, and the editor or the board
+    /// would lose the keyboard to it (§5.15 rule 4).
+    #[test]
+    fn the_warning_slot_keeps_its_place_in_the_widget_tree() {
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        for banner in [None, Some("A notice".to_owned())] {
+            app.registry_warning = None;
+            app.banner = banner;
+            let slot = app.warning_slot();
+            assert!(!slot.as_widget().size_hint().is_void(), "{:?}", app.banner);
+        }
+    }
+
     #[test]
     fn the_word_count_follows_edits_on_a_later_tick() {
         use iced::widget::text_editor::{Action, Edit, Motion};

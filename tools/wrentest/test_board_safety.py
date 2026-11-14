@@ -18,7 +18,7 @@ from tools.wrentest.boards import (
     note_id, open_note, stamp, type_text,
 )
 from tools.wrentest.client import RemoteError
-from tools.wrentest.test_board_view import wait_focus
+from tools.wrentest.test_board_view import focused, wait_focus
 from tools.wrentest.ui import WrenApp, wait_for
 
 PACK = "3qrg4kv1"
@@ -195,3 +195,33 @@ def test_an_edit_that_comes_to_nothing_writes_nothing(samples: Path) -> None:
         flushed(app)
         assert not app.client.call("session.get")["document"]["dirty"]
     assert stamp(path) == before
+
+
+@pytest.mark.parametrize("notice", ["blocked paste", "label full"])
+def test_a_notice_leaves_the_keyboard_where_it_was(samples: Path, notice: str) -> None:
+    """§5.15 rule 4: a banner is not among what may take the keyboard, so
+    the board keeps it, and an open label stays open, after a notice."""
+    with board_app(samples, f"board-safety-notice-{notice.replace(' ', '-')}") as app:
+        ready(app)
+        app.client.call("test.clipboard", {"own": True})
+        if notice == "blocked paste":
+            click(app, {"node": PACK})
+            app.client.call("clipboard.write", {"text": "# wren-board fragment 1\nschema = 2\n"})
+        else:
+            label_typed(app, "abc")
+            app.client.call("clipboard.write", {"text": "y" * 20_000})
+        key(app, "v", "mod")
+        wait_for(lambda: app.client.call("session.get")["banner"], timeout=5, interval=0.02,
+                 description="the notice")
+        # Let the frame that shows the banner be drawn.
+        time.sleep(0.3)
+        assert focused(app) == ["note-editor"]
+        if notice == "blocked paste":
+            before = board(app, elements=True)
+            state = key(app, "right", "alt")
+            assert state["handled"], state
+            after = board(app, elements=True)
+            assert before["nodes"] != after["nodes"]
+        else:
+            state = type_text(app, "def")
+            assert state["editing"]["text"] == "abcdef", state
