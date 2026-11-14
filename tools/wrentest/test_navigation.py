@@ -841,8 +841,11 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
             blocked = response["navigation"]["processed"]
             assert "injected storage failure" in blocked["warning"]
         assert blocked["correlation"] > nav_before["processed"]["correlation"]
-        app.client.call("test.timer.hold", {"held": False})
-        # Freeze only subsequent timer retries, after the injected write was reached.
+        # The timer stays held until the explicit retry has run: autosave
+        # retries a failed write once its backoff has passed, and a retry
+        # here would replace the injected error with the real one, or save
+        # the draft before the explicit retry is what recovers. The folder
+        # is read-only besides, so nothing else may write it either.
         with unwritable(source.parent):
             after = session(app)
             assert after["root"] == before["root"]
@@ -863,6 +866,7 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
         core(app, "flush")
         assert source.read_bytes() == expected.encode()
         assert session(app)["document"]["dirty"] is False
+        app.client.call("test.timer.hold", {"held": False})
         if request[0] == "core.apply":
             app.client.call(*request)
             assert navigation(app)["processed"]["disposition"] == "completed"
