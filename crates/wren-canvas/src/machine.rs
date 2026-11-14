@@ -1822,10 +1822,7 @@ mod tests {
     /// One step over an empty board.
     fn step(machine: &mut Machine, input: Input, viewport: Viewport, now: Instant) -> Vec<Act> {
         let board = Board::default();
-        let scene = Scene {
-            bounds: Rect::default(),
-            items: Vec::new(),
-        };
+        let scene = Scene::default();
         let view = View {
             viewport,
             now,

@@ -249,19 +249,26 @@ fn flagged(cap: Cap) -> Vec<(&'static str, IssueKind)> {
     }
 }
 
-/// Each text item of `id`'s element: its lines, and whether it was cut.
-fn texts(scene: &Scene, id: &str) -> Vec<(Vec<String>, bool)> {
+/// Each text item of `id`'s element: its lines.
+fn texts(scene: &Scene, id: &str) -> Vec<Vec<String>> {
     scene
         .items
         .iter()
         .filter(|item| item.source.id().as_str() == id)
         .filter_map(|item| match &item.draw {
-            Draw::Text { lines, cut, .. } => {
-                Some((lines.iter().map(|l| l.text.clone()).collect(), *cut))
-            }
+            Draw::Text { lines, .. } => Some(lines.iter().map(|l| l.text.clone()).collect()),
             Draw::Path { .. } => None,
         })
         .collect()
+}
+
+/// How many of `id`'s element's texts `scene` cut.
+fn cuts(scene: &Scene, id: &str) -> usize {
+    scene
+        .cut
+        .iter()
+        .filter(|source| source.id().as_str() == id)
+        .count()
 }
 
 /// What `cap`'s board draws, at its value or one past it.
@@ -306,11 +313,7 @@ fn assert_drawn(cap: Cap, past: bool, board: &Board, scene: &Scene) {
         Cap::Anchor | Cap::LabelAt | Cap::ZLength => {}
         Cap::LabelBytes => {
             for id in ["a", "e"] {
-                let drawn: usize = texts(scene, id)
-                    .iter()
-                    .flat_map(|(lines, _)| lines)
-                    .map(String::len)
-                    .sum();
+                let drawn: usize = texts(scene, id).iter().flatten().map(String::len).sum();
                 assert_eq!(drawn, MAX_LABEL_BYTES, "{id}");
             }
         }
@@ -319,8 +322,8 @@ fn assert_drawn(cap: Cap, past: bool, board: &Board, scene: &Scene) {
             for id in ["a", "e"] {
                 let drawn = texts(scene, id);
                 assert_eq!(drawn.len(), 1, "{id}");
-                let (lines, cut) = &drawn[0];
-                assert_eq!((lines.len(), *cut), (MAX_LABEL_LINES, past), "{id}");
+                assert_eq!(drawn[0].len(), MAX_LABEL_LINES, "{id}");
+                assert_eq!(cuts(scene, id), usize::from(past), "{id}");
             }
         }
     }
@@ -393,6 +396,34 @@ fn only_a_scene_finds_a_label_cut_at_the_line_cap() {
     cache.build(&board, &LIGHT, &FixedMeasure);
     let again = cache.build(&board, &LIGHT, &FixedMeasure);
     assert_eq!(scene::issues(&board, again).len(), 2);
+}
+
+/// A label whose lines up to the cap are all blank draws nothing, and is
+/// still listed as cut: as a node's label and as a connector's.
+#[test]
+fn a_label_cut_after_only_blank_lines_is_listed() {
+    let text = format!("{}hello", "\n".repeat(MAX_LABEL_LINES + 76));
+    let mut out = String::from(crate::EMPTY);
+    out += &node("a", &text, "at = [0, 0]\nsize = [120, 60]\nz = \"V\"\n");
+    out += &edge(
+        "e",
+        "{ at = [0, 100] }",
+        "{ at = [300, 100] }",
+        &format!("{}z = \"W\"\n", labels([label(&text).as_str()])),
+    );
+    let board = parse(&out).unwrap();
+    let scene = scene::build(&board, &LIGHT, &FixedMeasure);
+    let issues: Vec<(String, IssueKind)> = scene::issues(&board, &scene)
+        .into_iter()
+        .map(|issue| (issue.id().to_string(), issue.kind))
+        .collect();
+    let cut = IssueKind::OutOfRange(Limit::LabelLines);
+    assert_eq!(issues, [("a".to_owned(), cut), ("e".to_owned(), cut)]);
+    assert!(texts(&scene, "a").is_empty());
+    assert!(texts(&scene, "e").is_empty());
+    let mut cache = scene::Cache::default();
+    cache.build(&board, &LIGHT, &FixedMeasure);
+    assert_eq!(*cache.build(&board, &LIGHT, &FixedMeasure), scene);
 }
 
 /// The small boards of every flagged limit, at and past it, for the

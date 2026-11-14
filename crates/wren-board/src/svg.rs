@@ -446,6 +446,7 @@ pub(crate) mod tests {
                     stroke: None,
                 },
             }],
+            ..Scene::default()
         };
         let plain = write(&scene, &Options::default());
         assert!(plain.contains("width=\"100\" height=\"50\" viewBox=\"-10 5 100 50\""));

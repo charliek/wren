@@ -2099,7 +2099,7 @@ impl BoardView {
     fn reissue(&mut self) {
         let scene = self.scenes.scene();
         let cut = IssueKind::OutOfRange(Limit::LabelLines);
-        if scene.cut().next().is_some() || self.issues.iter().any(|issue| issue.kind == cut) {
+        if !scene.cut.is_empty() || self.issues.iter().any(|issue| issue.kind == cut) {
             self.issues = scene::issues(&self.board, scene);
         }
     }

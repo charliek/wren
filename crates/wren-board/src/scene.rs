@@ -31,20 +31,8 @@ pub use wrap::{graphemes, words, wrap, Wrapped};
 /// [`check`]: crate::check
 /// [`Limit::LabelLines`]: crate::Limit::LabelLines
 pub fn issues(board: &Board, scene: &Scene) -> Vec<Issue> {
-    let cut = cut_sources(&scene.items);
+    let cut: HashSet<&Source> = scene.cut.iter().collect();
     check_with(board, |source| cut.contains(source))
-}
-
-/// The elements whose text an item of `items` cut.
-fn cut_sources(items: &[Item]) -> HashSet<&Source> {
-    cut_items(items).collect()
-}
-
-fn cut_items(items: &[Item]) -> impl Iterator<Item = &Source> {
-    items
-        .iter()
-        .filter(|item| matches!(item.draw, Draw::Text { cut: true, .. }))
-        .map(|item| &item.source)
 }
 
 /// A node's label: Inter Regular at a fixed logical size, whatever the
@@ -156,14 +144,10 @@ pub struct Scene {
     pub bounds: Rect,
     /// Back to front.
     pub items: Vec<Item>,
-}
-
-impl Scene {
     /// Each element a text of which was cut at [`MAX_LABEL_LINES`], once
-    /// for each such text.
-    pub fn cut(&self) -> impl Iterator<Item = &Source> {
-        cut_items(&self.items)
-    }
+    /// for each such text, in drawing order. Kept apart from the items,
+    /// since a text whose kept lines are all blank draws none.
+    pub cut: Vec<Source>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -255,9 +239,6 @@ pub enum Draw {
         face: Face,
         size: f32,
         color: Rgba,
-        /// The text wrapped to more than [`MAX_LABEL_LINES`] lines, and
-        /// only those were laid out.
-        cut: bool,
     },
 }
 
@@ -353,6 +334,8 @@ struct KeptNode {
     node: Node,
     bounds: Rect,
     items: Range<usize>,
+    /// How many of its texts were cut.
+    cuts: usize,
 }
 
 /// A connector's items, by their place in the cache's scene, and what
@@ -364,6 +347,7 @@ struct KeptEdge {
     ends: [Option<Terminal>; 2],
     items: Range<usize>,
     corner: Option<Point>,
+    cuts: usize,
 }
 
 /// What a build takes from a cache and gives back to it: the routes, and
@@ -560,6 +544,7 @@ fn layout(
         measure,
         items: Vec::new(),
         corners: HashMap::new(),
+        cut: Vec::new(),
     };
     roots.sort_by(|a, b| a.order().cmp(&b.order()));
     let mut scopes = vec![roots.into_iter()];
@@ -580,9 +565,13 @@ fn layout(
                         Some((key, was))
                     });
                     match moved {
-                        Some(moved) => kept_nodes[k] = Some(moved),
+                        Some(moved) => {
+                            painter.recut(Source::Node(id.clone()), moved.1.cuts);
+                            kept_nodes[k] = Some(moved);
+                        }
                         None => {
                             let start = painter.items.len();
+                            let cut = painter.cut.len();
                             painter.node(id, node, bounds);
                             painted += 1;
                             if kept {
@@ -594,6 +583,7 @@ fn layout(
                                         node,
                                         bounds,
                                         items,
+                                        cuts: painter.cut.len() - cut,
                                     },
                                 ));
                             }
@@ -629,10 +619,12 @@ fn layout(
                         if let Some(corner) = was.corner {
                             painter.corners.insert(id, corner);
                         }
+                        painter.recut(Source::Edge(id.clone()), was.cuts);
                         kept_edges[k] = Some((key, was));
                     }
                     None => {
                         let start = painter.items.len();
+                        let cut = painter.cut.len();
                         painter.edge(id, edge, &places, routed);
                         painted += 1;
                         if kept {
@@ -642,6 +634,7 @@ fn layout(
                                 ends,
                                 items: start..painter.items.len(),
                                 corner: painter.corners.get(id).copied(),
+                                cuts: painter.cut.len() - cut,
                             };
                             kept_edges[k] = Some((id.clone(), edge));
                         }
@@ -651,7 +644,7 @@ fn layout(
         }
     }
 
-    let cut = cut_sources(&painter.items);
+    let cut: HashSet<&Source> = painter.cut.iter().collect();
     let mut flagged: Vec<Source> = Vec::new();
     for issue in check_with(board, |source| cut.contains(source)) {
         if !flagged.contains(&issue.element) {
@@ -674,13 +667,13 @@ fn layout(
         *laid.edges = kept_edges.into_iter().flatten().collect();
         *laid.painted = painted;
     }
-    let items = painter.items;
+    let Painter { items, cut, .. } = painter;
     let bounds = items
         .iter()
         .map(|item| item.bounds)
         .reduce(union)
         .unwrap_or_default();
-    Scene { bounds, items }
+    Scene { bounds, items, cut }
 }
 
 /// The side each connector meets its nodes on as [`build`] draws it,
@@ -940,6 +933,8 @@ struct Painter<'a, 'b> {
     items: Vec<Item>,
     /// The top-left corner of each connector drawn, for its issue marker.
     corners: HashMap<&'b Id, Point>,
+    /// The scene's [`Scene::cut`].
+    cut: Vec<Source>,
 }
 
 impl<'b> Painter<'_, 'b> {
@@ -973,12 +968,54 @@ impl<'b> Painter<'_, 'b> {
         size: f32,
         color: Rgba,
     ) {
+        let width = layout.wraps().then_some(area.width);
+        if let Some((text, wrapped)) = self.wrap(source, text, width, size) {
+            self.place(source, text, wrapped, area, layout, size, color);
+        }
+    }
+
+    /// The part of `text` drawn, at most [`MAX_LABEL_BYTES`], and its
+    /// lines wrapped at `width`, at most [`MAX_LABEL_LINES`]; a text with
+    /// more is listed in [`Scene::cut`] under `source`. `None` for a text
+    /// of only white space, which draws nothing.
+    fn wrap<'t>(
+        &mut self,
+        source: &Source,
+        text: &'t str,
+        width: Option<f32>,
+        size: f32,
+    ) -> Option<(&'t str, Vec<Wrapped>)> {
         let text = drawn_text(text);
         if text.trim().is_empty() {
-            return;
+            return None;
         }
-        let width = layout.wraps().then_some(area.width);
-        let (wrapped, cut) = self.wrap(text, width, size);
+        let most = MAX_LABEL_LINES.saturating_add(1);
+        let mut lines = wrap::wrap_at_most(text, width, Face::Regular, size, self.measure, most);
+        if lines.len() > MAX_LABEL_LINES {
+            lines.truncate(MAX_LABEL_LINES);
+            self.cut.push(source.clone());
+        }
+        Some((text, lines))
+    }
+
+    /// `count` cuts of `source`'s texts, for an element whose items a
+    /// cache kept.
+    fn recut(&mut self, source: Source, count: usize) {
+        self.cut.extend(std::iter::repeat_n(source, count));
+    }
+
+    /// `wrapped`, lines of `text`, placed in `area` as `layout` says.
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &mut self,
+        source: &Source,
+        text: &str,
+        wrapped: Vec<Wrapped>,
+        area: Rect,
+        layout: Layout,
+        size: f32,
+        color: Rgba,
+    ) {
         let height = line_height(size);
         let top = if layout.centred() {
             area.y + (area.height - wrapped.len() as f32 * height) / 2.0
@@ -1017,19 +1054,8 @@ impl<'b> Painter<'_, 'b> {
                 face: Face::Regular,
                 size,
                 color,
-                cut,
             },
         });
-    }
-
-    /// `text` wrapped at `width`, at most [`MAX_LABEL_LINES`] lines, and
-    /// whether it had more.
-    fn wrap(&self, text: &str, width: Option<f32>, size: f32) -> (Vec<Wrapped>, bool) {
-        let most = MAX_LABEL_LINES.saturating_add(1);
-        let mut lines = wrap::wrap_at_most(text, width, Face::Regular, size, self.measure, most);
-        let cut = lines.len() > MAX_LABEL_LINES;
-        lines.truncate(MAX_LABEL_LINES);
-        (lines, cut)
     }
 
     fn node(&mut self, id: &Id, node: &Node, bounds: Rect) {
@@ -1149,11 +1175,9 @@ impl<'b> Painter<'_, 'b> {
     /// A connector label: its lines centred on `center`, on a box of the
     /// canvas colour.
     fn edge_label(&mut self, source: &Source, text: &str, center: Point, color: Rgba) {
-        let text = drawn_text(text);
-        if text.trim().is_empty() {
+        let Some((text, lines)) = self.wrap(source, text, None, SMALL_SIZE) else {
             return;
-        }
-        let (lines, _) = self.wrap(text, None, SMALL_SIZE);
+        };
         let width = lines.iter().map(|line| line.width).fold(0.0, f32::max);
         let height = lines.len() as f32 * line_height(SMALL_SIZE);
         let area = Rect::new(
@@ -1176,7 +1200,15 @@ impl<'b> Painter<'_, 'b> {
             None,
             backing,
         );
-        self.text(source, text, area, Layout::Connector, SMALL_SIZE, color);
+        self.place(
+            source,
+            text,
+            lines,
+            area,
+            Layout::Connector,
+            SMALL_SIZE,
+            color,
+        );
     }
 
     /// A stub out of the end that names a node, ending in a cross stroke,
@@ -1311,14 +1343,12 @@ pub(crate) mod tests {
                     face,
                     size,
                     color,
-                    cut,
                 } => {
                     let _ = writeln!(
                         out,
-                        "{who} text in {} {face:?} {size} {}{}",
+                        "{who} text in {} {face:?} {size} {}",
                         rect(item.bounds),
                         hex(*color),
-                        if *cut { " cut" } else { "" }
                     );
                     for line in lines {
                         let _ = writeln!(
@@ -1331,6 +1361,9 @@ pub(crate) mod tests {
                     }
                 }
             }
+        }
+        for cut in &scene.cut {
+            let _ = writeln!(out, "{} cut", source(cut));
         }
         out
     }
@@ -1907,7 +1940,8 @@ edge e text in 85,9 30x32 Regular 12 #3060d0
             drawn,
             Scene {
                 bounds: Rect::default(),
-                items: Vec::new()
+                items: Vec::new(),
+                cut: Vec::new(),
             }
         );
     }

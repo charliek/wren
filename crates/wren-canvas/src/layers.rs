@@ -326,7 +326,6 @@ mod tests {
                 face: Face::Regular,
                 size: 14.0,
                 color: Rgba::rgb(0, 0, 0),
-                cut: false,
             },
         }
     }
