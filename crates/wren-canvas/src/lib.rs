@@ -1546,6 +1546,10 @@ impl BoardView {
                     self.edit(&intent, Unit::One, now, update);
                 }
             }
+            Command::Arrange(to) if editable => {
+                let intent = Intent::Restack { ids: picked, to };
+                self.edit(&intent, Unit::One, now, update);
+            }
             Command::Select(dir) => self.walk(dir, false),
             Command::ExtendSelection(dir) => self.walk(dir, true),
             Command::ZoomFit => self.fit(),
@@ -1963,6 +1967,7 @@ impl Probe {
 
 #[cfg(test)]
 mod tests {
+    use wren_board::edit::Stack;
     use wren_board::scene::{Draw, Measure as _};
     use wren_board::{Reason, Rgba, Side};
 
@@ -5456,6 +5461,66 @@ z = "c"
         };
         assert_eq!(ends(&view, "e"), ("b".to_owned(), "a".to_owned()));
         assert_eq!(ends(&view, "f"), ("a".to_owned(), "b".to_owned()));
+    }
+
+    /// The nodes, back to front, as the scene draws them.
+    fn stacked(view: &BoardView) -> Vec<String> {
+        let order = view
+            .scene()
+            .items
+            .iter()
+            .filter_map(|item| item.source.node());
+        let order = order.map(Id::as_str);
+        let mut out: Vec<String> = Vec::new();
+        for id in order {
+            if out.last().map(String::as_str) != Some(id) {
+                out.push(id.to_owned());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_arrange_command_restacks_the_selection_as_one_step() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        // With nothing selected nothing moves.
+        assert_eq!(
+            view.command(Command::Arrange(Stack::Back), now),
+            Update::default()
+        );
+        click_node(&mut view, "b", now);
+        assert_eq!(stacked(&view), ["a", "b"]);
+        assert_eq!(view.command(Command::Arrange(Stack::Back), now), CHANGED);
+        let lines = |lines: &[&str]| -> Vec<String> {
+            lines.iter().map(|line| (*line).to_owned()).collect()
+        };
+        assert_eq!(
+            line_diff(TWO, &view.draft()),
+            (lines(&["z = \"Zzz\""]), lines(&["z = \"b\""]))
+        );
+        assert_eq!(stacked(&view), ["b", "a"]);
+        // Already at the back: nothing, and no step.
+        assert_eq!(
+            view.command(Command::Arrange(Stack::Back), now),
+            Update::default()
+        );
+        assert_eq!(
+            view.command(Command::Arrange(Stack::Backward), now),
+            Update::default()
+        );
+        assert_eq!(view.command(Command::Arrange(Stack::Forward), now), CHANGED);
+        assert_eq!(stacked(&view), ["a", "b"]);
+        travel(&mut view, Command::Undo, now);
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!(selected(&view), ["b"]);
+        // A board that cannot be edited is left as it is.
+        let mut view = sized(&TWO.replacen("schema = 1", "schema = 2", 1));
+        view.command(Command::SelectAll, now);
+        for to in [Stack::Front, Stack::Back, Stack::Forward, Stack::Backward] {
+            assert_eq!(view.command(Command::Arrange(to), now), Update::default());
+        }
     }
 
     #[test]

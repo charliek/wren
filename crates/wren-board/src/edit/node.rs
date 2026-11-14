@@ -1,14 +1,16 @@
 //! The intents that make or change single nodes: add, relabel, move,
 //! resize and reshape (§5.5, §5.8, §5.9).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     connector, dangling_names, on_top, saturate, trim_label, Change, Edges, Endpoint, Plan,
 };
 use crate::ids::{fresh, Ids};
 use crate::scene::Source;
-use crate::{placements, Board, End, Extra, Id, Named, Node, NodeKind, NodeStyle, Shape, GRID};
+use crate::{
+    placements, Board, End, Extra, Id, Named, Node, NodeKind, NodeStyle, Placed, Shape, GRID,
+};
 
 /// A new node on top of the root scope, with an empty label, the neutral
 /// colour and the default fill, and with `from` a connector from there to
@@ -99,24 +101,11 @@ pub(super) fn moved(board: &Board, ids: &[Source], by: [i32; 2]) -> Plan {
     let chosen: BTreeSet<&Id> = ids.iter().filter_map(Source::node).collect();
     let edges: BTreeSet<&Id> = ids.iter().filter_map(Source::edge).collect();
     let placed = placements(board);
-    // The drawn tree is acyclic and at most MAX_DEPTH deep; the bound only
-    // keeps a mistake there from looping.
-    let carried = |id: &Id| {
-        let mut parent = placed.get(id).and_then(|placed| placed.parent);
-        for _ in 0..board.nodes.len() {
-            match parent {
-                Some(above) if chosen.contains(above) => return true,
-                Some(above) => parent = placed.get(above).and_then(|placed| placed.parent),
-                None => return false,
-            }
-        }
-        false
-    };
     let mut changes = Vec::new();
     for &id in &chosen {
         if let Some(node) = board.nodes.get(id) {
             let at = shifted(node.at, by);
-            if at != node.at && !carried(id) {
+            if at != node.at && !carried(&placed, &chosen, id) {
                 changes.push(Change::PutNode(
                     id.clone(),
                     Box::new(Node { at, ..node.clone() }),
@@ -144,6 +133,22 @@ pub(super) fn moved(board: &Board, ids: &[Source], by: [i32; 2]) -> Plan {
         changes,
         ..Plan::default()
     }
+}
+
+/// Whether a node the node `id` is drawn inside, at any depth, is among
+/// `chosen`: it then moves with that ancestor and not again.
+pub(super) fn carried(placed: &BTreeMap<&Id, Placed<'_>>, chosen: &BTreeSet<&Id>, id: &Id) -> bool {
+    // The drawn tree is acyclic and at most MAX_DEPTH deep; the bound only
+    // keeps a mistake there from looping.
+    let mut parent = placed.get(id).and_then(|placed| placed.parent);
+    for _ in 0..placed.len() {
+        match parent {
+            Some(above) if chosen.contains(above) => return true,
+            Some(above) => parent = placed.get(above).and_then(|placed| placed.parent),
+            None => return false,
+        }
+    }
+    false
 }
 
 fn shifted([x, y]: [i32; 2], [dx, dy]: [i32; 2]) -> [i32; 2] {

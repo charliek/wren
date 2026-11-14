@@ -21,6 +21,7 @@ use crate::{
     Node, NodeKind, Reason, Route, Shape, Side, Token,
 };
 
+mod arrange;
 mod connect;
 mod copy;
 mod delete;
@@ -280,10 +281,10 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::Reverse { ids: chosen } => connect::reverse(board, chosen),
         Intent::SetEdgeLabel { id, text, commit } => connect::set_label(board, id, text, *commit),
         Intent::Extend { from, dir, shape } => connect::extend(board, from, *dir, *shape, ids),
-        Intent::SetStyle { .. }
-        | Intent::Restack { .. }
-        | Intent::Align { .. }
-        | Intent::Distribute { .. } => Plan::default(),
+        Intent::Restack { ids: chosen, to } => arrange::restack(board, chosen, *to),
+        Intent::SetStyle { .. } | Intent::Align { .. } | Intent::Distribute { .. } => {
+            Plan::default()
+        }
     }
 }
 
