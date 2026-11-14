@@ -355,6 +355,11 @@ def test_a_menu_opened_just_after_a_theme_or_text_size_change_stays_open(
             drawn_frame(app, "spell-menu-after-change")
             assert menu(app) == opened, f"change {i}"
             app.client.call("editor.spell_event", {"event": "close"})
+            # A frame without the menu clears its drawn bounds, so the next
+            # opening's come from a frame that drew it. None is waited for
+            # after the change: the widget must not see it in an event
+            # before the menu opens.
+            drawn_frame(app, "spell-menu-after-change")
 
 
 # ── native X11 ────────────────────────────────────────────────────────────
