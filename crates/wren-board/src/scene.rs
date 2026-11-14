@@ -5,15 +5,16 @@
 //! growing right and y growing down. Labels arrive wrapped into lines, each
 //! placed and measured, so a painter never lays text out itself.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::check::check_with;
 use crate::route::{self, Attach, Connector, Routed, Terminal, STROKE_WIDTH};
 use crate::style::{self, Resolved};
 use crate::{
-    check, placements, shape, Board, Dash, Edge, End, Fill, Id, Named, Node, NodeKind, Palette,
+    placements, shape, Board, Dash, Edge, End, Fill, Id, Issue, Named, Node, NodeKind, Palette,
     Placed, Rgba, Shape, Side,
 };
 
@@ -22,6 +23,17 @@ mod incremental;
 mod wrap;
 
 pub use wrap::{graphemes, words, wrap, Wrapped};
+
+/// What is wrong with `board` that still lets it draw, as `scene`, built
+/// from it, draws it: [`check`]'s issues, with [`Limit::LabelLines`] for
+/// each element whose text the scene cut at [`MAX_LABEL_LINES`].
+///
+/// [`check`]: crate::check
+/// [`Limit::LabelLines`]: crate::Limit::LabelLines
+pub fn issues(board: &Board, scene: &Scene) -> Vec<Issue> {
+    let cut: HashSet<&Source> = scene.cut.iter().collect();
+    check_with(board, |source| cut.contains(source))
+}
 
 /// A node's label: Inter Regular at a fixed logical size, whatever the
 /// editor's font settings.
@@ -50,6 +62,17 @@ pub const COORDINATE_LIMIT: i64 = 1 << 24;
 pub const MAX_LABEL_BYTES: usize = 16 * 1024;
 /// Only this many of a connector's labels are drawn.
 pub const MAX_LABELS: usize = 16;
+/// Only this many lines of a label are drawn, blank ones included: about
+/// what [`MAX_LABEL_BYTES`] of text wraps to in a node of the default
+/// width, so a long word in a narrow box cannot become one line per
+/// grapheme.
+pub const MAX_LABEL_LINES: usize = 1024;
+/// Only this many lines of labels are drawn on a board, in drawing order,
+/// blank ones included: about five for each element a board may have, so
+/// that labels within [`MAX_LABEL_LINES`] each, many to a line's byte,
+/// cannot build a scene that grows with the file's size over box width.
+/// A text past it is cut, and listed, as one past [`MAX_LABEL_LINES`] is.
+pub const MAX_BOARD_LINES: usize = 1 << 18;
 /// Elements are stacked by at most this many bytes of their `z`.
 pub const MAX_Z: usize = crate::z::MAX_LEN;
 
@@ -127,6 +150,10 @@ pub struct Scene {
     pub bounds: Rect,
     /// Back to front.
     pub items: Vec<Item>,
+    /// Each element a text of which was cut at [`MAX_LABEL_LINES`] or at
+    /// [`MAX_BOARD_LINES`], once for each such text, in drawing order. Kept apart from the items,
+    /// since a text whose kept lines are all blank draws none.
+    pub cut: Vec<Source>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,6 +340,7 @@ struct KeptNode {
     node: Node,
     bounds: Rect,
     items: Range<usize>,
+    spent: Spent,
 }
 
 /// A connector's items, by their place in the cache's scene, and what
@@ -324,6 +352,30 @@ struct KeptEdge {
     ends: [Option<Terminal>; 2],
     items: Range<usize>,
     corner: Option<Point>,
+    spent: Spent,
+}
+
+/// What laying out an element's texts took from the board's
+/// [`MAX_BOARD_LINES`], and what it cut.
+#[derive(Clone, Copy, Debug)]
+struct Spent {
+    lines: usize,
+    cuts: usize,
+    /// The lines the board had left when the element was laid out, if one
+    /// of its texts was cut to them rather than to [`MAX_LABEL_LINES`]:
+    /// then only that many left lays it out the same.
+    starved: Option<usize>,
+}
+
+impl Spent {
+    /// Whether laying the element out with `room` lines left gives what
+    /// it gave.
+    fn holds(self, room: usize) -> bool {
+        match self.starved {
+            Some(was) => room == was,
+            None => room >= self.lines,
+        }
+    }
 }
 
 /// What a build takes from a cache and gives back to it: the routes, and
@@ -520,6 +572,9 @@ fn layout(
         measure,
         items: Vec::new(),
         corners: HashMap::new(),
+        cut: Vec::new(),
+        room: MAX_BOARD_LINES,
+        starved: false,
     };
     roots.sort_by(|a, b| a.order().cmp(&b.order()));
     let mut scopes = vec![roots.into_iter()];
@@ -532,17 +587,22 @@ fn layout(
             Element::Node(id, node, k) => {
                 if let Some(&bounds) = boxes.get(id) {
                     let was = was_nodes.get_mut(k).and_then(Option::take);
+                    let room = painter.room;
                     let moved = was.and_then(|(key, mut was)| {
-                        if was.bounds != bounds || was.node != *node {
+                        if was.bounds != bounds || was.node != *node || !was.spent.holds(room) {
                             return None;
                         }
                         was.items = take(&was.items, &mut painter.items)?;
                         Some((key, was))
                     });
                     match moved {
-                        Some(moved) => kept_nodes[k] = Some(moved),
+                        Some(moved) => {
+                            painter.keep(Source::Node(id.clone()), moved.1.spent);
+                            kept_nodes[k] = Some(moved);
+                        }
                         None => {
                             let start = painter.items.len();
+                            let mark = painter.mark();
                             painter.node(id, node, bounds);
                             painted += 1;
                             if kept {
@@ -554,6 +614,7 @@ fn layout(
                                         node,
                                         bounds,
                                         items,
+                                        spent: painter.spent(mark),
                                     },
                                 ));
                             }
@@ -574,10 +635,12 @@ fn layout(
                     }
                 };
                 let was = was_edges.get_mut(k).and_then(Option::take);
+                let room = painter.room;
                 let moved = was.and_then(|(key, mut was)| {
                     let same = same_route(was.routed.as_ref(), routed)
                         && was.ends == ends
-                        && was.edge == *edge;
+                        && was.edge == *edge
+                        && was.spent.holds(room);
                     if !same {
                         return None;
                     }
@@ -589,10 +652,12 @@ fn layout(
                         if let Some(corner) = was.corner {
                             painter.corners.insert(id, corner);
                         }
+                        painter.keep(Source::Edge(id.clone()), was.spent);
                         kept_edges[k] = Some((key, was));
                     }
                     None => {
                         let start = painter.items.len();
+                        let mark = painter.mark();
                         painter.edge(id, edge, &places, routed);
                         painted += 1;
                         if kept {
@@ -602,6 +667,7 @@ fn layout(
                                 ends,
                                 items: start..painter.items.len(),
                                 corner: painter.corners.get(id).copied(),
+                                spent: painter.spent(mark),
                             };
                             kept_edges[k] = Some((id.clone(), edge));
                         }
@@ -611,8 +677,9 @@ fn layout(
         }
     }
 
+    let cut: HashSet<&Source> = painter.cut.iter().collect();
     let mut flagged: Vec<Source> = Vec::new();
-    for issue in check(board) {
+    for issue in check_with(board, |source| cut.contains(source)) {
         if !flagged.contains(&issue.element) {
             flagged.push(issue.element);
         }
@@ -633,13 +700,13 @@ fn layout(
         *laid.edges = kept_edges.into_iter().flatten().collect();
         *laid.painted = painted;
     }
-    let items = painter.items;
+    let Painter { items, cut, .. } = painter;
     let bounds = items
         .iter()
         .map(|item| item.bounds)
         .reduce(union)
         .unwrap_or_default();
-    Scene { bounds, items }
+    Scene { bounds, items, cut }
 }
 
 /// The side each connector meets its nodes on as [`build`] draws it,
@@ -899,6 +966,19 @@ struct Painter<'a, 'b> {
     items: Vec<Item>,
     /// The top-left corner of each connector drawn, for its issue marker.
     corners: HashMap<&'b Id, Point>,
+    /// The scene's [`Scene::cut`].
+    cut: Vec<Source>,
+    /// The lines of [`MAX_BOARD_LINES`] not yet laid out.
+    room: usize,
+    /// Whether a text of the element being laid out was cut to `room`.
+    starved: bool,
+}
+
+/// Where an element's layout began, for [`Painter::spent`].
+#[derive(Clone, Copy)]
+struct Mark {
+    room: usize,
+    cuts: usize,
 }
 
 impl<'b> Painter<'_, 'b> {
@@ -932,12 +1012,80 @@ impl<'b> Painter<'_, 'b> {
         size: f32,
         color: Rgba,
     ) {
+        let width = layout.wraps().then_some(area.width);
+        if let Some((text, wrapped)) = self.wrap(source, text, width, size) {
+            self.place(source, text, wrapped, area, layout, size, color);
+        }
+    }
+
+    /// The part of `text` drawn, at most [`MAX_LABEL_BYTES`], and its
+    /// lines wrapped at `width`, at most [`MAX_LABEL_LINES`] and at most
+    /// what is left of [`MAX_BOARD_LINES`]; a text with more is listed in
+    /// [`Scene::cut`] under `source`. `None` for a text of only white
+    /// space, which draws nothing.
+    fn wrap<'t>(
+        &mut self,
+        source: &Source,
+        text: &'t str,
+        width: Option<f32>,
+        size: f32,
+    ) -> Option<(&'t str, Vec<Wrapped>)> {
         let text = drawn_text(text);
         if text.trim().is_empty() {
-            return;
+            return None;
         }
-        let width = layout.wraps().then_some(area.width);
-        let wrapped = wrap::wrap(text, width, Face::Regular, size, self.measure);
+        let most = MAX_LABEL_LINES.min(self.room);
+        // Text that is not all white space wraps to at least one line, so
+        // with no room left it is cut unmeasured.
+        let mut lines = match most {
+            0 => Vec::new(),
+            _ => wrap::wrap_at_most(text, width, Face::Regular, size, self.measure, most + 1),
+        };
+        if most == 0 || lines.len() > most {
+            lines.truncate(most);
+            self.cut.push(source.clone());
+            self.starved |= most < MAX_LABEL_LINES;
+        }
+        self.room -= lines.len();
+        Some((text, lines))
+    }
+
+    /// Starts laying out an element.
+    fn mark(&mut self) -> Mark {
+        self.starved = false;
+        Mark {
+            room: self.room,
+            cuts: self.cut.len(),
+        }
+    }
+
+    /// What the element laid out since `mark` spent.
+    fn spent(&self, mark: Mark) -> Spent {
+        Spent {
+            lines: mark.room - self.room,
+            cuts: self.cut.len() - mark.cuts,
+            starved: self.starved.then_some(mark.room),
+        }
+    }
+
+    /// Takes again what an element whose items a cache kept spent.
+    fn keep(&mut self, source: Source, spent: Spent) {
+        self.room -= spent.lines;
+        self.cut.extend(std::iter::repeat_n(source, spent.cuts));
+    }
+
+    /// `wrapped`, lines of `text`, placed in `area` as `layout` says.
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &mut self,
+        source: &Source,
+        text: &str,
+        wrapped: Vec<Wrapped>,
+        area: Rect,
+        layout: Layout,
+        size: f32,
+        color: Rgba,
+    ) {
         let height = line_height(size);
         let top = if layout.centred() {
             area.y + (area.height - wrapped.len() as f32 * height) / 2.0
@@ -1097,11 +1245,9 @@ impl<'b> Painter<'_, 'b> {
     /// A connector label: its lines centred on `center`, on a box of the
     /// canvas colour.
     fn edge_label(&mut self, source: &Source, text: &str, center: Point, color: Rgba) {
-        let text = drawn_text(text);
-        if text.trim().is_empty() {
+        let Some((text, lines)) = self.wrap(source, text, None, SMALL_SIZE) else {
             return;
-        }
-        let lines = wrap::wrap(text, None, Face::Regular, SMALL_SIZE, self.measure);
+        };
         let width = lines.iter().map(|line| line.width).fold(0.0, f32::max);
         let height = lines.len() as f32 * line_height(SMALL_SIZE);
         let area = Rect::new(
@@ -1124,7 +1270,15 @@ impl<'b> Painter<'_, 'b> {
             None,
             backing,
         );
-        self.text(source, text, area, Layout::Connector, SMALL_SIZE, color);
+        self.place(
+            source,
+            text,
+            lines,
+            area,
+            Layout::Connector,
+            SMALL_SIZE,
+            color,
+        );
     }
 
     /// A stub out of the end that names a node, ending in a cross stroke,
@@ -1181,7 +1335,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::fixtures::{self, Rng};
     use crate::style::tests::{DARK, LIGHT};
-    use crate::{parse, Vocabulary};
+    use crate::{check, parse, Vocabulary};
 
     #[track_caller]
     fn read(text: &str) -> Board {
@@ -1264,7 +1418,7 @@ pub(crate) mod tests {
                         out,
                         "{who} text in {} {face:?} {size} {}",
                         rect(item.bounds),
-                        hex(*color)
+                        hex(*color),
                     );
                     for line in lines {
                         let _ = writeln!(
@@ -1277,6 +1431,9 @@ pub(crate) mod tests {
                     }
                 }
             }
+        }
+        for cut in &scene.cut {
+            let _ = writeln!(out, "{} cut", source(cut));
         }
         out
     }
@@ -1732,7 +1889,7 @@ edge e text in 85,9 30x32 Regular 12 #3060d0
         let labels: Vec<String> = (0..20).map(|i| format!("{{ text = \"L{i}\" }}")).collect();
         let long = "x".repeat(MAX_LABEL_BYTES + 100);
         let text = format!(
-            "schema = 1\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [100, 50]\ntext = \"{long}\"\n\
+            "schema = 1\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [1000, 50]\ntext = \"{long}\"\n\
              [edge.e]\nkind = \"edge\"\nfrom = {{ at = [0, 100] }}\nto = {{ at = [500, 100] }}\nlabels = [{}]\n",
             labels.join(", ")
         );
@@ -1853,7 +2010,8 @@ edge e text in 85,9 30x32 Regular 12 #3060d0
             drawn,
             Scene {
                 bounds: Rect::default(),
-                items: Vec::new()
+                items: Vec::new(),
+                cut: Vec::new(),
             }
         );
     }

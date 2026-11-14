@@ -181,6 +181,10 @@ def test_failed_save_keeps_draft_and_blocks_transition(tmp_path: Path, transitio
         destination = item(snapshot, "sections", "S2")["id"]
         destination_group = item(snapshot, "groups", "S2/H")["id"]
         other_note = item(snapshot, "notes", "S2/H/b.md")["id"]
+        # Autosave must not write the draft before the fault is armed, nor
+        # retry it after the refused transition: either leaves the document
+        # clean. The explicit flush below is what recovers.
+        app.client.call("test.timer.hold", {"held": True})
         expected = append(app, "unsaved draft")
         app.client.call("test.fail_next", {"fault": "write"})
         with pytest.raises(RemoteError):
@@ -211,6 +215,7 @@ def test_failed_save_keeps_draft_and_blocks_transition(tmp_path: Path, transitio
         assert app.client.call("identify")["pid"] == app.pid
         op(app, "flush")
         assert (root / "S1/G/a.md").read_text() == expected
+        app.client.call("test.timer.hold", {"held": False})
 
 
 def test_focus_loss_flushes_without_waiting_for_the_timer(tmp_path: Path) -> None:

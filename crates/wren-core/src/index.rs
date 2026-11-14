@@ -76,7 +76,15 @@ struct Content {
     /// reconciliation snapshots, which compare exact bytes, so a change is
     /// detected without extracting anything.
     source: Arc<str>,
-    /// What search reads: the same allocation as `source` when nothing is
+    /// `None` while a board read from disk waits for its labels to be taken
+    /// off the owner's thread: parsing every board as a workspace opens
+    /// would hold up the open (the board plan's §3.6).
+    searched: Option<Searched>,
+}
+
+#[derive(Debug)]
+struct Searched {
+    /// What search reads: the same allocation as the source when nothing is
     /// extracted from it.
     text: Arc<str>,
     folded: Box<str>,
@@ -85,12 +93,15 @@ struct Content {
 
 impl Content {
     fn bytes(&self) -> usize {
-        let extracted = if Arc::ptr_eq(&self.source, &self.text) {
-            0
-        } else {
-            self.text.len()
-        };
-        self.source.len() + extracted + self.folded.len()
+        self.source.len()
+            + self.searched.as_ref().map_or(0, |searched| {
+                let extracted = if Arc::ptr_eq(&self.source, &searched.text) {
+                    0
+                } else {
+                    searched.text.len()
+                };
+                extracted + searched.folded.len()
+            })
     }
 }
 
@@ -169,14 +180,30 @@ impl Index {
     }
 
     pub fn preview(&self, note: NoteId) -> Option<&str> {
-        let content = self.entries.get(&note)?.content.as_ref()?;
-        Some(&content.preview.text)
+        Some(&self.searched(note)?.preview.text)
     }
 
     /// The text search reads: a Markdown note's source, or what was
     /// extracted from a board's.
     pub fn content(&self, note: NoteId) -> Option<&str> {
-        Some(&self.entries.get(&note)?.content.as_ref()?.text)
+        Some(&self.searched(note)?.text)
+    }
+
+    /// How many boards wait for their labels to be extracted.
+    pub fn unextracted(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| {
+                entry
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| content.searched.is_none())
+            })
+            .count()
+    }
+
+    fn searched(&self, note: NoteId) -> Option<&Searched> {
+        self.entries.get(&note)?.content.as_ref()?.searched.as_ref()
     }
 
     pub fn limitation(&self, note: NoteId) -> Option<&str> {
@@ -220,7 +247,8 @@ impl Index {
                 entry
                     .content
                     .as_ref()
-                    .and_then(|content| content.folded.find(&folded_query))
+                    .and_then(|content| content.searched.as_ref())
+                    .and_then(|searched| searched.folded.find(&folded_query))
             } else {
                 None
             };
@@ -248,17 +276,20 @@ impl Index {
             .into_iter()
             .map(|(rank, note, start)| {
                 let entry = &self.entries[&note];
+                let searched = entry
+                    .content
+                    .as_ref()
+                    .and_then(|content| content.searched.as_ref());
                 let content_match = start.and_then(|start| {
-                    let content = entry.content.as_ref()?;
                     Some(original_range(
-                        &content.text,
+                        &searched?.text,
                         start..start + folded_query.len(),
                     ))
                 });
-                let snippet = match &entry.content {
-                    Some(content) => match &content_match {
-                        Some(hit) => snippet(&content.text, hit.clone(), entry.kind),
-                        None => content.preview.snippet(),
+                let snippet = match searched {
+                    Some(searched) => match &content_match {
+                        Some(hit) => snippet(&searched.text, hit.clone(), entry.kind),
+                        None => searched.preview.snippet(),
                     },
                     None => Snippet {
                         text: String::new(),
@@ -377,7 +408,7 @@ impl Index {
         }
         match contents {
             Ok(file) => match std::str::from_utf8(&file.bytes) {
-                Ok(text) => self.set_content(note.id, text, false),
+                Ok(text) => self.hold_content(note.id, text),
                 Err(_) => self.unavailable(note.id, NOT_UTF8),
             },
             Err(reason) => self.unavailable(note.id, reason),
@@ -405,7 +436,7 @@ impl Index {
             return;
         }
         match contents {
-            Ok(text) => self.set_content(note, text, false),
+            Ok(text) => self.hold_content(note, text),
             Err(reason) => self.unavailable(note, reason),
         }
     }
@@ -479,6 +510,66 @@ impl Index {
     /// is extracted and folded again; a source of the note that waited is
     /// replaced by this one.
     pub(crate) fn set_content(&mut self, note: NoteId, source: &str, priority: bool) {
+        self.put(note, source, priority, false);
+    }
+
+    /// Takes a source read from disk as [`Index::set_content`] does, except
+    /// that a board's labels wait for [`Index::extracted`] or
+    /// [`Index::extract_waiting`]; until then search finds the board by
+    /// its title only.
+    fn hold_content(&mut self, note: NoteId, source: &str) {
+        self.put(note, source, false, true);
+    }
+
+    /// The boards whose labels wait, with the source each waits on.
+    pub(crate) fn waiting(&self) -> Vec<(NoteId, Arc<str>)> {
+        self.entries
+            .iter()
+            .filter_map(|(note, entry)| {
+                let content = entry.content.as_ref()?;
+                content
+                    .searched
+                    .is_none()
+                    .then(|| (*note, Arc::clone(&content.source)))
+            })
+            .collect()
+    }
+
+    /// Takes the labels extracted elsewhere from `source`, if the board's
+    /// labels still wait on that source.
+    pub(crate) fn extracted(&mut self, note: NoteId, source: &str, text: Option<String>) {
+        let waits = self.entries.get(&note).is_some_and(|entry| {
+            entry.kind == NoteKind::Board
+                && entry
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| content.searched.is_none() && &*content.source == source)
+        });
+        if waits {
+            let content = self
+                .entries
+                .get_mut(&note)
+                .and_then(|entry| entry.content.take());
+            if let Some(content) = content {
+                self.retained_bytes -= content.bytes();
+                self.install(note, content.source, Some(text), false);
+            }
+        }
+    }
+
+    /// Extracts every board's labels that wait, on the caller's thread.
+    pub(crate) fn extract_waiting(&mut self) {
+        for (note, source) in self.waiting() {
+            #[cfg(test)]
+            {
+                self.extractions += 1;
+            }
+            let text = searchable(NoteKind::Board, &source);
+            self.extracted(note, &source, text);
+        }
+    }
+
+    fn put(&mut self, note: NoteId, source: &str, priority: bool, hold: bool) {
         if self.pending.as_ref().is_some_and(|(of, _)| *of == note) {
             self.pending = None;
         }
@@ -494,24 +585,41 @@ impl Index {
         }
         let kind = entry.kind;
         self.drop_content(note);
-        #[cfg(test)]
-        if kind == NoteKind::Board {
-            self.extractions += 1;
-        }
         let source: Arc<str> = source.into();
-        let text = searchable(kind, &source).map_or_else(|| Arc::clone(&source), Arc::from);
-        let extracted = if Arc::ptr_eq(&source, &text) {
-            0
+        let searched = if hold && kind == NoteKind::Board {
+            None
         } else {
-            text.len()
+            #[cfg(test)]
+            if kind == NoteKind::Board {
+                self.extractions += 1;
+            }
+            Some(searchable(kind, &source))
         };
-        let folded_bytes: usize = if text.is_ascii() {
-            text.len()
-        } else {
-            text.chars()
+        self.install(note, source, searched, priority);
+    }
+
+    /// Keeps `source` with what search reads from it: `None` waits for a
+    /// board's labels, `Some(None)` searches the source itself.
+    fn install(
+        &mut self,
+        note: NoteId,
+        source: Arc<str>,
+        searched: Option<Option<String>>,
+        priority: bool,
+    ) {
+        let text = searched.map(|text| text.map_or_else(|| Arc::clone(&source), Arc::from));
+        let extracted = match &text {
+            Some(text) if !Arc::ptr_eq(&source, text) => text.len(),
+            _ => 0,
+        };
+        let folded_bytes: usize = match &text {
+            None => 0,
+            Some(text) if text.is_ascii() => text.len(),
+            Some(text) => text
+                .chars()
                 .flat_map(char::to_lowercase)
                 .map(char::len_utf8)
-                .sum()
+                .sum(),
         };
         let bytes = source
             .len()
@@ -537,21 +645,24 @@ impl Index {
             self.set_limitation(note, Some(self.budget_message()));
             return;
         }
-        let folded = if text.is_ascii() {
-            text.to_ascii_lowercase()
-        } else {
-            // Size before allocating: lowercase expansions must not cause an
-            // oversized staging buffer or allocate for content we cannot keep.
-            let mut folded = String::with_capacity(folded_bytes);
-            folded.extend(text.chars().flat_map(char::to_lowercase));
-            folded
-        };
-        let content = Content {
-            preview: Preview::new(&text, kind),
-            source,
-            text,
-            folded: folded.into_boxed_str(),
-        };
+        let kind = self.entries[&note].kind;
+        let searched = text.map(|text| {
+            let folded = if text.is_ascii() {
+                text.to_ascii_lowercase()
+            } else {
+                // Size before allocating: lowercase expansions must not cause an
+                // oversized staging buffer or allocate for content we cannot keep.
+                let mut folded = String::with_capacity(folded_bytes);
+                folded.extend(text.chars().flat_map(char::to_lowercase));
+                folded
+            };
+            Searched {
+                preview: Preview::new(&text, kind),
+                text,
+                folded: folded.into_boxed_str(),
+            }
+        });
+        let content = Content { source, searched };
         self.retained_bytes += content.bytes();
         self.entries
             .get_mut(&note)
@@ -656,7 +767,7 @@ fn fuzzy_pattern(query: &str) -> Pattern {
 /// itself, which keeps a Markdown note's text one shared allocation, byte for
 /// byte what was read. A board is searched by its labels, so its TOML keys
 /// and ids never match; one that does not parse is searched as it is written.
-fn searchable(kind: NoteKind, source: &str) -> Option<String> {
+pub(crate) fn searchable(kind: NoteKind, source: &str) -> Option<String> {
     match kind {
         NoteKind::Markdown => None,
         NoteKind::Board => wren_board::parse(source)
@@ -1655,6 +1766,12 @@ mod tests {
 
     /// The test workspace plus a board beside the Markdown notes of `A/G`.
     fn board_index() -> Index {
+        let mut index = Index::default();
+        index.sync_metadata(&board_index_workspace());
+        index
+    }
+
+    fn board_index_workspace() -> Workspace {
         let mut workspace = workspace();
         let path = RelPath::new("A/G/Flow.wren-board").unwrap();
         workspace.notes.push(Note {
@@ -1667,9 +1784,7 @@ mod tests {
             modified: SystemTime::UNIX_EPOCH,
             bytes: 0,
         });
-        let mut index = Index::default();
-        index.sync_metadata(&workspace);
-        index
+        workspace
     }
 
     #[test]
@@ -1721,7 +1836,10 @@ mod tests {
         let text = "# Title\n\nBody *words*\n";
         index.set_content(NoteId(5), text, false);
         let content = index.entries[&NoteId(5)].content.as_ref().unwrap();
-        assert!(Arc::ptr_eq(&content.source, &content.text));
+        assert!(Arc::ptr_eq(
+            &content.source,
+            &content.searched.as_ref().unwrap().text
+        ));
         assert_eq!(&*content.source, text);
         assert_eq!(index.content(NoteId(5)), Some(text));
         assert_eq!(index.retained_bytes(), 2 * text.len());
@@ -1757,6 +1875,9 @@ mod tests {
         index.set_content(BOARD, &format!("{long}\nsecond"), false);
         let preview = index.entries[&BOARD]
             .content
+            .as_ref()
+            .unwrap()
+            .searched
             .as_ref()
             .unwrap()
             .preview
@@ -1843,7 +1964,10 @@ labels = [{ text = "when paid" }]
         assert!(wren_board::parse(&conflicted).is_err());
         index.set_content(BOARD, &conflicted, false);
         let content = index.entries[&BOARD].content.as_ref().unwrap();
-        assert!(Arc::ptr_eq(&content.source, &content.text));
+        assert!(Arc::ptr_eq(
+            &content.source,
+            &content.searched.as_ref().unwrap().text
+        ));
         for word in ["schema", "parcel", "theirs"] {
             assert_eq!(search(&index, word).len(), 1, "{word}");
         }
@@ -1853,6 +1977,91 @@ labels = [{ text = "when paid" }]
         index.set_content(BOARD, LABELLED_BOARD, false);
         assert!(search(&index, "schema").is_empty());
         assert_eq!(search(&index, "parcel").len(), 1);
+
+        // A board over the size a board may have is not read as one: it is
+        // searched as written, as the app opens it as text.
+        let pad = "x".repeat(wren_board::MAX_BOARD_BYTES);
+        let large =
+            LABELLED_BOARD.replacen("schema = 1\n", &format!("schema = 1\npad = \"{pad}\"\n"), 1);
+        assert!(wren_board::parse(&large).is_err());
+        index.set_content(BOARD, &large, false);
+        let content = index.entries[&BOARD].content.as_ref().unwrap();
+        assert!(Arc::ptr_eq(
+            &content.source,
+            &content.searched.as_ref().unwrap().text
+        ));
+        assert_eq!(search(&index, "schema").len(), 1);
+    }
+
+    #[test]
+    fn a_board_read_from_disk_waits_for_its_labels_and_takes_only_its_own() {
+        let mut index = board_index();
+        index.hold_content(BOARD, LABELLED_BOARD);
+        // Held, not parsed: found by its title, never by its labels or TOML.
+        assert_eq!(index.extractions, 0);
+        assert_eq!(index.unextracted(), 1);
+        assert_eq!(index.content(BOARD), None);
+        assert_eq!(index.preview(BOARD), None);
+        assert!(search(&index, "parcel").is_empty());
+        assert!(search(&index, "schema").is_empty());
+        let hits = search(&index, "flow");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet.text, "");
+        assert_eq!(index.retained_bytes(), LABELLED_BOARD.len());
+        assert_eq!(&*index.content_snapshot()[&BOARD], LABELLED_BOARD);
+        // Markdown is never held.
+        index.hold_content(NoteId(5), "# Title\n\nBody\n");
+        assert_eq!(index.content(NoteId(5)), Some("# Title\n\nBody\n"));
+        assert_eq!(index.unextracted(), 1);
+
+        // Labels taken from another source are not kept.
+        let [(note, source)] = index.waiting().try_into().unwrap();
+        assert_eq!((note, &*source), (BOARD, LABELLED_BOARD));
+        index.extracted(BOARD, wren_board::EMPTY, Some(String::new()));
+        assert_eq!(index.unextracted(), 1);
+        index.extracted(NoteId(5), "# Title\n\nBody\n", Some("labels".into()));
+        assert_eq!(index.content(NoteId(5)), Some("# Title\n\nBody\n"));
+
+        let revision = index.revision();
+        let text = searchable(NoteKind::Board, &source);
+        index.extracted(BOARD, &source, text);
+        assert!(index.revision() > revision);
+        assert_eq!(index.unextracted(), 0);
+        assert_eq!(index.extractions, 0);
+        assert_eq!(index.preview(BOARD), Some("Receive order"));
+        assert_eq!(search(&index, "parcel").len(), 1);
+        let extracted = index.content(BOARD).unwrap().len();
+        let markdown = 2 * "# Title\n\nBody\n".len();
+        assert_eq!(
+            index.retained_bytes(),
+            LABELLED_BOARD.len() + 2 * extracted + markdown
+        );
+        // Labels kept are not replaced by a second delivery, and the same
+        // source read again keeps them.
+        index.extracted(BOARD, &source, Some("other".into()));
+        index.hold_content(BOARD, LABELLED_BOARD);
+        assert_eq!(index.preview(BOARD), Some("Receive order"));
+
+        // A changed source waits again; extracting what waits finds it.
+        index.hold_content(BOARD, wren_board::EMPTY);
+        assert_eq!(index.unextracted(), 1);
+        assert_eq!(index.retained_bytes(), wren_board::EMPTY.len() + markdown);
+        index.extract_waiting();
+        assert_eq!(index.extractions, 1);
+        assert_eq!(index.content(BOARD), Some(""));
+    }
+
+    #[test]
+    fn labels_that_do_not_fit_the_budget_leave_the_title_searchable() {
+        let mut index = Index::with_budget(LABELLED_BOARD.len() + 10);
+        index.sync_metadata(&board_index_workspace());
+        index.hold_content(BOARD, LABELLED_BOARD);
+        assert_eq!(index.unextracted(), 1);
+        index.extract_waiting();
+        assert_eq!(index.unextracted(), 0);
+        assert_eq!(index.retained_bytes(), 0);
+        assert!(index.limitation(BOARD).is_some());
+        assert_eq!(search(&index, "flow").len(), 1);
     }
 
     #[test]

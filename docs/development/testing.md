@@ -132,14 +132,14 @@ The board requests:
 
 | Request | What it does |
 |---|---|
-| `board.get` `{"elements": bool}` | The open note's surface (`board`, `raw`, `text` or none), whether the setting is on, and for a board its counts, issues, viewport, whether it is read-only, the machine's state (`unfocused`, `idle`, `armed`, `pressed`, `moving`, `marquee`, `resizing`, `creating`, `connecting`, `editing`, `panning`), the armed tool, the selection and cursor, the open label's text and caret, `connecting` (while a connector end is dragged, the node a release would attach it to, the side it would pin it to and an empty `query`; in keyboard Connecting, the node Enter would connect to, a `side` of `null` and the query typed so far; otherwise `null`), whether there is anything to undo or redo, whether the board still writes as it was opened (`pristine`) and `revision`, the count of its drafts and reloads. With `elements` it lists every node and connector by their file fields. For raw text, `error` names the line, column and message. |
+| `board.get` `{"elements": bool}` | The open note's surface (`board`, `raw`, `text` or none), whether the setting is on, and for a board its counts, issues (each with its `kind`, its element's `id` and, for `out_of_range`, the `limit` passed: `coordinates`, `size`, `anchor`, `label_at`, `label_bytes`, `labels`, `z_length` or `label_lines`; otherwise `null`), viewport, `fit_pending` (a fit still waiting for the widget's size, while the viewport is the board's origin at 100 %), whether it is read-only, the machine's state (`unfocused`, `idle`, `armed`, `pressed`, `moving`, `marquee`, `resizing`, `creating`, `connecting`, `editing`, `panning`), the armed tool, the selection and cursor, the open label's text and caret, `connecting` (while a connector end is dragged, the node a release would attach it to, the side it would pin it to and an empty `query`; in keyboard Connecting, the node Enter would connect to, a `side` of `null` and the query typed so far; otherwise `null`), whether there is anything to undo or redo, whether the board still writes as it was opened (`pristine`) and `revision`, the count of its drafts and reloads, and `export`: `waiting` while an export's save dialog is open, `writing` while its file is rendered and written, otherwise `null`. With `elements` it lists every node and connector by their file fields. For raw text, `error` names the line, column and message. |
 | `board.bounds` | Where the widget and each node, label and connector are drawn in the window, in logical pixels, with each element's fill and stroke colour and the window's scale factor; the handles shown (`nw` to `w` on the one selected node, `connect_top` to `connect_left` on the node the pointer has rested on, `from` and `to` on the one selected connector, and `side_top` to `side_left` on the node a dragged connector end is over) and the open label's box. |
-| `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`) or a button's `press`, `move`, `release`, `click` or `double_click` (`"button": "left"`, `"middle"` or `"right"`, `"mods": ["shift", "duplicate"]`), through the path the widget's own input takes. `at` is `{"node": id}`, `{"node": id, "handle": "se"}` (a resize handle `nw` to `w`, a connect handle `connect_top` to `connect_left`, or a side handle `side_top` to `side_left`, the middle of that side on the outline), `{"edge": id}` (the middle of its line), `{"edge": id, "handle": "from"}` (or `"to"`, one of its ends), `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. A `move` with no button down is the pointer passing over the board: it reaches only a board that has the keyboard, and the connect handles of the node it rests on come up 120 ms later. |
+| `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`) or a button's `press`, `move`, `release`, `click` or `double_click` (`"button": "left"`, `"middle"` or `"right"`, `"mods": ["shift", "duplicate"]`), through the path the widget's own input takes. A press on a board without the keyboard first gives it the keyboard, as a real press does, and then presses. `at` is `{"node": id}`, `{"node": id, "handle": "se"}` (a resize handle `nw` to `w`, a connect handle `connect_top` to `connect_left`, or a side handle `side_top` to `side_left`, the middle of that side on the outline), `{"edge": id}` (the middle of its line), `{"edge": id, "handle": "from"}` (or `"to"`, one of its ends), `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. A `move` with no button down is the pointer passing over the board: it reaches only a board that has the keyboard, and the connect handles of the node it rests on come up 120 ms later. |
 | `board.key` `{"key": "tab", "mods": ["mod", "shift"], "repeat": false}` | A key pressed on the focused board, through the board's key policy and then the app's keyboard path, as a real key goes; `mod` is ⌘ on macOS and Ctrl elsewhere. Answers the snapshot with `handled`, whether the board took the key; with a palette or dialog open, or another widget focused, nothing happens. |
 | `board.type` `{"text": "…"}` | Text typed on the focused board: the open label's, else the connect query's. |
 | `board.apply` `{"edits": [...]}` | Edits with explicit ids (`add_node`, `move`, `set`, `connect`, `delete`), applied as one undo step and one draft, for arranging a board before what a test looks at. |
 | `board.seed` `{"seed": 7}` | The open board draws the ids of the elements it makes from this seed from now on, so a test or a scene that builds a board makes the same one each run. Ids decide which of two connectors that would share a line moves aside. |
-| `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG (`"png"`: as PNG) writes, without the save dialog, and refuses the paths it refuses: a note's, and inside the workspace any but an `.svg` (or `.png`) file. |
+| `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG (`"png"`: as PNG) writes, without the save dialog, on the same worker thread, and answers once the file is written. It refuses the paths the command refuses (a note's, and inside the workspace any but an `.svg` or `.png` file), and any export while another is under way. |
 | `perf.board` | The board's scene, draw and frame timings, how long it took to open, how long each draft took (the canonical write, and with the Session's op), and how many times the view has parsed, built its scene and built geometry, optionally after a pan or zoom run of one step a redraw. |
 
 Every board request but `board.get` fails when the open note is not shown
@@ -155,6 +155,11 @@ each Board item's key and whether AppKit holds it enabled on macOS, and is
 `null` elsewhere. `menu.run` `{"key": "board.duplicate"}` sends an item's
 key back as choosing it does. Both work on every platform, so the Board
 menu's enabling and the path an item takes are tested on Linux too.
+
+`navigation.get` reports `index_unextracted`: how many boards the search
+index still holds by their title alone, waiting for their labels to be read
+off the UI thread after a workspace opens. A search from the palette reads
+them first, so the count only shows how far the background read has got.
 
 `test.clipboard` `{"own": true}` gives the app a clipboard of its own, which
 `clipboard.write`, `clipboard.read` and the board's copy, cut and paste then
@@ -206,6 +211,9 @@ for r in tiny-skia wgpu; do for t in dark light; do
     python3 tools/capture_scenes.py --only boards --theme $t --label $r
 done; done
 ```
+
+`--window 1024x640` (X11 only) resizes the window before the board scenes,
+to see them at the size of a smaller screen; give it a `--label` too.
 
 ## macOS
 

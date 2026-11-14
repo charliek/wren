@@ -53,6 +53,8 @@ mod fixtures;
 pub mod history;
 pub mod ids;
 #[cfg(test)]
+mod limits;
+#[cfg(test)]
 mod lock;
 pub mod place;
 mod read;
@@ -68,7 +70,7 @@ mod write;
 pub mod z;
 
 pub use check::{
-    access, check, placements, Access, Issue, IssueKind, Placed, Reason, MAX_DEPTH, SCHEMA,
+    access, check, placements, Access, Issue, IssueKind, Limit, Placed, Reason, MAX_DEPTH, SCHEMA,
 };
 pub use read::{parse, ParseError};
 pub use search::search_text;
@@ -81,6 +83,14 @@ pub const GRID: i32 = 20;
 /// The new-board template, which is also the canonical form of an empty
 /// board.
 pub const EMPTY: &str = "schema = 1\n";
+
+/// The largest board file, in bytes, that [`parse`] reads: 8 MiB. A larger
+/// one opens as raw text.
+pub const MAX_BOARD_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most nodes and connectors, together, that a board [`parse`] reads
+/// may have. A board with more opens as raw text.
+pub const MAX_ELEMENTS: usize = 50_000;
 
 /// Content kept as read and never interpreted: unknown keys, and
 /// everything under `ext`.
@@ -727,15 +737,84 @@ mod tests {
         let wide_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
         println!("50 wide labels of 8,000 words: scene {wide_ms:.2} ms");
         assert!(wide_ms <= 250.0, "scene of wide labels: {wide_ms:.2} ms");
+
+        // §3.8's case for the line cap: 200 labels of 16,000 characters in
+        // boxes 1 unit wide, a grapheme a line, 3.2 million lines without
+        // it.
+        let label = "x".repeat(16_000);
+        let mut narrow = String::from(EMPTY);
+        for i in 0..200 {
+            narrow += &format!(
+                "\n[node.n{i}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [{}, 0]\n\
+                 size = [1, 60]\nz = \"V\"\n",
+                i * 10
+            );
+        }
+        let board = parse(&narrow).unwrap();
+        let narrow_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+        let lines: usize = scene::build(&board, &palette, &measure)
+            .items
+            .iter()
+            .map(|item| match &item.draw {
+                scene::Draw::Text { lines, .. } => lines.len(),
+                scene::Draw::Path { .. } => 0,
+            })
+            .sum();
+        println!(
+            "200 labels of 16,000 characters 1 unit wide: scene {narrow_ms:.2} ms, {lines} lines"
+        );
+        assert_eq!(lines, 200 * scene::MAX_LABEL_LINES);
+
+        // The board within every cap with the largest scene: as many
+        // labels of a line's worth of graphemes, in boxes 1 unit wide, as
+        // 8 MiB holds. Without the board's line budget it drew a line per
+        // byte of the file, 7.8 million.
+        let label = "x".repeat(scene::MAX_LABEL_LINES);
+        let mut worst = String::from(EMPTY);
+        for i in 0.. {
+            let block = format!(
+                "\n[node.n{i:05}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [{}, 0]\n\
+                 size = [1, 60]\nz = \"V\"\n",
+                i * 10
+            );
+            if worst.len() + block.len() > MAX_BOARD_BYTES {
+                break;
+            }
+            worst += &block;
+        }
+        let board = parse(&worst).unwrap();
+        let worst_ms = median_ms(3, || drop(scene::build(&board, &palette, &measure)));
+        let drawn = scene::build(&board, &palette, &measure);
+        let lines: usize = (drawn.items.iter())
+            .map(|item| match &item.draw {
+                scene::Draw::Text { lines, .. } => lines.len(),
+                scene::Draw::Path { .. } => 0,
+            })
+            .sum();
+        let svg_ms = median_ms(3, || drop(svg::write(&drawn, &svg::Options::default())));
+        let svg_bytes = svg::write(&drawn, &svg::Options::default()).len();
+        println!(
+            "{} labels of {} characters 1 unit wide in {} bytes: scene {worst_ms:.2} ms, \
+             {lines} lines, {} cut; svg {svg_ms:.2} ms, {svg_bytes} bytes",
+            board.nodes.len(),
+            scene::MAX_LABEL_LINES,
+            worst.len(),
+            drawn.cut.len(),
+        );
+        assert_eq!(lines, scene::MAX_BOARD_LINES);
+        let whole = scene::MAX_BOARD_LINES / scene::MAX_LABEL_LINES;
+        assert_eq!(drawn.cut.len(), board.nodes.len() - whole);
+        assert!(worst_ms <= 400.0, "scene at the size cap: {worst_ms:.2} ms");
+        assert!(svg_ms <= 400.0, "svg at the size cap: {svg_ms:.2} ms");
     }
 
-    /// §6.7's Phase 3 row for arranging: each command on 1,000 selected
-    /// nodes, every other node of a 2,000-shape grid, planned and applied
-    /// within 50 ms.
+    /// §6.7's Phase 3 row for styling and arranging: each command on
+    /// 1,000 selected nodes, every other node of a 2,000-shape grid,
+    /// planned and applied within 50 ms.
     #[test]
     #[ignore = "timings; run by make perf-board in release"]
     fn perf_arrange_a_thousand_selected_nodes() {
-        use edit::{Alignment, Axis, Intent, Stack};
+        use edit::{Alignment, Axis, Intent, Stack, StyleField};
         let board = parse(&grid_board(2_000)).unwrap();
         let picked: Vec<Id> = (0..2_000)
             .step_by(2)
@@ -743,6 +822,14 @@ mod tests {
             .collect();
         let sources: Vec<scene::Source> = picked.iter().cloned().map(scene::Source::Node).collect();
         let intents = [
+            Intent::SetStyle {
+                ids: sources.clone(),
+                field: StyleField::Color(Token::Purple),
+            },
+            Intent::SetStyle {
+                ids: sources.clone(),
+                field: StyleField::Fill(Fill::Solid),
+            },
             Intent::Restack {
                 ids: sources.clone(),
                 to: Stack::Front,
@@ -768,8 +855,13 @@ mod tests {
                 after.apply(&plan.changes);
                 changed = plan.changes.len();
             });
-            let name = format!("{intent:?}");
-            let name = &name[..name.find(' ').unwrap_or(name.len())];
+            let name = match &intent {
+                Intent::SetStyle { field, .. } => format!("SetStyle {field:?}"),
+                other => {
+                    let name = format!("{other:?}");
+                    name[..name.find(' ').unwrap_or(name.len())].to_owned()
+                }
+            };
             println!("{name} of 1000 selected nodes: {ms:.2} ms, {changed} changes");
             assert!(changed > 0, "{name}");
             assert!(ms <= 50.0, "{name}: {ms:.2} ms");

@@ -172,6 +172,7 @@ pub(crate) fn item(frame: &mut Frame, item: &Item, cull: &Cull, fonts: &Measurer
             face,
             size,
             color: ink,
+            ..
         } => {
             let height = scene::line_height(*size);
             let font = fonts.font(*face);
@@ -470,6 +471,7 @@ mod tests {
         let scene = Scene {
             bounds: Rect::new(0.0, 0.0, 5240.0, 120.0),
             items,
+            cut: Vec::new(),
         };
         let rest = Cull::new(at(0.0, 0.0, 1.0), WINDOW, Labels::SOFTWARE, false);
         assert_eq!(shown(&scene, &plan, &rest), [vec![0, 1], vec![3, 4]]);

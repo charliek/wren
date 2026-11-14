@@ -97,8 +97,12 @@ pub struct App {
     folder_serial: u64,
     folder_request: Option<u64>,
     folder_correlation: Option<u64>,
-    /// An SVG export waiting for its save dialog; see `board::Export`.
+    /// A board export waiting for its save dialog or being written; see
+    /// `board::Export`.
     board_export: Option<board::Export>,
+    /// A quit asked for while an export was being written, which runs
+    /// once it is.
+    quit_after_export: bool,
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
@@ -181,6 +185,8 @@ pub enum Message {
     /// Where the save dialog of the board export with this tag was told
     /// to write, if anywhere.
     BoardExportChosen(u64, Option<PathBuf>),
+    /// The worker of the board export with this tag has finished.
+    BoardExportWritten(u64),
     Revealed {
         correlation: u64,
         generation: u64,
@@ -368,6 +374,7 @@ impl App {
             folder_request: None,
             folder_correlation: None,
             board_export: None,
+            quit_after_export: false,
             action_serial: 0,
             last_processed: None,
             palette: None,
@@ -515,6 +522,7 @@ impl App {
             Message::BoardExportChosen(tag, path) => {
                 return self.board_export_chosen(tag, path).task
             }
+            Message::BoardExportWritten(tag) => return self.board_export_written(tag),
             Message::Revealed {
                 correlation,
                 generation,

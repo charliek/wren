@@ -11,7 +11,9 @@ use iced::{Rectangle, Task};
 use serde_json::{json, Value};
 use wren_board::edit::{Endpoint, Intent};
 use wren_board::scene::{self, Draw, Rect, Segment, Source};
-use wren_board::{Access, Color, Edge, End, Id, Node, NodeKind, Rgba, Shape, Side, Vocabulary};
+use wren_board::{
+    Access, Color, Edge, End, Id, IssueKind, Node, NodeKind, Rgba, Shape, Side, Vocabulary,
+};
 use wren_canvas::machine::{self, State};
 use wren_canvas::{handles, hit, BoardView, Button, Input, Mods, Scroll, Tool};
 
@@ -79,6 +81,28 @@ impl App {
                 )
             }
             "board.bounds" => (Task::none(), self.board_bounds(placement)),
+            // A real press gives the widget the keyboard as it lands. The
+            // harness can only ask for focus with a task, and any event the
+            // widget sees between the press and that focus reports the board
+            // unfocused, which settles the gesture just begun: so the
+            // keyboard comes first, then the press.
+            "board.pointer"
+                if !placement.focused
+                    && self.palette.is_none()
+                    && matches!(
+                        params.get("kind").and_then(Value::as_str),
+                        Some("press" | "click" | "double_click")
+                    ) =>
+            {
+                let focused = Placement {
+                    focused: true,
+                    ..placement
+                };
+                return focus_editor().chain(Task::done(Message::BoardProbed(
+                    Arc::clone(request),
+                    focused,
+                )));
+            }
             "board.pointer" => match self.board_pointer(params, placement) {
                 Ok(task) => (task, Ok(self.board_snapshot(false, placement.focused))),
                 Err(error) => (Task::none(), Err(error)),
@@ -151,12 +175,14 @@ impl App {
             "editing": null,
             "connecting": null,
             "viewport": null,
+            "fit_pending": false,
             "can_undo": false,
             "can_redo": false,
             "pristine": true,
             "revision": null,
             "counts": null,
             "patch": null,
+            "export": self.export_state(),
         });
         let Some(view) = &self.board else {
             return snapshot;
@@ -168,6 +194,10 @@ impl App {
             "read_only": *view.access() != Access::Editable,
             "issues": view.issues().iter().map(|issue| json!({
                 "kind": issue.kind.name(), "id": issue.id().as_str(),
+                "limit": match issue.kind {
+                    IssueKind::OutOfRange(limit) => Some(limit.name()),
+                    _ => None,
+                },
             })).collect::<Vec<_>>(),
             "state": state_name(machine, focused),
             "tool": tool_name(machine.tool()),
@@ -186,6 +216,7 @@ impl App {
                 "query": seeking.query,
             }))),
             "viewport": {"x": viewport.x, "y": viewport.y, "zoom": viewport.zoom},
+            "fit_pending": view.fit_pending(),
             "can_undo": view.can_undo(),
             "can_redo": view.can_redo(),
             "pristine": view.pristine(),
@@ -1298,8 +1329,16 @@ mod tests {
             .is_some_and(|message| !message.is_empty()));
 
         boards::open_board(&mut app, "Flow");
+        // The first fit waits for the widget's size, at the board's origin.
+        let waiting = get(&mut app, json!({}));
+        assert_eq!(waiting["fit_pending"], true);
+        assert_eq!(
+            waiting["viewport"],
+            json!({"x": 0.0, "y": 0.0, "zoom": 1.0})
+        );
         lay_out(&mut app);
         let board = get(&mut app, json!({}));
+        assert_eq!(board["fit_pending"], false);
         assert_eq!(board["surface"], "board");
         assert_eq!(board["error"], Value::Null);
         assert_eq!(board["counts"], json!({"nodes": 2, "edges": 1}));
@@ -1425,6 +1464,22 @@ mod tests {
             reply["viewport"]["zoom"].as_f64().unwrap() as f32,
             zoomed.zoom
         );
+
+        // Pressed while the widget lacks the keyboard, the board hears
+        // nothing and nothing is answered until the focus asked for first
+        // has landed.
+        let (request, mut reply) = Request::detached(
+            "board.pointer",
+            json!({"kind": "press", "button": "middle", "at": {"node": "receive"}}),
+        );
+        let unfocused = Placement {
+            focused: false,
+            ..PLACED
+        };
+        let _ = app.board_probed(&request, unfocused);
+        assert!(reply.try_recv().is_err());
+        assert!(!app.board.as_ref().unwrap().machine().panning());
+        assert_eq!(app.column, Column::Notes);
 
         // A middle drag pans and takes the column.
         pointer(

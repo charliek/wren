@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{self, fontdb, ImageHrefResolver};
-use wren_board::scene::Source;
-use wren_board::{svg as svg_writer, Access, IssueKind};
+use wren_board::scene::{self, Source};
+use wren_board::{svg as svg_writer, Access, IssueKind, Limit};
 use wren_canvas::BoardView;
 use wren_core::fs_store::MAX_FILE_BYTES;
 use wren_core::kind::NoteKind;
@@ -432,8 +432,40 @@ fn describe(element: &Source, kind: IssueKind) -> String {
         IssueKind::MissingKind => "it has no kind",
         IssueKind::MissingZ => "it has no z",
         IssueKind::InvalidZ => "its z is not letters and digits",
+        IssueKind::OutOfRange(limit) => return format!("{what} {id}: {}", past(limit)),
     };
     format!("{what} {id}: {problem}")
+}
+
+/// What passing `limit` means for how the element is drawn.
+fn past(limit: Limit) -> String {
+    match limit {
+        Limit::Coordinates => format!(
+            "it reaches past ±{} on the board; drawn within it",
+            scene::COORDINATE_LIMIT
+        ),
+        Limit::Size => "a side is shorter than 1; drawn 1 long".into(),
+        Limit::Anchor => "an anchor is outside 0 to 1000; drawn at the box's edge".into(),
+        Limit::LabelAt => "a label's position is outside 0 to 1000; drawn at the line's end".into(),
+        Limit::LabelBytes => format!(
+            "a label or caption is over {} KiB; only that much is drawn",
+            scene::MAX_LABEL_BYTES / 1024
+        ),
+        Limit::Labels => format!(
+            "it has more than {0} labels; only the first {0} are drawn",
+            scene::MAX_LABELS
+        ),
+        Limit::ZLength => format!(
+            "its z is over {0} characters; stacked by the first {0}",
+            scene::MAX_Z
+        ),
+        Limit::LabelLines => format!(
+            "a label has more lines than are drawn ({} a label, {} a board); \
+             only those are drawn",
+            scene::MAX_LABEL_LINES,
+            scene::MAX_BOARD_LINES
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -532,6 +564,84 @@ mod tests {
             let (_, _, pixels) = decode(&pixmap.encode_png().unwrap());
             assert_eq!(red(&pixels), 100, "the defaults draw {href}");
         }
+    }
+
+    /// What a board file holds reaches an export only as escaped text in
+    /// `<text>`: markup is escaped, what XML cannot carry is dropped, and
+    /// no unknown colour, kind name markup or `link` becomes an attribute.
+    /// An XML parser reads the document, and the PNG is drawn from it.
+    #[test]
+    fn hostile_content_exports_as_a_document_xml_reads() {
+        use wren_board::{Color, Named};
+        fonts::load();
+        let controls: String = ('\u{0}'..='\u{1f}')
+            .filter(|c| !matches!(c, '\n' | '\r'))
+            .collect();
+        let hostile = format!(
+            "a < b & \"c\" 'd' ]]> <![CDATA[x]]> <!-- c --> <?pi?> &amp; &#0; \
+             {controls}\u{fffe}\u{ffff}\u{7f}\u{85}\u{feff}\u{10ffff} שלום 漢字 👩🏽‍💻"
+        );
+        let template = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\n\
+                        link = \"javascript:alert(1)\"\nsize = [4000, 200]\nz = \"V\"\n\n\
+                        [node.b]\nkind = \"shape\"\nat = [0, 400]\n\
+                        link = \"javascript:alert(1)\"\nsize = [4000, 200]\nz = \"V\"\n\n\
+                        [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\n\
+                        to = { node = \"b\" }\nlabels = [\n  { text = \"x\" },\n]\nz = \"W\"\n";
+        let mut board = wren_board::parse(template).unwrap();
+        for (id, node) in &mut board.nodes {
+            node.text.clone_from(&hostile);
+            node.style.color = Color::Unknown("#12\"/><script>alert(1)</script>".into());
+            if id.as_str() == "b" {
+                node.kind = Some(Named::Other(format!("<kind>{hostile}")));
+            }
+        }
+        for edge in board.edges.values_mut() {
+            edge.labels[0].text.clone_from(&hostile);
+            edge.style.color = Color::Unknown("url(#x)".into());
+        }
+        let text = wren_board::write(&board);
+        let view = BoardView::open(
+            &text,
+            crate::theme::board_palette(wren_core::theme::WREN_LIGHT),
+            fonts::UI,
+        )
+        .expect("the board");
+        let svg = svg(&view, Background::Theme);
+        let document = usvg::roxmltree::Document::parse(&svg).expect("well-formed XML");
+        let drawn: Vec<&str> = document
+            .descendants()
+            .filter(|node| node.has_tag_name("text"))
+            .map(|node| node.text().unwrap_or_default())
+            .collect();
+        let carried: String = hostile
+            .chars()
+            .filter(|&c| c == '\t' || !matches!(c, '\u{0}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}'))
+            .collect();
+        // Two node labels, the placeholder's caption and the connector's.
+        assert_eq!(
+            drawn.iter().filter(|line| **line == carried).count(),
+            3,
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.contains(&format!("<kind>{carried}").as_str()),
+            "{drawn:?}"
+        );
+        for absent in ["javascript", "script", "#12", "url(", "href"] {
+            assert!(!svg.contains(absent), "{absent} in the export");
+        }
+        let attributes = document
+            .descendants()
+            .flat_map(|node| node.attributes())
+            .filter(|attribute| matches!(attribute.name(), "fill" | "stroke"));
+        for attribute in attributes {
+            let value = attribute.value();
+            let hex = value.len() == 7
+                && value.starts_with('#')
+                && value[1..].bytes().all(|b| b.is_ascii_hexdigit());
+            assert!(hex || value == "none", "{value}");
+        }
+        assert!(png(&svg, 1.0).is_ok());
     }
 
     #[test]

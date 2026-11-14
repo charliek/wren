@@ -253,6 +253,22 @@ fn what_is_wrong_with_a_board_that_draws_is_a_warning() {
         stderr(&future)
     );
     assert!(directory.path().join("future.svg").is_file());
+
+    // A value past a limit draws, clamped, with a warning for each limit.
+    std::fs::write(
+        directory.path().join("far.wren-board"),
+        "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [16777216, 0]\nsize = [0, 60]\nz = \"V\"\n",
+    )
+    .unwrap();
+    let far = wren(directory.path(), &["export", "far.wren-board"]);
+    succeeded(&far);
+    for warning in [
+        "Wren: warning: far.wren-board: node a: it reaches past ±16777216 on the board; drawn within it",
+        "Wren: warning: far.wren-board: node a: a side is shorter than 1; drawn 1 long",
+    ] {
+        assert!(stderr(&far).contains(warning), "{}", stderr(&far));
+    }
+    assert!(directory.path().join("far.svg").is_file());
 }
 
 #[test]
@@ -289,6 +305,24 @@ fn a_failed_export_says_why_exits_with_its_code_and_writes_nothing() {
         path.join("wide.wren-board"),
         "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n\n\
          [node.b]\nkind = \"shape\"\nat = [4000, 4000]\nsize = [120, 60]\n",
+    )
+    .unwrap();
+    // One byte over the 8 MiB a board may have, and one element over the
+    // 50,000: each is refused before a model is built.
+    let pad = "x".repeat(wren_board::MAX_BOARD_BYTES - "schema = 1\npad = \"\"\n".len() + 1);
+    std::fs::write(
+        path.join("large.wren-board"),
+        format!("schema = 1\npad = \"{pad}\"\n"),
+    )
+    .unwrap();
+    let crowded: String = (0..=wren_board::MAX_ELEMENTS)
+        .map(|i| {
+            format!("\n[node.n{i}]\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\nz = \"V\"\n")
+        })
+        .collect();
+    std::fs::write(
+        path.join("crowded.wren-board"),
+        format!("schema = 1\n{crowded}"),
     )
     .unwrap();
     std::fs::create_dir(path.join("folder.svg")).unwrap();
@@ -375,6 +409,18 @@ fn a_failed_export_says_why_exits_with_its_code_and_writes_nothing() {
         ),
         (&["export", "binary.wren-board"], 3, "not UTF-8 text"),
         (&["export", "huge.wren-board"], 3, "it is over 64 MiB"),
+        (
+            &["export", "large.wren-board"],
+            3,
+            "large.wren-board is not a board Wren can draw: line 1, column 1: \
+             the board is 8,388,609 bytes, over the 8,388,608 (8 MiB) a board may have",
+        ),
+        (
+            &["export", "crowded.wren-board", "--format", "png"],
+            3,
+            "crowded.wren-board is not a board Wren can draw: line 1, column 1: \
+             the board has 50,001 nodes and connectors, over the 50,000 a board may have",
+        ),
     ];
     for (args, code, message) in cases {
         let output = wren(path, args);

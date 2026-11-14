@@ -3184,7 +3184,7 @@ fn a_session_without_boards_neither_lists_indexes_nor_creates_them() {
 fn a_session_with_boards_lists_titles_kinds_and_warnings() {
     let fixture = Fixture::empty();
     write_mixed(&fixture);
-    let session = fixture.board_session();
+    let mut session = fixture.board_session();
     assert_eq!(session.options(), SessionOptions { boards: true });
     assert_eq!(
         listed(&session),
@@ -3199,6 +3199,9 @@ fn a_session_with_boards_lists_titles_kinds_and_warnings() {
         ]
     );
     assert_eq!(session.index().len(), 3);
+    // The open parsed no board: their text waits until a search asks.
+    assert_eq!(session.index().unextracted(), 2);
+    session.settle_search();
     let hits = session
         .index()
         .query("labelword", Scope::Workspace, QueryKind::Search, 10);

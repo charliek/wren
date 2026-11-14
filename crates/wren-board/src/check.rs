@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::scene::Source;
-use crate::{Board, End, Id, Node};
+use crate::scene::{Source, COORDINATE_LIMIT, MAX_LABELS, MAX_LABEL_BYTES, MAX_Z};
+use crate::{Board, End, Id, Named, Node};
 
 /// The deepest nesting drawn inside parents: a node more levels down than
 /// this, counting a root as level 1, is laid out as a root.
@@ -106,6 +106,9 @@ pub enum IssueKind {
     MissingZ,
     /// A `z` that is empty or holds a character outside `[0-9A-Za-z]`.
     InvalidZ,
+    /// A value past one of the limits the scene draws within: drawn
+    /// clamped or cut, the stored value untouched (§4.12).
+    OutOfRange(Limit),
 }
 
 impl IssueKind {
@@ -120,19 +123,86 @@ impl IssueKind {
             Self::MissingKind => "missing_kind",
             Self::MissingZ => "missing_z",
             Self::InvalidZ => "invalid_z",
+            Self::OutOfRange(_) => "out_of_range",
+        }
+    }
+}
+
+/// Which limit an out-of-range value passes. An element is flagged once
+/// for each limit it passes, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Limit {
+    /// A node's resolved corner or far edge, or a free end, beyond
+    /// ±[`COORDINATE_LIMIT`].
+    Coordinates,
+    /// A node's width or height below 1.
+    Size,
+    /// An attached end's `anchor` outside 0 to 1000.
+    Anchor,
+    /// A connector label's `at` outside 0 to 1000.
+    LabelAt,
+    /// A label, or a placeholder's caption (its unknown kind name), over
+    /// [`MAX_LABEL_BYTES`]; only that much of it is drawn.
+    LabelBytes,
+    /// More than [`MAX_LABELS`] connector labels; only the first are drawn.
+    Labels,
+    /// A `z` over [`MAX_Z`] bytes, which stacks by its first [`MAX_Z`].
+    ZLength,
+    /// A label, or a placeholder's caption, that wraps to more than
+    /// [`MAX_LABEL_LINES`] lines, or past the [`MAX_BOARD_LINES`] drawn on
+    /// a board; only the lines within both are drawn. Only a scene,
+    /// which measures, can tell ([`crate::scene::issues`]).
+    ///
+    /// [`MAX_LABEL_LINES`]: crate::scene::MAX_LABEL_LINES
+    /// [`MAX_BOARD_LINES`]: crate::scene::MAX_BOARD_LINES
+    LabelLines,
+}
+
+impl Limit {
+    /// Every limit, in the order an element's issues list them.
+    pub const ALL: [Self; 8] = [
+        Self::Coordinates,
+        Self::Size,
+        Self::Anchor,
+        Self::LabelAt,
+        Self::LabelBytes,
+        Self::Labels,
+        Self::ZLength,
+        Self::LabelLines,
+    ];
+
+    /// The limit's name, as the test harness reports it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Coordinates => "coordinates",
+            Self::Size => "size",
+            Self::Anchor => "anchor",
+            Self::LabelAt => "label_at",
+            Self::LabelBytes => "label_bytes",
+            Self::Labels => "labels",
+            Self::ZLength => "z_length",
+            Self::LabelLines => "label_lines",
         }
     }
 }
 
 /// The board's integrity issues: nodes in id order, then connectors, each
-/// element's issues in a fixed order.
+/// element's issues in a fixed order. [`Limit::LabelLines`] is never among
+/// them, since finding it takes the measurer; [`crate::scene::issues`]
+/// adds it.
 pub fn check(board: &Board) -> Vec<Issue> {
+    check_with(board, |_| false)
+}
+
+/// [`check`], with [`Limit::LabelLines`] for each element `cut` names.
+pub(crate) fn check_with(board: &Board, cut: impl Fn(&Source) -> bool) -> Vec<Issue> {
     let mut issues = Vec::new();
     let tree = resolve(board);
     for ((id, node), placed) in board.nodes.iter().zip(&tree) {
+        let source = Source::Node(id.clone());
         let mut flag = |kind| {
             issues.push(Issue {
-                element: Source::Node(id.clone()),
+                element: source.clone(),
                 kind,
             })
         };
@@ -148,11 +218,29 @@ pub fn check(board: &Board) -> Vec<Issue> {
         if board.edges.contains_key(id) {
             flag(IssueKind::SharedId);
         }
+        let past = |limit| match limit {
+            Limit::Coordinates => outside_box(placed.at, node.size),
+            Limit::Size => node.size.iter().any(|&side| side < 1),
+            Limit::LabelBytes => {
+                let caption = match &node.kind {
+                    Some(Named::Other(kind)) => kind.len(),
+                    _ => 0,
+                };
+                node.text.len().max(caption) > MAX_LABEL_BYTES
+            }
+            Limit::ZLength => long_z(node.z.as_deref()),
+            Limit::LabelLines => cut(&source),
+            Limit::Anchor | Limit::LabelAt | Limit::Labels => false,
+        };
+        for limit in Limit::ALL.into_iter().filter(|&limit| past(limit)) {
+            flag(IssueKind::OutOfRange(limit));
+        }
     }
     for (id, edge) in &board.edges {
+        let source = Source::Edge(id.clone());
         let mut flag = |kind| {
             issues.push(Issue {
-                element: Source::Edge(id.clone()),
+                element: source.clone(),
                 kind,
             })
         };
@@ -173,8 +261,52 @@ pub fn check(board: &Board) -> Vec<Issue> {
         if board.nodes.contains_key(id) {
             flag(IssueKind::SharedId);
         }
+        let ends = [&edge.from, &edge.to];
+        let per_mille = |value: i32| !(0..=1000).contains(&value);
+        let past = |limit| match limit {
+            Limit::Coordinates => ends.iter().any(|end| match end {
+                End::Free { at, .. } => at
+                    .iter()
+                    .any(|&v| !(-COORDINATE_LIMIT..=COORDINATE_LIMIT).contains(&i64::from(v))),
+                End::Node { .. } => false,
+            }),
+            Limit::Anchor => ends.iter().any(|end| match end {
+                End::Node {
+                    anchor: Some(anchor),
+                    ..
+                } => anchor.iter().any(|&v| per_mille(v)),
+                _ => false,
+            }),
+            Limit::LabelAt => edge.labels.iter().any(|label| per_mille(label.at)),
+            Limit::LabelBytes => edge
+                .labels
+                .iter()
+                .any(|label| label.text.len() > MAX_LABEL_BYTES),
+            Limit::Labels => edge.labels.len() > MAX_LABELS,
+            Limit::ZLength => long_z(edge.z.as_deref()),
+            Limit::LabelLines => cut(&source),
+            Limit::Size => false,
+        };
+        for limit in Limit::ALL.into_iter().filter(|&limit| past(limit)) {
+            flag(IssueKind::OutOfRange(limit));
+        }
     }
     issues
+}
+
+/// Whether a node's box, at its resolved corner, reaches past what the
+/// scene draws: a corner outside −2^24 to 2^24 − 1, or a far edge past
+/// 2^24. A size below 1 is [`Limit::Size`].
+fn outside_box(corner: [i64; 2], size: [i32; 2]) -> bool {
+    corner.iter().zip(size).any(|(&start, length)| {
+        !(-COORDINATE_LIMIT..COORDINATE_LIMIT).contains(&start)
+            || start.saturating_add(i64::from(length)) > COORDINATE_LIMIT
+    })
+}
+
+/// A `z` longer than the bytes stacking compares.
+fn long_z(z: Option<&str>) -> bool {
+    z.is_some_and(|z| z.len() > MAX_Z)
 }
 
 /// A key longer than 64 characters is an out-of-range value, listed with
@@ -654,6 +786,7 @@ mod tests {
                 ("bare", "missing_kind"),
                 ("bare", "missing_z"),
                 ("empty", "invalid_z"),
+                ("long", "out_of_range"),
                 ("odd", "invalid_z"),
                 ("wide", "invalid_z"),
                 ("e-bare", "missing_kind"),
@@ -665,16 +798,65 @@ mod tests {
 
     /// Unknown values draw as their fallbacks and are never flagged.
     #[test]
-    fn unknown_values_and_out_of_range_numbers_are_not_flagged_yet() {
+    fn unknown_values_are_not_flagged() {
         let text = concat!(
             "schema = 1\n\n",
-            "[node.a]\nkind = \"sticky\"\nat = [2147483647, 0]\nshape = \"star\"\nsize = [-1, 0]\n",
+            "[node.a]\nkind = \"sticky\"\nat = [0, 0]\nshape = \"star\"\nsize = [1, 1]\n",
             "style.color = \"teal\"\nstyle.fill = \"hatched\"\nz = \"V\"\n\n",
-            "[edge.e]\nkind = \"pipe\"\nfrom = { anchor = [-5, 5000], node = \"a\", side = \"middle\" }\n",
-            "to = { at = [0, 0] }\nheads = [\"x\", \"y\"]\nlabels = [\n  { at = 2000, text = \"far\" },\n]\n",
-            "route = \"curved\"\nz = \"W\"\n",
+            "[edge.e]\nkind = \"pipe\"\nfrom = { node = \"a\", side = \"middle\" }\n",
+            "to = { at = [0, 0] }\nheads = [\"x\", \"y\"]\nroute = \"curved\"\n",
+            "style.color = \"#12345\"\nstyle.stroke = \"wavy\"\nz = \"W\"\n",
         );
         assert_eq!(check(&canonical(text)), vec![]);
+    }
+
+    /// Every value past a limit is flagged once per limit, nodes and then
+    /// connectors in id order, each element's limits in [`Limit::ALL`]'s
+    /// order after its other issues; the bytes write back unchanged.
+    #[test]
+    fn out_of_range_values_are_flagged_by_limit() {
+        let long_z = "V".repeat(MAX_Z + 1);
+        let long_label = "x".repeat(MAX_LABEL_BYTES + 1);
+        let labels = "  { text = \"l\" },\n".repeat(MAX_LABELS + 1);
+        let text = format!(
+            concat!(
+                "schema = 1\n\n",
+                "[node.a]\nkind = \"sticky\"\nat = [2147483647, 0]\nsize = [-1, 0]\nz = \"V\"\n\n",
+                "[node.b]\ntext = \"{long_label}\"\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\nz = \"{long_z}\"\n\n",
+                "[node.c]\nkind = \"shape\"\nat = [-16777217, 0]\nsize = [1, 1]\nz = \"V\"\n\n",
+                "[node.d]\nkind = \"{long_label}\"\nat = [0, 0]\nsize = [1, 1]\nz = \"V\"\n\n",
+                "[edge.e]\nkind = \"pipe\"\nfrom = {{ anchor = [-5, 500], node = \"b\" }}\n",
+                "to = {{ at = [16777217, 0] }}\nlabels = [\n  {{ at = 2000, text = \"far\" }},\n]\nz = \"W\"\n\n",
+                "[edge.f]\nkind = \"edge\"\nfrom = {{ node = \"c\" }}\nto = {{ node = \"b\" }}\nlabels = [\n{labels}]\nz = \"{long_z}\"\n\n",
+                "[edge.g]\nkind = \"edge\"\nfrom = {{ node = \"c\" }}\nto = {{ node = \"b\" }}\nlabels = [\n  {{ text = \"{long_label}\" }},\n]\nz = \"W\"\n",
+            ),
+            long_label = long_label,
+            long_z = long_z,
+            labels = labels,
+        );
+        let limits: Vec<(String, Limit)> = check(&canonical(&text))
+            .into_iter()
+            .map(|issue| match issue.kind {
+                IssueKind::OutOfRange(limit) => (issue.id().to_string(), limit),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let want = [
+            ("a", Limit::Coordinates),
+            ("a", Limit::Size),
+            ("b", Limit::LabelBytes),
+            ("b", Limit::ZLength),
+            ("c", Limit::Coordinates),
+            ("d", Limit::LabelBytes),
+            ("e", Limit::Coordinates),
+            ("e", Limit::Anchor),
+            ("e", Limit::LabelAt),
+            ("f", Limit::Labels),
+            ("f", Limit::ZLength),
+            ("g", Limit::LabelBytes),
+        ];
+        let want: Vec<(String, Limit)> = want.iter().map(|&(id, l)| (id.to_owned(), l)).collect();
+        assert_eq!(limits, want);
     }
 
     /// A chain and a cycle each 20,000 long resolve without recursion.

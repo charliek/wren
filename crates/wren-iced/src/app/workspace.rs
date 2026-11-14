@@ -1021,6 +1021,11 @@ impl App {
         if self.session.is_some() {
             let _ = self.apply_core(Op::Flush)?;
         }
+        if self.export_writing() {
+            // The file the export was asked to write is written first.
+            self.quit_after_export = true;
+            return Ok(Task::none());
+        }
         Ok(iced::exit())
     }
 

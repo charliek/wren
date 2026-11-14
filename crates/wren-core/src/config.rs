@@ -888,6 +888,14 @@ mod tests {
             Config::load_from(&self.directory)
         }
 
+        /// Hold the registry's lock, as another writer would. A child
+        /// another test thread forks during a config write keeps that
+        /// write's lock until it execs, so this retries as the registry's
+        /// own writes do.
+        fn lock(&self) -> FsStore {
+            open_registry_store(&self.directory).unwrap()
+        }
+
         fn bytes(&self) -> Vec<u8> {
             fs::read(self.file()).unwrap()
         }
@@ -1566,7 +1574,7 @@ mod tests {
             .contains("changed since it was loaded"));
         assert!(second.workspaces().is_empty());
         assert_eq!(fixture.load().workspaces(), first.workspaces());
-        let lock = FsStore::open(&fixture.directory).unwrap();
+        let lock = fixture.lock();
         let while_locked = fixture.load();
         assert_eq!(while_locked.workspaces(), first.workspaces());
         drop(lock);
@@ -1602,7 +1610,7 @@ mod tests {
         let mut config = fixture.load();
         config.add(&workspace, None).unwrap();
         let before = fixture.bytes();
-        let lock = FsStore::open(&fixture.directory).unwrap();
+        let lock = fixture.lock();
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "config::tests::cross_process_lock_contention_does_not_block_reading_or_note_editing", "--nocapture"])
             .env(CHILD_ROOT, &fixture.root).status().unwrap();
@@ -1826,7 +1834,7 @@ mod tests {
         fs::set_permissions(fixture.file(), fs::Permissions::from_mode(0o400)).unwrap();
         let config = fixture.load();
         assert!(!config.writable());
-        let lock = FsStore::open(&fixture.directory).unwrap();
+        let lock = fixture.lock();
         assert_eq!(config.validate_registration(&workspace).unwrap(), workspace);
         assert!(config
             .validate_registration(&fixture.workspace("unregistered"))

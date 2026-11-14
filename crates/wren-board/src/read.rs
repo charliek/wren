@@ -19,6 +19,7 @@ use toml::{Table, Value};
 use crate::write::{field_fits, inline_fits, NESTING};
 use crate::{
     Board, Color, Edge, EdgeStyle, End, Head, Id, Label, Named, Node, NodeStyle, Route, Shape,
+    MAX_BOARD_BYTES, MAX_ELEMENTS,
 };
 
 /// Why a file cannot be read as a board. Such a board opens as raw text
@@ -45,11 +46,58 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Reads a board file. Never panics, whatever the input.
+///
+/// A file over [`MAX_BOARD_BYTES`] is refused before the TOML parser sees
+/// it, and one with more than [`MAX_ELEMENTS`] nodes and connectors before
+/// any record is read: both at line 1, since no one line is at fault.
 pub fn parse(source: &str) -> Result<Board, ParseError> {
+    if source.len() > MAX_BOARD_BYTES {
+        return Err(whole(format!(
+            "the board is {} bytes, over the {} (8 MiB) a board may have",
+            thousands(source.len()),
+            thousands(MAX_BOARD_BYTES)
+        )));
+    }
     let table = source
         .parse::<Table>()
         .map_err(|error| syntax(source, &error))?;
+    let records = |key: &str| {
+        table
+            .get(key)
+            .and_then(Value::as_table)
+            .map_or(0, Table::len)
+    };
+    let elements = records("node").saturating_add(records("edge"));
+    if elements > MAX_ELEMENTS {
+        return Err(whole(format!(
+            "the board has {} nodes and connectors, over the {} a board may have",
+            thousands(elements),
+            thousands(MAX_ELEMENTS)
+        )));
+    }
     board(table).map_err(|fault| fault.locate(source))
+}
+
+/// An error about the whole file, placed at its start.
+fn whole(message: String) -> ParseError {
+    ParseError {
+        line: 1,
+        column: 1,
+        message,
+    }
+}
+
+/// `n` with a comma between each group of three digits.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// A parser error with its position. The one error the pinned crate gives
@@ -619,6 +667,7 @@ fn label_text(text: String) -> String {
 mod tests {
     use super::*;
     use crate::fixtures::{self, Rng};
+    use crate::svg::tests as svg_tests;
     use crate::{Dash, EdgeKind, Extra, Fill, Head, NodeKind, Side, Token, Vocabulary};
 
     #[track_caller]
@@ -1714,7 +1763,11 @@ mod tests {
     }
 
     fn survives_mutations(count: usize, seed: u64) {
-        let files: Vec<&str> = fixtures::all().map(|(_, text)| text).collect();
+        let limits = crate::limits::small();
+        let files: Vec<&str> = fixtures::all()
+            .map(|(_, text)| text)
+            .chain(limits.iter().map(String::as_str))
+            .collect();
         let mut rng = Rng(seed);
         let (mut loaded, mut refused) = (0, 0);
         for _ in 0..count {
@@ -1729,7 +1782,21 @@ mod tests {
                     let _ = (crate::access(&board), crate::placements(&board));
                     let palette = crate::style::tests::LIGHT;
                     let scene = crate::scene::build(&board, &palette, &crate::scene::FixedMeasure);
-                    crate::svg::write(&scene, &crate::svg::Options::default());
+                    let issues = crate::scene::issues(&board, &scene);
+                    assert!(issues.len() >= crate::check(&board).len());
+                    // What export writes parses as XML and holds every
+                    // line the scene draws, as drawn less what XML cannot
+                    // carry.
+                    let options = crate::svg::Options {
+                        background: Some(palette.canvas),
+                        padding: 40.0,
+                    };
+                    let svg = crate::svg::write(&scene, &options);
+                    let drawn: Vec<String> = svg_tests::lines(&scene)
+                        .into_iter()
+                        .map(svg_tests::escape_free)
+                        .collect();
+                    assert_eq!(svg_tests::texts(&svg), drawn, "{source}");
                     let written = crate::write(&board);
                     let again = parse(&written).unwrap_or_else(|e| panic!("{e}\n{written}"));
                     assert_eq!(crate::write(&again), written, "{source}");
