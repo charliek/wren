@@ -766,13 +766,13 @@ mod tests {
         assert_eq!(lines, 200 * scene::MAX_LABEL_LINES);
     }
 
-    /// §6.7's Phase 3 row for arranging: each command on 1,000 selected
-    /// nodes, every other node of a 2,000-shape grid, planned and applied
-    /// within 50 ms.
+    /// §6.7's Phase 3 row for styling and arranging: each command on
+    /// 1,000 selected nodes, every other node of a 2,000-shape grid,
+    /// planned and applied within 50 ms.
     #[test]
     #[ignore = "timings; run by make perf-board in release"]
     fn perf_arrange_a_thousand_selected_nodes() {
-        use edit::{Alignment, Axis, Intent, Stack};
+        use edit::{Alignment, Axis, Intent, Stack, StyleField};
         let board = parse(&grid_board(2_000)).unwrap();
         let picked: Vec<Id> = (0..2_000)
             .step_by(2)
@@ -780,6 +780,14 @@ mod tests {
             .collect();
         let sources: Vec<scene::Source> = picked.iter().cloned().map(scene::Source::Node).collect();
         let intents = [
+            Intent::SetStyle {
+                ids: sources.clone(),
+                field: StyleField::Color(Token::Purple),
+            },
+            Intent::SetStyle {
+                ids: sources.clone(),
+                field: StyleField::Fill(Fill::Solid),
+            },
             Intent::Restack {
                 ids: sources.clone(),
                 to: Stack::Front,
@@ -805,8 +813,13 @@ mod tests {
                 after.apply(&plan.changes);
                 changed = plan.changes.len();
             });
-            let name = format!("{intent:?}");
-            let name = &name[..name.find(' ').unwrap_or(name.len())];
+            let name = match &intent {
+                Intent::SetStyle { field, .. } => format!("SetStyle {field:?}"),
+                other => {
+                    let name = format!("{other:?}");
+                    name[..name.find(' ').unwrap_or(name.len())].to_owned()
+                }
+            };
             println!("{name} of 1000 selected nodes: {ms:.2} ms, {changed} changes");
             assert!(changed > 0, "{name}");
             assert!(ms <= 50.0, "{name}: {ms:.2} ms");

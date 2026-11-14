@@ -12,14 +12,15 @@ from __future__ import annotations
 import json
 import os
 import statistics
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from tools.wrentest.boards import (ROUTED, board, board_app, drag, grid_board, grid_elements,
-                                   routed_board)
-from tools.wrentest.test_setup import artifact_directory
+from tools.wrentest.boards import (FLOW, ROUTED, SAMPLES, board, board_app, drag, grid_board,
+                                   grid_elements, routed_board)
+from tools.wrentest.test_setup import artifact_directory, binary_path, isolated_environment
 from tools.wrentest.ui import wait_for
 
 MODE = os.environ.get("WRENTEST_PERF", "debug")
@@ -58,6 +59,11 @@ TYPED = {"grid": 20 if WGPU else 12, ROUTED[0]: EDIT, ROUTED[1]: EDIT, ROUTED[2]
 # One actions-palette preview step at 1,000 selected shapes, release only:
 # §6.7's Phase 3 row.
 ACTIONS = 16
+# Seconds, release only, §6.7's Phase 3 row: a PNG export at scale 2 of
+# about 1,000 elements, from the request to the file written; and `wren
+# export` started cold, with no display, on the sample flowchart.
+PNG = 1.0
+COLD_START = 1.5
 
 # Whole-scene changes left out before the timed ones, and those timed.
 WARM = 3
@@ -67,6 +73,9 @@ GROUP = "Perf/Boards"
 SHAPES = 1000
 # The spike's generated boards of about 1,000 and 10,000 elements.
 OPENS = {"1k": 347, "10k": 3380}
+# About 1,000 elements whose PNG at scale 2 is under the 64 megapixels an
+# export may have (39 megapixels); the 1,000-shape grid is 106 at scale 2.
+EXPORT_SHAPES = 350
 
 
 def median_ms(values: list[int]) -> float:
@@ -80,6 +89,7 @@ def workspace(tmp_path: Path) -> Path:
     (group / "Grid.wren-board").write_text(grid_board(SHAPES), encoding="utf-8")
     for name, shapes in OPENS.items():
         (group / f"Open {name}.wren-board").write_text(grid_board(shapes), encoding="utf-8")
+    (group / "Export.wren-board").write_text(grid_board(EXPORT_SHAPES), encoding="utf-8")
     for index, kind in enumerate(ROUTED):
         (group / f"Routed {index}.wren-board").write_text(routed_board(kind, SHAPES),
                                                           encoding="utf-8")
@@ -112,7 +122,22 @@ def opened(app) -> dict:
                     timeout=60, interval=0.02, description="the board's opening timed")
 
 
-def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
+def wren_export(home: Path, *args: str | Path) -> float:
+    """Seconds ``wren export`` takes with these arguments, started cold
+    with no display and an empty configuration under ``home``."""
+    home.mkdir()
+    env = isolated_environment(home, test_mode=False)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    started = time.monotonic()
+    result = subprocess.run([str(binary_path()), "export", *map(str, args)],
+                            env=env, capture_output=True, timeout=300, check=False)
+    seconds = time.monotonic() - started
+    assert result.returncode == 0, result.stderr
+    return seconds
+
+
+def test_board_timings_stay_under_their_ceilings(workspace: Path, tmp_path: Path) -> None:
     artifacts = artifact_directory(f"board-perf-{MODE}")
     # The release budgets hold on a quiet machine only; the load tells a run
     # made beside other work from a regression.
@@ -287,5 +312,40 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
                     steps = row["drag_scene_micros"][:4]
                     assert median_ms(steps) <= DRAG[kind], (kind, row)
                     assert median_ms(row["keystroke_scene_micros"]) <= TYPED[kind], (kind, row)
+
+            # A PNG export at scale 2 of about 1,000 elements, from the
+            # request to the file written: the SVG made on the UI thread,
+            # then the render and write on the export's worker.
+            open_row(app, notes[f"{GROUP}/Note.md"])
+            open_row(app, notes[f"{GROUP}/Export.wren-board"])
+            opened(app)
+            assert board(app)["counts"]["nodes"] == EXPORT_SHAPES
+            samples = []
+            for _ in range(3):
+                started = time.monotonic()
+                reply = app.client.call("board.export",
+                                        {"format": "png", "path": str(tmp_path / "export.png")},
+                                        timeout=300)
+                samples.append(time.monotonic() - started)
+            measured["png_export"] = {"elements": grid_elements(EXPORT_SHAPES), "seconds": samples,
+                                      "bytes": reply["bytes"]}
+
+        # `wren export` started cold: the sample flowchart as SVG and as
+        # PNG (§6.7's cold start); the export board at scale 2, and the
+        # 1,000-shape grid at scale 1, which at scale 2 is over the limit.
+        runs = {"flow_svg": (SAMPLES / FLOW, "flow.svg"), "flow_png": (SAMPLES / FLOW, "flow.png"),
+                "export_png": (workspace / GROUP / "Export.wren-board", "export.png"),
+                "grid_png_scale_1": (workspace / GROUP / "Grid.wren-board", "grid.png",
+                                     "--scale", "1")}
+        measured["cli_seconds"] = {}
+        for name, (source, out, *more) in runs.items():
+            measured["cli_seconds"][name] = [
+                wren_export(tmp_path / f"home-{name}-{run}", source, "-o", tmp_path / out, *more)
+                for run in range(3)]
+        if RELEASE:
+            png = measured["png_export"]
+            assert statistics.median(png["seconds"]) <= PNG, png
+            for name in ("flow_svg", "flow_png"):
+                assert statistics.median(measured["cli_seconds"][name]) <= COLD_START, measured
     finally:
         (artifacts / "measurements.json").write_text(json.dumps(measured, indent=2), encoding="utf-8")

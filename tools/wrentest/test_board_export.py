@@ -261,7 +261,8 @@ def test_the_window_answers_while_a_large_png_export_renders(tmp_path: Path) -> 
         worker = threading.Thread(target=export_large)
         try:
             worker.start()
-            wait_for(lambda: other.call("board.get")["export"] == "writing" or not worker.is_alive(),
+            wait_for(lambda: (other.call("board.get")["export"] == "writing"
+                              or not worker.is_alive()),
                      timeout=30, interval=0.002, description="the export being written")
             seen = time.monotonic()
             answers = []
