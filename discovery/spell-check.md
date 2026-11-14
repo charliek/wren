@@ -694,7 +694,7 @@ Captured on X11 for all eleven themes on tiny-skia and for Wren Light and Wren D
 
 - Review: 1 blocker, 0 majors, 0 minors.
 - Fixed: the blocker (the zigzag's cost on tiny-skia, item 22) in `aa361a4`, with `widget::tests::a_frames_zigzags_are_one_picture_of_their_squares_on_the_pixel_grid`, `widget::tests::the_zigzag_picture_is_kept_while_its_squares_and_colour_are` and `test_spell.py::test_a_screen_full_of_marks_draws_without_a_stall`; `architecture.md` describes the picture. Gates after it: `make check`; `test_spell.py` 10 passed on X11 and 7 passed, 3 deselected on Wayland; the X11 tiny-skia suite with `WRENTEST_SPELL=on` and with `off`, 251 passed and 1 skipped each; the macOS-target clippy; the strict docs build.
-- Not fixed: nothing.
+- Not fixed: nothing from the review. The verify step found one new minor, after the fix round, and it is carried to the end review: `test_spell.py::test_menu_keys_close_then_act_and_rows_follow_the_pointer_events` (lines 315 to 318) reads `opened = menu(app)` straight after opening the menu, then asserts `menu(app) == opened` after a bare Shift. The menu's `bounds` comes from the last drawn frame (item 17), so when no frame has drawn the menu before the first read it is `null` there and filled in at the second, and the assertion fails. Seen once in 26 Wayland runs; the fix is to compare without `bounds` or to take `opened` from a drawn menu.
 
 #### The end review
 
