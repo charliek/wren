@@ -1482,7 +1482,8 @@ fn a_settle_drops_the_preview_until_the_highlight_moves() {
 /// The keys of the Board menu that are enabled, each checked against the
 /// command it runs: the menu shares one count between the align items and
 /// one between the distribute items, and must still agree with each, except
-/// that a board command is greyed while the board takes text.
+/// that a board command is greyed while the board takes text. What the
+/// last `sync_menu` left the items showing must be the same.
 fn board_menu(app: &App) -> Vec<&'static str> {
     let menu = crate::menu::MENUS
         .iter()
@@ -1502,6 +1503,11 @@ fn board_menu(app: &App) -> Vec<&'static str> {
             (key, on)
         })
         .collect();
+    // What the items were last set to, wherever the menu holds them as
+    // up to date, is what they would be set to now.
+    if app.menu_current() {
+        assert_eq!(app.menu_synced, listed, "the items as last synced");
+    }
     listed
         .into_iter()
         .filter_map(|(key, on)| on.then_some(key))
@@ -1601,4 +1607,64 @@ fn the_board_menu_greys_its_board_items_while_the_board_takes_text() {
     assert!(view(&app).machine().seeking().is_some());
     assert_eq!(view(&app).board().nodes.len(), 2);
     assert_eq!(app.board_revision, revision);
+}
+
+/// The Board menu is worked out again only when something it reads has
+/// changed: the autosave tick, forty times a second whenever a workspace
+/// is open, and a pointer passing over the board cost a compare, however
+/// large the selection. Every change it reads is still seen.
+#[test]
+fn the_board_menu_is_worked_out_only_when_what_it_reads_changes() {
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    let _ = board_menu(&app);
+    let syncs = app.menu_syncs;
+    for _ in 0..100 {
+        let _ = app.update(Message::Tick);
+    }
+    input(&mut app, Input::Move { at: EMPTY });
+    assert_eq!(app.menu_syncs, syncs, "nothing the menu reads changed");
+
+    // A selection, an edit, an undo, an open label, a change on disk and
+    // another note each bring the items up to date.
+    type Change<'a> = &'a dyn Fn(&mut App);
+    let changes: [(&str, Change); 7] = [
+        ("a selection", &|app| click(app, "pack")),
+        ("an edit", &|app| {
+            assert_eq!(key(app, C::Duplicate), Disposition::Completed);
+        }),
+        ("an undo", &|app| {
+            assert_eq!(key(app, C::Undo), Disposition::Completed);
+        }),
+        ("an open label", &|app| {
+            assert_eq!(key(app, C::EditLabel), Disposition::Completed);
+        }),
+        ("a committed label", &|app| {
+            label(app, LabelAction::Insert("zz".into()));
+            assert_eq!(key(app, C::CommitLabel), Disposition::Completed);
+        }),
+        ("a change on disk", &|app| {
+            change_on_disk(app, &path, &flow_and("External"));
+        }),
+        ("another note", &|app| {
+            open_markdown(app, "Note");
+        }),
+    ];
+    // A test helper may change the app without a message, so a tick
+    // stands for the message that follows in a window.
+    for (what, change) in changes {
+        let before = app.menu_syncs;
+        change(&mut app);
+        let _ = app.update(Message::Tick);
+        assert!(app.menu_syncs > before, "{what}");
+        assert!(app.menu_current(), "{what}");
+        let _ = board_menu(&app);
+        let synced = app.menu_syncs;
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.menu_syncs, synced, "a tick after {what}");
+    }
+    assert_eq!(board_menu(&app), ["note.new_board"]);
 }

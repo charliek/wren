@@ -25,6 +25,32 @@ pub struct Preview {
     pub font: Option<&'static str>,
 }
 
+/// What the Board menu items were last enabled from; see `App::sync_menu`.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuInputs {
+    state: MenuState,
+    /// The open board's selection, which changes with neither its epoch
+    /// nor its revision.
+    selection: Option<std::collections::BTreeSet<wren_board::scene::Source>>,
+}
+
+/// Everything else the Board menu's enabling reads: the board by its epoch
+/// (a reload or another board) and its revision (an edit).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuState {
+    loading: bool,
+    boards: bool,
+    session: bool,
+    group: bool,
+    surface: Surface,
+    export: bool,
+    board: Option<(u64, u64)>,
+    writable: bool,
+    typing: bool,
+}
+
 /// Settings plus the derived keymap and the file they came from.
 pub struct Preferences {
     pub settings: Settings,
@@ -674,6 +700,8 @@ impl App {
     pub(super) fn install_menu(&mut self) {
         let installed =
             crate::macos_menu::install(&self.preferences.keymap, self.preferences.boards);
+        // The new items start enabled, whatever the last sync set.
+        self.menu_inputs = None;
         if let Err(error) = installed {
             self.banner = Some(format!("Could not build the menu bar: {error}"));
             self.banner_kind = workspace::WarningKind::General;
@@ -702,9 +730,9 @@ impl App {
 
     /// Whether the menu item for a command key is enabled: exactly when its
     /// command would run, except that a board command is greyed while the
-    /// board takes text. It is asked after every message on macOS, so the
-    /// align items, and the distribute items, which each share one rule
-    /// (§5.16 rule 3), count a large selection once between them.
+    /// board takes text. The align items, and the distribute items, which
+    /// each share one rule (§5.16 rule 3), count a large selection once
+    /// between them.
     #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
     pub(super) fn menu_enabled(&self) -> impl FnMut(&str) -> bool + '_ {
         use wren_canvas::Command as C;
@@ -723,6 +751,71 @@ impl App {
             };
             *shared.get_or_insert_with(|| self.command_enabled(id))
         }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn menu_state(&self) -> MenuState {
+        MenuState {
+            loading: self.loading.is_some(),
+            boards: self.preferences.boards,
+            session: self.session.is_some(),
+            group: self.selected_group.is_some(),
+            surface: self.surface(),
+            export: self.board_export.is_some(),
+            board: self
+                .board
+                .as_ref()
+                .map(|view| (view.epoch(), self.board_revision)),
+            writable: self
+                .board
+                .as_ref()
+                .is_some_and(wren_canvas::BoardView::writable),
+            typing: self.board_typing(),
+        }
+    }
+
+    /// Whether the Board menu's items were last enabled from what the app
+    /// holds now. The selection is compared where it lies, not copied.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn menu_current(&self) -> bool {
+        self.menu_inputs.as_ref().is_some_and(|inputs| {
+            inputs.state == self.menu_state()
+                && inputs.selection.as_ref()
+                    == self.board.as_ref().map(|view| view.machine().selection())
+        })
+    }
+
+    /// Bring the Board menu's items up to date, after every message. They
+    /// are worked out again only when something they read has changed, so
+    /// the autosave tick and a pointer passing over the board cost a
+    /// compare, not a count of the selection.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn sync_menu(&mut self) {
+        if self.menu_current() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        crate::macos_menu::sync_board(self.menu_enabled());
+        #[cfg(test)]
+        {
+            let board = crate::menu::MENUS
+                .iter()
+                .find(|menu| menu.kind == crate::menu::Kind::Board)
+                .map_or_else(Vec::new, |menu| crate::menu::commands(menu.rows));
+            let synced = {
+                let mut enabled = self.menu_enabled();
+                board.iter().map(|(key, _)| (*key, enabled(key))).collect()
+            };
+            self.menu_synced = synced;
+            self.menu_syncs += 1;
+        }
+        self.menu_inputs = Some(MenuInputs {
+            state: self.menu_state(),
+            selection: self
+                .board
+                .as_ref()
+                .map(|view| view.machine().selection().clone()),
+        });
     }
 
     /// Run a command chosen from the native menu bar, with the same rules
