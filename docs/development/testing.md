@@ -83,7 +83,7 @@ smoke lanes.
 
 ### Boards
 
-Boards are behind the `boards` setting, which is off by default. The board
+Boards are behind the `boards` setting, which is on by default. The board
 cases live in `tools/wrentest/test_board_*.py` and set the setting
 themselves; `tools/wrentest/boards.py` holds their helpers. Each copies the
 sample workspace, `tools/wrentest/fixtures/boards/workspace/`, before opening
@@ -97,6 +97,7 @@ never committed, and large boards come from `grid_board(n)`.
 | `test_board_gate.py` | The setting off, a board never written by looking at it, the hidden editor never writing a board, and the state file's board paths. |
 | `test_board_native.py` | Real wheel, Ctrl+wheel and middle-button input under X11 (`native_x11`). |
 | `test_board_perf.py` | Timings against debug ceilings, written to `measurements.json` beside the case's artifacts, and an idle second with no parse, scene build or geometry build. |
+| `test_board_menu.py` | The macOS menu bar's rows, shortcuts and enabling through `menu.get` and `menu.run`, on every platform. |
 
 Run them alone with a path glob (`-k board` would also pick every keyboard
 and clipboard case):
@@ -143,6 +144,17 @@ The board requests:
 
 Every board request but `board.get` fails when the open note is not shown
 as a board.
+
+`menu.get` reports the macOS menu bar as its table builds it with the
+setting the app runs with: each menu's `title`, `kind` (`plain`, `board` or
+`window`) and `items`. A command item has its `key`, `title`, the `trigger`
+a Mac would show for this keymap and whether it is `enabled`; AppKit's own
+rows are `{"native": name}`, separators `{"separator": true}` and submenus
+`{"submenu": title, "items": [...]}`. The reply's top-level `native` lists
+each Board item's key and whether AppKit holds it enabled on macOS, and is
+`null` elsewhere. `menu.run` `{"key": "board.duplicate"}` sends an item's
+key back as choosing it does. Both work on every platform, so the Board
+menu's enabling and the path an item takes are tested on Linux too.
 
 `test.clipboard` `{"own": true}` gives the app a clipboard of its own, which
 `clipboard.write`, `clipboard.read` and the board's copy, cut and paste then
