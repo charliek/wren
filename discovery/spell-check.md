@@ -535,6 +535,19 @@ Deviations:
 
 #### `spell-core`
 
+*C1 and C2.* Where §4.2 or §3.2 left a case open, this is what `wren-spell` does:
+
+1. *The empty word is not accepted.* `spellbook` counts `""` as correct; `Hunspell::accepts` does not, so no source vouches for nothing.
+2. *A run joins, not only a single character* (rule 4.2.1): a chunk is skipped when a run of `_`, `*` or `~` has a letter or digit directly on both sides, so `strong**wrod**ish` is skipped like `un*believ*able`. Read character by character, a doubled delimiter would never count.
+3. *A word cut by a prose range is not checked.* A candidate word that starts where its prose range starts with a letter or digit just before it in the line, or ends where the range ends with one just after it, is a piece of a longer word of the line, so it is skipped rather than marked (`marks` promises "words of `line`"). The editor's ranges never cut a word (rule 4.1.4), so this only guards against a bad caller.
+4. *Bad prose ranges are tolerated, not trusted.* Each is clamped to the line and shrunk to character boundaries; a range that starts before the end of an earlier one keeps only its part after it, so one out of order is dropped. The marks stay sorted, apart (a gap between any two) and inside the ranges given for any input; the seeded test passes ranges that are unsorted, overlapping, reversed, past the end and inside characters.
+5. *`_` belongs to a UAX #29 word* (it is `ExtendNumLet`), so with the delimiter in prose `_word_` or `trailing_` is one candidate that rule 4.2.4 never checks. Matched emphasis delimiters are not prose (exclusion 5), so the editor's `_word_` is still checked as `word`.
+6. *"Every cased one upper case"* is read as "upper-cases to itself": a title-case letter such as `ǅ` is not upper case. A word written with a combining mark (`cafe` plus U+0301) is never checked, since the mark is not a letter at or below U+024F.
+7. *The acceptance note needs no change*: with the bundled 2026.02.25 release its marks are exactly the nine words, in order (`speller::tests::the_acceptance_note_has_exactly_its_nine_marks`, with the editor's prose ranges given by hand).
+8. `Speller::suggestions` is still the stub (C4). The seeded test already calls it on a sample of its marks.
+
+Measured while trying to break it, in a debug test build (`spellbook` at the workspace's `opt-level = 2` for dependencies): the slowest of 200,000 random 2 to 40 character checks took 39 µs, far under the 50 ms the brief names; no input panicked.
+
 #### `spell-marks`
 
 #### `spell-menu`
