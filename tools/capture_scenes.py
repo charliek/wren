@@ -317,6 +317,16 @@ def board_scenes(client, shot_here, out: Path) -> None:
     shot_here("board-new-dialog")
     client.call("dialog.close")
     board_edit_scenes(client, shot_here, open_board)
+    board_arrange_scenes(client, shot_here, open_board)
+    board_style_scenes(client, shot_here)
+    # Jump to node (§5.18): the palette beside the flow, fitted, and the
+    # highlighted node selected and centred behind it. Last, so the view it
+    # leaves moves no other scene.
+    open_board("Checkout flow", fit=True)
+    client.call("command.run", {"id": "board.jump"})
+    client.call("palette.query", {"query": "pay"})
+    shot_here("board-jump")
+    client.call("palette.close")
     client.call("column.open", {"column": "sections"})
 
 
@@ -449,6 +459,84 @@ def board_edit_scenes(client, shot_here, open_board) -> None:
             client.call("board.type", {"text": step[1]})
     client.call("command.run", {"id": "board.zoom.fit"})
     shot_here("board-built")
+
+
+def board_arrange_scenes(client, shot_here, open_board) -> None:
+    """discovery/boards.md §6.3, Phase 3: the stacking order changed. The
+    shape at the back of Overlap, picked where no other covers it, is
+    brought to the front, over the other two, and the selection cleared."""
+    open_board("Overlap", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "left", "mods": [],
+                                  "at": {"canvas": [20, 10]}})
+    client.call("board.key", {"key": "]", "mods": []})
+    client.call("board.key", {"key": "escape", "mods": []})
+    shot_here("board-stacking")
+
+    # §5.17: a right-click on Pack opens the actions palette on its shape,
+    # the current value; the highlight moved to blue previews it on the
+    # board, which nothing has written.
+    open_board("Checkout flow", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "right", "mods": [],
+                                  "at": {"node": "3qrg4kv1"}})
+    modal = client.call("navigation.get")["modal"]
+    keys = [row["key"]["command"] for row in modal["results"]]
+    client.call("palette.step",
+                {"delta": keys.index("board.color.blue") - modal["active_index"]})
+    shot_here("board-actions")
+    client.call("palette.close")
+
+
+# The colour tokens in the order of their keys, 0 to 7.
+BOARD_COLORS = ("neutral", "red", "orange", "yellow", "green", "cyan", "purple", "blue")
+
+
+def board_style_scenes(client, shot_here) -> None:
+    """discovery/boards.md §6.3, Phase 3 styling: every colour at every
+    fill level, set through the digit keys and the fill commands on a new
+    board. A column per colour: a shape with each fill, then a text node,
+    and a labelled connector from the unfilled shape to it."""
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Colours"})
+    client.call("dialog.submit")
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    fills = ("tint", "solid", "none")
+    edits = []
+    for column, color in enumerate(BOARD_COLORS):
+        x = column * 140
+        for row, fill in enumerate(fills):
+            edits.append({"op": "add_node", "id": f"{fill}-{color}", "kind": "shape",
+                          "shape": "rounded", "at": [x, row * 100], "size": [120, 60],
+                          "text": f"{color.capitalize()}\n{fill}"})
+        edits.append({"op": "add_node", "id": f"text-{color}", "kind": "text",
+                      "at": [x, 420], "size": [120, 20], "text": f"{color.capitalize()} text"})
+        edits.append({"op": "connect", "id": f"edge-{color}", "from": {"node": f"none-{color}"},
+                      "to": {"node": f"text-{color}"}})
+    client.call("board.apply", {"edits": edits})
+    client.call("board.apply", {"edits": [
+        {"op": "set", "id": f"edge-{color}", "field": "text", "value": "yes"}
+        for color in BOARD_COLORS]})
+
+    def pick(ids: list[str]) -> None:
+        def at(id_: str) -> dict:
+            return {"edge": id_} if id_.startswith("edge-") else {"node": id_}
+
+        for index, id_ in enumerate(ids):
+            client.call("board.pointer", {"kind": "click", "at": at(id_), "button": "left",
+                                          "mods": [] if index == 0 else ["shift"]})
+
+    client.call("command.run", {"id": "board.zoom.fit"})
+    for digit, color in enumerate(BOARD_COLORS):
+        pick([f"{fill}-{color}" for fill in fills] + [f"text-{color}", f"edge-{color}"])
+        client.call("board.key", {"key": str(digit), "mods": []})
+    for fill in fills[1:]:
+        pick([f"{fill}-{color}" for color in BOARD_COLORS])
+        client.call("command.run", {"id": f"board.fill.{fill}"})
+    client.call("command.run", {"id": "board.select.none"})
+    client.call("command.run", {"id": "board.zoom.fit"})
+    # An unfocused board draws no cursor ring (§5.3 rule 7).
+    client.call("column.open", {"column": "notes"})
+    shot_here("board-colors")
 
 
 def main() -> int:

@@ -156,6 +156,7 @@ impl App {
             "pristine": true,
             "revision": null,
             "counts": null,
+            "patch": null,
         });
         let Some(view) = &self.board else {
             return snapshot;
@@ -190,6 +191,7 @@ impl App {
             "pristine": view.pristine(),
             "revision": self.board_revision,
             "counts": {"nodes": board.nodes.len(), "edges": board.edges.len()},
+            "patch": view.patch().map(wren_canvas::Command::key),
         });
         merge(&mut snapshot, fields);
         if elements {
@@ -447,7 +449,9 @@ impl App {
             .into_iter()
             .map(|input| self.board_edit(wren_canvas::Message::Input(epoch, input)))
             .collect();
-        if pressed.is_some() {
+        // A right press that opened the actions palette left the keyboard
+        // in its input.
+        if pressed.is_some() && self.palette.is_none() {
             tasks.push(focus_editor());
         }
         Ok(Task::batch(tasks))

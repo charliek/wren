@@ -262,7 +262,16 @@ fn step(rng: &mut Rng) -> [i32; 2] {
 fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
     let dirs = [Dir::Left, Dir::Right, Dir::Up, Dir::Down];
     let ends = [EdgeEnd::From, EdgeEnd::To];
-    match rng.below(14) {
+    let stacks = [Stack::Front, Stack::Back, Stack::Forward, Stack::Backward];
+    let alignments = [
+        Alignment::Left,
+        Alignment::Center,
+        Alignment::Right,
+        Alignment::Top,
+        Alignment::Middle,
+        Alignment::Bottom,
+    ];
+    match rng.below(17) {
         0 => Intent::AddNode {
             kind: if rng.one_in(3) {
                 NodeKind::Text
@@ -328,6 +337,14 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             end: *rng.pick(&ends),
             to: endpoint(board, rng),
         },
+        10 if rng.one_in(2) => Intent::SetStyle {
+            ids: picked(board, rng),
+            field: match rng.below(3) {
+                0 => StyleField::Color(*rng.pick(Token::ALL)),
+                1 => StyleField::Fill(*rng.pick(Fill::ALL)),
+                _ => StyleField::Stroke(*rng.pick(Dash::ALL)),
+            },
+        },
         10 => Intent::SetEdge {
             ids: chosen(board, rng),
             field: match rng.below(3) {
@@ -343,6 +360,18 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             id: edge_id(board, rng),
             text: (*rng.pick(TEXTS)).to_owned(),
             commit: rng.one_in(2),
+        },
+        13 => Intent::Restack {
+            ids: picked(board, rng),
+            to: *rng.pick(&stacks),
+        },
+        14 => Intent::Align {
+            ids: chosen(board, rng),
+            to: *rng.pick(&alignments),
+        },
+        15 => Intent::Distribute {
+            ids: chosen(board, rng),
+            axis: *rng.pick(&[Axis::Horizontal, Axis::Vertical]),
         },
         _ => Intent::Extend {
             from: node_id(board, rng),

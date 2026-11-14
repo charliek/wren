@@ -176,6 +176,51 @@ fn a_board_key_is_one_draft_through_dispatch() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW);
 }
 
+/// §5.16 rule 1 through the app: a colour or fill key is one draft of
+/// one line per element, a value already held or nothing selected sends no
+/// draft, and undo drafts the opening bytes again.
+#[test]
+fn a_colour_or_fill_key_is_one_draft_and_a_value_already_held_none() {
+    use wren_board::{Fill, Token};
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+
+    assert_eq!(key(&mut app, C::Color(Token::Red)), Disposition::Completed);
+    assert_eq!(app.board_revision, 0, "nothing selected, no draft");
+    click(&mut app, "pack");
+    assert_eq!(key(&mut app, C::Color(Token::Red)), Disposition::Completed);
+    assert_eq!(app.board_revision, 1);
+    let red = session_text(&app);
+    assert_eq!(
+        line_diff(FLOW, &red),
+        (vec![], vec!["style.color = \"red\""])
+    );
+    assert!(dirty(&app));
+    assert_eq!(key(&mut app, C::Color(Token::Red)), Disposition::Completed);
+    assert_eq!(app.board_revision, 1, "already red, no draft");
+
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    assert_eq!(
+        run(&mut app, C::Fill(Fill::Solid)),
+        (Disposition::Completed, 0)
+    );
+    assert_eq!(app.board_revision, 2);
+    let solid = session_text(&app);
+    assert_eq!(
+        line_diff(&red, &solid),
+        (vec![], vec!["style.fill = \"solid\""; 2]),
+        "the two shapes, and not the connector"
+    );
+
+    for text in [red.as_str(), FLOW] {
+        assert_eq!(key(&mut app, C::Undo), Disposition::Completed);
+        assert_eq!(session_text(&app), text);
+    }
+    assert_eq!(app.board_revision, 4);
+    assert_in_step(&app, Surface::Board);
+}
+
 #[test]
 fn a_hand_written_board_is_rewritten_only_by_an_edit_that_survives() {
     let (directory, mut app) = fixture();
@@ -1206,5 +1251,230 @@ fn a_command_that_did_nothing_says_why() {
     let did = app.board_did(notice);
     assert_eq!(did.notice.as_deref(), Some("No room."));
     assert_eq!(app.banner.as_deref(), Some("No room."));
+    assert_eq!(app.board_revision, 0);
+}
+
+/// The command keys of the open palette's rows, and which is highlighted.
+fn palette_rows(app: &App) -> (Vec<&'static str>, Option<&'static str>) {
+    use super::palette::Key;
+    let palette = app.palette.as_ref().expect("a palette is open");
+    let key = |key: &Key| match key {
+        Key::Command(id) => id.key(),
+        _ => "",
+    };
+    let keys = palette.results.iter().map(|row| key(&row.key)).collect();
+    let active = palette.active.map(|index| key(&palette.results[index].key));
+    (keys, active)
+}
+
+fn actions_open(app: &App) -> bool {
+    app.palette
+        .as_ref()
+        .is_some_and(|palette| palette.mode == super::palette::Mode::BoardActions)
+}
+
+/// A right press at the middle of the node `name`, as the widget sends it.
+fn right_click(app: &mut App, name: &str) {
+    let at = middle(app, name);
+    let button = Button::Right;
+    input(app, Input::Press { button, at });
+    input(app, Input::Release { button });
+}
+
+/// §5.17 rules 1 to 3 through the app: `/` and a right-click open the
+/// actions palette on the selection, which lists the commands the board
+/// takes for it, opens on the current value, and with nothing selected
+/// offers paste, select all, zoom to fit and export.
+#[test]
+fn the_actions_palette_lists_what_the_selection_takes() {
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+
+    assert_eq!(key(&mut app, C::Actions), Disposition::Completed);
+    assert!(actions_open(&app));
+    assert_eq!(
+        palette_rows(&app),
+        (
+            vec![
+                "board.paste",
+                "board.select.all",
+                "board.zoom.fit",
+                "note.export_svg"
+            ],
+            Some("board.paste")
+        )
+    );
+    let _ = app.update(Message::Escape);
+    assert!(app.palette.is_none());
+
+    // A right-click on a node selects it alone and opens the palette on
+    // its shape, the first current value.
+    right_click(&mut app, "pack");
+    assert!(actions_open(&app));
+    assert_eq!(selected(&app), ["pack"]);
+    let (rows, active) = palette_rows(&app);
+    assert_eq!(active, Some("board.shape.rectangle"));
+    assert!(rows.contains(&"board.color.red") && rows.contains(&"board.fill.solid"));
+    assert!(!rows.iter().any(|key| key.starts_with("board.edge.")));
+    assert!(!rows.contains(&"board.paste") && !rows.contains(&"board.align.left"));
+    let current: Vec<&str> = {
+        let palette = app.palette.as_ref().unwrap();
+        let current = palette.results.iter().filter(|row| row.current);
+        current
+            .map(|row| match &row.key {
+                super::palette::Key::Command(id) => id.key(),
+                _ => "",
+            })
+            .collect()
+    };
+    assert_eq!(
+        current,
+        [
+            "board.shape.rectangle",
+            "board.color.neutral",
+            "board.fill.tint"
+        ]
+    );
+    // Opening previews nothing; only a highlight move does.
+    assert_eq!(view(&app).patch(), None);
+    let _ = app.update(Message::Escape);
+
+    // Select all: both shapes and the connector.
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    assert_eq!(key(&mut app, C::Actions), Disposition::Completed);
+    let (rows, _) = palette_rows(&app);
+    assert!(rows.contains(&"board.edge.routing") && rows.contains(&"board.align.left"));
+    assert!(!rows.contains(&"board.distribute.horizontal"));
+    assert!(!rows.contains(&"board.label.edit"));
+    // A typed `/` or `]` is the query's, not a command.
+    let _ = app.update(Message::PaletteQuery("]/".into()));
+    assert!(actions_open(&app));
+    assert_eq!((app.board_revision, session_text(&app).as_str()), (0, FLOW));
+}
+
+/// The ways out of the actions palette while a row is previewed.
+const PREVIEW_LEAVES: [Leave; 5] = [
+    ("escape", |app| {
+        let _ = app.update(Message::Escape);
+    }),
+    ("another note", |app| {
+        open_markdown(app, "Note");
+    }),
+    ("the window losing focus", |app| {
+        app.window_unfocused().unwrap();
+    }),
+    ("quitting", |app| {
+        let _ = app.dispatch(Command::Run(CommandId::Quit));
+    }),
+    ("a theme change and escape", |app| {
+        let _ = app.update(Message::SystemTheme(iced::theme::Mode::Light));
+        let _ = app.update(Message::Escape);
+    }),
+];
+
+/// §5.17 rule 4 through the app: a highlighted style row is drawn on the
+/// board and is never the model, a draft or a write. Leaving the palette
+/// any way but Enter writes nothing and leaves the document clean; Enter
+/// writes exactly the one changed line as one undo step.
+#[test]
+fn a_previewed_style_reaches_the_file_only_by_enter() {
+    use wren_board::Token;
+    let red = C::Color(Token::Red);
+    for (name, leave) in PREVIEW_LEAVES {
+        let (directory, mut app) = fixture();
+        let path = file(&directory, "Flow.wren-board");
+        let saved = modified(&path);
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        click(&mut app, "pack");
+        assert_eq!(key(&mut app, C::Actions), Disposition::Completed, "{name}");
+        let _ = app.update(Message::PaletteQuery("colour: red".into()));
+        assert_eq!(palette_rows(&app).1, Some("board.color.red"), "{name}");
+        assert_eq!(view(&app).patch(), Some(red), "{name}");
+        assert_ne!(view(&app).shown(), view(&app).scene(), "{name}");
+        // The autosave tick sees nothing to write.
+        tick_to(&mut app, 2);
+        assert_eq!(view(&app).patch(), Some(red), "{name}");
+        assert!(!dirty(&app), "{name}");
+
+        leave(&mut app);
+        let _ = app.update(Message::Tick);
+        assert!(
+            !actions_open(&app) || name == "the window losing focus",
+            "{name}"
+        );
+        if let Some(view) = &app.board {
+            assert_eq!(view.patch(), None, "{name}");
+            assert_eq!(view.shown(), view.scene(), "{name}");
+            assert!(!view.can_undo(), "{name}");
+        }
+        tick_to(&mut app, 4);
+        assert_eq!(app.board_revision, 0, "{name}");
+        assert!(!dirty(&app), "{name}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW, "{name}");
+        assert_eq!(modified(&path), saved, "{name}");
+    }
+
+    // Enter applies the board the preview showed, as one step.
+    let (directory, mut app) = fixture();
+    let path = file(&directory, "Flow.wren-board");
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    assert_eq!(key(&mut app, C::Actions), Disposition::Completed);
+    let _ = app.update(Message::PaletteQuery("colour: red".into()));
+    let shown = view(&app).shown().clone();
+    let _ = app.update(Message::Key(crate::keys::Input::Nav(
+        crate::keys::Nav::Enter,
+    )));
+    assert!(app.palette.is_none());
+    assert_eq!(app.column, Column::Editor);
+    assert_eq!(view(&app).scene(), &shown);
+    assert_eq!(view(&app).patch(), None);
+    assert_eq!(app.board_revision, 1);
+    tick_to(&mut app, 2);
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        line_diff(FLOW, &on_disk),
+        (vec![], vec!["style.color = \"red\""])
+    );
+    assert_eq!(key(&mut app, C::Undo), Disposition::Completed);
+    assert_eq!(session_text(&app), FLOW);
+}
+
+/// A settle while the palette stays open drops the preview, which comes
+/// back only when the highlight moves again; the palette closes when its
+/// board is no longer the open note.
+#[test]
+fn a_settle_drops_the_preview_until_the_highlight_moves() {
+    use crate::keys::{Input as Keyed, Nav};
+    use wren_board::Token;
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    assert_eq!(key(&mut app, C::Actions), Disposition::Completed);
+    let _ = app.update(Message::PaletteQuery("colour".into()));
+    assert_eq!(palette_rows(&app).1, Some("board.color.neutral"));
+    // The current colour previews nothing.
+    assert_eq!(view(&app).patch(), None);
+    let _ = app.update(Message::Key(Keyed::Nav(Nav::Down)));
+    assert_eq!(view(&app).patch(), Some(C::Color(Token::Red)));
+    app.window_unfocused().unwrap();
+    let _ = app.update(Message::Tick);
+    assert!(actions_open(&app));
+    assert_eq!(view(&app).patch(), None);
+    let _ = app.update(Message::Key(Keyed::Nav(Nav::Down)));
+    assert_eq!(view(&app).patch(), Some(C::Color(Token::Orange)));
+    // An arrange row previews nothing.
+    let _ = app.update(Message::PaletteQuery("bring to front".into()));
+    assert_eq!(palette_rows(&app).1, Some("board.arrange.front"));
+    assert_eq!(view(&app).patch(), None);
+    assert_eq!(view(&app).shown(), view(&app).scene());
+    // Another note closes the palette.
+    open_markdown(&mut app, "Note");
+    let _ = app.update(Message::Tick);
+    assert!(app.palette.is_none());
     assert_eq!(app.board_revision, 0);
 }

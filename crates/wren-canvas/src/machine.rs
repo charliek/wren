@@ -890,12 +890,13 @@ impl Machine {
         }
         self.commit(acts);
         if button == Button::Right {
-            // §5.17 rule 2; in Phase 2 a right-click does nothing more.
+            // §5.17 rule 2: the selection the actions palette acts on.
             match hit.element() {
                 Some(element) if self.selection.contains(&element) => {}
                 Some(element) => self.select_only(element),
                 None => self.selection.clear(),
             }
+            acts.push(Act::Run(Command::Actions));
             return;
         }
         let on = match (self.tool, hit) {
@@ -3307,14 +3308,15 @@ z = "F"
     }
 
     #[test]
-    fn a_right_click_selects_what_is_not_selected() {
+    fn a_right_click_selects_what_is_not_selected_and_asks_for_the_actions() {
+        let actions = [Act::Run(Command::Actions)];
         let mut rig = Rig::new();
         rig.click(A);
         rig.step(shift());
         rig.click(B);
         rig.step(plain());
-        // On a selected element the selection stays.
-        assert!(rig.press_with(Button::Right, A).is_empty());
+        // On a selected element the selection stays (§5.17 rule 2).
+        assert_eq!(rig.press_with(Button::Right, A), actions);
         assert_eq!(rig.selected(), ["a", "b"]);
         assert_eq!(rig.state(), State::Idle);
         let release = Input::Release {
@@ -3322,16 +3324,16 @@ z = "F"
         };
         assert!(rig.step(release).is_empty());
         // On another, that one alone.
-        rig.press_with(Button::Right, OFF);
+        assert_eq!(rig.press_with(Button::Right, OFF), actions);
         assert_eq!((rig.selected(), rig.cursor()), (vec!["off"], Some("off")));
-        rig.press_with(Button::Right, E);
+        assert_eq!(rig.press_with(Button::Right, E), actions);
         assert_eq!((rig.selected(), rig.cursor()), (vec!["e"], Some("e")));
         // On empty canvas, nothing; the cursor stays.
-        rig.press_with(Button::Right, CANVAS);
+        assert_eq!(rig.press_with(Button::Right, CANVAS), actions);
         assert_eq!((rig.selected(), rig.cursor()), (vec![], Some("e")));
         // With a tool armed it still selects and makes nothing.
         rig.run(Command::Tool(DIAMOND));
-        assert!(rig.press_with(Button::Right, A).is_empty());
+        assert_eq!(rig.press_with(Button::Right, A), actions);
         assert_eq!(rig.selected(), ["a"]);
         assert_eq!(rig.machine.tool(), DIAMOND);
     }
@@ -5230,8 +5232,12 @@ to = { node = "gone" }
         assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("b")));
         assert!(rig.press_with(Button::Right, B).is_empty());
         assert_eq!(rig.state(), State::Editing);
-        // A right press elsewhere commits and selects.
-        assert_eq!(rig.press_with(Button::Right, A), [Act::CommitLabel]);
+        // A right press elsewhere commits and selects, then asks for the
+        // actions.
+        assert_eq!(
+            rig.press_with(Button::Right, A),
+            [Act::CommitLabel, Act::Run(Command::Actions)]
+        );
         assert_eq!((rig.selected(), rig.state()), (vec!["a"], State::Idle));
         // Losing the keyboard commits; a cancelled pointer does not.
         rig.run(Command::EditLabel);

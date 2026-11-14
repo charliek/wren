@@ -55,6 +55,9 @@ WGPU = RENDERER == "wgpu"
 DRAG = {"grid": EDIT, ROUTED[0]: 92 if WGPU else 68, ROUTED[1]: 47 if WGPU else 36,
         ROUTED[2]: 38 if WGPU else 22}
 TYPED = {"grid": 20 if WGPU else 12, ROUTED[0]: EDIT, ROUTED[1]: EDIT, ROUTED[2]: EDIT}
+# One actions-palette preview step at 1,000 selected shapes, release only:
+# §6.7's Phase 3 row.
+ACTIONS = 16
 
 # Whole-scene changes left out before the timed ones, and those timed.
 WARM = 3
@@ -218,6 +221,31 @@ def test_board_timings_stay_under_their_ceilings(workspace: Path) -> None:
             app.client.call("board.key", {"key": "escape"})
             if RELEASE:
                 assert median_ms(keys["draft_micros"]) <= KEYSTROKE, measured["keystroke"]
+
+            # One step of the actions palette's preview with every shape
+            # selected (§5.17 rule 4): each colour row highlighted draws the
+            # whole selection recoloured, from a copy of the board, in the
+            # spare scene cache. Nothing is written.
+            assert app.client.call("command.run", {"id": "board.select.all"})["disposition"] \
+                == "completed"
+            revision = board(app)["revision"]
+            assert app.client.call("command.run", {"id": "board.actions"})["disposition"] \
+                == "completed"
+            shown = app.client.call("navigation.get")["modal"]
+            assert shown is not None and shown["mode"] == "board_actions", shown
+            rings(app, clear=True)
+            colours = ("red", "orange", "yellow", "green", "cyan", "purple", "blue", "red")
+            for colour in colours:
+                app.client.call("palette.query", {"query": f"colour: {colour}"})
+                assert board(app)["patch"] == f"board.color.{colour}"
+            stepped = rings(app)
+            app.client.call("key.nav", {"key": "escape"})
+            state = board(app)
+            assert state["patch"] is None and state["revision"] == revision, state
+            measured["actions"] = {"scene_micros": stepped["scene_micros"]}
+            assert len(stepped["scene_micros"]) == len(colours), measured["actions"]
+            if RELEASE:
+                assert median_ms(stepped["scene_micros"]) <= ACTIONS, measured["actions"]
 
             # A drag's preview, rebuilt once a pointer move (§3.4 rule 4),
             # and a label keystroke each build the scene from the view's
