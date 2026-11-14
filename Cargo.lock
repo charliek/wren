@@ -4884,6 +4884,7 @@ dependencies = [
  "wren-editor",
  "wren-markdown",
  "wren-sparkle",
+ "wren-spell",
 ]
 
 [[package]]

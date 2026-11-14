@@ -639,6 +639,16 @@ Checked live as well as by the unit tests, on X11 with tiny-skia, through a temp
 
 #### `spell-wire`
 
+*W1, the setting, the dictionary, `words.txt` and the proofreader.* The app side lives in `crates/wren-iced/src/app/spelling.rs`: `Spelling` holds the dictionary (an `Arc<Hunspell>`), the last read of `words.txt` and the proofreader built from the two (a `Speller` over both, behind a local `Proofreader` newtype); `wren-core` gives the setting and `settings::words_path`. Where §3.4 or §4.4 left a case open:
+
+1. *The proofreader is synced after every message* (`App::update`), and after `apply_preferences` and a reload, not only where `markdown_assist` is set: "a note is open for editing" (`ensure_editor_ready`) changes with the note, the workspace and its loading, on many paths. Handing over the same `Arc` keeps an open menu, so syncing is free. The engine is not part of the rule; the editor ignores a proofreader on the classic engine (§3.3).
+2. *The dictionary loads at launch whatever the setting and the engine*, on a thread of its own (`wren-spell`); a `Task::perform` future alone would run on the UI thread until it first waits, as `threaded_load` notes for workspaces.
+3. *A read of `words.txt` made before the launch load arrives* (a focus, say) is newer than the load's and is kept. The load's warnings show when they differ from the warning shown at startup, so a banner shown since then is not replaced by the same text.
+4. *An unreadable `words.txt`* (a directory, invalid UTF-8, over 1 MiB, as `settings::read_text` reads `config.conf`) gives an empty list and the warning `could not read the file: …`; the dictionary keeps working. A missing file is an empty list and no warning.
+5. *The two files' warnings are joined with `; `*, `config.conf`'s first, each after its own path. A reload re-reads `words.txt` before `config.conf`, and returns a warning when either changed.
+6. *A dictionary that fails to load* (it is bundled, so only a broken build) shows `Spell check is unavailable: …` in the banner, and there is no proofreader.
+7. *`App::edit`'s `Spell` arm makes the editor the active column only for `OpenAtCaret`, `OpenAt` and `Accept`.* The widget publishes `Close` for a press outside the editor too, and that press may choose another column; `Move` and `Hover` change nothing about where the keyboard is. `OpenAt` also returns the focus operation for `note-editor` (§7.5 `spell-menu` item 21); the unit test checks that the task exists, and the real-window check (the find field keeping no key) is W4's.
+
 #### The end review
 
 #### The join

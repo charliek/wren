@@ -233,22 +233,42 @@ impl App {
         }
     }
 
-    /// Re-read `config.conf` and apply it. Returns any settings warning.
+    /// Re-read `config.conf` and `words.txt` and apply them. Returns any
+    /// settings warning, or `None` when neither changed.
     ///
     /// An engine switch keeps the editor widget's tree state, and with it
     /// keyboard focus, so nothing is refocused here.
     pub(super) fn reload_settings(&mut self, force: bool) -> Option<String> {
         #[cfg(target_os = "macos")]
         let keymap = self.preferences.keymap.clone();
-        if !self.preferences.reload(force) {
+        let words = self.spelling.reload_words();
+        if self.preferences.reload(force) {
+            self.apply_preferences();
+        } else if words {
+            self.sync_proofreader();
+        } else {
             return None;
         }
-        self.apply_preferences();
         #[cfg(target_os = "macos")]
         if self.window.is_some() && self.preferences.keymap != keymap {
             crate::macos_menu::install(&self.preferences.keymap);
         }
-        let warning = self.preferences.warning();
+        self.show_settings_warning()
+    }
+
+    /// The warnings of `config.conf` and of `words.txt`, each after its path.
+    fn settings_warning(&self) -> Option<String> {
+        let warnings: Vec<String> = [self.preferences.warning(), self.spelling.warning()]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!warnings.is_empty()).then(|| warnings.join("; "))
+    }
+
+    /// Show the settings warning in the banner, or retract the one shown
+    /// before when there is none. Returns the warning.
+    pub(super) fn show_settings_warning(&mut self) -> Option<String> {
+        let warning = self.settings_warning();
         match &warning {
             Some(warning) => {
                 self.banner = Some(warning.clone());
@@ -276,6 +296,7 @@ impl App {
             settings.markdown_assist,
         ));
         self.apply_editor_engine();
+        self.sync_proofreader();
     }
 
     /// Rebuild the editor on the configured engine from the session draft,
@@ -333,8 +354,13 @@ impl App {
         self.sync_outline()
     }
 
+    /// Whether the settings warning differs from the one last shown.
+    pub(super) fn settings_warning_changed(&self) -> bool {
+        self.settings_warning() != self.preferences.shown_warning
+    }
+
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
-        let warning = self.preferences.warning();
+        let warning = self.settings_warning();
         self.preferences.shown_warning = warning.clone();
         warning
     }
