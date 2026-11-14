@@ -539,6 +539,15 @@ impl<'a> TextEditor<'a> {
             Wrapping::WordOrGlyph,
             state.highlighter.borrow_mut().deref_mut(),
         );
+        drop(editor);
+
+        // What the open menu is first laid out with, so that only a change
+        // made while it is open closes it (rule 4.4.8).
+        if self.spell_menu.is_none() {
+            state.menu_look = None;
+        } else if state.menu_look.is_none() {
+            state.menu_look = Some((size, self.look()));
+        }
     }
 
     /// Handle `event` for a widget at `bounds`; [`Widget::update`] without
@@ -553,6 +562,17 @@ impl<'a> TextEditor<'a> {
         shell: &mut Shell<'_, Message>,
     ) {
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)));
+        // A size or look changed since the open menu was laid out closes it
+        // before the event is handled, which then acts as if it had not
+        // been open.
+        if state
+            .menu_look
+            .take_if(|(size, look)| *size != bounds.size() || *look != self.look())
+            .is_some()
+            && self.menu_now.get().is_some()
+        {
+            publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
+        }
         let menu = self.menu_now.get();
         // Whether the open menu closes (rule 4.4.8).
         let mut closing = false;
@@ -735,19 +755,15 @@ impl<'a> TextEditor<'a> {
             }
         }
 
-        let seen = Seen {
-            focused: state.focus.is_some(),
-            size: bounds.size(),
-            look: self.look(),
-        };
-        if let Some(before) = &state.seen {
-            closing |= (before.focused && !seen.focused)
-                || before.size != seen.size
-                || before.look != seen.look;
-        }
-        state.seen = Some(seen);
+        let focused = state.focus.is_some();
+        closing |= state.was_focused && !focused;
+        state.was_focused = focused;
         if closing && self.menu_now.get().is_some() {
             publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
+        }
+        // A menu opened later in this batch is laid out afresh.
+        if self.menu_now.get().is_none() {
+            state.menu_look = None;
         }
 
         let status = {
@@ -917,9 +933,12 @@ struct State {
     advance: Advance,
     /// The open menu's width and rows, and what they were fitted to.
     menu_fit: Option<(FitKey, proof::Fit)>,
-    /// What the last event saw, so a change while the menu is open closes
-    /// it.
-    seen: Option<Seen>,
+    /// Whether the editor had focus after the last event, so losing it
+    /// closes the menu.
+    was_focused: bool,
+    /// The size and look the open menu was first laid out with, so a
+    /// change to them while it is open closes it.
+    menu_look: Option<(Size, Look)>,
     zigzags: RefCell<Zigzags>,
 }
 
@@ -930,14 +949,6 @@ struct FitKey {
     font: Font,
     text_size: u32,
     width: u32,
-}
-
-/// What one event saw of the widget.
-#[derive(Debug, Clone, PartialEq)]
-struct Seen {
-    focused: bool,
-    size: Size,
-    look: Look,
 }
 
 /// What the widget is drawn with: colours, font, text size, gutter and
@@ -995,7 +1006,8 @@ impl State {
             advance: Advance::measure(highlighter_settings.font, TEXT_SIZE),
             highlighter_settings,
             menu_fit: None,
-            seen: None,
+            was_focused: false,
+            menu_look: None,
             zigzags: RefCell::new(Zigzags::default()),
         }
     }
@@ -3429,6 +3441,65 @@ mod tests {
         let (mut editor, mut state) = focused(&content, &proofreader, &menu);
         let (messages, _) = send(&mut editor, &mut state, neutral(), None);
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn a_change_made_before_the_menu_opened_does_not_close_it() {
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let menu = the_menu();
+        let neutral = || moved_to(over(1.0, 0.0));
+        fn changed(editor: TextEditor<'_>) -> TextEditor<'_> {
+            let mut editor = editor.measure(Measure {
+                wrap_column: Some(80),
+                centred: true,
+            });
+            editor.style.misspelling = iced::Color::WHITE;
+            editor.metrics = Metrics::for_size(18.0);
+            editor
+        }
+        let wider = Size::new(BOUNDS.width + 1.0, BOUNDS.height);
+        // The widget's last event saw no menu, then the theme, the text
+        // size and the measure change and the host opens the menu, as the
+        // palette and the harness do, before the widget's next event.
+        let mut editor = spelling(&content, &proofreader, None);
+        let mut state = laid_out_state(&editor);
+        state.focus = Some(Focus::now());
+        assert!(send(&mut editor, &mut state, neutral(), None).0.is_empty());
+        let mut editor = changed(spelling(&content, &proofreader, Some(&menu)));
+        editor.lay_out(&mut state, BOUNDS.size());
+        let (messages, _) = send(&mut editor, &mut state, neutral(), None);
+        assert!(messages.is_empty(), "{messages:?}");
+        // A later change while it is open still closes it.
+        let mut editor = spelling(&content, &proofreader, Some(&menu));
+        editor.lay_out(&mut state, BOUNDS.size());
+        let (messages, _) = send(&mut editor, &mut state, neutral(), None);
+        assert_eq!(spell_events(&messages), [SpellEvent::Close]);
+
+        // The same change, then the suggest key opening the menu itself.
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let policy = suggest_policy();
+        let mut editor = spelling(&content, &proofreader, None).key_policy(Some(&policy));
+        let mut state = laid_out_state(&editor);
+        state.focus = Some(Focus::now());
+        assert!(send(&mut editor, &mut state, neutral(), None).0.is_empty());
+        let mut editor = changed(spelling(&content, &proofreader, None)).key_policy(Some(&policy));
+        editor.lay_out(&mut state, wider);
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        content
+            .0
+            .borrow_mut()
+            .perform(Action::Move(iced::widget::text_editor::Motion::DocumentEnd));
+        editor.on_event(
+            &mut state,
+            &suggest_key(),
+            Rectangle::new(BOUNDS.position(), wider),
+            mouse::Cursor::Unavailable,
+            &mut clipboard::Null,
+            &mut shell,
+        );
+        assert_eq!(spell_events(&messages), [SpellEvent::OpenAtCaret]);
     }
 
     #[test]
