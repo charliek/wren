@@ -2856,6 +2856,8 @@ Run 2c, from `020ab12` (the merge of `boards-p2-preview`) to `27b41e7`, then `db
 
 *Next, by the orchestrating session* (not waiting on the owner): repeat the Mac's Rust tests on the final head, since the schema lock adds tests; tag `boards-p2`, kept local; push `boards` to the public remote (the owner's instruction of 2026-11-12) and report CI's result; write `.claude/board-notes/HANDOFF.md`.
 
+- *2026-11-14:* the Mac's Rust tests were repeated on this record's commit, `a5e7020` (the same Apple-silicon Mac, over ssh): `cargo test --workspace --locked --no-fail-fast` gave 1,804 passed, 0 failed, 21 ignored, three more than at `15db5bf` (the lock's tests). The branch is then tagged `boards-p2` at the commit that adds this line.
+
 *Folded in this run:* §2.4's Phase 2 decision 6, with a reference to it from §5.10 rule 5. Nothing else in §3 to §5 needed it: `boards-p2-endfix` folded its own deviations (§3.2's kinded `clip` and `walk` signatures, §5.10 rules 2 and 5), the schema lock wrote its note and its deviation into §4.17, `214f899` changes only the scene script, and the resize behaviour the Mac showed is a defect carried to Phase 3, not an accepted deviation.
 
 #### boards-p2-endfix
