@@ -1,8 +1,10 @@
-//! Arranging elements: the stacking order (§5.16 rule 2, over §4.7).
+//! Arranging elements: the stacking order (§5.16 rule 2, over §4.7), and
+//! aligning and distributing nodes (rule 3).
 
 use std::collections::BTreeSet;
 
-use super::{Change, Plan, Stack};
+use super::node::carried;
+use super::{saturate, Alignment, Axis, Change, Plan, Stack};
 use crate::scene::Source;
 use crate::z::{self, Element};
 use crate::{placements, Board, Edge, Id, Node};
@@ -193,6 +195,151 @@ fn between(keys: &[Option<&str>], moved: &[bool]) -> Option<Vec<Option<String>>>
         }
     }
     Some(out)
+}
+
+/// A node that align and distribute move: its absolute box.
+struct Subject<'a> {
+    id: &'a Id,
+    at: [i64; 2],
+    size: [i64; 2],
+}
+
+/// The nodes among `ids` that align and distribute move: each named node
+/// that exists and is not drawn inside another of them, which carries it
+/// (§5.16 rule 3), with its absolute box. A size below 1 counts as 1, as
+/// it is drawn.
+fn subjects<'a>(board: &'a Board, ids: &[Id]) -> Vec<Subject<'a>> {
+    let placed = placements(board);
+    let chosen: BTreeSet<&Id> = ids
+        .iter()
+        .filter_map(|id| board.nodes.get_key_value(id).map(|(id, _)| id))
+        .collect();
+    chosen
+        .iter()
+        .filter(|id| !carried(&placed, &chosen, id))
+        .map(|&id| Subject {
+            id,
+            at: placed[id].at,
+            size: board.nodes[id].size.map(|length| i64::from(length.max(1))),
+        })
+        .collect()
+}
+
+/// Puts each node at its new absolute position on one axis, written
+/// relative to the parent it is drawn inside; a node already there is
+/// left out.
+fn placed_at(board: &Board, axis: usize, moves: &[(&Id, i64)]) -> Plan {
+    let placed = placements(board);
+    let mut changes = Vec::new();
+    for &(id, to) in moves {
+        let origin = placed[id]
+            .parent
+            .map_or(0, |parent| placed[parent].at[axis]);
+        let node = &board.nodes[id];
+        let mut at = node.at;
+        at[axis] = saturate(to - origin);
+        if at != node.at {
+            changes.push(Change::PutNode(
+                id.clone(),
+                Box::new(Node { at, ..node.clone() }),
+            ));
+        }
+    }
+    Plan {
+        changes,
+        ..Plan::default()
+    }
+}
+
+/// `n / d` rounded to the nearest integer, half away from zero; `d > 0`.
+fn rounded(n: i128, d: i128) -> i64 {
+    let half_up = (n.abs() * 2 + d) / (2 * d);
+    let value = if n < 0 { -half_up } else { half_up };
+    value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+/// Lines the nodes up on one edge or centre line of their bounding box
+/// (§5.16 rule 3), when at least two move. Positions are not snapped.
+///
+/// A centre or middle cannot always be shared exactly, since a node of odd
+/// width and one of even width have centres half a unit apart. The widest
+/// node goes to the box's centre, rounded half away from zero, and every
+/// other node is centred on it, rounded the same way. Every other node then
+/// lies within the widest one's span, so the box stays that node's and a
+/// second run changes nothing.
+pub(super) fn align(board: &Board, ids: &[Id], to: Alignment) -> Plan {
+    let nodes = subjects(board, ids);
+    if nodes.len() < 2 {
+        return Plan::default();
+    }
+    let axis = match to {
+        Alignment::Left | Alignment::Center | Alignment::Right => 0,
+        Alignment::Top | Alignment::Middle | Alignment::Bottom => 1,
+    };
+    let low = nodes.iter().map(|node| node.at[axis]).min().unwrap_or(0);
+    let high = nodes
+        .iter()
+        .map(|node| node.at[axis] + node.size[axis])
+        .max()
+        .unwrap_or(0);
+    let widest = nodes.iter().map(|node| node.size[axis]).max().unwrap_or(1);
+    let doubled = i128::from(low) + i128::from(high);
+    let start = rounded(doubled - i128::from(widest), 2);
+    let centre = 2 * i128::from(start) + i128::from(widest);
+    let moves: Vec<(&Id, i64)> = nodes
+        .iter()
+        .map(|node| {
+            let to = match to {
+                Alignment::Left | Alignment::Top => low,
+                Alignment::Right | Alignment::Bottom => high - node.size[axis],
+                Alignment::Center | Alignment::Middle => {
+                    rounded(centre - i128::from(node.size[axis]), 2)
+                }
+            };
+            (node.id, to)
+        })
+        .collect();
+    placed_at(board, axis, &moves)
+}
+
+/// Makes the gaps between neighbouring nodes along `axis` equal, the two
+/// outermost staying (§5.16 rule 3), when there are at least three. Nodes
+/// are taken in order of their centres, then their starts, then their ids;
+/// each is placed from the exact fraction, rounded once, half away from
+/// zero, and not snapped. Overlapping nodes give a negative gap.
+pub(super) fn distribute(board: &Board, ids: &[Id], axis: Axis) -> Plan {
+    let mut nodes = subjects(board, ids);
+    if nodes.len() < 3 {
+        return Plan::default();
+    }
+    let axis = match axis {
+        Axis::Horizontal => 0,
+        Axis::Vertical => 1,
+    };
+    nodes.sort_by_key(|node| {
+        let start = node.at[axis];
+        (
+            2 * i128::from(start) + i128::from(node.size[axis]),
+            start,
+            node.id,
+        )
+    });
+    let last = nodes.len() - 1;
+    let first = i128::from(nodes[0].at[axis]);
+    let sizes: i128 = nodes[..last]
+        .iter()
+        .map(|node| i128::from(node.size[axis]))
+        .sum();
+    let free = i128::from(nodes[last].at[axis]) - first - sizes;
+    let gaps = last as i128;
+    let mut before = 0_i128;
+    let mut moves = Vec::with_capacity(last - 1);
+    for (k, node) in nodes.iter().enumerate().take(last).skip(1) {
+        before += i128::from(nodes[k - 1].size[axis]);
+        let exact = (first + before) * gaps + k as i128 * free;
+        moves.push((node.id, rounded(exact, gaps)));
+    }
+    placed_at(board, axis, &moves)
 }
 
 #[cfg(test)]
@@ -696,6 +843,307 @@ z = "Y"
                 let picked: BTreeSet<usize> = (0..count).filter(|_| rng.one_in(3)).collect();
                 let to = *rng.pick(&commands);
                 board = step(&board, &picked, to).0;
+            }
+        }
+    }
+
+    /// Three nodes of different sizes, one with an odd width, a container
+    /// `p` holding `q`, and a connector.
+    const ROW: &str = r#"schema = 1
+
+[node.a]
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V"
+
+[node.b]
+kind = "shape"
+at = [200, 100]
+size = [60, 40]
+z = "W"
+
+[node.c]
+kind = "shape"
+at = [400, 30]
+size = [81, 20]
+z = "X"
+
+[node.p]
+kind = "shape"
+at = [0, 300]
+size = [300, 200]
+z = "Y"
+
+[node.q]
+kind = "shape"
+at = [40, 40]
+parent = "p"
+size = [40, 40]
+z = "V"
+
+[edge.e]
+kind = "edge"
+from = { node = "a" }
+to = { node = "b" }
+z = "Z"
+"#;
+
+    fn ids(names: &[&str]) -> Vec<Id> {
+        names.iter().map(|name| Id::new(name).unwrap()).collect()
+    }
+
+    /// The board after `intent` on `text`, and the plan for the same
+    /// intent run again on it, which must change nothing.
+    fn twice(text: &str, intent: &Intent) -> String {
+        let mut board = parse(text).unwrap();
+        let first = plan(&board, intent, &mut Listed(Vec::new()));
+        board.apply(&first.changes);
+        let again = plan(&board, intent, &mut Listed(Vec::new()));
+        assert!(again.is_empty(), "{intent:?} again: {again:?}");
+        write(&board)
+    }
+
+    /// The `at` of each node `intent` moves, by name, in id order.
+    fn moved(text: &str, intent: &Intent) -> Vec<(String, [i32; 2])> {
+        assert_eq!(
+            write(&parse(text).unwrap()),
+            text,
+            "the fixture is canonical"
+        );
+        let after = twice(text, intent);
+        let (before, board) = (parse(text).unwrap(), parse(&after).unwrap());
+        // Only `at` lines change, one per moved node.
+        let diff = line_diff(text, &after);
+        assert!(
+            diff.iter().all(|line| line[1..].starts_with("at = ")),
+            "{diff:?}"
+        );
+        let out: Vec<(String, [i32; 2])> = board
+            .nodes
+            .iter()
+            .filter(|(id, node)| node.at != before.nodes[*id].at)
+            .map(|(id, node)| (id.as_str().to_owned(), node.at))
+            .collect();
+        assert_eq!(diff.len(), 2 * out.len(), "{diff:?}");
+        out
+    }
+
+    fn at(cases: &[(&str, [i32; 2])]) -> Vec<(String, [i32; 2])> {
+        cases
+            .iter()
+            .map(|(id, at)| ((*id).to_owned(), *at))
+            .collect()
+    }
+
+    #[test]
+    fn align_moves_each_node_to_the_bounding_box() {
+        use Alignment::{Bottom, Center, Left, Middle, Right, Top};
+        let abc = ids(&["a", "b", "c", "e"]);
+        let table = [
+            (Left, at(&[("b", [0, 100]), ("c", [0, 30])])),
+            (Right, at(&[("a", [361, 0]), ("b", [421, 100])])),
+            // The box is 0 to 481; the widest, `a`, goes to its centre,
+            // 180.5 rounded away from zero, and the rest centre on `a`:
+            // `c`, of odd width, at 200.5 rounded.
+            (
+                Center,
+                at(&[("a", [181, 0]), ("b", [211, 100]), ("c", [201, 30])]),
+            ),
+            (Top, at(&[("b", [200, 0]), ("c", [400, 0])])),
+            (Bottom, at(&[("a", [0, 80]), ("c", [400, 120])])),
+            (
+                Middle,
+                at(&[("a", [0, 40]), ("b", [200, 50]), ("c", [400, 60])]),
+            ),
+        ];
+        for (to, expected) in table {
+            let intent = Intent::Align {
+                ids: abc.clone(),
+                to,
+            };
+            assert_eq!(moved(ROW, &intent), expected, "{to:?}");
+        }
+    }
+
+    #[test]
+    fn align_needs_two_nodes_and_moves_an_ancestor_only() {
+        let align = |names: &[&str], to| Intent::Align {
+            ids: ids(names),
+            to,
+        };
+        let board = parse(ROW).unwrap();
+        for intent in [
+            align(&["a"], Alignment::Left),
+            align(&["a", "e", "gone"], Alignment::Right),
+            align(&[], Alignment::Top),
+            // `q` is carried by `p`, which is alone.
+            align(&["p", "q"], Alignment::Right),
+            // Already aligned.
+            align(&["a", "p"], Alignment::Left),
+        ] {
+            let plan = plan(&board, &intent, &mut Listed(Vec::new()));
+            assert!(plan.is_empty(), "{intent:?}");
+        }
+        // A child is placed in absolute units and written relative to its
+        // parent, which stays.
+        assert_eq!(
+            moved(ROW, &align(&["q", "b"], Alignment::Top)),
+            at(&[("q", [40, -200])])
+        );
+        assert_eq!(
+            moved(ROW, &align(&["q", "a"], Alignment::Left)),
+            at(&[("q", [0, 40])])
+        );
+        // With its ancestor selected the child is not moved itself, nor
+        // counted in the box.
+        assert_eq!(
+            moved(ROW, &align(&["p", "q", "c"], Alignment::Right)),
+            at(&[("p", [181, 300])])
+        );
+    }
+
+    #[test]
+    fn distribute_makes_the_gaps_equal_between_the_outermost_two() {
+        let distribute = |names: &[&str], axis| Intent::Distribute {
+            ids: ids(names),
+            axis,
+        };
+        // `a` ends at 120 and `c` starts at 400: gaps of 110 around `b`.
+        assert_eq!(
+            moved(ROW, &distribute(&["a", "b", "c"], Axis::Horizontal)),
+            at(&[("b", [230, 100])])
+        );
+        // By centre the order is `a`, `c`, `b`: gaps of 10.
+        assert_eq!(
+            moved(ROW, &distribute(&["c", "b", "a", "e"], Axis::Vertical)),
+            at(&[("c", [400, 70])])
+        );
+        // `q` goes with `p`, which is one of three: `c` between `a`,
+        // ending at 60, and `p`, starting at 300.
+        assert_eq!(
+            moved(ROW, &distribute(&["a", "p", "q", "c"], Axis::Vertical)),
+            at(&[("c", [400, 170])])
+        );
+        let board = parse(ROW).unwrap();
+        for intent in [
+            distribute(&["a", "b"], Axis::Horizontal),
+            distribute(&["a", "b", "e"], Axis::Vertical),
+            distribute(&["p", "q", "a"], Axis::Horizontal),
+        ] {
+            let plan = plan(&board, &intent, &mut Listed(Vec::new()));
+            assert!(plan.is_empty(), "{intent:?}");
+        }
+    }
+
+    /// Three nodes of `width` at the given starts on the x axis.
+    fn three(starts: [i32; 3], width: i32) -> String {
+        let mut text = String::from("schema = 1\n");
+        for (name, x) in ["n0", "n1", "n2"].iter().zip(starts) {
+            text += &format!(
+                "\n[node.{name}]\nkind = \"shape\"\nat = [{x}, 0]\nsize = [{width}, 20]\nz = \"V\"\n"
+            );
+        }
+        text
+    }
+
+    #[test]
+    fn distribute_rounds_once_away_from_zero_and_takes_overlaps() {
+        let all = Intent::Distribute {
+            ids: ids(&["n0", "n1", "n2"]),
+            axis: Axis::Horizontal,
+        };
+        // Gaps of 10.5: -60.5 and 60.5 round away from zero.
+        assert_eq!(
+            moved(&three([-101, -50, -40], 20), &all),
+            at(&[("n1", [-71, 0])])
+        );
+        assert_eq!(
+            moved(&three([40, 50, 101], 20), &all),
+            at(&[("n1", [71, 0])])
+        );
+        // Overlapping nodes give equal negative gaps.
+        assert_eq!(
+            moved(&three([0, 50, 60], 100), &all),
+            at(&[("n1", [30, 0])])
+        );
+        // All in one place: already equal, at -width.
+        assert!(moved(&three([7, 7, 7], 20), &all).is_empty());
+    }
+
+    /// Random rows of nodes: align is idempotent always, and distribute
+    /// whenever its result keeps the nodes' order, which holds while no
+    /// two neighbours overlap by more than their sizes.
+    #[test]
+    fn random_rows_align_and_distribute_once() {
+        let mut rng = Rng(23);
+        let alignments = [
+            Alignment::Left,
+            Alignment::Center,
+            Alignment::Right,
+            Alignment::Top,
+            Alignment::Middle,
+            Alignment::Bottom,
+        ];
+        for _ in 0..500 {
+            let mut text = String::from("schema = 1\n");
+            let count = 2 + rng.below(6);
+            let mut x = rng.below(400) as i32 - 200;
+            for k in 0..count {
+                let (w, h) = (1 + rng.below(160) as i32, 1 + rng.below(160) as i32);
+                let y = rng.below(600) as i32 - 300;
+                let parent = if k > 0 && rng.one_in(4) {
+                    format!("parent = \"n{}\"\n", k - 1)
+                } else {
+                    String::new()
+                };
+                text += &format!(
+                    "\n[node.n{k}]\nkind = \"shape\"\nat = [{x}, {y}]\n{parent}size = [{w}, {h}]\nz = \"V\"\n"
+                );
+                x += w + rng.below(100) as i32;
+            }
+            let names: Vec<Id> = (0..count)
+                .filter(|_| !rng.one_in(5))
+                .map(|k| Id::new(&format!("n{k}")).unwrap())
+                .collect();
+            let to = *rng.pick(&alignments);
+            twice(
+                &text,
+                &Intent::Align {
+                    ids: names.clone(),
+                    to,
+                },
+            );
+            let board = parse(&text).unwrap();
+            let intent = Intent::Distribute {
+                ids: names,
+                axis: if rng.one_in(2) {
+                    Axis::Horizontal
+                } else {
+                    Axis::Vertical
+                },
+            };
+            let mut after = board.clone();
+            after.apply(&plan(&board, &intent, &mut Listed(Vec::new())).changes);
+            let again = plan(&after, &intent, &mut Listed(Vec::new()));
+            let order = |board: &Board| {
+                let Intent::Distribute { ids, axis } = &intent else {
+                    unreachable!()
+                };
+                let axis = usize::from(*axis == Axis::Vertical);
+                let mut nodes = subjects(board, ids);
+                nodes.sort_by_key(|node| {
+                    let start = node.at[axis];
+                    (
+                        2 * i128::from(start) + i128::from(node.size[axis]),
+                        start,
+                        node.id.clone(),
+                    )
+                });
+                nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>()
+            };
+            if order(&board) == order(&after) {
+                assert!(again.is_empty(), "{intent:?}\n{text}");
             }
         }
     }

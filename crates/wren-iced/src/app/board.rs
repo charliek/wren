@@ -1666,7 +1666,8 @@ z = "c"
         let is_board = |id: CommandId| id.board_command().is_some();
 
         open_board(&mut app, "Flow");
-        // With one node selected every board command is enabled.
+        // With one node selected every board command is enabled but align
+        // and distribute, which need more.
         let _ = app.dispatch(Command::Run(CommandId::Board(
             wren_canvas::Command::Select(wren_board::Dir::Down),
         )));
@@ -1674,7 +1675,11 @@ z = "c"
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
         assert_eq!(listed.len(), 89);
-        assert!(listed.iter().all(|(_, _, enabled)| *enabled));
+        for (_, id, enabled) in &listed {
+            let more =
+                id.key().starts_with("board.align.") || id.key().starts_with("board.distribute.");
+            assert_eq!(*enabled, !more, "{id:?}");
+        }
         let groups: Vec<_> = rows.iter().map(|(group, ..)| *group).collect();
         let board = groups.iter().position(|group| *group == "Board").unwrap();
         assert!(groups[..board].iter().all(|group| *group == "This note"));
@@ -1727,8 +1732,11 @@ z = "c"
                 || key.starts_with("board.connect.") && key != "board.connect.next"
                 || key.starts_with("board.select.connector_")
         };
-        let needs_a_node =
-            |key: &str| matches!(key, "board.copy" | "board.cut" | "board.duplicate");
+        let needs_more =
+            |key: &str| key.starts_with("board.align.") || key.starts_with("board.distribute.");
+        let needs_a_node = |key: &str| {
+            matches!(key, "board.copy" | "board.cut" | "board.duplicate") || needs_more(key)
+        };
         for id in board_ids() {
             let key = id.key();
             assert_eq!(
@@ -1737,16 +1745,21 @@ z = "c"
                 "{key}"
             );
         }
-        // One node selected: every board command.
+        // One node selected: every board command but align and distribute.
         let _ = app.dispatch(walk.clone());
         assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 1);
-        assert!(board_ids().all(|id| app.command_enabled(id)));
-        // Several: the commands for one element are off again.
+        for id in board_ids() {
+            assert_eq!(app.command_enabled(id), !needs_more(id.key()), "{id:?}");
+        }
+        // Both nodes and the connector: the commands for one element are
+        // off again, and align is on; distribute needs a third node.
         let _ = app.dispatch(Command::Run(CommandId::Board(
             wren_canvas::Command::SelectAll,
         )));
         for id in board_ids() {
-            assert_eq!(app.command_enabled(id), !needs_one(id.key()), "{id:?}");
+            let key = id.key();
+            let three = key.starts_with("board.distribute.");
+            assert_eq!(app.command_enabled(id), !needs_one(key) && !three, "{id:?}");
         }
         // One connector: no fragment.
         let _ = app.dispatch(Command::Run(CommandId::Board(

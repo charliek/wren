@@ -1550,6 +1550,14 @@ impl BoardView {
                 let intent = Intent::Restack { ids: picked, to };
                 self.edit(&intent, Unit::One, now, update);
             }
+            Command::Align(to) if editable => {
+                let ids = picked.iter().filter_map(Source::node).cloned().collect();
+                self.edit(&Intent::Align { ids, to }, Unit::One, now, update);
+            }
+            Command::Distribute(axis) if editable => {
+                let ids = picked.iter().filter_map(Source::node).cloned().collect();
+                self.edit(&Intent::Distribute { ids, axis }, Unit::One, now, update);
+            }
             Command::Select(dir) => self.walk(dir, false),
             Command::ExtendSelection(dir) => self.walk(dir, true),
             Command::ZoomFit => self.fit(),
@@ -1967,7 +1975,7 @@ impl Probe {
 
 #[cfg(test)]
 mod tests {
-    use wren_board::edit::Stack;
+    use wren_board::edit::{Alignment, Axis, Stack};
     use wren_board::scene::{Draw, Measure as _};
     use wren_board::{Reason, Rgba, Side};
 
@@ -5521,6 +5529,81 @@ z = "c"
         for to in [Stack::Front, Stack::Back, Stack::Forward, Stack::Backward] {
             assert_eq!(view.command(Command::Arrange(to), now), Update::default());
         }
+    }
+
+    #[test]
+    fn align_and_distribute_move_the_selected_nodes_as_one_step() {
+        // `k` is inside `box`; `e` joins `a` and `c` and follows them.
+        let text = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"a\"\n\n\
+                    [node.box]\nkind = \"shape\"\nat = [300, 200]\nsize = [200, 200]\nz = \"b\"\n\n\
+                    [node.c]\nkind = \"shape\"\nat = [700, 40]\nsize = [60, 60]\nz = \"c\"\n\n\
+                    [node.k]\nkind = \"shape\"\nat = [20, 20]\nparent = \"box\"\nsize = [40, 40]\nz = \"a\"\n\n\
+                    [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"c\" }\nz = \"d\"\n";
+        let mut view = sized(text);
+        let now = Instant::now();
+        let lines = |lines: &[&str]| -> Vec<String> {
+            lines.iter().map(|line| (*line).to_owned()).collect()
+        };
+        // One node: neither has two to line up.
+        click_node(&mut view, "a", now);
+        assert_eq!(
+            view.command(Command::Align(Alignment::Top), now),
+            Update::default()
+        );
+        // Every element: the connector is passed over.
+        view.command(Command::SelectAll, now);
+        assert_eq!(view.command(Command::Align(Alignment::Top), now), CHANGED);
+        assert_eq!(
+            line_diff(text, &view.draft()),
+            (
+                lines(&["at = [300, 0]", "at = [700, 0]"]),
+                lines(&["at = [300, 200]", "at = [700, 40]"])
+            )
+        );
+        // Again: already aligned, nothing and no step.
+        assert_eq!(
+            view.command(Command::Align(Alignment::Top), now),
+            Update::default()
+        );
+        // `k` alone with `c`, under different parents: written relative
+        // to its own, and undone in one step.
+        let picked = BTreeSet::from([pick(&view, "k"), pick(&view, "c")]);
+        view.machine.select(picked, Some(pick(&view, "k")));
+        assert_eq!(view.command(Command::Align(Alignment::Left), now), CHANGED);
+        assert_eq!(view.board().nodes[&id("c")].at, [320, 0]);
+        assert_eq!(view.board().nodes[&id("k")].at, [20, 20]);
+        assert_eq!(view.command(Command::Align(Alignment::Right), now), CHANGED);
+        // The right edges meet at `c`'s, 380: `k` at 340, 40 inside `box`.
+        assert_eq!(view.board().nodes[&id("k")].at, [40, 20]);
+        travel(&mut view, Command::Undo, now);
+        assert_eq!(view.board().nodes[&id("k")].at, [20, 20]);
+        travel(&mut view, Command::Undo, now);
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine() && !view.can_undo());
+        // Distribute: `box` between `a`, ending at 120, and `c`, at 700.
+        view.command(Command::SelectAll, now);
+        assert_eq!(
+            view.command(Command::Distribute(Axis::Horizontal), now),
+            CHANGED
+        );
+        assert_eq!(view.board().nodes[&id("box")].at, [310, 200]);
+        assert_eq!(
+            view.command(Command::Distribute(Axis::Horizontal), now),
+            Update::default()
+        );
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine());
+        // A board that cannot be edited is left as it is.
+        let mut view = sized(&text.replacen("schema = 1", "schema = 2", 1));
+        view.command(Command::SelectAll, now);
+        assert_eq!(
+            view.command(Command::Align(Alignment::Left), now),
+            Update::default()
+        );
+        assert_eq!(
+            view.command(Command::Distribute(Axis::Vertical), now),
+            Update::default()
+        );
     }
 
     #[test]

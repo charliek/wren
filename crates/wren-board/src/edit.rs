@@ -282,9 +282,9 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::SetEdgeLabel { id, text, commit } => connect::set_label(board, id, text, *commit),
         Intent::Extend { from, dir, shape } => connect::extend(board, from, *dir, *shape, ids),
         Intent::Restack { ids: chosen, to } => arrange::restack(board, chosen, *to),
-        Intent::SetStyle { .. } | Intent::Align { .. } | Intent::Distribute { .. } => {
-            Plan::default()
-        }
+        Intent::Align { ids: chosen, to } => arrange::align(board, chosen, *to),
+        Intent::Distribute { ids: chosen, axis } => arrange::distribute(board, chosen, *axis),
+        Intent::SetStyle { .. } => Plan::default(),
     }
 }
 

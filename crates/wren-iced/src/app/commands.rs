@@ -690,20 +690,23 @@ fn board_mutates(command: BoardCommand) -> bool {
 /// takes only what does not change it (§5.2). A command for one element
 /// needs exactly one selected (§5.3 rule 7). Copy, cut and duplicate need
 /// a node selected, since a selection without one has no fragment (§5.10
-/// rule 2).
+/// rule 2). Align needs two nodes and distribute three (§5.16 rule 3).
 fn board_enabled(view: &wren_canvas::BoardView, command: BoardCommand) -> bool {
     use BoardCommand as C;
     if board_mutates(command) && *view.access() != Access::Editable {
         return false;
     }
     let selection = view.machine().selection();
+    let nodes = || {
+        let nodes = &view.board().nodes;
+        let picked = selection.iter().filter_map(wren_board::scene::Source::node);
+        picked.filter(|id| nodes.contains_key(*id)).count()
+    };
     match command {
         C::EditLabel | C::Connect(_) | C::SelectConnector(_) => selection.len() == 1,
-        C::Copy | C::Cut | C::Duplicate => {
-            let nodes = &view.board().nodes;
-            let mut picked = selection.iter().filter_map(wren_board::scene::Source::node);
-            picked.any(|id| nodes.contains_key(id))
-        }
+        C::Copy | C::Cut | C::Duplicate => nodes() >= 1,
+        C::Align(_) => nodes() >= 2,
+        C::Distribute(_) => nodes() >= 3,
         _ => true,
     }
 }

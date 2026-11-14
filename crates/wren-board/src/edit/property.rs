@@ -263,7 +263,15 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
     let dirs = [Dir::Left, Dir::Right, Dir::Up, Dir::Down];
     let ends = [EdgeEnd::From, EdgeEnd::To];
     let stacks = [Stack::Front, Stack::Back, Stack::Forward, Stack::Backward];
-    match rng.below(15) {
+    let alignments = [
+        Alignment::Left,
+        Alignment::Center,
+        Alignment::Right,
+        Alignment::Top,
+        Alignment::Middle,
+        Alignment::Bottom,
+    ];
+    match rng.below(17) {
         0 => Intent::AddNode {
             kind: if rng.one_in(3) {
                 NodeKind::Text
@@ -348,6 +356,14 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
         13 => Intent::Restack {
             ids: picked(board, rng),
             to: *rng.pick(&stacks),
+        },
+        14 => Intent::Align {
+            ids: chosen(board, rng),
+            to: *rng.pick(&alignments),
+        },
+        15 => Intent::Distribute {
+            ids: chosen(board, rng),
+            axis: *rng.pick(&[Axis::Horizontal, Axis::Vertical]),
         },
         _ => Intent::Extend {
             from: node_id(board, rng),
