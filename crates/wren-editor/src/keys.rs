@@ -86,6 +86,8 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         // An editor command never edits the text under an open preedit.
         KeyRoute::Intent(_) if context.composing => return None,
         KeyRoute::Intent(wanted) => return Some(intent(wanted)),
+        // An open menu would close at once: composing closes it.
+        KeyRoute::Suggest if context.composing => return None,
         KeyRoute::Suggest => {
             return Some(Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret)));
         }
@@ -430,6 +432,53 @@ mod tests {
         );
         assert!(unfocused.is_none());
         assert!(!asked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_suggest_route_asks_for_the_menu_at_the_caret_with_or_without_assist() {
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if modifiers == Modifiers::ALT && *key == Key::Character(".".into()) {
+                KeyRoute::Suggest
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        for context in [ASSIST, PLAIN] {
+            let context = Context {
+                policy: Some(&policy),
+                ..context
+            };
+            assert!(matches!(
+                press(
+                    Key::Character(".".into()),
+                    Modifiers::ALT,
+                    Some("."),
+                    context
+                ),
+                Some(Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret)))
+            ));
+            // Any other press of the key types it.
+            assert!(matches!(
+                press(
+                    Key::Character(".".into()),
+                    Modifiers::empty(),
+                    Some("."),
+                    context
+                ),
+                Some(Binding::Insert('.'))
+            ));
+        }
+        let composing = Context {
+            policy: Some(&policy),
+            ..COMPOSING
+        };
+        assert!(press(
+            Key::Character(".".into()),
+            Modifiers::ALT,
+            Some("."),
+            composing
+        )
+        .is_none());
     }
 
     #[test]

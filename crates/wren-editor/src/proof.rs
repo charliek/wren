@@ -46,7 +46,41 @@ pub struct SpellMenu {
     selected: Option<usize>,
 }
 
+/// The most suggestions the menu shows (rule 4.4.2).
+pub(crate) const SUGGESTIONS: usize = 5;
+
 impl SpellMenu {
+    /// A menu for `word`, at `mark` of `line`, offering `items`, the first
+    /// selected.
+    pub(crate) fn new(line: usize, mark: Range<usize>, word: String, items: Vec<String>) -> Self {
+        Self {
+            line,
+            mark,
+            word,
+            selected: (!items.is_empty()).then_some(0),
+            items,
+        }
+    }
+
+    /// Move the selection `delta` rows, stopping at the ends.
+    pub(crate) fn step(&mut self, delta: i32) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let last = self.items.len().saturating_sub(1);
+        let moved = i64::try_from(selected)
+            .unwrap_or(i64::MAX)
+            .saturating_add(i64::from(delta));
+        self.selected = Some(usize::try_from(moved.max(0)).map_or(last, |row| row.min(last)));
+    }
+
+    /// Select `row`, if it holds a suggestion.
+    pub(crate) fn hover(&mut self, row: usize) {
+        if row < self.items.len() {
+            self.selected = Some(row);
+        }
+    }
+
     /// The line that holds the word.
     pub fn line(&self) -> usize {
         self.line
@@ -114,6 +148,14 @@ pub(crate) fn line_marks(
     marks
 }
 
+/// The mark the keyboard opens the menu for (rule 4.4.1): the first that
+/// contains or touches the caret at byte `caret`.
+pub(crate) fn mark_at_caret(marks: Vec<Range<usize>>, caret: usize) -> Option<Range<usize>> {
+    marks
+        .into_iter()
+        .find(|mark| mark.start <= caret && caret <= mark.end)
+}
+
 /// Whether a caret at byte `caret` of `line` hides `mark` (rule 4.3.3): it
 /// sits at the mark's end, or only apostrophes lie between them, so the word
 /// being typed is not flagged before it is finished.
@@ -162,6 +204,36 @@ mod tests {
             line_marks(&proofreader, line, std::slice::from_ref(&prose)),
             [0..3, 4..7]
         );
+    }
+
+    #[test]
+    fn the_keyboard_targets_the_first_mark_containing_or_touching_the_caret() {
+        let marks = || vec![0..3, 4..7, 7..9];
+        for (caret, target) in [
+            (0, Some(0..3)),
+            (2, Some(0..3)),
+            (3, Some(0..3)),
+            (4, Some(4..7)),
+            (7, Some(4..7)),
+            (8, Some(7..9)),
+            (9, Some(7..9)),
+            (10, None),
+        ] {
+            assert_eq!(mark_at_caret(marks(), caret), target, "{caret}");
+        }
+        assert_eq!(mark_at_caret(Vec::new(), 0), None);
+    }
+
+    #[test]
+    fn a_new_menu_selects_its_first_suggestion_if_it_has_one() {
+        let menu = SpellMenu::new(2, 4..7, "teh".into(), vec!["the".into()]);
+        assert_eq!(
+            (menu.line(), menu.mark(), menu.word(), menu.selected()),
+            (2, 4..7, "teh", Some(0))
+        );
+        let empty = SpellMenu::new(0, 0..3, "zzz".into(), Vec::new());
+        assert_eq!(empty.selected(), None);
+        assert!(empty.items().is_empty());
     }
 
     #[test]

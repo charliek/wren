@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 
 use iced::advanced::graphics::text::font_system;
 use iced::{Color, Font};
@@ -90,24 +90,43 @@ pub fn load_font() {
     });
 }
 
-/// A proofreader that rejects a fixed set of words and counts the times it
-/// is asked for marks.
+/// A proofreader that rejects a fixed set of words, offers fixed
+/// corrections, and counts the times it is asked for marks.
 pub struct Rejects {
     words: &'static [&'static str],
+    corrections: &'static [(&'static str, &'static [&'static str])],
     calls: AtomicUsize,
+    /// The `(line, mark, limit)` of each request for suggestions.
+    asked: Mutex<Vec<(String, Range<usize>, usize)>>,
 }
 
 impl Rejects {
     pub fn new(words: &'static [&'static str]) -> Self {
         Self {
             words,
+            corrections: &[],
             calls: AtomicUsize::new(0),
+            asked: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Offer these corrections for each word, best first.
+    pub fn suggesting(
+        mut self,
+        corrections: &'static [(&'static str, &'static [&'static str])],
+    ) -> Self {
+        self.corrections = corrections;
+        self
     }
 
     /// How many times [`Proofreader::marks`] has been called.
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::Relaxed)
+    }
+
+    /// The `(line, mark, limit)` of each request for suggestions so far.
+    pub fn asked(&self) -> Vec<(String, Range<usize>, usize)> {
+        self.asked.lock().expect("asked").clone()
     }
 }
 
@@ -124,7 +143,16 @@ impl Proofreader for Rejects {
         }
     }
 
-    fn suggestions(&self, _line: &str, _mark: Range<usize>, _limit: usize) -> Vec<String> {
-        Vec::new()
+    fn suggestions(&self, line: &str, mark: Range<usize>, limit: usize) -> Vec<String> {
+        self.asked
+            .lock()
+            .expect("asked")
+            .push((line.to_owned(), mark.clone(), limit));
+        let word = &line[mark];
+        self.corrections
+            .iter()
+            .find(|(wrong, _)| *wrong == word)
+            .map(|(_, right)| right.iter().map(|&right| right.to_owned()).collect())
+            .unwrap_or_default()
     }
 }

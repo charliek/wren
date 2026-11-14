@@ -56,7 +56,7 @@ use iced::{
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::keys::KeyPolicy;
-use crate::proof::{self, Proofreader};
+use crate::proof::{self, Proofreader, SpellEvent, SpellMenu};
 #[cfg(any(test, feature = "test-support"))]
 use crate::proof::{DrawnMark, SpellFrame};
 use crate::{Message, Style};
@@ -196,6 +196,22 @@ impl Content {
         self.0.get_mut().scroll_to_line(line, placement);
     }
 
+    /// See [`Backend::reveal`].
+    pub fn reveal(&mut self, position: Position) {
+        self.0.get_mut().reveal(position);
+    }
+
+    /// The mark whose glyphs lie under `point`, relative to the text origin,
+    /// among the marks `marks` gives for a line and its text; see
+    /// [`mark_under`].
+    pub fn mark_under(
+        &self,
+        point: Point,
+        marks: impl FnMut(usize, &str) -> Vec<Range<usize>>,
+    ) -> Option<(usize, Range<usize>)> {
+        mark_under(&self.0.borrow(), point, marks)
+    }
+
     /// Where the view is scrolled.
     pub fn scroll(&self) -> Scroll {
         self.0.borrow().scroll()
@@ -286,7 +302,7 @@ impl Content {
             Wrapping::WordOrGlyph,
             &mut highlighter,
         );
-        visual_rows(backend, &highlighter, proofreader, caret)
+        visual_rows(backend, &highlighter, proofreader, caret, None)
     }
 
     /// The marks a frame of `size` draws, as [`Content::rows`] lays it out,
@@ -352,6 +368,8 @@ pub struct TextEditor<'a> {
     markdown_assist: bool,
     key_policy: Option<&'a KeyPolicy>,
     proofreader: Option<&'a dyn Proofreader>,
+    /// The open suggestions menu.
+    spell_menu: Option<&'a SpellMenu>,
     /// Where the last frame's marks are recorded for the host's tests.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: Option<&'a RefCell<SpellFrame>>,
@@ -379,6 +397,7 @@ impl<'a> TextEditor<'a> {
             markdown_assist,
             key_policy: None,
             proofreader: None,
+            spell_menu: None,
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: None,
             last_status: None,
@@ -402,6 +421,13 @@ impl<'a> TextEditor<'a> {
     /// iced engine never asks it.
     pub fn proofreader(mut self, proofreader: Option<&'a dyn Proofreader>) -> Self {
         self.proofreader = proofreader;
+        self
+    }
+
+    /// Show `menu`, the open suggestions menu, and route keys and presses to
+    /// it.
+    pub fn spell_menu(mut self, menu: Option<&'a SpellMenu>) -> Self {
+        self.spell_menu = menu;
         self
     }
 
@@ -477,7 +503,204 @@ impl<'a> TextEditor<'a> {
         }
     }
 
-    fn input_method<'b>(&self, state: &'b State, layout: Layout<'_>) -> InputMethod<&'b str> {
+    /// Lay the text out for a widget of `size`; [`Widget::layout`] without
+    /// the renderer, which it never needs.
+    fn lay_out(&self, state: &mut State, size: Size) {
+        let mut editor = self.content.0.borrow_mut();
+
+        if state.highlighter_settings.font != self.highlighter_settings.font {
+            editor.font_changing();
+        }
+        if state.highlighter_settings != self.highlighter_settings {
+            state
+                .highlighter
+                .borrow_mut()
+                .update(&self.highlighter_settings);
+            state.highlighter_settings = self.highlighter_settings;
+        }
+        let (font, text_size) = (self.highlighter_settings.font, self.metrics.text);
+        if (state.advance.font, state.advance.size) != (font, text_size) {
+            state.advance = Advance::measure(font, text_size);
+        }
+
+        editor.update(
+            layout::Limits::new(Size::ZERO, size)
+                .shrink(self.padding(size.width, state.advance.width))
+                .max(),
+            self.highlighter_settings.font,
+            Pixels(self.metrics.text),
+            self.metrics.line_height(),
+            Wrapping::WordOrGlyph,
+            state.highlighter.borrow_mut().deref_mut(),
+        );
+    }
+
+    /// Handle `event` for a widget at `bounds`; [`Widget::update`] without
+    /// the renderer, which it never needs.
+    fn on_event(
+        &mut self,
+        state: &mut State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)));
+
+        match event {
+            Event::Window(window::Event::Unfocused) => {
+                if let Some(focus) = &mut state.focus {
+                    focus.is_window_focused = false;
+                }
+            }
+            Event::Window(window::Event::Focused) => {
+                if let Some(focus) = &mut state.focus {
+                    focus.is_window_focused = true;
+                    focus.updated_at = Instant::now();
+                    shell.request_redraw();
+                }
+            }
+            Event::Window(window::Event::RedrawRequested(now)) => {
+                if let Some(focus) = state.focus.as_mut().filter(|f| f.is_window_focused) {
+                    focus.now = *now;
+                    let millis_until_redraw = Focus::CURSOR_BLINK_INTERVAL_MILLIS
+                        - (focus.now - focus.updated_at).as_millis()
+                            % Focus::CURSOR_BLINK_INTERVAL_MILLIS;
+                    shell.request_redraw_at(
+                        focus.now + Duration::from_millis(millis_until_redraw as u64),
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(update) = Update::from_event(
+            event,
+            state,
+            bounds,
+            self.padding(bounds.width, state.advance.width),
+            cursor,
+            crate::keys::Context {
+                markdown_assist: self.markdown_assist,
+                composing: state.is_composing(),
+                policy: self.key_policy,
+            },
+        ) {
+            match update {
+                Update::Click(click) => {
+                    let action = match click.kind() {
+                        mouse::click::Kind::Single => Action::Click(click.position()),
+                        mouse::click::Kind::Double => Action::SelectWord,
+                        mouse::click::Kind::Triple => Action::SelectLine,
+                    };
+                    state.focus = Some(Focus::now());
+                    state.last_click = Some(click);
+                    state.drag_click = Some(click.kind());
+                    shell.publish(Message::Action(action));
+                    shell.capture_event();
+                }
+                Update::RightClick(position) => {
+                    // Only a misspelled word answers; anywhere else the
+                    // press leaves focus and the caret alone.
+                    if self.misspelling_under(state, position).is_some() {
+                        state.focus = Some(Focus::now());
+                        state.drag_click = None;
+                        shell.publish(Message::Spell(SpellEvent::OpenAt(position)));
+                        shell.capture_event();
+                    }
+                }
+                Update::Drag(position) => {
+                    shell.publish(Message::Action(Action::Drag(position)));
+                }
+                Update::Release => {
+                    state.drag_click = None;
+                }
+                Update::Scroll(lines) => {
+                    let bounds = self.content.0.borrow().bounds();
+                    if bounds.height >= i32::MAX as f32 {
+                        return;
+                    }
+                    let lines = lines + state.partial_scroll;
+                    state.partial_scroll = lines.fract();
+                    shell.publish(Message::Action(Action::Scroll {
+                        lines: lines as i32,
+                    }));
+                    shell.capture_event();
+                }
+                Update::InputMethod(update) => match update {
+                    Ime::Toggle(is_open) => {
+                        state.set_preedit(is_open.then(input_method::Preedit::new));
+                        shell.request_redraw();
+                    }
+                    Ime::Preedit { content, selection } => {
+                        let preedit = input_method::Preedit {
+                            content,
+                            selection,
+                            text_size: Some(Pixels(self.metrics.text)),
+                        };
+                        // The iced engine scrolls to the caret when it is
+                        // next laid out.
+                        if take_preedit(state, self.content, preedit) {
+                            shell.invalidate_layout();
+                        }
+                        shell.request_redraw();
+                    }
+                    Ime::Commit(text) => {
+                        shell.publish(Message::Action(Action::Edit(Edit::Paste(Arc::new(text)))));
+                    }
+                },
+                Update::Binding(binding) => {
+                    if !matches!(binding, Binding::Unfocus) {
+                        shell.capture_event();
+                    }
+                    apply_binding(binding, self.content, state, clipboard, shell);
+                    if let Some(focus) = &mut state.focus {
+                        focus.updated_at = Instant::now();
+                    }
+                }
+            }
+        }
+
+        let status = {
+            let is_hovered = cursor.is_over(bounds);
+            if state.focus.is_some() {
+                Status::Focused { is_hovered }
+            } else if is_hovered {
+                Status::Hovered
+            } else {
+                Status::Active
+            }
+        };
+
+        if is_redraw {
+            self.last_status = Some(status);
+            shell.request_input_method(&self.input_method(state, bounds));
+        } else if self
+            .last_status
+            .is_some_and(|last_status| status != last_status)
+        {
+            shell.request_redraw();
+        }
+    }
+
+    /// The misspelled word under `point`, relative to the text origin, as
+    /// the last layout placed it and the widget's highlighter found its
+    /// prose. Only the owned engine has any (§3.3).
+    fn misspelling_under(&self, state: &State, point: Point) -> Option<(usize, Range<usize>)> {
+        let proofreader = self
+            .proofreader
+            .filter(|_| self.content.kind() == BackendKind::Owned)?;
+        let highlighter = state.highlighter.borrow();
+        self.content.mark_under(point, |line, text| {
+            highlighter
+                .decor(line)
+                .map(|decor| proof::line_marks(proofreader, text, &decor.prose))
+                .unwrap_or_default()
+        })
+    }
+
+    fn input_method<'b>(&self, state: &'b State, bounds: Rectangle) -> InputMethod<&'b str> {
         let Some(Focus {
             is_window_focused: true,
             ..
@@ -486,7 +709,6 @@ impl<'a> TextEditor<'a> {
             return InputMethod::Disabled;
         };
 
-        let bounds = layout.bounds();
         let text_bounds = bounds.shrink(self.padding(bounds.width, state.advance.width));
         let translation = text_bounds.position() - Point::ORIGIN;
         let editor = self.content.0.borrow();
@@ -652,36 +874,8 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         _renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let mut editor = self.content.0.borrow_mut();
-        let state = tree.state.downcast_mut::<State>();
-
-        if state.highlighter_settings.font != self.highlighter_settings.font {
-            editor.font_changing();
-        }
-        if state.highlighter_settings != self.highlighter_settings {
-            state
-                .highlighter
-                .borrow_mut()
-                .update(&self.highlighter_settings);
-            state.highlighter_settings = self.highlighter_settings;
-        }
-        let (font, size) = (self.highlighter_settings.font, self.metrics.text);
-        if (state.advance.font, state.advance.size) != (font, size) {
-            state.advance = Advance::measure(font, size);
-        }
-
         let limits = limits.width(Length::Fill).height(Length::Fill);
-        editor.update(
-            limits
-                .shrink(self.padding(limits.max().width, state.advance.width))
-                .max(),
-            self.highlighter_settings.font,
-            Pixels(self.metrics.text),
-            self.metrics.line_height(),
-            Wrapping::WordOrGlyph,
-            state.highlighter.borrow_mut().deref_mut(),
-        );
-
+        self.lay_out(tree.state.downcast_mut::<State>(), limits.max());
         layout::Node::new(limits.max())
     }
 
@@ -697,132 +891,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-        let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)));
-
-        match event {
-            Event::Window(window::Event::Unfocused) => {
-                if let Some(focus) = &mut state.focus {
-                    focus.is_window_focused = false;
-                }
-            }
-            Event::Window(window::Event::Focused) => {
-                if let Some(focus) = &mut state.focus {
-                    focus.is_window_focused = true;
-                    focus.updated_at = Instant::now();
-                    shell.request_redraw();
-                }
-            }
-            Event::Window(window::Event::RedrawRequested(now)) => {
-                if let Some(focus) = state.focus.as_mut().filter(|f| f.is_window_focused) {
-                    focus.now = *now;
-                    let millis_until_redraw = Focus::CURSOR_BLINK_INTERVAL_MILLIS
-                        - (focus.now - focus.updated_at).as_millis()
-                            % Focus::CURSOR_BLINK_INTERVAL_MILLIS;
-                    shell.request_redraw_at(
-                        focus.now + Duration::from_millis(millis_until_redraw as u64),
-                    );
-                }
-            }
-            _ => {}
-        }
-
-        if let Some(update) = Update::from_event(
-            event,
-            state,
-            layout.bounds(),
-            self.padding(layout.bounds().width, state.advance.width),
-            cursor,
-            crate::keys::Context {
-                markdown_assist: self.markdown_assist,
-                composing: state.is_composing(),
-                policy: self.key_policy,
-            },
-        ) {
-            match update {
-                Update::Click(click) => {
-                    let action = match click.kind() {
-                        mouse::click::Kind::Single => Action::Click(click.position()),
-                        mouse::click::Kind::Double => Action::SelectWord,
-                        mouse::click::Kind::Triple => Action::SelectLine,
-                    };
-                    state.focus = Some(Focus::now());
-                    state.last_click = Some(click);
-                    state.drag_click = Some(click.kind());
-                    shell.publish(Message::Action(action));
-                    shell.capture_event();
-                }
-                Update::Drag(position) => {
-                    shell.publish(Message::Action(Action::Drag(position)));
-                }
-                Update::Release => {
-                    state.drag_click = None;
-                }
-                Update::Scroll(lines) => {
-                    let bounds = self.content.0.borrow().bounds();
-                    if bounds.height >= i32::MAX as f32 {
-                        return;
-                    }
-                    let lines = lines + state.partial_scroll;
-                    state.partial_scroll = lines.fract();
-                    shell.publish(Message::Action(Action::Scroll {
-                        lines: lines as i32,
-                    }));
-                    shell.capture_event();
-                }
-                Update::InputMethod(update) => match update {
-                    Ime::Toggle(is_open) => {
-                        state.set_preedit(is_open.then(input_method::Preedit::new));
-                        shell.request_redraw();
-                    }
-                    Ime::Preedit { content, selection } => {
-                        let preedit = input_method::Preedit {
-                            content,
-                            selection,
-                            text_size: Some(Pixels(self.metrics.text)),
-                        };
-                        // The iced engine scrolls to the caret when it is
-                        // next laid out.
-                        if take_preedit(state, self.content, preedit) {
-                            shell.invalidate_layout();
-                        }
-                        shell.request_redraw();
-                    }
-                    Ime::Commit(text) => {
-                        shell.publish(Message::Action(Action::Edit(Edit::Paste(Arc::new(text)))));
-                    }
-                },
-                Update::Binding(binding) => {
-                    if !matches!(binding, Binding::Unfocus) {
-                        shell.capture_event();
-                    }
-                    apply_binding(binding, self.content, state, clipboard, shell);
-                    if let Some(focus) = &mut state.focus {
-                        focus.updated_at = Instant::now();
-                    }
-                }
-            }
-        }
-
-        let status = {
-            let is_hovered = cursor.is_over(layout.bounds());
-            if state.focus.is_some() {
-                Status::Focused { is_hovered }
-            } else if is_hovered {
-                Status::Hovered
-            } else {
-                Status::Active
-            }
-        };
-
-        if is_redraw {
-            self.last_status = Some(status);
-            shell.request_input_method(&self.input_method(state, layout));
-        } else if self
-            .last_status
-            .is_some_and(|last_status| status != last_status)
-        {
-            shell.request_redraw();
-        }
+        self.on_event(state, event, layout.bounds(), cursor, clipboard, shell);
     }
 
     fn draw(
@@ -873,6 +942,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             &state.highlighter.borrow(),
             self.proofreader,
             hiding_caret(state.focus.is_some(), cursor),
+            self.spell_menu,
         );
 
         // Code bands start just left of the text so the gutter stays clear.
@@ -985,6 +1055,25 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                     style.text_selection,
                 );
             }
+        }
+
+        for tint in rows.iter().filter_map(|row| {
+            let (start, end) = row.tint?;
+            let tint = Rectangle {
+                x: text_bounds.x + start,
+                y: text_bounds.y + row.top,
+                width: end - start,
+                height: row.height,
+            };
+            tint.intersection(&rows_clip)
+        }) {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: tint,
+                    ..renderer::Quad::default()
+                },
+                style.text_selection,
+            );
         }
 
         // Over the selection, which must not hide a mark, and under the
@@ -1167,6 +1256,8 @@ fn apply_binding(
 
 enum Update {
     Click(mouse::Click),
+    /// A right-click, relative to the text origin.
+    RightClick(Point),
     Drag(Point),
     Release,
     Scroll(f32),
@@ -1209,6 +1300,12 @@ impl Update {
                     } else {
                         None
                     }
+                }
+                mouse::Event::ButtonPressed(mouse::Button::Right) => {
+                    let position = cursor.position_in(bounds)?;
+                    Some(Update::RightClick(
+                        position - Vector::new(padding.left, padding.top),
+                    ))
                 }
                 mouse::Event::ButtonReleased(mouse::Button::Left) => Some(Update::Release),
                 mouse::Event::CursorMoved { .. } => match state.drag_click {
@@ -1311,6 +1408,9 @@ struct VisualRow {
     code: bool,
     /// The misspelled words with glyphs on the row.
     marks: Vec<RowMark>,
+    /// Horizontal `(start, end)` of the open menu's word on the row, which
+    /// is tinted (rule 4.4.2).
+    tint: Option<(f32, f32)>,
 }
 
 /// A misspelled word's glyphs on one visual row.
@@ -1340,12 +1440,14 @@ fn hiding_caret(focused: bool, cursor: Cursor) -> Option<Position> {
 /// Collects the visible rows of `editor`'s buffer (already scrolled by the
 /// editor), with the decoration `highlighter` left for each line and the
 /// misspellings `proofreader` finds in its prose, the mark ending at `caret`
-/// hidden. Only the owned engine asks the proofreader (§3.3).
+/// hidden, and the open menu's word, `menu`, tinted. Only the owned engine
+/// asks the proofreader (§3.3).
 fn visual_rows(
     editor: &Backend,
     highlighter: &MarkdownHighlighter,
     proofreader: Option<&dyn Proofreader>,
     caret: Option<Position>,
+    menu: Option<&SpellMenu>,
 ) -> Vec<VisualRow> {
     let buffer = editor.buffer();
     let body = buffer.metrics();
@@ -1431,6 +1533,9 @@ fn visual_rows(
                     .map(|decor| spans(&decor.code_spans))
                     .unwrap_or_default(),
                 marks,
+                tint: menu
+                    .filter(|menu| menu.line() == run.line_i)
+                    .and_then(|menu| glyph_span(run.text, glyphs(), menu.mark())),
             }
         })
         .collect()
@@ -1565,6 +1670,33 @@ fn selected_breaks(rows: &[VisualRow], cursor: Cursor, advance: f32) -> Vec<Rect
             height: row.height,
         })
         .collect()
+}
+
+/// The misspelled word whose glyphs lie under `point`, relative to the text
+/// origin, as its line and byte range: the visible row holding `point`, and
+/// the first of the marks `marks` gives for that row's line whose glyphs on
+/// that row span `point`'s x.
+fn mark_under(
+    editor: &Backend,
+    point: Point,
+    mut marks: impl FnMut(usize, &str) -> Vec<Range<usize>>,
+) -> Option<(usize, Range<usize>)> {
+    let run = editor
+        .buffer()
+        .layout_runs()
+        .find(|run| point.y >= run.line_top && point.y < run.line_top + run.line_height)?;
+    let glyphs = || {
+        run.glyphs
+            .iter()
+            .map(|glyph| (glyph.start..glyph.end, glyph.x, glyph.w))
+    };
+    marks(run.line_i, run.text)
+        .into_iter()
+        .find(|mark| {
+            glyph_span(run.text, glyphs(), mark.clone())
+                .is_some_and(|(left, right)| point.x >= left && point.x < right)
+        })
+        .map(|mark| (run.line_i, mark))
 }
 
 /// A wrapped continuation row starts past byte 0; an empty line has no glyphs.
@@ -2472,6 +2604,7 @@ mod tests {
             code_spans: Vec::new(),
             code: false,
             marks,
+            tint: None,
         };
         let mark = |range: Range<usize>, left, right, shown| RowMark {
             range,
@@ -2523,6 +2656,154 @@ mod tests {
                     rects: Vec::new(),
                 },
             ]
+        );
+    }
+
+    // ── The suggestions menu ───────────────────────────────────────────────
+
+    /// The widget's bounds in the window, for event tests.
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 600.0,
+        height: 400.0,
+    };
+
+    /// A widget over `content`, checked by `proofreader`, with `menu` open.
+    fn spelling<'a>(
+        content: &'a Content,
+        proofreader: &'a dyn Proofreader,
+        menu: Option<&'a SpellMenu>,
+    ) -> TextEditor<'a> {
+        editor_with(content, true, Measure::default())
+            .proofreader(Some(proofreader))
+            .spell_menu(menu)
+    }
+
+    /// A fresh widget state, laid out for [`BOUNDS`].
+    fn laid_out_state(editor: &TextEditor<'_>) -> State {
+        fixtures::load_font();
+        let mut state = State::new(fixtures::SETTINGS);
+        editor.lay_out(&mut state, BOUNDS.size());
+        state
+    }
+
+    /// What the widget publishes for `event` with the pointer at `pointer`,
+    /// and whether it captured it.
+    fn send(
+        editor: &mut TextEditor<'_>,
+        state: &mut State,
+        event: Event,
+        pointer: Option<Point>,
+    ) -> (Vec<Message>, bool) {
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        let cursor = pointer.map_or(mouse::Cursor::Unavailable, mouse::Cursor::Available);
+        editor.on_event(
+            state,
+            &event,
+            BOUNDS,
+            cursor,
+            &mut clipboard::Null,
+            &mut shell,
+        );
+        let captured = shell.event_status() == iced::event::Status::Captured;
+        (messages, captured)
+    }
+
+    fn press(button: mouse::Button) -> Event {
+        Event::Mouse(mouse::Event::ButtonPressed(button))
+    }
+
+    /// The window point over cell `cells` of row `row` of a widget at
+    /// [`BOUNDS`] with the gutter shown: 60 px of lead, 24 px of padding.
+    fn over(cells: f32, row: f32) -> Point {
+        Point::new(60.0 + cells * ADVANCE, 24.0 + row * LINE_HEIGHT + 12.0)
+    }
+
+    #[test]
+    fn a_right_click_on_a_misspelling_takes_the_keyboard_and_asks_for_the_menu() {
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let mut editor = spelling(&content, &proofreader, None);
+        let mut state = laid_out_state(&editor);
+        state.drag_click = Some(mouse::click::Kind::Single);
+        assert!(state.focus.is_none());
+        let (messages, captured) = send(
+            &mut editor,
+            &mut state,
+            press(mouse::Button::Right),
+            Some(over(5.0, 0.0)),
+        );
+        let [Message::Spell(SpellEvent::OpenAt(at))] = messages.as_slice() else {
+            panic!("{messages:?}");
+        };
+        assert!(
+            (at.x - 5.0 * ADVANCE).abs() < 0.01 && at.y == 12.0,
+            "{at:?}"
+        );
+        assert!(captured);
+        assert!(state.focus.is_some(), "the editor takes the keyboard");
+        assert!(state.drag_click.is_none(), "a drag in progress ends");
+        assert_eq!(content.cursor().position, Position { line: 0, column: 0 });
+    }
+
+    #[test]
+    fn a_right_click_anywhere_else_changes_nothing() {
+        let proofreader = rejects();
+        for (kind, point) in [
+            (BackendKind::Owned, over(1.0, 0.0)),
+            (BackendKind::Owned, over(9.0, 0.0)),
+            (BackendKind::Owned, over(1.0, 2.0)),
+            (BackendKind::Owned, Point::new(20.0, 36.0)),
+            (BackendKind::Owned, Point::new(700.0, 36.0)),
+            // The classic engine has no marks to open a menu for.
+            (BackendKind::Iced, over(5.0, 0.0)),
+        ] {
+            let content = Content::new(kind, "cat teh");
+            let mut editor = spelling(&content, &proofreader, None);
+            let mut state = laid_out_state(&editor);
+            let (messages, captured) = send(
+                &mut editor,
+                &mut state,
+                press(mouse::Button::Right),
+                Some(point),
+            );
+            assert!(messages.is_empty(), "{kind:?} {point:?}: {messages:?}");
+            assert!(!captured, "{kind:?} {point:?}");
+            assert!(state.focus.is_none(), "{kind:?} {point:?}");
+        }
+        // Without a proofreader, nothing answers.
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let mut editor = editor_with(&content, true, Measure::default());
+        let mut state = laid_out_state(&editor);
+        let (messages, _) = send(
+            &mut editor,
+            &mut state,
+            press(mouse::Button::Right),
+            Some(over(5.0, 0.0)),
+        );
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn the_open_menus_word_is_tinted_on_each_of_its_rows() {
+        let text = format!("ab {LONG_TYPO} cd teh");
+        let menu = SpellMenu::new(0, 3..3 + LONG_TYPO.len(), LONG_TYPO.into(), Vec::new());
+        let mut content = Content::new(BackendKind::Owned, &text);
+        content.lay_out(Size::new(120.0, 400.0));
+        let highlighter = MarkdownHighlighter::new(&fixtures::SETTINGS);
+        let rows = visual_rows(&content.0.borrow(), &highlighter, None, None, Some(&menu));
+        let tinted: Vec<(f32, f32)> = rows.iter().filter_map(|row| row.tint).collect();
+        assert!(tinted.len() >= 3, "{rows:?}");
+        // Exactly the word's glyphs: `teh` and the spaces stay clear.
+        let width: f32 = tinted.iter().map(|(start, end)| end - start).sum();
+        assert!(near(width, LONG_TYPO.len() as f32 * ADVANCE), "{width}");
+        let other = SpellMenu::new(1, 3..3 + LONG_TYPO.len(), LONG_TYPO.into(), Vec::new());
+        let rows = visual_rows(&content.0.borrow(), &highlighter, None, None, Some(&other));
+        assert!(
+            rows.iter().all(|row| row.tint.is_none()),
+            "another line's word"
         );
     }
 }

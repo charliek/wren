@@ -186,6 +186,8 @@ pub struct EditorView {
     markdown_assist: bool,
     key_policy: Option<KeyPolicy>,
     proofreader: Option<Arc<dyn Proofreader>>,
+    /// The open suggestions menu.
+    menu: Option<SpellMenu>,
     /// The marks the widget last drew.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: std::cell::RefCell<SpellFrame>,
@@ -219,6 +221,7 @@ impl EditorView {
             markdown_assist: true,
             key_policy: None,
             proofreader: None,
+            menu: None,
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: Default::default(),
         };
@@ -310,6 +313,7 @@ impl EditorView {
         )
         .key_policy(self.key_policy.as_ref())
         .proofreader(self.proofreader.as_deref())
+        .spell_menu(self.menu.as_ref())
         .measure(measure);
         #[cfg(any(test, feature = "test-support"))]
         let editor = editor.spell_frame(&self.spell_frame);
@@ -754,18 +758,80 @@ impl EditorView {
 
     /// Carry out a suggestions-menu event. Returns whether the text changed,
     /// as [`EditorView::perform`] does.
-    pub fn spell(&mut self, _event: SpellEvent) -> bool {
+    ///
+    /// Opening finds the misspelled word that contains or touches the caret
+    /// ([`SpellEvent::OpenAtCaret`]) or lies under a point relative to the
+    /// text origin ([`SpellEvent::OpenAt`]), asks the proofreader for its
+    /// suggestions, and scrolls the word's first row into view if it is
+    /// not; the caret and the selection stay where they are. With no such
+    /// word, on the iced engine, or with no proofreader, nothing opens.
+    pub fn spell(&mut self, event: SpellEvent) -> bool {
+        match event {
+            SpellEvent::OpenAtCaret => {
+                let caret = self.content.cursor().position;
+                let mark = proof::mark_at_caret(self.marks_at(caret.line), caret.column);
+                self.open_menu(mark.map(|mark| (caret.line, mark)));
+            }
+            SpellEvent::OpenAt(point) => {
+                let target = self
+                    .content
+                    .mark_under(point, |line, _| self.marks_at(line));
+                self.open_menu(target);
+            }
+            SpellEvent::Move(delta) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.step(delta);
+                }
+            }
+            SpellEvent::Hover(row) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.hover(row);
+                }
+            }
+            SpellEvent::Accept(_) | SpellEvent::Close => {
+                self.menu = None;
+            }
+        }
         false
     }
 
     /// The open suggestions menu, if any.
     pub fn spell_menu(&self) -> Option<&SpellMenu> {
-        None
+        self.menu.as_ref()
     }
 
     /// Close the suggestions menu. Returns whether one was open.
     pub fn close_spell_menu(&mut self) -> bool {
-        false
+        self.menu.take().is_some()
+    }
+
+    /// Open the menu for the misspelled word at `target`, a line and a byte
+    /// range of it; with no target, or none the proofreader can still be
+    /// asked about, whatever menu was open closes.
+    fn open_menu(&mut self, target: Option<(usize, Range<usize>)>) {
+        self.menu = None;
+        let Some((line, mark)) = target else {
+            return;
+        };
+        let Some(proofreader) = self.proofreader.clone() else {
+            return;
+        };
+        let Some(text) = self
+            .content
+            .with_lines(|lines| lines.get(line).map(|line| line.text.into_owned()))
+        else {
+            return;
+        };
+        let Some(word) = text.get(mark.clone()) else {
+            return;
+        };
+        let mut items = proofreader.suggestions(&text, mark.clone(), proof::SUGGESTIONS);
+        items.truncate(proof::SUGGESTIONS);
+        self.content.reveal(Position {
+            line,
+            column: mark.start,
+        });
+        self.menu = Some(SpellMenu::new(line, mark, word.to_owned(), items));
     }
 
     /// The marks and the menu as the last frame drew them.
@@ -789,7 +855,6 @@ impl EditorView {
     /// from a fresh pass over the lines down to it (§3.3), the same marks a
     /// frame draws there. Empty on the iced engine or with no proofreader,
     /// which is then not asked.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn marks_at(&self, line: usize) -> Vec<Range<usize>> {
         let Some(proofreader) = self
             .proofreader
@@ -1201,6 +1266,267 @@ mod tests {
         check(&mut ev, &[(1, 0..3)]);
         ev.replace_text("---\ntitle: teh\n---\nfine", false);
         check(&mut ev, &[]);
+    }
+
+    // ── The suggestions menu ───────────────────────────────────────────────
+
+    const TEH: &[(&str, &[&str])] = &[("teh", &["the", "tech", "ten", "tea", "tee", "Ted"])];
+
+    /// An owned-engine editor over `text`, checked by a proofreader that
+    /// rejects `teh` and `zzz` and corrects `teh`.
+    fn checked(text: &str) -> (EditorView, Arc<fixtures::Rejects>) {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh", "zzz"]).suggesting(TEH));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, text);
+        ev.set_proofreader(Some(proofreader.clone()));
+        (ev, proofreader)
+    }
+
+    /// `(line, mark, word, items, selected)` of an open menu.
+    type MenuState = (usize, Range<usize>, String, Vec<String>, Option<usize>);
+
+    /// The state of the open menu.
+    fn menu_of(ev: &EditorView) -> Option<MenuState> {
+        ev.spell_menu().map(|menu| {
+            (
+                menu.line(),
+                menu.mark(),
+                menu.word().to_owned(),
+                menu.items().to_vec(),
+                menu.selected(),
+            )
+        })
+    }
+
+    fn select(anchor: (usize, usize), head: (usize, usize)) -> Cursor {
+        Cursor {
+            position: Position {
+                line: head.0,
+                column: head.1,
+            },
+            selection: Some(Position {
+                line: anchor.0,
+                column: anchor.1,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_keyboard_opens_the_menu_for_the_word_containing_or_touching_the_caret() {
+        let text = "a cat\nteh cat teh";
+        let five: Vec<String> = ["the", "tech", "ten", "tea", "tee"]
+            .map(String::from)
+            .into();
+        for (column, mark) in [(0, 0..3), (2, 0..3), (3, 0..3), (8, 8..11), (11, 8..11)] {
+            let (mut ev, proofreader) = checked(text);
+            ev.move_cursor(at(1, column));
+            assert!(!ev.spell(SpellEvent::OpenAtCaret));
+            assert_eq!(
+                menu_of(&ev),
+                Some((1, mark.clone(), "teh".into(), five.clone(), Some(0))),
+                "{column}"
+            );
+            // Five at most, asked of the proofreader with the whole line.
+            assert_eq!(proofreader.asked(), [("teh cat teh".into(), mark, 5)]);
+            // Nothing moves, the caret at a mark's end included (rule
+            // 4.3.3 hides that mark, but it is still the target).
+            assert_eq!(ev.cursor(), at(1, column), "{column}");
+            assert_eq!(ev.text(), text);
+        }
+        // Past the space after a word, inside a correct one, or on a line
+        // with no mark, nothing opens and nobody is asked.
+        for (line, column) in [(1, 4), (1, 6), (0, 3)] {
+            let (mut ev, proofreader) = checked(text);
+            ev.move_cursor(at(line, column));
+            assert!(!ev.spell(SpellEvent::OpenAtCaret));
+            assert!(ev.spell_menu().is_none(), "{line}:{column}");
+            assert!(proofreader.asked().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_caret_of_a_selection_is_its_moving_end() {
+        let text = "teh cat teh";
+        let (mut ev, _) = checked(text);
+        for (selection, mark) in [
+            (select((0, 1), (0, 9)), 8..11),
+            (select((0, 9), (0, 1)), 0..3),
+            (select((0, 5), (0, 3)), 0..3),
+        ] {
+            ev.move_cursor(selection);
+            ev.spell(SpellEvent::OpenAtCaret);
+            assert_eq!(ev.spell_menu().map(SpellMenu::mark), Some(mark));
+            assert_eq!(ev.cursor(), selection, "the selection stays");
+            assert!(ev.close_spell_menu());
+        }
+        // A selection ending inside a correct word opens nothing.
+        ev.move_cursor(select((0, 0), (0, 5)));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_none());
+    }
+
+    #[test]
+    fn a_word_without_suggestions_opens_a_menu_with_nothing_selected() {
+        let (mut ev, _) = checked("zzz");
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert_eq!(
+            menu_of(&ev),
+            Some((0, 0..3, "zzz".into(), Vec::new(), None))
+        );
+        // Moving does nothing: there is no row to select.
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Hover(0));
+        assert_eq!(ev.spell_menu().and_then(SpellMenu::selected), None);
+    }
+
+    #[test]
+    fn the_menu_opens_only_on_the_owned_engine_with_a_proofreader() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh"]).suggesting(TEH));
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "teh");
+        ev.set_proofreader(Some(proofreader.clone()));
+        ev.content.lay_out(iced::Size::new(400.0, 200.0));
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::OpenAt(iced::Point::new(10.0, 5.0)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(proofreader.calls(), 0);
+        assert!(proofreader.asked().is_empty());
+
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "teh");
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_none(), "no proofreader");
+    }
+
+    #[test]
+    fn the_selection_moves_and_stops_at_the_ends() {
+        let (mut ev, _) = checked("teh");
+        ev.spell(SpellEvent::OpenAtCaret);
+        let selected = |ev: &EditorView| ev.spell_menu().and_then(SpellMenu::selected);
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Move(-1));
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Move(1));
+        assert_eq!(selected(&ev), Some(2));
+        ev.spell(SpellEvent::Move(i32::MAX));
+        assert_eq!(selected(&ev), Some(4));
+        ev.spell(SpellEvent::Move(1));
+        assert_eq!(selected(&ev), Some(4));
+        ev.spell(SpellEvent::Move(i32::MIN));
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Hover(3));
+        assert_eq!(selected(&ev), Some(3));
+        ev.spell(SpellEvent::Hover(5));
+        assert_eq!(selected(&ev), Some(3), "past the last row");
+        assert_eq!(ev.text(), "teh");
+
+        assert!(!ev.spell(SpellEvent::Close));
+        assert!(ev.spell_menu().is_none());
+        assert!(!ev.close_spell_menu());
+        // Events for a closed menu do nothing.
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Hover(1));
+        assert!(ev.spell_menu().is_none());
+    }
+
+    #[test]
+    fn opening_again_reads_the_word_afresh() {
+        let (mut ev, proofreader) = checked("teh teh");
+        ev.move_cursor(at(0, 0));
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::Move(2));
+        ev.move_cursor(at(0, 5));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert_eq!(
+            ev.spell_menu().map(|menu| (menu.mark(), menu.selected())),
+            Some((4..7, Some(0)))
+        );
+        assert_eq!(proofreader.asked().len(), 2);
+        // An opening that finds no word closes the open menu.
+        ev.content.lay_out(iced::Size::new(600.0, 400.0));
+        ev.spell(SpellEvent::OpenAt(iced::Point::new(1.0, 12.0)));
+        assert_eq!(ev.spell_menu().map(SpellMenu::mark), Some(0..3));
+        ev.spell(SpellEvent::OpenAt(iced::Point::new(3.5 * CELL, 12.0)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(ev.cursor(), at(0, 5));
+    }
+
+    /// The JetBrains Mono advance at 14 px.
+    const CELL: f32 = 8.4;
+
+    #[test]
+    fn a_point_opens_the_menu_for_the_word_under_it() {
+        let (mut ev, _) = checked("cat teh\n\n- [x] done teh\nzzz");
+        ev.content.lay_out(iced::Size::new(600.0, 400.0));
+        let point = |cells: f32, row: f32| iced::Point::new(cells * CELL, row * 24.0 + 12.0);
+        for (at_point, target) in [
+            (point(4.5, 0.0), Some((0, 4..7))),
+            (point(4.05, 0.0), Some((0, 4..7))),
+            (point(6.9, 0.0), Some((0, 4..7))),
+            (point(1.0, 0.0), None),
+            (point(3.5, 0.0), None),
+            (point(7.5, 0.0), None),
+            (point(1.0, 1.0), None),
+            (point(12.0, 2.0), Some((2, 11..14))),
+            (point(1.0, 3.0), Some((3, 0..3))),
+            (point(1.0, 4.0), None),
+            (iced::Point::new(10.0, -2.0), None),
+        ] {
+            ev.close_spell_menu();
+            ev.spell(SpellEvent::OpenAt(at_point));
+            assert_eq!(
+                ev.spell_menu().map(|menu| (menu.line(), menu.mark())),
+                target,
+                "{at_point:?}"
+            );
+        }
+        assert_eq!(ev.cursor(), at(0, 0));
+    }
+
+    #[test]
+    fn opening_scrolls_the_words_first_row_into_view() {
+        let mut text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        text.push_str("teh end");
+        let (mut ev, _) = checked(&text);
+        let size = iced::Size::new(400.0, 240.0);
+        ev.content.lay_out(size);
+        // The caret on the last line, the view back at the top.
+        let top = ev.content.scroll();
+        ev.content.return_to(at(60, 1), top);
+        ev.content.lay_out(size);
+        assert_eq!(ev.first_visible_line(), 0);
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_some());
+        ev.content.lay_out(size);
+        // Ten rows in view, the last of them the word's.
+        assert_eq!(ev.content.scroll().line, 51, "{:?}", ev.content.scroll());
+        assert_eq!(ev.content.scroll().vertical, 0.0);
+        assert_eq!(ev.cursor(), at(60, 1));
+
+        // A word already in view does not scroll it.
+        let scroll = ev.content.scroll();
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll(), scroll);
+    }
+
+    #[test]
+    fn opening_brings_a_half_hidden_row_fully_into_view() {
+        let text = format!("teh {}", "word ".repeat(200));
+        let (mut ev, _) = checked(&text);
+        let size = iced::Size::new(400.0, 240.0);
+        ev.content.lay_out(size);
+        // Half the first row scrolled off the top, the caret on it.
+        let mut scroll = ev.content.scroll();
+        scroll.vertical = 12.0;
+        ev.content.return_to(at(0, 1), scroll);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll().vertical, 12.0);
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll().vertical, 0.0);
+        assert_eq!(ev.cursor(), at(0, 1));
     }
 
     #[test]
