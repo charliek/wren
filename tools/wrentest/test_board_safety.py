@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, GROUP, HAND_WRITTEN, NOTES, board, board_app, click, copy_samples, fitted, flushed, key,
-    note_id, open_note, stamp, type_text,
+    FLOW, GROUP, HAND_WRITTEN, NOTES, blocks, board, board_app, click, copy_samples, fitted, flushed,
+    key, note_id, open_note, stamp, type_text,
 )
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_board_view import focused, wait_focus
@@ -225,3 +225,32 @@ def test_a_notice_leaves_the_keyboard_where_it_was(samples: Path, notice: str) -
         else:
             state = type_text(app, "def")
             assert state["editing"]["text"] == "abcdef", state
+
+
+# A node and a connector named alike (§4.12), the node with a child.
+SHARED = (
+    'schema = 1\n\n[node.a]\nkind = "shape"\nat = [0, 0]\nsize = [120, 60]\nz = "V"\n\n'
+    '[node.kid]\nkind = "shape"\nat = [0, 0]\nparent = "shared"\nsize = [40, 20]\nz = "V"\n\n'
+    '[node.shared]\ntext = "Node shared"\nkind = "shape"\nat = [0, 300]\nsize = [120, 60]\n'
+    'z = "W"\n\n[edge.shared]\nkind = "edge"\nfrom = { node = "a" }\nto = { at = [400, 30] }\n'
+    'labels = [{ text = "Edge shared" }]\nz = "X"\n'
+)
+
+
+def test_a_connector_named_as_a_node_is_acted_on_alone(samples: Path) -> None:
+    """§5.10 rule 1: delete removes what is selected, so a connector that
+    shares a node's id goes alone, and Enter and a key move are its own."""
+    path = samples / GROUP / "Shared.wren-board"
+    path.write_text(SHARED, encoding="utf-8")
+    with board_app(samples, "board-safety-shared-id") as app:
+        ready(app, f"{GROUP}/Shared.wren-board")
+        click(app, {"edge": "shared"})
+        assert key(app, "enter")["editing"]["text"] == "Edge shared"
+        key(app, "escape")
+        key(app, "right", "alt")
+        node = next(n for n in board(app, elements=True)["nodes"] if n["id"] == "shared")
+        assert node["at"] == [0, 300]
+        state = key(app, "delete")
+        assert state["counts"] == {"nodes": 3, "edges": 0}, state
+        flushed(app)
+    assert blocks(path.read_bytes()) == ["[node.a]", "[node.kid]", "[node.shared]"]
