@@ -37,7 +37,8 @@
 //! The scanner state is checkpointed every [`CHECKPOINT_INTERVAL`] lines so
 //! that `change_line` can resync cheaply without replaying the document.
 //! Alongside the spans, each highlighted line leaves a [`LineDecor`] for the
-//! widget to draw: strike-throughs, the code band, and inline code chips.
+//! widget to draw: strike-throughs, the code band, and inline code chips,
+//! plus the prose ranges spell check reads.
 //!
 //! All byte ranges returned are valid UTF-8 boundaries.
 
@@ -408,6 +409,7 @@ fn line_highlights(
                     Highlight::bold(color, ink.font).sized(Scale::heading(*level)),
                 );
                 spans.push(text.end..line.len(), faint);
+                decor.prose = shifted(&scan_inline(&line[text.clone()], ink).prose, text.start);
             }
         }
         Kind::SetextUnderline { .. } | Kind::ThematicBreak | Kind::Html => {
@@ -436,6 +438,12 @@ fn line_highlights(
             spans.push(covered..text.end, completed);
             spans.push(text.end..line.len(), Highlight::colored(ink.faint));
             decor.strikes.push(text);
+            // Done text keeps its one colour, but spell check still skips
+            // its code, links and markers.
+            let start = info.text_start;
+            if !is_reference_definition(&line[start..]) {
+                decor.prose = shifted(&scan_inline(&line[start..], ink).prose, start);
+            }
         }
         Kind::Prose => {
             let start = info.text_start;
@@ -443,6 +451,9 @@ fn line_highlights(
             let shift = |r: &Range<usize>| r.start + start..r.end + start;
             decor.strikes.extend(inline.strikes.iter().map(shift));
             decor.code_spans.extend(inline.code.iter().map(shift));
+            if !is_reference_definition(&line[start..]) {
+                decor.prose = shifted(&inline.prose, start);
+            }
             if info.quote_depth == 0 {
                 spans.extend_at(start, inline.spans);
             } else {
@@ -462,6 +473,37 @@ fn line_highlights(
     (spans.0, decor)
 }
 
+fn shifted(ranges: &[Range<usize>], by: usize) -> Vec<Range<usize>> {
+    ranges.iter().map(|r| r.start + by..r.end + by).collect()
+}
+
+/// Whether `text`, a line's text, opens a link reference definition:
+/// `[label]:`. A footnote definition (`[^label]:`) is not one; its text is
+/// prose.
+fn is_reference_definition(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('[') else {
+        return false;
+    };
+    if rest.starts_with('^') {
+        return false;
+    }
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while let Some(&byte) = bytes.get(i) {
+        match byte {
+            b'\\' => i += 1,
+            b'[' => return false,
+            b']' => {
+                return bytes.get(i + 1) == Some(&b':')
+                    && rest[..i].chars().any(|ch| !ch.is_whitespace());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Inline element scanner
 // ---------------------------------------------------------------------------
@@ -473,6 +515,9 @@ struct Inline {
     strikes: Vec<Range<usize>>,
     /// Inline code spans, backticks included.
     code: Vec<Range<usize>>,
+    /// The text spell check reads: everything but code, comments, link
+    /// syntax and destinations, URLs, and emphasis and strike delimiters.
+    prose: Vec<Range<usize>>,
 }
 
 /// Scans inline Markdown. Code spans and HTML comments come first and hold
@@ -485,6 +530,7 @@ fn scan_inline(line: &str, ink: &Ink) -> Inline {
     cells.comments(ink);
     let texts = cells.links(ink);
     cells.bare_urls(ink);
+    cells.autolinks();
     let mut strikes = Vec::new();
     for text in &texts {
         strikes.extend(cells.delimited(text.clone(), ink));
@@ -498,6 +544,7 @@ fn scan_inline(line: &str, ink: &Ink) -> Inline {
         spans: cells.spans(ink.font),
         strikes,
         code,
+        prose: cells.prose(),
     }
 }
 
@@ -519,6 +566,8 @@ struct Cell {
     fixed_face: bool,
     /// No later delimiter may match here.
     locked: bool,
+    /// Spell check skips this byte. Only prose reads it; no colour does.
+    excluded: bool,
 }
 
 /// A line's bytes as each kind of construct layers its style onto them. A
@@ -539,6 +588,40 @@ impl<'a> Cells<'a> {
 
     fn set(&mut self, range: Range<usize>, style: impl Fn(&mut Cell)) {
         self.cells[range].iter_mut().for_each(style);
+    }
+
+    fn exclude(&mut self, range: Range<usize>) {
+        self.set(range, |cell| cell.excluded = true);
+    }
+
+    /// Excludes a matched emphasis or strike delimiter, unless a letter or
+    /// digit touches it on both sides: `snake_case_name` and
+    /// `un*believ*able` stay one piece of prose.
+    fn exclude_delimiter(&mut self, range: Range<usize>) {
+        let before = self.line[..range.start].chars().next_back();
+        let after = self.line[range.end..].chars().next();
+        let inside = [before, after]
+            .iter()
+            .all(|ch| ch.is_some_and(char::is_alphanumeric));
+        if !inside {
+            self.exclude(range);
+        }
+    }
+
+    /// The maximal runs of characters with no excluded byte.
+    fn prose(&self) -> Vec<Range<usize>> {
+        let mut prose: Vec<Range<usize>> = Vec::new();
+        for (start, ch) in self.line.char_indices() {
+            let end = start + ch.len_utf8();
+            if self.cells[start..end].iter().any(|cell| cell.excluded) {
+                continue;
+            }
+            match prose.last_mut() {
+                Some(last) if last.end == start => last.end = end,
+                _ => prose.push(start..end),
+            }
+        }
+        prose
     }
 
     /// Faint, locked syntax: brackets, tildes, and the like.
@@ -598,6 +681,7 @@ impl<'a> Cells<'a> {
                         cell.color = Some(ink.code);
                         cell.fixed_face = true;
                         cell.locked = true;
+                        cell.excluded = true;
                     });
                     found.push(i..end);
                     i = end;
@@ -623,6 +707,7 @@ impl<'a> Cells<'a> {
                     cell.color = Some(ink.faint);
                     cell.fixed_face = true;
                     cell.locked = true;
+                    cell.excluded = true;
                 });
                 search = end;
             } else {
@@ -659,6 +744,11 @@ impl<'a> Cells<'a> {
             };
             covered = end;
             self.mark(start..start + 1, ink);
+            // Only a link's text is prose: an image's `!`, its brackets and
+            // its destination or label are not.
+            let bang = usize::from(start > 0 && bytes[start - 1] == b'!');
+            self.exclude(start - bang..start + 1);
+            self.exclude(close..end);
             let text = start + 1..close;
             self.set(text.clone(), |cell| {
                 cell.color.get_or_insert(ink.link);
@@ -727,9 +817,32 @@ impl<'a> Cells<'a> {
                 self.set(start..start + url.len(), |cell| {
                     cell.color = Some(ink.link);
                     cell.locked = true;
+                    cell.excluded = true;
                 });
             }
             search = start + length.max(1);
+        }
+    }
+
+    /// CommonMark autolinks, `<scheme:…>` and `<user@host>`, angle brackets
+    /// included. They are excluded from prose and otherwise left as they
+    /// were: the highlighter colours only the URL inside, if it is bare.
+    fn autolinks(&mut self) {
+        let line = self.line;
+        let mut search = 0;
+        while let Some(open) = line[search..].find('<').map(|at| search + at) {
+            let rest = &line[open + 1..];
+            let Some(length) = rest.find(['<', '>']) else {
+                break;
+            };
+            let inner = &rest[..length];
+            if rest.as_bytes()[length] == b'>' && is_autolink(inner) {
+                let end = open + 1 + length + 1;
+                self.exclude(open..end);
+                search = end;
+            } else {
+                search = open + 1;
+            }
         }
     }
 
@@ -765,6 +878,8 @@ impl<'a> Cells<'a> {
             });
             self.mark(open..inner.start, ink);
             self.mark(close..close + 2, ink);
+            self.exclude_delimiter(open..inner.start);
+            self.exclude_delimiter(close..close + 2);
             if !inner.is_empty() {
                 strikes.push(inner);
             }
@@ -796,10 +911,11 @@ impl<'a> Cells<'a> {
             // so a regular-weight `**` would leave `**Alice` regular. The
             // markers carry the span's font and differ only in colour.
             for markers in [open..content, close..end] {
-                self.set(markers, |cell| {
+                self.set(markers.clone(), |cell| {
                     cell.color = Some(ink.faint);
                     face(cell);
                 });
+                self.exclude_delimiter(markers);
             }
             self.set(open..end, |cell| cell.locked = true);
             search = end;
@@ -836,6 +952,29 @@ impl<'a> Cells<'a> {
         }
         spans.0
     }
+}
+
+/// Whether `inner`, the text between `<` and `>`, makes an autolink: a URI
+/// (a scheme of 2 to 32 letters, digits, `+`, `.` or `-` that starts with a
+/// letter, a `:`, then no space) or an email address.
+fn is_autolink(inner: &str) -> bool {
+    if inner.is_empty() || inner.contains(|ch: char| ch.is_whitespace() || ch.is_control()) {
+        return false;
+    }
+    if let Some((scheme, _)) = inner.split_once(':') {
+        let bytes = scheme.as_bytes();
+        if (2..=32).contains(&bytes.len())
+            && bytes[0].is_ascii_alphabetic()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+        {
+            return true;
+        }
+    }
+    inner
+        .split_once('@')
+        .is_some_and(|(user, host)| !user.is_empty() && !host.is_empty() && !host.contains('@'))
 }
 
 /// A bare URL without its trailing sentence punctuation, as in GFM's
@@ -1701,6 +1840,369 @@ mod tests {
         h.change_line(3);
         assert_eq!(h.current_line(), 0);
         assert!(h.decor(0).is_none());
+    }
+
+    // ── Prose ranges ──────────────────────────────────────────────────────────
+
+    /// Each line's prose ranges as the text they cover.
+    fn prose_of(text: &str) -> Vec<Vec<&str>> {
+        let lines: Vec<&str> = text.split('\n').collect();
+        highlight_text(fixtures::DARK, text)
+            .into_iter()
+            .zip(&lines)
+            .map(|((_, decor), line)| decor.prose.iter().map(|r| &line[r.clone()]).collect())
+            .collect()
+    }
+
+    fn line_prose(line: &str) -> Vec<&str> {
+        prose_of(line).remove(0)
+    }
+
+    #[test]
+    fn paragraph_lines_list_items_quotes_and_tasks_are_prose_after_their_prefix() {
+        for (line, prose) in [
+            ("Plain words here", "Plain words here"),
+            ("  indented a little ", "indented a little "),
+            ("- item text", "item text"),
+            ("12. ordered words", "ordered words"),
+            ("> quoted text", "quoted text"),
+            ("> > - deep item", "deep item"),
+            ("- [ ] open task", "open task"),
+            ("- [x] done task", "done task"),
+            ("> - [X] quoted done", "quoted done"),
+            ("| a cell | another |", "| a cell | another |"),
+        ] {
+            assert_eq!(line_prose(line), [prose], "{line:?}");
+        }
+        // A list item's continuation, and setext heading text.
+        assert_eq!(
+            prose_of("- item\n  more text\n\nTitle text\n=========="),
+            [
+                vec!["item"],
+                vec!["more text"],
+                vec![],
+                vec!["Title text"],
+                vec![]
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lazy_continuation_line_is_prose_of_its_paragraph() {
+        assert_eq!(
+            prose_of("> a quote\nlazy line\n- an item\nlazy too"),
+            [
+                vec!["a quote"],
+                vec!["lazy line"],
+                vec!["an item"],
+                vec!["lazy too"]
+            ]
+        );
+    }
+
+    #[test]
+    fn atx_heading_text_is_prose_without_its_hashes() {
+        for (line, prose) in [
+            ("# Title", vec!["Title"]),
+            ("## Heading text ##", vec!["Heading text"]),
+            ("> ### Quoted heading", vec!["Quoted heading"]),
+            ("- # In an item", vec!["In an item"]),
+            ("#", vec![]),
+            ("## ##", vec![]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn headings_and_done_tasks_exclude_inline_markup_but_keep_their_look() {
+        let heading = "# A `code` <!-- note --> _x_ end";
+        assert_eq!(line_prose(heading), ["A ", " ", " ", "x", " end"]);
+        let (spans, decor) = highlight_text(fixtures::DARK, heading).remove(0);
+        assert_eq!(colored(heading, &spans).len(), 2, "{spans:?}");
+        assert!(decor.code_spans.is_empty() && decor.strikes.is_empty());
+
+        let task = "- [x] a `code` <!-- note --> _x_ [link](u) end";
+        assert_eq!(line_prose(task), ["a ", " ", " ", "x", " ", "link", " end"]);
+        let (spans, decor) = highlight_text(fixtures::DARK, task).remove(0);
+        assert!(decor.code_spans.is_empty());
+        assert_eq!(decor.strikes, vec![(6..task.len())]);
+        assert!(spans.iter().all(|(_, highlight)| highlight.font.is_none()));
+    }
+
+    #[test]
+    fn a_link_reference_definition_has_no_prose_but_a_footnote_does() {
+        for line in [
+            "[ref-labl]: https://example.com \"Titel\"",
+            "[a label]:",
+            "- [label]: https://x.io",
+            "> [la\\]bel]: u",
+        ] {
+            assert_eq!(line_prose(line), Vec::<&str>::new(), "{line:?}");
+        }
+        for (line, prose) in [
+            ("[^1]: a footnote", vec!["[^1]: a footnote"]),
+            ("[label] : not one", vec!["[label] : not one"]),
+            ("[]: empty label", vec!["[]: empty label"]),
+            ("[a [b]]: nested", vec!["[a [b]]: nested"]),
+            ("text [label]: later", vec!["text [label]: later"]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn code_front_matter_html_breaks_and_blank_lines_have_no_prose() {
+        let text = "---\ntitle: Notes\n---\n```rust\nlet x = 1;\n```\n\n    indented code\n\n<div>\nhtml block\n</div>\n\n***\nSetext\n---\n~~~\nbody\n~~~";
+        let prose = prose_of(text);
+        let lines: Vec<&str> = text.split('\n').collect();
+        for (i, line) in lines.iter().enumerate() {
+            let expected: Vec<&str> = if *line == "Setext" {
+                vec!["Setext"]
+            } else {
+                vec![]
+            };
+            assert_eq!(prose[i], expected, "line {i}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn code_spans_and_comments_are_excluded() {
+        for (line, prose) in [
+            ("run `cargo test` now", vec!["run ", " now"]),
+            ("a ``b ` c`` d", vec!["a ", " d"]),
+            ("`all code`", vec![]),
+            ("unclosed `tick", vec!["unclosed `tick"]),
+            ("a <!-- hidden --> b", vec!["a ", " b"]),
+            ("a <!-- open only", vec!["a <!-- open only"]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_links_text_is_prose() {
+        for (line, prose) in [
+            (
+                "See [the desing note](https://example.com/spel) or",
+                vec!["See ", "the desing note", " or"],
+            ),
+            ("![alt text](a.png) after", vec!["alt text", " after"]),
+            (
+                "Read [the guide][guide-ref] now",
+                vec!["Read ", "the guide", " now"],
+            ),
+            ("[**bold** words](u)", vec!["bold", " words"]),
+            ("[x](https://example.com/a_b_c)", vec!["x"]),
+            ("[not a link] here", vec!["[not a link] here"]),
+            ("wow! [a](u)", vec!["wow! ", "a"]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn bare_urls_and_autolinks_are_excluded() {
+        for (line, prose) in [
+            ("go https://x.io/a_b now", vec!["go ", " now"]),
+            ("see https://example.com/a.", vec!["see ", "."]),
+            ("or <https://example.com/chek>", vec!["or "]),
+            ("mail <me@example.com> now", vec!["mail ", " now"]),
+            ("<kbd>Ctrll</kbd> stays", vec!["<kbd>Ctrll</kbd> stays"]),
+            ("a <b c> d", vec!["a <b c> d"]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+        // An autolink is excluded without changing how the line looks.
+        let p = dark_palette();
+        let line = "<https://x.io>";
+        assert_eq!(
+            colored(line, &highlights_for(line)),
+            [("https://x.io", Some(p.link))]
+        );
+    }
+
+    #[test]
+    fn matched_emphasis_and_strike_delimiters_are_excluded() {
+        for (line, prose) in [
+            ("_word_ and **two**", vec!["word", " and ", "two"]),
+            ("~~gone~~ text", vec!["gone", " text"]),
+            ("***both*** __b__", vec!["both", " ", "b"]),
+            ("~~**x**~~", vec!["x"]),
+            ("an *unmatched star", vec!["an *unmatched star"]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_delimiter_inside_a_word_stays_in_the_prose() {
+        for (line, prose) in [
+            (
+                "snake_case_name and un*believ*able",
+                vec!["snake_case_name and un*believ*able"],
+            ),
+            ("a~~b~~c", vec!["a~~b~~c"]),
+            ("foo**bar** baz", vec!["foo**bar", " baz"]),
+            ("**foo**bar", vec!["foo**bar"]),
+            ("x2_y_ end", vec!["x2_y", " end"]),
+            ("é*ü*ñ", vec!["é*ü*ñ"]),
+        ] {
+            assert_eq!(line_prose(line), prose, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_acceptance_note_has_the_prose_the_plan_expects() {
+        let note = "---\ntitle: Spel chek\n---\n# Spell chek plan\n\nMarks apear under prose as you type, and a\nright-click on one offers replacments.\n\n- Engine: `spelbook` with a bundeled dictionary\n- See [the desing note](https://example.com/spel) or <https://example.com/chek>\n- README, README's, PRs and v0.1.1 stay unmarked; CommonMark does not\n- Catppuccin and Catppuccin’s are in the word list; mail me@exmaple.com\n- and/or, #tagg, snake_case_nmae, un*believ*able and <kbd>Ctrll</kbd> are skipped\n- [x] A done task with a mispelled word\n- It doesn’t mark don't, well-known or a b c; it marks well-knwon\n\n> A quote with a misteak.\n\n```rust\nlet chek = speller.check(wrd);\n```\n\n[ref-labl]: https://example.com \"Titel\"\n";
+        let none: Vec<&str> = Vec::new();
+        assert_eq!(
+            prose_of(note),
+            [
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                vec!["Spell chek plan"],
+                none.clone(),
+                vec!["Marks apear under prose as you type, and a"],
+                vec!["right-click on one offers replacments."],
+                none.clone(),
+                vec!["Engine: ", " with a bundeled dictionary"],
+                vec!["See ", "the desing note", " or "],
+                vec!["README, README's, PRs and v0.1.1 stay unmarked; CommonMark does not"],
+                vec!["Catppuccin and Catppuccin’s are in the word list; mail me@exmaple.com"],
+                vec![
+                    "and/or, #tagg, snake_case_nmae, un*believ*able and <kbd>Ctrll</kbd> are skipped"
+                ],
+                vec!["A done task with a mispelled word"],
+                vec!["It doesn’t mark don't, well-known or a b c; it marks well-knwon"],
+                none.clone(),
+                vec!["A quote with a misteak."],
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none,
+            ]
+        );
+    }
+
+    #[test]
+    fn prose_ranges_are_sorted_apart_non_empty_and_on_boundaries_for_any_text() {
+        const PIECES: &[&str] = &[
+            "word",
+            "Wren",
+            "é",
+            "ü",
+            "🐦",
+            "说明",
+            "\u{301}",
+            "\u{feff}",
+            " ",
+            "  ",
+            "\t",
+            "*",
+            "**",
+            "_",
+            "__",
+            "~~",
+            "~",
+            "`",
+            "``",
+            "[",
+            "]",
+            "(",
+            ")",
+            "![",
+            "](",
+            "][",
+            "<",
+            ">",
+            "<!--",
+            "-->",
+            "https://",
+            "http://x.io/",
+            "a@b",
+            "#",
+            "# ",
+            "- ",
+            "> ",
+            "- [x] ",
+            "- [ ] ",
+            "1. ",
+            "```",
+            "~~~",
+            "    ",
+            "---",
+            "|",
+            ":",
+            "]:",
+            "\\",
+            "^",
+            "a_b",
+            "x:y",
+        ];
+        let mut rng = Rng(0x5eed_cafe_f00d_d00d);
+        for doc in 0..3000 {
+            let lines: Vec<String> = (0..1 + rng.below(10))
+                .map(|_| {
+                    (0..rng.below(14))
+                        .map(|_| *rng.pick(PIECES))
+                        .collect::<String>()
+                })
+                .collect();
+            let text = lines.join("\n");
+            for (i, (line, (_, decor))) in lines
+                .iter()
+                .zip(highlight_text(fixtures::DARK, &text))
+                .enumerate()
+            {
+                let what = format!("doc {doc} line {i} {line:?}: {:?}", decor.prose);
+                let mut previous: Option<&Range<usize>> = None;
+                for range in &decor.prose {
+                    assert!(range.start < range.end, "empty range in {what}");
+                    assert!(range.end <= line.len(), "out of bounds in {what}");
+                    assert!(
+                        line.is_char_boundary(range.start) && line.is_char_boundary(range.end),
+                        "splits a character in {what}"
+                    );
+                    assert!(
+                        previous.is_none_or(|p| p.end < range.start),
+                        "not sorted and apart in {what}"
+                    );
+                    assert!(
+                        decor
+                            .code_spans
+                            .iter()
+                            .all(|code| code.end <= range.start || range.end <= code.start),
+                        "prose over code in {what}"
+                    );
+                    previous = Some(range);
+                }
+            }
+        }
+    }
+
+    /// A small deterministic generator (xorshift64*), so failures replay.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len())]
+        }
     }
 
     // ── Palette switching ─────────────────────────────────────────────────────

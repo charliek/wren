@@ -537,6 +537,14 @@ Deviations:
 
 #### `spell-marks`
 
+*M1, prose ranges.* Built as §3.3 says: an `excluded` flag on the scanner's `Cell`, `Inline.prose`, and the scan run over ATX heading text and done-task text for `prose` only. A digest of every span, strike, chip, hang and code band over 20,000 generated documents is the same before and after the change.
+
+Deviations:
+1. *A footnote definition is not a link reference definition.* `[^label]:` keeps its prose, as §8's known limits assume; rule 4.2.1 skips the `[^label]:` chunk itself.
+2. *A reference definition is recognised on any line whose text starts `[label]:`*, not only where CommonMark allows one (it cannot interrupt a paragraph): the highlighter sees one line at a time and the classifier does not report a paragraph's first line. The label must be non-empty and hold no unescaped bracket.
+3. *Autolinks are found by a pass that only excludes*: `<scheme:…>` (scheme as CommonMark's) and `<user@host>`, brackets included. It sets neither colour nor lock, so the look of a line does not change; the URL inside keeps the bare-URL colour it had.
+4. *Prose ranges are the maximal runs of text with nothing excluded*, so they hold white space and punctuation too, and consecutive ranges are separated by at least one excluded byte. An image's `!` is excluded with its brackets.
+
 #### `spell-menu`
 
 #### `spell-wire`
