@@ -1481,25 +1481,30 @@ fn a_settle_drops_the_preview_until_the_highlight_moves() {
 
 /// The keys of the Board menu that are enabled, each checked against the
 /// command it runs: the menu shares one count between the align items and
-/// one between the distribute items, and must still agree with each.
+/// one between the distribute items, and must still agree with each, except
+/// that a board command is greyed while the board takes text.
 fn board_menu(app: &App) -> Vec<&'static str> {
     let menu = crate::menu::MENUS
         .iter()
         .find(|menu| menu.kind == crate::menu::Kind::Board)
         .unwrap();
+    let machine = app.board.as_ref().map(wren_canvas::BoardView::machine);
+    let typing =
+        machine.is_some_and(|machine| machine.editing().is_some() || machine.seeking().is_some());
     let mut enabled = app.menu_enabled();
-    crate::menu::commands(menu.rows)
+    let listed: Vec<(&'static str, bool)> = crate::menu::commands(menu.rows)
         .into_iter()
-        .filter(|(key, _)| {
+        .map(|(key, _)| {
+            let id = CommandId::parse(key).unwrap();
             let on = enabled(key);
-            assert_eq!(
-                on,
-                app.command_enabled(CommandId::parse(key).unwrap()),
-                "{key}"
-            );
-            on
+            let runs = app.command_enabled(id) && !(typing && matches!(id, CommandId::Board(_)));
+            assert_eq!(on, runs, "{key}");
+            (key, on)
         })
-        .map(|(key, _)| key)
+        .collect();
+    listed
+        .into_iter()
+        .filter_map(|(key, on)| on.then_some(key))
         .collect()
 }
 
@@ -1542,4 +1547,58 @@ fn the_board_menu_follows_its_commands_and_runs_them_as_the_keys_do() {
     let _ = app.menu_command("font.increase");
     assert!(view(&app).viewport().zoom > zoom);
     assert_eq!(app.board_revision, 1, "a zoom drafts nothing");
+}
+
+/// §5.1 rule 3: while a label is open, or keyboard Connecting takes a
+/// query, the board runs no command a menu lists, so the Board menu's
+/// board items are greyed and choosing one, or pressing its ⌘ key
+/// equivalent, which AppKit gives the menu first, does nothing.
+#[test]
+fn the_board_menu_greys_its_board_items_while_the_board_takes_text() {
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    click(&mut app, "pack");
+    assert!(board_menu(&app).contains(&"board.duplicate"));
+
+    assert_eq!(key(&mut app, C::EditLabel), Disposition::Completed);
+    label(&mut app, LabelAction::Insert("zz".into()));
+    let editing = board_menu(&app);
+    assert!(
+        editing.iter().all(|key| !key.starts_with("board.")),
+        "{editing:?}"
+    );
+    for key in ["note.new_board", "note.export_svg", "note.export_png"] {
+        assert!(editing.contains(&key), "{key}");
+    }
+    let revision = app.board_revision;
+    for key in ["board.duplicate", "board.select.connected"] {
+        let _ = app.menu_command(key);
+        assert_eq!(state(&app), "editing", "{key}");
+        assert_eq!(view(&app).label().map(|label| label.text()), Some("zz"));
+        assert_eq!(view(&app).board().nodes.len(), 2, "{key}");
+        assert_eq!(app.board_revision, revision, "{key}");
+    }
+
+    // Committing the label gives the items back.
+    assert_eq!(key(&mut app, C::CommitLabel), Disposition::Completed);
+    assert_eq!(state(&app), "idle");
+    assert!(board_menu(&app).contains(&"board.duplicate"));
+    let revision = app.board_revision;
+
+    // Keyboard Connecting from the one selected node.
+    assert_eq!(
+        key(&mut app, C::Tool(Tool::Connector)),
+        Disposition::Completed
+    );
+    assert!(view(&app).machine().seeking().is_some());
+    let connecting = board_menu(&app);
+    assert!(
+        connecting.iter().all(|key| !key.starts_with("board.")),
+        "{connecting:?}"
+    );
+    let _ = app.menu_command("board.duplicate");
+    assert!(view(&app).machine().seeking().is_some());
+    assert_eq!(view(&app).board().nodes.len(), 2);
+    assert_eq!(app.board_revision, revision);
 }

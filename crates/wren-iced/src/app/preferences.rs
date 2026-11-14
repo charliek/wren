@@ -680,8 +680,29 @@ impl App {
         }
     }
 
+    /// Whether the open board holds the keyboard as text: a label is open
+    /// (an input method's preedit lives only in one) or keyboard Connecting
+    /// takes a query. The board's own keys then run no command a menu
+    /// lists (§5.1 rules 2 and 3), and the menu must not either, since
+    /// AppKit gives a ⌘ key equivalent to the menu before the board sees it.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+    fn board_typing(&self) -> bool {
+        self.board.as_ref().is_some_and(|view| {
+            let machine = view.machine();
+            machine.editing().is_some() || machine.seeking().is_some()
+        })
+    }
+
+    /// Whether a menu item would be greyed for typing: a board command
+    /// while the board takes text.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+    fn menu_typing_blocks(&self, id: CommandId) -> bool {
+        matches!(id, CommandId::Board(_)) && self.board_typing()
+    }
+
     /// Whether the menu item for a command key is enabled: exactly when its
-    /// command would run. It is asked after every message on macOS, so the
+    /// command would run, except that a board command is greyed while the
+    /// board takes text. It is asked after every message on macOS, so the
     /// align items, and the distribute items, which each share one rule
     /// (§5.16 rule 3), count a large selection once between them.
     #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
@@ -692,6 +713,9 @@ impl App {
             let Some(id) = CommandId::parse(key) else {
                 return false;
             };
+            if self.menu_typing_blocks(id) {
+                return false;
+            }
             let shared = match id {
                 CommandId::Board(C::Align(_)) => &mut align,
                 CommandId::Board(C::Distribute(_)) => &mut distribute,
@@ -702,9 +726,13 @@ impl App {
     }
 
     /// Run a command chosen from the native menu bar, with the same rules
-    /// as its keyboard shortcut.
+    /// as its keyboard shortcut. A board command does nothing while the
+    /// board takes text, as its greyed item does on a Mac.
     #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
     pub(super) fn menu_command(&mut self, key: &str) -> Task<Message> {
+        if CommandId::parse(key).is_some_and(|id| self.menu_typing_blocks(id)) {
+            return Task::none();
+        }
         #[cfg(target_os = "macos")]
         if key == crate::menu::CHECK_FOR_UPDATES {
             if let Err(error) = wren_sparkle::check_for_updates() {
