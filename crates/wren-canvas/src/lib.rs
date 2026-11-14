@@ -335,6 +335,16 @@ pub enum Effect {
     Notice(String),
 }
 
+/// One row the actions palette offers for the selection (§5.17 rule 3):
+/// a board command that applies to it, the group it is listed under, and
+/// whether it names the value the whole selection already has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Offer {
+    pub group: &'static str,
+    pub command: Command,
+    pub current: bool,
+}
+
 /// A revision no view has had: geometry built for one scene is never
 /// taken for another's, even when the host swaps the view under a widget.
 fn revision() -> u64 {
@@ -387,8 +397,13 @@ pub struct BoardView {
     plan: layers::Plan,
     cap: usize,
     /// The board as a gesture in flight would leave it, shown in place of
-    /// the board until the gesture ends (§3.4 rule 4).
+    /// the board until the gesture ends (§3.4 rule 4), or as the actions
+    /// palette's highlighted row would.
     preview: Option<Preview>,
+    /// The command the actions palette's highlighted row previews (§5.17
+    /// rule 4): shown through `preview`, never in the model, an undo
+    /// snapshot or a draft.
+    patch: Option<Command>,
     ids: Draws,
     viewport: Viewport,
     revision: u64,
@@ -484,6 +499,7 @@ impl BoardView {
             plan: layers::Plan::default(),
             cap: layers::CAP,
             preview: None,
+            patch: None,
             ids: Draws::Random(Random::new()),
             viewport: Viewport::default(),
             revision: 0,
@@ -537,6 +553,9 @@ impl BoardView {
         self.machine.retain(&self.board);
         self.epoch = epoch();
         self.build();
+        // A row previewed while the text changed underneath shows on the
+        // new board; nothing of it is ever the model's.
+        self.show_patch();
         Ok(())
     }
 
@@ -788,7 +807,159 @@ impl BoardView {
         self.carry(acts, Unit::One, now, &mut update);
         self.keep_label();
         self.preview = None;
+        self.patch = None;
         update
+    }
+
+    /// Show the board as `command` would leave it, for the actions
+    /// palette's highlighted row (§5.17 rule 4), or as it is for `None`.
+    /// Only a shape, colour, fill, outline or connector style command
+    /// previews, and only on a board that may be edited; any other shows
+    /// the board as it is. The preview is drawn from a copy of the board:
+    /// running the command applies it, and a settle, an edit, undo and
+    /// redo drop it. A gesture in flight keeps the board to itself.
+    pub fn set_patch(&mut self, command: Option<Command>) {
+        let command = command.filter(|command| {
+            self.writable() && !self.machine.dragging() && self.patched(*command).is_some()
+        });
+        if command == self.patch {
+            return;
+        }
+        let shown = self.patch.is_some();
+        self.patch = command;
+        if self.patch.is_some() {
+            self.show_patch();
+        } else if shown {
+            self.preview = None;
+        }
+    }
+
+    /// The command the board shows previewed, if any.
+    pub fn patch(&self) -> Option<Command> {
+        self.patch
+    }
+
+    /// What the actions palette lists for the selection (§5.17 rule 3):
+    /// the board commands that apply to it and that the board takes, in
+    /// the groups shape, colour, fill, stroke, connector, arrange, align,
+    /// distribute and edit; with nothing selected, paste, select all and
+    /// zoom to fit. A command offered is one that can change something
+    /// here: a fill for a selection with a shape in it, a connector style
+    /// for one with a connector. Where every element that takes a value
+    /// holds the same one, that row is current.
+    pub fn offers(&self) -> Vec<Offer> {
+        let board = &self.board;
+        let writable = self.writable();
+        let picked: Vec<&Source> = self
+            .machine
+            .selection()
+            .iter()
+            .filter(|element| match element {
+                Source::Node(id) => board.nodes.contains_key(id),
+                Source::Edge(id) => board.edges.contains_key(id),
+            })
+            .collect();
+        if picked.is_empty() {
+            let commands = [Command::Paste, Command::SelectAll, Command::ZoomFit];
+            return commands
+                .into_iter()
+                .filter(|command| writable || *command != Command::Paste)
+                .map(|command| Offer {
+                    group: "Board",
+                    command,
+                    current: false,
+                })
+                .collect();
+        }
+        let kind = |node: &Node| node.kind.as_ref().and_then(Named::known);
+        let nodes: Vec<&Node> = picked
+            .iter()
+            .filter_map(|element| board.nodes.get(element.node()?))
+            .collect();
+        let shapes: Vec<&Node> = nodes
+            .iter()
+            .copied()
+            .filter(|node| kind(node) == Some(NodeKind::Shape))
+            .collect();
+        let edges: Vec<&wren_board::Edge> = picked
+            .iter()
+            .filter_map(|element| board.edges.get(element.edge()?))
+            .collect();
+        // What `board.color.*` sets: a shape's, a text node's and any
+        // connector's colour (§5.16 rule 1).
+        let colours: Vec<&wren_board::Color> = nodes
+            .iter()
+            .filter(|node| kind(node).is_some())
+            .map(|node| &node.style.color)
+            .chain(edges.iter().map(|edge| &edge.style.color))
+            .collect();
+        let strokes = picked
+            .iter()
+            .filter(|element| edit::stroke_of(board, element).is_some())
+            .count();
+        let shape = shared(shapes.iter().map(|node| node.shape.known()));
+        let colour = shared(colours.iter().copied());
+        let fill = shared(shapes.iter().map(|node| node.style.fill.known()));
+        let mut offers = Vec::new();
+        for command in Command::all() {
+            let (group, applies, current) = match command {
+                Command::Shape(each) => ("Shape", !shapes.is_empty(), shape == Some(Some(each))),
+                Command::Color(token) => (
+                    "Colour",
+                    !colours.is_empty(),
+                    colour == Some(&wren_board::Color::Token(token)),
+                ),
+                Command::Fill(each) => ("Fill", !shapes.is_empty(), fill == Some(Some(each))),
+                Command::StrokeDashed => ("Stroke", strokes > 0, false),
+                Command::EdgeRouting
+                | Command::EdgeStart
+                | Command::EdgeEnd
+                | Command::EdgeReverse => ("Connector", !edges.is_empty(), false),
+                Command::Arrange(_) => ("Arrange", true, false),
+                Command::Align(_) => ("Align", nodes.len() >= 2, false),
+                Command::Distribute(_) => ("Distribute", nodes.len() >= 3, false),
+                _ => continue,
+            };
+            if writable && applies {
+                offers.push(Offer {
+                    group,
+                    command,
+                    current,
+                });
+            }
+        }
+        // Copy is the one edit a read-only board takes (§5.2).
+        let edits = [
+            (Command::EditLabel, writable && picked.len() == 1),
+            (Command::Duplicate, writable && !nodes.is_empty()),
+            (Command::Copy, !nodes.is_empty()),
+            (Command::Cut, writable && !nodes.is_empty()),
+            (Command::Delete, writable),
+        ];
+        // The stable order of the groups (§5.17 rule 3), whatever the
+        // command table's order is.
+        const GROUPS: [&str; 8] = [
+            "Shape",
+            "Colour",
+            "Fill",
+            "Stroke",
+            "Connector",
+            "Arrange",
+            "Align",
+            "Distribute",
+        ];
+        offers.sort_by_key(|offer| GROUPS.iter().position(|group| *group == offer.group));
+        offers.extend(
+            edits
+                .into_iter()
+                .filter(|(_, offered)| *offered)
+                .map(|(command, _)| Offer {
+                    group: "Edit",
+                    command,
+                    current: false,
+                }),
+        );
+        offers
     }
 
     /// Whether there is a unit to undo (§5.11).
@@ -1079,6 +1250,7 @@ impl BoardView {
     /// Apply `plan`, as [`BoardView::edit`] does once it has planned.
     fn carry_out(&mut self, plan: &Plan, unit: Unit, now: Instant, update: &mut Update) -> bool {
         let shown = self.preview.take();
+        self.patch = None;
         let changed = !plan.is_empty();
         if changed {
             // A creation that opens its label begins a group, which the
@@ -1137,6 +1309,9 @@ impl BoardView {
         let Some(to) = to else {
             return;
         };
+        if self.patch.take().is_some() {
+            self.preview = None;
+        }
         self.board = to.board;
         self.issues = wren_board::check(&self.board);
         self.build();
@@ -1462,6 +1637,39 @@ impl BoardView {
         self.preview = Some(self.picture_of(board));
     }
 
+    /// Show the board as the patch would leave it, or as it is when the
+    /// patch would change nothing.
+    fn show_patch(&mut self) {
+        let intent = self.patch.and_then(|command| self.patched(command));
+        self.show(intent.as_ref());
+    }
+
+    /// What `command` would plan on the selection, for the commands the
+    /// actions palette previews (§5.17 rule 4): the intent running it
+    /// plans, so Enter applies the board the preview showed.
+    fn patched(&self, command: Command) -> Option<Intent> {
+        let picked: Vec<Source> = self.machine.selection().iter().cloned().collect();
+        match command {
+            Command::Shape(shape) => {
+                let ids: Vec<Id> = picked
+                    .iter()
+                    .filter_map(Source::node)
+                    .filter(|id| self.board.nodes.contains_key(*id))
+                    .cloned()
+                    .collect();
+                (!ids.is_empty()).then_some(Intent::SetShape { ids, shape })
+            }
+            Command::Color(_) | Command::Fill(_) | Command::StrokeDashed => {
+                style(&self.board, picked, command)
+            }
+            Command::EdgeRouting | Command::EdgeStart | Command::EdgeEnd | Command::EdgeReverse => {
+                let edges: Vec<Id> = picked.iter().filter_map(Source::edge).cloned().collect();
+                edge_style(&self.board, &edges, command)
+            }
+            _ => None,
+        }
+    }
+
     /// A preview of `board`, its scene built in the spare cache.
     fn picture_of(&mut self, board: Board) -> Preview {
         #[cfg(feature = "test-support")]
@@ -1559,6 +1767,8 @@ impl BoardView {
                     self.edit(&intent, Unit::One, now, update);
                 }
             }
+            // A right-click asks for it (§5.17 rule 2), as `board.actions` does.
+            Command::Actions => update.effects.push(Effect::OpenActions),
             Command::Select(dir) => self.walk(dir, false),
             Command::ExtendSelection(dir) => self.walk(dir, true),
             Command::ZoomFit => self.fit(),
@@ -1899,6 +2109,12 @@ fn shows(viewport: Viewport, size: (f32, f32), bounds: Rect) -> bool {
     let (left, top) = viewport.to_screen((bounds.x, bounds.y));
     let (right, bottom) = viewport.to_screen((bounds.right(), bounds.bottom()));
     left >= 0.0 && top >= 0.0 && right <= size.0 && bottom <= size.1
+}
+
+/// The value every item of `values` holds, if there is one and they agree.
+fn shared<T: PartialEq>(mut values: impl Iterator<Item = T>) -> Option<T> {
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
 }
 
 pub(crate) fn union(a: Rect, b: Rect) -> Rect {
@@ -5889,5 +6105,296 @@ z = "c"
         assert!(removed.is_empty());
         travel(&mut view, Command::Undo, now);
         assert!(view.pristine() && !view.can_undo());
+    }
+
+    /// What the actions palette lists, as `(group, key, current)`.
+    fn offered(view: &BoardView) -> Vec<(&'static str, &'static str, bool)> {
+        let offers = view.offers().into_iter();
+        offers
+            .map(|offer| (offer.group, offer.command.key(), offer.current))
+            .collect()
+    }
+
+    /// The groups of [`offered`] in order, and the keys of one of them.
+    fn offered_groups(view: &BoardView) -> Vec<&'static str> {
+        let mut groups: Vec<&str> = offered(view).iter().map(|offer| offer.0).collect();
+        groups.dedup();
+        groups
+    }
+
+    fn offered_in(view: &BoardView, group: &str) -> Vec<&'static str> {
+        let offers = offered(view).into_iter();
+        offers
+            .filter(|offer| offer.0 == group)
+            .map(|offer| offer.1)
+            .collect()
+    }
+
+    fn offered_current(view: &BoardView) -> Vec<&'static str> {
+        let offers = offered(view).into_iter();
+        offers
+            .filter(|offer| offer.2)
+            .map(|offer| offer.1)
+            .collect()
+    }
+
+    fn select(view: &mut BoardView, names: &[&str]) {
+        let picked: BTreeSet<Source> = names.iter().map(|name| pick(view, name)).collect();
+        let cursor = picked.iter().next().cloned();
+        view.machine.select(picked, cursor);
+    }
+
+    /// §5.17 rule 3: the actions palette lists the board commands that
+    /// apply to the selection and only those, grouped, with the value the
+    /// whole selection holds current.
+    #[test]
+    fn the_actions_offered_follow_the_selection() {
+        use wren_board::Token;
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        assert_eq!(
+            offered(&view),
+            [
+                ("Board", "board.paste", false),
+                ("Board", "board.select.all", false),
+                ("Board", "board.zoom.fit", false),
+            ]
+        );
+
+        // One shape.
+        select(&mut view, &["a"]);
+        assert_eq!(
+            offered_groups(&view),
+            ["Shape", "Colour", "Fill", "Stroke", "Arrange", "Edit"]
+        );
+        assert_eq!(offered_in(&view, "Shape").len(), 8);
+        assert_eq!(offered_in(&view, "Colour").len(), 8);
+        assert_eq!(
+            offered_in(&view, "Fill"),
+            ["board.fill.none", "board.fill.tint", "board.fill.solid"]
+        );
+        assert_eq!(
+            offered_in(&view, "Arrange"),
+            [
+                "board.arrange.front",
+                "board.arrange.back",
+                "board.arrange.forward",
+                "board.arrange.backward"
+            ]
+        );
+        assert_eq!(
+            offered_in(&view, "Edit"),
+            [
+                "board.label.edit",
+                "board.duplicate",
+                "board.copy",
+                "board.cut",
+                "board.delete"
+            ]
+        );
+        assert_eq!(
+            offered_current(&view),
+            [
+                "board.shape.rectangle",
+                "board.color.neutral",
+                "board.fill.tint"
+            ]
+        );
+
+        // One connector: no shape or fill, its own styles.
+        select(&mut view, &["e"]);
+        assert_eq!(
+            offered_groups(&view),
+            ["Colour", "Stroke", "Connector", "Arrange", "Edit"]
+        );
+        assert_eq!(
+            offered_in(&view, "Connector"),
+            [
+                "board.edge.routing",
+                "board.edge.start",
+                "board.edge.end",
+                "board.edge.reverse"
+            ]
+        );
+        assert_eq!(
+            offered_in(&view, "Edit"),
+            ["board.label.edit", "board.delete"]
+        );
+        assert_eq!(offered_current(&view), ["board.color.neutral"]);
+
+        // Two shapes and the connector, one shape red: align, and no
+        // colour is current; no single label to edit.
+        select(&mut view, &["a"]);
+        assert_eq!(view.command(Command::Color(Token::Red), now), CHANGED);
+        select(&mut view, &["a", "b", "e"]);
+        assert_eq!(
+            offered_groups(&view),
+            [
+                "Shape",
+                "Colour",
+                "Fill",
+                "Stroke",
+                "Connector",
+                "Arrange",
+                "Align",
+                "Edit"
+            ]
+        );
+        assert_eq!(offered_in(&view, "Align").len(), 6);
+        assert_eq!(
+            offered_in(&view, "Edit"),
+            ["board.duplicate", "board.copy", "board.cut", "board.delete"]
+        );
+        assert_eq!(
+            offered_current(&view),
+            ["board.shape.rectangle", "board.fill.tint"]
+        );
+        // Three nodes distribute.
+        let three = format!(
+            "{TWO}\n[node.c]\ntext = \"C\"\nkind = \"shape\"\nat = [600, 0]\nsize = [120, 60]\nz = \"d\"\n"
+        );
+        let mut view = sized(&three);
+        select(&mut view, &["a", "b", "c"]);
+        assert_eq!(
+            offered_in(&view, "Distribute"),
+            ["board.distribute.horizontal", "board.distribute.vertical"]
+        );
+
+        // A read-only board offers only what looks or copies.
+        let future = TWO.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1);
+        let mut view = sized(&future);
+        assert!(!view.writable());
+        assert_eq!(
+            offered(&view),
+            [
+                ("Board", "board.select.all", false),
+                ("Board", "board.zoom.fit", false),
+            ]
+        );
+        select(&mut view, &["a", "e"]);
+        assert_eq!(offered(&view), [("Edit", "board.copy", false)]);
+        select(&mut view, &["e"]);
+        assert!(offered(&view).is_empty());
+    }
+
+    /// §5.17 rule 4: a previewed row draws the board as its command would
+    /// leave it, from a copy: the model, the draft and the undo history
+    /// never see it. Another row or none replaces it; a theme change and a
+    /// reload keep it; a settle, an edit and undo drop it; running the
+    /// command applies the very board it showed, as one step.
+    #[test]
+    fn a_patch_is_drawn_and_is_never_the_model() {
+        use wren_board::{Color, Fill, Token};
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        select(&mut view, &["a"]);
+        let plain = view.scene().clone();
+        let built = |view: &BoardView, change: &dyn Fn(&mut Node)| {
+            let mut board = view.board().clone();
+            change(board.nodes.get_mut(&id("a")).expect("a"));
+            scene::build(&board, view.palette(), view.measurer())
+        };
+        let red = |node: &mut Node| node.style.color = Color::Token(Token::Red);
+
+        // Only a style the selection takes previews, and one it already
+        // holds shows the board as it is.
+        for command in [
+            Command::Arrange(Stack::Front),
+            Command::Delete,
+            Command::EdgeRouting,
+        ] {
+            view.set_patch(Some(command));
+            assert_eq!(view.patch(), None, "{command:?}");
+            assert_eq!(view.shown(), &plain, "{command:?}");
+        }
+        for command in [Command::Color(Token::Neutral), Command::Fill(Fill::Tint)] {
+            view.set_patch(Some(command));
+            assert_eq!(view.shown(), &plain, "{command:?}");
+        }
+        view.set_patch(Some(Command::Color(Token::Red)));
+        assert_eq!(view.patch(), Some(Command::Color(Token::Red)));
+        assert_eq!(view.shown(), &built(&view, &red));
+        assert_eq!(view.scene(), &plain);
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!(view.draft(), TWO);
+        view.set_patch(Some(Command::Shape(Shape::Diamond)));
+        let diamond = |node: &mut Node| node.shape = Named::Known(Shape::Diamond);
+        assert_eq!(view.shown(), &built(&view, &diamond));
+        view.set_patch(None);
+        assert_eq!((view.patch(), view.shown()), (None, &plain));
+
+        // A theme change draws it in the new colours, and a change
+        // underneath shows it on the new board.
+        view.set_patch(Some(Command::Color(Token::Red)));
+        let mut palette = fixtures::palette();
+        palette.hues[0] = Rgba::rgb(250, 0, 0);
+        view.set_palette(palette);
+        assert_eq!(view.shown(), &built(&view, &red));
+        let renamed = TWO.replace("text = \"B\"", "text = \"Bee\"");
+        view.reload(&renamed).expect("a board");
+        assert_eq!(view.patch(), Some(Command::Color(Token::Red)));
+        assert_eq!(view.shown(), &built(&view, &red));
+        assert_eq!(view.draft(), renamed);
+        // A settle drops it.
+        assert_eq!(view.settle(now), Update::default());
+        assert_eq!(view.patch(), None);
+        assert_eq!(view.shown(), view.scene());
+
+        // Running the command applies the board it showed, one step.
+        view.set_patch(Some(Command::Color(Token::Red)));
+        let shown = view.shown().clone();
+        assert_eq!(view.command(Command::Color(Token::Red), now), CHANGED);
+        assert_eq!(view.patch(), None);
+        assert_eq!(view.scene(), &shown);
+        assert_eq!(
+            line_diff(&renamed, &view.draft()),
+            (vec!["style.color = \"red\"".to_owned()], Vec::new())
+        );
+        // Undo drops one, and so does another edit.
+        view.set_patch(Some(Command::Fill(Fill::Solid)));
+        travel(&mut view, Command::Undo, now);
+        assert_eq!(view.patch(), None);
+        assert_eq!(view.shown(), view.scene());
+        assert_eq!(view.draft(), renamed);
+        view.set_patch(Some(Command::Fill(Fill::Solid)));
+        assert_eq!(view.command(Command::Arrange(Stack::Front), now), CHANGED);
+        assert_eq!(view.patch(), None);
+        assert_eq!(view.shown(), view.scene());
+
+        // A read-only board previews nothing.
+        let future = TWO.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1);
+        let mut view = sized(&future);
+        select(&mut view, &["a"]);
+        view.set_patch(Some(Command::Color(Token::Red)));
+        assert_eq!(view.patch(), None);
+    }
+
+    /// §5.17 rule 2: a right press selects and asks the host for the
+    /// actions palette, and so does `board.actions`.
+    #[test]
+    fn a_right_press_asks_for_the_actions_palette() {
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        let at = middle(&view, "b");
+        let update = input(
+            &mut view,
+            Input::Press {
+                button: Button::Right,
+                at,
+            },
+            now,
+        );
+        assert_eq!(
+            update,
+            Update {
+                changed: false,
+                effects: vec![Effect::OpenActions],
+            }
+        );
+        assert_eq!(selected(&view), ["b"]);
+        assert_eq!(
+            view.command(Command::Actions, now).effects,
+            [Effect::OpenActions]
+        );
     }
 }

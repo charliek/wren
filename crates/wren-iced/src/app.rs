@@ -94,6 +94,8 @@ pub struct App {
     palette: Option<Palette>,
     /// Where the outline palette opened; see `sync_outline`.
     outline_origin: Option<palette::OutlineOrigin>,
+    /// The board the actions palette opened on; see `sync_actions`.
+    actions_origin: Option<palette::ActionsOrigin>,
     widths: Widths,
     column: columns::Column,
     /// Browser panes folded from the left (0–2) by keyboard moves.
@@ -352,6 +354,7 @@ impl App {
             last_processed: None,
             palette: None,
             outline_origin: None,
+            actions_origin: None,
             widths: Widths::default(),
             column: columns::Column::Editor,
             fold: 0,

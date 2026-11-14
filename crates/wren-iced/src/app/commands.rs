@@ -1217,6 +1217,8 @@ impl App {
                 let task = self.edit(wren_editor::Message::Intent(intent));
                 self.finish_action(Disposition::Completed, None, task.chain(focus))
             }
+            // A right-click reaches it too, through the board's effect.
+            Board(BoardCommand::Actions) => self.open_palette(Mode::BoardActions),
             Board(command) => {
                 // From the palette, the menu or the harness: act on the
                 // board as it stands, then give it the keyboard (§5.1 rule 5).

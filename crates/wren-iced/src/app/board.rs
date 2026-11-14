@@ -209,8 +209,16 @@ impl App {
                         }));
                     }
                 }
-                // The view moved itself, and the two palettes are Phase 3's.
-                Effect::Look(_) | Effect::OpenActions | Effect::OpenJump => {}
+                // A right-click: the actions palette for the selection it
+                // made, opened as `board.actions` opens it (§5.17 rule 2).
+                Effect::OpenActions => {
+                    let id = super::commands::CommandId::Board(wren_canvas::Command::Actions);
+                    let opened = self.dispatch(super::commands::Command::Run(id));
+                    tasks.push(opened.task);
+                }
+                // The view moved itself, and the jump palette is the find
+                // chain's.
+                Effect::Look(_) | Effect::OpenJump => {}
             }
         }
         did.task = Task::batch(tasks);

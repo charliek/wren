@@ -447,7 +447,9 @@ impl App {
             .into_iter()
             .map(|input| self.board_edit(wren_canvas::Message::Input(epoch, input)))
             .collect();
-        if pressed.is_some() {
+        // A right press that opened the actions palette left the keyboard
+        // in its input.
+        if pressed.is_some() && self.palette.is_none() {
             tasks.push(focus_editor());
         }
         Ok(Task::batch(tasks))

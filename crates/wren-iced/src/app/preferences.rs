@@ -501,7 +501,8 @@ impl App {
             self.preview = preview;
             self.apply_shown();
         }
-        self.sync_outline()
+        let actions = self.sync_actions();
+        Task::batch([self.sync_outline(), actions])
     }
 
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
