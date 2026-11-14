@@ -1,0 +1,312 @@
+schema = 1
+
+[node.017xxzhn]
+text = "green none"
+kind = "shape"
+at = [20, 420]
+shape = "rounded"
+size = [120, 60]
+style.color = "green"
+style.fill = "none"
+z = "V0C"
+
+[node.0aytcway]
+text = "red tint"
+kind = "shape"
+at = [180, 120]
+shape = "rounded"
+size = [120, 60]
+style.color = "red"
+z = "V04"
+
+[node.1gh89gbj]
+text = "orange tint"
+kind = "shape"
+at = [180, 220]
+shape = "rounded"
+size = [120, 60]
+style.color = "orange"
+z = "V07"
+
+[node.2gp42xwd]
+text = "red solid"
+kind = "shape"
+at = [340, 120]
+shape = "rounded"
+size = [120, 60]
+style.color = "red"
+style.fill = "solid"
+z = "V05"
+
+[node.55gjdxqc]
+text = "purple none"
+kind = "shape"
+at = [20, 620]
+shape = "rounded"
+size = [120, 60]
+style.color = "purple"
+style.fill = "none"
+z = "V0I"
+
+[node.7t3t2qc9]
+text = "purple tint"
+kind = "shape"
+at = [180, 620]
+shape = "rounded"
+size = [120, 60]
+style.color = "purple"
+z = "V0J"
+
+[node.81gq99xv]
+text = "cyan solid"
+kind = "shape"
+at = [340, 520]
+shape = "rounded"
+size = [120, 60]
+style.color = "cyan"
+style.fill = "solid"
+z = "V0H"
+
+[node.9kggmfp3]
+text = "solid outline"
+kind = "shape"
+at = [20, 820]
+size = [120, 60]
+z = "V0O"
+
+[node.cctht8hs]
+text = "blue tint"
+kind = "shape"
+at = [180, 720]
+shape = "rounded"
+size = [120, 60]
+style.color = "blue"
+z = "V0M"
+
+[node.dyr0x3kn]
+text = "cyan tint"
+kind = "shape"
+at = [180, 520]
+shape = "rounded"
+size = [120, 60]
+style.color = "cyan"
+z = "V0G"
+
+[node.eec60twt]
+text = "orange none"
+kind = "shape"
+at = [20, 220]
+shape = "rounded"
+size = [120, 60]
+style.color = "orange"
+style.fill = "none"
+z = "V06"
+
+[node.fbb8nty7]
+text = "blue none"
+kind = "shape"
+at = [20, 720]
+shape = "rounded"
+size = [120, 60]
+style.color = "blue"
+style.fill = "none"
+z = "V0L"
+
+[node.fmvxt27c]
+text = "yellow none"
+kind = "shape"
+at = [20, 320]
+shape = "rounded"
+size = [120, 60]
+style.color = "yellow"
+style.fill = "none"
+z = "V09"
+
+[node.fx22r16y]
+text = "orange solid"
+kind = "shape"
+at = [340, 220]
+shape = "rounded"
+size = [120, 60]
+style.color = "orange"
+style.fill = "solid"
+z = "V08"
+
+[node.g55q3pcx]
+text = "yellow tint"
+kind = "shape"
+at = [180, 320]
+shape = "rounded"
+size = [120, 60]
+style.color = "yellow"
+z = "V0A"
+
+[node.nf8nysbx]
+text = "blue free text"
+kind = "text"
+at = [340, 820]
+size = [120, 40]
+style.color = "blue"
+z = "V0Q"
+
+[node.nxy8c4s4]
+text = "cyan none"
+kind = "shape"
+at = [20, 520]
+shape = "rounded"
+size = [120, 60]
+style.color = "cyan"
+style.fill = "none"
+z = "V0F"
+
+[node.p0xd9t7a]
+text = "neutral none"
+kind = "shape"
+at = [20, 20]
+shape = "rounded"
+size = [120, 60]
+style.fill = "none"
+z = "V"
+
+[node.pby24db1]
+text = "neutral tint"
+kind = "shape"
+at = [180, 20]
+shape = "rounded"
+size = [120, 60]
+z = "V01"
+
+[node.q4jppk3r]
+text = "red none"
+kind = "shape"
+at = [20, 120]
+shape = "rounded"
+size = [120, 60]
+style.color = "red"
+style.fill = "none"
+z = "V03"
+
+[node.q8z5ws6y]
+text = "yellow solid"
+kind = "shape"
+at = [340, 320]
+shape = "rounded"
+size = [120, 60]
+style.color = "yellow"
+style.fill = "solid"
+z = "V0B"
+
+[node.qdse3s1h]
+text = "dashed outline"
+kind = "shape"
+at = [180, 820]
+size = [120, 60]
+style.stroke = "dashed"
+z = "V0P"
+
+[node.tqs4ksey]
+text = "blue solid"
+kind = "shape"
+at = [340, 720]
+shape = "rounded"
+size = [120, 60]
+style.color = "blue"
+style.fill = "solid"
+z = "V0N"
+
+[node.wew393k3]
+text = "green tint"
+kind = "shape"
+at = [180, 420]
+shape = "rounded"
+size = [120, 60]
+style.color = "green"
+z = "V0D"
+
+[node.x0nk3a1m]
+text = "purple solid"
+kind = "shape"
+at = [340, 620]
+shape = "rounded"
+size = [120, 60]
+style.color = "purple"
+style.fill = "solid"
+z = "V0K"
+
+[node.x3ehavh5]
+text = "green solid"
+kind = "shape"
+at = [340, 420]
+shape = "rounded"
+size = [120, 60]
+style.color = "green"
+style.fill = "solid"
+z = "V0E"
+
+[node.yzhd5pr7]
+text = "neutral solid"
+kind = "shape"
+at = [340, 20]
+shape = "rounded"
+size = [120, 60]
+style.fill = "solid"
+z = "V02"
+
+[edge.03ey62ys]
+kind = "edge"
+from = { node = "dyr0x3kn" }
+to = { node = "81gq99xv" }
+style.color = "cyan"
+style.stroke = "dashed"
+z = "V0W"
+
+[edge.1b672qa0]
+kind = "edge"
+from = { node = "1gh89gbj" }
+to = { node = "fx22r16y" }
+style.color = "orange"
+z = "V0T"
+
+[edge.92j2nqjj]
+kind = "edge"
+from = { node = "0aytcway" }
+to = { node = "2gp42xwd" }
+style.color = "red"
+style.stroke = "dashed"
+z = "V0S"
+
+[edge.fwbr5pny]
+kind = "edge"
+from = { node = "g55q3pcx" }
+to = { node = "q8z5ws6y" }
+style.color = "yellow"
+style.stroke = "dashed"
+z = "V0U"
+
+[edge.m8xnsnkp]
+kind = "edge"
+from = { node = "wew393k3" }
+to = { node = "x3ehavh5" }
+style.color = "green"
+z = "V0V"
+
+[edge.rcjba214]
+kind = "edge"
+from = { node = "cctht8hs" }
+to = { node = "tqs4ksey" }
+style.color = "blue"
+style.stroke = "dashed"
+z = "V0Y"
+
+[edge.s8spzx9y]
+kind = "edge"
+from = { node = "7t3t2qc9" }
+to = { node = "x0nk3a1m" }
+style.color = "purple"
+z = "V0X"
+
+[edge.tq91kky2]
+kind = "edge"
+from = { node = "pby24db1" }
+to = { node = "yzhd5pr7" }
+z = "V0R"

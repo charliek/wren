@@ -1,7 +1,8 @@
 //! The committed board files the format tests read: the golden files of
 //! `golden/format/` and the boards of the sample workspace. They are
-//! written by `tools/board_fixtures.py`, never by hand. Also the seeded
-//! generator the property tests share.
+//! written by `tools/board_fixtures.py`, never by hand, except the
+//! `editor-*` files, which the app's board editor wrote when schema 1 was
+//! locked (§4.17). Also the seeded generator the property tests share.
 
 use std::path::PathBuf;
 
@@ -59,6 +60,10 @@ pub const CANONICAL: &[(&str, &str)] = &[
     sample!("Shapes"),
     sample!("Overlap"),
     sample!("Future"),
+    golden!("editor-flowchart.out"),
+    golden!("editor-paste.out"),
+    golden!("editor-connectors.out"),
+    golden!("editor-styles.out"),
 ];
 
 /// Non-canonical inputs, each with the canonical file it writes to.

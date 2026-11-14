@@ -52,6 +52,8 @@ pub mod edit;
 mod fixtures;
 pub mod history;
 pub mod ids;
+#[cfg(test)]
+mod lock;
 pub mod place;
 mod read;
 pub mod route;

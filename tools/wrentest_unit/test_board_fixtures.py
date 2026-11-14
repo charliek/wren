@@ -13,6 +13,9 @@ class BoardFixtureTests(unittest.TestCase):
                          "run python3 tools/board_fixtures.py write and review the diff")
 
     def test_outputs_are_canonical_and_inputs_are_not(self):
+        self.assertEqual([p.name for p in board_fixtures.EDITOR], [
+            "editor-connectors.out.wren-board", "editor-flowchart.out.wren-board",
+            "editor-paste.out.wren-board", "editor-styles.out.wren-board"])
         self.assertEqual(board_fixtures.problems(board_fixtures.committed(board_fixtures.fixtures())), [])
 
     def test_every_output_is_toml_1_0_that_the_reference_writes_back(self):

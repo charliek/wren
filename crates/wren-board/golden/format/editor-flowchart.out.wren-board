@@ -1,0 +1,231 @@
+schema = 1
+
+[node.0aay7x98]
+text = "Retry payment"
+kind = "shape"
+at = [140, 700]
+size = [120, 60]
+z = "V0K"
+
+[node.7j2a1f1w]
+text = "Backorder"
+kind = "shape"
+at = [140, 460]
+size = [120, 60]
+z = "V0B"
+
+[node.98058v3k]
+text = "Send receipt"
+kind = "shape"
+at = [-60, 1060]
+size = [120, 60]
+z = "V0R"
+
+[node.9kpd0rmb]
+text = "Start"
+kind = "shape"
+at = [-60, -20]
+shape = "pill"
+size = [120, 60]
+z = "V"
+
+[node.g21z5pdm]
+text = "Ship"
+kind = "shape"
+at = [-60, 940]
+size = [120, 60]
+z = "V0P"
+
+[node.h73cpwqn]
+text = "End"
+kind = "shape"
+at = [-60, 1180]
+shape = "pill"
+size = [120, 60]
+z = "V0T"
+
+[node.jjdjhaax]
+text = "Pack"
+kind = "shape"
+at = [-60, 820]
+size = [120, 60]
+z = "V0N"
+
+[node.kh2vxsdr]
+text = "Payment ok?"
+kind = "shape"
+at = [-60, 700]
+shape = "diamond"
+size = [120, 60]
+z = "V0I"
+
+[node.kmhs4c2t]
+text = "Check stock"
+kind = "shape"
+at = [-60, 340]
+size = [120, 60]
+z = "V07"
+
+[node.psk38f9w]
+text = "Notify customer"
+kind = "shape"
+at = [140, 580]
+size = [120, 60]
+z = "V0D"
+
+[node.tqqyvf8y]
+text = "Valid?"
+kind = "shape"
+at = [-60, 220]
+shape = "diamond"
+size = [120, 60]
+z = "V03"
+
+[node.ty7ff0b5]
+text = "Receive order"
+kind = "shape"
+at = [-60, 100]
+size = [120, 60]
+z = "V01"
+
+[node.wb22285y]
+text = "In stock?"
+kind = "shape"
+at = [-60, 460]
+shape = "diamond"
+size = [120, 60]
+z = "V09"
+
+[node.y497bv8h]
+text = "Charge card"
+kind = "shape"
+at = [-60, 580]
+size = [120, 60]
+z = "V0G"
+
+[node.zkc2a0dv]
+text = "Reject order"
+kind = "shape"
+at = [140, 220]
+size = [120, 60]
+z = "V05"
+
+[edge.627ezt8j]
+kind = "edge"
+from = { node = "psk38f9w" }
+to = { node = "kmhs4c2t" }
+z = "V0F"
+
+[edge.6v160t2w]
+kind = "edge"
+from = { node = "ty7ff0b5" }
+to = { node = "tqqyvf8y" }
+z = "V04"
+
+[edge.b77ks12x]
+kind = "edge"
+from = { node = "0aay7x98" }
+to = { node = "y497bv8h" }
+z = "V0M"
+
+[edge.e7ba7t9k]
+kind = "edge"
+from = { node = "g21z5pdm" }
+to = { node = "98058v3k" }
+z = "V0S"
+
+[edge.gkm51edh]
+kind = "edge"
+from = { node = "zkc2a0dv" }
+to = { node = "h73cpwqn" }
+z = "V0V"
+
+[edge.jcwv36dx]
+kind = "edge"
+from = { node = "kh2vxsdr" }
+to = { node = "0aay7x98" }
+labels = [
+  { text = "No" },
+]
+z = "V0L"
+
+[edge.mx21fgah]
+kind = "edge"
+from = { node = "tqqyvf8y" }
+to = { node = "zkc2a0dv" }
+labels = [
+  { text = "No" },
+]
+z = "V06"
+
+[edge.p9z526wr]
+kind = "edge"
+from = { node = "y497bv8h" }
+to = { node = "kh2vxsdr" }
+z = "V0J"
+
+[edge.q56mb10s]
+kind = "edge"
+from = { node = "98058v3k" }
+to = { node = "h73cpwqn" }
+z = "V0U"
+
+[edge.qp03cp8b]
+kind = "edge"
+from = { node = "tqqyvf8y" }
+to = { node = "kmhs4c2t" }
+labels = [
+  { text = "Yes" },
+]
+z = "V08"
+
+[edge.s9dmdmqe]
+kind = "edge"
+from = { node = "kmhs4c2t" }
+to = { node = "wb22285y" }
+z = "V0A"
+
+[edge.t62syjy1]
+kind = "edge"
+from = { node = "9kpd0rmb" }
+to = { node = "ty7ff0b5" }
+z = "V02"
+
+[edge.v7a7e0t9]
+kind = "edge"
+from = { node = "7j2a1f1w" }
+to = { node = "psk38f9w" }
+z = "V0E"
+
+[edge.wagcsvh9]
+kind = "edge"
+from = { node = "wb22285y" }
+to = { node = "7j2a1f1w" }
+labels = [
+  { text = "No" },
+]
+z = "V0C"
+
+[edge.x8gk66vm]
+kind = "edge"
+from = { node = "jjdjhaax" }
+to = { node = "g21z5pdm" }
+z = "V0Q"
+
+[edge.ybsqpth6]
+kind = "edge"
+from = { node = "kh2vxsdr" }
+to = { node = "jjdjhaax" }
+labels = [
+  { text = "Yes" },
+]
+z = "V0O"
+
+[edge.zg849q7c]
+kind = "edge"
+from = { node = "wb22285y" }
+to = { node = "y497bv8h" }
+labels = [
+  { text = "Yes" },
+]
+z = "V0H"

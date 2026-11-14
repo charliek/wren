@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = ROOT / "tools/wrentest/fixtures/boards/workspace/Boards/Samples"
 GOLDEN = ROOT / "crates/wren-board/golden/format"
 EXAMPLE = GOLDEN / "password-reset.out.wren-board"
+# Written by the app's board editor when schema 1 was locked (section 4.17): checked, not rewritten.
+EDITOR = sorted(GOLDEN.glob("editor-*.out.wren-board"))
 CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz"
 W, H = 120, 60
 
@@ -665,9 +667,9 @@ def stale(files):
 
 
 def committed(files):
-    """`files` plus the example, which was written once from a model and is checked, not
-    rewritten."""
-    return {**files, EXAMPLE: EXAMPLE.read_bytes().decode()}
+    """`files` plus the example, which was written once from a model, and the boards the editor
+    wrote at the schema lock: each is checked, not rewritten."""
+    return {**files, **{p: p.read_bytes().decode() for p in [EXAMPLE, *EDITOR]}}
 
 
 def problems(files):
