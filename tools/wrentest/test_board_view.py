@@ -18,7 +18,8 @@ import pytest
 
 from tools.wrentest.boards import (
     CONFLICT, FLOW, FUTURE, NOTES, SHAPES, board, board_app, bounds, conflict_board, copy_samples,
-    distance_to_polyline, fitted, inside, midpoint, near, open_note, screenshot, stamp, wheel,
+    distance_to_polyline, fitted, grid_board, inside, midpoint, near, open_note, screenshot, stamp,
+    wheel,
 )
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_setup import artifact_directory
@@ -559,6 +560,75 @@ def test_searching_a_label_finds_the_board_and_its_syntax_does_not(samples: Path
         modal = app.client.call("palette.query", {"query": "schema"})["navigation"]["modal"]
         assert [row["path"] for row in modal["results"] if row["path"].endswith(".wren-board")] == []
         app.client.call("palette.close")
+
+
+def many_boards(root: Path, count: int = 60) -> Path:
+    """A workspace of ``count`` boards of 101 elements and a note; only
+    ``Board 7`` has the label ``Needle in the grid``."""
+    group = root / "Boards" / "Many"
+    group.mkdir(parents=True)
+    plain = grid_board(38)
+    for number in range(count):
+        text = plain.replace("Step 5: validate", "Needle in the grid") if number == 7 else plain
+        (group / f"Board {number}.wren-board").write_text(text)
+    (group / "Note.md").write_text("# Note\n\nNothing to see.\n")
+    return root
+
+
+def content_hits(app: WrenApp, query: str) -> list[str]:
+    """The paths of the search palette's content hits for ``query``."""
+    app.client.call("palette.open", {"mode": "search"})
+    modal = app.client.call("palette.query", {"query": query})["navigation"]["modal"]
+    app.client.call("palette.close")
+    return [row["path"] for row in modal["results"] if row["hit"] == "content"]
+
+
+def unextracted(app: WrenApp) -> int:
+    return app.client.call("navigation.get")["index_unextracted"]
+
+
+NEEDLE = "Boards/Many/Board 7.wren-board"
+
+
+def test_a_search_right_after_open_finds_a_board_label(tmp_path: Path) -> None:
+    """§3.6: opening a workspace parses no board for the index; a search
+    straight after the open still finds a board's label."""
+    first = tmp_path / "first"
+    (first / "Notes" / "Inbox").mkdir(parents=True)
+    (first / "Notes" / "Inbox" / "Hello.md").write_text("# Hello\n")
+    many = many_boards(tmp_path / "many")
+    with board_app(first, "board-search-open") as app:
+        # With the timer held no background job runs, so what the open
+        # left waiting is what it parsed none of.
+        app.client.call("test.timer.hold", {"held": True})
+        app.client.call("workspace.open", {"path": str(many)})
+        assert unextracted(app) == 60
+        assert content_hits(app, "needle in the") == [NEEDLE]
+        assert unextracted(app) == 0
+        app.client.call("test.timer.hold", {"held": False})
+
+        # Without a search the background job extracts them.
+        app.client.call("workspace.open", {"path": str(first)})
+        app.client.call("workspace.open", {"path": str(many)})
+        wait_for(lambda: unextracted(app) == 0, timeout=10, interval=0.05,
+                 description="every board's labels extracted")
+        assert content_hits(app, "needle in the") == [NEEDLE]
+        assert content_hits(app, "schema") == []
+
+
+def test_a_search_after_an_edit_outside_wren_finds_the_new_label(tmp_path: Path) -> None:
+    many = many_boards(tmp_path / "many", count=20)
+    with board_app(many, "board-search-external") as app:
+        assert content_hits(app, "needle in the") == [NEEDLE]
+        path = many / NEEDLE
+        path.write_text(path.read_text().replace("Needle in the grid", "Haystack moved"))
+
+        def moved() -> bool:
+            return content_hits(app, "haystack moved") == [NEEDLE]
+
+        wait_for(moved, timeout=10, interval=0.1, description="the edited label found")
+        assert content_hits(app, "needle in the") == []
+        assert unextracted(app) == 0
 
 
 ESCAPES = '''schema = 1

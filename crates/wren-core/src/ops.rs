@@ -518,6 +518,15 @@ impl Session {
         self.reconcile_job.take()
     }
 
+    /// Boards read from disk are searched by their labels once the next
+    /// background job (or, without one, the next Tick) has extracted them,
+    /// so a workspace opens without parsing its boards. A content search
+    /// that must not miss them calls this first: it extracts what still
+    /// waits, here.
+    pub fn settle_search(&mut self) {
+        self.index.extract_waiting();
+    }
+
     pub fn apply(&mut self, op: Op) -> Result<Vec<Event>, OpError> {
         self.apply_at(op, self.started.elapsed())
     }
@@ -1281,6 +1290,13 @@ impl Session {
                 self.reconcile(now, events)?;
             }
         }
+        if self.index.unextracted() > 0 {
+            if self.background_reconcile {
+                self.reconcile_requested = true;
+            } else {
+                self.index.extract_waiting();
+            }
+        }
         if self.background_reconcile
             && self.reconcile_requested
             && self.reconcile_in_flight.is_none()
@@ -1298,6 +1314,7 @@ impl Session {
                 events.push(Event::Warning(format!(
                     "Background reconciliation unavailable; rescanning on the main thread: {error}"
                 )));
+                self.index.extract_waiting();
                 return self.reconcile(now, events);
             }
         };
@@ -1314,6 +1331,7 @@ impl Session {
             self.options.kinds(),
             self.model.scan_baseline(),
             self.index.content_snapshot(),
+            self.index.waiting(),
         ));
         Ok(())
     }
@@ -1344,7 +1362,13 @@ impl Session {
         self.reconcile_in_flight = None;
         if self.tree_revision != tags.tree_revision {
             // Own structural changes (or a conflict-copy rescan) happened after
-            // the snapshot; its IDs and paths cannot be merged safely.
+            // the snapshot; its IDs and paths cannot be merged safely. Labels
+            // name the source they came from, so they still apply.
+            if let Ok(scanned) = outcome {
+                for (note, source, text) in scanned.extracted {
+                    self.index.extracted(note, &source, text);
+                }
+            }
             self.reconcile_requested = true;
             return document_result;
         }
@@ -1367,6 +1391,7 @@ impl Session {
             mut model,
             changed,
             contents,
+            extracted,
         } = scanned;
         if changed {
             for note in &mut model.notes {
@@ -1398,6 +1423,9 @@ impl Session {
                 self.index
                     .ingest_scanned(*note, update.as_deref().map_err(String::as_str));
             }
+        }
+        for (note, source, text) in extracted {
+            self.index.extracted(note, &source, text);
         }
         self.push_limitation_warnings();
     }
@@ -1872,6 +1900,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::{QueryKind, Scope};
     use std::fs::{self, File, FileTimes};
 
     /// Native acceptance for the real OS trash; it moves one throwaway file
@@ -1954,7 +1983,11 @@ mod tests {
     }
 
     fn background_session(root: &std::path::Path) -> Session {
-        let mut session = Session::open(root).unwrap();
+        background_session_with(root, SessionOptions::default())
+    }
+
+    fn background_session_with(root: &std::path::Path, options: SessionOptions) -> Session {
+        let mut session = Session::open_with(root, options).unwrap();
         // Hints would only add requests; polling makes job creation deterministic.
         session.watcher = None;
         session.set_background_reconcile(true);
@@ -2047,11 +2080,10 @@ mod tests {
         assert_eq!(session.index.extractions, extracted + 2);
     }
 
-    #[test]
-    fn unchanged_boards_are_never_extracted_or_sent_again() {
+    fn labelled_boards(count: usize) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("S/G")).unwrap();
-        for number in 0..200 {
+        for number in 0..count {
             fs::write(
                 root.path().join(format!("S/G/Board {number}.wren-board")),
                 format!(
@@ -2062,25 +2094,116 @@ mod tests {
             .unwrap();
         }
         fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
-        session.watcher = None;
+        root
+    }
+
+    fn found(session: &Session, query: &str) -> Vec<NoteId> {
+        session
+            .index()
+            .query(query, Scope::Workspace, QueryKind::Search, 10)
+            .into_iter()
+            .filter(|hit| hit.content_match.is_some())
+            .map(|hit| hit.note)
+            .collect()
+    }
+
+    #[test]
+    fn a_workspace_opens_without_parsing_a_board_and_the_first_job_extracts_them() {
+        let root = labelled_boards(200);
+        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
         assert_eq!(session.model.notes.len(), 201);
-        assert_eq!(session.index.extractions, 200);
-        let labelled = id_at(&session, "S/G/Board 7.wren-board");
-        assert_eq!(session.index.content(labelled), Some("Label 7"));
+        let labelled = id_at(&session, "S/G/Board 123.wren-board");
+        // The open read every board and parsed none.
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.unextracted(), 200);
+        assert_eq!(session.index.content(labelled), None);
+        assert!(found(&session, "label 123").is_empty());
+
+        // The first job extracts every board on its own thread and sends no
+        // contents back, since the disk matches what the index holds.
+        let result = begin(&mut session, 1).run();
+        assert_eq!(result.sent_contents(), Some(0));
+        assert_eq!(result.sent_extractions(), Some(200));
+        finish(&mut session, result, 1).unwrap();
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.unextracted(), 0);
+        assert_eq!(session.index.content(labelled), Some("Label 123"));
+        assert_eq!(found(&session, "label 123"), [labelled]);
         let revision = session.index.revision();
 
-        for tick in 1..=40 {
-            session.apply_at(Op::Tick, secs(tick)).unwrap();
-        }
-        assert_eq!(session.index.extractions, 200);
-        assert_eq!(session.index.revision(), revision);
-
-        session.set_background_reconcile(true);
-        for tick in 41..=80 {
+        // Unchanged boards are never extracted or sent again.
+        for tick in 2..=41 {
             let result = begin(&mut session, tick).run();
             assert_eq!(result.sent_contents(), Some(0));
+            assert_eq!(result.sent_extractions(), Some(0));
             finish(&mut session, result, tick).unwrap();
+        }
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.revision(), revision);
+
+        // An edit made outside Wren comes back extracted with its contents.
+        fs::write(
+            root.path().join("S/G/Board 123.wren-board"),
+            "schema = 1\n\n[node.n123]\ntext = \"Relabelled\"\nkind = \"shape\"\n\
+             at = [0, 0]\nsize = [120, 60]\n",
+        )
+        .unwrap();
+        let result = begin(&mut session, 42).run();
+        assert_eq!(result.sent_contents(), Some(1));
+        assert_eq!(result.sent_extractions(), Some(1));
+        finish(&mut session, result, 42).unwrap();
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.unextracted(), 0);
+        assert_eq!(found(&session, "relabelled"), [labelled]);
+        assert!(found(&session, "label 123").is_empty());
+    }
+
+    #[test]
+    fn labels_a_job_took_from_an_older_source_are_not_kept() {
+        let root = labelled_boards(2);
+        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        let board = id_at(&session, "S/G/Board 1.wren-board");
+        let result = begin(&mut session, 1).run();
+        // Read again before the job returns: an own rescan finds the edit.
+        fs::write(
+            root.path().join("S/G/Board 1.wren-board"),
+            "schema = 1\n\n[node.n1]\ntext = \"Newer\"\nkind = \"shape\"\n\
+             at = [0, 0]\nsize = [120, 60]\n",
+        )
+        .unwrap();
+        session.apply_at(Op::Reconcile, secs(1)).unwrap();
+        assert_eq!(session.index.unextracted(), 2);
+        finish(&mut session, result, 1).unwrap();
+        // The unchanged board's labels apply; the edited one waits for the
+        // next job rather than taking labels of its older text.
+        assert_eq!(session.index.unextracted(), 1);
+        assert_eq!(session.index.content(board), None);
+        let result = begin(&mut session, 2).run();
+        finish(&mut session, result, 2).unwrap();
+        assert_eq!(session.index.content(board), Some("Newer"));
+        assert_eq!(session.index.extractions, 0);
+    }
+
+    #[test]
+    fn without_a_job_boards_are_extracted_by_a_search_or_the_next_tick() {
+        let root = labelled_boards(200);
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        let labelled = id_at(&session, "S/G/Board 123.wren-board");
+        assert_eq!(session.index.extractions, 0);
+        // A search that must not miss a board takes what waits first.
+        session.settle_search();
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(found(&session, "label 123"), [labelled]);
+        drop(session);
+
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        session.apply_at(Op::Tick, secs(1)).unwrap();
+        assert_eq!(session.index.extractions, 200);
+        let revision = session.index.revision();
+        for tick in 2..=41 {
+            session.apply_at(Op::Tick, secs(tick)).unwrap();
         }
         assert_eq!(session.index.extractions, 200);
         assert_eq!(session.index.revision(), revision);

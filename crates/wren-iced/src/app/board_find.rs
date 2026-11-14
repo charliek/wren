@@ -879,6 +879,8 @@ to = { node = "bare" }
         let (_directory, mut app, path) = workspace();
         let mtime = modified(&path);
         let find = note_id(&app, "Find", NoteKind::Board);
+        // As the search palette does before it searches.
+        app.session.as_mut().unwrap().settle_search();
         let target = |app: &App, query: &str| {
             let session = app.session.as_ref().unwrap();
             let hits = session.index().query(

@@ -1600,6 +1600,8 @@ z = "c"
     fn a_search_hit_in_a_board_opens_it_without_touching_the_editor() {
         let (_directory, mut app) = fixture();
         open_markdown(&mut app, "Note");
+        // As the search palette does before it searches.
+        app.session.as_mut().unwrap().settle_search();
         let session = app.session.as_ref().unwrap();
         let hits = session.index().query(
             "receive",

@@ -467,6 +467,11 @@ impl App {
         let source = palette.source;
         let query = palette.query.trim().to_owned();
         let generation = palette.generation;
+        if mode == Mode::Search && !query.is_empty() {
+            if let Some(session) = &mut self.session {
+                session.settle_search();
+            }
+        }
         let revision = self
             .session
             .as_ref()
