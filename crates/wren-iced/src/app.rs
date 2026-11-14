@@ -428,6 +428,8 @@ impl App {
         // Every way a picker row gets highlighted, or the picker closes,
         // arrives as a message, so the preview follows from here.
         let preview = self.sync_preview();
+        #[cfg(target_os = "macos")]
+        crate::macos_menu::sync_board(self.menu_enabled());
         Task::batch([task, preview])
     }
 
@@ -603,7 +605,7 @@ impl App {
                     });
                     #[cfg(target_os = "macos")]
                     {
-                        crate::macos_menu::install(&self.preferences.keymap);
+                        self.install_menu();
                         // A missing framework (a bare binary, a bundle built
                         // without Sparkle) only leaves the menu item disabled.
                         let _ = wren_sparkle::start();

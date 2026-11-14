@@ -1478,3 +1478,68 @@ fn a_settle_drops_the_preview_until_the_highlight_moves() {
     assert!(app.palette.is_none());
     assert_eq!(app.board_revision, 0);
 }
+
+/// The keys of the Board menu that are enabled, each checked against the
+/// command it runs: the menu shares one count between the align items and
+/// one between the distribute items, and must still agree with each.
+fn board_menu(app: &App) -> Vec<&'static str> {
+    let menu = crate::menu::MENUS
+        .iter()
+        .find(|menu| menu.kind == crate::menu::Kind::Board)
+        .unwrap();
+    let mut enabled = app.menu_enabled();
+    crate::menu::commands(menu.rows)
+        .into_iter()
+        .filter(|(key, _)| {
+            let on = enabled(key);
+            assert_eq!(
+                on,
+                app.command_enabled(CommandId::parse(key).unwrap()),
+                "{key}"
+            );
+            on
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// §5.19: the Board menu's items follow `command_enabled`, so New Board
+/// follows `note.new_board` and the rest are greyed unless a board is the
+/// surface; an item runs through the keyboard's path, and the View menu's
+/// text-size items zoom a board.
+#[test]
+fn the_board_menu_follows_its_commands_and_runs_them_as_the_keys_do() {
+    let (_directory, mut app) = fixture();
+    open_markdown(&mut app, "Note");
+    assert_eq!(board_menu(&app), ["note.new_board"]);
+
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+    let idle = board_menu(&app);
+    for key in ["note.new_board", "note.export_svg", "note.export_png"] {
+        assert!(idle.contains(&key), "{key}");
+    }
+    for key in [
+        "board.duplicate",
+        "board.align.left",
+        "board.distribute.horizontal",
+    ] {
+        assert!(!idle.contains(&key), "{key} with nothing selected");
+    }
+
+    // Two nodes: align, not distribute, which needs three.
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    let both = board_menu(&app);
+    assert!(both.contains(&"board.duplicate") && both.contains(&"board.align.middle"));
+    assert!(!both.contains(&"board.distribute.vertical"));
+
+    // An item sends its key back, and it runs as the shortcut does.
+    click(&mut app, "pack");
+    let _ = app.menu_command("board.duplicate");
+    assert_eq!(app.board_revision, 1);
+    assert_eq!(view(&app).board().nodes.len(), 3);
+    let zoom = view(&app).viewport().zoom;
+    let _ = app.menu_command("font.increase");
+    assert!(view(&app).viewport().zoom > zoom);
+    assert_eq!(app.board_revision, 1, "a zoom drafts nothing");
+}

@@ -389,7 +389,7 @@ impl App {
         self.apply_preferences();
         #[cfg(target_os = "macos")]
         if self.window.is_some() && self.preferences.keymap != keymap {
-            crate::macos_menu::install(&self.preferences.keymap);
+            self.install_menu();
         }
         let warning = self.preferences.warning();
         // The restart notice is shown like a warning and retracted like one,
@@ -667,11 +667,46 @@ impl App {
         }
     }
 
+    /// Build the menu bar for the keymap and the `boards` setting the app
+    /// runs with; the setting is fixed until a restart, so a reload that
+    /// rebuilds the menu keeps or leaves out the Board menu as before.
+    #[cfg(target_os = "macos")]
+    pub(super) fn install_menu(&mut self) {
+        let installed =
+            crate::macos_menu::install(&self.preferences.keymap, self.preferences.boards);
+        if let Err(error) = installed {
+            self.banner = Some(format!("Could not build the menu bar: {error}"));
+            self.banner_kind = workspace::WarningKind::General;
+        }
+    }
+
+    /// Whether the menu item for a command key is enabled: exactly when its
+    /// command would run. It is asked after every message on macOS, so the
+    /// align items, and the distribute items, which each share one rule
+    /// (§5.16 rule 3), count a large selection once between them.
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
+    pub(super) fn menu_enabled(&self) -> impl FnMut(&str) -> bool + '_ {
+        use wren_canvas::Command as C;
+        let (mut align, mut distribute) = (None, None);
+        move |key| {
+            let Some(id) = CommandId::parse(key) else {
+                return false;
+            };
+            let shared = match id {
+                CommandId::Board(C::Align(_)) => &mut align,
+                CommandId::Board(C::Distribute(_)) => &mut distribute,
+                _ => return self.command_enabled(id),
+            };
+            *shared.get_or_insert_with(|| self.command_enabled(id))
+        }
+    }
+
     /// Run a command chosen from the native menu bar, with the same rules
     /// as its keyboard shortcut.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]
     pub(super) fn menu_command(&mut self, key: &str) -> Task<Message> {
-        if key == crate::macos_menu::CHECK_FOR_UPDATES {
+        #[cfg(target_os = "macos")]
+        if key == crate::menu::CHECK_FOR_UPDATES {
             if let Err(error) = wren_sparkle::check_for_updates() {
                 self.banner = Some(format!("Could not check for updates: {error}"));
                 self.banner_kind = workspace::WarningKind::General;

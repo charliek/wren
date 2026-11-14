@@ -406,6 +406,14 @@ impl App {
                 }
                 return Ok(task);
             }
+            "menu.get" => request.respond(Ok(self.menu_snapshot())),
+            "menu.run" => {
+                // An item chosen from the macOS menu bar, which sends back
+                // its command key.
+                let task = self.menu_command(string(params, "key")?);
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
             #[cfg(target_os = "macos")]
             "updater.status" => request.respond(Ok(updater_status())),
             #[cfg(target_os = "macos")]
@@ -1143,6 +1151,64 @@ impl iced::advanced::widget::Operation<()> for RestartCaret {
 
     fn finish(&self) -> iced::advanced::widget::operation::Outcome<()> {
         iced::advanced::widget::operation::Outcome::Some(())
+    }
+}
+
+impl App {
+    /// The menu bar as the table builds it with the setting the app runs
+    /// with: each command item with the trigger a Mac would show for this
+    /// keymap and whether it is enabled. Only the Board menu's items follow
+    /// their commands; the rest are always enabled. On macOS `native` holds
+    /// the Board items' enabled state as AppKit has it.
+    fn menu_snapshot(&self) -> Value {
+        use crate::menu::{self, Kind, Row};
+        fn listed(
+            rows: &'static [Row],
+            kind: Kind,
+            keymap: &wren_core::keybind::Keymap,
+            enabled: &mut dyn FnMut(&str) -> bool,
+        ) -> Vec<Value> {
+            rows.iter()
+                .map(|row| match *row {
+                    Row::Command(key, title) => json!({
+                        "key": key,
+                        "title": title,
+                        "trigger": menu::triggers(keymap, key, kind)
+                            .next()
+                            .map(ToString::to_string),
+                        "enabled": kind != Kind::Board || enabled(key),
+                    }),
+                    Row::Native(native) => json!({"native": format!("{native:?}")}),
+                    Row::Separator => json!({"separator": true}),
+                    Row::Submenu(title, inner) => json!({
+                        "submenu": title,
+                        "items": listed(inner, kind, keymap, enabled),
+                    }),
+                })
+                .collect()
+        }
+        let mut enabled = self.menu_enabled();
+        let menus: Vec<Value> = menu::menus(self.preferences.boards)
+            .map(|spec| {
+                let kind = match spec.kind {
+                    Kind::Plain => "plain",
+                    Kind::Board => "board",
+                    Kind::Window => "window",
+                };
+                let items = listed(spec.rows, spec.kind, &self.preferences.keymap, &mut enabled);
+                json!({"title": spec.title, "kind": kind, "items": items})
+            })
+            .collect();
+        #[cfg(target_os = "macos")]
+        let native = Some(
+            crate::macos_menu::board_enabled()
+                .into_iter()
+                .map(|(key, enabled)| json!({"key": key, "enabled": enabled}))
+                .collect::<Vec<_>>(),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let native: Option<Vec<Value>> = None;
+        json!({"menus": menus, "native": native})
     }
 }
 

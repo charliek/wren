@@ -1,4 +1,4 @@
-//! The macOS menu bar.
+//! The macOS menu bar, built from the table in `crate::menu`.
 //!
 //! Installing it replaces winit's default menu, whose Quit item calls
 //! `terminate:` and would exit without Wren's autosave flush. Here Quit, like
@@ -17,106 +17,124 @@ use muda::accelerator::Accelerator;
 use muda::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use wren_core::keybind::Keymap;
 
-/// The menu id of "Check for Updates…".
-pub const CHECK_FOR_UPDATES: &str = "app.check_for_updates";
+use crate::menu::{self, Kind, Native, Row, CHECK_FOR_UPDATES};
+
+/// An item of the Board menu, and whether it was last set enabled.
+struct BoardItem {
+    key: &'static str,
+    item: MenuItem,
+    enabled: bool,
+}
 
 thread_local! {
     // NSApp keeps showing the menu only while muda's owner is alive.
     static MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
     static UPDATES: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    static BOARD: RefCell<Vec<BoardItem>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What building the rows produced besides the items themselves.
+struct Built {
+    updates: Option<MenuItem>,
+    board: Vec<BoardItem>,
 }
 
 /// Build and install the menu bar on the main thread. Item shortcuts come
-/// from the keymap so a rebinding in `config.conf` shows in the menu.
-pub fn install(keymap: &Keymap) {
-    let item = |action: &str, label: &str| {
-        // The first binding muda can show: it has no key for `+`, so text
-        // size shows its `=` binding.
-        let accelerator = keymap
-            .bindings()
-            .filter(|(_, bound)| *bound == action)
-            .find_map(|(accel, _)| accel.to_string().parse::<Accelerator>().ok());
-        MenuItem::with_id(action, label, true, accelerator)
+/// from the keymap so a rebinding in `config.conf` shows in the menu; the
+/// Board menu is built only with the `boards` setting on.
+pub fn install(keymap: &Keymap, boards: bool) -> muda::Result<()> {
+    let menu = Menu::new();
+    let mut built = Built {
+        updates: None,
+        board: Vec::new(),
     };
-    let about = AboutMetadata {
-        name: Some("Wren".into()),
-        version: Some(env!("CARGO_PKG_VERSION").into()),
-        ..AboutMetadata::default()
-    };
-    let updates = MenuItem::with_id(
-        CHECK_FOR_UPDATES,
-        "Check for Updates…",
-        wren_sparkle::can_check(),
-        None,
-    );
-    let app_menu = Submenu::with_items(
-        "Wren",
-        true,
-        &[
-            &PredefinedMenuItem::about(None, Some(about)),
-            &updates,
-            &PredefinedMenuItem::separator(),
-            &item("settings.open", "Settings…"),
-            &item("theme.choose", "Change Theme…"),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::services(None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::hide(None),
-            &PredefinedMenuItem::hide_others(None),
-            &PredefinedMenuItem::show_all(None),
-            &PredefinedMenuItem::separator(),
-            &item("app.quit", "Quit Wren"),
-        ],
-    );
-    let go_menu = Submenu::with_items(
-        "Go",
-        true,
-        &[
-            &item("palette.commands", "Command Palette…"),
-            &item("navigation.jump", "Jump to Note…"),
-            &item("navigation.search", "Search Workspace…"),
-            &item("navigation.outline", "Jump to Heading…"),
-            &PredefinedMenuItem::separator(),
-            &item("navigation.back", "Back"),
-            &item("navigation.forward", "Forward"),
-            &PredefinedMenuItem::separator(),
-            &item("navigation.column_left", "Column Left"),
-            &item("navigation.column_right", "Column Right"),
-        ],
-    );
-    let view_menu = Submenu::with_items(
-        "View",
-        true,
-        &[
-            &item("font.increase", "Increase Text Size"),
-            &item("font.decrease", "Decrease Text Size"),
-            &item("font.reset", "Reset Text Size"),
-            &PredefinedMenuItem::separator(),
-            &item("font.choose", "Change Editor Font…"),
-        ],
-    );
-    let window_menu = Submenu::with_items(
-        "Window",
-        true,
-        &[
-            &PredefinedMenuItem::minimize(None),
-            &PredefinedMenuItem::fullscreen(None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::bring_all_to_front(None),
-        ],
-    );
-    let (Ok(app_menu), Ok(go_menu), Ok(view_menu), Ok(window_menu)) =
-        (app_menu, go_menu, view_menu, window_menu)
-    else {
-        return;
-    };
-    let Ok(menu) = Menu::with_items(&[&app_menu, &go_menu, &view_menu, &window_menu]) else {
-        return;
-    };
+    let mut window_menu = None;
+    for spec in menu::menus(boards) {
+        let submenu = Submenu::new(spec.title, true);
+        append(&submenu, spec.rows, spec.kind, keymap, &mut built)?;
+        menu.append(&submenu)?;
+        if spec.kind == Kind::Window {
+            window_menu = Some(submenu);
+        }
+    }
     menu.init_for_nsapp();
-    window_menu.set_as_windows_menu_for_nsapp();
+    if let Some(window_menu) = window_menu {
+        window_menu.set_as_windows_menu_for_nsapp();
+    }
     MENU.with(|slot| *slot.borrow_mut() = Some(menu));
-    UPDATES.with(|slot| *slot.borrow_mut() = Some(updates));
+    UPDATES.with(|slot| *slot.borrow_mut() = built.updates);
+    BOARD.with(|slot| *slot.borrow_mut() = built.board);
+    Ok(())
+}
+
+fn append(
+    submenu: &Submenu,
+    rows: &'static [Row],
+    kind: Kind,
+    keymap: &Keymap,
+    built: &mut Built,
+) -> muda::Result<()> {
+    for row in rows {
+        match *row {
+            Row::Command(key, title) => {
+                // The first trigger muda can show: it has no key for `+`, so
+                // text size shows its `=` binding.
+                let accelerator = menu::triggers(keymap, key, kind)
+                    .find_map(|accel| accel.to_string().parse::<Accelerator>().ok());
+                let item = MenuItem::with_id(key, title, true, accelerator);
+                submenu.append(&item)?;
+                if kind == Kind::Board {
+                    built.board.push(BoardItem {
+                        key,
+                        item,
+                        enabled: true,
+                    });
+                }
+            }
+            Row::Native(native) => match predefined(native) {
+                Some(item) => submenu.append(&item)?,
+                None => {
+                    let item = MenuItem::with_id(
+                        CHECK_FOR_UPDATES,
+                        "Check for Updates…",
+                        wren_sparkle::can_check(),
+                        None,
+                    );
+                    submenu.append(&item)?;
+                    built.updates = Some(item);
+                }
+            },
+            Row::Separator => submenu.append(&PredefinedMenuItem::separator())?,
+            Row::Submenu(title, rows) => {
+                let inner = Submenu::new(title, true);
+                append(&inner, rows, kind, keymap, built)?;
+                submenu.append(&inner)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The AppKit item for `native`, or `None` for the updater's own item.
+fn predefined(native: Native) -> Option<PredefinedMenuItem> {
+    Some(match native {
+        Native::About => PredefinedMenuItem::about(
+            None,
+            Some(AboutMetadata {
+                name: Some("Wren".into()),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
+                ..AboutMetadata::default()
+            }),
+        ),
+        Native::Services => PredefinedMenuItem::services(None),
+        Native::Hide => PredefinedMenuItem::hide(None),
+        Native::HideOthers => PredefinedMenuItem::hide_others(None),
+        Native::ShowAll => PredefinedMenuItem::show_all(None),
+        Native::Minimize => PredefinedMenuItem::minimize(None),
+        Native::Fullscreen => PredefinedMenuItem::fullscreen(None),
+        Native::BringAllToFront => PredefinedMenuItem::bring_all_to_front(None),
+        Native::CheckForUpdates => return None,
+    })
 }
 
 /// Enable "Check for Updates…" exactly when the updater can check: never in a
@@ -129,10 +147,36 @@ pub fn sync_updates() {
     });
 }
 
+/// Enable each Board menu item as `enabled` says of its command key,
+/// touching only the items that change.
+pub fn sync_board(mut enabled: impl FnMut(&str) -> bool) {
+    BOARD.with(|slot| {
+        for board in slot.borrow_mut().iter_mut() {
+            let now = enabled(board.key);
+            if now != board.enabled {
+                board.item.set_enabled(now);
+                board.enabled = now;
+            }
+        }
+    });
+}
+
 /// Whether "Check for Updates…" is enabled, or `None` before the menu exists.
 #[cfg(feature = "smoke-test")]
 pub fn updates_enabled() -> Option<bool> {
     UPDATES.with(|slot| slot.borrow().as_ref().map(MenuItem::is_enabled))
+}
+
+/// Each Board menu item's key and whether the native item is enabled, in
+/// menu order; empty before the menu exists or with the setting off.
+#[cfg(feature = "smoke-test")]
+pub fn board_enabled() -> Vec<(&'static str, bool)> {
+    BOARD.with(|slot| {
+        slot.borrow()
+            .iter()
+            .map(|board| (board.key, board.item.is_enabled()))
+            .collect()
+    })
 }
 
 /// Command keys chosen from the menu bar.
