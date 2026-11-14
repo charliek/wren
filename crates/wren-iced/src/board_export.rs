@@ -1,7 +1,8 @@
-//! A board's export as a file: the SVG the scene writes, and that SVG
-//! rendered by resvg as a PNG image. The widget, the SVG and the PNG all
-//! come from one `scene::build`, so the image shows the lines the canvas
-//! drew. `wren export` writes the same files with no window.
+//! A board's export as a file: the SVG the scene writes, that SVG
+//! rendered by resvg as a PNG image, and the board as a draw.io file. The
+//! widget, the SVG and the PNG all come from one `scene::build`, so the
+//! image shows the lines the canvas drew; the draw.io file is the model's,
+//! for draw.io to draw. `wren export` writes the same files with no window.
 
 use std::ffi::OsString;
 use std::io::{Read as _, Write};
@@ -25,15 +26,19 @@ use crate::fonts;
 pub enum Format {
     Svg,
     Png,
+    Drawio,
 }
 
 impl Format {
+    pub const ALL: [Self; 3] = [Self::Svg, Self::Png, Self::Drawio];
+
     /// The file name extension, which an export inside the workspace must
-    /// have.
+    /// have, and the format's name on the command line.
     pub fn extension(self) -> &'static str {
         match self {
             Self::Svg => "svg",
             Self::Png => "png",
+            Self::Drawio => wren_board::drawio::EXTENSION,
         }
     }
 
@@ -42,8 +47,29 @@ impl Format {
         match self {
             Self::Svg => "SVG",
             Self::Png => "PNG",
+            Self::Drawio => "draw.io",
         }
     }
+
+    /// What a file of the format is, for a save dialog's filter.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Svg => "SVG image",
+            Self::Png => "PNG image",
+            Self::Drawio => "draw.io diagram",
+        }
+    }
+}
+
+/// The theme whose colours a draw.io export from the app is in, whatever
+/// the app's own: draw.io draws on a light page, and works out its own dark
+/// colours from light ones.
+pub const DRAWIO_THEME: wren_core::theme::Theme = wren_core::theme::LIGHT;
+
+/// The board `view` shows as a draw.io file, its page called `name`, in
+/// the colours of `theme`.
+pub fn drawio(view: &BoardView, theme: wren_core::theme::Theme, name: &str) -> String {
+    wren_board::drawio::write(view.board(), &crate::theme::board_palette(theme), name)
 }
 
 /// What is behind the board in an export.
@@ -284,8 +310,8 @@ fn failed(message: String) -> Failure {
     }
 }
 
-/// `wren export`: draw the board `args` names as the app would, and write
-/// it whole or not at all. Nothing here needs a display: the labels are
+/// `wren export`: draw the board `args` names as the app would, or write
+/// it as a draw.io file, whole or not at all. Nothing here needs a display: the labels are
 /// measured in the bundled faces through iced's font system, which needs
 /// no renderer. What is wrong with the board but still draws goes to
 /// `warn`, one line at a time; `stdout` takes the image for `-o -`.
@@ -314,22 +340,21 @@ pub fn run(
     if let Output::File(path) = &args.output {
         refuse_output(path, &args.board)?;
     }
-    let svg = svg(&view, args.background);
-    let png;
     let contents = match args.format {
-        Format::Svg => svg.as_bytes(),
-        Format::Png => {
-            png = self::png(&svg, args.scale)
-                .map_err(|error| failed(format!("Could not draw {board} as PNG: {error}")))?;
-            &png
+        Format::Svg => svg(&view, args.background).into_bytes(),
+        Format::Png => png(&svg(&view, args.background), args.scale)
+            .map_err(|error| failed(format!("Could not draw {board} as PNG: {error}")))?,
+        Format::Drawio => {
+            let name = args.board.file_name().unwrap_or(args.board.as_os_str());
+            drawio(&view, args.theme, &NoteKind::Board.title(name)).into_bytes()
         }
     };
     match &args.output {
         Output::Stdout => stdout
-            .write_all(contents)
+            .write_all(&contents)
             .and_then(|()| stdout.flush())
             .map_err(|error| failed(format!("Could not write to standard output: {error}"))),
-        Output::File(path) => write(path, contents)
+        Output::File(path) => write(path, &contents)
             .map(drop)
             .map_err(|error| failed(format!("Could not write {}: {error}", path.display()))),
     }

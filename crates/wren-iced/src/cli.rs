@@ -79,17 +79,20 @@ pub const EXPORT_USAGE_CODE: u8 = 2;
 pub fn export_usage() -> String {
     let themes: Vec<&str> = theme::BUILT_INS.iter().map(|theme| theme.id).collect();
     format!(
-        "Usage: wren export <board> [-o <path>|-] [--format svg|png] [--theme <id>] [--scale 1..4] [--background theme|transparent]
+        "Usage: wren export <board> [-o <path>|-] [--format svg|png|drawio] [--theme <id>] [--scale 1..4] [--background theme|transparent]
 
-Write a board as an SVG or PNG image, without opening a window.
+Write a board as an SVG or PNG image, or as a draw.io file, without opening
+a window.
 
   -o <path>       Where to write; - writes to standard output. An existing
                   file is replaced. Default: beside the board, as
-                  <name>.svg or <name>.png
-  --format        svg or png. Default: from the extension of -o, else svg
+                  <name>.svg, <name>.png or <name>.drawio
+  --format        svg, png or drawio. Default: from the extension of -o,
+                  else svg
   --theme <id>    The colours to draw in: {}. Default: {}
   --scale <n>     PNG pixels per board unit, from 1 to 4. Default: {PNG_SCALE}
-  --background    theme (the theme's canvas colour, the default) or transparent
+  --background    theme (the theme's canvas colour, the default) or
+                  transparent; for SVG and PNG
 
 Exit status: 0 written (warnings about the board go to standard error);
 1 the board could not be read or the image not written; 2 bad usage;
@@ -234,7 +237,8 @@ fn parse_export(args: &[OsString]) -> Result<Command, Refusal> {
             "--format" => {
                 once(format.is_some())?;
                 format = Some(
-                    format_named(text()?).ok_or_else(|| usage("--format is svg or png".into()))?,
+                    format_named(text()?)
+                        .ok_or_else(|| usage("--format is svg, png or drawio".into()))?,
                 );
             }
             "--theme" => {
@@ -278,15 +282,19 @@ fn parse_export(args: &[OsString]) -> Result<Command, Refusal> {
             None => Format::Svg,
             Some(extension) => extension.to_str().and_then(format_named).ok_or_else(|| {
                 usage(format!(
-                    "cannot tell the format from the name {}; give --format svg or --format png",
+                    "cannot tell the format from the name {}; give --format svg, png or drawio",
                     path.display()
                 ))
             })?,
         },
         (None, _) => Format::Svg,
     };
-    if format == Format::Svg && scale.is_some() {
+    if format != Format::Png && scale.is_some() {
         return Err(usage("--scale is for a PNG export".into()));
+    }
+    // A draw.io file has no background of its own: draw.io draws its page.
+    if format == Format::Drawio && background.is_some() {
+        return Err(usage("--background is for an SVG or PNG export".into()));
     }
     let output = output.unwrap_or_else(|| Output::File(board.with_extension(format.extension())));
     Ok(Command::Export(ExportArgs {
@@ -301,7 +309,7 @@ fn parse_export(args: &[OsString]) -> Result<Command, Refusal> {
 
 /// The format `name`, a `--format` value or an extension, names.
 fn format_named(name: &str) -> Option<Format> {
-    [Format::Svg, Format::Png]
+    Format::ALL
         .into_iter()
         .find(|format| name.eq_ignore_ascii_case(format.extension()))
 }
@@ -431,6 +439,17 @@ mod tests {
             export(&["export", "a.wren-board", "-o", "a.svg", "--format", "png"]).format,
             Format::Png
         );
+        // A draw.io file by its name or by --format, beside the board.
+        let drawio = export(&["export", "flow.wren-board", "-o", "out/Flow.DrawIO"]);
+        assert_eq!(drawio.format, Format::Drawio);
+        let drawio = export(&["export", "--format", "drawio", "Boards/flow.wren-board"]);
+        assert_eq!(
+            drawio.output,
+            Output::File(PathBuf::from("Boards/flow.drawio"))
+        );
+        assert_eq!(drawio.theme, theme::LIGHT);
+        let themed = export(&["export", "b", "--format", "drawio", "--theme", "nord"]);
+        assert_eq!(themed.theme.id, "nord");
     }
 
     #[test]
@@ -505,6 +524,16 @@ mod tests {
             vec!["export", "b", "--format", "png", "--scale", "NaN"],
             vec!["export", "b", "--format", "png", "--scale", "two"],
             vec!["export", "b", "--scale", "2"],
+            vec!["export", "b", "--format", "drawio", "--scale", "2"],
+            vec![
+                "export",
+                "b",
+                "-o",
+                "b.drawio",
+                "--background",
+                "transparent",
+            ],
+            vec!["export", "b", "--format", "drawio", "--background", "theme"],
         ] {
             match parse(&args(&values), None) {
                 Err(refusal) => {

@@ -74,7 +74,7 @@ def test_the_board_menu_follows_the_open_note_and_runs_through_the_keys_path(sam
         wait_focus(app, ["note-editor"])
         fitted(app)
         shown = enabled(app)
-        assert {"note.new_board", "note.export_svg", "note.export_png",
+        assert {"note.new_board", "note.export_svg", "note.export_png", "note.export_drawio",
                 "board.select.connected"} <= set(shown), shown
         assert "board.duplicate" not in shown and "board.align.left" not in shown
 
@@ -114,7 +114,8 @@ def test_a_board_item_does_nothing_while_the_board_takes_text(samples: Path) -> 
         assert type_text(app, "zz")["editing"]["text"] == "zz"
         shown = enabled(app)
         assert not [key for key in shown if key.startswith("board.")], shown
-        assert {"note.new_board", "note.export_svg", "note.export_png"} <= set(shown), shown
+        assert {"note.new_board", "note.export_svg", "note.export_png",
+                "note.export_drawio"} <= set(shown), shown
         for item in ("board.duplicate", "board.select.connected"):
             app.client.call("menu.run", {"key": item})
             state = board(app)
@@ -141,5 +142,6 @@ def test_with_the_setting_off_no_menu_reaches_a_board_command(samples: Path) -> 
         keys = [item["key"] for items in bar.values() for item in commands(items)]
         assert not [key for key in keys
                     if key.startswith("board.") or key in ("note.new_board", "note.export_svg",
-                                                           "note.export_png")]
+                                                           "note.export_png",
+                                                           "note.export_drawio")]
         assert app.client.call("menu.get")["native"] in (None, [])

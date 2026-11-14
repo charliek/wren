@@ -49,6 +49,7 @@ COMMANDS = {
 BOARD_COMMANDS = {
     "note.export_svg": "board",
     "note.export_png": "board",
+    "note.export_drawio": "board",
     "note.new_board": "group",
 }
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
