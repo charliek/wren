@@ -110,9 +110,9 @@ pub const WREN_DARK: Theme = Theme {
         orange: Rgb(0xe4, 0x7d, 0x3d),
         yellow: Rgb(0xf3, 0xdf, 0x8c),
         green: Rgb(0x8f, 0xcf, 0x70),
-        cyan: Rgb(0x85, 0xe4, 0xf0),
-        purple: Rgb(0xb1, 0x7d, 0xe3),
-        blue: Rgb(0x82, 0xb6, 0xee),
+        cyan: Rgb(0x72, 0xd6, 0xe3),
+        purple: Rgb(0xa9, 0x77, 0xde),
+        blue: Rgb(0x7e, 0xb1, 0xe7),
     },
 };
 
@@ -335,8 +335,8 @@ pub const ROSE_PINE: Theme = Theme {
         orange: Rgb(0xe0, 0xa0, 0x66),
         yellow: Rgb(0xe8, 0xc3, 0x6f),
         green: Rgb(0x6c, 0xef, 0x91),
-        cyan: Rgb(0x9e, 0xe1, 0xed),
-        purple: Rgb(0xc6, 0xa9, 0xe8),
+        cyan: Rgb(0x88, 0xcc, 0xd5),
+        purple: Rgb(0xc1, 0xa5, 0xe8),
         blue: Rgb(0x57, 0x89, 0xac),
     },
 };
@@ -376,12 +376,12 @@ pub const EVERFOREST_DARK: Theme = Theme {
         completed: Rgb(0xa9, 0xb4, 0xab),
         selected_inactive: Rgb(0x3a, 0x44, 0x49),
         text_selection: Rgb(0x40, 0x50, 0x4a),
-        red: Rgb(0xe4, 0x84, 0x8a),
-        orange: Rgb(0xf3, 0xa8, 0x88),
-        yellow: Rgb(0xef, 0xd3, 0x92),
-        green: Rgb(0x93, 0xb2, 0x66),
-        cyan: Rgb(0x91, 0xd2, 0xc9),
-        purple: Rgb(0xc4, 0x9c, 0xc0),
+        red: Rgb(0xe2, 0x83, 0x89),
+        orange: Rgb(0xf1, 0xa6, 0x86),
+        yellow: Rgb(0xef, 0xcd, 0x7d),
+        green: Rgb(0x8f, 0xae, 0x63),
+        cyan: Rgb(0x8e, 0xd2, 0xcd),
+        purple: Rgb(0xc4, 0x9b, 0xc0),
         blue: Rgb(0x82, 0xa9, 0xe6),
     },
 };
@@ -421,11 +421,11 @@ pub const TOKYO_NIGHT: Theme = Theme {
         completed: Rgb(0x9a, 0xa5, 0xce),
         selected_inactive: Rgb(0x26, 0x2a, 0x3d),
         text_selection: Rgb(0x25, 0x2d, 0x49),
-        red: Rgb(0xfd, 0x78, 0x8f),
-        orange: Rgb(0xfc, 0x9d, 0x64),
-        yellow: Rgb(0xb3, 0x91, 0x44),
-        green: Rgb(0xb6, 0xe4, 0x7c),
-        cyan: Rgb(0x7d, 0xdb, 0xff),
+        red: Rgb(0xf4, 0x6d, 0x86),
+        orange: Rgb(0xe7, 0x8f, 0x58),
+        yellow: Rgb(0xdf, 0xbc, 0x6d),
+        green: Rgb(0xc6, 0xf6, 0x8d),
+        cyan: Rgb(0xa3, 0xf5, 0xff),
         purple: Rgb(0xc2, 0xa0, 0xfe),
         blue: Rgb(0x69, 0x92, 0xe3),
     },
@@ -466,11 +466,11 @@ pub const DRACULA: Theme = Theme {
         completed: Rgb(0xb8, 0xbc, 0xd8),
         selected_inactive: Rgb(0x34, 0x37, 0x46),
         text_selection: Rgb(0x3a, 0x3d, 0x4e),
-        red: Rgb(0xff, 0x5a, 0x5a),
-        orange: Rgb(0xf2, 0xa8, 0x5e),
-        yellow: Rgb(0xff, 0xf5, 0x91),
-        green: Rgb(0x40, 0xfc, 0x6c),
-        cyan: Rgb(0x8b, 0xe8, 0xfb),
+        red: Rgb(0xfe, 0x60, 0x61),
+        orange: Rgb(0xe7, 0x9b, 0x4c),
+        yellow: Rgb(0xf0, 0xe5, 0x86),
+        green: Rgb(0x17, 0xf2, 0x62),
+        cyan: Rgb(0x8e, 0xe9, 0xfd),
         purple: Rgb(0xa8, 0x81, 0xe7),
         blue: Rgb(0x84, 0xb1, 0xff),
     },
@@ -515,7 +515,7 @@ pub const CATPPUCCIN_MOCHA: Theme = Theme {
         orange: Rgb(0xde, 0x9c, 0x70),
         yellow: Rgb(0xff, 0xe8, 0xb4),
         green: Rgb(0x9e, 0xd9, 0x98),
-        cyan: Rgb(0x8a, 0xd9, 0xe6),
+        cyan: Rgb(0x79, 0xc5, 0xd2),
         purple: Rgb(0xd3, 0xae, 0xff),
         blue: Rgb(0x72, 0xa0, 0xe7),
     },
@@ -557,10 +557,10 @@ pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
         selected_inactive: Rgb(0x31, 0x35, 0x4a),
         text_selection: Rgb(0x36, 0x3a, 0x53),
         red: Rgb(0xee, 0x84, 0x94),
-        orange: Rgb(0xde, 0x9c, 0x75),
+        orange: Rgb(0xda, 0x98, 0x71),
         yellow: Rgb(0xff, 0xe8, 0xb3),
-        green: Rgb(0xa7, 0xd8, 0x94),
-        cyan: Rgb(0x91, 0xd6, 0xe2),
+        green: Rgb(0x9b, 0xd7, 0x8f),
+        cyan: Rgb(0x77, 0xc1, 0xce),
         purple: Rgb(0xcc, 0xa6, 0xfe),
         blue: Rgb(0x78, 0x99, 0xdb),
     },
@@ -1000,9 +1000,11 @@ mod tests {
         ]
     }
 
-    /// Each pair of the seven hues, as a solid fill and as an outline, stays
-    /// apart for normal vision and under deuteranopia, protanopia and
-    /// tritanopia.
+    /// Each pair of the eight colour tokens, as a solid fill and as an
+    /// outline, stays apart for normal vision and under deuteranopia,
+    /// protanopia and tritanopia. `neutral` counts: it is a colour a user
+    /// picks, drawn in `ink` (or filled with `raised`), so it must not pass
+    /// for a hue.
     #[test]
     fn board_hues_stay_apart_under_colour_blindness() {
         use wren_board::{style, Color, Fill, Token, Vocabulary};
@@ -1013,8 +1015,8 @@ mod tests {
             Vision::Protanopia,
             Vision::Tritanopia,
         ];
-        let hues = &Token::ALL[1..];
-        assert_eq!(hues.len(), 7);
+        let hues = Token::ALL;
+        assert_eq!(hues.len(), 8);
         for theme in BUILT_INS {
             let palette = board_palette(&theme.colors);
             for (drawn, fill) in [("solid", Fill::Solid), ("stroke", Fill::None)] {
@@ -1029,7 +1031,7 @@ mod tests {
                     })
                     .collect();
                 for vision in visions {
-                    for (i, j) in (0..7).flat_map(|i| (i + 1..7).map(move |j| (i, j))) {
+                    for (i, j) in (0..8).flat_map(|i| (i + 1..8).map(move |j| (i, j))) {
                         let (a, b) = (lab(colours[i], vision), lab(colours[j], vision));
                         let delta_e = a
                             .iter()
@@ -1047,6 +1049,24 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// A yellow darker than its theme's red or orange reads as khaki or
+    /// olive, not yellow.
+    #[test]
+    fn board_yellow_is_the_lightest_warm_hue() {
+        for theme in BUILT_INS {
+            let c = theme.colors;
+            let yellow = lightness(c.yellow);
+            for (name, hue) in [("red", c.red), ("orange", c.orange)] {
+                let other = lightness(hue);
+                assert!(
+                    yellow > other,
+                    "{}: yellow L* {yellow:.1} not above {name} L* {other:.1}",
+                    theme.name
+                );
             }
         }
     }
