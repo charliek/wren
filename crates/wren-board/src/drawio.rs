@@ -304,13 +304,17 @@ impl<'a> Writer<'a> {
             .zip(sides)
         {
             match end {
-                Drawn::Node { id, attach, .. } => {
+                Drawn::Node {
+                    id,
+                    attach,
+                    terminal: drawn,
+                } => {
                     let _ = write!(
                         terminals,
                         " {terminal}=\"{}\"",
                         attribute(&Self::node_cell(id.as_str()))
                     );
-                    attachment(&mut style, prefix, *attach);
+                    attachment(&mut style, prefix, drawn);
                     // Every end of an elbow connector leaves by the side
                     // Wren's does, its pinned one or the one the router
                     // chose, so draw.io's own bends go the way Wren's do:
@@ -510,8 +514,24 @@ fn outline(style: &mut String, stroke: &Named<Dash>) {
 
 /// Where a connector end meets its node: the middle of a pinned side, or an
 /// anchor's point of the box, which draw.io would otherwise move onto the
-/// outline. A floating end is draw.io's to place.
-fn attachment(style: &mut String, prefix: &str, attach: Attach) {
+/// outline. A floating end is draw.io's to place. A document's pinned
+/// bottom meets the middle of its wave, one amplitude above the box's
+/// bottom (`shape::side_point`), where draw.io would put the box's bottom.
+fn attachment(style: &mut String, prefix: &str, terminal: &Terminal) {
+    let Terminal::Node {
+        bounds,
+        shape,
+        attach,
+    } = *terminal
+    else {
+        return;
+    };
+    let wave = (shape == Shape::Document && attach == Attach::Side(Side::Bottom))
+        .then(|| {
+            let h = bounds.height.max(0.0);
+            (h > 0.0).then(|| (h - shape::document_wave(h)) / h)
+        })
+        .flatten();
     let point = match attach {
         Attach::Floating => return,
         Attach::Side(side) => match side {
@@ -522,13 +542,13 @@ fn attachment(style: &mut String, prefix: &str, attach: Attach) {
         },
         Attach::Anchor(anchor) => anchor.map(|v| v.clamp(0, 1000)),
     };
+    let y = wave.map_or_else(|| per_mille(point[1]), num);
     let _ = write!(
         style,
-        "{prefix}X={};{prefix}Y={};{prefix}Dx=0;{prefix}Dy=0;",
+        "{prefix}X={};{prefix}Y={y};{prefix}Dx=0;{prefix}Dy=0;",
         per_mille(point[0]),
-        per_mille(point[1])
     );
-    if matches!(attach, Attach::Anchor(_)) {
+    if wave.is_some() || matches!(attach, Attach::Anchor(_)) {
         let _ = write!(style, "{prefix}Perimeter=0;");
     }
 }
@@ -1104,6 +1124,31 @@ pub(crate) mod tests {
         // A straight connector has no bends for draw.io to choose.
         let s = keys(style(&found, "s"));
         assert!(!s.contains_key("sourcePortConstraint") && !s.contains_key("targetPortConstraint"));
+    }
+
+    /// A document's pinned bottom meets the middle of its wave, as the
+    /// canvas draws it, not the box's bottom a wave's height below.
+    #[test]
+    fn a_documents_pinned_bottom_meets_its_wave() {
+        let text =
+            "schema = 1\n\n[node.doc]\nkind = \"shape\"\nat = [600, 0]\nshape = \"document\"\n\
+                    size = [120, 80]\nz = \"V\"\n\n\
+                    [node.r]\nkind = \"shape\"\nat = [600, 200]\nsize = [120, 60]\nz = \"V\"\n\n\
+                    [edge.d]\nkind = \"edge\"\nfrom = { node = \"doc\", side = \"bottom\" }\n\
+                    to = { node = \"r\", side = \"top\" }\nz = \"W\"\n\n\
+                    [edge.u]\nkind = \"edge\"\nfrom = { node = \"r\", side = \"bottom\" }\n\
+                    to = { node = \"doc\", side = \"bottom\" }\nroute = \"straight\"\nz = \"W\"\n";
+        let found = parsed(&export(text));
+        let d = keys(style(&found, "d"));
+        // 80 high, a wave of 8: the middle of the wave is 72 down.
+        assert_eq!(
+            (d["exitX"], d["exitY"], d["exitPerimeter"]),
+            ("0.5", "0.9", "0")
+        );
+        assert_eq!((d["entryY"], d.get("entryPerimeter")), ("0", None));
+        let u = keys(style(&found, "u"));
+        assert_eq!((u["exitY"], u.get("exitPerimeter")), ("1", None));
+        assert_eq!((u["entryY"], u["entryPerimeter"]), ("0.9", "0"));
     }
 
     #[test]
