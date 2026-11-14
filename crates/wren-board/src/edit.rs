@@ -28,8 +28,10 @@ mod delete;
 mod node;
 #[cfg(test)]
 mod property;
+mod style;
 
 pub(crate) use copy::{copies, fragment, Fragment, Layout};
+pub use style::stroke_of;
 
 /// What someone asked a board to do. Coordinates are absolute board
 /// units, already snapped where a rule snaps them ([`crate::snap`]).
@@ -284,7 +286,7 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::Restack { ids: chosen, to } => arrange::restack(board, chosen, *to),
         Intent::Align { ids: chosen, to } => arrange::align(board, chosen, *to),
         Intent::Distribute { ids: chosen, axis } => arrange::distribute(board, chosen, *axis),
-        Intent::SetStyle { .. } => Plan::default(),
+        Intent::SetStyle { ids: chosen, field } => style::set_style(board, chosen, *field),
     }
 }
 

@@ -1535,11 +1535,7 @@ impl BoardView {
             }
             Command::Undo => self.travel(false, update),
             Command::Redo => self.travel(true, update),
-            Command::EdgeRouting
-            | Command::EdgeStart
-            | Command::EdgeEnd
-            | Command::EdgeReverse
-            | Command::StrokeDashed
+            Command::EdgeRouting | Command::EdgeStart | Command::EdgeEnd | Command::EdgeReverse
                 if editable =>
             {
                 if let Some(intent) = edge_style(&self.board, &edges, command) {
@@ -1557,6 +1553,11 @@ impl BoardView {
             Command::Distribute(axis) if editable => {
                 let ids = picked.iter().filter_map(Source::node).cloned().collect();
                 self.edit(&Intent::Distribute { ids, axis }, Unit::One, now, update);
+            }
+            Command::Color(_) | Command::Fill(_) | Command::StrokeDashed if editable => {
+                if let Some(intent) = style(&self.board, picked, command) {
+                    self.edit(&intent, Unit::One, now, update);
+                }
             }
             Command::Select(dir) => self.walk(dir, false),
             Command::ExtendSelection(dir) => self.walk(dir, true),
@@ -1806,13 +1807,13 @@ fn nearest(board: &Board, point: scene::Point) -> Option<Id> {
 
 /// What a connector style command does to the selected connectors among
 /// `ids` (§5.12 rule 9), or `None` with none selected. Each switch sets
-/// every one of them to straight, an arrow or dashed, unless all of them
-/// are drawn so already, when it sets elbow, no head or solid: mixed
-/// connectors all take the first, as mixed text takes bold. A value this
+/// every one of them to straight or an arrow, unless all of them are drawn
+/// so already, when it sets elbow or no head: mixed connectors all take
+/// the first, as mixed text takes bold. A value this
 /// build does not know counts as what it is drawn as (§4.4).
 fn edge_style(board: &Board, ids: &[Id], command: Command) -> Option<Intent> {
     use wren_board::edit::{EdgeEnd, EdgeField};
-    use wren_board::{Dash, Head, Route};
+    use wren_board::{Head, Route};
     let ids: Vec<Id> = ids
         .iter()
         .filter(|id| board.edges.contains_key(*id))
@@ -1841,13 +1842,37 @@ fn edge_style(board: &Board, ids: &[Id], command: Command) -> Option<Intent> {
         }
         Command::EdgeStart => head(EdgeEnd::From),
         Command::EdgeEnd => head(EdgeEnd::To),
-        Command::StrokeDashed => {
-            let dashed = all(&|edge| edge.style.stroke == Named::Known(Dash::Dashed));
-            EdgeField::Stroke(if dashed { Dash::Solid } else { Dash::Dashed })
-        }
         _ => return None,
     };
     Some(Intent::SetEdge { ids, field })
+}
+
+/// What a colour, fill or outline command does to the selection `picked`
+/// (§5.16 rule 1), or `None` with nothing selected. The outline switch
+/// dashes every selected shape and connector unless all of them are dashed
+/// already, when it makes them solid, as the connector switches do; a
+/// stroke this build does not know counts as the solid it is drawn as.
+fn style(board: &Board, picked: Vec<Source>, command: Command) -> Option<Intent> {
+    use wren_board::edit::StyleField;
+    use wren_board::Dash;
+    if picked.is_empty() {
+        return None;
+    }
+    let field = match command {
+        Command::Color(token) => StyleField::Color(token),
+        Command::Fill(fill) => StyleField::Fill(fill),
+        Command::StrokeDashed => {
+            let mut strokes = picked
+                .iter()
+                .filter_map(|element| edit::stroke_of(board, element))
+                .peekable();
+            strokes.peek()?;
+            let dashed = strokes.all(|stroke| *stroke == Named::Known(Dash::Dashed));
+            StyleField::Stroke(if dashed { Dash::Solid } else { Dash::Dashed })
+        }
+        _ => return None,
+    };
+    Some(Intent::SetStyle { ids: picked, field })
 }
 
 /// Where `scene` centres the first label it draws for the connector `id`
@@ -5365,13 +5390,14 @@ z = "c"
             Command::EdgeReverse,
             Command::StrokeDashed,
         ];
-        // With no connector selected they do nothing.
+        // With no connector selected they do nothing; the outline switch
+        // is a shape's too (§5.16 rule 1).
         for command in styles {
             assert_eq!(view.command(command, now), Update::default());
         }
         click_node(&mut view, "a", now);
-        for command in styles {
-            assert_eq!(view.command(command, now), Update::default());
+        for command in &styles[..4] {
+            assert_eq!(view.command(*command, now), Update::default());
         }
         click(&mut view, (210.0, 30.0), now + Duration::from_secs(1));
         assert_eq!(selected(&view), ["e"]);
@@ -5424,6 +5450,101 @@ z = "c"
         for command in styles {
             assert_eq!(view.command(command, now), Update::default());
         }
+    }
+
+    /// §5.16 rule 1: colour, fill and outline over a selection of shapes
+    /// and connectors, each one undo step; nothing selected, a value
+    /// already held or a read-only board changes nothing and sends nothing.
+    #[test]
+    fn colour_fill_and_outline_set_the_selection_as_one_step() {
+        use wren_board::{Fill, Token};
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        let commands = [
+            Command::Color(Token::Red),
+            Command::Fill(Fill::Solid),
+            Command::StrokeDashed,
+        ];
+        for command in commands {
+            assert_eq!(view.command(command, now), Update::default(), "{command:?}");
+        }
+        view.command(Command::SelectAll, now);
+        let style = |lines: &[&str]| lines.iter().map(|line| (*line).to_owned()).collect();
+        for (command, added) in [
+            (
+                Command::Color(Token::Red),
+                style(&["style.color = \"red\""; 3]),
+            ),
+            (
+                Command::Fill(Fill::Solid),
+                style(&["style.fill = \"solid\""; 2]),
+            ),
+            (
+                Command::StrokeDashed,
+                style(&["style.stroke = \"dashed\""; 3]),
+            ),
+        ] {
+            assert_eq!(view.command(command, now), CHANGED, "{command:?}");
+            assert_eq!(
+                line_diff(TWO, &view.draft()),
+                (added, Vec::<String>::new()),
+                "{command:?}"
+            );
+            if command != Command::StrokeDashed {
+                // Set again, it changes nothing and sends nothing.
+                assert_eq!(view.command(command, now), Update::default(), "{command:?}");
+            }
+            travel(&mut view, Command::Undo, now);
+            assert!(view.pristine() && !view.can_undo(), "{command:?}");
+            assert_eq!(selected(&view), ["a", "b", "e"]);
+        }
+        // A read-only board takes none of them.
+        let mut view = sized("schema = 2\n");
+        view.command(Command::SelectAll, now);
+        for command in commands {
+            assert_eq!(view.command(command, now), Update::default(), "{command:?}");
+        }
+    }
+
+    /// The outline switch over shapes and connectors that differ dashes
+    /// them all, then makes them all solid; a text node has no outline and
+    /// is neither read nor written.
+    #[test]
+    fn the_outline_switch_over_a_mixed_selection_gives_them_all_the_first_value() {
+        let text = TWO.replace(
+            "z = \"b\"\n",
+            "style.stroke = \"dashed\"\nz = \"b\"\n\n[node.t]\ntext = \"Note\"\nkind = \"text\"\nat = [0, 200]\nsize = [120, 20]\nz = \"d\"\n",
+        );
+        let mut view = sized(&text);
+        let now = Instant::now();
+        let stroke = |view: &BoardView| {
+            let board = view.board();
+            let dash = |stroke: &Named<wren_board::Dash>| stroke.known();
+            (
+                dash(&board.nodes[&id("a")].style.stroke),
+                dash(&board.nodes[&id("b")].style.stroke),
+                dash(&board.edges[&id("e")].style.stroke),
+            )
+        };
+        use wren_board::Dash::{Dashed, Solid};
+        view.command(Command::SelectAll, now);
+        assert_eq!(view.command(Command::StrokeDashed, now), CHANGED);
+        assert_eq!(stroke(&view), (Some(Dashed), Some(Dashed), Some(Dashed)));
+        assert_eq!(view.command(Command::StrokeDashed, now), CHANGED);
+        assert_eq!(stroke(&view), (Some(Solid), Some(Solid), Some(Solid)));
+        assert_eq!(
+            view.board().nodes[&id("t")],
+            open(&text).board().nodes[&id("t")]
+        );
+        // The text node alone has no outline to switch.
+        let mut view = sized(&text);
+        view.machine
+            .select(BTreeSet::from([Source::Node(id("t"))]), None);
+        assert_eq!(view.command(Command::StrokeDashed, now), Update::default());
+        assert_eq!(
+            view.command(Command::Color(wren_board::Token::Blue), now),
+            CHANGED
+        );
     }
 
     #[test]

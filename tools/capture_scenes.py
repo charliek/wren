@@ -313,6 +313,7 @@ def board_scenes(client, shot_here, out: Path) -> None:
     client.call("dialog.close")
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
+    board_style_scenes(client, shot_here)
     client.call("column.open", {"column": "sections"})
 
 
@@ -457,6 +458,59 @@ def board_arrange_scenes(client, shot_here, open_board) -> None:
     client.call("board.key", {"key": "]", "mods": []})
     client.call("board.key", {"key": "escape", "mods": []})
     shot_here("board-stacking")
+
+
+# The colour tokens in the order of their keys, 0 to 7.
+BOARD_COLORS = ("neutral", "red", "orange", "yellow", "green", "cyan", "purple", "blue")
+
+
+def board_style_scenes(client, shot_here) -> None:
+    """discovery/boards.md §6.3, Phase 3 styling: every colour at every
+    fill level, set through the digit keys and the fill commands on a new
+    board. A column per colour: a shape with each fill, then a text node,
+    and a labelled connector from the unfilled shape to it."""
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Colours"})
+    client.call("dialog.submit")
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    fills = ("tint", "solid", "none")
+    edits = []
+    for column, color in enumerate(BOARD_COLORS):
+        x = column * 140
+        for row, fill in enumerate(fills):
+            edits.append({"op": "add_node", "id": f"{fill}-{color}", "kind": "shape",
+                          "shape": "rounded", "at": [x, row * 100], "size": [120, 60],
+                          "text": f"{color.capitalize()}\n{fill}"})
+        edits.append({"op": "add_node", "id": f"text-{color}", "kind": "text",
+                      "at": [x, 420], "size": [120, 20], "text": f"{color.capitalize()} text"})
+        edits.append({"op": "connect", "id": f"edge-{color}", "from": {"node": f"none-{color}"},
+                      "to": {"node": f"text-{color}"}})
+    client.call("board.apply", {"edits": edits})
+    client.call("board.apply", {"edits": [
+        {"op": "set", "id": f"edge-{color}", "field": "text", "value": "yes"}
+        for color in BOARD_COLORS]})
+
+    def pick(ids: list[str]) -> None:
+        def at(id_: str) -> dict:
+            return {"edge": id_} if id_.startswith("edge-") else {"node": id_}
+
+        for index, id_ in enumerate(ids):
+            client.call("board.pointer", {"kind": "click", "at": at(id_), "button": "left",
+                                          "mods": [] if index == 0 else ["shift"]})
+
+    client.call("command.run", {"id": "board.zoom.fit"})
+    for digit, color in enumerate(BOARD_COLORS):
+        pick([f"{fill}-{color}" for fill in fills] + [f"text-{color}", f"edge-{color}"])
+        client.call("board.key", {"key": str(digit), "mods": []})
+    for fill in fills[1:]:
+        pick([f"{fill}-{color}" for color in BOARD_COLORS])
+        client.call("command.run", {"id": f"board.fill.{fill}"})
+    client.call("command.run", {"id": "board.select.none"})
+    client.call("command.run", {"id": "board.zoom.fit"})
+    # An unfocused board draws no cursor ring (§5.3 rule 7).
+    client.call("column.open", {"column": "notes"})
+    shot_here("board-colors")
 
 
 def main() -> int:

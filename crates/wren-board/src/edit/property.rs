@@ -337,6 +337,14 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             end: *rng.pick(&ends),
             to: endpoint(board, rng),
         },
+        10 if rng.one_in(2) => Intent::SetStyle {
+            ids: picked(board, rng),
+            field: match rng.below(3) {
+                0 => StyleField::Color(*rng.pick(Token::ALL)),
+                1 => StyleField::Fill(*rng.pick(Fill::ALL)),
+                _ => StyleField::Stroke(*rng.pick(Dash::ALL)),
+            },
+        },
         10 => Intent::SetEdge {
             ids: chosen(board, rng),
             field: match rng.below(3) {
