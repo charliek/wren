@@ -535,6 +535,40 @@ Deviations:
 
 #### `spell-core`
 
+*C1 and C2.* Where §4.2 or §3.2 left a case open, this is what `wren-spell` does:
+
+1. *The empty word is not accepted.* `spellbook` counts `""` as correct; `Hunspell::accepts` does not, so no source vouches for nothing.
+2. *A run joins, not only a single character* (rule 4.2.1): a chunk is skipped when a run of `_`, `*` or `~` has a letter or digit directly on both sides, so `strong**wrod**ish` is skipped like `un*believ*able`. Read character by character, a doubled delimiter would never count.
+3. *A word cut by a prose range is not checked.* A candidate word that starts where its prose range starts with a letter or digit just before it in the line, or ends where the range ends with one just after it, is a piece of a longer word of the line, so it is skipped rather than marked (`marks` promises "words of `line`"). So is one with a UAX #29 mid-word joiner (`'`, `’`, `.`, `:` and the rest of `MidLetter` and `MidNumLet`) at the range's edge, inside or outside it, and a letter beyond that: `wouldn't` given `0..6` marks nothing (fixed after the review). `_` is not such a joiner, since outside a range it is an emphasis delimiter. The editor's ranges never cut a word (rule 4.1.4), so this only guards against a bad caller.
+4. *Bad prose ranges are tolerated, not trusted.* Each is clamped to the line and shrunk to character boundaries; a range that starts before the end of an earlier one keeps only its part after it, so one out of order is dropped. The marks stay sorted, apart (a gap between any two) and inside the ranges given for any input; the seeded test passes ranges that are unsorted, overlapping, reversed, past the end and inside characters.
+5. *`_` belongs to a UAX #29 word* (it is `ExtendNumLet`), so with the delimiter in prose `_word_` or `trailing_` is one candidate that rule 4.2.4 never checks. Matched emphasis delimiters are not prose (exclusion 5), so the editor's `_word_` is still checked as `word`.
+6. *"Every cased one upper case"* is read as "upper-cases to itself": a title-case letter such as `ǅ` is not upper case. A word written with a combining mark (`cafe` plus U+0301) is never checked, since the mark is not a letter at or below U+024F.
+7. *The acceptance note needs no change*: with the bundled 2026.02.25 release its marks are exactly the nine words, in order (`speller::tests::the_acceptance_note_has_exactly_its_nine_marks`, with the editor's prose ranges given by hand).
+8. `Speller::suggestions` was still the stub after C2 (C4 filled it). The seeded test already called it on a sample of its marks.
+
+Measured while trying to break it, in a debug test build (`spellbook` at the workspace's `opt-level = 2` for dependencies): the slowest of 200,000 random 2 to 40 character checks took 39 µs, far under the 50 ms the brief names; no input panicked.
+
+*C3 and C4.* Where §4.6 or §3.2 left a case open:
+
+1. *A comment is a line whose trimmed text starts with `#`*, as `config.conf` reads its comments, so an indented `# note` is ignored too. A byte-order mark is stripped only at the start of the file; anywhere else it is part of a word.
+2. *A line is split as `str::lines` splits it*: `\n` or `\r\n`, and a stray `\r` at a line's end is trimmed as white space. Line numbers in warnings count from 1 and include comments and blank lines.
+3. *The warnings read* `line N: not one word` and `line N: longer than 40 characters`, the shape `config.conf`'s warnings have, so W1 can prefix them with the path. A line that is both is reported as not one word. The 40 is counted in characters after `’` becomes `'`.
+4. *"All lower case" is read as C2 reads "upper case"*: an entry is all lower case when every character lower-cases to itself, so an entry starting with title-case `ǅ` is exact. "Capitalised" upper-cases the first character, not the first letter, so `'tis` is not also accepted as `'Tis`; Hunspell does the same. An entry need not be a word §4.2 checks: `x86` is stored, and harmless.
+5. *`WordList::accepts` reads `’` as `'` itself*, like `Hunspell`, so the source keeps rule 4.2.3 when asked directly, not only through `Speller`. `WordList` derives `Debug` and `Default` (the empty list); its field stays private.
+6. *`Speller::suggestions` passes and returns straight apostrophes*: the word is asked about with `'`, and a correction holding `’` is read with `'`, so `don’t` and `don't` are one correction. Turning them back into `’` is the editor's job (rule 4.4.6).
+7. *It leaves out* an empty correction, one holding a control character (a line break would change the note's lines on accepting), and the word itself. It asks no later source once it has `limit`, and nothing for `limit` 0.
+8. *A word that rule 4.2.4 never checks gets no suggestions.* Such a word is never marked, so the menu never asks; the guard also keeps a 10,000-character word away from `spellbook`'s suggester.
+9. *Split corrections are kept as the source offers them*: for `misteak` the bundled dictionary offers `mistake`, `mi steak`, `mi-steak`, `steak`; for `CommonMark`, `Common Mark` first. Removing them would also remove good ones such as `alot` → `a lot`. The menu or the owner may want to revisit this.
+10. *The first suggestions for the acceptance note* (`speller::tests::the_acceptance_notes_marks_have_these_first_suggestions`) are `cheek` for `chek` (`check` is second), `pear`, `replacements`, `bundled`, `design`, `Common Mark`, `misspelled`, `known` and `mistake`; W4's step 3 can expect them. In a debug test build each took 6 to 21 ms.
+
+*The review* (§7.1, then the fix step):
+
+11. *Suggestion time grows with the word's length*, past what §2.2 choice 6 and §4.7 assume (5 to 36 ms). In the test build (`spellbook` at `opt-level = 2`), on a machine that was not quiet: `teh` 19 ms, `recieve` 27 ms, `definately` 31 ms, `internationalizationnn` (22 characters) 77 ms, `antidisestablishmentarianismm` (29) 102 ms, `Supercalifragilisticexpialidociuos` (34) 116 ms, `edereovernonedantisunlymisantioutseanti` (39) 163 ms; the reviewer's worst over 300 random 2 to 40 character Latin words was 221 ms. Nothing is changed here: open question 3's default decides at the end review. So the end review's rule 4.7.3 measurement, in release, adds a few long misspelled words (20 to 40 characters) to the acceptance note's nine. If they miss 100 ms, the choices are a shorter length limit for suggesting than the 40 for checking, or suggestions off the UI thread (open question 3).
+
+- Counts: 0 blockers, 0 majors, 2 minors.
+- Fixed: the word cut at an inner apostrophe (`e497281`, tests `words::tests::a_word_cut_at_an_inner_apostrophe_is_not_checked` and new cases in `speller::tests::a_prose_range_that_cuts_a_word_marks_no_piece_of_it`).
+- Not fixed: suggestion time for long words (item 11). Reproduced; bounding it is a behaviour choice that open question 3 leaves to the end review's measurement, so it is recorded and carried there.
+
 #### `spell-marks`
 
 #### `spell-menu`
