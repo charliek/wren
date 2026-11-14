@@ -448,7 +448,7 @@ fn past(limit: Limit) -> String {
         Limit::Anchor => "an anchor is outside 0 to 1000; drawn at the box's edge".into(),
         Limit::LabelAt => "a label's position is outside 0 to 1000; drawn at the line's end".into(),
         Limit::LabelBytes => format!(
-            "a label is over {} KiB; only that much is drawn",
+            "a label or caption is over {} KiB; only that much is drawn",
             scene::MAX_LABEL_BYTES / 1024
         ),
         Limit::Labels => format!(

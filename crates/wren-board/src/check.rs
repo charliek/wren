@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::scene::{Source, COORDINATE_LIMIT, MAX_LABELS, MAX_LABEL_BYTES, MAX_Z};
-use crate::{Board, End, Id, Node};
+use crate::{Board, End, Id, Named, Node};
 
 /// The deepest nesting drawn inside parents: a node more levels down than
 /// this, counting a root as level 1, is laid out as a root.
@@ -141,7 +141,8 @@ pub enum Limit {
     Anchor,
     /// A connector label's `at` outside 0 to 1000.
     LabelAt,
-    /// A label over [`MAX_LABEL_BYTES`]; only that much of it is drawn.
+    /// A label, or a placeholder's caption (its unknown kind name), over
+    /// [`MAX_LABEL_BYTES`]; only that much of it is drawn.
     LabelBytes,
     /// More than [`MAX_LABELS`] connector labels; only the first are drawn.
     Labels,
@@ -220,7 +221,13 @@ pub(crate) fn check_with(board: &Board, cut: impl Fn(&Source) -> bool) -> Vec<Is
         let past = |limit| match limit {
             Limit::Coordinates => outside_box(placed.at, node.size),
             Limit::Size => node.size.iter().any(|&side| side < 1),
-            Limit::LabelBytes => node.text.len() > MAX_LABEL_BYTES,
+            Limit::LabelBytes => {
+                let caption = match &node.kind {
+                    Some(Named::Other(kind)) => kind.len(),
+                    _ => 0,
+                };
+                node.text.len().max(caption) > MAX_LABEL_BYTES
+            }
             Limit::ZLength => long_z(node.z.as_deref()),
             Limit::LabelLines => cut(&source),
             Limit::Anchor | Limit::LabelAt | Limit::Labels => false,
@@ -817,6 +824,7 @@ mod tests {
                 "[node.a]\nkind = \"sticky\"\nat = [2147483647, 0]\nsize = [-1, 0]\nz = \"V\"\n\n",
                 "[node.b]\ntext = \"{long_label}\"\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\nz = \"{long_z}\"\n\n",
                 "[node.c]\nkind = \"shape\"\nat = [-16777217, 0]\nsize = [1, 1]\nz = \"V\"\n\n",
+                "[node.d]\nkind = \"{long_label}\"\nat = [0, 0]\nsize = [1, 1]\nz = \"V\"\n\n",
                 "[edge.e]\nkind = \"pipe\"\nfrom = {{ anchor = [-5, 500], node = \"b\" }}\n",
                 "to = {{ at = [16777217, 0] }}\nlabels = [\n  {{ at = 2000, text = \"far\" }},\n]\nz = \"W\"\n\n",
                 "[edge.f]\nkind = \"edge\"\nfrom = {{ node = \"c\" }}\nto = {{ node = \"b\" }}\nlabels = [\n{labels}]\nz = \"{long_z}\"\n\n",
@@ -839,6 +847,7 @@ mod tests {
             ("b", Limit::LabelBytes),
             ("b", Limit::ZLength),
             ("c", Limit::Coordinates),
+            ("d", Limit::LabelBytes),
             ("e", Limit::Coordinates),
             ("e", Limit::Anchor),
             ("e", Limit::LabelAt),
