@@ -164,6 +164,16 @@ impl Viewport {
         }
     }
 
+    /// The same view in a widget resized from `from` to `to`: the board
+    /// point at the middle of the widget stays there.
+    pub fn resized(self, from: (f32, f32), to: (f32, f32)) -> Self {
+        Self {
+            x: self.x + (from.0 - to.0) / 2.0 / self.zoom,
+            y: self.y + (from.1 - to.1) / 2.0 / self.zoom,
+            zoom: self.zoom,
+        }
+    }
+
     /// The view of a widget of `size` that shows all of `content` with
     /// [`FIT_MARGIN`] around it, centred, never above 100 %. Content with
     /// no area is shown at 100 %, centred on its corner.
@@ -195,6 +205,18 @@ impl Default for Viewport {
             zoom: 1.0,
         }
     }
+}
+
+/// Where a board was looked at from, as a host keeps it to come back to
+/// ([`BoardView::saved_view`], [`BoardView::return_to`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedView {
+    pub viewport: Viewport,
+    /// The widget's size the viewport was set for, if it had said.
+    pub size: Option<(f32, f32)>,
+    /// Whether the view was the board's fit, untouched since: it comes
+    /// back as a fit for the widget's size then.
+    pub fitted: bool,
 }
 
 /// Which labels a frame holds. Shapes are cheap on both renderers; glyphs
@@ -420,6 +442,12 @@ pub struct BoardView {
     size: Option<(f32, f32)>,
     /// A fit asked for before the widget's size was known.
     fit_pending: bool,
+    /// The view is the board's fit, with no pan, zoom or centring since:
+    /// a resize fits it again (§5.13 rule 4).
+    fitted: bool,
+    /// The widget size a viewport from a [`SavedView`] was set for, until
+    /// the widget says its own: the first resize keeps that view's centre.
+    anchor: Option<(f32, f32)>,
     /// An element shown before the widget's size was known, centred once
     /// it is.
     showing: Option<Source>,
@@ -515,6 +543,8 @@ impl BoardView {
             epoch: epoch(),
             size: None,
             fit_pending: false,
+            fitted: false,
+            anchor: None,
             showing: None,
             jumps: 0,
             key_policy: None,
@@ -640,8 +670,8 @@ impl BoardView {
 
     /// Look at the board from `viewport`, its zoom brought within 10 % to
     /// 400 %. A viewport that is not finite is not taken. It replaces a fit
-    /// still waiting for the widget's size. A move puts the hover connect
-    /// handles away.
+    /// still waiting for the widget's size, and is no longer the fit a
+    /// resize keeps. A move puts the hover connect handles away.
     pub fn set_viewport(&mut self, viewport: Viewport) {
         if viewport.x.is_finite() && viewport.y.is_finite() && viewport.zoom.is_finite() {
             let viewport = Viewport {
@@ -653,6 +683,38 @@ impl BoardView {
             }
             self.viewport = viewport;
             self.fit_pending = false;
+            self.fitted = false;
+            self.anchor = None;
+        }
+    }
+
+    /// Where the board is looked at from, for [`BoardView::return_to`].
+    pub fn saved_view(&self) -> SavedView {
+        SavedView {
+            viewport: self.viewport,
+            size: self.size.or(self.anchor),
+            fitted: self.fitted,
+        }
+    }
+
+    /// Look at the board as `saved` was: fitted again if it was the fit,
+    /// else from its viewport, kept centred when the widget's size differs
+    /// from the one it was set for.
+    pub fn return_to(&mut self, saved: SavedView) {
+        if saved.fitted {
+            self.fit();
+            return;
+        }
+        self.jump(saved.viewport);
+        self.fit_pending = false;
+        self.fitted = false;
+        self.anchor = None;
+        match (self.size, saved.size) {
+            (Some(now), Some(then)) if now != then => {
+                self.jump(self.viewport.resized(then, now));
+            }
+            (None, then) => self.anchor = then,
+            _ => {}
         }
     }
 
@@ -690,11 +752,12 @@ impl BoardView {
     pub fn fit(&mut self) {
         match self.size {
             Some(size) => {
-                self.fit_pending = false;
                 self.jump(Viewport::fitting(self.scenes.scene().bounds, size));
+                self.fit_pending = false;
             }
             None => self.fit_pending = true,
         }
+        self.fitted = true;
     }
 
     /// Select `element` alone, as the cursor, and centre it in the widget
@@ -722,19 +785,19 @@ impl BoardView {
         true
     }
 
-    /// Put back the selection, its cursor and the viewport the host took
+    /// Put back the selection, its cursor and the view the host took
     /// before it showed elements (§5.18 rule 2), leaving out what the
     /// board no longer holds. A centring still waiting is dropped.
     pub fn restore(
         &mut self,
         selection: BTreeSet<Source>,
         cursor: Option<Source>,
-        viewport: Viewport,
+        saved: SavedView,
     ) {
         self.showing = None;
         self.machine.select(selection, cursor);
         self.machine.retain(&self.board);
-        self.jump(viewport);
+        self.return_to(saved);
     }
 
     /// Centre `element` in the widget, or fit it when it would be too
@@ -808,9 +871,14 @@ impl BoardView {
             }
             Message::Resized { width, height } => {
                 if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+                    let before = self.size.or(self.anchor.take());
                     self.size = Some((width, height));
-                    if self.fit_pending {
+                    // The fit follows the widget; a view the user chose
+                    // keeps what is at its middle (§5.13 rule 4).
+                    if self.fit_pending || (self.fitted && before != self.size) {
                         self.fit();
+                    } else if let Some(before) = before {
+                        self.jump(self.viewport.resized(before, (width, height)));
                     }
                     if let Some(element) = self.showing.take() {
                         self.centre_on(&element);
@@ -2712,8 +2780,7 @@ mod tests {
             view.viewport(),
             Viewport::fitting(view.scene().bounds, SIZE)
         );
-        // A later resize keeps where the view looks.
-        let fitted = view.viewport();
+        // The fit follows a later resize.
         view.update(
             Message::Resized {
                 width: 400.0,
@@ -2721,7 +2788,128 @@ mod tests {
             },
             Instant::now(),
         );
-        assert_eq!(view.viewport(), fitted);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, (400.0, 300.0))
+        );
+    }
+
+    fn resize(view: &mut BoardView, size: (f32, f32)) {
+        view.update(
+            Message::Resized {
+                width: size.0,
+                height: size.1,
+            },
+            Instant::now(),
+        );
+    }
+
+    /// The board point at the middle of the widget.
+    fn widget_middle(view: &BoardView) -> (f32, f32) {
+        let (width, height) = view.size().unwrap();
+        view.viewport().to_board((width / 2.0, height / 2.0))
+    }
+
+    fn assert_near(left: (f32, f32), right: (f32, f32)) {
+        assert!(
+            (left.0 - right.0).abs() < 1e-3 && (left.1 - right.1).abs() < 1e-3,
+            "{left:?} != {right:?}"
+        );
+    }
+
+    #[test]
+    fn a_resize_fits_the_fit_again_and_keeps_the_middle_of_a_chosen_view() {
+        // §5.13 rule 4. Fitted while the browser columns made it narrow,
+        // then widened: still the fit, for the new size.
+        let narrow = (400.0, 600.0);
+        let mut view = open(fixtures::CHECKOUT_FLOW);
+        view.fit();
+        resize(&mut view, narrow);
+        let jumps = view.jumps();
+        resize(&mut view, SIZE);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, SIZE)
+        );
+        assert!(view.saved_view().fitted);
+        assert!(view.jumps() > jumps, "drawn in full at once");
+        // So the keyboard zoom, about the middle, zooms about the board.
+        view.zoom_reset();
+        assert!(!view.saved_view().fitted);
+        let centre = view.scene().bounds.center();
+        assert_near(widget_middle(&view), (centre.x, centre.y));
+
+        // A chosen view keeps the board point at its middle, by any change
+        // of size, and its zoom.
+        for chosen in [
+            |view: &mut BoardView| view.zoom_step(-1),
+            |view: &mut BoardView| {
+                view.set_viewport(view.viewport().panned(-120.0, 35.0));
+            },
+            |view: &mut BoardView| {
+                view.show_element(Source::Node(id("ahj860xh")));
+            },
+        ] {
+            let mut view = sized(fixtures::CHECKOUT_FLOW);
+            chosen(&mut view);
+            let (at, zoom) = (widget_middle(&view), view.viewport().zoom);
+            for size in [narrow, (1280.0, 800.0), (333.0, 211.0), SIZE] {
+                resize(&mut view, size);
+                assert_near(widget_middle(&view), at);
+                assert_eq!(view.viewport().zoom, zoom);
+                assert!(!view.saved_view().fitted);
+            }
+        }
+
+        // Asked for again, the fit follows the size again.
+        view.fit();
+        resize(&mut view, narrow);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, narrow)
+        );
+    }
+
+    #[test]
+    fn a_saved_view_comes_back_fitted_or_centred_for_the_new_size() {
+        let narrow = (400.0, 600.0);
+        let mut first = open(fixtures::CHECKOUT_FLOW);
+        first.fit();
+        resize(&mut first, narrow);
+        let fitted = first.saved_view();
+        assert_eq!(fitted.size, Some(narrow));
+        // Opened again in a wider widget, before it has said its size.
+        let mut view = open(fixtures::CHECKOUT_FLOW);
+        view.return_to(fitted);
+        assert!(view.fit_pending());
+        resize(&mut view, SIZE);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, SIZE)
+        );
+
+        first.zoom_step(1);
+        let chosen = first.saved_view();
+        let at = widget_middle(&first);
+        assert!(!chosen.fitted);
+        // Before the size: the first resize keeps the middle it had.
+        let mut view = open(fixtures::CHECKOUT_FLOW);
+        view.return_to(chosen);
+        assert_eq!(view.viewport(), chosen.viewport);
+        assert_eq!(view.saved_view(), chosen);
+        resize(&mut view, SIZE);
+        assert_near(widget_middle(&view), at);
+        // After it: at once.
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        view.return_to(chosen);
+        assert_near(widget_middle(&view), at);
+        assert_eq!(view.viewport().zoom, chosen.viewport.zoom);
+        // A viewport the host sets is taken as it is.
+        let mut view = open(fixtures::CHECKOUT_FLOW);
+        view.return_to(chosen);
+        view.set_viewport(chosen.viewport);
+        resize(&mut view, SIZE);
+        assert_eq!(view.viewport(), chosen.viewport);
     }
 
     #[test]
@@ -3455,9 +3643,11 @@ mod tests {
         let fitted = Viewport::fitting(view.scene().bounds, SIZE);
         assert_eq!(view.viewport().zoom, fitted.zoom);
         assert_centred(&view, &node);
-        // Only once: a later size keeps the view.
+        // Only once: a later size keeps the view the user moved to, by
+        // what is at its middle.
         let moved = view.viewport().panned(50.0, 0.0);
         view.set_viewport(moved);
+        let at = widget_middle(&view);
         view.update(
             Message::Resized {
                 width: 900.0,
@@ -3465,7 +3655,8 @@ mod tests {
             },
             now,
         );
-        assert_eq!(view.viewport(), moved);
+        assert_near(widget_middle(&view), at);
+        assert_eq!(view.viewport().zoom, moved.zoom);
     }
 
     #[test]
@@ -3489,10 +3680,11 @@ mod tests {
         let selection = view.machine().selection().clone();
         let cursor = view.machine().cursor().cloned();
         let viewport = view.viewport();
+        let saved = view.saved_view();
         assert!(view.show_element(Source::Node(second.clone())));
         assert_ne!(view.viewport(), viewport);
         let jumps = view.jumps();
-        view.restore(selection.clone(), cursor.clone(), viewport);
+        view.restore(selection.clone(), cursor.clone(), saved);
         assert_eq!(*view.machine().selection(), selection);
         assert_eq!(view.machine().cursor(), cursor.as_ref());
         assert_eq!(view.viewport(), viewport);
@@ -3503,7 +3695,7 @@ mod tests {
         view.restore(
             BTreeSet::from([gone.clone(), kept.clone()]),
             Some(gone),
-            viewport,
+            saved,
         );
         assert_eq!(*view.machine().selection(), BTreeSet::from([kept]));
         assert_eq!(view.machine().cursor(), None);
@@ -3516,7 +3708,15 @@ mod tests {
             y: 20.0,
             zoom: 0.5,
         };
-        waiting.restore(BTreeSet::new(), None, at);
+        waiting.restore(
+            BTreeSet::new(),
+            None,
+            SavedView {
+                viewport: at,
+                size: None,
+                fitted: false,
+            },
+        );
         waiting.update(
             Message::Resized {
                 width: SIZE.0,

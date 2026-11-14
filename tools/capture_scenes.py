@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -586,6 +587,22 @@ def board_style_scenes(client, shot_here) -> None:
     shot_here("board-colors")
 
 
+def window_size(app: WrenApp, size: str) -> None:
+    """Resize the app's window to ``WIDTHxHEIGHT`` logical pixels with
+    xdotool, so X11 only, and wait until the app lays itself out at it."""
+    width, height = (int(part) for part in size.split("x"))
+
+    def xdo(*args: str) -> str:
+        return subprocess.run(["xdotool", *args], check=True, capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+
+    window = xdo("search", "--onlyvisible", "--pid", str(app.pid)).splitlines()[0]
+    xdo("windowsize", window, str(width), str(height))
+    wait_for(lambda: app.client.call("navigation.get")["viewport"]
+             == {"width": width, "height": height},
+             timeout=5, description=f"the window at {size}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
@@ -596,7 +613,13 @@ def main() -> int:
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
     parser.add_argument("--only", choices=("markdown", "boards"), help="shoot only these scenes")
+    parser.add_argument("--window", metavar="WIDTHxHEIGHT",
+                        help="with --only boards, resize the window first (X11 only); "
+                             "pair it with --label")
     args = parser.parse_args()
+    if args.window and (args.only != "boards" or sys.platform == "darwin"
+                        or "x" not in args.window):
+        parser.error("--window takes WIDTHxHEIGHT, with --only boards, on X11")
     out = args.out if args.engine == "classic" else args.out / args.engine
     if args.label:
         out = out / args.label
@@ -631,6 +654,8 @@ def main() -> int:
             build_board_workspace(workspace)
             with WrenApp(workspace=workspace, evaluation=False,
                          settings=settings + "boards = on\n") as app:
+                if args.window:
+                    window_size(app, args.window)
                 app.client.call("theme.set", {"id": args.theme})
                 wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
                 banner = app.client.call("session.get")["banner"]

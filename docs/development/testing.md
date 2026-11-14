@@ -195,6 +195,9 @@ for r in tiny-skia wgpu; do for t in dark light; do
 done; done
 ```
 
+`--window 1024x640` (X11 only) resizes the window before the board scenes,
+to see them at the size of a smaller screen; give it a `--label` too.
+
 ## macOS
 
 Rsync the tree to a Mac (excluding `target/`, `.venv/`, and `.claude/`) and

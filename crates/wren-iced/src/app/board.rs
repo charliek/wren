@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use iced::Task;
 use wren_board::{Access, Palette, ParseError};
-use wren_canvas::{BoardView, Effect, Input, Viewport};
+use wren_canvas::{BoardView, Effect, Input, SavedView};
 use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
 use wren_core::ops::Op;
@@ -36,7 +36,7 @@ pub(super) enum Surface {
 
 /// Where each board opened in this run was last looked at from. It is
 /// never stored on disk.
-pub(super) type Viewports = HashMap<NoteId, Viewport>;
+pub(super) type Viewports = HashMap<NoteId, SavedView>;
 
 /// A view of the board `text` holds, looked at from where `note` was left,
 /// or fitted the first time it opens in this run.
@@ -51,7 +51,7 @@ pub(super) fn open(
     fonts::load();
     let mut view = BoardView::open(text, palette, fonts::UI)?;
     match viewports.get(&note) {
-        Some(viewport) => view.set_viewport(*viewport),
+        Some(saved) => view.return_to(*saved),
         None => view.fit(),
     }
     Ok(view)
@@ -61,7 +61,7 @@ pub(super) fn open(
 /// A view still waiting to be fitted was never looked at.
 pub(super) fn close(view: &BoardView, note: NoteId, viewports: &mut Viewports) {
     if !view.fit_pending() {
-        viewports.insert(note, view.viewport());
+        viewports.insert(note, view.saved_view());
     }
 }
 
@@ -687,6 +687,7 @@ pub(super) mod tests {
 
     use super::super::{Message, Options};
     use super::*;
+    use wren_canvas::Viewport;
 
     pub const FLOW: &str = r#"schema = 1
 

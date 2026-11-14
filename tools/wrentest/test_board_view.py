@@ -138,6 +138,65 @@ def test_a_board_opens_fitted_with_every_node_in_view(samples: Path) -> None:
             assert visible["x"] >= root["x"] + 39 and visible["y"] >= root["y"] + 39, node
 
 
+def content_box(placed: dict) -> dict:
+    """The box around every node as drawn, in window pixels."""
+    nodes = [node["bounds"] for node in placed["nodes"]]
+    left = min(box["x"] for box in nodes)
+    top = min(box["y"] for box in nodes)
+    return {"x": left, "y": top,
+            "width": max(box["x"] + box["width"] for box in nodes) - left,
+            "height": max(box["y"] + box["height"] for box in nodes) - top}
+
+
+def intersects(box: dict, root: dict) -> bool:
+    return (box["x"] < root["x"] + root["width"] and root["x"] < box["x"] + box["width"]
+            and box["y"] < root["y"] + root["height"] and root["y"] < box["y"] + box["height"])
+
+
+@pytest.mark.native_x11
+def test_a_board_fitted_narrow_stays_in_view_once_the_canvas_widens(samples: Path) -> None:
+    """§5.13 rule 4: a fit follows a resize, so a board fitted beside the
+    browser columns of a 1024 by 640 window is still in view, fitted, once
+    they fold, and the keyboard zoom about the middle keeps it in view
+    (the `board-wide` scene's steps)."""
+    from tools.wrentest.test_editor import focus_native
+    from tools.wrentest.test_gestures import window_size
+
+    with board_app(samples, "board-resize-fit") as app:
+        window = focus_native(app)
+        window_size(app, window, 1024, 640)
+        open_note(app, FLOW)
+        app.client.call("editor.focus")
+        narrow = fitted(app)
+        for _ in range(3):
+            command(app, "navigation.column_left")
+        for _ in range(3):
+            command(app, "navigation.column_right")
+
+        def widened() -> dict | None:
+            placed = bounds(app)
+            return placed if placed["root"]["width"] > narrow["root"]["width"] + 100 else None
+
+        wait_for(widened, timeout=5, interval=0.05, description="the canvas widened")
+        # Still the fit, now for the wide canvas: every node in view and
+        # the board in the middle (the fit centres connectors and labels
+        # too, so the nodes' own box sits a little off it).
+        wait_for(lambda: all(node["visible"] == node["bounds"] for node in bounds(app)["nodes"]),
+                 timeout=5, interval=0.05, description="the board fitted to the wide canvas")
+        placed = bounds(app)
+        box, root = content_box(placed), placed["root"]
+        assert abs(box["x"] + box["width"] / 2 - (root["x"] + root["width"] / 2)) < 40, (box, root)
+        for step in ("font.reset", "font.decrease", "font.decrease"):
+            command(app, step)
+            placed = bounds(app)
+            box, root = content_box(placed), placed["root"]
+            assert intersects(box, root), (step, box, root)
+            # Zoomed about the middle of the board, which is in the middle
+            # of the canvas.
+            middle = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            assert inside(middle, root), (step, middle, root)
+
+
 def fill_point(node: dict, placed: dict) -> tuple[int, int] | None:
     """A pixel at least 4 px inside a filled rectangle, clear of every
     label, other node and connector."""
