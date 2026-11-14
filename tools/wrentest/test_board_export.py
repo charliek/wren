@@ -1,15 +1,18 @@
-"""Board export as PNG, with the `boards` setting on (discovery/boards.md
-§3.8, §5.19, §6.8 Phase 3 item 5, §7.4 EX1).
+"""Board export as PNG, with the `boards` setting on, and `wren export`
+(discovery/boards.md §3.8, §5.19, §6.8 Phase 3 items 5 and 6, §7.4 EX1
+and EX2).
 
 `board.export` writes what Export board as PNG… writes once its save dialog
 has closed: the board's SVG export, as drawn when the command ran, rendered
-by resvg at twice its size on the theme's canvas colour.
+by resvg at twice its size on the theme's canvas colour. `wren export`
+writes the same files from the command line with no display.
 """
 
 from __future__ import annotations
 
 import math
 import re
+import subprocess
 import time
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -17,12 +20,12 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, GROUP, NOTES, board, board_app, copy_samples, fitted, near, open_note, screenshot,
-    stamp,
+    FLOW, GROUP, NOTES, board, board_app, conflict_board, copy_samples, fitted, near, open_note,
+    screenshot, stamp,
 )
 from tools.wrentest.client import RemoteError
 from tools.wrentest.png import PNG, read_png
-from tools.wrentest.test_setup import artifact_directory
+from tools.wrentest.test_setup import artifact_directory, binary_path, isolated_environment
 from tools.wrentest.ui import WrenApp
 
 # A pan or zoom step draws no label on the software renderer until the
@@ -224,3 +227,95 @@ def test_with_the_setting_off_there_is_no_png_export(samples: Path) -> None:
         open_note(app, NOTES)
         assert export_rows(app) == []
         assert command(app, "note.export_png")["disposition"] == "blocked"
+
+
+def wren_export(home: Path, *args: str | Path) -> subprocess.CompletedProcess[bytes]:
+    """``wren export`` with these arguments, run with no display, no test
+    mode and an empty configuration under ``home``."""
+    home.mkdir()
+    env = isolated_environment(home, test_mode=False)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    return subprocess.run(
+        [str(binary_path()), "export", *map(str, args)],
+        env=env, capture_output=True, timeout=60, check=False,
+    )
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_wren_export_writes_what_the_app_exports(
+    samples: Path, tmp_path: Path, theme: str,
+) -> None:
+    """§6.8 Phase 3 item 6: with no display, ``wren export`` exits 0 and
+    writes the bytes ``board.export`` writes for the same board in the same
+    theme, SVG and PNG; at another scale its PNG is the scene's bounds times
+    that scale and each shape's middle is the fill the app drew (item 5)."""
+    artifacts = artifact_directory(f"board-export-cli-{theme}")
+    flow, swatch = samples / FLOW, samples / SWATCHES
+    before = stamp(flow), stamp(swatch)
+    app_out = tmp_path / "app"
+    app_out.mkdir()
+    with board_app(samples, f"board-export-cli-app-{theme}") as app:
+        app.client.call("theme.set", {"id": theme})
+        open_note(app, FLOW)
+        fitted(app)
+        for extension in ("svg", "png"):
+            app.client.call(
+                "board.export", {"format": extension, "path": str(app_out / f"flow.{extension}")},
+            )
+        open_note(app, SWATCHES)
+        placed = fitted(app)
+        nodes = {node["id"]: node for node in board(app, elements=True)["nodes"]}
+        app.client.call("board.export", {"format": "png", "path": str(app_out / "swatches.png")})
+        app.client.call("board.export", {"format": "svg", "path": str(app_out / "swatches.svg")})
+        assert app.client.call("session.get")["document"]["dirty"] is False
+
+    for extension in ("svg", "png"):
+        out = artifacts / f"flow-cli.{extension}"
+        result = wren_export(tmp_path / f"home-{extension}", flow, "-o", out, "--theme", theme)
+        assert result.returncode == 0, result.stderr
+        assert out.read_bytes() == (app_out / f"flow.{extension}").read_bytes(), extension
+
+    x, y, width, height = view_box(app_out / "swatches.svg")
+    shown = read_png((app_out / "swatches.png").read_bytes())
+    for scale in (1, 3):
+        out = artifacts / f"swatches-x{scale}.png"
+        result = wren_export(
+            tmp_path / f"home-x{scale}", swatch, "-o", out, "--theme", theme, "--scale", str(scale),
+        )
+        assert result.returncode == 0, result.stderr
+        image = read_png(out.read_bytes())
+        assert (image.width, image.height) == (math.ceil(width * scale), math.ceil(height * scale))
+        for node in placed["nodes"]:
+            (left, top), (w, h) = nodes[node["id"]]["at"], nodes[node["id"]]["size"]
+            middle = (left + w / 2 - x, top + h / 2 - y)
+            fill = shown.pixel(
+                round(middle[0] * shown.width / width), round(middle[1] * shown.height / height),
+            )
+            assert near(fill, node["fill"], 8), (node["id"], fill, node["fill"])
+            pixel = image.pixel(
+                round(middle[0] * image.width / width), round(middle[1] * image.height / height),
+            )
+            assert near(pixel, fill, 8), (node["id"], scale, pixel, fill)
+    assert (stamp(flow), stamp(swatch)) == before
+
+
+def test_wren_export_of_a_missing_or_broken_board_writes_nothing(
+    samples: Path, tmp_path: Path,
+) -> None:
+    """§6.8 Phase 3 item 6: a missing input and one that does not parse exit
+    non-zero with a message and write nothing."""
+    broken = samples / GROUP / "Broken.wren-board"
+    broken.write_text(conflict_board(), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    missing = wren_export(tmp_path / "home-missing", samples / "Missing.wren-board", "-o", out / "a.svg")
+    assert missing.returncode == 1
+    assert b"Could not read" in missing.stderr, missing.stderr
+    unparsed = wren_export(tmp_path / "home-broken", broken, "-o", out / "b.png")
+    assert unparsed.returncode == 3
+    assert b"is not a board Wren can draw: line 1" in unparsed.stderr, unparsed.stderr
+    beside = wren_export(tmp_path / "home-beside", broken)
+    assert beside.returncode == 3
+    assert list(out.iterdir()) == []
+    assert not (samples / GROUP / "Broken.svg").exists()
