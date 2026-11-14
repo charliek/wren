@@ -698,6 +698,29 @@ Captured on X11 for all eleven themes on tiny-skia and for Wren Light and Wren D
 
 #### The end review
 
+*Fix session.* The queue held two majors and three minors. Deviations:
+
+1. *`SpellEvent` gains `AcceptSelected`* (§3.2): replace the word with the host's selected row, or close a menu with none selected. Enter sends it while the menu is open, so a batch's keys no longer need the widget to know how many rows the host's menu has. `Accept(usize)` stays for a click on a row and for the harness. This replaces `spell-menu` item 19: the widget now also checks the caret's word before it takes the suggest key's opening as a menu (from its own highlighter, or a fresh pass when that has not reached the line), so keys after an opening that finds no word reach the text. One case is left: a key that moves the caret earlier in the same batch, then the suggest key, is checked against the caret as it was before that batch.
+2. *The widget closes the menu for a change of size or look only when the change came while the menu was open* (rule 4.4.8): it records the size and look the open menu is first laid out with and compares against those, before it handles the event. Losing focus is compared with the last event, as before.
+3. *`settings::read_text` refuses anything but a regular file*, opening without blocking and enforcing the 1 MiB limit while reading, so a FIFO at `config.conf` or `words.txt` returns an error instead of hanging the UI thread. That is the whole fix: the word list is still re-read on the UI thread, as §3.4 says.
+
+Budget 4.7.4 is not met and waits for the owner. Measured in release, tiny-skia, X11, with a smoke build in its own target directory, on the spec-ship lens's method: per round, the median of 20 `open_note` calls, each followed by an `app.screenshot` frame, and the median of a screenshot of the unchanged frame. Three or four rounds a row, the variants built from the head with throwaway switches:
+
+| Build | Open, on | Open, off | Frame, on | Frame, off |
+|---|---|---|---|---|
+| Head (one picture a frame) | 62.6 to 67.3 ms | 55.0 to 57.4 ms | 32.4 to 37.4 ms | 25.3 to 29.6 ms |
+| Marks computed, picture not drawn | 55.5 to 55.6 ms | 55.2 to 57.4 ms | 28.7 to 28.8 ms | 25.3 to 29.4 ms |
+| Proofreader withheld from drawing | 55.2 to 57.0 ms | 55.9 to 56.1 ms | 28.8 to 30.2 ms | 29.0 to 29.3 ms |
+| One picture per row | 70.3 to 70.8 ms | 55.8 to 56.4 ms | 28.8 to 29.2 ms | 28.7 to 29.6 ms |
+
+Each cell is the range of the rounds' medians; each row's two settings ran in the same run. By run medians, the head opens 14 to 19 % slower with the setting on, and one picture per row 26 % slower.
+
+Computing the marks costs 32 µs a frame (median; at most 85 µs). The whole cost is drawing the zigzag picture: tiny-skia blits a picture's whole extent on every frame it repaints, and the acceptance note's single picture spans every marked row, about 4 to 6 ms a full frame. Splitting it into one picture per row removed the frame cost but made opening worse, because a note switch makes every picture new and each new one costs about 1.5 ms (some 15 ms over the note's nine marked rows), in iced's tiny-skia SVG path or the repaints it causes; the two were not told apart. The picture's raster is already kept between frames (`spell-wire` item 29). An unchanged frame damages nothing on screen, so the frame cost lands only on frames that repaint the marked rows: a note switch, a scroll, or a change to the marks. The head keeps one picture a frame. Cutting the cost further means a different drawing path (§8, "a smooth wave"), or the owner accepting about 8 ms an open on the software renderer.
+
+- Fixed: the major on keys in one batch after the suggest key (text-safety lens) in `938e869`, with `widget::tests::keys_after_an_opening_that_finds_no_word_go_to_the_text` and `enter_after_an_opening_in_one_batch_accepts_the_row_the_host_selected`; with real X11 input, Alt+. then Return or Down on a correctly spelled word lost 0 of 12 presses, and Alt+. Down Down Down Return on `dosen’t` accepted `don’t` 8 of 8 times. The minor on a FIFO hanging `read_text` (Codex) in `5e6a018`, with `settings::tests::a_fifo_or_a_directory_is_an_error_at_once`. The minor on the menu closed after a theme or text size change (spec-ship lens) in `bb4f4a9`, with `widget::tests::a_change_made_before_the_menu_opened_does_not_close_it` and `test_spell.py::test_a_menu_opened_just_after_a_theme_or_text_size_change_stays_open` (`cff1c6e`), which failed 6 runs of 6 on Wayland with the earlier widget. The flaky minor in `test_spell.py` (carried from `spell-wire`) in `83e4822`.
+- Not fixed: budget 4.7.4 (major, spec-ship lens), measured above; it needs an owner decision.
+- Gates after the fixes: `make check`; the X11 tiny-skia suite with `WRENTEST_SPELL=off` and with `on`, 252 passed and 1 skipped each; `test_spell.py` 11 passed on X11 and 8 passed, 3 deselected on Wayland, three runs; the macOS-target clippy.
+
 #### The join
 
 ## 8. After this, and risks
