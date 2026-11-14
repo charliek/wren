@@ -31,7 +31,7 @@
 //! `Content` hides its renderer editor, and the line geometry lives in that
 //! editor's cosmic-text buffer, so this module owns its own `Content`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::{DerefMut, Range};
 use std::sync::Arc;
 
@@ -55,8 +55,8 @@ use iced::{
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
-use crate::keys::{KeyPolicy, OpenMenu, Routed};
-use crate::proof::{self, MenuOverlay, Proofreader, SpellEvent, SpellMenu};
+use crate::keys::{KeyPolicy, Routed};
+use crate::proof::{self, publish, MenuOverlay, OpenMenu, Proofreader, SpellEvent, SpellMenu};
 #[cfg(any(test, feature = "test-support"))]
 use crate::proof::{DrawnMark, SpellFrame};
 use crate::{Message, Style};
@@ -370,6 +370,9 @@ pub struct TextEditor<'a> {
     proofreader: Option<&'a dyn Proofreader>,
     /// The open suggestions menu.
     spell_menu: Option<&'a SpellMenu>,
+    /// The open menu as the events this widget has handled leave it; see
+    /// [`OpenMenu`]. The host builds a new widget once it has applied them.
+    menu_now: Cell<Option<OpenMenu>>,
     /// Where the last frame's marks are recorded for the host's tests.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: Option<&'a RefCell<SpellFrame>>,
@@ -398,6 +401,7 @@ impl<'a> TextEditor<'a> {
             key_policy: None,
             proofreader: None,
             spell_menu: None,
+            menu_now: Cell::new(None),
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: None,
             last_status: None,
@@ -428,6 +432,7 @@ impl<'a> TextEditor<'a> {
     /// it.
     pub fn spell_menu(mut self, menu: Option<&'a SpellMenu>) -> Self {
         self.spell_menu = menu;
+        self.menu_now.set(menu.map(OpenMenu::of));
         self
     }
 
@@ -547,15 +552,18 @@ impl<'a> TextEditor<'a> {
         shell: &mut Shell<'_, Message>,
     ) {
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)));
-        let menu = self.spell_menu.map(|menu| OpenMenu {
-            selected: menu.selected(),
-        });
-        // Whether the open menu closes (rule 4.4.8), and whether it has
-        // been told to already.
+        let menu = self.menu_now.get();
+        // Whether the open menu closes (rule 4.4.8).
         let mut closing = false;
-        let mut closed = false;
 
         match event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) => {
+                // The host closes the menu on Escape, so it is not told.
+                self.menu_now.set(None);
+            }
             Event::Window(window::Event::Unfocused) => {
                 if let Some(focus) = &mut state.focus {
                     focus.is_window_focused = false;
@@ -610,7 +618,7 @@ impl<'a> TextEditor<'a> {
                     state.focus = Some(Focus::now());
                     state.last_click = Some(click);
                     state.drag_click = Some(click.kind());
-                    shell.publish(Message::Action(action));
+                    publish(shell, &self.menu_now, Message::Action(action));
                     shell.capture_event();
                 }
                 Update::RightClick(position) => {
@@ -619,19 +627,26 @@ impl<'a> TextEditor<'a> {
                     if self.misspelling_under(state, position).is_some() {
                         state.focus = Some(Focus::now());
                         state.drag_click = None;
-                        shell.publish(Message::Spell(SpellEvent::OpenAt(position)));
+                        publish(
+                            shell,
+                            &self.menu_now,
+                            Message::Spell(SpellEvent::OpenAt(position)),
+                        );
                         shell.capture_event();
                     }
                 }
                 Update::Dismiss => {
                     // A press in the editor closes the menu and does
                     // nothing more, so the caret stays (rule 4.4.5).
-                    shell.publish(Message::Spell(SpellEvent::Close));
+                    publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
                     shell.capture_event();
-                    closed = true;
                 }
                 Update::Drag(position) => {
-                    shell.publish(Message::Action(Action::Drag(position)));
+                    publish(
+                        shell,
+                        &self.menu_now,
+                        Message::Action(Action::Drag(position)),
+                    );
                 }
                 Update::Release => {
                     state.drag_click = None;
@@ -643,9 +658,13 @@ impl<'a> TextEditor<'a> {
                     }
                     let lines = lines + state.partial_scroll;
                     state.partial_scroll = lines.fract();
-                    shell.publish(Message::Action(Action::Scroll {
-                        lines: lines as i32,
-                    }));
+                    publish(
+                        shell,
+                        &self.menu_now,
+                        Message::Action(Action::Scroll {
+                            lines: lines as i32,
+                        }),
+                    );
                     shell.capture_event();
                 }
                 Update::InputMethod(update) => match update {
@@ -668,7 +687,11 @@ impl<'a> TextEditor<'a> {
                         shell.request_redraw();
                     }
                     Ime::Commit(text) => {
-                        shell.publish(Message::Action(Action::Edit(Edit::Paste(Arc::new(text)))));
+                        publish(
+                            shell,
+                            &self.menu_now,
+                            Message::Action(Action::Edit(Edit::Paste(Arc::new(text)))),
+                        );
                     }
                 },
                 Update::Key(routed) => {
@@ -677,8 +700,7 @@ impl<'a> TextEditor<'a> {
                         Routed::Close(binding) => {
                             // Before the key's own message, which then acts
                             // as if the menu had not been open.
-                            shell.publish(Message::Spell(SpellEvent::Close));
-                            closed = true;
+                            publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
                             binding
                         }
                     };
@@ -686,7 +708,14 @@ impl<'a> TextEditor<'a> {
                         if !matches!(binding, Binding::Unfocus) {
                             shell.capture_event();
                         }
-                        apply_binding(binding, self.content, state, clipboard, shell);
+                        apply_binding(
+                            binding,
+                            self.content,
+                            state,
+                            clipboard,
+                            shell,
+                            &self.menu_now,
+                        );
                         if let Some(focus) = &mut state.focus {
                             focus.updated_at = Instant::now();
                         }
@@ -706,8 +735,8 @@ impl<'a> TextEditor<'a> {
                 || before.look != seen.look;
         }
         state.seen = Some(seen);
-        if menu.is_some() && closing && !closed {
-            shell.publish(Message::Spell(SpellEvent::Close));
+        if closing && self.menu_now.get().is_some() {
+            publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
         }
 
         let status = {
@@ -752,7 +781,7 @@ impl<'a> TextEditor<'a> {
         state: &'b mut State,
         bounds: Rectangle,
     ) -> Option<MenuOverlay<'b>> {
-        let menu = self.spell_menu?;
+        let menu = self.spell_menu.filter(|_| self.menu_now.get().is_some())?;
         let text_bounds = bounds.shrink(self.padding(bounds.width, state.advance.width));
         let (left, top, bottom) = word_row(&self.content.0.borrow(), menu)?;
         let style = self.style.menu;
@@ -787,6 +816,7 @@ impl<'a> TextEditor<'a> {
             ),
             editor: bounds,
             style,
+            now: &self.menu_now,
             #[cfg(any(test, feature = "test-support"))]
             frame: self.spell_frame,
         })
@@ -1373,8 +1403,9 @@ fn apply_binding(
     state: &mut State,
     clipboard: &mut dyn Clipboard,
     shell: &mut Shell<'_, Message>,
+    menu: &Cell<Option<OpenMenu>>,
 ) {
-    let mut publish = |action| shell.publish(Message::Action(action));
+    let mut act = |action| publish(shell, menu, Message::Action(action));
 
     match binding {
         Binding::Unfocus => {
@@ -1389,29 +1420,29 @@ fn apply_binding(
         Binding::Cut => {
             if let Some(selection) = content.selection() {
                 clipboard.write(clipboard::Kind::Standard, selection);
-                publish(Action::Edit(Edit::Delete));
+                act(Action::Edit(Edit::Delete));
             }
         }
         Binding::Paste => {
             if let Some(contents) = clipboard.read(clipboard::Kind::Standard) {
-                publish(Action::Edit(Edit::Paste(Arc::new(contents))));
+                act(Action::Edit(Edit::Paste(Arc::new(contents))));
             }
         }
-        Binding::Move(motion) => publish(Action::Move(motion)),
-        Binding::Select(motion) => publish(Action::Select(motion)),
-        Binding::SelectWord => publish(Action::SelectWord),
-        Binding::SelectLine => publish(Action::SelectLine),
-        Binding::SelectAll => publish(Action::SelectAll),
-        Binding::Insert(c) => publish(Action::Edit(Edit::Insert(c))),
-        Binding::Enter => publish(Action::Edit(Edit::Enter)),
-        Binding::Backspace => publish(Action::Edit(Edit::Backspace)),
-        Binding::Delete => publish(Action::Edit(Edit::Delete)),
+        Binding::Move(motion) => act(Action::Move(motion)),
+        Binding::Select(motion) => act(Action::Select(motion)),
+        Binding::SelectWord => act(Action::SelectWord),
+        Binding::SelectLine => act(Action::SelectLine),
+        Binding::SelectAll => act(Action::SelectAll),
+        Binding::Insert(c) => act(Action::Edit(Edit::Insert(c))),
+        Binding::Enter => act(Action::Edit(Edit::Enter)),
+        Binding::Backspace => act(Action::Edit(Edit::Backspace)),
+        Binding::Delete => act(Action::Edit(Edit::Delete)),
         Binding::Sequence(sequence) => {
             for binding in sequence {
-                apply_binding(binding, content, state, clipboard, shell);
+                apply_binding(binding, content, state, clipboard, shell, menu);
             }
         }
-        Binding::Custom(message) => shell.publish(message),
+        Binding::Custom(message) => publish(shell, menu, message),
     }
 }
 
@@ -3054,18 +3085,17 @@ mod tests {
         let proofreader = rejects();
         let content = Content::new(BackendKind::Owned, "cat teh");
         let menu = the_menu();
+        // Each key in a frame of its own, with the menu as the host left it.
         let (mut editor, mut state) = focused(&content, &proofreader, &menu);
         let (messages, captured) = send(&mut editor, &mut state, named(Named::ArrowDown), None);
         assert_eq!(spell_events(&messages), [SpellEvent::Move(1)]);
         assert!(captured);
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
         let (messages, captured) = send(&mut editor, &mut state, named(Named::Enter), None);
         assert_eq!(spell_events(&messages), [SpellEvent::Accept(0)]);
         assert!(captured);
-        // Escape: no message, not captured, and the editor keeps focus.
-        let (messages, captured) = send(&mut editor, &mut state, named(Named::Escape), None);
-        assert!(messages.is_empty() && !captured, "{messages:?}");
-        assert!(state.focus.is_some());
-        // A lone Shift: nothing.
+        // A lone Shift: nothing, and the menu stays open.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
         let shift = key(
             keyboard::Key::Named(Named::Shift),
             keyboard::Modifiers::SHIFT,
@@ -3073,6 +3103,11 @@ mod tests {
         );
         let (messages, captured) = send(&mut editor, &mut state, shift, None);
         assert!(messages.is_empty() && !captured);
+        assert!(editor.menu_now.get().is_some());
+        // Escape: no message, not captured, and the editor keeps focus.
+        let (messages, captured) = send(&mut editor, &mut state, named(Named::Escape), None);
+        assert!(messages.is_empty() && !captured, "{messages:?}");
+        assert!(state.focus.is_some());
     }
 
     #[test]
@@ -3100,6 +3135,7 @@ mod tests {
         assert!(captured);
         // A key the editor leaves alone: closed, and not captured, so the
         // host still sees it.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
         let f5 = named(keyboard::key::Named::F5);
         let (messages, captured) = send(&mut editor, &mut state, f5, None);
         assert_eq!(spell_events(&messages), [SpellEvent::Close]);
@@ -3338,5 +3374,198 @@ mod tests {
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(600.0, 300.0));
         assert!(placed(&text, bounds, 0, 6..9, &["the"], 20).is_none());
         assert!(placed(&text, bounds, 0, 6..9, &["the"], 0).is_some());
+    }
+
+    // iced hands every event queued since the last frame to the same widget,
+    // overlay first, before the host applies any message, so each test
+    // below sends its events to one widget.
+
+    fn three() -> SpellMenu {
+        SpellMenu::new(
+            0,
+            4..7,
+            "teh".into(),
+            vec!["the".into(), "ten".into(), "tea".into()],
+        )
+    }
+
+    fn typed(text: &str) -> Event {
+        key(
+            keyboard::Key::Character(text.into()),
+            keyboard::Modifiers::empty(),
+            Some(text),
+        )
+    }
+
+    #[test]
+    fn keys_in_one_batch_see_the_menu_as_the_earlier_keys_left_it() {
+        use keyboard::key::Named;
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let menu = three();
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        for (event, expected) in [
+            (named(Named::ArrowDown), SpellEvent::Move(1)),
+            (named(Named::ArrowDown), SpellEvent::Move(1)),
+            // Stopped at the end, as the host's menu stops.
+            (named(Named::ArrowDown), SpellEvent::Move(1)),
+            (named(Named::ArrowUp), SpellEvent::Move(-1)),
+            (named(Named::Enter), SpellEvent::Accept(1)),
+        ] {
+            let (messages, _) = send(&mut editor, &mut state, event, None);
+            assert_eq!(spell_events(&messages), [expected]);
+        }
+        // Accepting closed the menu: the next Enter is the text's again.
+        let (messages, _) = send(&mut editor, &mut state, named(Named::Enter), None);
+        assert!(
+            matches!(messages.as_slice(), [Message::Intent(crate::Intent::Enter)]),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_that_closed_the_menu_leaves_the_next_key_to_the_text() {
+        use keyboard::key::Named;
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let menu = three();
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let (messages, _) = send(&mut editor, &mut state, typed("x"), None);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Spell(SpellEvent::Close),
+                    Message::Action(Action::Edit(Edit::Insert('x')))
+                ]
+            ),
+            "{messages:?}"
+        );
+        for (event, arrow) in [
+            (
+                named(Named::ArrowDown),
+                iced::widget::text_editor::Motion::Down,
+            ),
+            (named(Named::ArrowUp), iced::widget::text_editor::Motion::Up),
+        ] {
+            let (messages, _) = send(&mut editor, &mut state, event, None);
+            assert!(
+                matches!(messages.as_slice(), [Message::Action(Action::Move(motion))] if *motion == arrow),
+                "{messages:?}"
+            );
+        }
+        let (messages, _) = send(&mut editor, &mut state, named(Named::Enter), None);
+        assert!(
+            matches!(messages.as_slice(), [Message::Intent(crate::Intent::Enter)]),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn after_escape_the_next_key_is_the_texts_as_the_host_closes_the_menu() {
+        use keyboard::key::Named;
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let menu = three();
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let (messages, captured) = send(&mut editor, &mut state, named(Named::Escape), None);
+        assert!(messages.is_empty() && !captured, "{messages:?}");
+        assert!(state.focus.is_some());
+        let (messages, _) = send(&mut editor, &mut state, named(Named::Enter), None);
+        assert!(
+            matches!(messages.as_slice(), [Message::Intent(crate::Intent::Enter)]),
+            "{messages:?}"
+        );
+        // Nor is the menu drawn or handed the pointer any longer.
+        assert!(editor.menu_overlay(&mut state, BOUNDS).is_none());
+    }
+
+    /// The middle of row `row` of the menu `editor` draws.
+    fn menu_row(editor: &TextEditor<'_>, state: &mut State, row: usize) -> Point {
+        let bounds = editor.menu_overlay(state, BOUNDS).unwrap().bounds;
+        Point::new(bounds.center_x(), bounds.y + 4.0 + 30.0 * row as f32 + 15.0)
+    }
+
+    /// What `overlay` publishes for `event` with the pointer at `pointer`.
+    fn to_menu(overlay: &MenuOverlay<'_>, event: Event, pointer: Point) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        overlay.on_event(&event, mouse::Cursor::Available(pointer), &mut shell);
+        messages
+    }
+
+    #[test]
+    fn a_key_after_the_pointer_in_one_batch_sees_what_the_pointer_did() {
+        use keyboard::key::Named;
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let menu = three();
+
+        // Hovering the third row, then Enter, accepts the third row.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let point = menu_row(&editor, &mut state, 2);
+        {
+            let overlay = editor.menu_overlay(&mut state, BOUNDS).unwrap();
+            let messages = to_menu(&overlay, moved_to(point), point);
+            assert_eq!(spell_events(&messages), [SpellEvent::Hover(2)]);
+            // Over the row it now selects, nothing new.
+            assert!(to_menu(&overlay, moved_to(point), point).is_empty());
+        }
+        let (messages, _) = send(&mut editor, &mut state, named(Named::Enter), None);
+        assert_eq!(spell_events(&messages), [SpellEvent::Accept(2)]);
+
+        // A click that accepted leaves the next key to the text, and the
+        // overlay, built once for the batch, takes no more of the pointer.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let (first, third) = (
+            menu_row(&editor, &mut state, 1),
+            menu_row(&editor, &mut state, 2),
+        );
+        {
+            let overlay = editor.menu_overlay(&mut state, BOUNDS).unwrap();
+            let messages = to_menu(&overlay, press(mouse::Button::Left), first);
+            assert_eq!(spell_events(&messages), [SpellEvent::Accept(1)]);
+            assert!(to_menu(&overlay, moved_to(third), third).is_empty());
+            assert!(to_menu(&overlay, press(mouse::Button::Left), third).is_empty());
+        }
+        let (messages, _) = send(&mut editor, &mut state, named(Named::ArrowDown), None);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::Action(Action::Move(
+                    iced::widget::text_editor::Motion::Down
+                ))]
+            ),
+            "{messages:?}"
+        );
+        // Nor is it drawn again.
+        assert!(editor.menu_overlay(&mut state, BOUNDS).is_none());
+    }
+
+    #[test]
+    fn keys_after_an_opening_in_one_batch_go_to_the_menu_it_opens() {
+        use keyboard::key::Named;
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let mut editor = spelling(&content, &proofreader, None);
+        let mut state = laid_out_state(&editor);
+        let (messages, _) = send(
+            &mut editor,
+            &mut state,
+            press(mouse::Button::Right),
+            Some(over(5.0, 0.0)),
+        );
+        assert!(matches!(
+            spell_events(&messages).as_slice(),
+            [SpellEvent::OpenAt(_)]
+        ));
+        // The host opens it with the first row selected.
+        for (event, expected) in [
+            (named(Named::ArrowDown), SpellEvent::Move(1)),
+            (named(Named::Enter), SpellEvent::Accept(1)),
+        ] {
+            let (messages, _) = send(&mut editor, &mut state, event, None);
+            assert_eq!(spell_events(&messages), [expected]);
+        }
     }
 }

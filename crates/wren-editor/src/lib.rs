@@ -953,9 +953,7 @@ impl EditorView {
             composing: false,
             policy: self.key_policy.as_ref(),
         };
-        let menu = self.menu.as_ref().map(|menu| keys::OpenMenu {
-            selected: menu.selected(),
-        });
+        let menu = self.menu.as_ref().map(proof::OpenMenu::of);
         let selection = self
             .content
             .selection()

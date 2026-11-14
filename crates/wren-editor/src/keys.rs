@@ -6,6 +6,7 @@ use iced::keyboard::key::{self, Named};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text_editor::{self, Binding, KeyPress, Motion};
 
+use crate::proof::OpenMenu;
 use crate::{Intent, Message, SpellEvent};
 
 /// Where the host sends a key press that reaches the focused editor.
@@ -37,13 +38,6 @@ pub(crate) struct Context<'a> {
     /// An input method has preedit text, so the keys that edit it are its own.
     pub composing: bool,
     pub policy: Option<&'a KeyPolicy>,
-}
-
-/// The open suggestions menu, as key routing sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OpenMenu {
-    /// The selected row; `None` when the menu has nothing to offer.
-    pub selected: Option<usize>,
 }
 
 /// Where a key press goes.
@@ -602,7 +596,7 @@ mod tests {
                 status: text_editor::Status::Focused { is_hovered: false },
             },
             context,
-            Some(OpenMenu { selected }),
+            Some(OpenMenu { selected, items: 3 }),
         )
     }
 
@@ -772,7 +766,10 @@ mod tests {
                 status: text_editor::Status::Active,
             },
             ASSIST,
-            Some(OpenMenu { selected: Some(0) }),
+            Some(OpenMenu {
+                selected: Some(0),
+                items: 3,
+            }),
         );
         assert!(routed.is_none());
     }

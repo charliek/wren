@@ -1,6 +1,7 @@
 //! The suggestions menu as drawn: its size and place under the word (rule
 //! 4.4.3), and the overlay that draws it and takes the pointer (rule 4.4.5).
 
+use std::cell::Cell;
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::RefCell;
 
@@ -13,7 +14,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[cfg(any(test, feature = "test-support"))]
 use super::SpellFrame;
-use super::{SpellEvent, SpellMenu};
+use super::{publish, OpenMenu, SpellEvent, SpellMenu};
 use crate::{MenuStyle, Message};
 
 /// The space between the word's row and the menu.
@@ -177,6 +178,8 @@ pub(crate) struct MenuOverlay<'a> {
     /// Where the editor is, in window coordinates.
     pub editor: Rectangle,
     pub style: MenuStyle,
+    /// The menu as the editor's events have left it; see [`OpenMenu`].
+    pub now: &'a Cell<Option<OpenMenu>>,
     /// Where the menu's bounds are recorded for the host's tests.
     #[cfg(any(test, feature = "test-support"))]
     pub frame: Option<&'a RefCell<SpellFrame>>,
@@ -188,17 +191,21 @@ impl MenuOverlay<'_> {
         row_at(self.bounds, self.menu.items().len(), point)
     }
 
-    /// Handle `event` with the pointer at `cursor` (rule 4.4.5). Keys are
-    /// the editor widget's.
+    /// Handle `event` with the pointer at `cursor` (rule 4.4.5), unless an
+    /// earlier event has closed the menu. Keys are the editor widget's.
     pub fn on_event(&self, event: &Event, cursor: mouse::Cursor, shell: &mut Shell<'_, Message>) {
+        let Some(open) = self.now.get() else {
+            return;
+        };
+        let mut tell = |event| publish(shell, self.now, Message::Spell(event));
         match event {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let Some(point) = cursor.position() else {
                     return;
                 };
                 if let Some(row) = self.active_row_at(point) {
-                    if self.menu.selected() != Some(row) {
-                        shell.publish(Message::Spell(SpellEvent::Hover(row)));
+                    if open.selected != Some(row) {
+                        tell(SpellEvent::Hover(row));
                     }
                 }
                 if self.bounds.contains(point) {
@@ -209,21 +216,21 @@ impl MenuOverlay<'_> {
                 Some(point) if self.bounds.contains(point) => {
                     if *button == mouse::Button::Left {
                         if let Some(row) = self.active_row_at(point) {
-                            shell.publish(Message::Spell(SpellEvent::Accept(row)));
+                            tell(SpellEvent::Accept(row));
                         } else if self.menu.items().is_empty()
                             && row_at(self.bounds, 1, point).is_some()
                         {
-                            shell.publish(Message::Spell(SpellEvent::Close));
+                            tell(SpellEvent::Close);
                         }
                     }
                     shell.capture_event();
                 }
                 Some(point) if self.editor.contains(point) => {
-                    shell.publish(Message::Spell(SpellEvent::Close));
+                    tell(SpellEvent::Close);
                     shell.capture_event();
                 }
                 // Outside the editor the press goes on to do what it does.
-                _ => shell.publish(Message::Spell(SpellEvent::Close)),
+                _ => tell(SpellEvent::Close),
             },
             _ => {}
         }
@@ -231,9 +238,10 @@ impl MenuOverlay<'_> {
 
     /// What the pointer over `point` shows: a hand over a suggestion, and
     /// over the rest of the menu anything but nothing, so the editor under
-    /// it does not show its own.
+    /// it does not show its own. A menu an earlier event closed shows
+    /// nothing.
     fn interaction(&self, point: Option<Point>) -> mouse::Interaction {
-        match point {
+        match point.filter(|_| self.now.get().is_some()) {
             Some(point) if self.active_row_at(point).is_some() => mouse::Interaction::Pointer,
             Some(point) if self.bounds.contains(point) => mouse::Interaction::Idle,
             _ => mouse::Interaction::None,
@@ -267,7 +275,7 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
             },
             style.background,
         );
-        if let Some(selected) = self.menu.selected() {
+        if let Some(selected) = self.now.get().and_then(|open| open.selected) {
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: row_bounds(self.bounds, selected),
@@ -483,8 +491,13 @@ mod tests {
         }
     }
 
-    /// `menu` drawn 200 px wide at (300, 128) in [`EDITOR`].
-    fn overlay<'a>(menu: &'a SpellMenu, labels: &'a [String]) -> MenuOverlay<'a> {
+    /// `menu` drawn 200 px wide at (300, 128) in [`EDITOR`], with `now` as
+    /// the editor's copy of it.
+    fn overlay<'a>(
+        menu: &'a SpellMenu,
+        labels: &'a [String],
+        now: &'a Cell<Option<OpenMenu>>,
+    ) -> MenuOverlay<'a> {
         MenuOverlay {
             menu,
             labels,
@@ -494,6 +507,7 @@ mod tests {
             ),
             editor: EDITOR,
             style: fixtures::STYLE.menu,
+            now,
             frame: None,
         }
     }
@@ -502,9 +516,10 @@ mod tests {
     /// `point`, and whether it captured it.
     fn send(menu: &SpellMenu, event: Event, point: Point) -> (Vec<Message>, bool) {
         let labels = labels_of(menu);
+        let now = Cell::new(Some(OpenMenu::of(menu)));
         let mut messages = Vec::new();
         let mut shell = Shell::new(&mut messages);
-        overlay(menu, &labels).on_event(&event, mouse::Cursor::Available(point), &mut shell);
+        overlay(menu, &labels, &now).on_event(&event, mouse::Cursor::Available(point), &mut shell);
         let captured = shell.event_status() == iced::event::Status::Captured;
         (messages, captured)
     }
@@ -603,7 +618,8 @@ mod tests {
     fn the_pointer_shows_a_hand_only_over_a_suggestion() {
         let three = menu(&["the", "ten", "tea"], 0);
         let labels = labels_of(&three);
-        let overlay = overlay(&three, &labels);
+        let now = Cell::new(Some(OpenMenu::of(&three)));
+        let overlay = overlay(&three, &labels, &now);
         assert_eq!(
             overlay.interaction(Some(on_row(1))),
             mouse::Interaction::Pointer
@@ -617,6 +633,11 @@ mod tests {
             mouse::Interaction::None
         );
         assert_eq!(overlay.interaction(None), mouse::Interaction::None);
+        now.set(None);
+        assert_eq!(
+            overlay.interaction(Some(on_row(1))),
+            mouse::Interaction::None
+        );
     }
 
     #[test]

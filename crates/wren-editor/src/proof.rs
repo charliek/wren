@@ -68,21 +68,12 @@ impl SpellMenu {
 
     /// Move the selection `delta` rows, stopping at the ends.
     pub(crate) fn step(&mut self, delta: i32) {
-        let Some(selected) = self.selected else {
-            return;
-        };
-        let last = self.items.len().saturating_sub(1);
-        let moved = i64::try_from(selected)
-            .unwrap_or(i64::MAX)
-            .saturating_add(i64::from(delta));
-        self.selected = Some(usize::try_from(moved.max(0)).map_or(last, |row| row.min(last)));
+        self.selected = stepped(self.selected, self.items.len(), delta);
     }
 
     /// Select `row`, if it holds a suggestion.
     pub(crate) fn hover(&mut self, row: usize) {
-        if row < self.items.len() {
-            self.selected = Some(row);
-        }
+        self.selected = hovered(self.selected, self.items.len(), row);
     }
 
     /// The line that holds the word.
@@ -109,6 +100,88 @@ impl SpellMenu {
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
+}
+
+/// `selected` moved `delta` rows among `items`, stopping at the ends; a menu
+/// with nothing selected stays so.
+fn stepped(selected: Option<usize>, items: usize, delta: i32) -> Option<usize> {
+    let selected = selected?;
+    let last = items.saturating_sub(1);
+    let moved = i64::try_from(selected)
+        .unwrap_or(i64::MAX)
+        .saturating_add(i64::from(delta));
+    Some(usize::try_from(moved.max(0)).map_or(last, |row| row.min(last)))
+}
+
+/// The selection once the pointer is over `row`: that row, if it is one of
+/// `items`.
+fn hovered(selected: Option<usize>, items: usize, row: usize) -> Option<usize> {
+    if row < items {
+        Some(row)
+    } else {
+        selected
+    }
+}
+
+/// The open suggestions menu as the editor widget sees it while it handles
+/// a batch of events.
+///
+/// iced hands every event queued since the last frame to the same widget,
+/// the menu's overlay first, before the host applies any message the widget
+/// published. So the widget keeps its own copy, starting from the menu the
+/// host handed it and changed by each message it publishes as the host will
+/// change its menu, and routes keys and presses against that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OpenMenu {
+    /// The selected row; `None` when the menu has nothing to offer.
+    pub selected: Option<usize>,
+    /// How many suggestions it has.
+    pub items: usize,
+}
+
+impl OpenMenu {
+    pub(crate) fn of(menu: &SpellMenu) -> Self {
+        Self {
+            selected: menu.selected(),
+            items: menu.items().len(),
+        }
+    }
+
+    /// The menu `message` leaves `menu` as, once the host applies it. An
+    /// opening is taken as the menu it opens when it finds a word, with as
+    /// many suggestions as there may be and the first selected: the host
+    /// clamps a move past its last row, and accepting a row past it, or the
+    /// inactive row, closes it. Every message but a move, a hover or an
+    /// opening closes the menu: the host closes it on any action, intent,
+    /// undo or redo (rule 4.4.8).
+    pub(crate) fn after(menu: Option<Self>, message: &crate::Message) -> Option<Self> {
+        match message {
+            crate::Message::Spell(SpellEvent::OpenAtCaret | SpellEvent::OpenAt(_)) => Some(Self {
+                selected: Some(0),
+                items: SUGGESTIONS,
+            }),
+            crate::Message::Spell(SpellEvent::Move(delta)) => menu.map(|menu| Self {
+                selected: stepped(menu.selected, menu.items, *delta),
+                ..menu
+            }),
+            crate::Message::Spell(SpellEvent::Hover(row)) => menu.map(|menu| Self {
+                selected: hovered(menu.selected, menu.items, *row),
+                ..menu
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Publish `message`, keeping `menu`, the widget's copy, as the host will
+/// leave its own once it applies it.
+pub(crate) fn publish(
+    shell: &mut iced::advanced::Shell<'_, crate::Message>,
+    menu: &std::cell::Cell<Option<OpenMenu>>,
+    message: crate::Message,
+) {
+    menu.set(OpenMenu::after(menu.get(), &message));
+    shell.publish(message);
 }
 
 /// The marks and the menu as the last frame drew them, for the host's
@@ -301,6 +374,46 @@ mod tests {
             ["doesn't", "doesn’t"]
         );
         assert_eq!(offered("teh", given(&["t'he"])), ["t'he"]);
+    }
+
+    #[test]
+    fn the_widgets_copy_follows_each_message_as_the_hosts_menu_will() {
+        use crate::Message;
+        let open = |selected| Some(OpenMenu { selected, items: 3 });
+        let spell = |event| Message::Spell(event);
+        let after = |menu, event| OpenMenu::after(menu, &spell(event));
+        assert_eq!(after(open(Some(0)), SpellEvent::Move(1)), open(Some(1)));
+        assert_eq!(after(open(Some(2)), SpellEvent::Move(1)), open(Some(2)));
+        assert_eq!(after(open(Some(0)), SpellEvent::Move(-1)), open(Some(0)));
+        assert_eq!(after(open(None), SpellEvent::Move(1)), open(None));
+        assert_eq!(after(open(Some(0)), SpellEvent::Hover(2)), open(Some(2)));
+        assert_eq!(after(open(Some(0)), SpellEvent::Hover(3)), open(Some(0)));
+        assert_eq!(after(None, SpellEvent::Move(1)), None);
+        assert_eq!(after(open(Some(1)), SpellEvent::Accept(1)), None);
+        assert_eq!(after(open(Some(1)), SpellEvent::Close), None);
+        let opening = Some(OpenMenu {
+            selected: Some(0),
+            items: SUGGESTIONS,
+        });
+        assert_eq!(after(None, SpellEvent::OpenAtCaret), opening);
+        assert_eq!(
+            after(open(Some(2)), SpellEvent::OpenAt(Point::ORIGIN)),
+            opening
+        );
+        // Every other message closes it, as the host closes its menu.
+        for message in [
+            Message::Undo,
+            Message::Redo,
+            Message::Find,
+            Message::Intent(crate::Intent::Enter),
+            Message::Action(iced::widget::text_editor::Action::SelectAll),
+        ] {
+            assert_eq!(
+                OpenMenu::after(open(Some(0)), &message),
+                None,
+                "{message:?}"
+            );
+        }
     }
 
     #[test]
