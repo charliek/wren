@@ -1,9 +1,9 @@
 //! Finding things on a board (discovery/boards.md §5.18): the jump
 //! palette, [`Mode::BoardNodes`], which lists the board's labelled
 //! elements, shows the highlighted one and puts the view back when it
-//! closes without a choice, as the outline palette does for headings.
-//! None of it changes the board: the selection and the viewport are never
-//! written to the file.
+//! closes without a choice, as the outline palette does for headings; and
+//! the element a workspace search hit lands on. None of it changes the
+//! board: the selection and the viewport are never written to the file.
 
 use std::collections::BTreeSet;
 
@@ -102,6 +102,20 @@ pub(super) fn labelled(board: &Board, scene: &Scene) -> Vec<Labelled> {
             .then_with(|| rank(first).cmp(&rank(second)))
     });
     placed.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// The first element of `entries`, in their order, whose label contains
+/// `query`, ignoring case as search does: what a search hit on a board
+/// lands on (§5.18 rule 4). An empty query finds nothing.
+pub(super) fn first_containing<'a>(entries: &'a [Labelled], query: &str) -> Option<&'a Labelled> {
+    let lower = |text: &str| -> String { text.chars().flat_map(char::to_lowercase).collect() };
+    let query = lower(query.trim());
+    if query.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .find(|entry| lower(&entry.label).contains(&query))
 }
 
 /// Where the board was when the jump palette opened, so leaving it any
@@ -306,6 +320,20 @@ impl App {
         }
         Task::none()
     }
+
+    /// A search hit on the open board: select and centre the first
+    /// element whose label contains `query` (§5.18 rule 4). The hit was
+    /// found in the board's labels, so a query only its TOML holds finds
+    /// nothing here and the board stays as it opened.
+    pub(super) fn reveal_on_board(&mut self, query: &str) {
+        let Some(view) = &mut self.board else {
+            return;
+        };
+        let entries = labelled(view.board(), view.scene());
+        if let Some(entry) = first_containing(&entries, query) {
+            view.show_element(entry.element.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -323,7 +351,7 @@ mod tests {
     use super::super::board::Surface;
     use super::super::columns::Column;
     use super::super::commands::{Command, CommandId, Disposition};
-    use super::super::palette::{Key, Mode};
+    use super::super::palette::{Key, Mode, SearchTarget};
     use super::super::preferences::shortcut;
     use super::super::{App, Message};
     use super::*;
@@ -510,6 +538,15 @@ to = { node = "bare" }
                 row(node("future"), "From the future", "frame"),
             ]
         );
+        let entries = labelled(view.board(), view.scene());
+        let found = |query: &str| first_containing(&entries, query).map(|entry| &entry.element);
+        assert_eq!(found("TOP"), Some(&node("left")));
+        assert_eq!(found("  right "), Some(&node("top")));
+        assert_eq!(found("twice"), Some(&edge("go")));
+        assert_eq!(found("line"), Some(&node("left")));
+        for nothing in ["", "   ", "diamond", "kind", "quiet", "schema"] {
+            assert_eq!(found(nothing), None, "{nothing:?}");
+        }
     }
 
     #[test]
@@ -713,5 +750,73 @@ to = { node = "bare" }
             );
         }
         assert!(!dirty(&app));
+    }
+
+    #[test]
+    fn a_search_hit_selects_and_centres_the_first_element_holding_the_query() {
+        let (_directory, mut app, path) = workspace();
+        let mtime = modified(&path);
+        let find = note_id(&app, "Find", NoteKind::Board);
+        let target = |app: &App, query: &str| {
+            let session = app.session.as_ref().unwrap();
+            let hits = session.index().query(
+                query,
+                wren_core::index::Scope::Workspace,
+                wren_core::index::QueryKind::Search,
+                10,
+            );
+            SearchTarget {
+                generation: app.workspace_generation(),
+                index_revision: session.index().revision(),
+                note: find,
+                query: query.into(),
+                content_match: hits
+                    .iter()
+                    .find(|hit| hit.note == find)
+                    .and_then(|hit| hit.content_match.clone()),
+            }
+        };
+        let land = |app: &mut App, target: SearchTarget| {
+            open_markdown(app, "Note");
+            let outcome = app.dispatch(Command::OpenNote(target));
+            assert!(outcome.processed.disposition.committed());
+            assert_eq!(app.surface(), Surface::Board);
+        };
+
+        // The first time the board opens it waits for its size, fitted,
+        // and the element is centred at the zoom the fit gives.
+        let hit = target(&app, "TWICE");
+        assert!(hit.content_match.is_some());
+        land(&mut app, hit);
+        assert_eq!(selection(&app), [edge("go")]);
+        lay_out(&mut app);
+        assert_shown(&app, &edge("go"));
+        let fitted = Viewport::fitting(view(&app).scene().bounds, SIZE);
+        assert_eq!(view(&app).viewport().zoom, fitted.zoom);
+
+        // Opened again it keeps the zoom it was left at.
+        run(&mut app, CommandId::TextBigger);
+        let zoom = view(&app).viewport().zoom;
+        assert_ne!(zoom, fitted.zoom);
+        let hit = target(&app, "top");
+        land(&mut app, hit);
+        lay_out(&mut app);
+        assert_shown(&app, &node("left"));
+        assert_eq!(view(&app).viewport().zoom, zoom);
+
+        // A title hit, and a query that only the file's syntax holds, show
+        // nothing.
+        let hit = target(&app, "Find");
+        land(&mut app, hit);
+        lay_out(&mut app);
+        assert!(selection(&app).is_empty());
+        let mut syntax = target(&app, "diamond");
+        assert!(syntax.content_match.is_none());
+        syntax.content_match = Some(0..7);
+        land(&mut app, syntax);
+        lay_out(&mut app);
+        assert!(selection(&app).is_empty());
+
+        assert_untouched(&app, &path, mtime);
     }
 }

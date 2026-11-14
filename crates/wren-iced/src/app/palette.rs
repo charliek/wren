@@ -1101,8 +1101,12 @@ impl App {
             let _queried_revision = target.index_revision;
             // A board's match is in its labels, which the empty editor
             // behind it does not hold.
-            if target.content_match.is_some() && self.surface() != Surface::Board {
-                self.editor.reveal_literal(target.query.trim());
+            if target.content_match.is_some() {
+                if self.surface() == Surface::Board {
+                    self.reveal_on_board(&target.query);
+                } else {
+                    self.editor.reveal_literal(target.query.trim());
+                }
             }
             self.palette = None;
             self.reveal_selection();

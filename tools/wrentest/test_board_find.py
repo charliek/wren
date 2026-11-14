@@ -1,5 +1,6 @@
 """Finding things on a board (discovery/boards.md §5.18): the jump palette
-that Find, Outline and `board.jump` open on a board.
+that Find, Outline and `board.jump` open on a board, and where a workspace
+search hit on a board lands.
 
 Neither changes the board: the selection and the view are never written to
 the file, so every case also checks the bytes, the mtime and the draft.
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, NOTES, board, board_app, bounds, click, copy_samples, fitted, key, open_note,
+    FLOW, NOTES, board, board_app, bounds, click, copy_samples, fitted, key, note_id, open_note,
     stamp,
 )
 from tools.wrentest.test_board_view import column, wait_focus
@@ -150,3 +151,31 @@ def test_a_note_change_closes_the_jump_palette(samples: Path) -> None:
         open_note(app, NOTES)
         wait_for(lambda: modal(app) is None, timeout=5, description="the palette closed")
         assert board(app)["surface"] == "text"
+
+
+def test_a_search_hit_lands_on_the_first_node_holding_the_query(samples: Path) -> None:
+    flow = samples / FLOW
+    before = stamp(flow)
+    with board_app(samples, "board-find-search") as app:
+        open_note(app, NOTES)
+        app.client.call("palette.open", {"mode": "search"})
+        app.client.call("palette.query", {"query": "PAYMENT"})
+        note = note_id(app, FLOW)
+        hit = next(row for row in modal(app)["results"] if row["note"] == note)
+        assert hit["hit"] == "content", hit
+        app.client.call("palette.activate", {"key": hit["key"]})
+        wait_for(lambda: board(app)["surface"] == "board", timeout=10,
+                 description="the board open")
+        # "Payment ok?" and "Retry payment" share a row; the left one is
+        # first in reading order. It is centred once the widget has its
+        # size, after the fit a board opened for the first time waits for.
+        payment = node_named(app, "Payment ok?")
+        assert board(app)["selection"] == [payment]
+        assert board(app)["cursor"] == payment
+
+        def centred() -> bool:
+            dx, dy = off_centre(app, payment)
+            return abs(dx) < 1 and abs(dy) < 1
+
+        wait_for(centred, timeout=10, interval=0.05, description="the hit centred")
+        assert_untouched(app, flow, before)
