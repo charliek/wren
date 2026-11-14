@@ -152,6 +152,32 @@ pub(crate) fn line_marks(
     marks
 }
 
+/// What the menu offers for `word` out of the proofreader's `suggestions`:
+/// at most [`SUGGESTIONS`], in order, without duplicates, and with each `'`
+/// written `’` when `word` holds one (rule 4.4.6). A suggestion is one piece
+/// of a line, so an empty one or one holding a line break is dropped.
+pub(crate) fn offered(word: &str, suggestions: Vec<String>) -> Vec<String> {
+    let curly = word.contains('\u{2019}');
+    let mut items: Vec<String> = Vec::with_capacity(SUGGESTIONS);
+    for suggestion in suggestions {
+        if items.len() == SUGGESTIONS {
+            break;
+        }
+        if suggestion.is_empty() || suggestion.contains(['\r', '\n']) {
+            continue;
+        }
+        let item = if curly {
+            suggestion.replace('\'', "\u{2019}")
+        } else {
+            suggestion
+        };
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
+}
+
 /// The mark the keyboard opens the menu for (rule 4.4.1): the first that
 /// contains or touches the caret at byte `caret`.
 pub(crate) fn mark_at_caret(marks: Vec<Range<usize>>, caret: usize) -> Option<Range<usize>> {
@@ -238,6 +264,43 @@ mod tests {
         let empty = SpellMenu::new(0, 0..3, "zzz".into(), Vec::new());
         assert_eq!(empty.selected(), None);
         assert!(empty.items().is_empty());
+    }
+
+    #[test]
+    fn the_menu_offers_five_distinct_one_line_suggestions_in_order() {
+        let given = |items: &[&str]| items.iter().map(|&item| item.to_owned()).collect();
+        assert_eq!(
+            offered(
+                "teh",
+                given(&["the", "", "the", "a\nb", "c\rd", "tea", "ten"])
+            ),
+            ["the", "tea", "ten"]
+        );
+        assert_eq!(
+            offered("teh", given(&["a", "b", "c", "d", "e", "f"])),
+            ["a", "b", "c", "d", "e"]
+        );
+        // Duplicates do not use up the five.
+        assert_eq!(
+            offered("teh", given(&["a", "a", "b", "c", "d", "e"])),
+            ["a", "b", "c", "d", "e"]
+        );
+        assert!(offered("teh", Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_word_written_with_a_curly_apostrophe_is_offered_curly_ones() {
+        let given = |items: &[&str]| items.iter().map(|&item| item.to_owned()).collect();
+        assert_eq!(
+            offered("dosen’t", given(&["doesn't", "dozen", "doesn’t", "o'er'"])),
+            ["doesn’t", "dozen", "o’er’"]
+        );
+        // A straight one, or none, leaves the suggestions as written.
+        assert_eq!(
+            offered("dosen't", given(&["doesn't", "doesn’t"])),
+            ["doesn't", "doesn’t"]
+        );
+        assert_eq!(offered("teh", given(&["t'he"])), ["t'he"]);
     }
 
     #[test]

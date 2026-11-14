@@ -799,6 +799,8 @@ impl EditorView {
     /// suggestions, and scrolls the word's first row into view if it is
     /// not; the caret and the selection stay where they are. With no such
     /// word, on the iced engine, or with no proofreader, nothing opens.
+    /// Accepting replaces the word through [`EditorView::apply`], so it is
+    /// one undo step and the only event that can return true.
     pub fn spell(&mut self, event: SpellEvent) -> bool {
         match event {
             SpellEvent::OpenAtCaret => {
@@ -822,11 +824,46 @@ impl EditorView {
                     menu.hover(row);
                 }
             }
-            SpellEvent::Accept(_) | SpellEvent::Close => {
+            SpellEvent::Accept(row) => return self.accept(row),
+            SpellEvent::Close => {
                 self.menu = None;
             }
         }
         false
+    }
+
+    /// Replace the menu's word with its suggestion in `row`, as one undo
+    /// step with the caret after it, and close the menu. A row with no
+    /// suggestion, or a word no longer at its mark, closes it and changes
+    /// nothing.
+    fn accept(&mut self, row: usize) -> bool {
+        let Some(menu) = self.menu.take() else {
+            return false;
+        };
+        let Some(suggestion) = menu.items().get(row) else {
+            return false;
+        };
+        let line = menu.line();
+        let mark = menu.mark();
+        let unchanged = self.content.with_lines(|lines| {
+            lines
+                .get(line)
+                .is_some_and(|text| text.text.get(mark.clone()) == Some(menu.word()))
+        });
+        if !unchanged {
+            return false;
+        }
+        let at = |column| Position { line, column };
+        let edit = Replace {
+            start: at(mark.start),
+            end: at(mark.end),
+            text: suggestion.clone(),
+        };
+        let caret = Cursor {
+            position: at(mark.start + suggestion.len()),
+            selection: None,
+        };
+        self.apply(&[edit], caret)
     }
 
     /// The open suggestions menu, if any.
@@ -859,8 +896,10 @@ impl EditorView {
         let Some(word) = text.get(mark.clone()) else {
             return;
         };
-        let mut items = proofreader.suggestions(&text, mark.clone(), proof::SUGGESTIONS);
-        items.truncate(proof::SUGGESTIONS);
+        let items = proof::offered(
+            word,
+            proofreader.suggestions(&text, mark.clone(), proof::SUGGESTIONS),
+        );
         self.content.reveal(Position {
             line,
             column: mark.start,
@@ -1670,6 +1709,13 @@ mod tests {
             assert_eq!(spell_events(&enter), [SpellEvent::Accept(1)]);
             assert_eq!(ev.text(), "teh cat");
             assert_eq!(ev.cursor(), at(0, 1));
+            assert_eq!(enter.len(), 1);
+            for message in enter {
+                assert!(handle(&mut ev, message));
+            }
+            assert_eq!(ev.text(), "tech cat");
+            assert_eq!(ev.cursor(), at(0, 4));
+            assert!(ev.spell_menu().is_none());
         }
 
         #[test]
@@ -1802,6 +1848,174 @@ mod tests {
         assert!(!ev.spell(SpellEvent::Close));
         assert_eq!(ev.text(), "teh cat teh");
         assert_eq!(ev.cursor(), selection);
+        assert!(!ev.can_undo());
+    }
+
+    #[test]
+    fn accepting_replaces_the_word_as_one_undo_step_with_the_caret_after_it() {
+        let (mut ev, _) = checked("cat teh dog");
+        let selection = select((0, 0), (0, 5));
+        ev.move_cursor(selection);
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::Move(1));
+        assert!(ev.spell(SpellEvent::Accept(1)));
+        assert_eq!(ev.text(), "cat tech dog");
+        assert_eq!(ev.cursor(), at(0, 8), "after the word, nothing selected");
+        assert!(ev.spell_menu().is_none());
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "cat teh dog");
+        assert!(!ev.can_undo(), "one step");
+        assert!(ev.redo());
+        assert_eq!(ev.text(), "cat tech dog");
+        // With the menu shut, accepting does nothing.
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "cat tech dog");
+    }
+
+    #[test]
+    fn accepting_closes_a_typing_group_and_is_undone_alone() {
+        let (mut ev, _) = checked("teh cat");
+        ev.move_cursor(at(0, 7));
+        assert!(ev.perform(Action::Edit(Edit::Insert('s'))));
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "the cats");
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "teh cats");
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "teh cat");
+    }
+
+    /// A text, the caret's line and column, the row accepted, the text
+    /// after, and the caret's column after.
+    type Replacement = (&'static str, (usize, usize), usize, &'static str, usize);
+
+    #[test]
+    fn a_replacement_changes_only_the_words_bytes_under_any_line_endings() {
+        let cases: [Replacement; 9] = [
+            // The start of a line and of the text.
+            ("teh cat\ndog\n", (0, 0), 0, "the cat\ndog\n", 3),
+            ("teh cat\r\ndog\r\n", (0, 2), 1, "tech cat\r\ndog\r\n", 4),
+            // The end of a line, under each ending.
+            ("cat teh\ndog", (0, 7), 1, "cat tech\ndog", 8),
+            ("cat teh\r\ndog", (0, 7), 1, "cat tech\r\ndog", 8),
+            // Mixed endings: the line between them, and the end of the text.
+            ("one\r\ncat teh\nend", (1, 5), 0, "one\r\ncat the\nend", 7),
+            (
+                "one\r\ncat teh\nlast teh",
+                (2, 8),
+                1,
+                "one\r\ncat teh\nlast tech",
+                9,
+            ),
+            ("one\ncat\r\nteh", (2, 3), 0, "one\ncat\r\nthe", 3),
+            // Multi-byte neighbours.
+            ("«teh» —teh—\r\n", (0, 12), 1, "«teh» —tech—\r\n", 15),
+            ("«teh» —teh—\r\n", (0, 2), 0, "«the» —teh—\r\n", 5),
+        ];
+        for (text, (line, column), row, after, caret) in cases {
+            let (mut ev, _) = checked(text);
+            ev.move_cursor(at(line, column));
+            ev.spell(SpellEvent::OpenAtCaret);
+            assert!(ev.spell_menu().is_some(), "{text:?}");
+            assert!(ev.spell(SpellEvent::Accept(row)), "{text:?}");
+            assert_eq!(ev.text(), after, "{text:?}");
+            assert_eq!(ev.cursor(), at(line, caret), "{text:?}");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_with_a_curly_apostrophe_is_corrected_with_curly_ones() {
+        let proofreader = Arc::new(
+            fixtures::Rejects::new(&["dosen’t"])
+                .suggesting(&[("dosen’t", &["doesn't", "dozen", "doesn’t"])]),
+        );
+        let text = "It dosen’t work\r\nok";
+        let mut ev = EditorView::with_backend(BackendKind::Owned, text);
+        ev.set_proofreader(Some(proofreader));
+        ev.move_cursor(at(0, 4));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert_eq!(
+            menu_of(&ev),
+            Some((
+                0,
+                3..12,
+                "dosen’t".into(),
+                vec!["doesn’t".into(), "dozen".into()],
+                Some(0)
+            ))
+        );
+        assert!(ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "It doesn’t work\r\nok");
+        assert_eq!(ev.cursor(), at(0, 3 + "doesn’t".len()));
+    }
+
+    #[test]
+    fn accepting_changes_nothing_when_the_word_is_no_longer_at_its_mark() {
+        let position = |line, column| Position { line, column };
+        // Changed behind the view's back, so the menu stays open.
+        let (mut ev, _) = opened();
+        ev.content
+            .replace_range(position(0, 0), position(0, 3), "ten");
+        assert!(ev.spell_menu().is_some());
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "ten cat");
+        assert!(ev.spell_menu().is_none());
+        assert!(!ev.can_undo());
+        // Moved along its line.
+        let (mut ev, _) = opened();
+        ev.content
+            .replace_range(position(0, 0), position(0, 0), "x");
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "xteh cat");
+        // Its line gone.
+        let (mut ev, _) = opened();
+        ev.content.replace_text("");
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "");
+
+        // Through the view, any change closes the menu first.
+        let undone = |ev: &mut EditorView| {
+            ev.undo();
+        };
+        let steps: [(&str, Step); 3] = [
+            ("replaced text", |ev| ev.replace_text("teh teh", true)),
+            ("undo", undone),
+            ("typing", |ev| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            }),
+        ];
+        for (name, step) in steps {
+            let (mut ev, _) = checked("cat");
+            ev.move_cursor(at(0, 3));
+            ev.perform(Action::Edit(Edit::Insert(' ')));
+            ev.perform(Action::Edit(Edit::Insert('t')));
+            ev.perform(Action::Edit(Edit::Insert('e')));
+            ev.perform(Action::Edit(Edit::Insert('h')));
+            ev.spell(SpellEvent::OpenAtCaret);
+            assert!(ev.spell_menu().is_some(), "{name}");
+            step(&mut ev);
+            let text = ev.text();
+            let cursor = ev.cursor();
+            assert!(!ev.spell(SpellEvent::Accept(0)), "{name}");
+            assert_eq!((ev.text(), ev.cursor()), (text, cursor), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_row_without_a_suggestion_closes_the_menu_and_changes_nothing() {
+        let (mut ev, _) = opened();
+        assert!(!ev.spell(SpellEvent::Accept(5)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!((ev.text(), ev.cursor()), ("teh cat".into(), at(0, 1)));
+        let (mut ev, _) = checked("zzz");
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(ev.text(), "zzz");
         assert!(!ev.can_undo());
     }
 
