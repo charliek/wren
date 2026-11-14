@@ -166,9 +166,12 @@ nor the editor knows the other ([behaviour](../reference/spell-check.md)).
   `EditorView::set_proofreader`; it never depends on `wren-spell`. Marks
   are computed while a row is drawn, from the line, its prose ranges, and
   the proofreader, and nothing is cached between frames, so an edit or a
-  new word list is right on the next frame. The zigzag is drawn with
-  `fill_quad`, one 1 px square per pixel of the word in a 4 px period,
-  after the selection and before the text. The suggestions menu is the
+  new word list is right on the next frame. The zigzag is one 1 px square
+  per pixel of the word in a 4 px period, after the selection and before
+  the text. A frame's squares are drawn as a single SVG picture, kept
+  while they stay the same: tiny-skia repaints the screen once for each
+  changed primitive it cannot merge, so a quad per square cost seconds a
+  frame with a screen of marks. The suggestions menu is the
   widget's `overlay()`, placed at layout time from the word's glyph
   extents. Opening it (`EditorView::spell`, with a `SpellEvent`) runs a
   fresh highlighter over the lines down to the target to find its prose,

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -276,6 +277,32 @@ def test_the_lanes_setting_decides_when_the_test_names_none(tmp_path: Path) -> N
             caret(app, 5, 10)
             app.client.call("editor.spell_event", {"event": "open_at_caret"})
             assert menu(app) is None
+
+
+def test_a_screen_full_of_marks_draws_without_a_stall(tmp_path: Path) -> None:
+    # Drawn as one 1 px quad per pixel, a screen of marks once took tiny-skia
+    # 4 to 12 s a frame in this build, and the client gave up at 5 s.
+    root = tmp_path / "workspace"
+    (root / "Notes/Inbox").mkdir(parents=True)
+    filler = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor"
+    (root / "Notes/Inbox/Filler.md").write_text(
+        "".join(f"- item {n} {filler}\n" for n in range(600)), encoding="utf-8")
+    with WrenApp(workspace=root, settings=ADVANCED,
+                 artifacts_dir=artifact_directory("spell-many-marks")) as app:
+        wait_for(lambda: spell(app)["ready"], description="the dictionary loads")
+        open_note(app, "Notes/Inbox/Filler.md")
+        wait_for(lambda: sum(mark["shown"] for mark in spell(app)["marks"]) >= 100,
+                 description="a screen of marks")
+        frames = []
+        for page in range(1, 6):
+            start = time.monotonic()
+            # Each page moves every mark, so the whole screen is drawn again.
+            caret(app, page * 100, 0)
+            drawn_frame(app, "spell-many-marks")
+            frames.append(time.monotonic() - start)
+        # A generous ceiling for a debug build on a shared machine; these
+        # frames take tens of milliseconds there.
+        assert max(frames) < 2.0, frames
 
 
 def test_menu_keys_close_then_act_and_rows_follow_the_pointer_events(tmp_path: Path) -> None:
