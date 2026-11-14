@@ -1,8 +1,8 @@
 # Board file format
 
 This page is the specification of a board file, schema 1. Schema 1 is
-locked: a later version of Wren reads and writes these files exactly as
-described here, and anything it adds follows the rules in
+locked: nothing described here changes while a file says `schema = 1`, and
+anything a later version adds follows the rules in
 [Compatibility](#compatibility). It is written for people who generate,
 convert, or review boards by hand or with a tool. What a board looks like
 and how it is edited is in [Boards](boards.md).
@@ -59,7 +59,9 @@ A node is a block `[node.<id>]`.
 | `z` | string | required | | The stacking key ([Stacking order](#stacking-order)). |
 | `ext.<tool>.*` | table | optional | | Foreign data, namespaced by tool. Any TOML value. Never interpreted. |
 
-Wren honours `parent` but never creates it.
+Wren honours `parent` but never creates it. Of the required fields, a
+missing `at` or `size` is an [error](#errors), and a missing `kind` or `z`
+is [flagged](#flagged-issues).
 
 ## Edge records
 
@@ -86,8 +88,9 @@ An endpoint holds exactly one of `node` and `at`:
 | `{ anchor = [fx, fy], node = "id" }` | Attached at a point of the node's box, in thousandths from its top-left corner, each from 0 to 1000: `[500, 0]` is the top centre. `anchor` wins over `side`. |
 | `{ at = [x, y] }` | A free end at absolute board coordinates. In a free end, `side` and `anchor` are unknown content. |
 
-Wren writes `side` only when an end is dropped on a side handle, never
-writes `anchor`, and never creates a free end.
+Wren's editor sets `side` only when a connector end is dropped on a side
+handle, never sets `anchor`, and never makes a free end; all three are kept
+when a file has them. A missing `from` or `to` is an error.
 
 ## Reserved names
 

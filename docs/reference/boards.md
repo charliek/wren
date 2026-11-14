@@ -70,8 +70,8 @@ that direction, so a branch steps aside instead of covering another shape.
 **Labels.** Enter or F2 edits the selected element's label, with its text
 selected, and a double-click edits the label under the pointer. Inside a
 label, Enter and Shift+Enter insert a line break, and the arrows, Backspace,
-and Mod+A/C/X/V are the text's. Mod+Enter or Esc finishes the label, Tab
-finishes it and adds the next shape, and so does a click elsewhere. Mod+Z
+and Mod+A/C/X/V are the text's. Mod+Enter, Esc, or a click elsewhere
+finishes the label, and Tab finishes it and adds the next shape. Mod+Z
 inside a label puts it back as it was when you started; after it is
 finished, the board's undo does. A label that grows past its shape makes
 the shape taller in whole cells as you type; nothing shrinks a shape by
@@ -81,9 +81,9 @@ you finish it. A label holds at most 16 KiB.
 **Selection.** Click selects one element, Shift-click adds or removes one,
 and a marquee selects what lies wholly inside it. Mod+A selects
 everything, ⇧Mod+A adds every shape reachable from the selection by
-following connectors in their direction, and Esc clears the selection. The last element selected keeps
-a ring (the cursor) when the selection changes, so walking with the arrows
-picks up where you were.
+following connectors in their direction, and Esc clears the selection.
+The last element selected keeps a ring (the cursor) when the selection
+changes, so walking with the arrows picks up where you were.
 
 **Delete, duplicate, and the clipboard.**
 
@@ -157,9 +157,10 @@ with the digit keys on the selection:
 Shapes also have one of three fills, from the palette: **Fill: none** (the
 outline only), **Fill: tint** (the colour mixed into the canvas, the
 default), and **Fill: solid**. Neutral is the theme's text colour, and its
-solid fill is the theme's raised surface colour. Label text takes whichever
-of the theme's text and canvas colours reads better on the fill; on a
-connector, the line, its arrowheads, and its label all take the colour.
+solid fill is the theme's raised surface colour. A shape's label is in the
+theme's text colour, except on a solid fill, where it takes whichever of
+the text and canvas colours reads better. Free text, and a connector's
+line, arrowheads, and label, take the colour itself.
 
 The file stores the colour's name, not a value, and every theme supplies
 its own seven hues, taken from that theme's published palette where it has
@@ -208,7 +209,7 @@ connectors follow the shapes they join.
 palette for the selection. A right-click on an element outside the
 selection selects it alone first; on empty canvas it clears the selection.
 
-It lists only what can change the selection, grouped: Shape, Colour, Fill,
+It lists only what applies to the selection, grouped: Shape, Colour, Fill,
 Stroke, Connector, Arrange, Align, Distribute, and Edit (Edit label,
 Duplicate, Copy, Cut, Delete). The row that matches the selection's
 current shape, colour, or fill is marked and highlighted when the palette
