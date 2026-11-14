@@ -39,6 +39,7 @@ use iced::advanced::graphics::text::cosmic_text::{self, Scroll};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
 use iced::advanced::renderer::{self, Renderer as _};
+use iced::advanced::svg::{self, Renderer as _, Svg};
 use iced::advanced::text::highlighter::Highlighter as _;
 use iced::advanced::text::{self, LineHeight, Paragraph as _, Renderer as _, Text, Wrapping};
 use iced::advanced::widget::{self, operation, tree, Widget};
@@ -49,8 +50,8 @@ use iced::widget::text_editor::{
     Action, Binding, Cursor, Edit, KeyPress, LineEnding, Position, Selection, Status,
 };
 use iced::{
-    alignment, window, Border, Element, Event, Font, Length, Padding, Pixels, Point, Rectangle,
-    Renderer, Size, Theme, Vector,
+    alignment, window, Border, Color, Element, Event, Font, Length, Padding, Pixels, Point,
+    Rectangle, Renderer, Size, Theme, Vector,
 };
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
@@ -877,6 +878,7 @@ struct State {
     /// What the last event saw, so a change while the menu is open closes
     /// it.
     seen: Option<Seen>,
+    zigzags: RefCell<Zigzags>,
 }
 
 /// What a menu's width and rows were fitted to.
@@ -952,6 +954,7 @@ impl State {
             highlighter_settings,
             menu_fit: None,
             seen: None,
+            zigzags: RefCell::new(Zigzags::default()),
         }
     }
 
@@ -1253,7 +1256,7 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         // Over the selection, which must not hide a mark, and under the
         // glyphs, which paint over it.
         let origin = text_bounds.position();
-        for square in rows
+        let squares: Vec<Rectangle> = rows
             .iter()
             .flat_map(|row| {
                 row.marks
@@ -1263,14 +1266,13 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             })
             .flat_map(Zigzag::squares)
             .filter_map(|square| square.intersection(&rows_clip))
+            .collect();
+        if let Some(picture) = state
+            .zigzags
+            .borrow_mut()
+            .update(squares, style.misspelling)
         {
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: square,
-                    ..renderer::Quad::default()
-                },
-                style.misspelling,
-            );
+            renderer.draw_svg(Svg::new(picture.handle.clone()), picture.bounds, rows_clip);
         }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(frame) = self.spell_frame {
@@ -1784,6 +1786,81 @@ impl Zigzag {
             height: 1.0,
         })
     }
+}
+
+/// A frame's zigzag squares, drawn as one SVG picture. tiny-skia damages
+/// and repaints every changed primitive separately, so a screen of marks
+/// drawn as 1 px quads took seconds a frame there; one picture is one
+/// primitive, and it keeps its handle while the squares stay the same, so
+/// an unchanged frame damages nothing.
+#[derive(Debug, Default)]
+struct Zigzags {
+    squares: Vec<Rectangle>,
+    color: Option<Color>,
+    picture: Option<ZigzagPicture>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ZigzagPicture {
+    bounds: Rectangle,
+    handle: svg::Handle,
+}
+
+impl Zigzags {
+    /// The picture of `squares` in `color`, built again only when either
+    /// changed; `None` when there are no squares.
+    fn update(&mut self, squares: Vec<Rectangle>, color: Color) -> Option<&ZigzagPicture> {
+        if self.squares != squares || self.color != Some(color) {
+            self.picture = zigzag_svg(&squares, color).map(|(bounds, source)| ZigzagPicture {
+                bounds,
+                handle: svg::Handle::from_memory(source.into_bytes()),
+            });
+            self.squares = squares;
+            self.color = Some(color);
+        }
+        self.picture.as_ref()
+    }
+}
+
+/// The SVG source that fills `squares` with `color`, and where it is drawn:
+/// the whole pixels around the squares, so each square keeps its place on
+/// the pixel grid.
+fn zigzag_svg(squares: &[Rectangle], color: Color) -> Option<(Rectangle, String)> {
+    let first = squares.first()?;
+    let (mut left, mut top) = (first.x, first.y);
+    let (mut right, mut bottom) = (first.x + first.width, first.y + first.height);
+    for square in squares {
+        left = left.min(square.x);
+        top = top.min(square.y);
+        right = right.max(square.x + square.width);
+        bottom = bottom.max(square.y + square.height);
+    }
+    let bounds = Rectangle {
+        x: left.floor(),
+        y: top.floor(),
+        width: right.ceil() - left.floor(),
+        height: bottom.ceil() - top.floor(),
+    };
+    let mut path = String::with_capacity(squares.len() * 24);
+    for square in squares {
+        path.push_str(&format!(
+            "M{} {}h{}v{}h-{}z",
+            square.x - bounds.x,
+            square.y - bounds.y,
+            square.width,
+            square.height,
+            square.width
+        ));
+    }
+    let [r, g, b, _] = color.into_rgba8();
+    let (width, height) = (bounds.width, bounds.height);
+    let source = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' \
+         viewBox='0 0 {width} {height}'><path fill='#{r:02x}{g:02x}{b:02x}' \
+         fill-opacity='{}' d='{path}'/></svg>",
+        color.a
+    );
+    Some((bounds, source))
 }
 
 impl RowMark {
@@ -2769,6 +2846,63 @@ mod tests {
             squares(Zigzag::new(10.0, 11.0, 0.0, 24.0).unwrap()),
             [(10.0, 4.0)]
         );
+    }
+
+    #[test]
+    fn a_frames_zigzags_are_one_picture_of_their_squares_on_the_pixel_grid() {
+        // Two words' zigzags, the second cut by the rows' clip at y = 41.5.
+        let clip = Rectangle::new(Point::new(0.0, 0.0), Size::new(400.0, 41.5));
+        let squares: Vec<Rectangle> = [
+            Zigzag::new(10.3, 14.0, 30.4, 48.0).unwrap(),
+            Zigzag::new(20.0, 22.0, 37.0, 48.0).unwrap(),
+        ]
+        .into_iter()
+        .flat_map(Zigzag::squares)
+        .filter_map(|square| square.intersection(&clip))
+        .collect();
+        let color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
+        let (bounds, source) = zigzag_svg(&squares, color).unwrap();
+        // From the first square's left and the top step to the cut half
+        // pixel, rounded out to whole pixels.
+        assert_eq!(
+            bounds,
+            Rectangle::new(Point::new(11.0, 32.0), Size::new(11.0, 10.0))
+        );
+        assert_eq!(
+            source,
+            "<svg xmlns='http://www.w3.org/2000/svg' width='11' height='10' \
+             viewBox='0 0 11 10'><path fill='#e06c6c' fill-opacity='1' \
+             d='M0 2h1v1h-1zM1 1h1v1h-1zM2 0h1v1h-1zM9 9h1v0.5h-1zM10 8h1v1h-1z'/></svg>"
+        );
+        assert_eq!(zigzag_svg(&[], color), None);
+    }
+
+    #[test]
+    fn the_zigzag_picture_is_kept_while_its_squares_and_colour_are() {
+        let squares: Vec<Rectangle> = Zigzag::new(10.0, 30.0, 30.0, 48.0)
+            .unwrap()
+            .squares()
+            .collect();
+        let red = Color::from_rgb8(0xe0, 0x6c, 0x6c);
+        let mut zigzags = Zigzags::default();
+        let first = zigzags.update(squares.clone(), red).cloned().unwrap();
+        // The same handle, so the renderer sees an unchanged primitive.
+        assert_eq!(
+            zigzags.update(squares.clone(), red).unwrap().handle.id(),
+            first.handle.id()
+        );
+        let blue = Color::from_rgb8(0x40, 0x60, 0xe0);
+        assert_ne!(
+            zigzags.update(squares.clone(), blue).unwrap().handle.id(),
+            first.handle.id()
+        );
+        let moved: Vec<Rectangle> = squares
+            .iter()
+            .map(|square| *square + Vector::new(0.0, 24.0))
+            .collect();
+        let picture = zigzags.update(moved, red).cloned().unwrap();
+        assert_eq!(picture.bounds, first.bounds + Vector::new(0.0, 24.0));
+        assert_eq!(zigzags.update(Vec::new(), red), None);
     }
 
     #[test]

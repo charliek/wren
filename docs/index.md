@@ -54,6 +54,8 @@ and building from source.
   custom bindings.
 - [Configuration](reference/configuration.md): `config.conf`, themes, and
   editor settings.
+- [Spell check](reference/spell-check.md): what is checked, the
+  corrections menu, and your word list.
 - [Workspace folder](reference/workspace-folder.md): what Wren reads and
   writes on disk.
 - [Autosave and external edits](reference/autosave.md): when notes are

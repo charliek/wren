@@ -19,8 +19,10 @@ test-support = []
 # widget draws through the concrete iced::Renderer, which needs a renderer;
 # iced always pulls in winit, which needs a windowing feature on Linux; and
 # iced needs an executor (a host's tokio takes precedence over the pool).
+# The misspelling zigzags are drawn as one SVG picture a frame.
 iced = { version = "=0.14.0", default-features = false, features = [
     "advanced",
+    "svg",
     "thread-pool",
     "tiny-skia",
     "x11",

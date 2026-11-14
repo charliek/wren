@@ -118,6 +118,20 @@ editor's cursor and give it the keyboard. They are unavailable while
 cursor. On macOS, ⌘ with a letter never types the letter, even when
 nothing is bound to it.
 
+### Spell check
+
+| Action | macOS | Linux | Action name |
+|---|---|---|---|
+| Suggest spelling | ⌘. | Alt+. | `editor.spell_suggest` |
+
+On the `advanced` engine, with the caret in or touching an underlined
+word, **Suggest spelling** opens the corrections menu under it; a
+right-click on the word does the same. ↑ and ↓ move through the
+corrections, ↵ replaces the word, and Esc closes the menu. Like the
+Markdown commands, the key belongs to the editor, and the palette lists
+the command under **Markdown**; unlike them, it works whether or not
+Markdown assist is on. See [Spell check](../reference/spell-check.md).
+
 ## Jumping to a heading
 
 **Jump to heading** (⇧⌘O / Alt+Shift+O) opens the open note's outline: its
@@ -189,7 +203,8 @@ Lines apply in order on top of the defaults. A later line for the same
 trigger replaces the earlier one, and the action `unbind` removes a
 binding. A user binding also becomes the shortcut shown in the palette and
 title bar for that action. A key bound to any command other than the
-Markdown commands above is the app's even inside the editor, so binding
+Markdown commands and Suggest spelling above is the app's even inside the
+editor, so binding
 `ctrl+z` to something else takes it from Undo.
 
 ```conf
@@ -222,12 +237,15 @@ workspace.add  workspace.remove  settings.open  settings.reload  app.quit
 palette.commands  markdown.toggle_task  markdown.bold  markdown.italic
 markdown.code  edit.move_line_up  edit.move_line_down
 editor.toggle_markdown_assist  editor.toggle_engine
+editor.toggle_spell_check  editor.spell_suggest  settings.open_words
 ```
 
-`editor.toggle_markdown_assist` and `editor.toggle_engine` have no default
-key. They flip `markdown-assist` and `editor-engine`, save the change to
+`editor.toggle_markdown_assist`, `editor.toggle_engine`, and
+`editor.toggle_spell_check` have no default key. They flip
+`markdown-assist`, `editor-engine`, and `spell-check`, save the change to
 `config.conf`, and apply it at once; switching engines keeps the note's
-text and cursor but clears its undo history.
+text and cursor but clears its undo history. `settings.open_words`, which
+opens the spelling word list, has no default key either.
 
 An unknown action or an invalid trigger is skipped, and the line is named
 in the warning banner.

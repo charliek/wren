@@ -65,6 +65,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spell_check_takes_the_danger_colour_and_the_menu_the_raised_surface() {
+        for definition in theme::BUILT_INS {
+            let c = definition.colors;
+            let (style, _) = editor_colors(*definition);
+            assert_eq!(style.misspelling, color(c.danger), "{}", definition.id);
+            assert_ne!(style.misspelling, style.background, "{}", definition.id);
+            let menu = style.menu;
+            assert_eq!(menu.background, color(c.raised), "{}", definition.id);
+            assert_eq!(menu.border, color(c.dialog_border), "{}", definition.id);
+            assert_eq!(menu.selected, color(c.selected), "{}", definition.id);
+            assert_eq!(menu.text, color(c.text), "{}", definition.id);
+            assert_eq!(menu.muted, color(c.muted), "{}", definition.id);
+            assert_eq!(menu.font, crate::fonts::UI);
+            assert_eq!(menu.text_size, 13.0);
+            for shown in [menu.selected, menu.text, menu.muted, menu.border] {
+                assert_ne!(shown, menu.background, "{}", definition.id);
+            }
+        }
+    }
+
+    #[test]
     fn editor_style_has_editor_background() {
         let (style, _) = editor_colors(theme::DARK);
         assert_eq!(style.background, color(theme::DARK.colors.editor));

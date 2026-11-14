@@ -12,6 +12,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub const FILE_NAME: &str = "config.conf";
+/// The user's spelling word list, beside the settings file.
+pub const WORDS_FILE_NAME: &str = "words.txt";
 const MAX_BYTES: u64 = 1024 * 1024;
 pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
@@ -131,6 +133,8 @@ pub struct Settings {
     pub editor_engine: EditorEngine,
     /// The Markdown-aware Enter, Tab, Backspace, and Home.
     pub markdown_assist: bool,
+    /// Spell check, which the advanced engine alone carries out.
+    pub spell_check: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -147,6 +151,7 @@ impl Default for Settings {
             line_numbers: true,
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
+            spell_check: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -241,6 +246,10 @@ impl Settings {
                     Some(enabled) => settings.markdown_assist = enabled,
                     None => invalid(),
                 },
+                "spell-check" => match parse_bool(value) {
+                    Some(enabled) => settings.spell_check = enabled,
+                    None => invalid(),
+                },
                 "keybind" => match value.rsplit_once('=') {
                     Some((trigger, action)) if !trigger.trim().is_empty() => settings
                         .keybinds
@@ -293,6 +302,41 @@ pub fn path() -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("wren").join(FILE_NAME))
+}
+
+/// The spelling word list for the settings file at `settings`: `words.txt`
+/// in the same directory.
+pub fn words_path(settings: &Path) -> PathBuf {
+    settings.with_file_name(WORDS_FILE_NAME)
+}
+
+/// What a new `words.txt` holds: comments only, so it adds no word.
+pub const WORDS_TEMPLATE: &str = "\
+# Wren's spelling word list: one word per line, each accepted as correctly
+# spelled. A word in lower case is also accepted capitalised and in capitals;
+# one with a capital letter is accepted exactly as written.
+# Lines starting with # are comments. Changes apply when Wren regains focus
+# or on “Reload settings”.
+";
+
+/// Create the word list at `path`, with only [`WORDS_TEMPLATE`], if there is
+/// no such file yet. An existing file is never written.
+pub fn ensure_words_exist(path: &Path) -> io::Result<()> {
+    if read_text(path)?.is_some() {
+        return Ok(());
+    }
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    match created {
+        Ok(mut file) => file.write_all(WORDS_TEMPLATE.as_bytes()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Replace the last active `key = …` line, or append one, keeping every
@@ -421,6 +465,11 @@ pub const TEMPLATE: &str = "\
 # Backspace removes markup, and Home stops at the text after the markup.
 # Off, the Markdown commands (toggle task, bold, move line, ...) are disabled.
 # markdown-assist = on
+
+# Spell check: misspelled words are underlined, and Alt+. (Cmd+. on macOS)
+# or a right-click offers corrections. It needs editor-engine = advanced.
+# Your own words go in words.txt, beside this file, one per line.
+# spell-check = on
 
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
@@ -560,6 +609,54 @@ mod tests {
         assert!(!settings.markdown_assist);
         assert_eq!(settings.warnings.len(), 1);
         assert!(settings.warnings[0].contains("markdown-assist"));
+    }
+
+    #[test]
+    fn spell_check_defaults_on_and_parses_booleans() {
+        assert!(Settings::default().spell_check);
+        for (value, enabled) in [("off", false), ("on", true), ("no", false), ("TRUE", true)] {
+            let settings = Settings::parse(&format!("spell-check = {value}\n"));
+            assert_eq!(settings.spell_check, enabled, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        let settings = Settings::parse("spell-check = off\nspell-check = maybe\n");
+        assert!(!settings.spell_check);
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("spell-check"));
+        assert_eq!(
+            with_value("theme = nord\n", "spell-check", "off"),
+            "theme = nord\nspell-check = off\n"
+        );
+    }
+
+    #[test]
+    fn the_word_list_sits_beside_the_settings_file() {
+        let settings = Path::new("/home/someone/.config/wren/config.conf");
+        assert_eq!(
+            words_path(settings),
+            Path::new("/home/someone/.config/wren/words.txt")
+        );
+        assert_eq!(
+            words_path(Path::new("elsewhere.conf")),
+            Path::new("words.txt")
+        );
+    }
+
+    #[test]
+    fn a_new_word_list_holds_only_comments_and_an_existing_one_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/words.txt");
+        ensure_words_exist(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), WORDS_TEMPLATE);
+        assert!(WORDS_TEMPLATE
+            .lines()
+            .all(|line| line.trim_start().starts_with('#')));
+        fs::write(&path, "wren\n").unwrap();
+        ensure_words_exist(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "wren\n");
+        let folder = directory.path().join("folder.txt");
+        fs::create_dir(&folder).unwrap();
+        assert!(ensure_words_exist(&folder).is_err());
     }
 
     #[test]

@@ -37,8 +37,9 @@ when one lands, move what users need into `docs/` and trim the note.
   - `app.rs` holds `App`, `Message`, `update`, `view`, and `subscription`;
     its submodules live in `app/`: `commands.rs` (the command table and
     gateway), `palette.rs`, `preferences.rs` (settings, keymap, and theme),
-    `workspace.rs` (loading and core events), `workspace_view.rs`, and
-    `navigation.rs`.
+    `spelling.rs` (the dictionary, `words.txt`, and the editor's
+    proofreader), `workspace.rs` (loading and core events),
+    `workspace_view.rs`, and `navigation.rs`.
   - `theme.rs` maps a `wren_core` theme to iced's and to the editor's
     `Style` and `Palette`.
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
