@@ -22,8 +22,8 @@ pub(crate) fn checked_words(line: &str, prose: Range<usize>, mut found: impl FnM
             let end = start + word.len();
             // A prose range that cuts a word of the line leaves only a piece
             // of it here, which is not a word to judge.
-            let cut_before = start == prose.start && continues(line[..start].chars().next_back());
-            let cut_after = end == prose.end && continues(line[end..].chars().next());
+            let cut_before = cut(line[..start].chars().rev(), start - prose.start);
+            let cut_after = cut(line[end..].chars(), prose.end - end);
             if !cut_before && !cut_after && checkable(word) {
                 found(start..end);
             }
@@ -87,6 +87,46 @@ fn joined_inside(chunk: &str) -> bool {
 
 fn continues(neighbour: Option<char>) -> bool {
     neighbour.is_some_and(char::is_alphanumeric)
+}
+
+/// Whether the line's word goes on past a prose range's edge from a candidate
+/// word, given the characters of the line going outward from the word and
+/// `inside`, the bytes between the word and the edge. A letter or digit just
+/// past the edge continues it; so does a mid-word joiner (`wouldn` + `'t`) at
+/// the edge, inside or outside it, with a letter beyond, as UAX #29 joins it.
+fn cut(mut outward: impl Iterator<Item = char>, inside: usize) -> bool {
+    match outward.next() {
+        Some(c) if inside == 0 && c.is_alphanumeric() => true,
+        Some(c) if mid_word(c) && c.len_utf8() >= inside => {
+            outward.next().is_some_and(char::is_alphabetic)
+        }
+        _ => false,
+    }
+}
+
+/// The characters UAX #29 keeps inside a word between two letters
+/// (`MidLetter`, `MidNumLet` and `Single_Quote`). `_` is not one: outside a
+/// prose range it is an emphasis delimiter, and `_word_` is checked as `word`.
+fn mid_word(c: char) -> bool {
+    matches!(
+        c,
+        '\'' | '.'
+            | ':'
+            | '\u{B7}'
+            | '\u{387}'
+            | '\u{55F}'
+            | '\u{5F4}'
+            | '\u{2018}'
+            | '’'
+            | '\u{2024}'
+            | '\u{2027}'
+            | '\u{FE13}'
+            | '\u{FE52}'
+            | '\u{FE55}'
+            | '\u{FF07}'
+            | '\u{FF0E}'
+            | '\u{FF1A}'
+    )
 }
 
 pub(crate) fn is_apostrophe(c: char) -> bool {
@@ -260,5 +300,16 @@ mod tests {
         checked_words("foo`code`bar", 0..3, |r| out.push(r));
         checked_words("foo`code`bar", 9..12, |r| out.push(r));
         assert_eq!(out, [0..3, 9..12], "a code span does not cut a word");
+    }
+
+    #[test]
+    fn a_word_cut_at_an_inner_apostrophe_is_not_checked() {
+        let mut out = Vec::new();
+        checked_words("wouldn't", 0..6, |r| out.push(r));
+        checked_words("wouldn'tve", 6..10, |r| out.push(r));
+        assert!(out.is_empty(), "{out:?}: pieces of `wouldn't`");
+        checked_words("**Wren**'s note", 2..6, |r| out.push(r));
+        checked_words("_rock_'s roll", 1..5, |r| out.push(r));
+        assert_eq!(out, [2..6, 1..5], "a delimiter stands between, so no cut");
     }
 }

@@ -532,6 +532,26 @@ mod tests {
         assert_eq!(marked(&speller, line, &[0..5]), Vec::<&str>::new());
         assert_eq!(marked(&speller, line, &[5..13]), Vec::<&str>::new());
         assert_eq!(marked(&speller, line, &[3..9]), Vec::<&str>::new());
+        for (line, prose) in [
+            ("wouldn't", 0..6),
+            ("wouldn't", 0..7),
+            ("wouldn’tve", 6..12),
+            ("wouldn'tve", 6..10),
+            ("e.gx", 2..4),
+            ("chek:re", 0..4),
+        ] {
+            assert_eq!(
+                marked(&speller, line, std::slice::from_ref(&prose)),
+                Vec::<&str>::new(),
+                "{line:?} {prose:?}: a joiner with a letter beyond continues the word"
+            );
+        }
+        assert_eq!(
+            marked(&speller, "chek'", &[0..4]),
+            ["chek"],
+            "an apostrophe with nothing beyond ends the word"
+        );
+        assert_eq!(marked(&speller, "'chek' x", &[1..5]), ["chek"]);
     }
 
     #[test]
