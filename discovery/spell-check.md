@@ -544,9 +544,22 @@ Deviations:
 5. *`_` belongs to a UAX #29 word* (it is `ExtendNumLet`), so with the delimiter in prose `_word_` or `trailing_` is one candidate that rule 4.2.4 never checks. Matched emphasis delimiters are not prose (exclusion 5), so the editor's `_word_` is still checked as `word`.
 6. *"Every cased one upper case"* is read as "upper-cases to itself": a title-case letter such as `ǅ` is not upper case. A word written with a combining mark (`cafe` plus U+0301) is never checked, since the mark is not a letter at or below U+024F.
 7. *The acceptance note needs no change*: with the bundled 2026.02.25 release its marks are exactly the nine words, in order (`speller::tests::the_acceptance_note_has_exactly_its_nine_marks`, with the editor's prose ranges given by hand).
-8. `Speller::suggestions` is still the stub (C4). The seeded test already calls it on a sample of its marks.
+8. `Speller::suggestions` was still the stub after C2 (C4 filled it). The seeded test already called it on a sample of its marks.
 
 Measured while trying to break it, in a debug test build (`spellbook` at the workspace's `opt-level = 2` for dependencies): the slowest of 200,000 random 2 to 40 character checks took 39 µs, far under the 50 ms the brief names; no input panicked.
+
+*C3 and C4.* Where §4.6 or §3.2 left a case open:
+
+1. *A comment is a line whose trimmed text starts with `#`*, as `config.conf` reads its comments, so an indented `# note` is ignored too. A byte-order mark is stripped only at the start of the file; anywhere else it is part of a word.
+2. *A line is split as `str::lines` splits it*: `\n` or `\r\n`, and a stray `\r` at a line's end is trimmed as white space. Line numbers in warnings count from 1 and include comments and blank lines.
+3. *The warnings read* `line N: not one word` and `line N: longer than 40 characters`, the shape `config.conf`'s warnings have, so W1 can prefix them with the path. A line that is both is reported as not one word. The 40 is counted in characters after `’` becomes `'`.
+4. *"All lower case" is read as C2 reads "upper case"*: an entry is all lower case when every character lower-cases to itself, so an entry starting with title-case `ǅ` is exact. "Capitalised" upper-cases the first character, not the first letter, so `'tis` is not also accepted as `'Tis`; Hunspell does the same. An entry need not be a word §4.2 checks: `x86` is stored, and harmless.
+5. *`WordList::accepts` reads `’` as `'` itself*, like `Hunspell`, so the source keeps rule 4.2.3 when asked directly, not only through `Speller`. `WordList` derives `Debug` and `Default` (the empty list); its field stays private.
+6. *`Speller::suggestions` passes and returns straight apostrophes*: the word is asked about with `'`, and a correction holding `’` is read with `'`, so `don’t` and `don't` are one correction. Turning them back into `’` is the editor's job (rule 4.4.6).
+7. *It leaves out* an empty correction, one holding a control character (a line break would change the note's lines on accepting), and the word itself. It asks no later source once it has `limit`, and nothing for `limit` 0.
+8. *A word that rule 4.2.4 never checks gets no suggestions.* Such a word is never marked, so the menu never asks; the guard also keeps a 10,000-character word away from `spellbook`'s suggester.
+9. *Split corrections are kept as the source offers them*: for `misteak` the bundled dictionary offers `mistake`, `mi steak`, `mi-steak`, `steak`; for `CommonMark`, `Common Mark` first. Removing them would also remove good ones such as `alot` → `a lot`. The menu or the owner may want to revisit this.
+10. *The first suggestions for the acceptance note* (`speller::tests::the_acceptance_notes_marks_have_these_first_suggestions`) are `cheek` for `chek` (`check` is second), `pear`, `replacements`, `bundled`, `design`, `Common Mark`, `misspelled`, `known` and `mistake`; W4's step 3 can expect them. In a debug test build each took 6 to 21 ms.
 
 #### `spell-marks`
 
