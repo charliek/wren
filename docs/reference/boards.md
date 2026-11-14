@@ -225,8 +225,9 @@ other way, drops the preview; nothing is written.
 
 **Jump to node…** lists every labelled shape, text element, and connector
 on the board in reading order (top, then left), with the label's first line
-as the title and the shape's name, `text`, or `connector` at the end of the
-row. On a board, Jump to heading (⇧⌘O / Alt+Shift+O) and Find in note
+as the title and, at the end of the row, the shape's name, `text`,
+`connector`, or, for a placeholder, its kind (`placeholder` when it has
+none). On a board, Jump to heading (⇧⌘O / Alt+Shift+O) and Find in note
 (⌘F / Alt+F or Ctrl+F) open it. Type to filter. Moving the highlight
 selects and centres that element; ↵ keeps it and gives the board the
 keyboard, and Esc puts the selection and the view back.

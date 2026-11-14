@@ -159,11 +159,13 @@ absent, reading each character as a digit from 0 to 61 in that order:
 3. Nothing below: the same from the upper key, minus 1, and minus 1 again
    if the result is a multiple of 62. When that is below 1, it bisects.
 4. Both present: bisect. At each position take the lower key's digit `a`
-   (0 past its end) and the upper key's `b`. Equal: append it and go on. At
-   least 2 apart: append their mean, rounded down, and stop. One apart and
-   the upper key has more characters: append `b` and stop. One apart
+   (0 past its end) and the upper key's `b`; an absent upper key reads as
+   the digit 62 at every position. Equal: append it and go on. At least 2
+   apart: append their mean, rounded down, and stop. One apart and the
+   upper key has more characters: append `b` and stop. One apart
    otherwise: append `a` and go on as if there were no upper key. When the
-   upper key is the lower key followed only by `0`s, nothing fits.
+   upper key equals the lower key, or is the lower key followed by `0`s,
+   nothing fits.
 
 The keys Wren picks are not part of the format: a new element, a key, or
 a renumbered scope may come out differently in another version.
