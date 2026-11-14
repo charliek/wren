@@ -507,6 +507,20 @@ Beside the lenses, through the installed Codex CLI, in its own detached worktree
 
 #### Step 0
 
+*Item 2, the dependency and the dictionary.*
+
+- Dictionary: fetched from SCOWL's published release, not a distribution copy. SCOWL now publishes on GitHub (`en-wl/wordlist`); the latest release at build time is 2026.02.25 (`hunspell-en_US-2026.02.25.zip`), and it is the one bundled. `crates/wren-spell/dict/SOURCE.md` has the addresses and hashes; `test_package.py` checks the hashes and that `README_en_US.txt`, `SOURCE.md` and `NOTICES` name the same release.
+- Notices inventory, with `target/` created first (the tool will not create its output's directory):
+  - before: `Cargo dependency notices: 485 packages, 768 local texts, 65 packages requiring review; 5 workspace members excluded.`
+  - after: `Cargo dependency notices: 486 packages, 769 local texts, 65 packages requiring review; 6 workspace members excluded.`
+  - The one package added to `Cargo.lock` is `spellbook 0.4.2` (MPL-2.0, its `LICENSE` collected, not in the review list). Its `foldhash 0.1.5` and `hashbrown 0.17.1` were already locked. The lock also gains the `wren-spell` member, depending on `spellbook` and `unicode-segmentation`.
+
+Deviations:
+1. *Release 2026.02.25, not 2020.12.07* (§3.5 allows the latest). Its `.dic` is 508,614 bytes, not "about 860 KB": that figure was the distribution's build, which is larger than SCOWL's own standard archive even for 2020.12.07 (551,762 bytes). The new `.aff` adds `ICONV ’ '` and `’` to `WORDCHARS`, so the dictionary itself accepts `can’t`. With `spellbook 0.4.2`, every word of the acceptance note (§5.5) gets the same verdict from the bundled files as from the distribution's 2020.12.07 copy: the nine marked words and the tokens §4.2 skips are rejected, everything else is accepted.
+2. *`NOTICES` also names `spellbook`*, its version, the MPL-2.0 and where its source is, as decision 2.1.1 asks and MPL-2.0 §3.2(a) requires for an executable. `tools/package.py` keeps the version in `SPELLBOOK_VERSION` and the release in `SCOWL_RELEASE`; the unit test ties the first to the `Cargo.toml` pin and `Cargo.lock`.
+3. *`wren-spell` is in `[workspace.dependencies]` already*, so `spell-wire` adds it to `wren-iced` without touching the root `Cargo.toml` (it still changes `Cargo.lock`, in Stage B).
+4. Until W1 links `wren-spell` into `wren-iced`, `NOTICES` says the executable embeds a dictionary it does not yet hold. Harmless on an unreleased branch.
+
 #### `spell-core`
 
 #### `spell-marks`
