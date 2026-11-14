@@ -1476,11 +1476,20 @@ impl App {
             .max_width((self.viewport.width - 32.0).max(120.0))
             .clip(true)
             .style(move |_| chrome::dialog(self.definition));
+        // The board's actions preview on the board, so they leave it
+        // undimmed; a click outside still closes them.
+        let dims = palette.mode != Mode::BoardActions;
         let scrim = mouse_area(
             container(iced::widget::space())
                 .width(Fill)
                 .height(Fill)
-                .style(move |_| chrome::scrim(self.definition)),
+                .style(move |_| {
+                    if dims {
+                        chrome::scrim(self.definition)
+                    } else {
+                        container::Style::default()
+                    }
+                }),
         )
         .on_press(Message::PaletteClose);
         stack![

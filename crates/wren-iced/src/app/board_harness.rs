@@ -156,6 +156,7 @@ impl App {
             "pristine": true,
             "revision": null,
             "counts": null,
+            "patch": null,
         });
         let Some(view) = &self.board else {
             return snapshot;
@@ -190,6 +191,7 @@ impl App {
             "pristine": view.pristine(),
             "revision": self.board_revision,
             "counts": {"nodes": board.nodes.len(), "edges": board.edges.len()},
+            "patch": view.patch().map(wren_canvas::Command::key),
         });
         merge(&mut snapshot, fields);
         if elements {
