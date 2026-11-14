@@ -254,20 +254,52 @@ class TestPNGDecodeIHDR(unittest.TestCase):
 class TestPNGDecodePixelData(unittest.TestCase):
     """Pixel data decompression and filter-byte validation."""
 
-    def test_nonzero_filter_type_rejected(self):
-        # Row with filter type 1 (Sub) instead of 0 (None).
-        raw_row = bytes([1]) + bytes(4)  # filter=1, one RGBA pixel
+    def test_unknown_filter_type_rejected(self):
+        raw_row = bytes([5]) + bytes(4)  # filter=5 is not defined
         idat = _chunk(b"IDAT", zlib.compress(raw_row))
         data = _png.PNG_MAGIC + _ihdr(1, 1) + idat + _iend()
         with self.assertRaises(_png.PNGDecodeError):
             _png.read_png(data)
 
-    def test_filter_type_4_paeth_rejected(self):
-        raw_row = bytes([4]) + bytes(4)  # filter=4 (Paeth)
-        idat = _chunk(b"IDAT", zlib.compress(raw_row))
-        data = _png.PNG_MAGIC + _ihdr(1, 1) + idat + _iend()
-        with self.assertRaises(_png.PNGDecodeError):
-            _png.read_png(data)
+    def test_every_standard_filter_is_undone(self):
+        """A 3×3 image written with each filter type on every row, filtered
+        here by the spec's own formulas, decodes to the original pixels."""
+        width, height = 3, 3
+        image = [
+            bytes((x * 70 + y * 30 + c * 50 + 200) & 0xFF for x in range(width) for c in range(4))
+            for y in range(height)
+        ]
+
+        def paeth(a: int, b: int, c: int) -> int:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            if pa <= pb and pa <= pc:
+                return a
+            return b if pb <= pc else c
+
+        def filtered(filter_type: int, line: bytes, above: bytes) -> bytes:
+            out = bytearray([filter_type])
+            for i, value in enumerate(line):
+                a = line[i - 4] if i >= 4 else 0
+                b = above[i]
+                c = above[i - 4] if i >= 4 else 0
+                predictor = [0, a, b, (a + b) // 2, paeth(a, b, c)][filter_type]
+                out.append((value - predictor) & 0xFF)
+            return bytes(out)
+
+        for filter_type in range(5):
+            rows, above = [], bytes(width * 4)
+            for line in image:
+                rows.append(filtered(filter_type, line, above))
+                above = line
+            data = _png.PNG_MAGIC + _ihdr(width, height) + _idat(rows) + _iend()
+            img = _png.read_png(data)
+            for y in range(height):
+                for x in range(width):
+                    self.assertEqual(
+                        bytes(img.pixel(x, y)), image[y][x * 4 : x * 4 + 4],
+                        f"filter {filter_type} at ({x}, {y})",
+                    )
 
     def test_wrong_raw_data_length_too_short(self):
         # Compress fewer bytes than a 1×1 RGBA image requires.

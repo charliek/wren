@@ -14,9 +14,9 @@ just the editor scenes: the Markdown tour, the headings note, the long list
 items, and all three again with the browser columns folded so the editor is
 wider than its column. `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
-scenes, writing `board-flow.svg` beside them; the last of them select, drag
-a marquee, arm a tool, open a label and make an empty board, through the
-harness's `board.*` requests.
+scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
+them; the last of them select, drag a marquee, arm a tool, open a label and
+make an empty board, through the harness's `board.*` requests.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -272,6 +272,11 @@ def board_scenes(client, shot_here, out: Path) -> None:
     svg.unlink(missing_ok=True)
     client.call("board.export", {"format": "svg", "path": str(svg)})
     print(svg)
+    # Beside the window's own `board-flow.png`, which it must not replace.
+    png = out / "board-flow-export.png"
+    png.unlink(missing_ok=True)
+    client.call("board.export", {"format": "png", "path": str(png)})
+    print(png)
     # The kind icon, with the notes list holding the keyboard.
     client.call("column.open", {"column": "notes"})
     shot_here("board-notes-list")

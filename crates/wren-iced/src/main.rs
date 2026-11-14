@@ -1,4 +1,5 @@
 mod app;
+mod board_export;
 mod chrome;
 mod cli;
 mod drag;

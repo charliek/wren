@@ -4,10 +4,7 @@
 //! asks [`App::surface`].
 
 use std::collections::HashMap;
-use std::ffi::OsString;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use iced::Task;
@@ -21,6 +18,7 @@ use super::columns::Column;
 use super::commands::{Disposition, Gateway};
 use super::workspace::WarningKind;
 use super::{App, Message};
+use crate::board_export::{self, Format};
 use crate::fonts;
 
 /// What shows the open note. Only this surface may write its draft.
@@ -295,12 +293,14 @@ pub(super) struct BoardDid {
     pub failed: Option<String>,
 }
 
-/// An SVG export of the open board, made when it was asked for and kept
-/// until its save dialog says where it goes.
+/// An export of the open board, its SVG made when it was asked for and
+/// kept until its save dialog says where it goes. A PNG export renders that
+/// SVG once it has somewhere to go.
 pub(super) struct Export {
     /// The correlation of the action that asked for it, which its
     /// completion reports as.
     tag: u64,
+    format: Format,
     svg: String,
 }
 
@@ -317,23 +317,28 @@ pub(super) fn svg_document(view: &BoardView) -> String {
     )
 }
 
-/// Why an export may not be written to `path`, if it may not, with the
-/// open workspace at `workspace`. An export never replaces a note, here or
-/// in another workspace, and inside the open workspace it is only ever an
-/// SVG file, so the state Wren keeps there is never replaced either. Those
-/// files are written through the Session, which keeps a copy of what a
-/// write replaces; an export does not.
-pub(super) fn export_refusal(path: &Path, workspace: Option<&Path>) -> Option<String> {
+/// Why an export in `format` may not be written to `path`, if it may not,
+/// with the open workspace at `workspace`. An export never replaces a note,
+/// here or in another workspace, and inside the open workspace it is only
+/// ever a file of its format's extension, so the state Wren keeps there is
+/// never replaced either. Those files are written through the Session,
+/// which keeps a copy of what a write replaces; an export does not.
+pub(super) fn export_refusal(
+    path: &Path,
+    workspace: Option<&Path>,
+    format: Format,
+) -> Option<String> {
+    let extension = format.extension();
     let name = path.file_name()?;
     if NoteKind::from_name(name).is_some() {
         return Some(format!(
-            "Did not export the board over {}: it is a note. Choose a name ending in .svg",
+            "Did not export the board over {}: it is a note. Choose a name ending in .{extension}",
             path.display()
         ));
     }
-    let svg = path
+    let own = path
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+        .is_some_and(|found| found.eq_ignore_ascii_case(extension));
     let inside = || {
         let (Some(parent), Some(root)) = (path.parent(), workspace) else {
             return false;
@@ -344,54 +349,18 @@ pub(super) fn export_refusal(path: &Path, workspace: Option<&Path>) -> Option<St
         };
         parent.starts_with(root)
     };
-    (!svg && inside()).then(|| {
+    (!own && inside()).then(|| {
         format!(
-            "Did not export the board to {}: inside the workspace an export is an .svg file",
+            "Did not export the board to {}: inside the workspace an export is an .{extension} file",
             path.display()
         )
     })
 }
 
-/// Write `contents` to `path` whole or not at all: into a new file beside
-/// it, renamed over it once written. Returns the bytes written.
-pub(super) fn write_export(path: &Path, contents: &str) -> std::io::Result<u64> {
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the path names no file")
-    })?;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = OsString::from(".");
-    temporary.push(name);
-    temporary.push(format!(
-        ".{}-{}.tmp",
-        std::process::id(),
-        SERIAL.fetch_add(1, Ordering::Relaxed)
-    ));
-    let temporary = parent.join(temporary);
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .and_then(|mut file| {
-            file.write_all(contents.as_bytes())?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&temporary, path));
-    if written.is_err() {
-        // The write's own error is the one to report; the half-written
-        // file is removed if it was made.
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written.map(|()| contents.len() as u64)
-}
-
 impl App {
-    /// `note.export_svg`: make the open board's SVG now, as it is drawn,
-    /// and ask where to save it.
-    pub(super) fn export_board(&mut self) -> Gateway {
+    /// `note.export_svg` and `note.export_png`: make the open board's SVG
+    /// now, as it is drawn, and ask where to save it.
+    pub(super) fn export_board(&mut self, format: Format) -> Gateway {
         let Some(view) = &self.board else {
             return self.blocked("The open note is not shown as a board");
         };
@@ -405,16 +374,17 @@ impl App {
             .map_or_else(|| "Board".to_owned(), |note| note.title.clone());
         self.palette = None;
         let tag = self.action_serial.wrapping_add(1);
-        self.board_export = Some(Export { tag, svg });
+        self.board_export = Some(Export { tag, format, svg });
+        let extension = format.extension();
         self.finish_action(
             Disposition::AsyncPending,
             None,
             Task::perform(
                 async move {
                     rfd::AsyncFileDialog::new()
-                        .set_title("Export board as SVG")
-                        .set_file_name(format!("{name}.svg"))
-                        .add_filter("SVG image", &["svg"])
+                        .set_title(format!("Export board as {}", format.name()))
+                        .set_file_name(format!("{name}.{extension}"))
+                        .add_filter(format!("{} image", format.name()), &[extension])
                         .save_file()
                         .await
                         .map(|file| file.path().to_path_buf())
@@ -432,7 +402,7 @@ impl App {
         };
         let mut outcome = match path {
             None => self.finish_action(Disposition::Completed, None, Task::none()),
-            Some(path) => match self.export_to(&path, &export.svg) {
+            Some(path) => match self.export_to(&path, export.format, &export.svg) {
                 Ok(_) => self.finish_action(Disposition::Completed, None, Task::none()),
                 Err(warning) => {
                     self.banner = Some(warning.clone());
@@ -446,26 +416,38 @@ impl App {
         outcome
     }
 
-    /// Write an export's `svg` to `path`, unless [`export_refusal`] says
-    /// no. Returns the bytes written, or the warning to show.
-    fn export_to(&self, path: &Path, svg: &str) -> Result<u64, String> {
+    /// Write an export's `svg` to `path` in `format`, unless
+    /// [`export_refusal`] says no. Returns the bytes written, or the
+    /// warning to show.
+    fn export_to(&self, path: &Path, format: Format, svg: &str) -> Result<u64, String> {
         let workspace = self.model().map(|model| model.root.as_path());
-        if let Some(refusal) = export_refusal(path, workspace) {
+        if let Some(refusal) = export_refusal(path, workspace, format) {
             return Err(refusal);
         }
-        write_export(path, svg)
-            .map_err(|error| format!("Could not export the board to {}: {error}", path.display()))
+        let failed = |error: &dyn std::fmt::Display| {
+            format!("Could not export the board to {}: {error}", path.display())
+        };
+        let png;
+        let contents = match format {
+            Format::Svg => svg.as_bytes(),
+            Format::Png => {
+                png = board_export::png(svg, board_export::PNG_SCALE)
+                    .map_err(|error| failed(&error))?;
+                &png
+            }
+        };
+        board_export::write(path, contents).map_err(|error| failed(&error))
     }
 
-    /// Write the open board's SVG to `path` as the command does once its
-    /// dialog closes, for the test harness, which has no dialog.
+    /// Write the open board to `path` in `format` as the command does once
+    /// its dialog closes, for the test harness, which has no dialog.
     #[cfg(feature = "smoke-test")]
-    pub(super) fn write_board_svg(&self, path: &Path) -> Result<u64, String> {
+    pub(super) fn write_board_export(&self, path: &Path, format: Format) -> Result<u64, String> {
         let view = self
             .board
             .as_ref()
             .ok_or("The open note is not shown as a board")?;
-        self.export_to(path, &svg_document(view))
+        self.export_to(path, format, &svg_document(view))
     }
 }
 
@@ -2016,56 +1998,64 @@ z = "c"
         );
     }
 
-    /// The export command's row in the Commands palette, if it is listed.
-    fn export_row(app: &mut App) -> Option<bool> {
+    /// The two export commands' rows in the Commands palette, SVG then
+    /// PNG, each `None` when it is not listed.
+    fn export_rows(app: &mut App) -> [Option<bool>; 2] {
         let _ = app.open_palette(super::super::palette::Mode::Commands);
-        let row = app
-            .palette
-            .as_ref()
-            .unwrap()
-            .results
-            .iter()
-            .find(|row| row.title == "Export board as SVG…")
-            .map(|row| row.enabled);
+        let row = |app: &App, title: &str| {
+            app.palette
+                .as_ref()
+                .unwrap()
+                .results
+                .iter()
+                .find(|row| row.title == title)
+                .map(|row| row.enabled)
+        };
+        let rows = [
+            row(app, "Export board as SVG…"),
+            row(app, "Export board as PNG…"),
+        ];
         let _ = app.close_palette();
-        row
+        rows
     }
 
     #[test]
-    fn export_svg_is_enabled_on_a_board_and_listed_only_with_the_setting_on() {
+    fn export_is_enabled_on_a_board_and_listed_only_with_the_setting_on() {
         let (_directory, mut app) = fixture();
-        let enabled = |app: &App| app.command_enabled(CommandId::ExportSvg);
-        assert_eq!(
-            CommandId::parse("note.export_svg"),
-            Some(CommandId::ExportSvg)
-        );
-        assert_eq!(
-            CommandId::ExportSvg.scope(),
-            super::super::commands::Scope::App
-        );
-        assert!(CommandId::ExportSvg.boards());
-        assert!(!enabled(&app));
-        assert_eq!(export_row(&mut app), Some(false));
+        let exports = [CommandId::ExportSvg, CommandId::ExportPng];
+        let enabled = |app: &App| exports.map(|id| app.command_enabled(id));
+        for (id, key) in exports
+            .into_iter()
+            .zip(["note.export_svg", "note.export_png"])
+        {
+            assert_eq!(CommandId::parse(key), Some(id));
+            assert_eq!(id.scope(), super::super::commands::Scope::App);
+            assert!(id.boards());
+        }
+        assert_eq!(enabled(&app), [false; 2]);
+        assert_eq!(export_rows(&mut app), [Some(false); 2]);
         open_markdown(&mut app, "Note");
-        assert!(!enabled(&app));
+        assert_eq!(enabled(&app), [false; 2]);
         open_board(&mut app, "Broken");
         assert_eq!(app.surface(), Surface::Raw);
-        assert!(!enabled(&app));
+        assert_eq!(enabled(&app), [false; 2]);
         open_board(&mut app, "Flow");
-        assert!(enabled(&app));
-        assert_eq!(export_row(&mut app), Some(true));
+        assert_eq!(enabled(&app), [true; 2]);
+        assert_eq!(export_rows(&mut app), [Some(true); 2]);
         // Only the board's own commands are held back by the setting.
         for definition in super::super::commands::definitions() {
             assert_eq!(
                 definition.id.boards(),
-                matches!(definition.id, CommandId::ExportSvg | CommandId::NewBoard)
-                    || definition.scope == super::super::commands::Scope::Board,
+                matches!(
+                    definition.id,
+                    CommandId::ExportSvg | CommandId::ExportPng | CommandId::NewBoard
+                ) || definition.scope == super::super::commands::Scope::Board,
                 "{}",
                 definition.key
             );
         }
 
-        // With the setting off it is listed nowhere and runs nowhere.
+        // With the setting off they are listed nowhere and run nowhere.
         let directory = crate::test_support::tempdir();
         std::fs::create_dir_all(directory.path().join(GROUP)).unwrap();
         std::fs::write(directory.path().join(GROUP).join("Note.md"), "note").unwrap();
@@ -2073,9 +2063,11 @@ z = "c"
         off.preferences.boards = false;
         let note = off.model().unwrap().notes[0].id;
         let _ = off.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
-        assert_eq!(export_row(&mut off), None);
-        let outcome = off.dispatch(Command::Run(CommandId::ExportSvg));
-        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        assert_eq!(export_rows(&mut off), [None; 2]);
+        for id in exports {
+            let outcome = off.dispatch(Command::Run(id));
+            assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        }
     }
 
     fn files_in(directory: &Path) -> Vec<String> {
@@ -2106,7 +2098,7 @@ z = "c"
         // One dialog at a time.
         assert!(!app.command_enabled(CommandId::ExportSvg));
         assert_eq!(
-            app.export_board().processed.disposition,
+            app.export_board(Format::Svg).processed.disposition,
             Disposition::Blocked
         );
 
@@ -2162,6 +2154,137 @@ z = "c"
         tick_to(&mut app, 2);
         assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
         assert_eq!((std::fs::read(&flow).unwrap(), modified(&flow)), before);
+    }
+
+    /// `note.export_png` renders the SVG the board was drawn as when the
+    /// command ran: twice the size of the SVG, on the canvas colour.
+    #[test]
+    fn a_png_export_renders_the_board_as_it_was_drawn() {
+        use resvg::tiny_skia::Pixmap;
+
+        let (directory, mut app) = fixture();
+        let flow = file(&directory, "Flow.wren-board");
+        let before = (std::fs::read(&flow).unwrap(), modified(&flow));
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        let view = app.board.as_ref().unwrap();
+        let drawn = svg_document(view);
+        let canvas = view.palette().canvas;
+        let bounds = view.scene().bounds;
+        let fill = view
+            .scene()
+            .items
+            .iter()
+            .find_map(|item| match &item.draw {
+                wren_board::scene::Draw::Path { fill: Some(fill), .. }
+                    if matches!(&item.source, wren_board::scene::Source::Node(id) if id.as_str() == "receive") =>
+                {
+                    Some(*fill)
+                }
+                _ => None,
+            })
+            .expect("the shape is filled");
+
+        let asked = app.dispatch(Command::Run(CommandId::ExportPng));
+        assert_eq!(asked.processed.disposition, Disposition::AsyncPending);
+        let tag = app.board_export.as_ref().unwrap().tag;
+        // One dialog at a time, whatever its format.
+        assert!(!app.command_enabled(CommandId::ExportPng));
+        assert!(!app.command_enabled(CommandId::ExportSvg));
+        let other = if app.definition == definitions::LIGHT {
+            definitions::DARK
+        } else {
+            definitions::LIGHT
+        };
+        let _ = app.update(Message::ChooseTheme(Some(other)));
+
+        let out = crate::test_support::tempdir();
+        let target = out.path().join("Flow.png");
+        let done = app.board_export_chosen(tag, Some(target.clone()));
+        assert_eq!(done.processed.disposition, Disposition::Completed);
+        assert_eq!(done.processed.correlation, tag);
+        let written = std::fs::read(&target).unwrap();
+        assert_eq!(
+            written,
+            board_export::png(&drawn, board_export::PNG_SCALE).unwrap()
+        );
+        assert_eq!(files_in(out.path()), ["Flow.png"]);
+        assert!(app.board_export.is_none());
+
+        let image = Pixmap::decode_png(&written).unwrap();
+        let margin = wren_canvas::FIT_MARGIN;
+        let (width, height) = (bounds.width + 2.0 * margin, bounds.height + 2.0 * margin);
+        assert_eq!(
+            (image.width(), image.height()),
+            ((width * 2.0).ceil() as u32, (height * 2.0).ceil() as u32)
+        );
+        let pixel = |x: f32, y: f32| {
+            let column = ((x - bounds.x + margin) * image.width() as f32 / width) as u32;
+            let row = ((y - bounds.y + margin) * image.height() as f32 / height) as u32;
+            let color = image.pixel(column, row).unwrap().demultiply();
+            [color.red(), color.green(), color.blue(), color.alpha()]
+        };
+        assert_eq!(
+            pixel(bounds.x - margin / 2.0, bounds.y - margin / 2.0),
+            [canvas.r, canvas.g, canvas.b, 255],
+            "the canvas of the theme it was asked in"
+        );
+        // Inside the shape, left of its label.
+        assert_eq!(pixel(4.0, 30.0), [fill.r, fill.g, fill.b, 255]);
+
+        // Inside the workspace a PNG export is a .png file.
+        let _ = app.dispatch(Command::Run(CommandId::ExportPng));
+        let tag = app.board_export.as_ref().unwrap().tag;
+        let refused = app.board_export_chosen(tag, Some(file(&directory, "Flow.svg")));
+        assert_eq!(refused.processed.disposition, Disposition::Blocked);
+        let banner = app.banner.take().unwrap();
+        assert!(
+            banner.ends_with("inside the workspace an export is an .png file"),
+            "{banner}"
+        );
+        assert!(!file(&directory, "Flow.svg").exists());
+        let _ = app.dispatch(Command::Run(CommandId::ExportPng));
+        let tag = app.board_export.as_ref().unwrap().tag;
+        let inside = file(&directory, "Flow.PNG");
+        let done = app.board_export_chosen(tag, Some(inside.clone()));
+        assert_eq!(done.processed.disposition, Disposition::Completed);
+        assert!(Pixmap::decode_png(&std::fs::read(&inside).unwrap()).is_ok());
+
+        // Exporting writes nothing into the board.
+        tick_to(&mut app, 2);
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+        assert_eq!((std::fs::read(&flow).unwrap(), modified(&flow)), before);
+    }
+
+    /// A board too large for a PNG export is a banner, and nothing is
+    /// written.
+    #[test]
+    fn a_png_export_over_the_pixel_limit_writes_nothing() {
+        let (directory, mut app) = fixture();
+        std::fs::write(
+            file(&directory, "Flow.wren-board"),
+            format!("{FLOW}\n[node.far]\nkind = \"shape\"\nat = [6000, 6000]\nsize = [120, 60]\n"),
+        )
+        .unwrap();
+        let _ = app.apply_core(Op::Reconcile).unwrap();
+        open_board(&mut app, "Flow");
+        let _ = app.dispatch(Command::Run(CommandId::ExportPng));
+        let tag = app.board_export.as_ref().unwrap().tag;
+        let out = crate::test_support::tempdir();
+        let outcome = app.board_export_chosen(tag, Some(out.path().join("Flow.png")));
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        let banner = app.banner.clone().unwrap();
+        assert!(
+            banner.starts_with("Could not export the board to "),
+            "{banner}"
+        );
+        assert!(banner.contains("over the 64 megapixels"), "{banner}");
+        assert!(files_in(out.path()).is_empty());
+        // The SVG of the same board has no such limit.
+        let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
+        let tag = app.board_export.as_ref().unwrap().tag;
+        let outcome = app.board_export_chosen(tag, Some(out.path().join("Flow.svg")));
+        assert_eq!(outcome.processed.disposition, Disposition::Completed);
     }
 
     #[test]

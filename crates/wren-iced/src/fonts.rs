@@ -43,6 +43,9 @@ const CURATED: &[&str] = &[
     "Monaco",
 ];
 
+/// How many of [`FACES`], from the first, are Inter's.
+pub const INTER_FACES: usize = 4;
+
 pub const FACES: &[&[u8]] = &[
     include_bytes!("../../../third_party/inter/Inter-Regular.ttf"),
     include_bytes!("../../../third_party/inter/Inter-Medium.ttf"),
