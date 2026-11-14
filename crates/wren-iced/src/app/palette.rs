@@ -1146,10 +1146,12 @@ impl App {
         let width = if outline { 460.0 } else { PALETTE_WIDTH };
         // The outline previews headings in the editor, so it sits beside the
         // text: over the browser columns when they are wide enough, else at
-        // the right, away from where lines start.
+        // the right, away from where lines start. The jump palette centres
+        // its element in the board, to the right of the browser columns, so
+        // at the left it covers that middle on any window it fits beside.
         let align = if !outline {
             iced::alignment::Horizontal::Center
-        } else if self.browser_width() >= width + 32.0 {
+        } else if palette.mode == Mode::BoardNodes || self.browser_width() >= width + 32.0 {
             iced::alignment::Horizontal::Left
         } else {
             iced::alignment::Horizontal::Right
