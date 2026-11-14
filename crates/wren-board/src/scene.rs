@@ -39,8 +39,10 @@ pub const CAPTION_INSET: f32 = 4.0;
 /// from its other end, ending in a cross stroke this long.
 pub const STUB_LENGTH: f32 = 24.0;
 pub const STUB_CROSS: f32 = 8.0;
-/// The diameter of the dot marking a flagged element.
+/// The diameter of the dot marking a flagged element, and the width of the
+/// canvas-coloured ring around it.
 pub const MARKER_SIZE: f32 = 6.0;
+pub const MARKER_RING: f32 = 1.5;
 /// Resolved coordinates and sizes are drawn within this range, which `f32`
 /// holds exactly; the stored values are untouched.
 pub const COORDINATE_LIMIT: i64 = 1 << 24;
@@ -1155,11 +1157,20 @@ impl<'b> Painter<'_, 'b> {
     }
 
     /// The dot marking a flagged element, centred on its top-left corner.
+    /// A ring in the canvas colour sets it off from whatever it lies on,
+    /// since the issue colour can be close to a hue (a red solid fill).
     fn marker(&mut self, source: Source, corner: Point) {
-        let half = MARKER_SIZE / 2.0;
-        let bounds = Rect::new(corner.x - half, corner.y - half, MARKER_SIZE, MARKER_SIZE);
-        let dot = shape::outline(Shape::Ellipse, bounds);
-        self.path(&source, dot, Some(self.palette.issue), None, bounds);
+        let across = MARKER_SIZE + MARKER_RING;
+        let half = across / 2.0;
+        let ring = Rect::new(corner.x - half, corner.y - half, across, across);
+        let dot = shape::outline(Shape::Ellipse, ring);
+        let stroke = Stroke {
+            color: self.palette.canvas,
+            width: MARKER_RING,
+            dash: None,
+        };
+        let bounds = grow(ring, MARKER_RING / 2.0);
+        self.path(&source, dot, Some(self.palette.issue), Some(stroke), bounds);
     }
 }
 
@@ -1544,9 +1555,9 @@ node f text in 82.5,40 35x20 Regular 14 #202428
 node m path in 299.25,-0.75 101.5x51.5 stroke #808890 1.5 dash 6,4: M 300,0 L 400,0 L 400,50 L 300,50 Z
 node m text in 325.5,15 49x20 Regular 14 #202428
   325.5,15 w 49 \"No kind\"
-node m path in 297,-3 6x6 fill #d02020:";
+node m path in 295.5,-4.5 9x9 fill #d02020 stroke #ffffff 1.5:";
         assert!(
-            dump.starts_with(&format!("bounds -0.75,-3 401.5x103.75\n{want}")),
+            dump.starts_with(&format!("bounds -0.75,-4.5 401.5x105.25\n{want}")),
             "{dump}"
         );
     }
@@ -1563,11 +1574,11 @@ node m path in 297,-3 6x6 fill #d02020:";
 edge out path in 99.25,20.25 25.5x9.5 stroke #d02020 1.5: M 100,25 L 124,25 M 124,29 L 124,21
 edge in path in 45.25,-24.75 9.5x25.5 stroke #d02020 1.5: M 50,0 L 50,-24 M 54,-24 L 46,-24
 edge free path in 499.25,495.25 25.5x9.5 stroke #d02020 1.5: M 500,500 L 524,500 M 524,504 L 524,496
-edge free path in 496.25,492.25 6x6 fill #d02020:";
+edge free path in 494.75,490.75 9x9 fill #d02020 stroke #ffffff 1.5:";
         assert!(dump.contains(want), "{dump}");
         for marker in [
-            "edge in path in 42.25,-27.75 6x6",
-            "edge out path in 96.25,17.25 6x6",
+            "edge in path in 40.75,-29.25 9x9",
+            "edge out path in 94.75,15.75 9x9",
         ] {
             assert!(dump.contains(marker), "{marker}\n{dump}");
         }
@@ -1587,8 +1598,11 @@ edge free path in 496.25,492.25 6x6 fill #d02020:";
             .iter()
             .rev()
             .take_while(|item| {
-                matches!(item.draw, Draw::Path { fill: Some(c), stroke: None, .. } if c == LIGHT.issue)
-                    && item.bounds.width == MARKER_SIZE
+                matches!(
+                    item.draw,
+                    Draw::Path { fill: Some(c), stroke: Some(ring), .. }
+                        if c == LIGHT.issue && ring.color == LIGHT.canvas && ring.width == MARKER_RING
+                ) && item.bounds.width == MARKER_SIZE + 2.0 * MARKER_RING
             })
             .collect();
         let mut flagged: Vec<&Source> = issues.iter().map(|i| &i.element).collect();
