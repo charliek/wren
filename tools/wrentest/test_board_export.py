@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import re
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -20,13 +21,13 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, GROUP, NOTES, board, board_app, conflict_board, copy_samples, fitted, near, open_note,
-    screenshot, stamp,
+    FLOW, GROUP, NOTES, board, board_app, conflict_board, copy_samples, fitted, grid_board, near,
+    open_note, screenshot, stamp,
 )
-from tools.wrentest.client import RemoteError
+from tools.wrentest.client import Client, RemoteError
 from tools.wrentest.png import PNG, read_png
 from tools.wrentest.test_setup import artifact_directory, binary_path, isolated_environment
-from tools.wrentest.ui import WrenApp
+from tools.wrentest.ui import WrenApp, wait_for
 
 # A pan or zoom step draws no label on the software renderer until the
 # view has been still for 150 ms.
@@ -227,6 +228,76 @@ def test_with_the_setting_off_there_is_no_png_export(samples: Path) -> None:
         open_note(app, NOTES)
         assert export_rows(app) == []
         assert command(app, "note.export_png")["disposition"] == "blocked"
+
+
+def test_the_window_answers_while_a_large_png_export_renders(tmp_path: Path) -> None:
+    """A PNG export renders and writes on a thread of its own: while a
+    board of about 1,450 elements (54 megapixels) is written, the window
+    answers requests at once, the board is still shown, and a second export
+    is refused until the first has finished; the export's own reply comes
+    when the file is written."""
+    work = tmp_path / "work"
+    (work / GROUP).mkdir(parents=True)
+    (work / GROUP / "Large.wren-board").write_text(grid_board(500), encoding="utf-8")
+    out = tmp_path / "large.png"
+    with board_app(work, "board-export-worker") as app:
+        open_note(app, f"{GROUP}/Large.wren-board")
+        wait_for(lambda: board(app)["surface"] == "board", timeout=30, interval=0.05,
+                 description="the board shown")
+        assert board(app)["export"] is None
+        finished: dict = {}
+
+        def export_large() -> None:
+            finished["started"] = started = time.monotonic()
+            try:
+                finished["reply"] = app.client.call(
+                    "board.export", {"format": "png", "path": str(out)}, timeout=120)
+            except Exception as error:  # noqa: BLE001 - reported below
+                finished["error"] = error
+            finished["seconds"] = time.monotonic() - started
+
+        other = Client(app.client.socket_path)
+        other.connect()
+        worker = threading.Thread(target=export_large)
+        try:
+            worker.start()
+            wait_for(lambda: other.call("board.get")["export"] == "writing" or not worker.is_alive(),
+                     timeout=30, interval=0.002, description="the export being written")
+            seen = time.monotonic()
+            answers = []
+            while worker.is_alive() and len(answers) < 20:
+                started = time.monotonic()
+                state = other.call("board.get")
+                answers.append((time.monotonic() - started, state["export"], state["surface"]))
+                if len(answers) == 1:
+                    with pytest.raises(RemoteError, match="is still being written"):
+                        other.call("board.export",
+                                   {"format": "svg", "path": str(tmp_path / "second.svg")})
+                    refused = other.call("command.run", {"id": "note.export_png"})
+                    assert refused["disposition"] == "blocked", refused
+        finally:
+            worker.join(timeout=120)
+            other.close()
+        assert "error" not in finished, finished
+        assert answers and answers[0][1] == "writing", (answers, finished)
+        print(f"export {finished['seconds']:.3f} s; answers while writing: "
+              f"{[round(answer[0], 4) for answer in answers if answer[1] == 'writing']}")
+        writing = [answer for answer in answers if answer[1] == "writing"]
+        assert all(surface == "board" for _, _, surface in writing), answers
+        # The export was seen under way early in its render, and each answer
+        # took a fraction of it: on the UI thread the render held every
+        # request for all of it (§8.5, boards-p3-harden).
+        assert seen - finished["started"] < finished["seconds"] / 2, (seen, finished)
+        assert max(seconds for seconds, _, _ in writing) < finished["seconds"] / 4, (
+            answers, finished)
+        assert finished["reply"]["bytes"] == out.stat().st_size
+        header = out.read_bytes()[:24]
+        # Too large for the harness's decoder: the signature and the size.
+        assert header[:8] == b"\x89PNG\r\n\x1a\n" and header[12:16] == b"IHDR", header
+        assert int.from_bytes(header[16:20], "big") > 10_000, header
+        assert not (tmp_path / "second.svg").exists()
+        assert board(app)["export"] is None
+        assert [row["enabled"] for row in export_rows(app)] == [True]
 
 
 def wren_export(home: Path, *args: str | Path) -> subprocess.CompletedProcess[bytes]:

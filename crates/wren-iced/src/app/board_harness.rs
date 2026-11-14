@@ -159,6 +159,7 @@ impl App {
             "revision": null,
             "counts": null,
             "patch": null,
+            "export": self.export_state(),
         });
         let Some(view) = &self.board else {
             return snapshot;

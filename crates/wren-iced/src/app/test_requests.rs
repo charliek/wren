@@ -329,8 +329,7 @@ impl App {
                 if !path.is_absolute() {
                     return Err("path must be absolute".into());
                 }
-                let bytes = self.write_board_export(&path, format)?;
-                request.respond(Ok(json!({"path": path, "bytes": bytes})));
+                return self.request_board_export(path, format, request);
             }
             "focus.get" => {
                 let request = Arc::clone(request);
@@ -1370,6 +1369,7 @@ mod tests {
         let export = |app: &mut App, params: Value| {
             let (request, mut reply) = Request::detached("board.export", params);
             let _ = app.handle_test(request);
+            let _ = app.wait_for_export();
             reply.try_recv().unwrap()
         };
         let svg = json!({"format":"svg","path":target});
@@ -1407,6 +1407,21 @@ mod tests {
             .unwrap()
         );
         assert_eq!(reply["bytes"], written.len());
+        // The reply waits for the worker, and no other export starts
+        // until it has finished.
+        let (request, mut first) =
+            Request::detached("board.export", json!({"format":"png","path":png}));
+        let _ = app.handle_test(request);
+        assert!(first.try_recv().is_err(), "answered when written");
+        assert_eq!(app.export_state(), Some("writing"));
+        let (request, mut second) =
+            Request::detached("board.export", json!({"format":"svg","path":target}));
+        let _ = app.handle_test(request);
+        let error = second.try_recv().unwrap().expect_err("a second export");
+        assert!(error.contains("is still being written"), "{error}");
+        let _ = app.wait_for_export();
+        assert_eq!(first.try_recv().unwrap().unwrap()["bytes"], written.len());
+        assert_eq!(app.export_state(), None);
         let missing = json!({"format":"svg","path":out.path().join("no/such/Flow.svg")});
         let error = export(&mut app, missing).expect_err("an unwritable path");
         assert!(
