@@ -587,9 +587,11 @@ fn object(out: &mut String, cell: &str, id: &Id, label: &str, extra: &[(&str, &s
 /// A label as the HTML of an `html=1` cell: the text drawn (its first
 /// [`scene::MAX_LABEL_BYTES`]), escaped, each line break a `<br>`, white
 /// space at a line's end dropped as the canvas drops it, and white space
-/// that HTML would collapse kept as no-break spaces: at a line's start, a
-/// run after its first character, and every tab, which is four. A label of
-/// only white space draws nothing.
+/// that HTML would collapse kept as no-break spaces, a tab being four. A
+/// run of white space after a line's first character ends in its one
+/// ordinary space, so a line may break only after the whole run, as the
+/// canvas breaks it and drops the run; a run at a line's start holds no
+/// break. A label of only white space draws nothing.
 fn html(text: &str) -> String {
     let text = scene::drawn_text(text);
     if text.trim().is_empty() {
@@ -601,28 +603,28 @@ fn html(text: &str) -> String {
         if row > 0 {
             out.push_str("<br>");
         }
-        let mut spaced = true;
-        for c in line.trim_end().chars() {
+        let kept: String = line.chars().filter(|&c| c == '\t' || carried(c)).collect();
+        let mut chars = kept.trim_end().chars().peekable();
+        let mut started = false;
+        while let Some(c) = chars.next() {
             match c {
-                ' ' if spaced => out.push_str("&nbsp;"),
-                ' ' => {
-                    out.push(' ');
-                    spaced = true;
-                    continue;
-                }
-                '\t' => {
-                    out.push_str("&nbsp;&nbsp;&nbsp;&nbsp;");
-                    spaced = true;
-                    continue;
+                ' ' | '\t' => {
+                    let wide = if c == '\t' { 4 } else { 1 };
+                    let breaks = started && !matches!(chars.peek(), Some(' ' | '\t'));
+                    for _ in 0..wide - usize::from(breaks) {
+                        out.push_str("&nbsp;");
+                    }
+                    if breaks {
+                        out.push(' ');
+                    }
                 }
                 '&' => out.push_str("&amp;"),
                 '<' => out.push_str("&lt;"),
                 '>' => out.push_str("&gt;"),
                 '"' => out.push_str("&quot;"),
-                c if !carried(c) => continue,
                 c => out.push(c),
             }
-            spaced = c == ' ';
+            started |= !matches!(c, ' ' | '\t');
         }
     }
     out
@@ -872,11 +874,17 @@ pub(crate) mod tests {
             ("<b>not bold</b>", "&lt;b&gt;not bold&lt;/b&gt;"),
             ("two\nlines", "two<br>lines"),
             ("crlf\r\nand\rcr", "crlf<br>and<br>cr"),
+            // A run's one break point is its last space, as the canvas
+            // breaks after a whole run and a tab.
             (
                 "  lead  and   runs  ",
-                "&nbsp;&nbsp;lead &nbsp;and &nbsp;&nbsp;runs",
+                "&nbsp;&nbsp;lead&nbsp; and&nbsp;&nbsp; runs",
             ),
-            ("tab\there", "tab&nbsp;&nbsp;&nbsp;&nbsp;here"),
+            ("alpha     beta", "alpha&nbsp;&nbsp;&nbsp;&nbsp; beta"),
+            ("tab\there", "tab&nbsp;&nbsp;&nbsp; here"),
+            ("a \t b", "a&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; b"),
+            ("\tlead", "&nbsp;&nbsp;&nbsp;&nbsp;lead"),
+            ("a \u{7} b \u{7}", "a&nbsp; b"),
             ("blank\n\nline", "blank<br><br>line"),
             ("a\u{0}b\u{7}c\u{fffe}\u{ffff}d", "abcd"),
             ("no\u{a0}break", "no\u{a0}break"),
