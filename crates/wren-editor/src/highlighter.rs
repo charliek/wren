@@ -775,7 +775,18 @@ impl<'a> Cells<'a> {
         let mut texts = Vec::new();
         let mut covered = 0;
         for (start, close) in pairs {
+            // Only a link's text is prose: an image's `!`, its brackets and
+            // its destination or label are not.
+            let bang = usize::from(start > 0 && bytes[start - 1] == b'!');
             if start < covered {
+                // A link or image inside a link's text, such as a linked
+                // image: excluded the same way, but drawn as the outer
+                // link's text. A pair in the outer link's tail finds its
+                // own tail locked.
+                if let Some(end) = self.link_tail(close + 1) {
+                    self.exclude(start - bang..start + 1);
+                    self.exclude(close..end);
+                }
                 continue;
             }
             let Some(end) = self.link_tail(close + 1) else {
@@ -783,9 +794,6 @@ impl<'a> Cells<'a> {
             };
             covered = end;
             self.mark(start..start + 1, ink);
-            // Only a link's text is prose: an image's `!`, its brackets and
-            // its destination or label are not.
-            let bang = usize::from(start > 0 && bytes[start - 1] == b'!');
             self.exclude(start - bang..start + 1);
             self.exclude(close..end);
             let text = start + 1..close;
@@ -2035,6 +2043,12 @@ mod tests {
             ("[x](https://example.com/a_b_c)", vec!["x"]),
             ("[not a link] here", vec!["[not a link] here"]),
             ("wow! [a](u)", vec!["wow! ", "a"]),
+            // A linked image: only the image's alt text is prose.
+            ("[![alt texxt](img.png)](https://x.io)", vec!["alt texxt"]),
+            ("[![logo](#logoo)](home) end", vec!["logo", " end"]),
+            ("[a ![b](c) d](e)", vec!["a ", "b", " d"]),
+            ("[a [b][r] c](e)", vec!["a ", "b", " c"]),
+            ("[a [not] c](e)", vec!["a [not] c"]),
         ] {
             assert_eq!(line_prose(line), prose, "{line:?}");
         }
