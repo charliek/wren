@@ -19,6 +19,7 @@ mod highlighter;
 mod history;
 mod keys;
 mod plain;
+mod proof;
 mod widget;
 
 #[cfg(test)]
@@ -36,6 +37,9 @@ use iced::{Color, Element, Font};
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
 pub use keys::{KeyPolicy, KeyRoute};
+#[cfg(feature = "test-support")]
+pub use proof::{DrawnMark, SpellFrame};
+pub use proof::{Proofreader, SpellEvent, SpellMenu};
 pub use widget::Measure;
 pub use wren_markdown::Intent;
 
@@ -70,6 +74,25 @@ pub struct Style {
     pub caret: Color,
     /// The line through completed tasks and struck text.
     pub strike: Color,
+    /// The zigzag under a misspelled word.
+    pub misspelling: Color,
+    /// The suggestions menu.
+    pub menu: MenuStyle,
+}
+
+/// Colours and type of the suggestions menu. The editor knows no UI font of
+/// its own, so the host supplies it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuStyle {
+    pub background: Color,
+    pub border: Color,
+    /// The fill behind the selected row.
+    pub selected: Color,
+    pub text: Color,
+    /// The inactive "No suggestions" row.
+    pub muted: Color,
+    pub font: Font,
+    pub text_size: f32,
 }
 
 /// Colours of the Markdown syntax highlighting.
@@ -115,6 +138,8 @@ pub enum Message {
     /// An editing key that depends on the text around the cursor: Enter,
     /// Tab, Backspace, Home, and the like. See [`EditorView::intent`].
     Intent(Intent),
+    /// The suggestions menu. See [`EditorView::spell`].
+    Spell(SpellEvent),
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +729,47 @@ impl EditorView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
+    }
+
+    // -----------------------------------------------------------------------
+    // Spell check
+    // -----------------------------------------------------------------------
+
+    /// The host's proofreader, or `None` to check nothing. Only the owned
+    /// engine uses it.
+    pub fn set_proofreader(&mut self, _proofreader: Option<Arc<dyn Proofreader>>) {}
+
+    /// Carry out a suggestions-menu event. Returns whether the text changed,
+    /// as [`EditorView::perform`] does.
+    pub fn spell(&mut self, _event: SpellEvent) -> bool {
+        false
+    }
+
+    /// The open suggestions menu, if any.
+    pub fn spell_menu(&self) -> Option<&SpellMenu> {
+        None
+    }
+
+    /// Close the suggestions menu. Returns whether one was open.
+    pub fn close_spell_menu(&mut self) -> bool {
+        false
+    }
+
+    /// The marks and the menu as the last frame drew them.
+    #[cfg(feature = "test-support")]
+    pub fn spell_frame(&self) -> SpellFrame {
+        SpellFrame::default()
+    }
+
+    /// The editor's own key routing run on one press, without a window: the
+    /// message the focused editor would produce for `key` with `modifiers`.
+    #[cfg(feature = "test-support")]
+    pub fn key_message(
+        &self,
+        _key: iced::keyboard::Key,
+        _modifiers: iced::keyboard::Modifiers,
+    ) -> Option<Message> {
+        None
     }
 
     // -----------------------------------------------------------------------

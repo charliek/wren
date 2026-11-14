@@ -34,6 +34,16 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
         code_block: color(c.code_block),
         caret: color(c.accent),
         strike: color(c.faint),
+        misspelling: color(c.danger),
+        menu: wren_editor::MenuStyle {
+            background: color(c.raised),
+            border: color(c.dialog_border),
+            selected: color(c.selected),
+            text: color(c.text),
+            muted: color(c.muted),
+            font: crate::fonts::UI,
+            text_size: 13.0,
+        },
     };
     let palette = wren_editor::Palette {
         text: color(c.text),

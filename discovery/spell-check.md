@@ -68,7 +68,7 @@ The contract commit (§6.1 step 0) lands these as declared types and stub bodies
 
 ```rust
 // crates/wren-spell/src/lib.rs
-pub enum Error { /* a dictionary that does not parse; a word list that cannot be read */ }
+pub enum Error { Dictionary(String), WordList(String) }          // Display + std::error::Error
 /// One place words come from: a dictionary, the user's list, later a system checker.
 pub trait WordSource: Send + Sync {
     /// Whether this source knows `word` as correctly spelled.
@@ -109,15 +109,16 @@ pub trait Proofreader: Send + Sync {
 /// `OpenAt` is relative to the text origin, as a click action's position is.
 pub enum SpellEvent { OpenAtCaret, OpenAt(Point), Move(i32), Hover(usize), Accept(usize), Close }
 pub struct SpellMenu { /* line, mark, word, items, selected; read through accessors */ }
+// line() -> usize, mark() -> Range<usize>, word() -> &str, items() -> &[String], selected() -> Option<usize>
 ```
 
 Changes to existing editor types:
 - `highlighter::LineDecor` (`highlighter.rs:165`) gains `prose: Vec<Range<usize>>`, the checkable byte ranges of the line (§4.1).
 - `Message` (`lib.rs:106`) gains `Spell(SpellEvent)`.
 - `KeyRoute` (`keys.rs:13`) gains `Suggest`: a host-bound request for corrections at the caret, carried out as `Message::Spell(SpellEvent::OpenAtCaret)`.
-- `Style` (`lib.rs:56`) gains `misspelling: Color` and `menu: MenuStyle { background, border, selected, text, muted, font, text_size }`. The editor knows no UI font of its own. Its two constructors outside the editor are `crates/wren-iced/src/theme.rs:27` and `crates/wren-editor/src/fixtures.rs:14`.
+- `Style` (`lib.rs:56`) gains `misspelling: Color` and `menu: MenuStyle { background, border, selected, text, muted, font, text_size }` (five `Color`s, a `Font` and an `f32`; `Copy`, so `Style` stays `Copy`). The editor knows no UI font of its own. Its two constructors outside the editor are `crates/wren-iced/src/theme.rs:27` and `crates/wren-editor/src/fixtures.rs:14`.
 - `EditorView` gains `set_proofreader(Option<Arc<dyn Proofreader>>)`, `spell(&mut self, SpellEvent) -> bool` (true only when the text changed, as `perform` reports, `lib.rs:292`), `spell_menu() -> Option<&SpellMenu>` and `close_spell_menu() -> bool` (true when one was open).
-- Behind `test-support`: `spell_frame()`, the marks and the menu as the last frame drew them (§5.2), and `key_message(key, modifiers) -> Option<Message>`, the editor's own key routing run on one press without a window.
+- Behind `test-support`: `spell_frame() -> SpellFrame`, the marks and the menu as the last frame drew them (§5.2): `SpellFrame { marks: Vec<DrawnMark>, menu: Option<Rectangle> }` and `DrawnMark { line, range, shown, rects: Vec<Rectangle> }`, all public fields, rectangles in window coordinates (the menu's word, items and selection come from `spell_menu()`); and `key_message(key: Key, modifiers: Modifiers) -> Option<Message>`, the editor's own key routing run on one press without a window.
 
 In `wren-iced`, `App::edit` (the one place that matches `wren_editor::Message`) gets a `Spell` arm, and `CommandId` gets `editor_route() -> Option<KeyRoute>` in place of the assumption that an editor command is an `Intent` (§3.4).
 
@@ -520,6 +521,17 @@ Deviations:
 2. *`NOTICES` also names `spellbook`*, its version, the MPL-2.0 and where its source is, as decision 2.1.1 asks and MPL-2.0 §3.2(a) requires for an executable. `tools/package.py` keeps the version in `SPELLBOOK_VERSION` and the release in `SCOWL_RELEASE`; the unit test ties the first to the `Cargo.toml` pin and `Cargo.lock`.
 3. *`wren-spell` is in `[workspace.dependencies]` already*, so `spell-wire` adds it to `wren-iced` without touching the root `Cargo.toml` (it still changes `Cargo.lock`, in Stage B).
 4. Until W1 links `wren-spell` into `wren-iced`, `NOTICES` says the executable embeds a dictionary it does not yet hold. Harmless on an unreleased branch.
+
+*Item 3, the contract commit.* §3.2 compiled as written; what it left open was decided as below and written back into §3.2.
+
+1. *`Error` carries `String` reasons* (`Dictionary`, `WordList`), so `spellbook`'s types stay out of the public surface; it implements `Display` and `std::error::Error`.
+2. *The `wren-spell` types are declared without fields* (`#[non_exhaustive]`, so no other crate can build one): their representation is `spell-core`'s to choose. The stubs build no dictionary; `en_us` and `from_text` return `Ok`, sources accept nothing, and `Speller` finds and suggests nothing.
+3. *`spell_frame()` returns `SpellFrame`*, a test-support type §3.2 did not name; see the bullet there. `DrawnMark.range` is the word's byte range, from which the host reports `start`, `end` and `word` (§5.2).
+4. *`key_message` takes no physical key*, as §3.2 writes it. The editor's routing reads `Key::to_latin(physical)`; `spell-menu` can pass an unidentified physical key, which falls back to the key's own character.
+5. *`KeyRoute::Suggest` is already routed* in `keys::key_binding` to `Message::Spell(SpellEvent::OpenAtCaret)`, the variant's documented meaning, so the match stays exhaustive. Nothing returns the route yet, and the host drops it while an input method composes (§3.4).
+6. *`App::edit`'s `Spell` arm returns `false`* without calling `EditorView::spell`, as step 0 says; W1 gives it its body.
+7. *`CommandId::editor_route()` is not in the contract commit*: step 0 touches `wren-iced` only where the build needs it, and W2 adds the method with the route.
+8. *The theme mapping already holds §3.4's values*: `danger` for the zigzag; `raised`, `dialog_border`, `selected`, `text` and `muted` for the menu; the UI font (`fonts::UI`) at 13 px, the palette's row size, since the plan names no size. W3 owns any change.
 
 #### `spell-core`
 

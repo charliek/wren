@@ -7,7 +7,7 @@ use iced::advanced::graphics::text::font_system;
 use iced::{Color, Font};
 
 use crate::highlighter::Settings;
-use crate::{Palette, Style};
+use crate::{MenuStyle, Palette, Style};
 
 pub const FONT: Font = Font::with_name("JetBrains Mono");
 
@@ -21,6 +21,16 @@ pub const STYLE: Style = Style {
     code_block: Color::from_rgb8(0x18, 0x1b, 0x21),
     caret: Color::from_rgb8(0xf0, 0xb4, 0x5a),
     strike: Color::from_rgb8(0x8a, 0x91, 0x9c),
+    misspelling: Color::from_rgb8(0xe0, 0x6c, 0x6c),
+    menu: MenuStyle {
+        background: Color::from_rgb8(0x1d, 0x21, 0x28),
+        border: Color::from_rgb8(0x33, 0x3a, 0x46),
+        selected: Color::from_rgb8(0x2a, 0x31, 0x40),
+        text: Color::from_rgb8(0xe6, 0xe8, 0xec),
+        muted: Color::from_rgb8(0xa3, 0xaa, 0xb5),
+        font: FONT,
+        text_size: 13.0,
+    },
 };
 
 pub const DARK: Palette = Palette {

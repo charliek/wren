@@ -100,6 +100,7 @@ clippy:
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo clippy --workspace --all-targets --locked --features smoke-test -- -D warnings
 	cargo clippy -p wren-editor --all-targets --locked -- -D warnings
+	cargo clippy -p wren-spell --all-targets --locked -- -D warnings
 
 check: fmt-check clippy test test-python check-patches
 

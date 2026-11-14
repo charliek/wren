@@ -173,6 +173,9 @@ pub struct LineDecor {
     /// container prefix, so a list item's rows line up under its content
     /// and a quote's under the text after `>`.
     pub hang: usize,
+    /// The byte ranges spell check reads: sorted, apart, non-empty, and on
+    /// character boundaries.
+    pub prose: Vec<Range<usize>>,
 }
 
 // ---------------------------------------------------------------------------

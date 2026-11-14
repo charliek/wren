@@ -6,7 +6,7 @@ use iced::keyboard::key::{self, Named};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text_editor::{self, Binding, KeyPress, Motion};
 
-use crate::{Intent, Message};
+use crate::{Intent, Message, SpellEvent};
 
 /// Where the host sends a key press that reaches the focused editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +16,9 @@ pub enum KeyRoute {
     Host,
     /// A host-bound editor command, carried out as [`Message::Intent`].
     Intent(Intent),
+    /// A host-bound request for corrections at the caret, carried out as
+    /// [`Message::Spell`] with [`SpellEvent::OpenAtCaret`].
+    Suggest,
     /// Not the host's: the editor handles the key itself.
     Pass,
 }
@@ -83,6 +86,9 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         // An editor command never edits the text under an open preedit.
         KeyRoute::Intent(_) if context.composing => return None,
         KeyRoute::Intent(wanted) => return Some(intent(wanted)),
+        KeyRoute::Suggest => {
+            return Some(Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret)));
+        }
         KeyRoute::Pass => {}
     }
 

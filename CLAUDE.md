@@ -19,7 +19,8 @@ when one lands, move what users need into `docs/` and trim the note.
   (built-in palettes).
 - `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
   types so it can be extracted later. It must not depend on `wren-core` or
-  know app messages; the host passes in a `Style`, a `Palette`, and the font.
+  `wren-spell`, or know app messages; the host passes in a `Style`, a
+  `Palette`, the font, and spell check's `Proofreader`.
   `lib.rs` holds `EditorView` and `Message`; `widget.rs` is a fork of iced's
   text editor with the gutter, current line, and caret; `backend/` holds
   the two text engines behind `Content` (`iced.rs`, iced's own editor, and
@@ -28,7 +29,8 @@ when one lands, move what users need into `docs/` and trim the note.
   endings their breaks take), `plain.rs` (the keys' plain plans while
   Markdown assist is off), `highlighter.rs` (spans and per-line
   decorations from `wren_markdown::block`), `history.rs` (snapshot
-  undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
+  undo), `find.rs`, `keys.rs` (the editor's own shortcuts), and
+  `proof.rs` (the `Proofreader` trait and the suggestions menu). Test-only
   accessors sit behind its `test-support` feature, which
   `wren-iced/smoke-test` enables.
 - `crates/wren-iced/`: the desktop app (binary `wren`).
@@ -49,6 +51,11 @@ when one lands, move what users need into `docs/` and trim the note.
   editing `Intent` as an `EditPlan` of replacements. `block` is Wren's one
   classifier: the editor's highlighter and the search index's previews use
   it.
+- `crates/wren-spell/`: spell checking, with no iced or Wren dependency
+  (only `spellbook` and `unicode-segmentation`), so it can be extracted
+  later. A `Speller` asks its `WordSource`s in order: a `Hunspell`
+  dictionary (the bundled SCOWL `en_US` in `dict/`, described by
+  `dict/SOURCE.md`) and the user's `WordList`.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
 - `vendor/`: patched copies of crates.io crates (`cosmic-text`, `iced_winit`,
