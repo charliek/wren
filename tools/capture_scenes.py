@@ -459,6 +459,19 @@ def board_arrange_scenes(client, shot_here, open_board) -> None:
     client.call("board.key", {"key": "escape", "mods": []})
     shot_here("board-stacking")
 
+    # §5.17: a right-click on Pack opens the actions palette on its shape,
+    # the current value; the highlight moved to blue previews it on the
+    # board, which nothing has written.
+    open_board("Checkout flow", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "right", "mods": [],
+                                  "at": {"node": "3qrg4kv1"}})
+    modal = client.call("navigation.get")["modal"]
+    keys = [row["key"]["command"] for row in modal["results"]]
+    client.call("palette.step",
+                {"delta": keys.index("board.color.blue") - modal["active_index"]})
+    shot_here("board-actions")
+    client.call("palette.close")
+
 
 # The colour tokens in the order of their keys, 0 to 7.
 BOARD_COLORS = ("neutral", "red", "orange", "yellow", "green", "cyan", "purple", "blue")

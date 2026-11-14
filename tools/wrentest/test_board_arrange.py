@@ -1,11 +1,14 @@
 """Arranging a board: stacking, align and distribute (discovery/boards.md
-§5.16 rules 2 and 3, §7.4 items AR1 to AR3).
+§5.16 rules 2 and 3, §7.4 items AR1 to AR3), and the actions palette
+(§5.17, item AR4).
 
 Each case flushes, keeps the bytes, acts, flushes again and reads the line
 diff: a restack changes only the moved elements' `z` lines, and align and
 distribute only `at` lines. The keys go in through `board.key`, the
 widget's own seam; align and distribute have no default key and run as the
-palette runs them, through `command.run`.
+palette runs them, through `command.run`. The actions palette opens with
+`/` and with a right-click, through `board.pointer` and, in the X11 lane,
+through xdotool.
 """
 
 from __future__ import annotations
@@ -17,14 +20,19 @@ import pytest
 
 from tools.wrentest.boards import (
     FLOW, OVERLAP, board, board_app, bounds, click, copy_samples, fitted, flushed, inside, key,
-    line_diff, near, open_note, screenshot, type_text,
+    line_diff, near, open_note, pointer, screenshot, type_text, wheel,
 )
+from tools.wrentest.test_board_native import native_board
 from tools.wrentest.test_board_view import REST, wait_focus
+from tools.wrentest.test_editor import xdo
+from tools.wrentest.test_gestures import move, point_in
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp
+from tools.wrentest.ui import WrenApp, wait_for
 
 # Checkout flow's elements.
 START, RECEIVE, PACK, BACKORDER = "ahj860xh", "12axfsny", "3qrg4kv1", "7kfsgr04"
+# The connector from Start to Receive order.
+START_RECEIVE = "4x2tte9d"
 
 
 # A point of Overlap's back shape that no other shape covers.
@@ -165,3 +173,209 @@ def test_a_bracket_typed_in_a_label_is_text(samples: Path) -> None:
         flushed(app)
         diff = line_diff(original, flow.read_bytes())
         assert diff and all(line[2:].startswith("text = ") for line in diff), diff
+
+
+def modal(app: WrenApp) -> dict | None:
+    return app.client.call("navigation.get")["modal"]
+
+
+def actions_open(app: WrenApp) -> bool:
+    shown = modal(app)
+    return shown is not None and shown["mode"] == "board_actions"
+
+
+def open_actions(app: WrenApp) -> dict:
+    """`/` on the focused board: the actions palette for the selection."""
+    assert key(app, "/")["handled"]
+    assert actions_open(app)
+    return modal(app)
+
+
+def close_actions(app: WrenApp) -> None:
+    """Escape, as the palette's input passes it on, and the keyboard back
+    on the board."""
+    app.client.call("key.nav", {"key": "escape"})
+    assert modal(app) is None
+    wait_focus(app, ["note-editor"])
+
+
+def listing(shown: dict) -> list[tuple[str, str]]:
+    return [(row["group"], row["key"]["command"]) for row in shown["results"]]
+
+
+def groups(shown: dict) -> list[str]:
+    seen: list[str] = []
+    for group, _ in listing(shown):
+        if not seen or seen[-1] != group:
+            seen.append(group)
+    return seen
+
+
+def current(shown: dict) -> list[str]:
+    return [row["key"]["command"] for row in shown["results"] if row["current"]]
+
+
+def test_the_actions_palette_lists_the_commands_the_selection_takes(samples: Path) -> None:
+    """§5.17 rule 3 for nothing selected, one node, one connector and a
+    mixed selection: only the commands the selection takes, grouped, with
+    the selection's own values current and the first of them highlighted.
+    Listing writes nothing."""
+    flow = samples / FLOW
+    with board_app(samples, "board-actions-listing") as app:
+        ready(app, FLOW)
+        original = flow.read_bytes()
+
+        shown = open_actions(app)
+        assert listing(shown) == [
+            ("Board", "board.paste"), ("Board", "board.select.all"),
+            ("Board", "board.zoom.fit"), ("Board", "note.export_svg"),
+        ]
+        close_actions(app)
+
+        click(app, {"node": START})
+        shown = open_actions(app)
+        assert groups(shown) == ["Shape", "Colour", "Fill", "Stroke", "Arrange", "Edit"]
+        assert current(shown) == ["board.shape.pill", "board.color.neutral", "board.fill.tint"]
+        assert shown["active_key"] == {"command": "board.shape.pill"}
+        rows = {row["key"]["command"]: row for row in shown["results"]}
+        assert rows["board.color.red"]["shortcut"] == "1"
+        assert [command for group, command in listing(shown) if group == "Edit"] == [
+            "board.label.edit", "board.duplicate", "board.copy", "board.cut", "board.delete",
+        ]
+        close_actions(app)
+
+        click(app, {"edge": START_RECEIVE})
+        shown = open_actions(app)
+        assert groups(shown) == ["Colour", "Stroke", "Connector", "Arrange", "Edit"]
+        assert current(shown) == ["board.color.neutral"]
+        close_actions(app)
+
+        for node in (START, RECEIVE, PACK):
+            click(app, {"node": node}, mods=("shift",))
+        shown = open_actions(app)
+        assert groups(shown) == [
+            "Shape", "Colour", "Fill", "Stroke", "Connector", "Arrange", "Align", "Distribute",
+            "Edit",
+        ]
+        # Start is a pill and the others rectangles: no shape is current.
+        assert current(shown) == ["board.color.neutral", "board.fill.tint"]
+        assert shown["active_key"] == {"command": "board.color.neutral"}
+        # `/` and `]` typed into the palette are its query.
+        typed = app.client.call("palette.query", {"query": "/]"})["navigation"]["modal"]
+        assert typed["query"] == "/]" and typed["mode"] == "board_actions"
+        close_actions(app)
+        flushed(app)
+        assert flow.read_bytes() == original and not dirty(app)
+        assert board(app)["revision"] == 0
+
+
+def test_a_right_click_previews_and_only_enter_writes(samples: Path) -> None:
+    """§5.17 rules 2 and 4 through `board.pointer`: a right-click selects
+    what it is on and opens the palette; a highlighted colour is drawn on
+    the board and never written; Escape takes it away; Enter writes the one
+    changed line, which undo takes back."""
+    flow = samples / FLOW
+    artifacts = artifact_directory("board-actions-preview")
+    with board_app(samples, "board-actions-preview") as app:
+        ready(app, FLOW)
+        original = flow.read_bytes()
+        # Pack alone, at 100 % in the middle of the board, clear of the
+        # palette, which sits over the browser columns.
+        click(app, {"node": PACK})
+        assert app.client.call("command.run", {"id": "board.zoom.selection"})["disposition"] \
+            == "completed"
+        click(app, {"node": START})
+        placed = {node["id"]: node for node in bounds(app)["nodes"]}
+        box = placed[PACK]["bounds"]
+        point = (box["x"] + 12, box["y"] + box["height"] / 2)
+
+        def pixel(name: str) -> tuple[int, ...]:
+            time.sleep(REST)
+            image = screenshot(app, artifacts / f"{name}.png")
+            scale = bounds(app)["scale_factor"]
+            return image.pixel(round(point[0] * scale), round(point[1] * scale))
+
+        state = pointer(app, "click", {"node": PACK}, button="right")
+        assert state["selection"] == [PACK] and actions_open(app), state
+        assert board(app)["patch"] is None
+        opened = pixel("opened")
+
+        shown = app.client.call("palette.query", {"query": "colour: red"})["navigation"]["modal"]
+        assert shown["active_key"] == {"command": "board.color.red"}
+        assert board(app)["patch"] == "board.color.red"
+        previewed = pixel("previewed")
+        assert not near(previewed, opened, 8), (previewed, opened)
+        flushed(app)
+        assert flow.read_bytes() == original and not dirty(app)
+
+        # The current colour shows the board as it is.
+        app.client.call("palette.query", {"query": "colour: neutral"})
+        assert board(app)["patch"] is None
+        assert near(pixel("current"), opened, 2)
+
+        app.client.call("palette.query", {"query": "colour: red"})
+        close_actions(app)
+        state = board(app)
+        assert state["patch"] is None and state["revision"] == 0 and not state["can_undo"]
+        flushed(app)
+        assert flow.read_bytes() == original and not dirty(app)
+
+        # On a selected element the selection stays; Enter applies.
+        pointer(app, "click", {"node": PACK}, button="right")
+        app.client.call("palette.query", {"query": "colour: red"})
+        app.client.call("key.nav", {"key": "enter"})
+        assert modal(app) is None
+        wait_focus(app, ["note-editor"])
+        state = board(app)
+        assert state["revision"] == 1 and state["patch"] is None, state
+        flushed(app)
+        assert line_diff(original, flow.read_bytes()) == ['+ style.color = "red"']
+        key(app, "z", "mod")
+        flushed(app)
+        assert flow.read_bytes() == original and not dirty(app)
+
+        # On empty canvas the selection clears, and the palette offers what
+        # needs none.
+        state = pointer(app, "click", {"canvas": [-2000, -2000]}, button="right")
+        assert state["selection"] == [] and actions_open(app), state
+        assert listing(modal(app))[0] == ("Board", "board.paste")
+        close_actions(app)
+
+
+@pytest.mark.native_x11
+def test_native_right_click_opens_the_actions_on_the_element_under_the_pointer(
+    samples: Path,
+) -> None:
+    """A real right-click (§5.17 rule 2) selects the element under the
+    pointer and opens the palette with the keyboard in its input, where `/`
+    and `]` type; after a pan it still finds the element under it."""
+    flow = samples / FLOW
+    with board_app(samples, "board-actions-native") as app:
+        window, placed = native_board(app, FLOW)
+        wait_focus(app, ["note-editor"])
+        original = flow.read_bytes()
+
+        def right_click(node: str) -> None:
+            where = {each["id"]: each for each in bounds(app)["nodes"]}[node]
+            move(window, point_in(where["visible"]))
+            xdo("click", "3")
+            wait_for(lambda: actions_open(app), timeout=5, interval=0.025,
+                     description="the actions palette opened")
+            assert board(app)["selection"] == [node]
+
+        right_click(PACK)
+        wait_focus(app, ["palette-query"])
+        xdo("type", "/]")
+        wait_for(lambda: modal(app)["query"] == "/]", timeout=5, interval=0.025,
+                 description="the palette took the text")
+        close_actions(app)
+
+        # After a pan and a zoom the element under the pointer is the one
+        # drawn there.
+        wheel(app, {"node": RECEIVE}, -3)
+        wheel(app, {"node": RECEIVE}, 2, mods=("mod",))
+        time.sleep(REST)
+        right_click(RECEIVE)
+        close_actions(app)
+        flushed(app)
+        assert flow.read_bytes() == original and board(app)["revision"] == 0
