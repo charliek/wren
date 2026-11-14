@@ -555,6 +555,14 @@ Deviations:
 5. *Rule 4.3.3's apostrophes are `'` and `’`*, and "has focus" is the widget's keyboard focus, whatever the window's.
 6. *The zigzag's pixels are whole window pixels*: `L`, `R` and the top are rounded after adding the text origin, so the squares stay on the grid wherever the editor sits.
 
+*Fix step.* Deviations:
+1. *A link or image inside a link's text is excluded but not restyled.* In `[![alt](img.png)](u)` only `alt` is prose: the inner image's `!`, brackets and destination are excluded as an outer link's are, while their colours and locks stay as the outer link's text, so the line looks as before (a digest of every span, strike, chip, hang and code flag over 30,000 generated bracket-heavy documents is unchanged; their prose changes).
+2. *Rule 4.3.3's "nothing is selected" is read from the cursor*: the cursor has no selection anchor. The caret's on-screen position plays no part, so a mark on a wrapped word stays hidden on its visible rows while the caret's row is scrolled out of view. A selection whose anchor equals the caret still hides nothing, as before.
+
+Review: 0 blockers, 1 major, 1 minor.
+Fixed: the major in `a3fe7a2` (a linked image's `!`, brackets and destination were prose), the minor in `30d54fe` (a caret on a row out of view did not hide its wrapped word's mark), each with a regression test.
+Not fixed: nothing.
+
 #### `spell-menu`
 
 #### `spell-wire`
