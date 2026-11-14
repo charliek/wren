@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use iced::keyboard::key::Physical;
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
 use wren_core::keybind::{self, Accel, Keymap, Layer, Platform};
@@ -101,9 +102,46 @@ pub(super) fn board_policy(keymap: &Keymap) -> wren_canvas::KeyPolicy {
         }
         // Bare keys are board triggers, so read the press as `accel` does,
         // not as `shortcut`, which drops them.
-        crate::keys::accel(key, physical, modifiers).map_or(BoardRoute::Pass, |trigger| {
-            board_route(&keymap, &trigger, repeat)
-        })
+        let Some(trigger) = crate::keys::accel(key, physical, modifiers) else {
+            return BoardRoute::Pass;
+        };
+        let route = board_route(&keymap, &trigger, repeat);
+        match digit_row(&keymap, &trigger, physical) {
+            Some(fallback) => match board_route(&keymap, &fallback, repeat) {
+                // The app reads the typed character, not this fallback.
+                BoardRoute::Host => route,
+                found => found,
+            },
+            None => route,
+        }
+    })
+}
+
+/// The press of a digit-row key read as its digit, when the character it
+/// typed is bound in neither layer (§5.1 rule 7). `accel` names an
+/// unshifted key by the character typed, so on AZERTY the 1 key is `&`.
+fn digit_row(keymap: &Keymap, trigger: &Accel, physical: Physical) -> Option<Accel> {
+    use iced::keyboard::key::Code;
+    let Physical::Code(code) = physical else {
+        return None;
+    };
+    let digit = match code {
+        Code::Digit0 => "0",
+        Code::Digit1 => "1",
+        Code::Digit2 => "2",
+        Code::Digit3 => "3",
+        Code::Digit4 => "4",
+        Code::Digit5 => "5",
+        Code::Digit6 => "6",
+        Code::Digit7 => "7",
+        Code::Digit8 => "8",
+        Code::Digit9 => "9",
+        _ => return None,
+    };
+    let unbound = keymap.action(trigger).is_none() && keymap.board_action(trigger).is_none();
+    (unbound && trigger.key != digit).then(|| Accel {
+        mods: trigger.mods,
+        key: digit.to_owned(),
     })
 }
 
@@ -464,7 +502,8 @@ impl App {
             self.preview = preview;
             self.apply_shown();
         }
-        Task::batch([self.sync_outline(), self.sync_board_nodes()])
+        let actions = self.sync_actions();
+        Task::batch([self.sync_outline(), self.sync_board_nodes(), actions])
     }
 
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
@@ -946,6 +985,82 @@ mod tests {
             policy(
                 &Key::Named(Named::Tab),
                 Physical::Code(Code::Tab),
+                Modifiers::empty(),
+                true
+            ),
+            BoardRoute::Pass
+        );
+    }
+
+    /// §5.1 rule 7: on AZERTY the unshifted digit row types `&`, `"`, `'`,
+    /// `(` and `-`, which no binding names, so the key reads as its digit;
+    /// a character a binding does name keeps its own meaning.
+    #[test]
+    fn the_digit_row_falls_back_to_the_physical_key_when_the_character_is_unbound() {
+        use iced::keyboard::key::{Code, Physical};
+        use iced::keyboard::{Key, Modifiers};
+        use wren_board::Token;
+        use wren_canvas::Command as C;
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let (p, _) = modifiers();
+        std::fs::write(&path, format!("keybind = {p}+1 = board.color.blue\n")).unwrap();
+        let preferences = Preferences::load(Some(path));
+        assert!(
+            preferences.settings.warnings.is_empty(),
+            "{:?}",
+            preferences.settings.warnings
+        );
+        let policy = board_policy(&preferences.keymap);
+        let press = |c: &str, code, modifiers| {
+            policy(
+                &Key::Character(c.into()),
+                Physical::Code(code),
+                modifiers,
+                false,
+            )
+        };
+        for (typed, code, token) in [
+            ("&", Code::Digit1, Token::Red),
+            ("\"", Code::Digit3, Token::Yellow),
+            ("'", Code::Digit4, Token::Green),
+            ("(", Code::Digit5, Token::Cyan),
+            ("-", Code::Digit6, Token::Purple),
+            // Non-Latin text already reads the physical key.
+            ("é", Code::Digit2, Token::Orange),
+            ("1", Code::Digit1, Token::Red),
+        ] {
+            assert_eq!(
+                press(typed, code, Modifiers::empty()),
+                BoardRoute::Command(C::Color(token)),
+                "{typed}"
+            );
+        }
+        // The fallback keeps the modifiers: a user's chord on the digit.
+        let chord = match Platform::current() {
+            Platform::Mac => Modifiers::LOGO,
+            Platform::Linux => Modifiers::ALT,
+        };
+        assert_eq!(
+            press("&", Code::Digit1, chord),
+            BoardRoute::Command(C::Color(Token::Blue))
+        );
+        // A digit key that types a bound character is that character's,
+        // and a key off the digit row has no fallback.
+        assert_eq!(
+            press("/", Code::Digit7, Modifiers::empty()),
+            BoardRoute::Command(C::Actions)
+        );
+        assert_eq!(press("&", Code::KeyQ, Modifiers::empty()), BoardRoute::Pass);
+        assert_eq!(
+            press("_", Code::Digit8, Modifiers::empty()),
+            BoardRoute::Pass
+        );
+        // A held digit does one thing.
+        assert_eq!(
+            policy(
+                &Key::Character("&".into()),
+                Physical::Code(Code::Digit1),
                 Modifiers::empty(),
                 true
             ),

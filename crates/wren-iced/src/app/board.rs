@@ -209,8 +209,16 @@ impl App {
                         }));
                     }
                 }
-                // The view moved itself, and the two palettes are Phase 3's.
-                Effect::Look(_) | Effect::OpenActions | Effect::OpenJump => {}
+                // A right-click: the actions palette for the selection it
+                // made, opened as `board.actions` opens it (§5.17 rule 2).
+                Effect::OpenActions => {
+                    let id = super::commands::CommandId::Board(wren_canvas::Command::Actions);
+                    let opened = self.dispatch(super::commands::Command::Run(id));
+                    tasks.push(opened.task);
+                }
+                // The view moved itself, and the jump palette is the find
+                // chain's.
+                Effect::Look(_) | Effect::OpenJump => {}
             }
         }
         did.task = Task::batch(tasks);
@@ -1668,7 +1676,8 @@ z = "c"
         let is_board = |id: CommandId| id.board_command().is_some();
 
         open_board(&mut app, "Flow");
-        // With one node selected every board command is enabled.
+        // With one node selected every board command is enabled but align
+        // and distribute, which need more.
         let _ = app.dispatch(Command::Run(CommandId::Board(
             wren_canvas::Command::Select(wren_board::Dir::Down),
         )));
@@ -1676,7 +1685,11 @@ z = "c"
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
         assert_eq!(listed.len(), 89);
-        assert!(listed.iter().all(|(_, _, enabled)| *enabled));
+        for (_, id, enabled) in &listed {
+            let more =
+                id.key().starts_with("board.align.") || id.key().starts_with("board.distribute.");
+            assert_eq!(*enabled, !more, "{id:?}");
+        }
         let groups: Vec<_> = rows.iter().map(|(group, ..)| *group).collect();
         let board = groups.iter().position(|group| *group == "Board").unwrap();
         assert!(groups[..board].iter().all(|group| *group == "This note"));
@@ -1714,6 +1727,47 @@ z = "c"
         assert!(command_rows(&mut app).iter().all(|(_, id, _)| !id.boards()));
     }
 
+    /// A node inside another selected one moves with it and is not counted
+    /// toward the two that align needs or the three of distribute.
+    #[test]
+    fn align_and_distribute_count_a_container_and_its_child_once() {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join(GROUP);
+        std::fs::create_dir_all(&group).unwrap();
+        let nested = "schema = 1\n\n[node.box]\nkind = \"shape\"\nat = [0, 0]\nsize = [200, 200]\nz = \"a\"\n\n\
+                      [node.k]\nkind = \"shape\"\nat = [20, 20]\nparent = \"box\"\nsize = [40, 40]\nz = \"a\"\n";
+        let third = "\n[node.c]\nkind = \"shape\"\nat = [400, 0]\nsize = [40, 40]\nz = \"b\"\n";
+        std::fs::write(group.join("Nested.wren-board"), nested).unwrap();
+        std::fs::write(group.join("Three.wren-board"), format!("{nested}{third}")).unwrap();
+        let mut app = app_at(directory.path());
+        let select_all = Command::Run(CommandId::Board(wren_canvas::Command::SelectAll));
+        let arranging = |app: &App| {
+            board_ids()
+                .filter(|id| {
+                    let key = id.key();
+                    key.starts_with("board.align.") || key.starts_with("board.distribute.")
+                })
+                .filter(|id| app.command_enabled(*id))
+                .map(CommandId::key)
+                .collect::<Vec<_>>()
+        };
+
+        open_board(&mut app, "Nested");
+        let _ = app.dispatch(select_all.clone());
+        assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 2);
+        assert!(arranging(&app).is_empty(), "{:?}", arranging(&app));
+
+        open_board(&mut app, "Three");
+        let _ = app.dispatch(select_all);
+        assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 3);
+        let on = arranging(&app);
+        assert_eq!(on.len(), 6, "{on:?}");
+        assert!(
+            on.iter().all(|key| key.starts_with("board.align.")),
+            "{on:?}"
+        );
+    }
+
     #[test]
     fn board_commands_need_a_board_and_a_writable_one_to_change_it() {
         let (directory, mut app) = fixture();
@@ -1738,8 +1792,11 @@ z = "c"
                 || key.starts_with("board.connect.") && key != "board.connect.next"
                 || key.starts_with("board.select.connector_")
         };
-        let needs_a_node =
-            |key: &str| matches!(key, "board.copy" | "board.cut" | "board.duplicate");
+        let needs_more =
+            |key: &str| key.starts_with("board.align.") || key.starts_with("board.distribute.");
+        let needs_a_node = |key: &str| {
+            matches!(key, "board.copy" | "board.cut" | "board.duplicate") || needs_more(key)
+        };
         for id in board_ids() {
             let key = id.key();
             assert_eq!(
@@ -1748,16 +1805,21 @@ z = "c"
                 "{key}"
             );
         }
-        // One node selected: every board command.
+        // One node selected: every board command but align and distribute.
         let _ = app.dispatch(walk.clone());
         assert_eq!(app.board.as_ref().unwrap().machine().selection().len(), 1);
-        assert!(board_ids().all(|id| app.command_enabled(id)));
-        // Several: the commands for one element are off again.
+        for id in board_ids() {
+            assert_eq!(app.command_enabled(id), !needs_more(id.key()), "{id:?}");
+        }
+        // Both nodes and the connector: the commands for one element are
+        // off again, and align is on; distribute needs a third node.
         let _ = app.dispatch(Command::Run(CommandId::Board(
             wren_canvas::Command::SelectAll,
         )));
         for id in board_ids() {
-            assert_eq!(app.command_enabled(id), !needs_one(id.key()), "{id:?}");
+            let key = id.key();
+            let three = key.starts_with("board.distribute.");
+            assert_eq!(app.command_enabled(id), !needs_one(key) && !three, "{id:?}");
         }
         // One connector: no fragment.
         let _ = app.dispatch(Command::Run(CommandId::Board(

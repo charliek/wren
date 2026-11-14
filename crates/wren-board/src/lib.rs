@@ -729,6 +729,53 @@ mod tests {
         assert!(wide_ms <= 250.0, "scene of wide labels: {wide_ms:.2} ms");
     }
 
+    /// §6.7's Phase 3 row for arranging: each command on 1,000 selected
+    /// nodes, every other node of a 2,000-shape grid, planned and applied
+    /// within 50 ms.
+    #[test]
+    #[ignore = "timings; run by make perf-board in release"]
+    fn perf_arrange_a_thousand_selected_nodes() {
+        use edit::{Alignment, Axis, Intent, Stack};
+        let board = parse(&grid_board(2_000)).unwrap();
+        let picked: Vec<Id> = (0..2_000)
+            .step_by(2)
+            .map(|i| Id::new(&format!("n{i}")).unwrap())
+            .collect();
+        let sources: Vec<scene::Source> = picked.iter().cloned().map(scene::Source::Node).collect();
+        let intents = [
+            Intent::Restack {
+                ids: sources.clone(),
+                to: Stack::Front,
+            },
+            Intent::Restack {
+                ids: sources.clone(),
+                to: Stack::Backward,
+            },
+            Intent::Align {
+                ids: picked.clone(),
+                to: Alignment::Center,
+            },
+            Intent::Distribute {
+                ids: picked.clone(),
+                axis: Axis::Vertical,
+            },
+        ];
+        for intent in intents {
+            let mut changed = 0;
+            let ms = median_ms(9, || {
+                let plan = edit::plan(&board, &intent, &mut ids::Seeded::new(1));
+                let mut after = board.clone();
+                after.apply(&plan.changes);
+                changed = plan.changes.len();
+            });
+            let name = format!("{intent:?}");
+            let name = &name[..name.find(' ').unwrap_or(name.len())];
+            println!("{name} of 1000 selected nodes: {ms:.2} ms, {changed} changes");
+            assert!(changed > 0, "{name}");
+            assert!(ms <= 50.0, "{name}: {ms:.2} ms");
+        }
+    }
+
     /// What a change costs once a scene cache holds the build before, at
     /// 1,000 shapes on the grid and on the three boards whose every
     /// connector spends its routing budget: each step of a drag of `n1`
