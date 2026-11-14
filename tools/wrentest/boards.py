@@ -164,11 +164,11 @@ def fitted(app: WrenApp) -> dict:
     """The open board's bounds once its first fit has its widget's size."""
     def ready():
         state = board(app)
-        if state["surface"] != "board" or state["viewport"] is None:
+        # A waiting fit is still at the board's origin, full size, where a
+        # small board already shows whole.
+        if state["surface"] != "board" or state["viewport"] is None or state["fit_pending"]:
             return None
         placed = bounds(app)
-        # Fitted boards sit inside the widget: a waiting fit is still at
-        # the board's origin, full size.
         return placed if all(node["visible"] == node["bounds"] for node in placed["nodes"]) else None
 
     return wait_for(ready, timeout=10, interval=0.05, description="the board fitted")

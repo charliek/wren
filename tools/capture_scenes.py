@@ -260,7 +260,8 @@ def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
 
         def fitted():
             state = client.call("board.get")
-            if state["surface"] != "board":
+            # A small board shows whole from its origin before its first fit.
+            if state["surface"] != "board" or state["fit_pending"]:
                 return False
             placed = client.call("board.bounds")
             return all(node["visible"] == node["bounds"] for node in placed["nodes"])

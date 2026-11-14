@@ -153,6 +153,7 @@ impl App {
             "editing": null,
             "connecting": null,
             "viewport": null,
+            "fit_pending": false,
             "can_undo": false,
             "can_redo": false,
             "pristine": true,
@@ -193,6 +194,7 @@ impl App {
                 "query": seeking.query,
             }))),
             "viewport": {"x": viewport.x, "y": viewport.y, "zoom": viewport.zoom},
+            "fit_pending": view.fit_pending(),
             "can_undo": view.can_undo(),
             "can_redo": view.can_redo(),
             "pristine": view.pristine(),
@@ -1305,8 +1307,16 @@ mod tests {
             .is_some_and(|message| !message.is_empty()));
 
         boards::open_board(&mut app, "Flow");
+        // The first fit waits for the widget's size, at the board's origin.
+        let waiting = get(&mut app, json!({}));
+        assert_eq!(waiting["fit_pending"], true);
+        assert_eq!(
+            waiting["viewport"],
+            json!({"x": 0.0, "y": 0.0, "zoom": 1.0})
+        );
         lay_out(&mut app);
         let board = get(&mut app, json!({}));
+        assert_eq!(board["fit_pending"], false);
         assert_eq!(board["surface"], "board");
         assert_eq!(board["error"], Value::Null);
         assert_eq!(board["counts"], json!({"nodes": 2, "edges": 1}));
