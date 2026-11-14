@@ -729,13 +729,6 @@ impl<'a> TextEditor<'a> {
                         if !matches!(binding, Binding::Unfocus) {
                             shell.capture_event();
                         }
-                        // The host opens nothing without a word at the
-                        // caret, and the later keys of this batch must then
-                        // reach the text.
-                        let opens_nothing = matches!(
-                            binding,
-                            Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret))
-                        ) && !self.misspelling_at_caret(state);
                         apply_binding(
                             binding,
                             self.content,
@@ -744,9 +737,6 @@ impl<'a> TextEditor<'a> {
                             shell,
                             &self.menu_now,
                         );
-                        if opens_nothing {
-                            self.menu_now.set(None);
-                        }
                         if let Some(focus) = &mut state.focus {
                             focus.updated_at = Instant::now();
                         }
@@ -863,38 +853,6 @@ impl<'a> TextEditor<'a> {
                 .map(|decor| proof::line_marks(proofreader, text, &decor.prose))
                 .unwrap_or_default()
         })
-    }
-
-    /// Whether a misspelled word contains or touches the caret, as
-    /// [`crate::EditorView::spell`] finds the keyboard's target: from the
-    /// widget's highlighter when it has reached the caret's line, or a fresh
-    /// pass over the lines down to it.
-    fn misspelling_at_caret(&self, state: &State) -> bool {
-        let Some(proofreader) = self
-            .proofreader
-            .filter(|_| self.content.kind() == BackendKind::Owned)
-        else {
-            return false;
-        };
-        let caret = self.content.cursor().position;
-        let highlighter = state.highlighter.borrow();
-        let marks = self.content.with_lines(|lines| {
-            let Some(text) = lines.get(caret.line) else {
-                return Vec::new();
-            };
-            let prose = highlighter.decor(caret.line).map_or_else(
-                || {
-                    crate::highlighter::prose_at(
-                        &lines,
-                        caret.line,
-                        self.highlighter_settings.front_matter_end,
-                    )
-                },
-                |decor| decor.prose.clone(),
-            );
-            proof::line_marks(proofreader, &text.text, &prose)
-        });
-        proof::mark_at_caret(marks, caret.column).is_some()
     }
 
     fn input_method<'b>(&self, state: &'b State, bounds: Rectangle) -> InputMethod<&'b str> {
@@ -3806,10 +3764,13 @@ mod tests {
             spell_events(&messages).as_slice(),
             [SpellEvent::OpenAt(_)]
         ));
-        // The host opens it with the first row selected.
+        // The host resolves the menu's keys against what it opened.
         for (event, expected) in [
-            (named(Named::ArrowDown), SpellEvent::Move(1)),
-            (named(Named::Enter), SpellEvent::AcceptSelected),
+            (
+                named(Named::ArrowDown),
+                SpellEvent::Key(proof::MenuKey::Down),
+            ),
+            (named(Named::Enter), SpellEvent::Key(proof::MenuKey::Enter)),
         ] {
             let (messages, _) = send(&mut editor, &mut state, event, None);
             assert_eq!(spell_events(&messages), [expected]);
@@ -3854,6 +3815,7 @@ mod tests {
     /// frame's events, then carry out what it published as the host does.
     fn one_batch(ev: &mut crate::EditorView, events: Vec<Event>) -> Vec<Message> {
         let policy = suggest_policy();
+        ev.set_key_policy(policy.clone());
         let messages: Vec<Message> = {
             let mut editor = editor_with(&ev.content, true, Measure::default())
                 .key_policy(Some(&policy))
@@ -3888,27 +3850,96 @@ mod tests {
             &mut ev,
             vec![suggest_key(), named(Named::Enter), named(Named::ArrowDown)],
         );
+        // The host, which opened nothing, handles Enter as a plain key, and
+        // Enter leaves no menu either way, so Down is the text's.
         assert!(
             matches!(
                 messages.as_slice(),
                 [
                     Message::Spell(SpellEvent::OpenAtCaret),
-                    Message::Intent(crate::Intent::Enter),
+                    Message::Spell(SpellEvent::Key(proof::MenuKey::Enter)),
                     Message::Action(Action::Move(iced::widget::text_editor::Motion::Down)),
                 ]
             ),
             "{messages:?}"
         );
         assert_eq!(ev.text(), "c\nat teh");
+        assert_eq!(ev.cursor().position, Position { line: 1, column: 0 });
         assert!(ev.spell_menu().is_none());
         // A word at the caret still opens the menu for the keys after it.
         let mut ev = host("cat teh", 7);
         let messages = one_batch(&mut ev, vec![suggest_key(), named(Named::Enter)]);
         assert_eq!(
             spell_events(&messages),
-            [SpellEvent::OpenAtCaret, SpellEvent::AcceptSelected]
+            [
+                SpellEvent::OpenAtCaret,
+                SpellEvent::Key(proof::MenuKey::Enter)
+            ]
         );
         assert_eq!(ev.text(), "cat the");
+    }
+
+    #[test]
+    fn a_suggest_press_after_a_caret_move_in_one_batch_opens_where_the_caret_went() {
+        use keyboard::key::Named;
+        // From the end of `teh` onto `line`, which is spelled right: Enter
+        // breaks the line where the caret went, and nothing is lost.
+        let mut ev = host("another teh line", 11);
+        let messages = one_batch(
+            &mut ev,
+            vec![named(Named::ArrowRight), suggest_key(), named(Named::Enter)],
+        );
+        assert_eq!(
+            spell_events(&messages),
+            [
+                SpellEvent::OpenAtCaret,
+                SpellEvent::Key(proof::MenuKey::Enter)
+            ]
+        );
+        assert_eq!(ev.text(), "another teh \nline");
+        assert_eq!(ev.cursor().position, Position { line: 1, column: 0 });
+        assert!(ev.spell_menu().is_none());
+        // From `line` back to the end of `teh`: Enter accepts the first
+        // suggestion and breaks no line.
+        let mut ev = host("another teh line", 12);
+        one_batch(
+            &mut ev,
+            vec![named(Named::ArrowLeft), suggest_key(), named(Named::Enter)],
+        );
+        assert_eq!(ev.text(), "another the line");
+        assert_eq!(
+            ev.cursor().position,
+            Position {
+                line: 0,
+                column: 11
+            }
+        );
+        assert!(ev.spell_menu().is_none());
+        // Up and Down after the move reach the menu the host opened.
+        let mut ev = host("another teh line", 12);
+        one_batch(
+            &mut ev,
+            vec![
+                named(Named::ArrowLeft),
+                suggest_key(),
+                named(Named::ArrowDown),
+                named(Named::Enter),
+            ],
+        );
+        assert_eq!(ev.text(), "another ten line");
+        // And to the text when it opened nothing.
+        let mut ev = host("another teh line\nnext", 11);
+        one_batch(
+            &mut ev,
+            vec![
+                named(Named::ArrowRight),
+                suggest_key(),
+                named(Named::ArrowDown),
+            ],
+        );
+        assert_eq!(ev.text(), "another teh line\nnext");
+        assert_eq!(ev.cursor().position.line, 1);
+        assert!(ev.spell_menu().is_none());
     }
 
     #[test]

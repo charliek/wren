@@ -39,7 +39,7 @@ pub use edit::Replace;
 pub use keys::{KeyPolicy, KeyRoute};
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
-pub use proof::{Proofreader, SpellEvent, SpellMenu};
+pub use proof::{MenuKey, Proofreader, SpellEvent, SpellMenu};
 pub use widget::Measure;
 pub use wren_markdown::Intent;
 
@@ -800,9 +800,14 @@ impl EditorView {
     /// not; the caret and the selection stay where they are. With no such
     /// word, on the iced engine, or with no proofreader, nothing opens.
     /// Accepting replaces the word through [`EditorView::apply`], so it is
-    /// one undo step and the only event that can return true.
+    /// one undo step. A menu key ([`SpellEvent::Key`]) acts on the open menu,
+    /// or with none open is handled as the editor handles that press, which
+    /// may edit the text too; these two are the events that can return
+    /// true.
     pub fn spell(&mut self, event: SpellEvent) -> bool {
         match event {
+            SpellEvent::Key(key) if self.menu.is_some() => return self.spell(key.event()),
+            SpellEvent::Key(key) => return self.press_without_menu(key),
             SpellEvent::OpenAtCaret => {
                 let caret = self.content.cursor().position;
                 let mark = proof::mark_at_caret(self.marks_at(caret.line), caret.column);
@@ -939,39 +944,10 @@ impl EditorView {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Vec<Message> {
-        use iced::keyboard::key::{Named, NativeCode, Physical};
-        use iced::keyboard::Key;
-
-        let typing = !(modifiers.control()
-            || modifiers.logo()
-            || (modifiers.alt() && !cfg!(target_os = "macos")));
-        let text = match key.as_ref() {
-            Key::Character(c) if typing => Some(c.into()),
-            Key::Named(Named::Space) if typing => Some(" ".into()),
-            Key::Named(Named::Enter) => Some("\r".into()),
-            Key::Named(Named::Tab) => Some("\t".into()),
-            _ => None,
-        };
-        let press = text_editor::KeyPress {
-            modified_key: key.clone(),
-            key,
-            physical_key: Physical::Unidentified(NativeCode::Unidentified),
-            modifiers,
-            text,
-            status: text_editor::Status::Focused { is_hovered: false },
-        };
-        let context = keys::Context {
-            markdown_assist: self.markdown_assist,
-            composing: false,
-            policy: self.key_policy.as_ref(),
-        };
         let menu = self.menu.as_ref().map(proof::OpenMenu::of);
-        let selection = self
-            .content
-            .selection()
-            .is_some_and(|text| !text.is_empty());
+        let selection = self.has_selection();
         let mut out = Vec::new();
-        match keys::route(press, context, menu) {
+        match keys::route(key_press(key, modifiers), self.key_context(), menu) {
             None => {}
             Some(keys::Routed::Binding(binding)) => keys::messages(binding, selection, &mut out),
             Some(keys::Routed::Close(binding)) => {
@@ -982,6 +958,56 @@ impl EditorView {
             }
         }
         out
+    }
+
+    /// Handle a press of `key` as the focused editor does with no menu
+    /// open, carrying out what it publishes. Returns whether the text
+    /// changed.
+    fn press_without_menu(&mut self, key: MenuKey) -> bool {
+        use iced::keyboard::key::Named;
+
+        let named = match key {
+            MenuKey::Up => Named::ArrowUp,
+            MenuKey::Down => Named::ArrowDown,
+            MenuKey::Enter => Named::Enter,
+        };
+        let press = key_press(
+            iced::keyboard::Key::Named(named),
+            iced::keyboard::Modifiers::empty(),
+        );
+        let Some(binding) = keys::key_binding(press, self.key_context()) else {
+            return false;
+        };
+        let mut messages = Vec::new();
+        keys::messages(binding, self.has_selection(), &mut messages);
+        let mut changed = false;
+        for message in messages {
+            changed |= match message {
+                Message::Action(action) => self.perform(action),
+                Message::Intent(intent) => self.intent(intent),
+                Message::Spell(event) => self.spell(event),
+                Message::Undo => self.undo(),
+                Message::Redo => self.redo(),
+                // Only Ctrl or Cmd+F routes to Find, never a plain key.
+                Message::Find => false,
+            };
+        }
+        changed
+    }
+
+    /// What key routing needs from the editor, as no input method composes.
+    fn key_context(&self) -> keys::Context<'_> {
+        keys::Context {
+            markdown_assist: self.markdown_assist,
+            composing: false,
+            policy: self.key_policy.as_ref(),
+        }
+    }
+
+    fn has_selection(&self) -> bool {
+        self.content
+            .selection()
+            .is_some_and(|text| !text.is_empty())
     }
 
     /// The misspellings of `line`, found without the widget: its prose comes
@@ -1222,6 +1248,36 @@ impl EditorView {
 // ---------------------------------------------------------------------------
 // Cursor clamping
 // ---------------------------------------------------------------------------
+
+/// A focused press of `key` with `modifiers`, as a window would deliver it:
+/// its own physical key, and the text it types, which a character types
+/// unless Ctrl or the logo key is held (or Alt, off macOS).
+fn key_press(
+    key: iced::keyboard::Key,
+    modifiers: iced::keyboard::Modifiers,
+) -> text_editor::KeyPress {
+    use iced::keyboard::key::{Named, NativeCode, Physical};
+    use iced::keyboard::Key;
+
+    let typing = !(modifiers.control()
+        || modifiers.logo()
+        || (modifiers.alt() && !cfg!(target_os = "macos")));
+    let text = match key.as_ref() {
+        Key::Character(c) if typing => Some(c.into()),
+        Key::Named(Named::Space) if typing => Some(" ".into()),
+        Key::Named(Named::Enter) => Some("\r".into()),
+        Key::Named(Named::Tab) => Some("\t".into()),
+        _ => None,
+    };
+    text_editor::KeyPress {
+        modified_key: key.clone(),
+        key,
+        physical_key: Physical::Unidentified(NativeCode::Unidentified),
+        modifiers,
+        text,
+        status: text_editor::Status::Focused { is_hovered: false },
+    }
+}
 
 fn markdown_selection(cursor: Cursor) -> wren_markdown::Selection {
     let pos = |at: Position| wren_markdown::Pos::new(at.line, at.column);
