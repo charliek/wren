@@ -39,8 +39,41 @@ impl Speller {
     }
 
     /// Up to `limit` corrections for `word`, best first, without duplicates.
-    pub fn suggestions(&self, _word: &str, _limit: usize) -> Vec<String> {
-        Vec::new()
+    ///
+    /// The sources are asked in order and their corrections kept in that
+    /// order. `word` and its corrections are read with straight apostrophes.
+    /// A correction that is empty, holds a control character such as a line
+    /// break, or is `word` itself is left out. A word that is never checked
+    /// (§4.2 rule 4) gets none, which also bounds what a source is asked.
+    pub fn suggestions(&self, word: &str, limit: usize) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        if limit == 0 || !words::checkable(word) {
+            return found;
+        }
+        let word = words::straight(word);
+        let mut offered = Vec::new();
+        for source in &self.sources {
+            source.suggest(&word, &mut offered);
+            for correction in offered.drain(..) {
+                let correction = if correction.contains('’') {
+                    correction.replace('’', "'")
+                } else {
+                    correction
+                };
+                if correction.is_empty()
+                    || correction.contains(char::is_control)
+                    || correction == *word
+                    || found.contains(&correction)
+                {
+                    continue;
+                }
+                found.push(correction);
+                if found.len() == limit {
+                    return found;
+                }
+            }
+        }
+        found
     }
 
     /// Whether some source accepts `word`, read with straight apostrophes, or
@@ -318,6 +351,150 @@ mod tests {
         );
     }
 
+    /// A source that knows no word and offers the same corrections for any.
+    struct Offers(&'static [&'static str]);
+
+    impl WordSource for Offers {
+        fn accepts(&self, _word: &str) -> bool {
+            false
+        }
+
+        fn suggest(&self, _word: &str, out: &mut Vec<String>) {
+            out.extend(self.0.iter().map(|s| s.to_string()));
+        }
+    }
+
+    /// A source that must not be asked for corrections.
+    struct Unasked;
+
+    impl WordSource for Unasked {
+        fn accepts(&self, _word: &str) -> bool {
+            false
+        }
+
+        fn suggest(&self, word: &str, _out: &mut Vec<String>) {
+            panic!("asked for corrections to {word:?}");
+        }
+    }
+
+    #[test]
+    fn suggestions_stop_at_the_limit() {
+        let speller = Speller::new(vec![Box::new(Offers(&["one", "two", "three"]))]);
+        assert_eq!(speller.suggestions("chek", 2), ["one", "two"]);
+        assert_eq!(speller.suggestions("chek", 3), ["one", "two", "three"]);
+        assert_eq!(speller.suggestions("chek", 9), ["one", "two", "three"]);
+
+        let unasked = Speller::new(vec![Box::new(Unasked)]);
+        assert!(unasked.suggestions("chek", 0).is_empty());
+        let enough = Speller::new(vec![Box::new(Offers(&["one", "two"])), Box::new(Unasked)]);
+        assert_eq!(
+            enough.suggestions("chek", 2),
+            ["one", "two"],
+            "a later source is not asked once the limit is reached"
+        );
+    }
+
+    #[test]
+    fn suggestions_follow_the_sources_in_order() {
+        let speller = Speller::new(vec![
+            Box::new(Offers(&["b1", "b2"])),
+            list("chek"),
+            Box::new(Offers(&["a1", "a2"])),
+        ]);
+        assert_eq!(speller.suggestions("chke", 5), ["b1", "b2", "a1", "a2"]);
+        assert_eq!(speller.suggestions("chke", 3), ["b1", "b2", "a1"]);
+    }
+
+    #[test]
+    fn suggestions_hold_no_duplicates() {
+        let speller = Speller::new(vec![
+            Box::new(Offers(&["check", "cheek", "check", "don’t"])),
+            Box::new(Offers(&["cheek", "Check", "don't", "chef"])),
+        ]);
+        assert_eq!(
+            speller.suggestions("chek", 5),
+            ["check", "cheek", "don't", "Check", "chef"],
+            "the first of each is kept; `’` and `'` are one spelling"
+        );
+    }
+
+    #[test]
+    fn suggestions_leave_out_empty_multi_line_and_identical_corrections() {
+        let speller = Speller::new(vec![Box::new(Offers(&[
+            "",
+            "two\nlines",
+            "carriage\r",
+            "nul\0",
+            "tab\tbed",
+            "chek",
+            "chek’s",
+            "a lot",
+            "check",
+        ]))]);
+        assert_eq!(speller.suggestions("chek", 5), ["chek's", "a lot", "check"]);
+        assert_eq!(
+            speller.suggestions("chek’s", 5),
+            ["chek", "a lot", "check"],
+            "the word is compared with straight apostrophes"
+        );
+    }
+
+    #[test]
+    fn a_word_that_is_never_checked_gets_no_suggestions() {
+        let speller = Speller::new(vec![Box::new(Unasked)]);
+        let long = "q".repeat(41);
+        for word in [
+            "",
+            "a",
+            "README",
+            "PRs",
+            "v0.1",
+            "слово",
+            "😀😀",
+            long.as_str(),
+        ] {
+            assert!(speller.suggestions(word, 5).is_empty(), "{word:?}");
+        }
+    }
+
+    #[test]
+    fn the_acceptance_notes_marks_have_these_first_suggestions() {
+        let speller = speller();
+        for (word, first) in [
+            ("chek", "cheek"),
+            ("apear", "pear"),
+            ("replacments", "replacements"),
+            ("bundeled", "bundled"),
+            ("desing", "design"),
+            ("CommonMark", "Common Mark"),
+            ("mispelled", "misspelled"),
+            ("knwon", "known"),
+            ("misteak", "mistake"),
+        ] {
+            let found = speller.suggestions(word, 5);
+            assert!(found.len() <= 5, "{word:?}: {found:?}");
+            assert_eq!(
+                found.first().map(String::as_str),
+                Some(first),
+                "{word:?}: {found:?}"
+            );
+        }
+        assert!(speller.suggestions("chek", 5).iter().any(|s| s == "check"));
+    }
+
+    #[test]
+    fn suggestions_for_a_curly_word_use_straight_apostrophes() {
+        let speller = speller();
+        let found = speller.suggestions("dosen’t", 5);
+        assert_eq!(
+            found.first().map(String::as_str),
+            Some("doesn't"),
+            "{found:?}"
+        );
+        assert!(found.iter().all(|s| !s.contains('’')), "{found:?}");
+        assert_eq!(speller.suggestions("Wrne’s", 1), ["Wren's"]);
+    }
+
     #[test]
     fn rule_7_a_mark_is_the_byte_range_of_the_word() {
         let speller = speller();
@@ -568,6 +745,17 @@ mod tests {
                 let word = &line[mark.clone()];
                 let found = speller.suggestions(word, 5);
                 assert!(found.len() <= 5, "{word:?}: {found:?}");
+                let straight = words::straight(word);
+                for (i, correction) in found.iter().enumerate() {
+                    assert!(
+                        !correction.is_empty()
+                            && !correction.contains(char::is_control)
+                            && !correction.contains('’')
+                            && *correction != *straight
+                            && !found[..i].contains(correction),
+                        "case {case}: {word:?}: {found:?}"
+                    );
+                }
                 suggested += 1;
             }
         }
