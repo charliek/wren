@@ -21,7 +21,7 @@ import pytest
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture
 from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, spell_setting, wait_for
 
 
 COMMANDS = {
@@ -256,7 +256,7 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         assert all(row["title"] for row in rows)
         assert {key: row["state"] for key, row in by_id.items() if row["state"]} == {
             "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic",
-            "editor.toggle_spell_check": "on"}
+            "editor.toggle_spell_check": spell_setting()}
         # Suggesting needs the advanced engine, and this runs on the classic.
         assert by_id["editor.spell_suggest"]["enabled"] is False
         for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict",

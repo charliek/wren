@@ -913,6 +913,14 @@ impl EditorView {
         self.spell_frame.borrow().clone()
     }
 
+    /// The text of `line` without its ending, so a host can name the word a
+    /// mark of [`spell_frame`](Self::spell_frame) covers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn line_text(&self, line: usize) -> Option<String> {
+        self.content
+            .with_lines(|lines| lines.get(line).map(|text| text.text.to_string()))
+    }
+
     /// The editor's own key routing run on one press, without a window: the
     /// messages the focused editor would publish for `key` with `modifiers`,
     /// in order. A key that closes the open menu and is then handled as if
