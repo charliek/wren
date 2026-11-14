@@ -37,6 +37,8 @@ nav = [
     { "Keybindings" = "getting-started/keybindings.md" },
   ] },
   { "Reference" = [
+    { "Boards" = "reference/boards.md" },
+    { "Board File Format" = "reference/board-format.md" },
     { "Configuration" = "reference/configuration.md" },
     { "Workspace Folder" = "reference/workspace-folder.md" },
     { "Autosave and External Edits" = "reference/autosave.md" },

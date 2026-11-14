@@ -177,6 +177,92 @@ note. Esc in a filter box leaves the filter and keeps the column. Commands
 chosen from the palette always do what their label says, whichever column
 is active.
 
+## On a board
+
+These keys work while a [board](../reference/boards.md) has the keyboard.
+Their modifier is **Mod**: ⌘ on macOS and **Ctrl** on Linux, as in text
+editing, so Linux board shortcuts take Ctrl where the app's take Alt. The
+app's shortcuts in the first table above keep working on a board.
+
+| Action | macOS | Linux | Action name |
+|---|---|---|---|
+| Select tool / Hand tool | V / H | V / H | `board.tool.select` / `board.tool.hand` |
+| Rectangle, ellipse, diamond, pill, cylinder, parallelogram tool | R, O, D, U, Y, P | the same | `board.tool.rectangle`, `.ellipse`, `.diamond`, `.pill`, `.cylinder`, `.parallelogram` |
+| Rounded rectangle, document tool | — | — | `board.tool.rounded`, `board.tool.document` |
+| Text tool / Connector tool | T / C or A | the same | `board.tool.text` / `board.tool.connector` |
+| Change shape | ⇧ + the tool letter | Shift + the tool letter | `board.shape.rectangle`, … (`rounded` and `document` have no key) |
+| Edit label / Finish label | ↵ or F2 / ⌘↵ | Enter or F2 / Ctrl+Enter | `board.label.edit` / `board.label.commit` |
+| Add next shape | Tab | Tab | `board.connect.next` |
+| Connect left, right, up, down | ⌘ + arrow | Ctrl + arrow | `board.connect.left`, … |
+| Select left, right, up, down | arrow | arrow | `board.select.left`, … |
+| Extend selection | ⇧ + arrow | Shift + arrow | `board.select.extend_left`, … |
+| Select the connector on that side | ⇧⌘ + arrow | Ctrl+Shift + arrow | `board.select.connector_left`, … |
+| Select all / Select connected | ⌘A / ⇧⌘A | Ctrl+A / Ctrl+Shift+A | `board.select.all` / `board.select.connected` |
+| Clear selection | — (Esc clears it too) | — (Esc clears it too) | `board.select.none` |
+| Move one cell | ⌥ + arrow | Alt + arrow | `board.move.left`, … |
+| Wider, narrower, taller, shorter | ⌥⇧ + → ← ↓ ↑ | Alt+Shift + → ← ↓ ↑ | `board.resize.wider`, `.narrower`, `.taller`, `.shorter` |
+| Delete / Duplicate | ⌫ or ⌦ / ⌘D | Backspace or Delete / Ctrl+D | `board.delete` / `board.duplicate` |
+| Copy / Cut / Paste | ⌘C / ⌘X / ⌘V | Ctrl+C / Ctrl+X / Ctrl+V | `board.copy` / `board.cut` / `board.paste` |
+| Undo / Redo | ⌘Z / ⇧⌘Z | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y | `board.undo` / `board.redo` |
+| Zoom to fit / Zoom to selection | ⇧1 / ⇧2 | Shift+1 / Shift+2 | `board.zoom.fit` / `board.zoom.selection` |
+| Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Alt+= / Alt+- / Alt+0 | `font.increase` / `font.decrease` / `font.reset` |
+| Bring to front / Send to back | ] / [ | the same | `board.arrange.front` / `board.arrange.back` |
+| Bring forward / Send backward | ⇧] / ⇧[ | Shift+] / Shift+[ | `board.arrange.forward` / `board.arrange.backward` |
+| Colour: neutral, red, orange, yellow, green, cyan, purple, blue | 0 to 7 | 0 to 7 | `board.color.neutral`, `.red`, `.orange`, `.yellow`, `.green`, `.cyan`, `.purple`, `.blue` |
+| Board actions | / or ⇧F10 | / or Shift+F10 | `board.actions` |
+| Jump to node | ⇧⌘O or ⌘F | Alt+Shift+O, Alt+F, or Ctrl+F | `board.jump` (reached through `navigation.outline` and `navigation.find`) |
+
+These have no default key; run them from the command palette or the
+[actions palette](../reference/boards.md#the-actions-palette), or bind
+them:
+
+| Actions | Action names |
+|---|---|
+| Align left, centre, right, top, middle, bottom | `board.align.left`, `.center`, `.right`, `.top`, `.middle`, `.bottom` |
+| Distribute horizontally, vertically | `board.distribute.horizontal`, `board.distribute.vertical` |
+| Fill: none, tint, solid | `board.fill.none`, `board.fill.tint`, `board.fill.solid` |
+| Connector: straight or elbow / start head / end head / reverse | `board.edge.routing`, `board.edge.start`, `board.edge.end`, `board.edge.reverse` |
+| Solid or dashed | `board.stroke.dashed` |
+| New board, Export board as SVG, PNG, draw.io | `note.new_board`, `note.export_svg`, `note.export_png`, `note.export_drawio` |
+
+Esc steps back one thing at a time: it finishes an open label, ends a
+connect, puts away an armed tool, then clears the selection. It never
+leaves the board.
+
+While a label is open, only Finish label (⌘↵ / Ctrl+Enter) and Add next
+shape (Tab) act as board keys, and every other key edits the label's text,
+so ⌘C, ⌘Z, arrows, and Backspace are the label's. While you connect from
+the keyboard (C with one shape selected), letters type into the search for
+a target. The app's own shortcuts, such as the command palette, work in
+both.
+
+The Board group of the command palette appears only while a board is open,
+and the Markdown group is hidden then. With `boards = off` no board
+command appears anywhere.
+
+**The digit row.** The colour keys are the digits as typed. On a layout
+that types a symbol there without Shift, such as AZERTY (`&` on the 1 key),
+a digit-row key whose character nothing is bound to acts as its digit, so
+0 to 7 still colour the selection.
+
+**Alt+Shift on Linux.** Some Linux desktops use Alt+Shift to switch
+keyboard layout, which can take the resize keys (Alt+Shift + arrow) and the
+app's Alt+Shift shortcuts before Wren sees them. Change the desktop's
+layout switch, or bind the commands to other keys.
+
+**Board keybindings.** Board actions bind with the same `keybind` lines
+(see below), and a bare key such as `x` is allowed for them:
+
+```conf
+keybind = x = board.delete          # X deletes on a board
+keybind = tab = board.unbind        # Tab no longer adds the next shape
+```
+
+`board.unbind` removes a board binding, and `unbind` removes only an app
+binding. A board binding on a key the app already uses for one of its own
+commands, or on Esc, is dropped with a warning, since the app's shortcut
+would always win.
+
 ## Custom keybindings
 
 Add `keybind` lines to [`config.conf`](../reference/configuration.md):
@@ -221,8 +307,11 @@ font.choose  font.increase  font.decrease  font.reset  workspace.switch
 workspace.add  workspace.remove  settings.open  settings.reload  app.quit
 palette.commands  markdown.toggle_task  markdown.bold  markdown.italic
 markdown.code  edit.move_line_up  edit.move_line_down
-editor.toggle_markdown_assist  editor.toggle_engine
+editor.toggle_markdown_assist  editor.toggle_engine  note.new_board
+note.export_svg  note.export_png  note.export_drawio
 ```
+
+The board actions are listed under [On a board](#on-a-board).
 
 `editor.toggle_markdown_assist` and `editor.toggle_engine` have no default
 key. They flip `markdown-assist` and `editor-engine`, save the change to

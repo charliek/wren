@@ -22,6 +22,22 @@ sudo apt install wren
 Each release also attaches `.deb` packages for amd64 and arm64 to
 [GitHub Releases](https://github.com/charliek/wren/releases).
 
+## The `wren` command
+
+The app is also a command line, used for
+[`wren export`](../reference/boards.md#wren-export), which writes a board as
+an image or a draw.io file without opening a window.
+
+| Install | The binary |
+|---|---|
+| macOS | `/Applications/Wren.app/Contents/MacOS/wren`. Add an alias, or a symlink in a folder on your `PATH`, to call it as `wren`. |
+| Linux `.deb` | `/usr/bin/wren`, already on your `PATH`. |
+| From source | `target/debug/wren` after `make build`, or run it through cargo: `cargo run --locked -p wren-iced -- export …`. |
+
+```bash
+wren export "Checkout flow.wren-board" -o flow.png
+```
+
 ## Build from source
 
 Requires the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs
