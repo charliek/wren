@@ -8,7 +8,9 @@ core and a thin desktop crate on top.
 | `crates/wren-core` | The model, scanning, storage, autosave, search index, settings, and keybindings. No iced dependency. |
 | `crates/wren-markdown` | Markdown structure with no UI dependency: the one block classifier (`block`), the heading outline, and the edit planner, which turns an editing intent (Enter, Tab, Backspace, Home, …) at a selection into replacements. The search index's note previews and the editor's highlighting both classify lines with `block`. The app's outline palette lists its headings. |
 | `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, and find. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends only on iced (a minimal feature set of its own), `wren-markdown`, and `unicode-segmentation`; the app passes in colours and the font. It is not yet extractable: the advanced engine's hanging indent needs Wren's patched cosmic-text (`vendor/cosmic-text`), the crate has no publish metadata, and its glyph metrics assume JetBrains Mono. |
-| `crates/wren-iced` | The desktop app (binary `wren`): views, widgets, the command table, gestures, and the macOS menu bar. |
+| `crates/wren-board` | Boards with no UI dependency (only `toml` and `unicode-segmentation`): the model, the reader and canonical writer of the [board file format](../reference/board-format.md), the integrity check, connector routing, editing intents and undo, and the scene, the display list every board drawing comes from. It writes SVG and draw.io from them. |
+| `crates/wren-canvas` | The board widget, free of Wren types as `wren-editor` is: it paints a `wren_board` scene and owns a pure interaction machine. Depends on iced (a minimal feature set plus `canvas`) and `wren-board`; the app passes in a `Palette`, a style, the font, and a key policy. |
+| `crates/wren-iced` | The desktop app (binary `wren`): views, widgets, the command table, gestures, the macOS menu bar, board export, and the `wren export` command line. |
 | `crates/wren-sparkle` | The macOS Sparkle updater bridge. The only crate allowed `unsafe`; empty on Linux. |
 | `tools/` | The Python functional harness, packaging, scene capture, and release helpers. |
 
@@ -54,6 +56,18 @@ Editor command's key becomes its `Message::Intent`. From the palette, an
 enabled Editor command runs wherever the keyboard is, through `App::edit`
 at the editor's cursor; the Markdown commands are disabled while
 `markdown-assist` is off.
+
+A third scope, **Board**, holds the `board.*` commands. Their keys live in
+a second layer of the keymap (`wren_core::keybind::default_board_bindings`,
+and a user's `keybind` lines for board actions, removed with
+`board.unbind`), read only by a focused board through the `KeyPolicy`
+`board_policy` builds. A key the base layer gives an App command stays the
+app's on a board, and no board default shares a trigger with one, so
+`App::key_input` never needs to know a board is focused. Board keys may be
+bare (`r`, `]`, `1`), and on a board the document modifier is ⌘ on macOS
+and Ctrl on Linux, as in text editing. Every board command is one
+`CommandId::Board(wren_canvas::Command)` row; `command_enabled` and
+`run_command` route it to the board.
 
 ## Editing keys
 
@@ -171,8 +185,32 @@ Markdown markers (`#`, `**`, `>`, link destinations, strike lines) use
   `link` and `text`, `code` from `success`, and the status colours from
   each other and from `accent`.
 
-To add a theme, add a `Theme` to `BUILT_INS` and run the tests; they name
-each rule a palette breaks.
+A theme also has seven board hues, `red`, `orange`, `yellow`, `green`,
+`cyan`, `purple`, and `blue`, each taken from the theme's own published
+palette where it has one and moved only as far as the rules below need.
+`theme::board_palette` turns a theme into a `wren_board::Palette`: the
+hues, the editor surface as the canvas, `text` as ink, `raised`, `muted`,
+`accent` for the selection, and `danger` for issue markers. A tint fill is
+the hue mixed into the canvas at 16 % in a dark theme and 12 % in a light
+one. The board tests in `theme.rs` hold every theme, every colour token,
+and every fill to:
+
+- A label at 4.5:1 on its fill, an outline at 3:1 on the canvas, a
+  connector label (drawn in its colour) at 4.5:1 on the canvas, a tint at
+  least 4.0 L* from the canvas, and the selection outline, focused and
+  unfocused, at 3:1 on the canvas.
+- Colour blindness: for every pair of the eight colour tokens (`neutral`,
+  as ink at stroke and as `raised` at solid, beside the seven hues), at
+  solid fill and as a stroke, the two colours differ by CIE76 ΔE of at
+  least 15 or by at least 8 L*, for normal vision and for protanopia,
+  deuteranopia, and tritanopia, simulated with the Machado, Oliveira, and
+  Fernandes (2009) matrices at severity 1.0. Loosening either number is a
+  design change, not a fix.
+- Yellow is lighter in L* than red and orange, so it never reads as khaki.
+
+To add a theme, add a `Theme` to `BUILT_INS`, with its seven hues, and run
+the tests; they name each rule a palette breaks, and the colour-blindness
+test names the pair, the vision, and both distances.
 
 ## Storage safety
 
@@ -213,3 +251,106 @@ a case-insensitive substring scan. On 5,000 notes / 25 MB a query takes a few
 milliseconds (`make perf-search`). A note's preview is its first paragraph
 line outside front matter and headings, with list, task, and quote markers
 dropped.
+
+## Boards
+
+A board is a note whose file ends in `.wren-board`
+([format](../reference/board-format.md)). `wren_core::kind::NoteKind`
+decides the kind from the file name alone and replaces every `.md`
+assumption in the core: storage keeps a note's extension through create,
+rename, and move, and the Session names a conflict copy for its kind. The
+Session stays text-typed: a board reaches it as the canonical text of its
+model, through the same `Op::EditDraft` a note's editor sends, so
+autosave, conflict copies, and external reloads need nothing new. With
+`boards = off` (read at launch into `SessionOptions`), no scan lists a
+board.
+
+### One scene, every drawing
+
+`wren_board::scene::build(board, palette, measure)` turns the model, the
+theme's `Palette`, and a text `Measure` into a `Scene`: back-to-front items,
+each a path (segments, fill, stroke) or pre-wrapped text lines, tagged with
+the element they draw. The canvas paints exactly those items through
+iced's geometry API, `svg::write` serialises the same items, and a PNG is
+that SVG rendered by resvg (`wren-iced/src/board_export.rs`), so the window
+and every image show the same lines. Connector routes are computed in the
+scene from the board alone and never stored. `scene::Cache` keeps what one
+build read and rebuilds only what a change can reach, and its scene is
+always the one a whole build gives. The draw.io file (`wren_board::drawio`)
+is written from the model instead, for draw.io to lay out and draw.
+
+The scene's constants (the 14 px Inter label, 1.5 px strokes, the label box
+of each shape, the arrowhead, the tint ratios) are part of what every
+exported board looks like; `crates/wren-board/golden/scene/` and
+`golden/svg/` pin them.
+
+### The surface and the single writer
+
+`App` keeps a `board: Option<BoardView>` beside the editor. The view mounts
+one of the two widgets under the focus id `note-editor`, and
+`app/board.rs` decides the `Surface` (Text, Board, or Raw, a board that does
+not parse, shown as text in the editor) whenever the open note or its
+Session text changes. Only the visible surface may write: on a board,
+`ensure_editor_ready` fails and `command_enabled` disables the editor's
+commands, so a hidden editor can never overwrite a board.
+
+`BoardView` (in `wren-canvas`) owns the board's state, none of it in widget
+tree state: the model, the scene, the viewport, the interaction machine,
+the undo history, and the pristine pair. The machine
+(`wren_canvas::machine`) is a pure function from inputs (pointer, keys,
+commands, focus, time) to acts, so its tables and the keyboard acceptance
+script run as unit tests.
+
+- **One writer.** `App::board_changed()` is the only place a board sends
+  `Op::EditDraft`. Keys, the pointer, the palette, the menu, and the test
+  harness all reach it through `App::board_edit` or
+  `dispatch(Command::Run(..))`.
+- **The pristine rule.** The view keeps the text it opened and the
+  canonical form of the model parsed from it. A draft whose canonical form
+  equals that is sent as the opening text verbatim, so opening never
+  writes, a hand-written file keeps its bytes until its first edit, and
+  undoing to the start makes the document clean again. Canonical text is
+  compared with canonical text, never with the file.
+- **Settle before any non-passive op.** `App::settle_board()` commits an open
+  label, cancels a pointer gesture and a keyboard connect, and drops an
+  actions-palette preview before a note switch, a palette or dialog, a
+  window blur, or quit, so the flush that follows sends a whole board and
+  never a half-finished drag.
+- **A change on disk** reloads the view: the gesture is cancelled, the label
+  closes without committing, the undo history is cleared, and the viewport
+  is kept. A dirty board's draft has already gone to the conflict copy.
+- **Previews are never the model.** A drag's preview, and the actions
+  palette's, are drawn from a copy; nothing reaches a draft, an undo
+  snapshot, or the file until it is applied.
+- **Undo** is whole-model snapshots with the selection, 200 entries and a
+  32 MiB budget, kept by the view and dropped when another note opens.
+
+### The state file
+
+Released Wren 0.1 rejects the whole `.wren/workspace.toml` when
+`history`, `recent`, or `last_open_note` names anything but a `.md` file,
+so those keys hold the Markdown projection of the real lists, and the
+mixed lists go in a `[navigation]` table written only while it names a
+board ([details](../reference/workspace-folder.md#wrenworkspacetoml)). A
+workspace with no boards, and every one with the setting off, gets the
+state file an older Wren writes. `crates/wren-core/tests/released_state.rs`
+runs a verbatim copy of v0.1.1's validator over the state file after every
+step of a mixed-kind navigation walk.
+
+### Search, export, and limits
+
+- The search index keeps a board's source and searches the labels
+  `wren_board::search_text` extracts (every label, in reading order), never
+  the TOML. A board read by a scan waits with its labels unread, found by
+  its title, until the background reconcile job extracts them off the UI
+  thread; a search from the palette extracts what still waits first.
+- An export makes its SVG from the scene on screen when the command runs,
+  then renders and writes the file on a worker thread, to a temporary file
+  renamed over the target. `wren export` (`board_export::run`) loads the
+  bundled fonts into iced's font system with no renderer, opens the board
+  with the same `BoardView`, and writes the same bytes as the app, with no
+  window.
+- Loading never writes and never panics. Above 8 MiB or 50,000 elements a
+  board opens as raw text; values past a drawing limit are flagged and
+  drawn clamped or cut; the canvas cuts any path reaching far past the
+  widget before the renderer sees it.
