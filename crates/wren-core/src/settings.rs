@@ -277,18 +277,39 @@ impl Settings {
     }
 }
 
-/// Read the settings text; `None` when the file does not exist. Files over
-/// 1 MiB and invalid UTF-8 are errors.
+/// Read the settings text; `None` when the file does not exist. Anything but
+/// a regular file (a symlink to one is fine), files over 1 MiB and invalid
+/// UTF-8 are errors. The file is opened without blocking, so a FIFO with no
+/// writer cannot hang the caller.
 pub fn read_text(path: &Path) -> io::Result<Option<String>> {
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.len() > MAX_BYTES => Err(io::Error::other(format!(
-            "larger than {} KiB",
-            MAX_BYTES / 1024
-        ))),
-        Ok(_) => fs::read_to_string(path).map(Some),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+
+    let too_large = || io::Error::other(format!("larger than {} KiB", MAX_BYTES / 1024));
+    let file = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(file) => fs::File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("not a regular file"));
     }
+    if metadata.len() > MAX_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// The settings file location: `WREN_CONFIG`, else the XDG config directory.
@@ -740,6 +761,29 @@ mod tests {
         assert_eq!(Settings::load(&path).warnings.len(), 1);
         fs::write(&path, vec![b'#'; MAX_BYTES as usize + 1]).unwrap();
         assert!(read_text(&path).is_err());
+    }
+
+    #[test]
+    fn a_fifo_or_a_directory_is_an_error_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("config.conf");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // A FIFO with no writer would block a plain read for good.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read_text(&fifo).is_err()));
+        let read = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        assert_eq!(read, Ok(true), "still blocked after 3 s, or read");
+        assert!(read_text(directory.path()).is_err());
+        // A symlink to a regular file still reads.
+        let target = directory.path().join("real.conf");
+        fs::write(&target, "theme = nord\n").unwrap();
+        let link = directory.path().join("linked.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(read_text(&link).unwrap().as_deref(), Some("theme = nord\n"));
     }
 
     #[test]
