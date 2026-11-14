@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use iced::Task;
-use wren_board::{Access, Dir, Shape};
+use wren_board::edit::{Alignment, Axis, Stack};
+use wren_board::{Access, Dir, Fill, Shape, Token};
 use wren_canvas::{Command as BoardCommand, Grow, Tool};
 use wren_core::kind::NoteKind;
 use wren_core::model::{ItemRef, Parent};
@@ -373,10 +374,17 @@ const fn board_view(command: BoardCommand, key: &'static str, label: &'static st
     }
 }
 
+const fn board_go(command: BoardCommand, key: &'static str, label: &'static str) -> Definition {
+    Definition {
+        group: "Go",
+        ..board(command, key, label)
+    }
+}
+
 /// The board's rows, in the order of the plan's command table (§5.19). Each
 /// key is the one `wren_canvas::Command::key` gives; a test holds them
 /// together.
-pub const BOARD_DEFINITIONS: [Definition; 64] = {
+pub const BOARD_DEFINITIONS: [Definition; 89] = {
     use BoardCommand as C;
     use Dir::{Down, Left, Right, Up};
     [
@@ -568,6 +576,87 @@ pub const BOARD_DEFINITIONS: [Definition; 64] = {
             "board.zoom.selection",
             "Zoom to selection",
         ),
+        board(
+            C::Arrange(Stack::Front),
+            "board.arrange.front",
+            "Bring to front",
+        ),
+        board(
+            C::Arrange(Stack::Back),
+            "board.arrange.back",
+            "Send to back",
+        ),
+        board(
+            C::Arrange(Stack::Forward),
+            "board.arrange.forward",
+            "Bring forward",
+        ),
+        board(
+            C::Arrange(Stack::Backward),
+            "board.arrange.backward",
+            "Send backward",
+        ),
+        board(C::Align(Alignment::Left), "board.align.left", "Align left"),
+        board(
+            C::Align(Alignment::Center),
+            "board.align.center",
+            "Align centre",
+        ),
+        board(
+            C::Align(Alignment::Right),
+            "board.align.right",
+            "Align right",
+        ),
+        board(C::Align(Alignment::Top), "board.align.top", "Align top"),
+        board(
+            C::Align(Alignment::Middle),
+            "board.align.middle",
+            "Align middle",
+        ),
+        board(
+            C::Align(Alignment::Bottom),
+            "board.align.bottom",
+            "Align bottom",
+        ),
+        board(
+            C::Distribute(Axis::Horizontal),
+            "board.distribute.horizontal",
+            "Distribute horizontally",
+        ),
+        board(
+            C::Distribute(Axis::Vertical),
+            "board.distribute.vertical",
+            "Distribute vertically",
+        ),
+        board(
+            C::Color(Token::Neutral),
+            "board.color.neutral",
+            "Colour: neutral",
+        ),
+        board(C::Color(Token::Red), "board.color.red", "Colour: red"),
+        board(
+            C::Color(Token::Orange),
+            "board.color.orange",
+            "Colour: orange",
+        ),
+        board(
+            C::Color(Token::Yellow),
+            "board.color.yellow",
+            "Colour: yellow",
+        ),
+        board(C::Color(Token::Green), "board.color.green", "Colour: green"),
+        board(C::Color(Token::Cyan), "board.color.cyan", "Colour: cyan"),
+        board(
+            C::Color(Token::Purple),
+            "board.color.purple",
+            "Colour: purple",
+        ),
+        board(C::Color(Token::Blue), "board.color.blue", "Colour: blue"),
+        board(C::Fill(Fill::None), "board.fill.none", "Fill: none"),
+        board(C::Fill(Fill::Tint), "board.fill.tint", "Fill: tint"),
+        board(C::Fill(Fill::Solid), "board.fill.solid", "Fill: solid"),
+        board(C::Actions, "board.actions", "Board actions…"),
+        board_go(C::Jump, "board.jump", "Jump to node…"),
     ]
 };
 
@@ -592,6 +681,8 @@ fn board_mutates(command: BoardCommand) -> bool {
             | C::Copy
             | C::ZoomFit
             | C::ZoomSelection
+            | C::Actions
+            | C::Jump
     )
 }
 
@@ -1538,22 +1629,18 @@ mod tests {
             assert!(definition.id.board_command().is_none() || definition.id.boards());
         }
         // The board's rows are the canvas's commands, key for key, in its
-        // order, all in the Board group but the two zooms.
+        // order, all in the Board group but the two zooms and the jump.
         assert!(BOARD_DEFINITIONS
             .iter()
             .map(|definition| (definition.id, definition.key))
             .eq(BoardCommand::all().map(|command| (CommandId::Board(command), command.key()))));
         for definition in &BOARD_DEFINITIONS {
-            let zoom = matches!(
-                definition.id,
-                CommandId::Board(BoardCommand::ZoomFit | BoardCommand::ZoomSelection)
-            );
-            assert_eq!(
-                definition.group,
-                if zoom { "View" } else { "Board" },
-                "{}",
-                definition.key
-            );
+            let group = match definition.id {
+                CommandId::Board(BoardCommand::ZoomFit | BoardCommand::ZoomSelection) => "View",
+                CommandId::Board(BoardCommand::Jump) => "Go",
+                _ => "Board",
+            };
+            assert_eq!(definition.group, group, "{}", definition.key);
         }
         assert_eq!(GROUPS[..3], ["This note", "Markdown", "Board"]);
     }

@@ -17,8 +17,8 @@ use crate::ids::Ids;
 pub use crate::scene::Source;
 use crate::z::{self, Element};
 use crate::{
-    access, Access, Board, Dash, Dir, Edge, EdgeKind, EdgeStyle, End, Extra, Head, Id, Named, Node,
-    NodeKind, Reason, Route, Shape, Side,
+    access, Access, Board, Dash, Dir, Edge, EdgeKind, EdgeStyle, End, Extra, Fill, Head, Id, Named,
+    Node, NodeKind, Reason, Route, Shape, Side, Token,
 };
 
 mod connect;
@@ -114,6 +114,62 @@ pub enum Intent {
         dir: Option<Dir>,
         shape: Option<Shape>,
     },
+    /// Set one style field of each element (§5.16 rule 1): the colour of
+    /// nodes and connectors, the fill of shapes, the outline of shapes.
+    /// Each element is named with its kind, as for [`Intent::Move`].
+    SetStyle { ids: Vec<Source>, field: StyleField },
+    /// Move the elements in the stacking order of their parent's scope,
+    /// keeping their relative order (§5.16 rule 2, over §4.7).
+    Restack { ids: Vec<Source>, to: Stack },
+    /// Line the nodes up on one edge or centre of their bounding box,
+    /// unsnapped (§5.16 rule 3). Connectors follow their nodes.
+    Align { ids: Vec<Id>, to: Alignment },
+    /// Make the gaps between the nodes equal along `axis`, the outermost
+    /// two staying, unsnapped (§5.16 rule 3).
+    Distribute { ids: Vec<Id>, axis: Axis },
+}
+
+/// A style field of a node or connector and its new value (§5.16 rule 1).
+/// Every value is a token or a known name: no command writes literal hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StyleField {
+    Color(Token),
+    Fill(Fill),
+    Stroke(Dash),
+}
+
+/// Where [`Intent::Restack`] moves the elements among their siblings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Stack {
+    /// Above every sibling.
+    Front,
+    /// Below every sibling.
+    Back,
+    /// One place past the next unselected sibling above.
+    Forward,
+    /// One place past the next unselected sibling below.
+    Backward,
+}
+
+/// The edge or centre line of the selection's bounding box that
+/// [`Intent::Align`] moves each node to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Alignment {
+    Left,
+    /// The horizontal centre.
+    Center,
+    Right,
+    Top,
+    /// The vertical middle.
+    Middle,
+    Bottom,
+}
+
+/// The direction [`Intent::Distribute`] spaces nodes along.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
 }
 
 /// How far each edge of a node's box moves, in board units; positive is
@@ -224,6 +280,10 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::Reverse { ids: chosen } => connect::reverse(board, chosen),
         Intent::SetEdgeLabel { id, text, commit } => connect::set_label(board, id, text, *commit),
         Intent::Extend { from, dir, shape } => connect::extend(board, from, *dir, *shape, ids),
+        Intent::SetStyle { .. }
+        | Intent::Restack { .. }
+        | Intent::Align { .. }
+        | Intent::Distribute { .. } => Plan::default(),
     }
 }
 

@@ -5498,8 +5498,8 @@ to = { node = "gone" }
             }
         }
         // Walking, the connector style commands, delete, duplicate, the
-        // clipboard, undo and the two zooms.
-        assert_eq!(passed, 22);
+        // clipboard, undo and the two zooms; and the 25 of Phase 3.
+        assert_eq!(passed, 47);
     }
 
     #[test]

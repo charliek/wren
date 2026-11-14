@@ -39,6 +39,18 @@ pub enum Mode {
     Fonts,
     /// The open note's headings.
     Outline,
+    /// The board commands enabled for the open board's selection (§5.17).
+    #[expect(
+        dead_code,
+        reason = "Phase 3's contract: the arrangement chain opens it (item AR4)"
+    )]
+    BoardActions,
+    /// The open board's labelled nodes and connectors (§5.18).
+    #[expect(
+        dead_code,
+        reason = "Phase 3's contract: the find chain opens it (item F1)"
+    )]
+    BoardNodes,
 }
 
 impl Mode {
@@ -57,6 +69,8 @@ impl Mode {
             Self::Themes => "themes",
             Self::Fonts => "fonts",
             Self::Outline => "outline",
+            Self::BoardActions => "board_actions",
+            Self::BoardNodes => "board_nodes",
         }
     }
 
@@ -74,6 +88,8 @@ impl Mode {
             Self::Themes => "Choose a theme…",
             Self::Fonts => "Choose an editor font…",
             Self::Outline => "Jump to a heading…",
+            Self::BoardActions => "Choose an action for the selection…",
+            Self::BoardNodes => "Jump to a node…",
         }
     }
 
@@ -90,6 +106,8 @@ impl Mode {
             Self::Themes => Some("Theme"),
             Self::Fonts => Some("Editor font"),
             Self::Outline => Some("Outline"),
+            Self::BoardActions => Some("Board actions"),
+            Self::BoardNodes => Some("Jump to node"),
             _ => None,
         }
     }
@@ -657,6 +675,7 @@ impl App {
                 }
             }
             Mode::Outline => rows = self.outline_rows(&query),
+            Mode::BoardActions | Mode::BoardNodes => {}
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
                     for id in item_commands(item) {

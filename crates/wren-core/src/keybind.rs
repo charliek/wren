@@ -310,6 +310,20 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
         ("delete", "board.delete"),
         ("shift+1", "board.zoom.fit"),
         ("shift+2", "board.zoom.selection"),
+        ("]", "board.arrange.front"),
+        ("[", "board.arrange.back"),
+        ("shift+]", "board.arrange.forward"),
+        ("shift+[", "board.arrange.backward"),
+        ("0", "board.color.neutral"),
+        ("1", "board.color.red"),
+        ("2", "board.color.orange"),
+        ("3", "board.color.yellow"),
+        ("4", "board.color.green"),
+        ("5", "board.color.cyan"),
+        ("6", "board.color.purple"),
+        ("7", "board.color.blue"),
+        ("/", "board.actions"),
+        ("shift+f10", "board.actions"),
     ]
     .into_iter()
     .map(|(trigger, action)| (trigger.to_string(), action))
@@ -760,10 +774,11 @@ mod tests {
             assert_eq!(board, defaults, "{platform:?}");
             // Ten of the 64 Phase 2 commands have no default key: the two
             // unlettered tools and reshapes, `board.select.none`, and the
-            // five connector style commands.
+            // five connector style commands. Twelve of the 25 of Phase 3
+            // have none: align, distribute, fill and `board.jump`.
             let actions: std::collections::HashSet<&str> =
                 board.iter().map(|(_, action)| *action).collect();
-            assert_eq!(actions.len(), 54, "{platform:?}");
+            assert_eq!(actions.len(), 54 + 13, "{platform:?}");
         }
     }
 
@@ -822,6 +837,12 @@ mod tests {
                 (format!("{m}+shift+down"), "board.select.connector_down"),
                 (format!("{m}+z"), "board.undo"),
                 (format!("{m}+shift+z"), "board.redo"),
+                ("]".to_string(), "board.arrange.front"),
+                ("shift+[".to_string(), "board.arrange.backward"),
+                ("0".to_string(), "board.color.neutral"),
+                ("7".to_string(), "board.color.blue"),
+                ("/".to_string(), "board.actions"),
+                ("shift+f10".to_string(), "board.actions"),
             ] {
                 assert_eq!(
                     keymap.board_action(&accel(&trigger)),

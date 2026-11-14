@@ -3,9 +3,11 @@
 //! keeps the bindings and the palette rows; each command's key is its
 //! stable name there (the plan's §5.19 command table).
 
-use wren_board::{Dir, Shape};
+use wren_board::edit::{Alignment, Axis, Stack};
+use wren_board::{Dir, Fill, Shape, Token};
 
-/// One board command. [`Command::all`] lists the 64 of Phase 2.
+/// One board command. [`Command::all`] lists the 64 of Phase 2, then the
+/// 25 of Phase 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     /// `board.tool.*`: arm a tool.
@@ -64,6 +66,20 @@ pub enum Command {
     ZoomFit,
     /// `board.zoom.selection`
     ZoomSelection,
+    /// `board.arrange.*`: restack the selection among its siblings.
+    Arrange(Stack),
+    /// `board.align.*`
+    Align(Alignment),
+    /// `board.distribute.*`
+    Distribute(Axis),
+    /// `board.color.*`: the colour token of the selected elements.
+    Color(Token),
+    /// `board.fill.*`: the fill of the selected shapes.
+    Fill(Fill),
+    /// `board.actions`: the actions palette for the selection.
+    Actions,
+    /// `board.jump`: the jump-to-node palette.
+    Jump,
 }
 
 /// What the pointer does on a board.
@@ -87,7 +103,7 @@ pub enum Grow {
 }
 
 /// Every command and its key, in the order of the plan's table.
-const TABLE: [(Command, &str); 64] = {
+const TABLE: [(Command, &str); 89] = {
     use Command as C;
     use Dir::{Down, Left, Right, Up};
     [
@@ -158,6 +174,34 @@ const TABLE: [(Command, &str); 64] = {
         (C::StrokeDashed, "board.stroke.dashed"),
         (C::ZoomFit, "board.zoom.fit"),
         (C::ZoomSelection, "board.zoom.selection"),
+        (C::Arrange(Stack::Front), "board.arrange.front"),
+        (C::Arrange(Stack::Back), "board.arrange.back"),
+        (C::Arrange(Stack::Forward), "board.arrange.forward"),
+        (C::Arrange(Stack::Backward), "board.arrange.backward"),
+        (C::Align(Alignment::Left), "board.align.left"),
+        (C::Align(Alignment::Center), "board.align.center"),
+        (C::Align(Alignment::Right), "board.align.right"),
+        (C::Align(Alignment::Top), "board.align.top"),
+        (C::Align(Alignment::Middle), "board.align.middle"),
+        (C::Align(Alignment::Bottom), "board.align.bottom"),
+        (
+            C::Distribute(Axis::Horizontal),
+            "board.distribute.horizontal",
+        ),
+        (C::Distribute(Axis::Vertical), "board.distribute.vertical"),
+        (C::Color(Token::Neutral), "board.color.neutral"),
+        (C::Color(Token::Red), "board.color.red"),
+        (C::Color(Token::Orange), "board.color.orange"),
+        (C::Color(Token::Yellow), "board.color.yellow"),
+        (C::Color(Token::Green), "board.color.green"),
+        (C::Color(Token::Cyan), "board.color.cyan"),
+        (C::Color(Token::Purple), "board.color.purple"),
+        (C::Color(Token::Blue), "board.color.blue"),
+        (C::Fill(Fill::None), "board.fill.none"),
+        (C::Fill(Fill::Tint), "board.fill.tint"),
+        (C::Fill(Fill::Solid), "board.fill.solid"),
+        (C::Actions, "board.actions"),
+        (C::Jump, "board.jump"),
     ]
 };
 
@@ -194,12 +238,25 @@ mod tests {
     fn every_command_has_one_board_key_and_parses_back() {
         let commands: HashSet<Command> = Command::all().collect();
         let keys: HashSet<&str> = Command::all().map(Command::key).collect();
-        assert_eq!((commands.len(), keys.len()), (64, 64));
+        assert_eq!((commands.len(), keys.len()), (89, 89));
         for command in Command::all() {
             assert!(command.key().starts_with("board."), "{command:?}");
             assert_eq!(Command::parse(command.key()), Some(command));
         }
         assert_eq!(Command::parse("note.new"), None);
+    }
+
+    #[test]
+    fn every_colour_token_and_fill_has_a_command() {
+        use wren_board::Vocabulary;
+        for &token in Token::ALL {
+            let command = Command::Color(token);
+            assert_eq!(command.key(), format!("board.color.{}", token.name()));
+        }
+        for &fill in Fill::ALL {
+            let command = Command::Fill(fill);
+            assert_eq!(command.key(), format!("board.fill.{}", fill.name()));
+        }
     }
 
     #[test]
