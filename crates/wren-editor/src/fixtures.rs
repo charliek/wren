@@ -1,13 +1,17 @@
 //! Colours and a font for the crate's own tests.
 
 use std::borrow::Cow;
+use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Once;
 
 use iced::advanced::graphics::text::font_system;
 use iced::{Color, Font};
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::highlighter::Settings;
-use crate::{MenuStyle, Palette, Style};
+use crate::{MenuStyle, Palette, Proofreader, Style};
 
 pub const FONT: Font = Font::with_name("JetBrains Mono");
 
@@ -32,6 +36,9 @@ pub const STYLE: Style = Style {
         text_size: 13.0,
     },
 };
+
+/// The plan's acceptance note (§5.5 of `discovery/spell-check.md`).
+pub const SPELL_NOTE: &str = "---\ntitle: Spel chek\n---\n# Spell chek plan\n\nMarks apear under prose as you type, and a\nright-click on one offers replacments.\n\n- Engine: `spelbook` with a bundeled dictionary\n- See [the desing note](https://example.com/spel) or <https://example.com/chek>\n- README, README's, PRs and v0.1.1 stay unmarked; CommonMark does not\n- Catppuccin and Catppuccin’s are in the word list; mail me@exmaple.com\n- and/or, #tagg, snake_case_nmae, un*believ*able and <kbd>Ctrll</kbd> are skipped\n- [x] A done task with a mispelled word\n- It doesn’t mark don't, well-known or a b c; it marks well-knwon\n\n> A quote with a misteak.\n\n```rust\nlet chek = speller.check(wrd);\n```\n\n[ref-labl]: https://example.com \"Titel\"\n";
 
 pub const DARK: Palette = Palette {
     text: Color::from_rgb8(0xe6, 0xe8, 0xec),
@@ -81,4 +88,43 @@ pub fn load_font() {
             fonts.load_font(Cow::Borrowed(bytes));
         }
     });
+}
+
+/// A proofreader that rejects a fixed set of words and counts the times it
+/// is asked for marks.
+pub struct Rejects {
+    words: &'static [&'static str],
+    calls: AtomicUsize,
+}
+
+impl Rejects {
+    pub fn new(words: &'static [&'static str]) -> Self {
+        Self {
+            words,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many times [`Proofreader::marks`] has been called.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+impl Proofreader for Rejects {
+    fn marks(&self, line: &str, prose: &[Range<usize>], out: &mut Vec<Range<usize>>) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        for range in prose {
+            for (at, word) in line[range.clone()].unicode_word_indices() {
+                if self.words.contains(&word) {
+                    let start = range.start + at;
+                    out.push(start..start + word.len());
+                }
+            }
+        }
+    }
+
+    fn suggestions(&self, _line: &str, _mark: Range<usize>, _limit: usize) -> Vec<String> {
+        Vec::new()
+    }
 }

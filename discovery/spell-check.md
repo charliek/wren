@@ -571,6 +571,32 @@ Measured while trying to break it, in a debug test build (`spellbook` at the wor
 
 #### `spell-marks`
 
+*M1, prose ranges.* Built as §3.3 says: an `excluded` flag on the scanner's `Cell`, `Inline.prose`, and the scan run over ATX heading text and done-task text for `prose` only. A digest of every span, strike, chip, hang and code band over 20,000 generated documents is the same before and after the change.
+
+Deviations:
+1. *A footnote definition is not a link reference definition.* `[^label]:` keeps its prose, as §8's known limits assume; rule 4.2.1 skips the `[^label]:` chunk itself.
+2. *A reference definition is recognised on any line whose text starts `[label]:`*, not only where CommonMark allows one (it cannot interrupt a paragraph): the highlighter sees one line at a time and the classifier does not report a paragraph's first line. The label must be non-empty and hold no unescaped bracket.
+3. *Autolinks are found by a pass that only excludes*: `<scheme:…>` (scheme as CommonMark's) and `<user@host>`, brackets included. It sets neither colour nor lock, so the look of a line does not change; the URL inside keeps the bare-URL colour it had.
+4. *Prose ranges are the maximal runs of text with nothing excluded*, so they hold white space and punctuation too, and consecutive ranges are separated by at least one excluded byte. An image's `!` is excluded with its brackets.
+
+*M2 and M3, marks and the zigzag.* One commit: `spell_frame()`'s rectangles are the zigzag's, so the two items share their geometry. The widget asks the proofreader once per drawn line (not per wrapped row), and the on-demand path (`EditorView::marks_at`, a fresh `MarkdownHighlighter` over lines `0..=line`) gives the same marks as a frame for every line of the acceptance note.
+
+Deviations:
+1. *`marks_at` is private and only tests call it until `spell-menu` does*, so it carries `#[cfg_attr(not(test), allow(dead_code))]`, which U1 removes. §3.2 names no public on-demand accessor and none was added.
+2. *`SpellFrame`, `DrawnMark` and `spell_frame()` compile under `any(test, feature = "test-support")`*, not the feature alone, so the crate's own tests can read them.
+3. *A hidden mark is still reported, with its rectangles*: `DrawnMark.rects` is where the zigzag goes on each drawn row, clipped to the rows, whether or not rule 4.3.3 hid it. A row on which the word covers no whole pixel gives no rectangle, but the mark is still listed.
+4. *What the editor accepts from a proofreader:* a line with no prose is not asked about, and a returned range that is empty or not on character boundaries of the line is dropped, so later code may slice the line with any mark.
+5. *Rule 4.3.3's apostrophes are `'` and `’`*, and "has focus" is the widget's keyboard focus, whatever the window's.
+6. *The zigzag's pixels are whole window pixels*: `L`, `R` and the top are rounded after adding the text origin, so the squares stay on the grid wherever the editor sits.
+
+*Fix step.* Deviations:
+1. *A link or image inside a link's text is excluded but not restyled.* In `[![alt](img.png)](u)` only `alt` is prose: the inner image's `!`, brackets and destination are excluded as an outer link's are, while their colours and locks stay as the outer link's text, so the line looks as before (a digest of every span, strike, chip, hang and code flag over 30,000 generated bracket-heavy documents is unchanged; their prose changes).
+2. *Rule 4.3.3's "nothing is selected" is read from the cursor*: the cursor has no selection anchor. The caret's on-screen position plays no part, so a mark on a wrapped word stays hidden on its visible rows while the caret's row is scrolled out of view. A selection whose anchor equals the caret still hides nothing, as before.
+
+Review: 0 blockers, 1 major, 1 minor.
+Fixed: the major in `a3fe7a2` (a linked image's `!`, brackets and destination were prose), the minor in `30d54fe` (a caret on a row out of view did not hide its wrapped word's mark), each with a regression test.
+Not fixed: nothing.
+
 #### `spell-menu`
 
 #### `spell-wire`

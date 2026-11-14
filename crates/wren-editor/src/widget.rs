@@ -56,6 +56,9 @@ use iced::{
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::keys::KeyPolicy;
+use crate::proof::{self, Proofreader};
+#[cfg(any(test, feature = "test-support"))]
+use crate::proof::{DrawnMark, SpellFrame};
 use crate::{Message, Style};
 
 const TEXT_SIZE: f32 = 14.0;
@@ -88,6 +91,11 @@ const CHIP_HEIGHT_EM: f32 = 1.3;
 const CHIP_PADDING_X: f32 = 2.0;
 const CHIP_RADIUS: f32 = 3.0;
 const STRIKE_THICKNESS: f32 = 1.0;
+/// How far below the zigzag's top each square of its 4 px period sits.
+const ZIGZAG_STEPS: [f32; 4] = [2.0, 1.0, 0.0, 1.0];
+const ZIGZAG_HEIGHT: f32 = 3.0;
+/// How far the zigzag's top sits below the baseline.
+const ZIGZAG_DROP: f32 = 2.0;
 
 /// Text size, row height, caret height, and gutter width. The caret and
 /// gutter scale from the mockup's 14 px text / 18 px caret / 52 px gutter;
@@ -252,6 +260,49 @@ impl Content {
         );
     }
 
+    /// Lays the text out in `size` as [`Content::lay_out`] does, with a
+    /// highlighter given `front_matter_end`, and returns the visible rows
+    /// with the marks `proofreader` finds.
+    #[cfg(test)]
+    fn rows(
+        &mut self,
+        size: Size,
+        front_matter_end: Option<usize>,
+        proofreader: Option<&dyn Proofreader>,
+        caret: Option<Position>,
+    ) -> Vec<VisualRow> {
+        crate::fixtures::load_font();
+        let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
+            palette: crate::fixtures::DARK,
+            font: crate::fixtures::FONT,
+            front_matter_end,
+        });
+        let backend = self.0.get_mut();
+        backend.update(
+            size,
+            crate::fixtures::FONT,
+            Pixels(TEXT_SIZE),
+            line_height(),
+            Wrapping::WordOrGlyph,
+            &mut highlighter,
+        );
+        visual_rows(backend, &highlighter, proofreader, caret)
+    }
+
+    /// The marks a frame of `size` draws, as [`Content::rows`] lays it out,
+    /// with the text origin at the window's.
+    #[cfg(test)]
+    pub fn drawn_marks(
+        &mut self,
+        size: Size,
+        front_matter_end: Option<usize>,
+        proofreader: Option<&dyn Proofreader>,
+        caret: Option<Position>,
+    ) -> Vec<DrawnMark> {
+        let rows = self.rows(size, front_matter_end, proofreader, caret);
+        drawn_marks(&rows, Point::ORIGIN, Rectangle::new(Point::ORIGIN, size))
+    }
+
     /// Whether `line` still has its layout from the last update.
     #[cfg(test)]
     pub fn is_laid_out(&self, line: usize) -> bool {
@@ -300,6 +351,10 @@ pub struct TextEditor<'a> {
     measure: Measure,
     markdown_assist: bool,
     key_policy: Option<&'a KeyPolicy>,
+    proofreader: Option<&'a dyn Proofreader>,
+    /// Where the last frame's marks are recorded for the host's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    spell_frame: Option<&'a RefCell<SpellFrame>>,
     last_status: Option<Status>,
 }
 
@@ -323,6 +378,9 @@ impl<'a> TextEditor<'a> {
             measure: Measure::default(),
             markdown_assist,
             key_policy: None,
+            proofreader: None,
+            #[cfg(any(test, feature = "test-support"))]
+            spell_frame: None,
             last_status: None,
         }
     }
@@ -337,6 +395,20 @@ impl<'a> TextEditor<'a> {
     /// Ask `policy` about each key press first (see [`KeyPolicy`]).
     pub fn key_policy(mut self, policy: Option<&'a KeyPolicy>) -> Self {
         self.key_policy = policy;
+        self
+    }
+
+    /// Mark the misspellings `proofreader` finds on the drawn rows. The
+    /// iced engine never asks it.
+    pub fn proofreader(mut self, proofreader: Option<&'a dyn Proofreader>) -> Self {
+        self.proofreader = proofreader;
+        self
+    }
+
+    /// Record each frame's marks in `frame`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spell_frame(mut self, frame: &'a RefCell<SpellFrame>) -> Self {
+        self.spell_frame = Some(frame);
         self
     }
 
@@ -790,9 +862,18 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
             width: bounds.width,
             height: text_bounds.height,
         };
-        let rows = visual_rows(editor.buffer(), &state.highlighter.borrow());
         let cursor = editor.cursor();
         let cursor_line = cursor.position.line;
+        let selection = state
+            .focus
+            .as_ref()
+            .and_then(|focus| Some((focus, editor.selection()?)));
+        let rows = visual_rows(
+            &editor,
+            &state.highlighter.borrow(),
+            self.proofreader,
+            hiding_caret(state.focus.is_some(), cursor),
+        );
 
         // Code bands start just left of the text so the gutter stays clear.
         let code_left = text_bounds.x - CODE_BAND_OUTSET;
@@ -887,10 +968,6 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         }
 
         let translation = text_bounds.position() - Point::ORIGIN;
-        let selection = state
-            .focus
-            .as_ref()
-            .and_then(|focus| Some((focus, editor.selection()?)));
 
         if let Some((_, Selection::Range(ranges))) = &selection {
             let breaks = selected_breaks(&rows, cursor, state.advance.width);
@@ -908,6 +985,33 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
                     style.text_selection,
                 );
             }
+        }
+
+        // Over the selection, which must not hide a mark, and under the
+        // glyphs, which paint over it.
+        let origin = text_bounds.position();
+        for square in rows
+            .iter()
+            .flat_map(|row| {
+                row.marks
+                    .iter()
+                    .filter(|mark| mark.shown)
+                    .filter_map(move |mark| mark.zigzag(row, origin))
+            })
+            .flat_map(Zigzag::squares)
+            .filter_map(|square| square.intersection(&rows_clip))
+        {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: square,
+                    ..renderer::Quad::default()
+                },
+                style.misspelling,
+            );
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(frame) = self.spell_frame {
+            frame.borrow_mut().marks = drawn_marks(&rows, origin, rows_clip);
         }
 
         // The owned engine hands the renderer a weak buffer reference, which
@@ -1205,28 +1309,97 @@ struct VisualRow {
     code_spans: Vec<(f32, f32)>,
     /// Whether the row belongs to a fenced code block.
     code: bool,
+    /// The misspelled words with glyphs on the row.
+    marks: Vec<RowMark>,
 }
 
-/// Collects the visible rows of `buffer` (already scrolled by the editor),
-/// with the decoration `highlighter` left for each line.
-fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) -> Vec<VisualRow> {
+/// A misspelled word's glyphs on one visual row.
+#[derive(Debug, Clone, PartialEq)]
+struct RowMark {
+    /// The word's byte range in its line.
+    range: Range<usize>,
+    /// Horizontal extent of the word's glyphs on the row.
+    left: f32,
+    right: f32,
+    /// False while the caret hides the mark (rule 4.3.3).
+    shown: bool,
+}
+
+/// A misspelled word's byte range in its line, and whether it is shown.
+type LineMark = (Range<usize>, bool);
+
+/// The caret that hides a mark ending at it (rule 4.3.3): the cursor's
+/// position while the editor has focus and nothing is selected. It is read
+/// from the cursor, not from the caret the widget draws, which is missing
+/// when the caret's row is out of view though the rest of a wrapped word
+/// is not.
+fn hiding_caret(focused: bool, cursor: Cursor) -> Option<Position> {
+    (focused && cursor.selection.is_none()).then_some(cursor.position)
+}
+
+/// Collects the visible rows of `editor`'s buffer (already scrolled by the
+/// editor), with the decoration `highlighter` left for each line and the
+/// misspellings `proofreader` finds in its prose, the mark ending at `caret`
+/// hidden. Only the owned engine asks the proofreader (§3.3).
+fn visual_rows(
+    editor: &Backend,
+    highlighter: &MarkdownHighlighter,
+    proofreader: Option<&dyn Proofreader>,
+    caret: Option<Position>,
+) -> Vec<VisualRow> {
+    let buffer = editor.buffer();
     let body = buffer.metrics();
+    let proofreader = proofreader.filter(|_| editor.kind() == BackendKind::Owned);
+    // The marks of the line the last run belonged to, asked once per line
+    // however many rows it wraps to.
+    let mut line_marks: Option<(usize, Vec<LineMark>)> = None;
     buffer
         .layout_runs()
         .map(|run| {
             let decor = highlighter.decor(run.line_i);
+            let glyphs = || {
+                run.glyphs
+                    .iter()
+                    .map(|glyph| (glyph.start..glyph.end, glyph.x, glyph.w))
+            };
+            let marks = match (proofreader, decor) {
+                (Some(proofreader), Some(decor)) => {
+                    if line_marks
+                        .as_ref()
+                        .is_none_or(|(line, _)| *line != run.line_i)
+                    {
+                        let marks = proof::line_marks(proofreader, run.text, &decor.prose)
+                            .into_iter()
+                            .map(|mark| {
+                                let hidden = caret.is_some_and(|caret| {
+                                    caret.line == run.line_i
+                                        && proof::caret_hides(run.text, &mark, caret.column)
+                                });
+                                (mark, !hidden)
+                            })
+                            .collect();
+                        line_marks = Some((run.line_i, marks));
+                    }
+                    line_marks
+                        .iter()
+                        .flat_map(|(_, marks)| marks)
+                        .filter_map(|(range, shown)| {
+                            let (left, right) = glyph_span(run.text, glyphs(), range.clone())?;
+                            Some(RowMark {
+                                range: range.clone(),
+                                left,
+                                right,
+                                shown: *shown,
+                            })
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
             let spans = |ranges: &[Range<usize>]| -> Vec<(f32, f32)> {
                 ranges
                     .iter()
-                    .filter_map(|range| {
-                        glyph_span(
-                            run.text,
-                            run.glyphs
-                                .iter()
-                                .map(|glyph| (glyph.start..glyph.end, glyph.x, glyph.w)),
-                            range.clone(),
-                        )
-                    })
+                    .filter_map(|range| glyph_span(run.text, glyphs(), range.clone()))
                     .collect()
             };
             let largest = run
@@ -1257,9 +1430,100 @@ fn visual_rows(buffer: &cosmic_text::Buffer, highlighter: &MarkdownHighlighter) 
                 code_spans: decor
                     .map(|decor| spans(&decor.code_spans))
                     .unwrap_or_default(),
+                marks,
             }
         })
         .collect()
+}
+
+/// The zigzag under one row's glyphs of a misspelled word (rule 4.3.4): 1 px
+/// squares from `left` to `right`, each 0 to 2 px below `top`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Zigzag {
+    left: f32,
+    right: f32,
+    top: f32,
+}
+
+impl Zigzag {
+    /// Under glyphs from `left` to `right` on a row with its baseline at
+    /// `baseline` and its bottom at `bottom`, all in logical pixels; `None`
+    /// when no whole pixel lies between the glyphs' edges.
+    fn new(left: f32, right: f32, baseline: f32, bottom: f32) -> Option<Self> {
+        let (left, right) = (left.ceil(), right.floor());
+        (right > left).then(|| Self {
+            left,
+            right,
+            top: (baseline + ZIGZAG_DROP)
+                .round()
+                .min((bottom - ZIGZAG_HEIGHT).floor()),
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn bounds(self) -> Rectangle {
+        Rectangle {
+            x: self.left,
+            y: self.top,
+            width: self.right - self.left,
+            height: ZIGZAG_HEIGHT,
+        }
+    }
+
+    /// One square per whole pixel, the phase starting at `left`.
+    fn squares(self) -> impl Iterator<Item = Rectangle> {
+        let count = (self.right - self.left) as usize;
+        (0..count).map(move |i| Rectangle {
+            x: self.left + i as f32,
+            y: self.top + ZIGZAG_STEPS[i % ZIGZAG_STEPS.len()],
+            width: 1.0,
+            height: 1.0,
+        })
+    }
+}
+
+impl RowMark {
+    /// The mark's zigzag on `row`, whose text origin is at `origin`.
+    fn zigzag(&self, row: &VisualRow, origin: Point) -> Option<Zigzag> {
+        Zigzag::new(
+            origin.x + self.left,
+            origin.x + self.right,
+            origin.y + row.baseline,
+            origin.y + row.top + row.height,
+        )
+    }
+}
+
+/// The marks of the drawn `rows`, whose text origin is at `origin`, one per
+/// word in the order they are drawn, with the parts of their zigzags inside
+/// `clip`.
+#[cfg(any(test, feature = "test-support"))]
+fn drawn_marks(rows: &[VisualRow], origin: Point, clip: Rectangle) -> Vec<DrawnMark> {
+    let mut marks: Vec<DrawnMark> = Vec::new();
+    for row in rows {
+        for mark in &row.marks {
+            let rect = mark
+                .zigzag(row, origin)
+                .and_then(|zigzag| zigzag.bounds().intersection(&clip));
+            let index = match marks
+                .iter()
+                .position(|drawn| drawn.line == row.line && drawn.range == mark.range)
+            {
+                Some(index) => index,
+                None => {
+                    marks.push(DrawnMark {
+                        line: row.line,
+                        range: mark.range.clone(),
+                        shown: mark.shown,
+                        rects: Vec::new(),
+                    });
+                    marks.len() - 1
+                }
+            };
+            marks[index].rects.extend(rect);
+        }
+    }
+    marks
 }
 
 /// The top of a `body_height` box whose body-sized text shares its baseline
@@ -1656,22 +1920,20 @@ mod tests {
     }
 
     fn laid_out_in(kind: BackendKind, text: &str, size: Size) -> Vec<VisualRow> {
-        fixtures::load_font();
-        let mut editor = Backend::with_text(kind, text);
-        let mut highlighter = MarkdownHighlighter::new(&HighlighterSettings {
-            palette: fixtures::DARK,
-            font: fixtures::FONT,
-            front_matter_end: None,
-        });
-        editor.update(
-            size,
-            fixtures::FONT,
-            Pixels(TEXT_SIZE),
-            line_height(),
-            Wrapping::WordOrGlyph,
-            &mut highlighter,
-        );
-        visual_rows(editor.buffer(), &highlighter)
+        spelled(kind, text, size, None, None)
+    }
+
+    /// The rows of `text` laid out in `size`, marked by `proofreader`, the
+    /// mark ending at `caret` hidden.
+    fn spelled(
+        kind: BackendKind,
+        text: &str,
+        size: Size,
+        proofreader: Option<&dyn Proofreader>,
+        caret: Option<Position>,
+    ) -> Vec<VisualRow> {
+        let mut content = Content::new(kind, text);
+        content.rows(size, None, proofreader, caret)
     }
 
     #[test]
@@ -1831,5 +2093,436 @@ mod tests {
             assert!(cell > 7.0 && cell < 10.0, "{start}");
             assert!((end - start - 4.0 * cell).abs() < 0.5, "{start}..{end}");
         }
+    }
+
+    // ── Spelling marks ─────────────────────────────────────────────────────
+
+    const LONG_TYPO: &str = "zzzzzzzzzzqqqqqqqqqqzzzzzzzzzzqqqqqqqqqq";
+
+    fn rejects() -> fixtures::Rejects {
+        fixtures::Rejects::new(&["teh", "Teh", "wouldn", LONG_TYPO])
+    }
+
+    /// `(line, mark text, left, right, shown)` for each row mark.
+    fn row_marks<'a>(text: &'a str, rows: &[VisualRow]) -> Vec<(usize, &'a str, f32, f32, bool)> {
+        let lines: Vec<&str> = text.split('\n').collect();
+        rows.iter()
+            .flat_map(|row| {
+                let line = lines[row.line];
+                row.marks.iter().map(move |mark| {
+                    (
+                        row.line,
+                        &line[mark.range.clone()],
+                        mark.left,
+                        mark.right,
+                        mark.shown,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn near(found: f32, expected: f32) -> bool {
+        (found - expected).abs() < 0.5
+    }
+
+    #[test]
+    fn marks_cover_the_glyphs_of_each_misspelled_word() {
+        let proofreader = rejects();
+        let text = "Teh cat sat on teh mat\nfine words `teh` here";
+        let rows = spelled(
+            BackendKind::Owned,
+            text,
+            Size::new(600.0, 200.0),
+            Some(&proofreader),
+            None,
+        );
+        let marks = row_marks(text, &rows);
+        assert_eq!(marks.len(), 2, "{marks:?}");
+        for ((line, word, left, right, shown), cells) in marks.iter().zip([0.0..3.0, 15.0..18.0]) {
+            assert_eq!(
+                (*line, *word, *shown),
+                (0, &text[cells.start as usize..cells.end as usize], true)
+            );
+            assert!(near(*left, cells.start * ADVANCE), "{left}");
+            assert!(near(*right, cells.end * ADVANCE), "{right}");
+        }
+        // Once per line: the code span is not prose, so the second line has
+        // no mark, but it is still asked about its prose.
+        assert_eq!(proofreader.calls(), 2);
+    }
+
+    #[test]
+    fn a_word_wrapped_mid_word_is_marked_on_each_of_its_rows() {
+        let proofreader = rejects();
+        let text = format!("ab {LONG_TYPO} cd");
+        let rows = spelled(
+            BackendKind::Owned,
+            &text,
+            Size::new(120.0, 400.0),
+            Some(&proofreader),
+            None,
+        );
+        assert!(rows.len() >= 3, "{rows:?}");
+        let marked: Vec<&VisualRow> = rows.iter().filter(|row| !row.marks.is_empty()).collect();
+        assert!(marked.len() >= 3, "{rows:?}");
+        let mut width = 0.0;
+        for (i, row) in marked.iter().enumerate() {
+            let [mark] = row.marks.as_slice() else {
+                panic!("one mark a row: {row:?}");
+            };
+            assert_eq!(mark.range, 3..3 + LONG_TYPO.len());
+            // Continuation rows start the word at their left edge.
+            if i > 0 {
+                assert!(near(mark.left, 0.0), "{mark:?}");
+            }
+            width += mark.right - mark.left;
+        }
+        assert!(near(width, LONG_TYPO.len() as f32 * ADVANCE), "{width}");
+        // One line, however many rows it wraps to.
+        assert_eq!(proofreader.calls(), 1);
+    }
+
+    #[test]
+    fn a_word_on_a_hanging_row_is_marked_under_its_glyphs() {
+        let proofreader = rejects();
+        // Fourteen cells a row: "gamma teh" wraps, hanging under "alpha".
+        let text = "- alpha beta gamma teh";
+        let rows = spelled(
+            BackendKind::Owned,
+            text,
+            Size::new(120.0, 200.0),
+            Some(&proofreader),
+            None,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].marks.is_empty());
+        let [mark] = rows[1].marks.as_slice() else {
+            panic!("{rows:?}");
+        };
+        assert_eq!(&text[mark.range.clone()], "teh");
+        // Two cells of hang, then "gamma ".
+        assert!(near(mark.left, 8.0 * ADVANCE), "{mark:?}");
+        assert!(near(mark.right, 11.0 * ADVANCE), "{mark:?}");
+    }
+
+    #[test]
+    fn a_heading_row_marks_its_larger_glyphs() {
+        let proofreader = rejects();
+        let text = "# Teh title\nteh body";
+        let rows = spelled(
+            BackendKind::Owned,
+            text,
+            Size::new(600.0, 200.0),
+            Some(&proofreader),
+            None,
+        );
+        let marks = row_marks(text, &rows);
+        assert_eq!(marks.len(), 2, "{marks:?}");
+        let heading = marks[0].3 - marks[0].2;
+        let body = marks[1].3 - marks[1].2;
+        assert!(near(body, 3.0 * ADVANCE), "{body}");
+        // H1 text is 1.35 em.
+        assert!(near(heading, 3.0 * ADVANCE * 1.35), "{heading}");
+        // The `# ` marker is not prose.
+        assert!(marks[0].2 > ADVANCE * 2.0, "{marks:?}");
+    }
+
+    #[test]
+    fn the_caret_at_a_marks_end_hides_only_that_mark() {
+        let proofreader = rejects();
+        // Half-typed `wouldn't`, straight and curly.
+        let text = "teh teh\nwouldn' wouldn’ teh";
+        let size = Size::new(600.0, 200.0);
+        let at = |line, column| Some(Position { line, column });
+        let shown = |caret| -> Vec<bool> {
+            spelled(BackendKind::Owned, text, size, Some(&proofreader), caret)
+                .iter()
+                .flat_map(|row| row.marks.iter().map(|mark| mark.shown))
+                .collect()
+        };
+        assert_eq!(shown(None), [true, true, true, true, true]);
+        assert_eq!(shown(at(0, 3)), [false, true, true, true, true]);
+        assert_eq!(shown(at(0, 7)), [true, false, true, true, true]);
+        // Inside the word, or a space past it, hides nothing.
+        assert_eq!(shown(at(0, 2)), [true; 5]);
+        assert_eq!(shown(at(0, 4)), [true; 5]);
+        // Only apostrophes between the caret and the end: `wouldn'`, and
+        // `wouldn’` with a curly one.
+        assert_eq!(shown(at(1, 7)), [true, true, false, true, true]);
+        assert_eq!(shown(at(1, 8)), [true; 5]);
+        let curly = "wouldn' wouldn’".len();
+        assert_eq!(shown(at(1, curly)), [true, true, true, false, true]);
+        // The same column on another line hides nothing.
+        assert_eq!(shown(at(1, 3)), [true; 5]);
+    }
+
+    #[test]
+    fn only_a_focused_caret_with_nothing_selected_hides_a_mark() {
+        let cursor = Cursor {
+            position: Position { line: 2, column: 5 },
+            selection: None,
+        };
+        assert_eq!(hiding_caret(true, cursor), Some(cursor.position));
+        assert_eq!(hiding_caret(false, cursor), None);
+        let selected = Cursor {
+            selection: Some(Position { line: 2, column: 1 }),
+            ..cursor
+        };
+        assert_eq!(hiding_caret(true, selected), None);
+    }
+
+    #[test]
+    fn a_caret_on_a_row_below_the_view_still_hides_its_wrapped_word() {
+        let proofreader = rejects();
+        let text = format!("ab {LONG_TYPO}");
+        // Two rows in view; the word wraps to at least three.
+        let size = Size::new(120.0, 2.0 * LINE_HEIGHT);
+        let mut content = Content::new(BackendKind::Owned, &text);
+        content.move_to(Cursor {
+            position: Position {
+                line: 0,
+                column: text.len(),
+            },
+            selection: None,
+        });
+        content.rows(size, None, Some(&proofreader), None);
+        content.perform(Action::Scroll { lines: -10 });
+        let rows = content.rows(size, None, Some(&proofreader), None);
+        assert_eq!(content.scroll().vertical, 0.0, "{:?}", content.scroll());
+        assert!(rows.iter().any(|row| !row.marks.is_empty()), "{rows:?}");
+        // The widget draws no caret for a row out of view.
+        assert!(content.selection_geometry().is_none());
+
+        let caret = hiding_caret(true, content.cursor());
+        let rows = content.rows(size, None, Some(&proofreader), caret);
+        let shown: Vec<bool> = rows
+            .iter()
+            .flat_map(|row| row.marks.iter().map(|mark| mark.shown))
+            .collect();
+        assert!(
+            !shown.is_empty() && shown.iter().all(|shown| !shown),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_classic_engine_never_asks_the_proofreader() {
+        let proofreader = rejects();
+        let text = "Teh cat\n# teh\n- [x] teh";
+        let size = Size::new(600.0, 200.0);
+        let rows = spelled(BackendKind::Iced, text, size, Some(&proofreader), None);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.marks.is_empty()));
+        assert_eq!(proofreader.calls(), 0);
+        // With none set, the owned engine marks nothing.
+        let rows = spelled(BackendKind::Owned, text, size, None, None);
+        assert!(rows.iter().all(|row| row.marks.is_empty()));
+        assert_eq!(
+            spelled(BackendKind::Owned, text, size, Some(&proofreader), None)
+                .iter()
+                .map(|row| row.marks.len())
+                .sum::<usize>(),
+            3
+        );
+    }
+
+    #[test]
+    fn lines_without_prose_are_not_asked_about() {
+        let proofreader = rejects();
+        let text = "```\nteh\n```\n\n---\nteh";
+        let rows = spelled(
+            BackendKind::Owned,
+            text,
+            Size::new(600.0, 300.0),
+            Some(&proofreader),
+            None,
+        );
+        assert_eq!(row_marks(text, &rows).len(), 1);
+        assert_eq!(proofreader.calls(), 1);
+    }
+
+    // ── The zigzag ─────────────────────────────────────────────────────────
+
+    /// `(x, y)` of each square.
+    fn squares(zigzag: Zigzag) -> Vec<(f32, f32)> {
+        zigzag
+            .squares()
+            .map(|square| {
+                assert_eq!(square.size(), Size::new(1.0, 1.0));
+                (square.x, square.y)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_zigzag_steps_two_one_zero_one_from_its_left_pixel() {
+        // Glyphs from 10.3 to 19.7: whole pixels 11 to 19.
+        let zigzag = Zigzag::new(10.3, 19.7, 30.4, 48.0).unwrap();
+        assert_eq!(
+            zigzag,
+            Zigzag {
+                left: 11.0,
+                right: 19.0,
+                top: 32.0
+            }
+        );
+        assert_eq!(
+            squares(zigzag),
+            [
+                (11.0, 34.0),
+                (12.0, 33.0),
+                (13.0, 32.0),
+                (14.0, 33.0),
+                (15.0, 34.0),
+                (16.0, 33.0),
+                (17.0, 32.0),
+                (18.0, 33.0),
+            ]
+        );
+        assert_eq!(
+            zigzag.bounds(),
+            Rectangle::new(Point::new(11.0, 32.0), Size::new(8.0, 3.0))
+        );
+        // Whole edges are kept; the top rounds half up.
+        let zigzag = Zigzag::new(4.0, 6.0, 7.5, 48.0).unwrap();
+        assert_eq!(
+            zigzag,
+            Zigzag {
+                left: 4.0,
+                right: 6.0,
+                top: 10.0
+            }
+        );
+        assert_eq!(squares(zigzag), [(4.0, 12.0), (5.0, 11.0)]);
+    }
+
+    #[test]
+    fn the_zigzag_moves_up_to_stay_inside_its_row() {
+        // round(38.2 + 2) = 40 would put the squares at 40..43, past 41.
+        let zigzag = Zigzag::new(0.0, 4.0, 38.2, 41.0).unwrap();
+        assert_eq!(zigzag.top, 38.0);
+        assert!(squares(zigzag)
+            .iter()
+            .all(|&(_, y)| (38.0..41.0).contains(&y)));
+        // A fractional bottom: the squares stay above it.
+        assert_eq!(Zigzag::new(0.0, 4.0, 38.2, 41.6).unwrap().top, 38.0);
+        // Room enough: it stays where it is.
+        assert_eq!(Zigzag::new(0.0, 4.0, 38.2, 43.0).unwrap().top, 40.0);
+    }
+
+    #[test]
+    fn a_zigzag_without_a_whole_pixel_draws_nothing() {
+        assert_eq!(Zigzag::new(10.2, 10.9, 0.0, 24.0), None);
+        assert_eq!(Zigzag::new(10.5, 10.5, 0.0, 24.0), None);
+        assert_eq!(Zigzag::new(12.0, 10.0, 0.0, 24.0), None);
+        assert_eq!(
+            squares(Zigzag::new(10.0, 11.0, 0.0, 24.0).unwrap()),
+            [(10.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn the_zigzag_sits_under_the_baseline_inside_every_row() {
+        let proofreader = rejects();
+        let text = format!("# Teh title\nteh body\n### teh\nab {LONG_TYPO}");
+        let rows = spelled(
+            BackendKind::Owned,
+            &text,
+            Size::new(160.0, 600.0),
+            Some(&proofreader),
+            None,
+        );
+        let origin = Point::new(60.0, 24.0);
+        let mut drawn = 0;
+        for row in &rows {
+            for mark in &row.marks {
+                let zigzag = mark.zigzag(row, origin).unwrap();
+                let baseline = origin.y + row.baseline;
+                let bottom = origin.y + row.top + row.height;
+                assert_eq!(zigzag.top, (baseline + ZIGZAG_DROP).round(), "{row:?}");
+                assert!(zigzag.top + ZIGZAG_HEIGHT <= bottom, "{row:?}");
+                assert_eq!(zigzag.left, (origin.x + mark.left).ceil());
+                assert_eq!(zigzag.right, (origin.x + mark.right).floor());
+                // The phase restarts on every row, heading rows included,
+                // and the squares keep their size.
+                let first = zigzag.squares().next().unwrap();
+                assert_eq!(first.y, zigzag.top + 2.0);
+                assert_eq!(first.size(), Size::new(1.0, 1.0));
+                drawn += 1;
+            }
+        }
+        // The heading, the body word, the H3, and the long word's rows.
+        assert!(drawn >= 5, "{drawn}");
+        assert!(rows[0].height > LINE_HEIGHT);
+    }
+
+    #[test]
+    fn drawn_marks_join_a_words_rows_and_clip_them() {
+        let row = |line, top: f32, marks: Vec<RowMark>| VisualRow {
+            line,
+            top,
+            height: LINE_HEIGHT,
+            baseline: top + 17.0,
+            number_top: top,
+            starts_line: true,
+            ends_line: true,
+            width: 100.0,
+            strikes: Vec::new(),
+            code_spans: Vec::new(),
+            code: false,
+            marks,
+        };
+        let mark = |range: Range<usize>, left, right, shown| RowMark {
+            range,
+            left,
+            right,
+            shown,
+        };
+        let rows = [
+            row(
+                0,
+                0.0,
+                vec![mark(0..3, 0.0, 25.2, true), mark(8..20, 60.0, 100.0, true)],
+            ),
+            row(0, 24.0, vec![mark(8..20, 0.0, 40.4, true)]),
+            // No whole pixel: listed, with no zigzag.
+            row(1, 48.0, vec![mark(4..5, 10.2, 10.8, false)]),
+            row(2, 72.0, vec![mark(0..4, 0.0, 30.0, true)]),
+        ];
+        let origin = Point::new(60.0, 24.0);
+        // The last row's zigzag falls below the clip.
+        let clip = Rectangle::new(Point::new(0.0, 24.0), Size::new(400.0, 90.0));
+        let marks = drawn_marks(&rows, origin, clip);
+        let rect = |x, y, width| Rectangle::new(Point::new(x, y), Size::new(width, 3.0));
+        assert_eq!(
+            marks,
+            [
+                DrawnMark {
+                    line: 0,
+                    range: 0..3,
+                    shown: true,
+                    rects: vec![rect(60.0, 43.0, 25.0)],
+                },
+                DrawnMark {
+                    line: 0,
+                    range: 8..20,
+                    shown: true,
+                    rects: vec![rect(120.0, 43.0, 40.0), rect(60.0, 67.0, 40.0)],
+                },
+                DrawnMark {
+                    line: 1,
+                    range: 4..5,
+                    shown: false,
+                    rects: Vec::new(),
+                },
+                DrawnMark {
+                    line: 2,
+                    range: 0..4,
+                    shown: true,
+                    rects: Vec::new(),
+                },
+            ]
+        );
     }
 }

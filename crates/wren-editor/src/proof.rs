@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use iced::Point;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 use iced::Rectangle;
 
 /// What the host gives the editor to find and correct mistakes. Line by line,
@@ -75,7 +75,7 @@ impl SpellMenu {
 
 /// The marks and the menu as the last frame drew them, for the host's
 /// functional tests.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpellFrame {
     pub marks: Vec<DrawnMark>,
@@ -83,8 +83,8 @@ pub struct SpellFrame {
     pub menu: Option<Rectangle>,
 }
 
-/// One mark of a drawn row.
-#[cfg(feature = "test-support")]
+/// One mark of the drawn rows.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrawnMark {
     pub line: usize,
@@ -92,6 +92,96 @@ pub struct DrawnMark {
     pub range: Range<usize>,
     /// Whether the zigzag was drawn, or hidden by the caret at the word's end.
     pub shown: bool,
-    /// The zigzag's extent on each row, in window coordinates.
+    /// The zigzag's extent on each drawn row, in window coordinates and
+    /// clipped to the rows, whether or not it was shown.
     pub rects: Vec<Rectangle>,
+}
+
+/// The marks `proofreader` finds in `line`'s `prose`. A line with no prose is
+/// not asked about, and a range that is empty or not on character boundaries
+/// of `line` is dropped, so callers may slice `line` with every mark.
+pub(crate) fn line_marks(
+    proofreader: &dyn Proofreader,
+    line: &str,
+    prose: &[Range<usize>],
+) -> Vec<Range<usize>> {
+    let mut marks = Vec::new();
+    if prose.is_empty() {
+        return marks;
+    }
+    proofreader.marks(line, prose, &mut marks);
+    marks.retain(|mark| !mark.is_empty() && line.get(mark.clone()).is_some());
+    marks
+}
+
+/// Whether a caret at byte `caret` of `line` hides `mark` (rule 4.3.3): it
+/// sits at the mark's end, or only apostrophes lie between them, so the word
+/// being typed is not flagged before it is finished.
+pub(crate) fn caret_hides(line: &str, mark: &Range<usize>, caret: usize) -> bool {
+    caret >= mark.end
+        && line
+            .get(mark.end..caret)
+            .is_some_and(|gap| gap.chars().all(|ch| matches!(ch, '\'' | '\u{2019}')))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::Rejects;
+
+    /// Hands back fixed ranges, whatever it is asked.
+    struct Fixed(Vec<Range<usize>>);
+
+    impl Proofreader for Fixed {
+        fn marks(&self, _line: &str, _prose: &[Range<usize>], out: &mut Vec<Range<usize>>) {
+            out.extend(self.0.iter().cloned());
+        }
+
+        fn suggestions(&self, _line: &str, _mark: Range<usize>, _limit: usize) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_line_with_no_prose_is_not_asked_about() {
+        let proofreader = Rejects::new(&["teh"]);
+        assert!(line_marks(&proofreader, "teh", &[]).is_empty());
+        assert_eq!(proofreader.calls(), 0);
+        let word = 0..3;
+        let marks = line_marks(&proofreader, "teh", std::slice::from_ref(&word));
+        assert_eq!(marks, std::slice::from_ref(&word));
+        assert_eq!(proofreader.calls(), 1);
+    }
+
+    #[test]
+    fn marks_off_the_line_or_inside_a_character_are_dropped() {
+        let line = "né teh";
+        let proofreader = Fixed(vec![0..3, 2..3, 4..4, 4..7, 4..9, 8..8]);
+        let prose = 0..line.len();
+        assert_eq!(
+            line_marks(&proofreader, line, std::slice::from_ref(&prose)),
+            [0..3, 4..7]
+        );
+    }
+
+    #[test]
+    fn only_the_caret_at_a_marks_end_or_past_its_apostrophes_hides_it() {
+        let line = "wouldn'’' x teh";
+        let mark = 0..6;
+        for (caret, hides) in [
+            (6, true),
+            (7, true),
+            (10, true),
+            (11, true),
+            (5, false),
+            (0, false),
+            // Past the space, or inside the curly apostrophe.
+            (12, false),
+            (8, false),
+            (99, false),
+        ] {
+            assert_eq!(caret_hides(line, &mark, caret), hides, "{caret}");
+        }
+        assert!(caret_hides(line, &(12..15), 15));
+    }
 }
