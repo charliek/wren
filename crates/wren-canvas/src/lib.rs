@@ -1660,7 +1660,7 @@ impl BoardView {
             })
         } else {
             let from = cursor.or_else(|| selection.iter().next().cloned());
-            let next = from.and_then(|from| walk::next(&self.board, from.id(), dir));
+            let next = from.and_then(|from| walk::next(&self.board, &from, dir));
             next.map(Source::Node)
         };
         let Some(target) = target else {
@@ -3562,6 +3562,25 @@ mod tests {
         view.command(Command::SelectAll, now);
         view.command(Command::Delete, now);
         assert!(view.board().nodes.is_empty() && view.board().edges.is_empty());
+        // An arrow walks from the connector the cursor is on, to its one
+        // attached end; from the node of that id nothing lies to the right.
+        let mut view = sized(board);
+        let at = on_edge(&view);
+        click(&mut view, at, now);
+        view.command(Command::Select(Dir::Right), now);
+        assert!(view
+            .machine()
+            .selection()
+            .iter()
+            .eq(&[Source::Node(id("a"))]));
+        let mut view = sized(board);
+        click_node(&mut view, "shared", now);
+        view.command(Command::Select(Dir::Right), now);
+        assert!(view
+            .machine()
+            .selection()
+            .iter()
+            .eq(&[Source::Node(shared)]));
     }
 
     #[test]

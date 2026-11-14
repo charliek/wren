@@ -1506,7 +1506,7 @@ impl Machine {
             Key::Escape => {}
             Key::Arrow(dir) => {
                 let from = seek.target.as_ref().unwrap_or(&seek.source);
-                if let Some(next) = walk::next(view.board, from, dir) {
+                if let Some(next) = walk::next(view.board, &Source::Node(from.clone()), dir) {
                     seek.target = Some(next);
                 }
                 seek.query.clear();
