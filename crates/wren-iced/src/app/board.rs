@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use iced::Task;
-use wren_board::{svg, Access, Palette, ParseError};
+use wren_board::{Access, Palette, ParseError};
 use wren_canvas::{BoardView, Effect, Input, Viewport};
 use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
@@ -305,16 +305,9 @@ pub(super) struct Export {
 }
 
 /// The board as an SVG document, in the colours it is drawn in now, on a
-/// background of the canvas colour. The margin is the one a fitted board
-/// has on screen.
+/// background of the canvas colour.
 pub(super) fn svg_document(view: &BoardView) -> String {
-    svg::write(
-        view.scene(),
-        &svg::Options {
-            background: Some(view.palette().canvas),
-            padding: wren_canvas::FIT_MARGIN,
-        },
-    )
+    board_export::svg(view, board_export::Background::Theme)
 }
 
 /// Why an export in `format` may not be written to `path`, if it may not,
@@ -2077,6 +2070,49 @@ z = "c"
             .collect();
         names.sort();
         names
+    }
+
+    /// `wren export` writes what the app's export writes for the same board
+    /// in the same theme, SVG and PNG, and reads the file it is given, not
+    /// the open draft.
+    #[test]
+    fn the_command_line_export_is_the_app_export() {
+        let (directory, mut app) = fixture();
+        let flow = file(&directory, "Flow.wren-board");
+        for definition in [definitions::DARK, definitions::LIGHT] {
+            let _ = app.update(Message::ChooseTheme(Some(definition)));
+            open_board(&mut app, "Flow");
+            lay_out(&mut app);
+            let drawn = svg_document(app.board.as_ref().unwrap());
+            let exported = |format: Format, scale: f32| {
+                let mut out = Vec::new();
+                let mut warnings = Vec::new();
+                board_export::run(
+                    &crate::cli::ExportArgs {
+                        board: flow.clone(),
+                        output: crate::cli::Output::Stdout,
+                        format,
+                        theme: definition,
+                        scale,
+                        background: board_export::Background::Theme,
+                    },
+                    &mut out,
+                    &mut |warning| warnings.push(warning),
+                )
+                .unwrap();
+                // `FLOW` gives its elements no `z`.
+                assert_eq!(warnings.len(), 3, "{warnings:?}");
+                out
+            };
+            assert_eq!(
+                String::from_utf8(exported(Format::Svg, 1.0)).unwrap(),
+                drawn
+            );
+            assert_eq!(
+                exported(Format::Png, board_export::PNG_SCALE),
+                board_export::png(&drawn, board_export::PNG_SCALE).unwrap()
+            );
+        }
     }
 
     #[test]

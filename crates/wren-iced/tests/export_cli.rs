@@ -1,0 +1,416 @@
+//! `wren export` run as a program with no display (discovery/boards.md
+//! §7.4 EX2, §6.8 Phase 3 item 6): every option, every exit code, nothing
+//! written when it fails, and the Checkout flow's SVG byte for byte.
+//!
+//! `WREN_BLESS=1` rewrites the golden SVG for review.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const FLOW: &str = "Checkout flow.wren-board";
+const GOLDEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/checkout-flow.svg"
+);
+
+fn samples() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/wrentest/fixtures/boards/workspace/Boards/Samples")
+}
+
+/// A folder holding copies of the sample boards, its path canonical.
+fn workspace() -> tempfile::TempDir {
+    let root = std::env::temp_dir().canonicalize().unwrap();
+    let directory = tempfile::tempdir_in(root).unwrap();
+    for name in [FLOW, "Shapes.wren-board", "Future.wren-board"] {
+        std::fs::copy(samples().join(name), directory.path().join(name)).unwrap();
+    }
+    directory
+}
+
+/// `wren` run in `directory` with these arguments and no display to open.
+fn wren<S: AsRef<OsStr>>(directory: &Path, args: &[S]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_wren"))
+        .args(args)
+        .current_dir(directory)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WREN_TEST_MODE")
+        .output()
+        .unwrap()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[track_caller]
+fn succeeded(output: &Output) {
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(output));
+}
+
+/// The names in `directory`, sorted.
+fn names(directory: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A PNG's width, height and RGBA pixels.
+fn decode(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let frame = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(
+        (frame.color_type, frame.bit_depth),
+        (png::ColorType::Rgba, png::BitDepth::Eight)
+    );
+    pixels.truncate(frame.buffer_size());
+    (frame.width, frame.height, pixels)
+}
+
+/// The width and height of an SVG export, from its root element.
+fn svg_size(svg: &str) -> (f64, f64) {
+    let attribute = |name: &str| -> f64 {
+        let start = svg.find(&format!(" {name}=\"")).unwrap() + name.len() + 3;
+        let end = start + svg[start..].find('"').unwrap();
+        svg[start..end].parse().unwrap()
+    };
+    (attribute("width"), attribute("height"))
+}
+
+#[test]
+fn the_flow_exports_with_no_display_as_its_golden_svg() {
+    let directory = workspace();
+    let board = std::fs::read(directory.path().join(FLOW)).unwrap();
+    // A relative path, the output beside it.
+    let output = wren(directory.path(), &["export", FLOW]);
+    succeeded(&output);
+    assert_eq!(stderr(&output), "");
+    let written = std::fs::read_to_string(directory.path().join("Checkout flow.svg")).unwrap();
+    if std::env::var_os("WREN_BLESS").is_some_and(|value| value == "1") {
+        std::fs::write(GOLDEN, &written).unwrap();
+    }
+    let golden = std::fs::read_to_string(GOLDEN).unwrap();
+    assert_eq!(
+        written, golden,
+        "rerun with WREN_BLESS=1 to review a change"
+    );
+    assert_eq!(std::fs::read(directory.path().join(FLOW)).unwrap(), board);
+
+    // The same bytes to standard output, and over an existing file.
+    let output = wren(directory.path(), &["export", FLOW, "-o", "-"]);
+    succeeded(&output);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), golden);
+    std::fs::write(directory.path().join("old.svg"), "old").unwrap();
+    succeeded(&wren(directory.path(), &["export", FLOW, "-o", "old.svg"]));
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("old.svg")).unwrap(),
+        golden
+    );
+    let absolute = directory.path().join(FLOW);
+    succeeded(&wren(
+        Path::new("/"),
+        &[OsStr::new("export"), absolute.as_os_str()],
+    ));
+    assert!(names(directory.path())
+        .iter()
+        .all(|name| !name.contains(".tmp")));
+}
+
+#[test]
+fn every_option_changes_what_is_written() {
+    let directory = workspace();
+    let light = wren(directory.path(), &["export", FLOW, "-o", "-"]);
+    succeeded(&light);
+    let golden = String::from_utf8(light.stdout).unwrap();
+    let (width, height) = svg_size(&golden);
+
+    // Dark: the same drawing in other colours.
+    let dark = wren(
+        directory.path(),
+        &["export", FLOW, "-o", "-", "--theme", "wren-dark"],
+    );
+    succeeded(&dark);
+    let dark = String::from_utf8(dark.stdout).unwrap();
+    assert_ne!(dark, golden);
+    assert_eq!(svg_size(&dark), (width, height));
+    assert!(dark.contains("fill=\"#14161b\""), "the dark canvas");
+    let alias = wren(
+        directory.path(),
+        &["export", FLOW, "-o", "-", "--theme", "dark"],
+    );
+    assert_eq!(String::from_utf8(alias.stdout).unwrap(), dark);
+
+    // A transparent SVG has no background rectangle.
+    let clear = wren(
+        directory.path(),
+        &["export", FLOW, "-o", "-", "--background", "transparent"],
+    );
+    succeeded(&clear);
+    let clear = String::from_utf8(clear.stdout).unwrap();
+    assert_eq!(
+        golden.matches("<rect").count(),
+        clear.matches("<rect").count() + 1
+    );
+
+    // PNG by the name, by --format with the default name, at each scale.
+    succeeded(&wren(directory.path(), &["export", FLOW, "-o", "flow.png"]));
+    let (w, h, pixels) = decode(&std::fs::read(directory.path().join("flow.png")).unwrap());
+    assert_eq!(
+        (f64::from(w), f64::from(h)),
+        ((width * 2.0).ceil(), (height * 2.0).ceil())
+    );
+    assert_eq!(pixels[..4], [0xf7, 0xf8, 0xfa, 255], "the light canvas");
+    succeeded(&wren(
+        directory.path(),
+        &["export", FLOW, "--format", "png"],
+    ));
+    assert_eq!(
+        std::fs::read(directory.path().join("Checkout flow.png")).unwrap(),
+        std::fs::read(directory.path().join("flow.png")).unwrap()
+    );
+    for scale in ["1", "4"] {
+        let output = wren(
+            directory.path(),
+            &[
+                "export", FLOW, "-o", "-", "--format", "png", "--scale", scale,
+            ],
+        );
+        succeeded(&output);
+        let factor: f64 = scale.parse().unwrap();
+        let (w, h, _) = decode(&output.stdout);
+        assert_eq!(
+            (f64::from(w), f64::from(h)),
+            ((width * factor).ceil(), (height * factor).ceil())
+        );
+    }
+    let output = wren(
+        directory.path(),
+        &[
+            "export",
+            FLOW,
+            "-o",
+            "-",
+            "--format",
+            "png",
+            "--background",
+            "transparent",
+            "--theme",
+            "nord",
+        ],
+    );
+    succeeded(&output);
+    let (_, _, pixels) = decode(&output.stdout);
+    assert_eq!(pixels[3], 0, "a transparent corner");
+    assert!(
+        pixels.chunks(4).any(|pixel| pixel[3] == 255),
+        "the shapes are drawn"
+    );
+}
+
+#[test]
+fn an_empty_board_is_an_empty_padded_canvas() {
+    let directory = workspace();
+    for (name, text) in [
+        ("blank.wren-board", ""),
+        ("empty.wren-board", "schema = 1\n"),
+    ] {
+        std::fs::write(directory.path().join(name), text).unwrap();
+        let output = wren(directory.path(), &["export", name, "-o", "-"]);
+        succeeded(&output);
+        let svg = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(svg_size(&svg), (80.0, 80.0), "{svg}");
+        assert_eq!(svg.matches('<').count(), 4, "{svg}");
+    }
+}
+
+#[test]
+fn what_is_wrong_with_a_board_that_draws_is_a_warning() {
+    let directory = workspace();
+    let shapes = wren(directory.path(), &["export", "Shapes.wren-board"]);
+    succeeded(&shapes);
+    assert!(
+        stderr(&shapes).contains(
+            "Wren: warning: Shapes.wren-board: connector dangling: its end names no node"
+        ),
+        "{}",
+        stderr(&shapes)
+    );
+    let future = wren(
+        directory.path(),
+        &["export", "Future.wren-board", "-o", "future.svg"],
+    );
+    succeeded(&future);
+    assert!(
+        stderr(&future).contains("would open read-only"),
+        "{}",
+        stderr(&future)
+    );
+    assert!(directory.path().join("future.svg").is_file());
+}
+
+#[test]
+fn help_is_printed_with_no_display() {
+    let directory = workspace();
+    let help = wren(directory.path(), &["export", "--help"]);
+    succeeded(&help);
+    assert!(String::from_utf8(help.stdout)
+        .unwrap()
+        .starts_with("Usage: wren export <board>"));
+    let main = wren(directory.path(), &["--help"]);
+    succeeded(&main);
+    assert!(String::from_utf8(main.stdout)
+        .unwrap()
+        .contains("wren export BOARD"));
+}
+
+#[test]
+fn a_failed_export_says_why_exits_with_its_code_and_writes_nothing() {
+    let directory = workspace();
+    let path = directory.path();
+    std::fs::write(
+        path.join("conflict.wren-board"),
+        "schema = 1\n<<<<<<< ours\n[node.a]\n=======\n[node.b]\n>>>>>>> theirs\n",
+    )
+    .unwrap();
+    std::fs::write(path.join("binary.wren-board"), [0xff, 0xfe, 0x00]).unwrap();
+    let huge = std::fs::File::create(path.join("huge.wren-board")).unwrap();
+    huge.set_len(wren_core::fs_store::MAX_FILE_BYTES + 1)
+        .unwrap();
+    drop(huge);
+    // 16,800 pixels square at scale 4.
+    std::fs::write(
+        path.join("wide.wren-board"),
+        "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n\n\
+         [node.b]\nkind = \"shape\"\nat = [4000, 4000]\nsize = [120, 60]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(path.join("folder.svg")).unwrap();
+    std::fs::write(path.join("Note.md"), "a note").unwrap();
+    let before = names(path);
+    let note = std::fs::read(path.join("Note.md")).unwrap();
+
+    let cases: &[(&[&str], u8, &str)] = &[
+        (
+            &["export", "missing.wren-board"],
+            1,
+            "Could not read missing.wren-board",
+        ),
+        (
+            &["export", "folder.svg", "-o", "x.svg"],
+            1,
+            "it is a folder",
+        ),
+        (&["export", FLOW, "-o", "folder.svg"], 1, "it is a folder"),
+        (
+            &["export", FLOW, "-o", "no/such/x.svg"],
+            1,
+            "Could not write no/such/x.svg",
+        ),
+        (
+            &["export", FLOW, "-o", FLOW, "--format", "svg"],
+            1,
+            "it is the board being exported",
+        ),
+        (
+            &[
+                "export",
+                FLOW,
+                "-o",
+                "./Checkout flow.wren-board",
+                "--format",
+                "png",
+            ],
+            1,
+            "it is the board being exported",
+        ),
+        (
+            &["export", FLOW, "-o", "Note.md", "--format", "svg"],
+            1,
+            "it is a note",
+        ),
+        (
+            &[
+                "export",
+                "wide.wren-board",
+                "--format",
+                "png",
+                "--scale",
+                "4",
+            ],
+            1,
+            "over the 64 megapixels",
+        ),
+        (&["export"], 2, "needs a board"),
+        (
+            &["export", FLOW, "--format", "pdf"],
+            2,
+            "--format is svg or png",
+        ),
+        (
+            &["export", FLOW, "--theme", "sepia"],
+            2,
+            "there is no theme sepia",
+        ),
+        (
+            &["export", FLOW, "--scale", "2"],
+            2,
+            "--scale is for a PNG export",
+        ),
+        (
+            &["export", FLOW, "-o", "flow.gif"],
+            2,
+            "cannot tell the format",
+        ),
+        (
+            &["export", "conflict.wren-board"],
+            3,
+            "conflict.wren-board is not a board Wren can draw: line 2",
+        ),
+        (&["export", "binary.wren-board"], 3, "not UTF-8 text"),
+        (&["export", "huge.wren-board"], 3, "it is over 64 MiB"),
+    ];
+    for (args, code, message) in cases {
+        let output = wren(path, args);
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(*code)),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains(message),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(stderr(&output).starts_with("Wren: "), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(names(path), before, "{args:?} wrote something");
+    }
+    assert_eq!(std::fs::read(path.join("Note.md")).unwrap(), note);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unwritable_folder_fails_and_leaves_nothing() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = workspace();
+    let locked = directory.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // A superuser can write into a read-only folder.
+    if std::fs::write(locked.join("probe"), "").is_ok() {
+        return;
+    }
+    let output = wren(directory.path(), &["export", FLOW, "-o", "locked/flow.svg"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("Could not write locked/flow.svg"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(names(&locked).is_empty());
+}

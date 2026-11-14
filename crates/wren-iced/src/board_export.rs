@@ -1,17 +1,23 @@
 //! A board's export as a file: the SVG the scene writes, and that SVG
 //! rendered by resvg as a PNG image. The widget, the SVG and the PNG all
 //! come from one `scene::build`, so the image shows the lines the canvas
-//! drew.
+//! drew. `wren export` writes the same files with no window.
 
 use std::ffi::OsString;
-use std::io::Write as _;
+use std::io::{Read as _, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{self, fontdb, ImageHrefResolver};
+use wren_board::scene::Source;
+use wren_board::{svg as svg_writer, Access, IssueKind};
+use wren_canvas::BoardView;
+use wren_core::fs_store::MAX_FILE_BYTES;
+use wren_core::kind::NoteKind;
 
+use crate::cli::{ExportArgs, Output};
 use crate::fonts;
 
 /// What an export writes.
@@ -40,8 +46,31 @@ impl Format {
     }
 }
 
+/// What is behind the board in an export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Background {
+    /// The theme's canvas colour, as on screen.
+    Theme,
+    Transparent,
+}
+
 /// How many image pixels a board unit takes in a PNG export.
 pub const PNG_SCALE: f32 = 2.0;
+
+/// The board `view` shows as an SVG document, in the colours it is drawn
+/// in now. The margin is the one a fitted board has on screen.
+pub fn svg(view: &BoardView, background: Background) -> String {
+    svg_writer::write(
+        view.scene(),
+        &svg_writer::Options {
+            background: match background {
+                Background::Theme => Some(view.palette().canvas),
+                Background::Transparent => None,
+            },
+            padding: wren_canvas::FIT_MARGIN,
+        },
+    )
+}
 
 /// The largest PNG export, in pixels: 64 megapixels, 256 MB of pixels
 /// before encoding.
@@ -213,6 +242,160 @@ pub fn write(path: &Path, contents: &[u8]) -> std::io::Result<u64> {
         let _ = std::fs::remove_file(&temporary);
     }
     written.map(|()| contents.len() as u64)
+}
+
+/// Why `wren export` wrote nothing, and its exit code.
+#[derive(Debug)]
+pub struct Failure {
+    pub code: u8,
+    pub message: String,
+}
+
+/// The exit code for a board that could not be read or an image that
+/// could not be made or written.
+pub const EXIT_FAILED: u8 = 1;
+/// The exit code for a file that is not a board Wren can draw.
+pub const EXIT_NOT_A_BOARD: u8 = 3;
+
+fn failed(message: String) -> Failure {
+    Failure {
+        code: EXIT_FAILED,
+        message,
+    }
+}
+
+/// `wren export`: draw the board `args` names as the app would, and write
+/// it whole or not at all. Nothing here needs a display: the labels are
+/// measured in the bundled faces through iced's font system, which needs
+/// no renderer. What is wrong with the board but still draws goes to
+/// `warn`, one line at a time; `stdout` takes the image for `-o -`.
+pub fn run(
+    args: &ExportArgs,
+    stdout: &mut dyn Write,
+    warn: &mut dyn FnMut(String),
+) -> Result<(), Failure> {
+    let board = args.board.display();
+    let text = read_board(&args.board)?;
+    fonts::load();
+    let view = BoardView::open(&text, crate::theme::board_palette(args.theme), fonts::UI).map_err(
+        |error| Failure {
+            code: EXIT_NOT_A_BOARD,
+            message: format!("{board} is not a board Wren can draw: {error}"),
+        },
+    )?;
+    if let Access::ReadOnly(reason) = view.access() {
+        warn(format!(
+            "{board} would open read-only in this version of Wren: {reason}"
+        ));
+    }
+    for issue in view.issues() {
+        warn(format!("{board}: {}", describe(&issue.element, issue.kind)));
+    }
+    if let Output::File(path) = &args.output {
+        refuse_output(path, &args.board)?;
+    }
+    let svg = svg(&view, args.background);
+    let png;
+    let contents = match args.format {
+        Format::Svg => svg.as_bytes(),
+        Format::Png => {
+            png = self::png(&svg, args.scale)
+                .map_err(|error| failed(format!("Could not draw {board} as PNG: {error}")))?;
+            &png
+        }
+    };
+    match &args.output {
+        Output::Stdout => stdout
+            .write_all(contents)
+            .and_then(|()| stdout.flush())
+            .map_err(|error| failed(format!("Could not write to standard output: {error}"))),
+        Output::File(path) => write(path, contents)
+            .map(drop)
+            .map_err(|error| failed(format!("Could not write {}: {error}", path.display()))),
+    }
+}
+
+/// The text of the board at `path`, read whole. A file over the size any
+/// note may have is not a board Wren draws.
+fn read_board(path: &Path) -> Result<String, Failure> {
+    let board = path.display();
+    let unreadable = |error: std::io::Error| failed(format!("Could not read {board}: {error}"));
+    let too_large = || Failure {
+        code: EXIT_NOT_A_BOARD,
+        message: format!(
+            "{board} is not a board Wren can draw: it is over {} MiB",
+            MAX_FILE_BYTES / (1024 * 1024)
+        ),
+    };
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let metadata = file.metadata().map_err(unreadable)?;
+    if metadata.is_dir() {
+        return Err(failed(format!("Could not read {board}: it is a folder")));
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes).map_err(|_| Failure {
+        code: EXIT_NOT_A_BOARD,
+        message: format!("{board} is not a board Wren can draw: it is not UTF-8 text"),
+    })
+}
+
+/// Why an export may not be written to `path`: it is a folder, the board
+/// itself, or a note, which an export never replaces.
+fn refuse_output(path: &Path, board: &Path) -> Result<(), Failure> {
+    let refused = |why: &str| {
+        Err(failed(format!(
+            "Did not export the board to {}: {why}",
+            path.display()
+        )))
+    };
+    if path.is_dir() {
+        return refused("it is a folder");
+    }
+    // The board is read by now, so it exists; an output that does not yet
+    // exist cannot be it.
+    if let (Ok(output), Ok(board)) = (path.canonicalize(), board.canonicalize()) {
+        if output == board {
+            return refused("it is the board being exported");
+        }
+    }
+    if path.file_name().and_then(NoteKind::from_name).is_some() {
+        return refused("it is a note");
+    }
+    Ok(())
+}
+
+/// What is wrong with `element`, as a line of `wren export`'s warnings.
+fn describe(element: &Source, kind: IssueKind) -> String {
+    let (what, id) = match element {
+        Source::Node(id) => ("node", id),
+        Source::Edge(id) => ("connector", id),
+    };
+    let problem = match kind {
+        IssueKind::DanglingEdge {
+            from: true,
+            to: true,
+        } => "neither end names a node",
+        IssueKind::DanglingEdge { from: true, .. } => "its start names no node",
+        IssueKind::DanglingEdge { .. } => "its end names no node",
+        IssueKind::MissingParent => "its parent names no node; drawn as a top-level node",
+        IssueKind::ParentCycle => "its parents form a cycle; drawn as a top-level node",
+        IssueKind::TooDeep => "it is nested too deep; drawn as a top-level node",
+        IssueKind::SharedId => "a node and a connector share its id",
+        IssueKind::MissingKind => "it has no kind",
+        IssueKind::MissingZ => "it has no z",
+        IssueKind::InvalidZ => "its z is not letters and digits",
+    };
+    format!("{what} {id}: {problem}")
 }
 
 #[cfg(test)]

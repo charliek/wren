@@ -31,13 +31,7 @@ use std::process::ExitCode;
 use app::App;
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("Wren: {error}");
-            ExitCode::FAILURE
-        }
-    }
+    run()
 }
 
 /// The Linux window `application_id` (Wayland `app_id`, X11 `WM_CLASS`). It
@@ -79,20 +73,53 @@ fn window_icon() -> Option<iced::window::Icon> {
     iced::window::icon::from_rgba(rgba, frame.width, frame.height).ok()
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+/// Run the command the arguments name and say how it ended. Help, the
+/// licences and `wren export` return before any window is made.
+fn run() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref())? {
-        cli::Command::Run(options) => options,
-        cli::Command::Help => {
-            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --board-spike N        Unsaved generated board of N shapes, to pan and zoom\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike / --board-spike) are never saved to disk.");
-            return Ok(());
+    let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref()) {
+        Ok(cli::Command::Run(options)) => options,
+        Ok(cli::Command::Help) => {
+            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --board-spike N        Unsaved generated board of N shapes, to pan and zoom\n  wren export BOARD [OPTIONS] Write a board as SVG or PNG, with no window; see wren export --help\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike / --board-spike) are never saved to disk.");
+            return ExitCode::SUCCESS;
         }
-        cli::Command::FontLicenses => {
+        Ok(cli::Command::FontLicenses) => {
             print!("{}", fonts::LICENSES);
-            return Ok(());
+            return ExitCode::SUCCESS;
+        }
+        Ok(cli::Command::ExportHelp) => {
+            print!("{}", cli::export_usage());
+            return ExitCode::SUCCESS;
+        }
+        Ok(cli::Command::Export(export)) => {
+            let outcome =
+                board_export::run(&export, &mut std::io::stdout().lock(), &mut |warning| {
+                    eprintln!("Wren: warning: {warning}");
+                });
+            return match outcome {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(failure) => {
+                    eprintln!("Wren: {}", failure.message);
+                    ExitCode::from(failure.code)
+                }
+            };
+        }
+        Err(refusal) => {
+            eprintln!("Wren: {}", refusal.message);
+            return ExitCode::from(refusal.code);
         }
     };
+    match launch(options) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Wren: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
+/// Open the window and run the app until it quits.
+fn launch(options: cli::Options) -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "smoke-test")]
     let options = {
         let mut options = options;
