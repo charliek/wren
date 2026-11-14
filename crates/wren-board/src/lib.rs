@@ -25,7 +25,8 @@
 //! - [`scene::build`] lays a board out for drawing, with [`shape`] for
 //!   outlines and label boxes, [`route`] for connector paths and [`style`]
 //!   for colours. [`svg::write`] serialises a scene; [`search_text`]
-//!   gives the labels search indexes.
+//!   gives the labels search indexes; [`drawio::write`] writes the board
+//!   as a draw.io file.
 //! - [`edit::plan`] turns an [`edit::Intent`] into the changes
 //!   [`Board::apply`] makes, with [`ids`], [`z`], [`snap`], [`place`] and
 //!   [`walk`] for new ids, stacking keys, the grid, keyboard building and
@@ -47,6 +48,7 @@ use std::fmt;
 mod accept;
 mod check;
 pub mod clip;
+pub mod drawio;
 pub mod edit;
 #[cfg(test)]
 mod fixtures;

@@ -183,15 +183,15 @@ pub fn anchor_point(bounds: Rect, anchor: [i32; 2]) -> Point {
 }
 
 /// How far a parallelogram's top edge is shifted right of its bottom edge.
-fn skew(w: f32, h: f32) -> f32 {
+pub(crate) fn skew(w: f32, h: f32) -> f32 {
     (w / 4.0).min(h / 3.0)
 }
 
-fn cylinder_cap(h: f32) -> f32 {
+pub(crate) fn cylinder_cap(h: f32) -> f32 {
     (h / 6.0).min(CYLINDER_CAP)
 }
 
-fn document_wave(h: f32) -> f32 {
+pub(crate) fn document_wave(h: f32) -> f32 {
     (h / 8.0).min(DOCUMENT_WAVE)
 }
 

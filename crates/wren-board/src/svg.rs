@@ -140,7 +140,7 @@ fn paint(attribute: &str, color: Rgba) -> String {
 /// A number as SVG reads it: the shortest decimal that is the same `f32`,
 /// never in exponent form, with no negative zero and 0 for a non-finite
 /// value.
-fn num(value: f32) -> String {
+pub(crate) fn num(value: f32) -> String {
     if !value.is_finite() || value == 0.0 {
         return "0".into();
     }
@@ -183,34 +183,48 @@ pub(crate) mod tests {
     /// elements in order, each with its attributes and unescaped text, or
     /// what is wrong.
     pub(crate) fn elements(xml: &str) -> Result<Vec<Element>, String> {
+        let body = xml
+            .strip_prefix("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+            .ok_or("no declaration")?;
+        document(body)
+    }
+
+    /// [`elements`] of a document with no declaration, whose text may also
+    /// hold character references.
+    pub(crate) fn document(body: &str) -> Result<Vec<Element>, String> {
         fn unescape(text: &str) -> Result<String, String> {
             let mut out = String::new();
             let mut rest = text;
             while let Some(at) = rest.find('&') {
                 out.push_str(&rest[..at]);
                 let end = rest[at..].find(';').ok_or("an unterminated entity")?;
-                out.push(match &rest[at + 1..at + end] {
-                    "amp" => '&',
-                    "lt" => '<',
-                    "gt" => '>',
-                    "quot" => '"',
-                    "apos" => '\'',
-                    other => return Err(format!("an unknown entity {other}")),
+                let name = &rest[at + 1..at + end];
+                let number = match name.strip_prefix("#x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => name.strip_prefix('#').and_then(|n| n.parse().ok()),
+                };
+                out.push(match (name, number) {
+                    ("amp", _) => '&',
+                    ("lt", _) => '<',
+                    ("gt", _) => '>',
+                    ("quot", _) => '"',
+                    ("apos", _) => '\'',
+                    (_, Some(number)) => char::from_u32(number)
+                        .filter(|&c| legal(c))
+                        .ok_or(format!("an illegal reference {name}"))?,
+                    (other, None) => return Err(format!("an unknown entity {other}")),
                 });
                 rest = &rest[at + end + 1..];
             }
             out.push_str(rest);
             Ok(out)
         }
-        for c in xml.chars() {
-            let legal = matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..);
-            if !legal {
-                return Err(format!("the character {c:?}"));
-            }
+        fn legal(c: char) -> bool {
+            matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..)
         }
-        let body = xml
-            .strip_prefix("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-            .ok_or("no declaration")?;
+        if let Some(c) = body.chars().find(|&c| !legal(c)) {
+            return Err(format!("the character {c:?}"));
+        }
         let mut found: Vec<Element> = Vec::new();
         // The innermost open elements, by name and index into `found`.
         let mut open: Vec<(String, usize)> = Vec::new();

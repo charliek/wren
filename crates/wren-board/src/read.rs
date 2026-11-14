@@ -1797,6 +1797,10 @@ mod tests {
                         .map(svg_tests::escape_free)
                         .collect();
                     assert_eq!(svg_tests::texts(&svg), drawn, "{source}");
+                    // And the draw.io export parses as XML, with one
+                    // element for each that is drawn and no id twice.
+                    let xml = crate::drawio::write(&board, &palette, "Mutated");
+                    crate::drawio::tests::holds(&board, &xml);
                     let written = crate::write(&board);
                     let again = parse(&written).unwrap_or_else(|e| panic!("{e}\n{written}"));
                     assert_eq!(crate::write(&again), written, "{source}");
