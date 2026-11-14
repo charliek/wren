@@ -83,7 +83,7 @@ struct Writer<'a> {
     /// The node each node is drawn inside.
     parents: BTreeMap<&'a Id, Option<&'a Id>>,
     /// The sides Wren's router took for each connector's ends, worked out
-    /// only when an elbow connector has a floating end.
+    /// only when an elbow connector has a floating or anchored end.
     sides: BTreeMap<&'a Id, [Option<Side>; 2]>,
 }
 
@@ -92,13 +92,14 @@ impl<'a> Writer<'a> {
         let placed = placements(board);
         let boxes = scene::boxes(board, &placed);
         let parents = placed.iter().map(|(&id, p)| (id, p.parent)).collect();
-        let floating = |end: &End| {
-            matches!(end, End::Node { side, anchor: None, .. }
-                if side.as_ref().and_then(Named::known).is_none())
+        // A pinned end leaves by its own side; the router picks the side
+        // of a floating end and of an anchor.
+        let chosen = |end: &End| {
+            matches!(end, End::Node { side, anchor, .. }
+                if !matches!(Attach::of(side.as_ref(), *anchor), Attach::Side(_)))
         };
         let routed = board.edges.values().any(|edge| {
-            route::drawn(&edge.route) == Route::Elbow
-                && (floating(&edge.from) || floating(&edge.to))
+            route::drawn(&edge.route) == Route::Elbow && (chosen(&edge.from) || chosen(&edge.to))
         });
         let sides = if routed {
             scene::sides(board)
@@ -310,10 +311,16 @@ impl<'a> Writer<'a> {
                         attribute(&Self::node_cell(id.as_str()))
                     );
                     attachment(&mut style, prefix, *attach);
-                    // A floating end of an elbow connector leaves by the
-                    // side Wren's router chose and stays free along it, so
-                    // draw.io's own bends go the way Wren's do.
-                    if let (true, Attach::Floating, Some(side)) = (elbow, attach, side) {
+                    // Every end of an elbow connector leaves by the side
+                    // Wren's does, its pinned one or the one the router
+                    // chose, so draw.io's own bends go the way Wren's do:
+                    // without it draw.io guesses, and on a parallelogram's
+                    // slanted side it guesses across the shape.
+                    let leaves = match attach {
+                        Attach::Side(pinned) => Some(*pinned),
+                        Attach::Floating | Attach::Anchor(_) => side,
+                    };
+                    if let (true, Some(side)) = (elbow, leaves) {
                         let _ = write!(style, "{terminal}PortConstraint={};", compass(side));
                     }
                 }
@@ -1066,6 +1073,39 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every attached end of an elbow connector names the side it leaves
+    /// by, or draw.io guesses: from a parallelogram's slanted left side it
+    /// ran the first segment right, across the shape.
+    #[test]
+    fn an_elbow_connectors_pinned_and_anchored_ends_leave_by_their_sides() {
+        let text =
+            "schema = 1\n\n[node.p]\nkind = \"shape\"\nat = [280, 0]\nshape = \"parallelogram\"\n\
+                    size = [120, 60]\nz = \"V\"\n\n\
+                    [node.r]\nkind = \"shape\"\nat = [280, 200]\nsize = [120, 60]\nz = \"V\"\n\n\
+                    [edge.e]\nkind = \"edge\"\nfrom = { node = \"p\", side = \"left\" }\n\
+                    to = { node = \"r\", side = \"left\" }\nz = \"W\"\n\n\
+                    [edge.a]\nkind = \"edge\"\nfrom = { anchor = [1000, 400], node = \"p\" }\n\
+                    to = { anchor = [500, 950], node = \"r\" }\nz = \"W\"\n\n\
+                    [edge.s]\nkind = \"edge\"\nfrom = { node = \"p\", side = \"left\" }\n\
+                    to = { node = \"r\", side = \"left\" }\nroute = \"straight\"\nz = \"W\"\n";
+        let found = parsed(&export(text));
+        let e = keys(style(&found, "e"));
+        assert_eq!(
+            (e["sourcePortConstraint"], e["targetPortConstraint"]),
+            ("west", "west")
+        );
+        assert_eq!((e["exitX"], e["exitY"]), ("0", "0.5"));
+        // An anchor leaves by the side of the box nearest to it.
+        let a = keys(style(&found, "a"));
+        assert_eq!(
+            (a["sourcePortConstraint"], a["targetPortConstraint"]),
+            ("east", "south")
+        );
+        // A straight connector has no bends for draw.io to choose.
+        let s = keys(style(&found, "s"));
+        assert!(!s.contains_key("sourcePortConstraint") && !s.contains_key("targetPortConstraint"));
+    }
+
     #[test]
     fn a_dangling_end_is_the_tip_of_its_stub_and_two_draw_nothing() {
         let text = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [100, 50]\nz = \"V\"\n\n\
@@ -1273,14 +1313,20 @@ pub(crate) mod tests {
         );
         assert_eq!(get(object(&found, "note-a"), "wrenKind"), Some("note"));
         // An elbow connector's floating end leaves by the side Wren's router
-        // chose; a pinned end keeps its own.
+        // chose; a pinned end by its own.
         let r2 = keys(style(&found, "r2"));
         assert_eq!(
             (r2["sourcePortConstraint"], r2["targetPortConstraint"]),
             ("south", "west")
         );
         let pinned = keys(style(&found, "self"));
-        assert!(!pinned.contains_key("sourcePortConstraint"));
+        assert_eq!(
+            (
+                pinned["sourcePortConstraint"],
+                pinned["targetPortConstraint"]
+            ),
+            ("east", "south")
+        );
         assert_eq!((pinned["exitX"], pinned["entryY"]), ("1", "1"));
         // Ring 0 reads no file a node names: no image is embedded.
         assert!(!xml.contains("data:image") && !xml.contains("warehouse"));
