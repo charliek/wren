@@ -4,7 +4,9 @@
 Each case flushes, keeps the bytes, acts, flushes again and compares lines,
 as `test_board_edit.py` does: a style command changes one line per element
 it touches, and undo gives the bytes back. The digit keys go in through
-`board.key`, and once under X11 through a real AZERTY key press.
+`board.key`, and once under X11 as real digit presses of the lane's US
+layout; the AZERTY fallback of §5.1 rule 7 is held by the key-policy unit
+tests in `wren-iced`, since Xvfb keeps its US keymap.
 """
 
 from __future__ import annotations

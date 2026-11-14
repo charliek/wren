@@ -188,6 +188,8 @@ pub mod svg { pub struct Options { pub background: Option<Rgba>, pub padding: f3
 //          and walk::next(&Board, &Source, Dir) -> Option<Id>;
 //          history::Snapshot { board, selection: BTreeSet<Source>, cursor: Option<Source> };
 //          History::drop_group() -> Option<Snapshot> gives back an open group's opening snapshot and records nothing
+// Phase 3: [boards-p3-style] Intent::SetStyle { ids: Vec<Source>, field: StyleField }, StyleField { Color(Token) | Fill(Fill) | Stroke(Dash) },
+//          edit::stroke_of(&Board, &Source) -> Option<&Named<Dash>>, the outline the switch reads, exactly what SetStyle writes
 
 // wren-canvas: the public surface at boards-p2-canvas (clip, command, keys, measure, overlay, paint and widget are private
 // modules; what command, keys and measure export is re-exported here)
@@ -2985,7 +2987,7 @@ The owner's open questions are in §2.4. The technical questions are answered by
 | A gate replaces the smoke binary under a running suite, and the failure looks like a product bug. | The operating rules of §6.6; a detached worktree per lens; hand trials in their own target directory. |
 | macOS-only code breaks unseen. | The cross-target lint in chain gates; the Mac over ssh at each phase end; the owner's push for CI. |
 | Software Vulkan numbers mislead. | Budgets are judged on tiny-skia and on `draw_micros`; Metal and a desktop run are recorded beside them. |
-| The scene constants or the provisional palette change after golden files exist. | Constants are recorded in §3.7 before any golden is blessed; the palette lives in one function named provisional; hues are checked before the schema lock. |
+| The scene constants or the provisional palette change after golden files exist. | Constants are recorded in §3.7 before any golden is blessed; hues were checked before the schema lock; since `boards-p3-style` the hues are fields of each theme's `Colors`, held by the ST3 tests (readability, and the eight colour tokens apart under colour-blindness). |
 | A preview or a read-only action writes. | The preview is a scene-time patch, never model state; fuzz check 3; the arrangement review's list. |
 | The headless measurer or resvg disagrees with the app, so exported labels overflow. | One font-loading function; pre-wrapped lines; the confirmation step; the CLI-against-app byte comparison. |
 | Limits too tight for real boards, or too loose to stay responsive. | The caps come from H2's measurements, are documented, and the fallback is raw text, never data loss. |
