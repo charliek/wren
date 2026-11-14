@@ -81,6 +81,28 @@ impl App {
                 )
             }
             "board.bounds" => (Task::none(), self.board_bounds(placement)),
+            // A real press gives the widget the keyboard as it lands. The
+            // harness can only ask for focus with a task, and any event the
+            // widget sees between the press and that focus reports the board
+            // unfocused, which settles the gesture just begun: so the
+            // keyboard comes first, then the press.
+            "board.pointer"
+                if !placement.focused
+                    && self.palette.is_none()
+                    && matches!(
+                        params.get("kind").and_then(Value::as_str),
+                        Some("press" | "click" | "double_click")
+                    ) =>
+            {
+                let focused = Placement {
+                    focused: true,
+                    ..placement
+                };
+                return focus_editor().chain(Task::done(Message::BoardProbed(
+                    Arc::clone(request),
+                    focused,
+                )));
+            }
             "board.pointer" => match self.board_pointer(params, placement) {
                 Ok(task) => (task, Ok(self.board_snapshot(false, placement.focused))),
                 Err(error) => (Task::none(), Err(error)),
@@ -1442,6 +1464,22 @@ mod tests {
             reply["viewport"]["zoom"].as_f64().unwrap() as f32,
             zoomed.zoom
         );
+
+        // Pressed while the widget lacks the keyboard, the board hears
+        // nothing and nothing is answered until the focus asked for first
+        // has landed.
+        let (request, mut reply) = Request::detached(
+            "board.pointer",
+            json!({"kind": "press", "button": "middle", "at": {"node": "receive"}}),
+        );
+        let unfocused = Placement {
+            focused: false,
+            ..PLACED
+        };
+        let _ = app.board_probed(&request, unfocused);
+        assert!(reply.try_recv().is_err());
+        assert!(!app.board.as_ref().unwrap().machine().panning());
+        assert_eq!(app.column, Column::Notes);
 
         // A middle drag pans and takes the column.
         pointer(
