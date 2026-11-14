@@ -19,10 +19,11 @@ comment.
   merged groups still cover every damaged pixel, and a group is repainted
   from the background up, so the pixels on screen do not change.
 
-Measured on the spell check's acceptance note in release under X11 (see
-`discovery/spell-check.md`, §7.5 `spell-endfix`): the frame that switches to
-it went from 15 groups and about 23 ms to a few groups and about 10 ms, and
-opening it from the test harness from about 56 ms to about 41 ms.
+Measured on the spell check's acceptance note in release under X11, with
+spell check off (see `discovery/spell-check.md`, §7.5 `spell-endfix`): the
+frame that switches to it went from 15 groups and about 23 ms to about 4
+groups and 8 ms, and opening it from the test harness from about 56 ms to
+about 42 ms.
 
 The workspace `[patch.crates-io]` entry wires this in. A patch only shadows the
 version it matches, so `make check` asserts that iced_tiny_skia still resolves
