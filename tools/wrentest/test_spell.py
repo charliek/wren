@@ -312,7 +312,8 @@ def test_menu_keys_close_then_act_and_rows_follow_the_pointer_events(tmp_path: P
         caret(app, line, 13)
         app.client.call("editor.focus")
         app.client.call("editor.spell_event", {"event": "open_at_caret"})
-        opened = menu(app)
+        # Drawn first, so the comparison below never sees `bounds` filled in.
+        opened = drawn_menu(app)
         assert opened["word"] == "desing" and opened["selected"] == 0
         key(app, "shift")
         assert menu(app) == opened, "a modifier alone does nothing"
