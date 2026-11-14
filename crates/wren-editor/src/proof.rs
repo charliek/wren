@@ -1,6 +1,8 @@
 //! Spell check's seam: the host's [`Proofreader`], the suggestions menu
 //! ([`SpellMenu`]) and the events that drive it ([`SpellEvent`]).
 
+mod menu;
+
 use std::ops::Range;
 
 use iced::Point;
@@ -46,7 +48,34 @@ pub struct SpellMenu {
     selected: Option<usize>,
 }
 
+pub(crate) use menu::{fit, height, measure, place, Fit, MenuOverlay};
+
+/// The most suggestions the menu shows (rule 4.4.2).
+pub(crate) const SUGGESTIONS: usize = 5;
+
 impl SpellMenu {
+    /// A menu for `word`, at `mark` of `line`, offering `items`, the first
+    /// selected.
+    pub(crate) fn new(line: usize, mark: Range<usize>, word: String, items: Vec<String>) -> Self {
+        Self {
+            line,
+            mark,
+            word,
+            selected: (!items.is_empty()).then_some(0),
+            items,
+        }
+    }
+
+    /// Move the selection `delta` rows, stopping at the ends.
+    pub(crate) fn step(&mut self, delta: i32) {
+        self.selected = stepped(self.selected, self.items.len(), delta);
+    }
+
+    /// Select `row`, if it holds a suggestion.
+    pub(crate) fn hover(&mut self, row: usize) {
+        self.selected = hovered(self.selected, self.items.len(), row);
+    }
+
     /// The line that holds the word.
     pub fn line(&self) -> usize {
         self.line
@@ -71,6 +100,88 @@ impl SpellMenu {
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
+}
+
+/// `selected` moved `delta` rows among `items`, stopping at the ends; a menu
+/// with nothing selected stays so.
+fn stepped(selected: Option<usize>, items: usize, delta: i32) -> Option<usize> {
+    let selected = selected?;
+    let last = items.saturating_sub(1);
+    let moved = i64::try_from(selected)
+        .unwrap_or(i64::MAX)
+        .saturating_add(i64::from(delta));
+    Some(usize::try_from(moved.max(0)).map_or(last, |row| row.min(last)))
+}
+
+/// The selection once the pointer is over `row`: that row, if it is one of
+/// `items`.
+fn hovered(selected: Option<usize>, items: usize, row: usize) -> Option<usize> {
+    if row < items {
+        Some(row)
+    } else {
+        selected
+    }
+}
+
+/// The open suggestions menu as the editor widget sees it while it handles
+/// a batch of events.
+///
+/// iced hands every event queued since the last frame to the same widget,
+/// the menu's overlay first, before the host applies any message the widget
+/// published. So the widget keeps its own copy, starting from the menu the
+/// host handed it and changed by each message it publishes as the host will
+/// change its menu, and routes keys and presses against that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OpenMenu {
+    /// The selected row; `None` when the menu has nothing to offer.
+    pub selected: Option<usize>,
+    /// How many suggestions it has.
+    pub items: usize,
+}
+
+impl OpenMenu {
+    pub(crate) fn of(menu: &SpellMenu) -> Self {
+        Self {
+            selected: menu.selected(),
+            items: menu.items().len(),
+        }
+    }
+
+    /// The menu `message` leaves `menu` as, once the host applies it. An
+    /// opening is taken as the menu it opens when it finds a word, with as
+    /// many suggestions as there may be and the first selected: the host
+    /// clamps a move past its last row, and accepting a row past it, or the
+    /// inactive row, closes it. Every message but a move, a hover or an
+    /// opening closes the menu: the host closes it on any action, intent,
+    /// undo or redo (rule 4.4.8).
+    pub(crate) fn after(menu: Option<Self>, message: &crate::Message) -> Option<Self> {
+        match message {
+            crate::Message::Spell(SpellEvent::OpenAtCaret | SpellEvent::OpenAt(_)) => Some(Self {
+                selected: Some(0),
+                items: SUGGESTIONS,
+            }),
+            crate::Message::Spell(SpellEvent::Move(delta)) => menu.map(|menu| Self {
+                selected: stepped(menu.selected, menu.items, *delta),
+                ..menu
+            }),
+            crate::Message::Spell(SpellEvent::Hover(row)) => menu.map(|menu| Self {
+                selected: hovered(menu.selected, menu.items, *row),
+                ..menu
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Publish `message`, keeping `menu`, the widget's copy, as the host will
+/// leave its own once it applies it.
+pub(crate) fn publish(
+    shell: &mut iced::advanced::Shell<'_, crate::Message>,
+    menu: &std::cell::Cell<Option<OpenMenu>>,
+    message: crate::Message,
+) {
+    menu.set(OpenMenu::after(menu.get(), &message));
+    shell.publish(message);
 }
 
 /// The marks and the menu as the last frame drew them, for the host's
@@ -112,6 +223,40 @@ pub(crate) fn line_marks(
     proofreader.marks(line, prose, &mut marks);
     marks.retain(|mark| !mark.is_empty() && line.get(mark.clone()).is_some());
     marks
+}
+
+/// What the menu offers for `word` out of the proofreader's `suggestions`:
+/// at most [`SUGGESTIONS`], in order, without duplicates, and with each `'`
+/// written `’` when `word` holds one (rule 4.4.6). A suggestion is one piece
+/// of a line, so an empty one or one holding a line break is dropped.
+pub(crate) fn offered(word: &str, suggestions: Vec<String>) -> Vec<String> {
+    let curly = word.contains('\u{2019}');
+    let mut items: Vec<String> = Vec::with_capacity(SUGGESTIONS);
+    for suggestion in suggestions {
+        if items.len() == SUGGESTIONS {
+            break;
+        }
+        if suggestion.is_empty() || suggestion.contains(['\r', '\n']) {
+            continue;
+        }
+        let item = if curly {
+            suggestion.replace('\'', "\u{2019}")
+        } else {
+            suggestion
+        };
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
+}
+
+/// The mark the keyboard opens the menu for (rule 4.4.1): the first that
+/// contains or touches the caret at byte `caret`.
+pub(crate) fn mark_at_caret(marks: Vec<Range<usize>>, caret: usize) -> Option<Range<usize>> {
+    marks
+        .into_iter()
+        .find(|mark| mark.start <= caret && caret <= mark.end)
 }
 
 /// Whether a caret at byte `caret` of `line` hides `mark` (rule 4.3.3): it
@@ -162,6 +307,113 @@ mod tests {
             line_marks(&proofreader, line, std::slice::from_ref(&prose)),
             [0..3, 4..7]
         );
+    }
+
+    #[test]
+    fn the_keyboard_targets_the_first_mark_containing_or_touching_the_caret() {
+        let marks = || vec![0..3, 4..7, 7..9];
+        for (caret, target) in [
+            (0, Some(0..3)),
+            (2, Some(0..3)),
+            (3, Some(0..3)),
+            (4, Some(4..7)),
+            (7, Some(4..7)),
+            (8, Some(7..9)),
+            (9, Some(7..9)),
+            (10, None),
+        ] {
+            assert_eq!(mark_at_caret(marks(), caret), target, "{caret}");
+        }
+        assert_eq!(mark_at_caret(Vec::new(), 0), None);
+    }
+
+    #[test]
+    fn a_new_menu_selects_its_first_suggestion_if_it_has_one() {
+        let menu = SpellMenu::new(2, 4..7, "teh".into(), vec!["the".into()]);
+        assert_eq!(
+            (menu.line(), menu.mark(), menu.word(), menu.selected()),
+            (2, 4..7, "teh", Some(0))
+        );
+        let empty = SpellMenu::new(0, 0..3, "zzz".into(), Vec::new());
+        assert_eq!(empty.selected(), None);
+        assert!(empty.items().is_empty());
+    }
+
+    #[test]
+    fn the_menu_offers_five_distinct_one_line_suggestions_in_order() {
+        let given = |items: &[&str]| items.iter().map(|&item| item.to_owned()).collect();
+        assert_eq!(
+            offered(
+                "teh",
+                given(&["the", "", "the", "a\nb", "c\rd", "tea", "ten"])
+            ),
+            ["the", "tea", "ten"]
+        );
+        assert_eq!(
+            offered("teh", given(&["a", "b", "c", "d", "e", "f"])),
+            ["a", "b", "c", "d", "e"]
+        );
+        // Duplicates do not use up the five.
+        assert_eq!(
+            offered("teh", given(&["a", "a", "b", "c", "d", "e"])),
+            ["a", "b", "c", "d", "e"]
+        );
+        assert!(offered("teh", Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_word_written_with_a_curly_apostrophe_is_offered_curly_ones() {
+        let given = |items: &[&str]| items.iter().map(|&item| item.to_owned()).collect();
+        assert_eq!(
+            offered("dosen’t", given(&["doesn't", "dozen", "doesn’t", "o'er'"])),
+            ["doesn’t", "dozen", "o’er’"]
+        );
+        // A straight one, or none, leaves the suggestions as written.
+        assert_eq!(
+            offered("dosen't", given(&["doesn't", "doesn’t"])),
+            ["doesn't", "doesn’t"]
+        );
+        assert_eq!(offered("teh", given(&["t'he"])), ["t'he"]);
+    }
+
+    #[test]
+    fn the_widgets_copy_follows_each_message_as_the_hosts_menu_will() {
+        use crate::Message;
+        let open = |selected| Some(OpenMenu { selected, items: 3 });
+        let spell = |event| Message::Spell(event);
+        let after = |menu, event| OpenMenu::after(menu, &spell(event));
+        assert_eq!(after(open(Some(0)), SpellEvent::Move(1)), open(Some(1)));
+        assert_eq!(after(open(Some(2)), SpellEvent::Move(1)), open(Some(2)));
+        assert_eq!(after(open(Some(0)), SpellEvent::Move(-1)), open(Some(0)));
+        assert_eq!(after(open(None), SpellEvent::Move(1)), open(None));
+        assert_eq!(after(open(Some(0)), SpellEvent::Hover(2)), open(Some(2)));
+        assert_eq!(after(open(Some(0)), SpellEvent::Hover(3)), open(Some(0)));
+        assert_eq!(after(None, SpellEvent::Move(1)), None);
+        assert_eq!(after(open(Some(1)), SpellEvent::Accept(1)), None);
+        assert_eq!(after(open(Some(1)), SpellEvent::Close), None);
+        let opening = Some(OpenMenu {
+            selected: Some(0),
+            items: SUGGESTIONS,
+        });
+        assert_eq!(after(None, SpellEvent::OpenAtCaret), opening);
+        assert_eq!(
+            after(open(Some(2)), SpellEvent::OpenAt(Point::ORIGIN)),
+            opening
+        );
+        // Every other message closes it, as the host closes its menu.
+        for message in [
+            Message::Undo,
+            Message::Redo,
+            Message::Find,
+            Message::Intent(crate::Intent::Enter),
+            Message::Action(iced::widget::text_editor::Action::SelectAll),
+        ] {
+            assert_eq!(
+                OpenMenu::after(open(Some(0)), &message),
+                None,
+                "{message:?}"
+            );
+        }
     }
 
     #[test]
