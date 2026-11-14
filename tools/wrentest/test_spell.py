@@ -335,6 +335,28 @@ def test_menu_keys_close_then_act_and_rows_follow_the_pointer_events(tmp_path: P
         assert menu(app) is None
 
 
+def test_a_menu_opened_just_after_a_theme_or_text_size_change_stays_open(
+        tmp_path: Path) -> None:
+    changes = [
+        lambda app: app.client.call("theme.set", {"id": "nord"}),
+        lambda app: command(app, "font.increase"),
+        lambda app: app.client.call("theme.set", {"id": "wren-dark"}),
+    ]
+    with spell_app(tmp_path, "spell-menu-after-change") as (app, _root):
+        wait_marks(app, MARKS, "the acceptance note's nine marks")
+        app.client.call("editor.focus")
+        for i, change in enumerate(changes):
+            change(app)
+            caret(app, 9, 13)
+            app.client.call("editor.spell_event", {"event": "open_at_caret"})
+            opened = drawn_menu(app)
+            # The editor's events after the change see a menu opened since.
+            drawn_frame(app, "spell-menu-after-change")
+            drawn_frame(app, "spell-menu-after-change")
+            assert menu(app) == opened, f"change {i}"
+            app.client.call("editor.spell_event", {"event": "close"})
+
+
 # ── native X11 ────────────────────────────────────────────────────────────
 
 
