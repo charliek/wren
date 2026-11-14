@@ -349,8 +349,8 @@ fn read_board(path: &Path) -> Result<String, Failure> {
     })
 }
 
-/// Why an export may not be written to `path`: it is a folder, the board
-/// itself, or a note, which an export never replaces.
+/// Why an export may not be written to `path`: it is a folder or a device,
+/// the board itself, or a note, which an export never replaces.
 fn refuse_output(path: &Path, board: &Path) -> Result<(), Failure> {
     let refused = |why: &str| {
         Err(failed(format!(
@@ -358,8 +358,13 @@ fn refuse_output(path: &Path, board: &Path) -> Result<(), Failure> {
             path.display()
         )))
     };
-    if path.is_dir() {
-        return refused("it is a folder");
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return refused("it is a folder"),
+        // A device or a pipe cannot be replaced by renaming a file over it.
+        Ok(metadata) if !metadata.is_file() => {
+            return refused("it is not a file; -o - writes to standard output")
+        }
+        _ => {}
     }
     // The board is read by now, so it exists; an output that does not yet
     // exist cannot be it.

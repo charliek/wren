@@ -398,6 +398,15 @@ fn a_failed_export_says_why_exits_with_its_code_and_writes_nothing() {
 
 #[cfg(unix)]
 #[test]
+fn a_device_is_refused_for_standard_output() {
+    let directory = workspace();
+    let output = wren(directory.path(), &["export", FLOW, "-o", "/dev/null"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("it is not a file; -o - writes to standard output"));
+}
+
+#[cfg(unix)]
+#[test]
 fn an_unwritable_folder_fails_and_leaves_nothing() {
     use std::os::unix::fs::PermissionsExt as _;
     let directory = workspace();
