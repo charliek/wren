@@ -613,37 +613,35 @@ fn object(out: &mut String, cell: &str, id: &Id, label: &str, extra: &[(&str, &s
 
 /// A label as the HTML of an `html=1` cell: the text drawn (its first
 /// [`scene::MAX_LABEL_BYTES`]), escaped, each line break a `<br>`, white
-/// space at a line's end dropped as the canvas drops it, and white space
-/// that HTML would collapse kept as no-break spaces, a tab being four. A
-/// run of white space after a line's first character ends in its one
-/// ordinary space, so a line may break only after the whole run, as the
-/// canvas breaks it and drops the run; a run at a line's start holds no
-/// break. A label of only white space draws nothing.
+/// space at a line's end dropped as the canvas drops it, and a tab four
+/// spaces. A label holding white space that HTML would collapse (at a
+/// line's start, a run, or a tab) is set `white-space:pre-wrap`, which
+/// keeps it and, as the canvas does, breaks a line only after a whole run
+/// and lets the run hang past the line's end; draw.io's sanitiser keeps
+/// that style. A label of only white space draws nothing.
 fn html(text: &str) -> String {
     let text = scene::drawn_text(text);
     if text.trim().is_empty() {
         return String::new();
     }
     let mut out = String::with_capacity(text.len());
+    let mut collapsed = false;
     let normal = text.replace("\r\n", "\n").replace('\r', "\n");
     for (row, line) in normal.split('\n').enumerate() {
         if row > 0 {
             out.push_str("<br>");
         }
         let kept: String = line.chars().filter(|&c| c == '\t' || carried(c)).collect();
-        let mut chars = kept.trim_end().chars().peekable();
-        let mut started = false;
-        while let Some(c) = chars.next() {
+        let mut spaced = true;
+        for c in kept.trim_end().chars() {
             match c {
-                ' ' | '\t' => {
-                    let wide = if c == '\t' { 4 } else { 1 };
-                    let breaks = started && !matches!(chars.peek(), Some(' ' | '\t'));
-                    for _ in 0..wide - usize::from(breaks) {
-                        out.push_str("&nbsp;");
-                    }
-                    if breaks {
-                        out.push(' ');
-                    }
+                ' ' => {
+                    collapsed |= spaced;
+                    out.push(' ');
+                }
+                '\t' => {
+                    collapsed = true;
+                    out.push_str("    ");
                 }
                 '&' => out.push_str("&amp;"),
                 '<' => out.push_str("&lt;"),
@@ -651,10 +649,14 @@ fn html(text: &str) -> String {
                 '"' => out.push_str("&quot;"),
                 c => out.push(c),
             }
-            started |= !matches!(c, ' ' | '\t');
+            spaced = matches!(c, ' ' | '\t');
         }
     }
-    out
+    if collapsed {
+        format!("<div style=\"white-space:pre-wrap\">{out}</div>")
+    } else {
+        out
+    }
 }
 
 /// An attribute value: markup escaped, the white space an XML reader would
@@ -901,17 +903,29 @@ pub(crate) mod tests {
             ("<b>not bold</b>", "&lt;b&gt;not bold&lt;/b&gt;"),
             ("two\nlines", "two<br>lines"),
             ("crlf\r\nand\rcr", "crlf<br>and<br>cr"),
-            // A run's one break point is its last space, as the canvas
-            // breaks after a whole run and a tab.
+            // White space HTML would collapse keeps its width in pre-wrap,
+            // which breaks a line after a whole run, as the canvas does.
             (
                 "  lead  and   runs  ",
-                "&nbsp;&nbsp;lead&nbsp; and&nbsp;&nbsp; runs",
+                "<div style=\"white-space:pre-wrap\">  lead  and   runs</div>",
             ),
-            ("alpha     beta", "alpha&nbsp;&nbsp;&nbsp;&nbsp; beta"),
-            ("tab\there", "tab&nbsp;&nbsp;&nbsp; here"),
-            ("a \t b", "a&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; b"),
-            ("\tlead", "&nbsp;&nbsp;&nbsp;&nbsp;lead"),
-            ("a \u{7} b \u{7}", "a&nbsp; b"),
+            (
+                "alpha     beta",
+                "<div style=\"white-space:pre-wrap\">alpha     beta</div>",
+            ),
+            (
+                "tab\there",
+                "<div style=\"white-space:pre-wrap\">tab    here</div>",
+            ),
+            (
+                "one\n two",
+                "<div style=\"white-space:pre-wrap\">one<br> two</div>",
+            ),
+            (
+                "a \u{7} b \u{7}",
+                "<div style=\"white-space:pre-wrap\">a  b</div>",
+            ),
+            ("one space each ", "one space each"),
             ("blank\n\nline", "blank<br><br>line"),
             ("a\u{0}b\u{7}c\u{fffe}\u{ffff}d", "abcd"),
             ("no\u{a0}break", "no\u{a0}break"),
