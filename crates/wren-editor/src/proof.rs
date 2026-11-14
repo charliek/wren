@@ -1,6 +1,8 @@
 //! Spell check's seam: the host's [`Proofreader`], the suggestions menu
 //! ([`SpellMenu`]) and the events that drive it ([`SpellEvent`]).
 
+mod menu;
+
 use std::ops::Range;
 
 use iced::Point;
@@ -45,6 +47,8 @@ pub struct SpellMenu {
     items: Vec<String>,
     selected: Option<usize>,
 }
+
+pub(crate) use menu::{fit, height, measure, place, Fit, MenuOverlay};
 
 /// The most suggestions the menu shows (rule 4.4.2).
 pub(crate) const SUGGESTIONS: usize = 5;
