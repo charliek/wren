@@ -12,7 +12,10 @@ key=value` adds a `config.conf` line (`--setting editor-line-height=2`), and
 `--label` names a further directory level for them. `--only markdown` shoots
 just the editor scenes: the Markdown tour, the headings note, the long list
 items, and all three again with the browser columns folded so the editor is
-wider than its column.
+wider than its column. `--only spell` (with `--engine advanced`) turns spell
+check on, seeds `words.txt` and shoots the spell-check acceptance note: its
+marks with one hidden at the caret, the suggestions menu under a word, the
+menu with no suggestions, and the menu above a word on the last visible row.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -210,6 +214,83 @@ def folded_editor_scenes(client, shot_here) -> None:
     client.call("column.open", {"column": "sections"})
 
 
+SPELL_NOTE = Path(__file__).resolve().parent / "wrentest" / "fixtures" / "spell.md"
+SPELL_WORDS = "catppuccin\n"
+# The acceptance note's nine marks with `catppuccin` in the word list.
+SPELL_MARK_COUNT = 9
+# A word no dictionary suggests anything for, for the empty menu.
+NO_SUGGESTIONS = "xqzvkpw"
+# Enough correctly spelled rows to push the last one to the bottom of the view.
+FILLER = "".join(f"\n- Row {n} of a list long enough to fill the view" for n in range(1, 61))
+
+
+def spell_scenes(client, shot_here) -> None:
+    """The acceptance note's marks and the suggestions menu in three places."""
+    wait_for(lambda: client.call("editor.spell")["ready"], timeout=10,
+             description="the dictionary loads")
+    open_note(client, "Spell chek plan.md")
+    text = client.call("editor.get")["text"]
+    lines = text.split("\n")
+    client.call("editor.focus")
+
+    def caret(line: int, column: int) -> None:
+        client.call("editor.cursor", {"line": line, "column": column, "selection": None})
+
+    def column_after(line: int, word: str) -> int:
+        return lines[line].index(word) + len(word)
+
+    def marks() -> list[dict]:
+        return client.call("editor.spell")["marks"]
+
+    def open_menu(word: str, *, empty: bool = False) -> dict:
+        client.call("shortcut", {"id": "editor.spell_suggest"})
+        menu = wait_for(lambda: (state := client.call("editor.spell")["menu"])
+                        and state["bounds"] and state, timeout=10,
+                        description=f"the menu under {word!r} is drawn")
+        assert menu["word"] == word and bool(menu["items"]) != empty, menu
+        return menu
+
+    def close_menu() -> None:
+        client.call("editor.key", {"key": "escape", "mods": []})
+        assert client.call("editor.spell")["menu"] is None
+
+    # The caret at the end of `apear` hides its mark (rule 4.3.3).
+    caret(5, column_after(5, "apear"))
+    wait_for(lambda: len(marks()) == SPELL_MARK_COUNT
+             and [m["shown"] for m in marks() if m["word"] == "apear"] == [False],
+             timeout=10, description="nine marks, the one at the caret hidden")
+    shot_here("spell-marks")
+
+    caret(6, column_after(6, "replacments") - 2)
+    open_menu("replacments")
+    shot_here("spell-menu")
+    close_menu()
+
+    # A word with no suggestions, typed before the quote's full stop.
+    quote = next(index for index, line in enumerate(lines) if "misteak." in line)
+    caret(quote, column_after(quote, "misteak"))
+    client.call("editor.insert", {"text": f" {NO_SUGGESTIONS}"})
+    open_menu(NO_SUGGESTIONS, empty=True)
+    shot_here("spell-menu-empty")
+    close_menu()
+    client.call("editor.undo")
+    assert client.call("editor.get")["text"] == text
+
+    # Rows of filler after the note leave its last row, and the typo at the
+    # caret, at the bottom of the view, so the menu opens above the word.
+    caret(len(lines) - 1, len(lines[-1]))
+    client.call("editor.insert", {"text": FILLER + "\n\nThe last row ends in a typo: wrogn"})
+    # Inside the word, so its mark shows under the tint.
+    client.call("editor.action", {"kind": "move", "motion": "left"})
+    client.call("editor.action", {"kind": "move", "motion": "left"})
+    word = wait_for(lambda: next((m for m in marks() if m["word"] == "wrogn" and m["shown"]),
+                                 None), timeout=10, description="the typo's mark")
+    menu = open_menu("wrogn")
+    assert menu["bounds"]["y"] + menu["bounds"]["height"] <= word["rects"][0]["y"], (menu, word)
+    shot_here("spell-menu-above")
+    close_menu()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
@@ -219,8 +300,10 @@ def main() -> int:
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown",), help="shoot only these scenes")
+    parser.add_argument("--only", choices=("markdown", "spell"), help="shoot only these scenes")
     args = parser.parse_args()
+    if args.only == "spell" and args.engine != "advanced":
+        parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
     out = args.out if args.engine == "classic" else args.out / args.engine
     if args.label:
         out = out / args.label
@@ -241,6 +324,23 @@ def main() -> int:
         print(path)
 
     with tempfile.TemporaryDirectory() as temp:
+        if args.only == "spell":
+            workspace = Path(temp).resolve() / "work"
+            (workspace / "Notes/Inbox").mkdir(parents=True)
+            shutil.copyfile(SPELL_NOTE, workspace / "Notes/Inbox/Spell chek plan.md")
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "spell-check = on\n", words=SPELL_WORDS) as app:
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_spell(name: str) -> None:
+                    shot(app.client, name)
+
+                spell_scenes(app.client, shot_spell)
+            return 0
+
         if args.only == "markdown":
             workspace = Path(temp).resolve() / "work"
             build_workspace(workspace)
