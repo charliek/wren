@@ -3,14 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Change, Plan};
+use crate::scene::Source;
 use crate::{Board, End, Id};
 
-/// Removes the elements named by `ids`, their [`family`], and every
-/// connector attached at either end to a removed node. An id naming both a
-/// node and a connector removes both.
-pub(super) fn delete(board: &Board, ids: &[Id]) -> Plan {
-    let nodes = family(board, ids);
-    let chosen: BTreeSet<&Id> = ids.iter().collect();
+/// Removes the elements `ids` names, the [`family`] of each node among
+/// them, and every connector attached at either end to a removed node. A
+/// node and a connector that share an id are each removed only when named
+/// with their kind (§4.12).
+pub(super) fn delete(board: &Board, ids: &[Source]) -> Plan {
+    let chosen: Vec<Id> = ids.iter().filter_map(Source::node).cloned().collect();
+    let nodes = family(board, &chosen);
+    let picked: BTreeSet<&Id> = ids.iter().filter_map(Source::edge).collect();
     let names: BTreeSet<&str> = nodes.iter().map(|id| id.as_str()).collect();
     let attached = |end: &End| match end {
         End::Node { node, .. } => names.contains(node.as_str()),
@@ -19,7 +22,7 @@ pub(super) fn delete(board: &Board, ids: &[Id]) -> Plan {
     let edges: Vec<&Id> = board
         .edges
         .iter()
-        .filter(|(id, edge)| chosen.contains(id) || attached(&edge.from) || attached(&edge.to))
+        .filter(|(id, edge)| picked.contains(id) || attached(&edge.from) || attached(&edge.to))
         .map(|(id, _)| id)
         .collect();
     if nodes.is_empty() && edges.is_empty() {

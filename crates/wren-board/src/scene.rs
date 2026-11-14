@@ -136,10 +136,72 @@ pub struct Item {
     pub draw: Draw,
 }
 
+/// One element of a board: a node, or a connector. A node and a connector
+/// may share an id (§4.12), so an element is named with its kind wherever
+/// one is picked, never by its id alone.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Source {
     Node(Id),
     Edge(Id),
+}
+
+impl Source {
+    pub fn id(&self) -> &Id {
+        match self {
+            Self::Node(id) | Self::Edge(id) => id,
+        }
+    }
+
+    /// The node's id, when this is a node.
+    pub fn node(&self) -> Option<&Id> {
+        match self {
+            Self::Node(id) => Some(id),
+            Self::Edge(_) => None,
+        }
+    }
+
+    /// The connector's id, when this is a connector.
+    pub fn edge(&self) -> Option<&Id> {
+        match self {
+            Self::Edge(id) => Some(id),
+            Self::Node(_) => None,
+        }
+    }
+
+    /// The element `id` names in `board`: its node, or else its connector.
+    /// Only for an id that cannot name both, such as one a plan just drew.
+    pub fn of(board: &crate::Board, id: &Id) -> Option<Self> {
+        if board.nodes.contains_key(id) {
+            Some(Self::Node(id.clone()))
+        } else {
+            board.edges.contains_key(id).then(|| Self::Edge(id.clone()))
+        }
+    }
+
+    /// Whether `board` has this element.
+    pub fn exists(&self, board: &crate::Board) -> bool {
+        match self {
+            Self::Node(id) => board.nodes.contains_key(id),
+            Self::Edge(id) => board.edges.contains_key(id),
+        }
+    }
+}
+
+/// By id, then a node before a connector, as the drawing order breaks ties
+/// (§4.7).
+impl Ord for Source {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let rank = |source: &Self| u8::from(matches!(source, Self::Edge(_)));
+        self.id()
+            .cmp(other.id())
+            .then_with(|| rank(self).cmp(&rank(other)))
+    }
+}
+
+impl PartialOrd for Source {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

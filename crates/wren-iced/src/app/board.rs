@@ -1781,7 +1781,7 @@ z = "c"
         assert_eq!(
             selection
                 .iter()
-                .map(wren_board::Id::as_str)
+                .map(|element| element.id().as_str())
                 .collect::<Vec<_>>(),
             ["then"]
         );

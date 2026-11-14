@@ -753,7 +753,10 @@ fn change_on_disk(app: &mut App, path: &std::path::Path, contents: &str) {
 
 fn selected(app: &App) -> Vec<&str> {
     let selection = view(app).machine().selection();
-    selection.iter().map(wren_board::Id::as_str).collect()
+    selection
+        .iter()
+        .map(|element| element.id().as_str())
+        .collect()
 }
 
 fn wheel() -> Input {
@@ -1140,7 +1143,8 @@ fn the_clipboard_is_written_and_read_through_the_app() {
     // blocks, and the old ones as they were.
     let fragment = wren_board::clip::copy(view(&app).board(), &{
         let selection = view(&app).machine().selection();
-        selection.iter().cloned().collect::<Vec<_>>()
+        let nodes = selection.iter().filter_map(wren_board::scene::Source::node);
+        nodes.cloned().collect::<Vec<_>>()
     })
     .expect("a fragment");
     let paste = |app: &mut App| {

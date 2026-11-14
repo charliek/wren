@@ -7,6 +7,7 @@ use super::{
     connector, dangling_names, on_top, saturate, trim_label, Change, Edges, Endpoint, Plan,
 };
 use crate::ids::{fresh, Ids};
+use crate::scene::Source;
 use crate::{placements, Board, End, Extra, Id, Named, Node, NodeKind, NodeStyle, Shape, GRID};
 
 /// A new node on top of the root scope, with an empty label, the neutral
@@ -94,8 +95,9 @@ pub(super) fn set_text(board: &Board, id: &Id, text: &str, size: [i32; 2]) -> Pl
 /// Moves the nodes and the free ends of the connectors among `ids` (§5.8
 /// rules 2 and 4). A node whose drawn ancestor is also among them moves
 /// with it and not again; coordinates stop at the `i32` range.
-pub(super) fn moved(board: &Board, ids: &[Id], by: [i32; 2]) -> Plan {
-    let chosen: BTreeSet<&Id> = ids.iter().collect();
+pub(super) fn moved(board: &Board, ids: &[Source], by: [i32; 2]) -> Plan {
+    let chosen: BTreeSet<&Id> = ids.iter().filter_map(Source::node).collect();
+    let edges: BTreeSet<&Id> = ids.iter().filter_map(Source::edge).collect();
     let placed = placements(board);
     // The drawn tree is acyclic and at most MAX_DEPTH deep; the bound only
     // keeps a mistake there from looping.
@@ -121,6 +123,8 @@ pub(super) fn moved(board: &Board, ids: &[Id], by: [i32; 2]) -> Plan {
                 ));
             }
         }
+    }
+    for &id in &edges {
         if let Some(edge) = board.edges.get(id) {
             let mut edge = edge.clone();
             let mut changed = false;

@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 
 use toml::Value;
 
-use crate::{write, Board, Color, End, Extra, Id};
+use crate::scene::Source;
+use crate::{write, Board, Color, End, Extra};
 
 /// The most entries kept, undo and redo together.
 pub const MAX_ENTRIES: usize = 200;
@@ -33,8 +34,8 @@ pub const RUN_PAUSE: Duration = Duration::from_millis(1_000);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub board: Board,
-    pub selection: BTreeSet<Id>,
-    pub cursor: Option<Id>,
+    pub selection: BTreeSet<Source>,
+    pub cursor: Option<Source>,
 }
 
 impl Snapshot {
@@ -85,7 +86,7 @@ impl Snapshot {
             + edges
             + table(&board.extra)
             + board.requires.iter().map(String::len).sum::<usize>()
-            + ids.map(|id| id.as_str().len() + 32).sum::<usize>()
+            + ids.map(|id| id.id().as_str().len() + 32).sum::<usize>()
     }
 }
 
@@ -151,12 +152,12 @@ impl Entry {
 #[derive(Clone, Debug)]
 struct Run {
     unit: Unit,
-    selection: BTreeSet<Id>,
+    selection: BTreeSet<Source>,
     last: Instant,
 }
 
 impl Run {
-    fn joins(&self, unit: Unit, selection: &BTreeSet<Id>, now: Instant) -> bool {
+    fn joins(&self, unit: Unit, selection: &BTreeSet<Source>, now: Instant) -> bool {
         self.unit == unit
             && self.selection == *selection
             && now.saturating_duration_since(self.last) <= RUN_PAUSE
@@ -194,7 +195,7 @@ impl History {
     pub fn record_with(
         &mut self,
         unit: Unit,
-        selection: &BTreeSet<Id>,
+        selection: &BTreeSet<Source>,
         now: Instant,
         before: impl FnOnce() -> Snapshot,
     ) {
@@ -372,7 +373,11 @@ fn same(a: &Board, b: &Board) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::{parse, Id};
+
+    fn node(name: &str) -> Source {
+        Source::Node(Id::new(name).unwrap())
+    }
 
     /// A board whose one node's label is `label`.
     fn board(label: &str) -> Board {
@@ -385,7 +390,7 @@ mod tests {
     }
 
     fn state(label: &str, selected: &[&str]) -> Snapshot {
-        let selection: BTreeSet<Id> = selected.iter().map(|id| Id::new(id).unwrap()).collect();
+        let selection: BTreeSet<Source> = selected.iter().map(|id| node(id)).collect();
         Snapshot {
             board: board(label),
             cursor: selection.iter().next_back().cloned(),
@@ -422,7 +427,7 @@ mod tests {
             (label(&back), &back.selection),
             ("2", &state("", &["a"]).selection)
         );
-        assert_eq!(back.cursor, Some(Id::new("a").unwrap()));
+        assert_eq!(back.cursor, Some(node("a")));
         let back = history.undo(back).unwrap();
         assert_eq!(label(&back), "1");
         assert!(history.can_redo());
@@ -468,7 +473,7 @@ mod tests {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
         let mut history = History::new();
-        let selection: BTreeSet<Id> = [Id::new("a").unwrap()].into();
+        let selection: BTreeSet<Source> = [node("a")].into();
         let asked = std::cell::Cell::new(0);
         let mut record = |label: &str, unit: Unit, ms: u64| {
             history.record_with(unit, &selection, at(ms), || {
@@ -564,7 +569,7 @@ mod tests {
         let start = history.drop_group().unwrap();
         assert_eq!(
             (label(&start), start.cursor.as_ref()),
-            ("before", Id::new("a").as_ref())
+            ("before", Some(&node("a")))
         );
         assert!(!history.group_open());
         assert_eq!(undo_all(&mut history, "before"), ["first"]);

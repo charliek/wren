@@ -113,11 +113,16 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
     let mut marks = Vec::new();
 
     let selection = machine.selection();
-    for id in selection {
-        if let Some(bounds) = frames.get(id) {
-            marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
-            continue;
-        }
+    for element in selection {
+        let id = match element {
+            Source::Node(id) => {
+                if let Some(bounds) = frames.get(id) {
+                    marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
+                }
+                continue;
+            }
+            Source::Edge(id) => id,
+        };
         let stroked = |item: &scene::Item| {
             matches!(
                 &item.draw,
@@ -176,7 +181,7 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
             Some((id, picture.board.nodes.get(id)?, frames.get(id)?, pinned))
         });
         if let Some((id, node, bounds, pinned)) = target {
-            if !selection.contains(id) {
+            if !selection.contains(&Source::Node(id.clone())) {
                 marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
             }
             let sides = handles::sides(node, bounds, viewport);
@@ -205,7 +210,7 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
     let seeking = machine.seeking();
     let target = seeking.and_then(|seeking| seeking.target);
     if let Some(bounds) = target
-        .filter(|id| !selection.contains(*id))
+        .filter(|id| !selection.contains(&Source::Node((*id).clone())))
         .and_then(|id| frames.get(id))
     {
         marks.push(Mark::Outline(grown(screen(bounds), OUTLINE_GAP)));
@@ -611,7 +616,7 @@ mod tests {
     #[test]
     fn a_selected_connector_s_label_is_painted_over_its_highlight() {
         let mut view = open(fixtures::HAND_WRITTEN);
-        let flow = wren_board::Id::new("flow").expect("an id");
+        let flow = Source::Edge(wren_board::Id::new("flow").expect("an id"));
         view.machine
             .select(std::collections::BTreeSet::from([flow.clone()]), Some(flow));
         let overlay = marks(&view);
@@ -658,6 +663,7 @@ mod tests {
         input(&mut view, Input::Focus(true));
         for name in ["first", "flow"] {
             let id = wren_board::Id::new(name).expect("an id");
+            let id = Source::of(view.board(), &id).expect("an element");
             view.machine
                 .select(std::collections::BTreeSet::from([id.clone()]), Some(id));
             view.command(Command::EditLabel, Instant::now());
@@ -869,7 +875,7 @@ mod tests {
         // A label a command opened on a board without the keyboard shows
         // its selection and no caret: no key would reach it.
         let mut view = open(fixtures::TWO);
-        let a = wren_board::Id::new("a").expect("an id");
+        let a = Source::Node(wren_board::Id::new("a").expect("an id"));
         view.machine
             .select(std::collections::BTreeSet::from([a.clone()]), Some(a));
         view.command(Command::EditLabel, Instant::now());

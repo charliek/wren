@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use crate::edit::{self, Endpoint, Intent, Plan};
 use crate::history::{History, Snapshot, Unit};
 use crate::ids::Seeded;
+use crate::scene::Source;
 use crate::{parse, place, walk, write, Board, Dir, End, Id, Named, NodeKind, Shape, EMPTY, GRID};
 
 const GOLDEN: &str = include_str!(concat!(
@@ -62,8 +63,15 @@ impl Driver {
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             board: self.board.clone(),
-            selection: self.selection.iter().cloned().collect(),
-            cursor: self.cursor.clone(),
+            selection: self
+                .selection
+                .iter()
+                .filter_map(|id| Source::of(&self.board, id))
+                .collect(),
+            cursor: self
+                .cursor
+                .as_ref()
+                .and_then(|id| Source::of(&self.board, id)),
         }
     }
 

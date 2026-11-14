@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use wren_board::edit::{Area, EdgeEnd, Edges, Endpoint, Intent, Plan};
-use wren_board::scene::{Rect, Scene};
+use wren_board::scene::{Rect, Scene, Source};
 use wren_board::{place, snap, walk, Board, Dir, End, Id, NodeKind, Shape, Side, GRID};
 
 use crate::command::{Command, Grow, Tool};
@@ -184,7 +184,7 @@ pub enum Act {
     /// shows the board itself again.
     Preview(Option<Intent>),
     /// Open the label editor on this element (§5.9 rule 1).
-    OpenLabel(Id),
+    OpenLabel(Source),
     /// Commit the open label and close its editor (§5.9 rule 4). When that
     /// removes the element, the view says so with [`Machine::retain`].
     CommitLabel,
@@ -252,6 +252,17 @@ enum Target {
     Canvas,
     /// Anywhere, with a shape or text tool armed.
     Create,
+}
+
+impl Target {
+    /// The node or connector pressed, an endpoint handle's included.
+    fn element(&self) -> Option<Source> {
+        match self {
+            Self::Node(id) => Some(Source::Node(id.clone())),
+            Self::Edge(id) | Self::End(id, _) => Some(Source::Edge(id.clone())),
+            Self::Resize(..) | Self::Connect(..) | Self::Canvas | Self::Create => None,
+        }
+    }
 }
 
 /// What a Connecting gesture drags.
@@ -326,7 +337,7 @@ enum Gesture {
         /// The pressed node's corner, which lands on the grid; a pressed
         /// connector has none, and the move itself is whole cells.
         origin: Option<[i64; 2]>,
-        ids: Vec<Id>,
+        ids: Vec<Source>,
         /// The originals stay and copies move.
         copy: bool,
         by: [i32; 2],
@@ -343,9 +354,9 @@ enum Gesture {
         anchor: (f32, f32),
         to: (f32, f32),
         /// What the marquee adds to.
-        base: BTreeSet<Id>,
+        base: BTreeSet<Source>,
         /// The selection to put back if the marquee is cancelled.
-        before: BTreeSet<Id>,
+        before: BTreeSet<Source>,
     },
     Creating {
         anchor: (f32, f32),
@@ -377,10 +388,10 @@ enum Run {
 pub struct Machine {
     focused: bool,
     tool: Tool,
-    selection: BTreeSet<Id>,
-    cursor: Option<Id>,
+    selection: BTreeSet<Source>,
+    cursor: Option<Source>,
     /// The element whose label is open.
-    editing: Option<Id>,
+    editing: Option<Source>,
     gesture: Gesture,
     space: bool,
     mods: Mods,
@@ -483,20 +494,18 @@ impl Machine {
             Command::CommitLabel => {}
             // With one node selected the connector tool connects it by
             // keyboard (§5.12 rule 3); otherwise it is armed for the pointer.
-            Command::Tool(Tool::Connector) if view.writable => {
-                match self.only().filter(|id| view.board.nodes.contains_key(id)) {
-                    Some(source) => {
-                        self.tool = Tool::Select;
-                        self.seek = Some(Seek {
-                            source,
-                            target: None,
-                            query: String::new(),
-                            walked: None,
-                        });
-                    }
-                    None => self.tool = Tool::Connector,
+            Command::Tool(Tool::Connector) if view.writable => match self.only_node(view.board) {
+                Some(source) => {
+                    self.tool = Tool::Select;
+                    self.seek = Some(Seek {
+                        source,
+                        target: None,
+                        query: String::new(),
+                        walked: None,
+                    });
                 }
-            }
+                None => self.tool = Tool::Connector,
+            },
             Command::Tool(tool) => {
                 if view.writable || matches!(tool, Tool::Select | Tool::Hand) {
                     self.tool = tool;
@@ -516,16 +525,17 @@ impl Machine {
             Command::ConnectNext => self.extend(None, view, &mut acts),
             Command::Connect(dir) => self.extend(Some(dir), view, &mut acts),
             Command::SelectAll => {
-                let (nodes, edges) = (view.board.nodes.keys(), view.board.edges.keys());
-                self.selection = nodes.chain(edges).cloned().collect();
+                let nodes = view.board.nodes.keys().cloned().map(Source::Node);
+                let edges = view.board.edges.keys().cloned().map(Source::Edge);
+                self.selection = nodes.chain(edges).collect();
             }
             Command::SelectNone => self.selection.clear(),
             // The connector meeting the one selected node on that side
             // (§5.7 rule 4).
             Command::SelectConnector(dir) => {
-                let node = self.only().filter(|id| view.board.nodes.contains_key(id));
+                let node = self.only_node(view.board);
                 if let Some(edge) = node.and_then(|node| walk::connector(view.board, &node, dir)) {
-                    self.select_only(edge);
+                    self.select_only(Source::Edge(edge));
                 }
             }
             Command::SelectConnected => {
@@ -572,20 +582,28 @@ impl Machine {
         }
         if let Some(select) = &plan.select {
             self.run = None;
-            self.selection = select.iter().cloned().collect();
-            let node = select.iter().find(|id| board.nodes.contains_key(*id));
-            let cursor = node.or_else(|| select.iter().find(|id| exists(board, id)));
-            if let Some(cursor) = cursor {
+            // What a plan selects it made or reached, under ids that name
+            // one element each.
+            let select: Vec<Source> = select
+                .iter()
+                .filter_map(|id| Source::of(board, id))
+                .collect();
+            let node = select.iter().find(|source| source.node().is_some());
+            if let Some(cursor) = node.or_else(|| select.first()) {
                 self.cursor = Some(cursor.clone());
             }
+            self.selection = select.into_iter().collect();
         }
         self.retain(board);
-        let made = plan.edit.as_ref().filter(|id| exists(board, id));
+        let made = plan
+            .edit
+            .as_ref()
+            .filter(|id| board.nodes.contains_key(*id));
         if let Some(id) = made {
             self.run = None;
-            self.selection = BTreeSet::from([id.clone()]);
-            self.cursor = Some(id.clone());
-            self.open(id.clone(), &mut acts);
+            let made = Source::Node(id.clone());
+            self.select_only(made.clone());
+            self.open(made, &mut acts);
         }
         acts
     }
@@ -625,10 +643,13 @@ impl Machine {
     /// Forget the elements `board` no longer has: in the selection, as the
     /// cursor, and as the open label.
     pub fn retain(&mut self, board: &Board) {
-        self.selection.retain(|id| exists(board, id));
-        self.cursor = self.cursor.take().filter(|id| exists(board, id));
-        self.editing = self.editing.take().filter(|id| exists(board, id));
-        self.hover = self.hover.take().filter(|hover| exists(board, &hover.id));
+        self.selection.retain(|source| source.exists(board));
+        self.cursor = self.cursor.take().filter(|source| source.exists(board));
+        self.editing = self.editing.take().filter(|source| source.exists(board));
+        self.hover = self
+            .hover
+            .take()
+            .filter(|hover| board.nodes.contains_key(&hover.id));
         let source = self.seek.as_ref().map(|seek| &seek.source);
         if !source.is_some_and(|source| board.nodes.contains_key(source)) {
             self.seek = None;
@@ -642,7 +663,7 @@ impl Machine {
 
     /// Put a selection and a cursor back, as undo and redo do (§5.11 rule
     /// 1).
-    pub fn select(&mut self, selection: BTreeSet<Id>, cursor: Option<Id>) {
+    pub fn select(&mut self, selection: BTreeSet<Source>, cursor: Option<Source>) {
         self.run = None;
         self.hover = None;
         self.selection = selection;
@@ -673,18 +694,18 @@ impl Machine {
     }
 
     /// The selected elements (§5.3 rule 1).
-    pub fn selection(&self) -> &BTreeSet<Id> {
+    pub fn selection(&self) -> &BTreeSet<Source> {
         &self.selection
     }
 
     /// The element last selected, which outlives the selection (§5.3
     /// rule 2).
-    pub fn cursor(&self) -> Option<&Id> {
+    pub fn cursor(&self) -> Option<&Source> {
         self.cursor.as_ref()
     }
 
     /// The element whose label is open.
-    pub fn editing(&self) -> Option<&Id> {
+    pub fn editing(&self) -> Option<&Source> {
         self.editing.as_ref()
     }
 
@@ -811,11 +832,11 @@ impl Machine {
         let rested = self.hover.as_ref().filter(|hover| hover.shown);
         shown.connect = rested.map(|hover| &hover.id);
         let mut selected = self.selection.iter();
-        if let (Some(id), None) = (selected.next(), selected.next()) {
-            if view.board.nodes.contains_key(id) {
-                shown.resize = Some(id);
-            } else if view.board.edges.contains_key(id) {
-                shown.ends = Some(id);
+        if let (Some(one), None) = (selected.next(), selected.next()) {
+            match one {
+                Source::Node(id) if view.board.nodes.contains_key(id) => shown.resize = Some(id),
+                Source::Edge(id) if view.board.edges.contains_key(id) => shown.ends = Some(id),
+                _ => {}
             }
         }
         shown
@@ -857,7 +878,7 @@ impl Machine {
         };
         // A press on the element being labelled is the label's own: it
         // puts the caret there, and a drag from it selects.
-        if self.editing.is_some() && hit.element() == self.editing.as_ref() {
+        if self.editing.is_some() && hit.element().as_ref() == self.editing.as_ref() {
             if button == Button::Left {
                 self.gesture = Gesture::Selecting;
                 acts.push(Act::Caret {
@@ -871,8 +892,8 @@ impl Machine {
         if button == Button::Right {
             // §5.17 rule 2; in Phase 2 a right-click does nothing more.
             match hit.element() {
-                Some(id) if self.selection.contains(id) => {}
-                Some(id) => self.select_only(id.clone()),
+                Some(element) if self.selection.contains(&element) => {}
+                Some(element) => self.select_only(element),
                 None => self.selection.clear(),
             }
             return;
@@ -1093,19 +1114,24 @@ impl Machine {
         match on {
             Target::Connect(id, _) if view.writable => connecting(Link::New(id)),
             Target::End(id, end) if view.writable => connecting(Link::End(id, end)),
-            Target::Node(id) | Target::Edge(id) if view.writable => {
+            Target::Node(_) | Target::Edge(_) if view.writable => {
                 // A drag moves the selection; a press outside it selects
                 // what it pressed first, alone unless Shift adds it.
-                if !self.selection.contains(&id) {
+                let Some(pressed) = on.element() else {
+                    return Gesture::None;
+                };
+                if !self.selection.contains(&pressed) {
                     if !self.mods.shift {
                         self.selection.clear();
                     }
-                    self.selection.insert(id.clone());
-                    self.cursor = Some(id.clone());
+                    self.selection.insert(pressed.clone());
+                    self.cursor = Some(pressed.clone());
                 }
                 Gesture::Moving {
                     anchor,
-                    origin: Frames::new(view.board).corner(&id),
+                    origin: pressed
+                        .node()
+                        .and_then(|id| Frames::new(view.board).corner(id)),
                     ids: self.selection.iter().cloned().collect(),
                     copy: self.mods.duplicate,
                     by: [0, 0],
@@ -1199,15 +1225,18 @@ impl Machine {
         acts: &mut Vec<Act>,
     ) {
         match on {
-            Target::Node(id) | Target::Edge(id) | Target::End(id, _) => {
+            Target::Node(_) | Target::Edge(_) | Target::End(..) => {
+                let Some(pressed) = on.element() else {
+                    return;
+                };
                 if double && view.writable {
-                    self.select_only(id.clone());
-                    self.open(id, acts);
+                    self.select_only(pressed.clone());
+                    self.open(pressed, acts);
                 } else if !self.mods.shift {
-                    self.select_only(id);
-                } else if !self.selection.remove(&id) {
-                    self.selection.insert(id.clone());
-                    self.cursor = Some(id);
+                    self.select_only(pressed);
+                } else if !self.selection.remove(&pressed) {
+                    self.selection.insert(pressed.clone());
+                    self.cursor = Some(pressed);
                 }
             }
             Target::Resize(..) | Target::Connect(_, None) => {}
@@ -1215,7 +1244,7 @@ impl Machine {
             // node (§5.5 rule 8).
             Target::Connect(id, Some(side)) => {
                 self.hover = None;
-                self.select_only(id);
+                self.select_only(Source::Node(id));
                 let dir = match side {
                     Side::Top => Dir::Up,
                     Side::Right => Dir::Right,
@@ -1298,31 +1327,38 @@ impl Machine {
 
     /// Open the label of `id`. A label is edited with no tool armed, and
     /// Space is text in it.
-    fn open(&mut self, id: Id, acts: &mut Vec<Act>) {
+    fn open(&mut self, element: Source, acts: &mut Vec<Act>) {
         self.tool = Tool::Select;
         self.space = false;
         self.seek = None;
-        self.editing = Some(id.clone());
-        acts.push(Act::OpenLabel(id));
+        self.editing = Some(element.clone());
+        acts.push(Act::OpenLabel(element));
     }
 
-    fn select_only(&mut self, id: Id) {
-        self.selection = BTreeSet::from([id.clone()]);
-        self.cursor = Some(id);
+    fn select_only(&mut self, element: Source) {
+        self.selection = BTreeSet::from([element.clone()]);
+        self.cursor = Some(element);
     }
 
     /// The one selected element.
-    fn only(&self) -> Option<Id> {
+    fn only(&self) -> Option<Source> {
         let mut selected = self.selection.iter();
         match (selected.next(), selected.next()) {
-            (Some(id), None) => Some(id.clone()),
+            (Some(element), None) => Some(element.clone()),
             _ => None,
         }
     }
 
+    /// The one selected element, when it is a node `board` has.
+    fn only_node(&self, board: &Board) -> Option<Id> {
+        let only = self.only();
+        only.and_then(|only| only.node().cloned())
+            .filter(|id| board.nodes.contains_key(id))
+    }
+
     /// The selected nodes.
     fn nodes(&self, board: &Board) -> Vec<Id> {
-        let nodes = self.selection.iter();
+        let nodes = self.selection.iter().filter_map(Source::node);
         nodes
             .filter(|id| board.nodes.contains_key(*id))
             .cloned()
@@ -1338,9 +1374,9 @@ impl Machine {
             return;
         }
         let frames = Frames::new(board);
-        let corners = self.selection.iter().filter_map(|id| {
-            let [x, y] = frames.corner(id)?;
-            Some(((y, x), id))
+        let corners = self.selection.iter().filter_map(|element| {
+            let [x, y] = frames.corner(element.node()?)?;
+            Some(((y, x), element))
         });
         let first = corners.min().map(|(_, id)| id);
         if let Some(id) = first.or(self.selection.iter().next()) {
@@ -1376,8 +1412,8 @@ impl Machine {
     fn cell(&self, dir: Dir, board: &Board) -> [i32; 2] {
         let cursor = self.cursor.as_ref();
         let corner = cursor
-            .filter(|id| self.selection.contains(*id))
-            .and_then(|id| Frames::new(board).corner(id));
+            .filter(|cursor| self.selection.contains(*cursor))
+            .and_then(|cursor| Frames::new(board).corner(cursor.node()?));
         let (axis, forward) = match dir {
             Dir::Left => (0, false),
             Dir::Right => (0, true),
@@ -1409,19 +1445,21 @@ impl Machine {
             self.start(view, acts);
             return;
         }
-        let Some(id) = self.only() else {
+        let Some(only) = self.only() else {
             return;
         };
         let board = view.board;
-        let from = if board.nodes.contains_key(&id) {
-            Some(id)
-        } else if dir.is_none() {
-            board.edges.get(&id).and_then(|edge| match &edge.to {
-                End::Node { node, .. } => Id::new(node).filter(|id| board.nodes.contains_key(id)),
-                End::Free { .. } => None,
-            })
-        } else {
-            None
+        let from = match only {
+            Source::Node(id) if board.nodes.contains_key(&id) => Some(id),
+            Source::Edge(id) if dir.is_none() => {
+                board.edges.get(&id).and_then(|edge| match &edge.to {
+                    End::Node { node, .. } => {
+                        Id::new(node).filter(|id| board.nodes.contains_key(id))
+                    }
+                    End::Free { .. } => None,
+                })
+            }
+            Source::Node(_) | Source::Edge(_) => None,
         };
         let Some(from) = from else {
             return;
@@ -1554,36 +1592,33 @@ impl Machine {
     }
 }
 
-fn exists(board: &Board, id: &Id) -> bool {
-    board.nodes.contains_key(id) || board.edges.contains_key(id)
-}
-
 /// What `board.select.connected` adds to `selection` (§5.3 rule 6): every
 /// node reachable from it along connectors in their `from` to `to`
 /// direction, and those connectors. A selected connector leads to its `to`
 /// node; a connector to a free point or to a node that is not there leads
 /// nowhere and is not taken.
-fn connected(board: &Board, selection: &BTreeSet<Id>) -> BTreeSet<Id> {
+fn connected(board: &Board, selection: &BTreeSet<Source>) -> BTreeSet<Source> {
     let node = |end: &End| match end {
         End::Node { node, .. } => board.nodes.get_key_value(node.as_str()).map(|(id, _)| id),
         End::Free { .. } => None,
     };
     let mut reached = BTreeSet::new();
     let mut frontier: Vec<&Id> = Vec::new();
-    for id in selection {
-        if board.nodes.contains_key(id) {
-            frontier.push(id);
-        } else if let Some(to) = board.edges.get(id).and_then(|edge| node(&edge.to)) {
-            frontier.push(to);
+    for element in selection {
+        match element {
+            Source::Node(id) => frontier.extend(board.nodes.get_key_value(id).map(|(id, _)| id)),
+            Source::Edge(id) => {
+                frontier.extend(board.edges.get(id).and_then(|edge| node(&edge.to)))
+            }
         }
     }
     let mut seen: BTreeSet<&Id> = frontier.iter().copied().collect();
     while let Some(from) = frontier.pop() {
-        reached.insert(from.clone());
+        reached.insert(Source::Node(from.clone()));
         for (id, edge) in &board.edges {
             let leaves = node(&edge.from) == Some(from);
             if let Some(to) = node(&edge.to).filter(|_| leaves) {
-                reached.insert(id.clone());
+                reached.insert(Source::Edge(id.clone()));
                 if seen.insert(to) {
                     frontier.push(to);
                 }
@@ -1611,11 +1646,13 @@ fn landing(from: i64, by: f32) -> i32 {
 }
 
 /// What a pointer move asks for: the selection moved, or copies of it.
-fn moving(ids: &[Id], copy: bool, by: [i32; 2]) -> Intent {
-    let ids = ids.to_vec();
+fn moving(ids: &[Source], copy: bool, by: [i32; 2]) -> Intent {
     if copy {
+        // The fragment is the nodes' (§5.10 rule 2).
+        let ids = ids.iter().filter_map(Source::node).cloned().collect();
         Intent::Duplicate { ids, by }
     } else {
+        let ids = ids.to_vec();
         Intent::Move { ids, by }
     }
 }
@@ -2351,9 +2388,21 @@ z = "F"
         names.iter().map(|name| id(name)).collect()
     }
 
+    /// The connectors of the boards these tests use.
+    const EDGES: [&str; 8] = ["ab", "bc", "ca", "cx", "cy", "da", "e", "free"];
+
+    /// The element `name` names in these tests' boards, with its kind.
+    fn element(name: &str) -> Source {
+        if EDGES.contains(&name) {
+            Source::Edge(id(name))
+        } else {
+            Source::Node(id(name))
+        }
+    }
+
     fn moved(names: &[&str], by: [i32; 2]) -> Intent {
         Intent::Move {
-            ids: ids(names),
+            ids: names.iter().map(|name| element(name)).collect(),
             by,
         }
     }
@@ -2546,15 +2595,16 @@ z = "F"
         }
 
         fn selected(&self) -> Vec<&str> {
-            self.machine.selection().iter().map(Id::as_str).collect()
+            let ids = self.machine.selection().iter().map(Source::id);
+            ids.map(Id::as_str).collect()
         }
 
         fn cursor(&self) -> Option<&str> {
-            self.machine.cursor().map(Id::as_str)
+            self.machine.cursor().map(|cursor| cursor.id().as_str())
         }
 
         fn editing(&self) -> Option<&str> {
-            self.machine.editing().map(Id::as_str)
+            self.machine.editing().map(|editing| editing.id().as_str())
         }
 
         fn state(&self) -> State {
@@ -3998,7 +4048,7 @@ z = "F"
         let acts = rig.release();
         assert_eq!(acts, [Act::Edit(made)]);
         let answers = rig.play(&acts);
-        assert_eq!(answers, [Act::OpenLabel(id("new1"))]);
+        assert_eq!(answers, [Act::OpenLabel(element("new1"))]);
         assert_eq!(rig.state(), State::Editing);
         assert_eq!(rig.selected(), ["new1"]);
 
@@ -4097,7 +4147,8 @@ z = "F"
         // would bring it back.
         let mut rig = Rig::new();
         rig.run(Command::Tool(Tool::Connector));
-        rig.machine.select(BTreeSet::from([id("a")]), Some(id("a")));
+        rig.machine
+            .select(BTreeSet::from([element("a")]), Some(element("a")));
         rig.press(A_CORNER);
         rig.to(B);
         assert_eq!(rig.state(), State::Connecting);
@@ -4287,7 +4338,7 @@ z = "F"
         assert!(rig.click(B_LEFT).is_empty());
         assert_eq!(rig.selected(), ["e"]);
         // And a double-click there edits the connector's label.
-        assert_eq!(rig.double_click(B_LEFT), [Act::OpenLabel(id("e"))]);
+        assert_eq!(rig.double_click(B_LEFT), [Act::OpenLabel(element("e"))]);
         assert_eq!(rig.editing(), Some("e"));
     }
 
@@ -4439,7 +4490,8 @@ z = "F"
             ("a command", |rig| {
                 rig.run(Command::SelectNone);
                 rig.run(Command::SelectAll);
-                rig.machine.select(BTreeSet::from([id("a")]), Some(id("a")));
+                rig.machine
+                    .select(BTreeSet::from([element("a")]), Some(element("a")));
             }),
             ("a command of the view's", |rig| {
                 rig.run(Command::Copy);
@@ -4458,7 +4510,8 @@ z = "F"
                 rig.machine.settle();
             }),
             ("a selection put back", |rig| {
-                rig.machine.select(BTreeSet::from([id("a")]), Some(id("a")));
+                rig.machine
+                    .select(BTreeSet::from([element("a")]), Some(element("a")));
             }),
         ];
         for (name, interrupt) in breaks {
@@ -4548,7 +4601,7 @@ z = "F"
         assert_eq!(rig.machine.tool(), Tool::Select);
         assert_eq!(rig.selected(), ["a"]);
         // The view's answer selects the new node and opens its label.
-        assert_eq!(rig.play(&acts), [Act::OpenLabel(id("new1"))]);
+        assert_eq!(rig.play(&acts), [Act::OpenLabel(element("new1"))]);
         assert_eq!((rig.selected(), rig.cursor()), (vec!["new1"], Some("new1")));
         assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("new1")));
     }
@@ -4613,7 +4666,7 @@ z = "F"
             let acts = rig.release();
             assert_eq!(acts, [Act::Edit(made(at, size))]);
             assert_eq!(rig.machine.tool(), Tool::Select);
-            assert_eq!(rig.play(&acts), [Act::OpenLabel(id("new1"))]);
+            assert_eq!(rig.play(&acts), [Act::OpenLabel(element("new1"))]);
             assert_eq!(rig.state(), State::Editing);
         }
         // The preview follows the pointer, and a move within the cell says
@@ -4637,13 +4690,13 @@ z = "F"
     #[test]
     fn a_double_click_opens_a_label_or_makes_a_rectangle() {
         let mut rig = Rig::new();
-        assert_eq!(rig.double_click(B), [Act::OpenLabel(id("b"))]);
+        assert_eq!(rig.double_click(B), [Act::OpenLabel(element("b"))]);
         assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("b")));
         assert_eq!((rig.selected(), rig.cursor()), (vec!["b"], Some("b")));
         rig.run(Command::CommitLabel);
 
         // A connector's label opens the same way.
-        assert_eq!(rig.double_click(E), [Act::OpenLabel(id("e"))]);
+        assert_eq!(rig.double_click(E), [Act::OpenLabel(element("e"))]);
         assert_eq!((rig.selected(), rig.editing()), (vec!["e"], Some("e")));
         rig.run(Command::CommitLabel);
 
@@ -4651,7 +4704,7 @@ z = "F"
         let acts = rig.double_click(CANVAS);
         let want = added(NodeKind::Shape, Shape::Rect, [240, 120], [120, 60]);
         assert_eq!(acts, [Act::Edit(want)]);
-        assert_eq!(rig.play(&acts), [Act::OpenLabel(id("new1"))]);
+        assert_eq!(rig.play(&acts), [Act::OpenLabel(element("new1"))]);
         assert_eq!(
             (rig.selected(), rig.editing()),
             (vec!["new1"], Some("new1"))
@@ -4724,7 +4777,7 @@ z = "F"
         let acts = rig.run(Command::ConnectNext);
         assert_eq!(acts, [extend("a", None, Some(Shape::Diamond))]);
         assert_eq!(rig.machine.tool(), Tool::Select);
-        assert_eq!(rig.play(&acts), [Act::OpenLabel(id("new1"))]);
+        assert_eq!(rig.play(&acts), [Act::OpenLabel(element("new1"))]);
         assert_eq!(
             (rig.selected(), rig.editing()),
             (vec!["new1"], Some("new1"))
@@ -5094,21 +5147,23 @@ to = { node = "gone" }
 "#;
         let mut rig = Rig::with(text);
         rig.step(Input::Focus(true));
-        rig.machine.select(BTreeSet::from([id("b")]), Some(id("b")));
+        rig.machine
+            .select(BTreeSet::from([element("b")]), Some(element("b")));
         rig.run(Command::SelectConnected);
         assert_eq!(rig.selected(), ["a", "ab", "b", "bc", "c", "ca"]);
         assert_eq!(rig.cursor(), Some("b"));
         // From a connector, its `to` node onwards; from `d`, everything.
         rig.machine
-            .select(BTreeSet::from([id("da")]), Some(id("da")));
+            .select(BTreeSet::from([element("da")]), Some(element("da")));
         rig.run(Command::SelectConnected);
         assert_eq!(rig.selected(), ["a", "ab", "b", "bc", "c", "ca", "da"]);
-        rig.machine.select(BTreeSet::from([id("d")]), Some(id("d")));
+        rig.machine
+            .select(BTreeSet::from([element("d")]), Some(element("d")));
         rig.run(Command::SelectConnected);
         assert_eq!(rig.selected().len(), 8);
         // A dangling connector leads nowhere.
         rig.machine
-            .select(BTreeSet::from([id("cy")]), Some(id("cy")));
+            .select(BTreeSet::from([element("cy")]), Some(element("cy")));
         rig.run(Command::SelectConnected);
         assert_eq!(rig.selected(), ["cy"]);
     }
@@ -5142,7 +5197,7 @@ to = { node = "gone" }
         rig.run(Command::SelectAll);
         assert!(rig.run(Command::EditLabel).is_empty());
         rig.click(E);
-        assert_eq!(rig.run(Command::EditLabel), [Act::OpenLabel(id("e"))]);
+        assert_eq!(rig.run(Command::EditLabel), [Act::OpenLabel(element("e"))]);
         assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("e")));
         // The commit command, and only once.
         assert_eq!(rig.run(Command::CommitLabel), [Act::CommitLabel]);
@@ -5268,7 +5323,7 @@ to = { node = "gone" }
         rig.run(Command::EditLabel);
         assert_eq!(
             rig.run(Command::EditLabel),
-            [Act::CommitLabel, Act::OpenLabel(id("a"))]
+            [Act::CommitLabel, Act::OpenLabel(element("a"))]
         );
         assert_eq!(rig.state(), State::Editing);
     }
@@ -5595,8 +5650,10 @@ to = { node = "gone" }
     #[test]
     fn a_reload_keeps_the_selection_that_still_exists() {
         let mut rig = Rig::new();
-        rig.machine
-            .select(BTreeSet::from([id("a"), id("b"), id("e")]), Some(id("a")));
+        rig.machine.select(
+            BTreeSet::from([element("a"), element("b"), element("e")]),
+            Some(element("a")),
+        );
         rig.run(Command::Tool(DIAMOND));
         rig.press(CANVAS);
         rig.by(40.0, 40.0);

@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 
 use crate::ids::Ids;
+pub use crate::scene::Source;
 use crate::z::{self, Element};
 use crate::{
     access, Access, Board, Dash, Dir, Edge, EdgeKind, EdgeStyle, End, Extra, Head, Id, Named, Node,
@@ -54,8 +55,9 @@ pub enum Intent {
     },
     /// Move the nodes and the free ends of the connectors among `ids` by
     /// `by` (§5.8 rules 2 and 4). A node whose drawn ancestor is also
-    /// among `ids` moves with it and not again.
-    Move { ids: Vec<Id>, by: [i32; 2] },
+    /// among `ids` moves with it and not again. Each element is named with
+    /// its kind, since a node and a connector may share an id (§4.12).
+    Move { ids: Vec<Source>, by: [i32; 2] },
     /// Move edges of each node's box, never below one grid cell either
     /// way (§5.8 rules 5 and 6).
     Resize { ids: Vec<Id>, edges: Edges },
@@ -63,8 +65,9 @@ pub enum Intent {
     /// rule 9).
     SetShape { ids: Vec<Id>, shape: Shape },
     /// Remove the elements, the descendants of removed nodes and every
-    /// connector attached to a removed node (§5.10 rule 1).
-    Delete { ids: Vec<Id> },
+    /// connector attached to a removed node (§5.10 rule 1). Each element
+    /// is named with its kind, as for [`Intent::Move`].
+    Delete { ids: Vec<Source> },
     /// Copy the fragment of `ids` (§5.10 rule 2) under new ids, offset by
     /// `by`, on top in the same relative order (§5.10 rule 3; a
     /// duplicate-drag, §5.8 rule 3).
@@ -427,6 +430,16 @@ z = "Y"
         names.iter().map(|name| Id::new(name).unwrap()).collect()
     }
 
+    /// The nodes named `names`, each with its kind.
+    pub(crate) fn nodes(names: &[&str]) -> Vec<Source> {
+        ids(names).into_iter().map(Source::Node).collect()
+    }
+
+    /// The connectors named `names`, each with its kind.
+    pub(crate) fn edges(names: &[&str]) -> Vec<Source> {
+        ids(names).into_iter().map(Source::Edge).collect()
+    }
+
     /// The lines that differ between two files, in file order: a removed
     /// line as `-line` and an added one as `+line`, by a longest common
     /// subsequence. Empty lines are left out, so where a block lands among
@@ -717,7 +730,7 @@ z = "Y"
         ];
         for (moved, expected) in table {
             let intent = Intent::Move {
-                ids: ids(moved),
+                ids: nodes(moved),
                 by,
             };
             assert_lines(intent, &[], &expected);
@@ -727,7 +740,7 @@ z = "Y"
     #[test]
     fn a_moved_connector_moves_its_free_end_only() {
         let intent = Intent::Move {
-            ids: ids(&["e", "f"]),
+            ids: edges(&["e", "f"]),
             by: [20, 20],
         };
         assert_lines(
@@ -741,11 +754,11 @@ z = "Y"
     fn a_move_that_changes_nothing_is_an_empty_plan() {
         for intent in [
             Intent::Move {
-                ids: ids(&["a"]),
+                ids: nodes(&["a"]),
                 by: [0, 0],
             },
             Intent::Move {
-                ids: ids(&["f", "gone"]),
+                ids: edges(&["f", "gone"]),
                 by: [20, 0],
             },
             Intent::Move {
@@ -760,11 +773,40 @@ z = "Y"
     #[test]
     fn a_move_stops_at_the_integer_range() {
         let intent = Intent::Move {
-            ids: ids(&["c"]),
+            ids: nodes(&["c"]),
             by: [i32::MAX, i32::MIN],
         };
         let (_, board) = planned(BOARD, &intent, &[]);
         assert_eq!(board.nodes["c"].at, [i32::MAX, i32::MIN]);
+    }
+
+    /// A node and a connector sharing an id (§4.12): a move names which.
+    #[test]
+    fn a_move_moves_only_the_kind_it_names() {
+        let text = "schema = 1\n\n[node.v]\nkind = \"shape\"\nat = [0, 0]\nsize = [20, 20]\nz = \"V\"\n\n[edge.v]\nkind = \"edge\"\nfrom = { at = [0, 100] }\nto = { at = [80, 100] }\nz = \"W\"\n";
+        let by = [20, 0];
+        let free = |board: &Board| match &board.edges["v"].from {
+            End::Free { at, .. } => *at,
+            End::Node { .. } => panic!("a free end"),
+        };
+        let (_, board) = planned(
+            text,
+            &Intent::Move {
+                ids: nodes(&["v"]),
+                by,
+            },
+            &[],
+        );
+        assert_eq!((board.nodes["v"].at, free(&board)), ([20, 0], [0, 100]));
+        let (_, board) = planned(
+            text,
+            &Intent::Move {
+                ids: edges(&["v"]),
+                by,
+            },
+            &[],
+        );
+        assert_eq!((board.nodes["v"].at, free(&board)), ([0, 0], [20, 100]));
     }
 
     #[test]
@@ -851,9 +893,9 @@ z = "Y"
 
     #[test]
     fn delete_removes_whole_blocks() {
-        let delete = |names: &[&str]| Intent::Delete { ids: ids(names) };
+        let delete = |ids: Vec<Source>| Intent::Delete { ids };
         assert_lines(
-            delete(&["b"]),
+            delete(nodes(&["b"])),
             &[],
             &[
                 "-[node.b]",
@@ -866,7 +908,7 @@ z = "Y"
             ],
         );
         assert_lines(
-            delete(&["e"]),
+            delete(edges(&["e"])),
             &[],
             &[
                 "-[edge.e]",
@@ -877,16 +919,20 @@ z = "Y"
             ],
         );
         // A node takes its descendants and its connectors with it.
-        let (plan, board) = planned(BOARD, &delete(&["a"]), &[]);
+        let (plan, board) = planned(BOARD, &delete(nodes(&["a"])), &[]);
         let left: Vec<&str> = board.nodes.keys().map(Id::as_str).collect();
         assert_eq!(left, ["c", "t"]);
         assert!(board.edges.is_empty());
         assert_eq!(plan.select, Some(Vec::new()));
-        let (_, board) = planned(BOARD, &delete(&["c"]), &[]);
+        let (_, board) = planned(BOARD, &delete(nodes(&["c"])), &[]);
         let left: Vec<&str> = board.edges.keys().map(Id::as_str).collect();
         assert_eq!(left, ["e"]);
-        assert_empty(BOARD, delete(&["gone"]));
-        assert_empty(BOARD, delete(&[]));
+        assert_empty(BOARD, delete(nodes(&["gone"])));
+        assert_empty(BOARD, delete(edges(&["gone"])));
+        // A node named as a connector is not deleted, nor the other way.
+        assert_empty(BOARD, delete(edges(&["a"])));
+        assert_empty(BOARD, delete(nodes(&["e"])));
+        assert_empty(BOARD, delete(Vec::new()));
     }
 
     /// Integrity damage around a deleted node never turns into a parent
@@ -910,14 +956,20 @@ z = "Y"
         // An edge with the same id as a node.
         text += "\n[edge.v]\nkind = \"edge\"\nfrom = { at = [0, 0] }\nto = { at = [9, 9] }\nz = \"V\"\n";
         let before = check(&parse(&text).unwrap());
-        let (_, board) = planned(&text, &Intent::Delete { ids: ids(&["x"]) }, &[]);
+        let (_, board) = planned(&text, &Intent::Delete { ids: nodes(&["x"]) }, &[]);
         let left: Vec<&str> = board.nodes.keys().map(Id::as_str).collect();
         assert_eq!(left, ["v"]);
         for issue in check(&board) {
             assert!(before.contains(&issue), "{issue:?}");
         }
-        // An id naming a node and a connector removes both.
-        let (_, board) = planned(&text, &Intent::Delete { ids: ids(&["v"]) }, &[]);
+        // An id naming a node and a connector removes the one named with
+        // its kind, and both only when both are named (§4.12).
+        let (_, board) = planned(&text, &Intent::Delete { ids: nodes(&["v"]) }, &[]);
+        assert!(!board.nodes.contains_key("v") && board.edges.contains_key("v"));
+        let (_, board) = planned(&text, &Intent::Delete { ids: edges(&["v"]) }, &[]);
+        assert!(board.nodes.contains_key("v") && board.edges.is_empty());
+        let both = [nodes(&["v"]), edges(&["v"])].concat();
+        let (_, board) = planned(&text, &Intent::Delete { ids: both }, &[]);
         assert!(!board.nodes.contains_key("v") && board.edges.is_empty());
 
         // A chain 34 deep: below level 32 nodes are drawn as roots, yet
@@ -927,7 +979,13 @@ z = "Y"
             let parent = (k > 0).then(|| format!("n{:02}", k - 1));
             chain += &node(&format!("n{k:02}"), parent.as_deref());
         }
-        let (_, board) = planned(&chain, &Intent::Delete { ids: ids(&["n31"]) }, &[]);
+        let (_, board) = planned(
+            &chain,
+            &Intent::Delete {
+                ids: nodes(&["n31"]),
+            },
+            &[],
+        );
         assert_eq!(board.nodes.len(), 31);
         assert!(check(&board).is_empty(), "{:?}", check(&board));
     }
@@ -957,7 +1015,7 @@ z = "Y"
             let copied = crate::clip::copy(&board, &ids(&[cut])).unwrap();
             let body = copied.strip_prefix(crate::clip::HEADER).unwrap();
             let fragment = parse(body).unwrap();
-            let (_, after) = planned(text, &Intent::Delete { ids: ids(&[cut]) }, &[]);
+            let (_, after) = planned(text, &Intent::Delete { ids: nodes(&[cut]) }, &[]);
             let removed: Vec<&Id> = board
                 .nodes
                 .keys()
@@ -1101,7 +1159,7 @@ z = "Y"
         let board = parse(text).unwrap();
         let plan = plan(
             &board,
-            &Intent::Delete { ids: ids(&["a"]) },
+            &Intent::Delete { ids: nodes(&["a"]) },
             &mut Listed(Vec::new()),
         );
         assert!(plan.is_empty());

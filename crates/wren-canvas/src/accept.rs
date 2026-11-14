@@ -378,7 +378,7 @@ fn the_acceptance_script_builds_the_flowchart_by_keyboard() {
     let [last] = selected[..] else {
         panic!("{selected:?}")
     };
-    let edge = &board.edges[last];
+    let edge = &board.edges[last.edge().expect("a connector")];
     assert_eq!(
         (label_of(board, &edge.from), label_of(board, &edge.to)),
         ("Reject order", "End")

@@ -695,7 +695,7 @@ impl BoardView {
                 // cursor is when a key moves it (§5.7 rule 5).
                 let now_target = self.seek_target();
                 if let Some(id) = now_target.as_ref().filter(|_| now_target != target) {
-                    self.reveal_element(id);
+                    self.reveal_element(&Source::Node(id.clone()));
                 }
             }
             Message::Label(epoch, action) if epoch == self.epoch => {
@@ -1149,21 +1149,25 @@ impl BoardView {
     /// existing label selected, and the view brought to where the text can
     /// be read. An element the scene gives no label a place, which is a
     /// connector it does not route, is not edited.
-    fn open_label(&mut self, id: Id) {
-        let text = match (self.board.nodes.get(&id), self.board.edges.get(&id)) {
+    fn open_label(&mut self, element: Source) {
+        let (node, edge) = match &element {
+            Source::Node(id) => (self.board.nodes.get(id), None),
+            Source::Edge(id) => (None, self.board.edges.get(id)),
+        };
+        let text = match (node, edge) {
             (Some(node), _) => Some(node.text.as_str()),
             (None, Some(edge)) => Some(edge.labels.first().map_or("", |label| label.text.as_str())),
             (None, None) => None,
         };
-        let (Some(text), Some((place, ink))) = (text, self.label_place(&id)) else {
+        let (Some(text), Some((place, ink))) = (text, self.label_place(&element)) else {
             self.label = None;
             self.machine.abandon();
             return;
         };
         self.labels_opened += 1;
-        let mut label = Label::open(id.clone(), text, place, &self.measurer);
+        let mut label = Label::open(element.clone(), text, place, &self.measurer);
         label.ink = ink;
-        label.before = match (self.board.nodes.get(&id), self.board.edges.get(&id)) {
+        label.before = match (node, edge) {
             (Some(node), _) => Some(Before::Node {
                 text: node.text.clone(),
                 size: node.size,
@@ -1171,15 +1175,16 @@ impl BoardView {
             (None, Some(edge)) => Some(Before::Edge(edge.labels.clone())),
             (None, None) => None,
         };
-        label.made = self.making.as_ref() == Some(&id)
-            || self
-                .board
-                .edges
-                .get(&id)
-                .is_some_and(|edge| edge.labels.is_empty());
+        label.made = match (node, edge) {
+            (Some(_), _) => self.making.as_ref() == element.node(),
+            (None, Some(edge)) => edge.labels.is_empty(),
+            (None, None) => false,
+        };
         // What has to be in view: the label, and with it the node it is on.
         let lines = label.bounds(&self.measurer);
-        let node = hit::Frames::new(&self.board).get(&id);
+        let node = element
+            .node()
+            .and_then(|id| hit::Frames::new(&self.board).get(id));
         let around = node.map_or(lines, |node| union(node, lines));
         let small = label.text_size() * self.viewport.zoom < MIN_LABEL_PX;
         self.label = Some(label);
@@ -1227,22 +1232,22 @@ impl BoardView {
         if !label.stored().is_empty() || !(label.changed() || label.made) {
             return;
         }
-        let id = label.id().clone();
-        let free =
-            self.board.nodes.get(&id).is_some_and(|node| {
-                node.kind.as_ref().and_then(Named::known) == Some(NodeKind::Text)
-            });
-        let labelled = !self.board.nodes.contains_key(&id)
-            && self
-                .board
-                .edges
-                .get(&id)
-                .is_some_and(|edge| !edge.labels.is_empty());
+        let element = label.element().clone();
+        let id = element.id().clone();
+        let free = element
+            .node()
+            .and_then(|id| self.board.nodes.get(id))
+            .is_some_and(|node| node.kind.as_ref().and_then(Named::known) == Some(NodeKind::Text));
+        let labelled = element
+            .edge()
+            .and_then(|id| self.board.edges.get(id))
+            .is_some_and(|edge| !edge.labels.is_empty());
         if free && label.made && self.unmake(update) {
             // The creation and the label are taken back whole, keys the
             // creation renumbered (§4.7) and all.
         } else if free {
-            self.edit(&Intent::Delete { ids: vec![id] }, Unit::Label, now, update);
+            let ids = vec![element];
+            self.edit(&Intent::Delete { ids }, Unit::Label, now, update);
         } else if labelled {
             let intent = Intent::SetEdgeLabel {
                 id,
@@ -1286,9 +1291,10 @@ impl BoardView {
             self.place_label();
             return;
         }
-        let id = label.id().clone();
+        let element = label.element().clone();
+        let id = element.id().clone();
         let text = label.stored().to_owned();
-        let intent = match self.board.nodes.get(&id) {
+        let intent = match element.node().and_then(|id| self.board.nodes.get(id)) {
             Some(node) => {
                 let size = label::grown(node, node.size, &text, &self.measurer);
                 Intent::SetText { id, text, size }
@@ -1308,11 +1314,11 @@ impl BoardView {
     /// the board is too (§5.9 rules 3 and 4). It joins the label's unit.
     fn put_back(&mut self, label: &Label, now: Instant, update: &mut Update) {
         let id = label.id();
+        let element = label.element();
         let change = match &label.before {
-            Some(Before::Node { text, size }) => self
-                .board
-                .nodes
-                .get(id)
+            Some(Before::Node { text, size }) => element
+                .node()
+                .and_then(|id| self.board.nodes.get(id))
                 .filter(|node| node.text != *text || node.size != *size)
                 .map(|node| {
                     let node = Node {
@@ -1322,10 +1328,9 @@ impl BoardView {
                     };
                     Change::PutNode(id.clone(), Box::new(node))
                 }),
-            Some(Before::Edge(labels)) => self
-                .board
-                .edges
-                .get(id)
+            Some(Before::Edge(labels)) => element
+                .edge()
+                .and_then(|id| self.board.edges.get(id))
                 .filter(|edge| edge.labels != *labels)
                 .map(|edge| {
                     let edge = wren_board::Edge {
@@ -1365,10 +1370,10 @@ impl BoardView {
 
     /// Lay the open label out where the board now draws it.
     fn place_label(&mut self) {
-        let Some(id) = self.label.as_ref().map(|label| label.id().clone()) else {
+        let Some(element) = self.label.as_ref().map(|label| label.element().clone()) else {
             return;
         };
-        let place = self.label_place(&id);
+        let place = self.label_place(&element);
         if let (Some(label), Some((place, ink))) = (&mut self.label, place) {
             label.ink = ink;
             label.place(place, &self.measurer);
@@ -1378,7 +1383,7 @@ impl BoardView {
     /// The label is open only while the machine edits its element: an edit
     /// that removed the element closed it.
     fn keep_label(&mut self) {
-        let open = self.label.as_ref().map(Label::id);
+        let open = self.label.as_ref().map(Label::element);
         if open != self.machine.editing() {
             self.label = None;
         }
@@ -1392,8 +1397,9 @@ impl BoardView {
     /// Where the label of `id` is laid out, and the colour it is drawn in:
     /// a node's label box, or the point a connector's first label is
     /// centred on.
-    fn label_place(&self, id: &Id) -> Option<(label::Place, Rgba)> {
-        if let Some(node) = self.board.nodes.get(id) {
+    fn label_place(&self, element: &Source) -> Option<(label::Place, Rgba)> {
+        let id = element.id();
+        if let Some(node) = element.node().and_then(|id| self.board.nodes.get(id)) {
             let bounds = hit::Frames::new(&self.board).get(id)?;
             let ink = match node.kind.as_ref().and_then(Named::known) {
                 Some(NodeKind::Shape) => {
@@ -1407,7 +1413,7 @@ impl BoardView {
             };
             return Some((label::Place::of_node(node, bounds), ink));
         }
-        let edge = self.board.edges.get(id)?;
+        let edge = self.board.edges.get(element.edge()?)?;
         let ink = style::resolve(&edge.style.color, Fill::None, &self.palette).stroke;
         let first = edge.labels.first();
         let centre = if first.is_some_and(|label| !label.text.trim().is_empty()) {
@@ -1494,26 +1500,31 @@ impl BoardView {
 
     /// A command the machine left to the view.
     fn run(&mut self, command: Command, now: Instant, update: &mut Update) {
-        let ids: Vec<Id> = self.machine.selection().iter().cloned().collect();
-        let editable = self.writable() && !ids.is_empty();
+        let picked: Vec<Source> = self.machine.selection().iter().cloned().collect();
+        // A node and a connector may share an id (§4.12), so each command
+        // takes only the kind it acts on.
+        let nodes: Vec<Id> = picked.iter().filter_map(Source::node).cloned().collect();
+        let edges: Vec<Id> = picked.iter().filter_map(Source::edge).cloned().collect();
+        let editable = self.writable() && !picked.is_empty();
         match command {
-            Command::Delete if editable => self.delete(ids, now, update),
+            Command::Delete if editable => self.delete(picked, now, update),
             Command::Duplicate if editable => {
                 let by = [GRID, GRID];
-                self.edit(&Intent::Duplicate { ids, by }, Unit::One, now, update);
+                let intent = Intent::Duplicate { ids: nodes, by };
+                self.edit(&intent, Unit::One, now, update);
             }
             // A selection with no node has no fragment and copies nothing
             // (§5.10 rule 2). A read-only board copies too.
             Command::Copy => {
-                if let Some(text) = wren_board::clip::copy(&self.board, &ids) {
+                if let Some(text) = wren_board::clip::copy(&self.board, &nodes) {
                     update.effects.push(Effect::ClipboardWrite(text));
                 }
             }
             // Copy, then delete what was selected: one unit (rule 5).
             Command::Cut if editable => {
-                if let Some(text) = wren_board::clip::copy(&self.board, &ids) {
+                if let Some(text) = wren_board::clip::copy(&self.board, &nodes) {
                     update.effects.push(Effect::ClipboardWrite(text));
-                    self.delete(ids, now, update);
+                    self.delete(picked, now, update);
                 }
             }
             // The text comes back as `Message::Pasted`.
@@ -1530,7 +1541,7 @@ impl BoardView {
             | Command::StrokeDashed
                 if editable =>
             {
-                if let Some(intent) = edge_style(&self.board, &ids, command) {
+                if let Some(intent) = edge_style(&self.board, &edges, command) {
                     self.edit(&intent, Unit::One, now, update);
                 }
             }
@@ -1538,9 +1549,9 @@ impl BoardView {
             Command::ExtendSelection(dir) => self.walk(dir, true),
             Command::ZoomFit => self.fit(),
             Command::ZoomSelection => {
-                let bounds = ids
+                let bounds = picked
                     .iter()
-                    .filter_map(|id| bounds(&self.board, self.scenes.scene(), id))
+                    .filter_map(|element| bounds(&self.board, self.scenes.scene(), element))
                     .reduce(union);
                 if let (Some(bounds), Some(size)) = (bounds, self.size) {
                     self.jump(Viewport::fitting(bounds, size));
@@ -1553,15 +1564,16 @@ impl BoardView {
     /// Delete `ids` as one unit (§5.10 rule 1). When that takes the cursor
     /// with it, the cursor moves to the remaining node nearest where it
     /// was, by centre, ties by id; nothing is selected after.
-    fn delete(&mut self, ids: Vec<Id>, now: Instant, update: &mut Update) {
+    fn delete(&mut self, ids: Vec<Source>, now: Instant, update: &mut Update) {
         let cursor = self.machine.cursor();
-        let was = cursor.and_then(|id| bounds(&self.board, self.scenes.scene(), id));
+        let was = cursor.and_then(|element| bounds(&self.board, self.scenes.scene(), element));
         if !self.edit(&Intent::Delete { ids }, Unit::One, now, update) {
             return;
         }
         if self.machine.cursor().is_none() {
             let nearest = was.and_then(|was| nearest(&self.board, was.center()));
-            self.machine.select(BTreeSet::new(), nearest);
+            self.machine
+                .select(BTreeSet::new(), nearest.map(Source::Node));
         }
     }
 
@@ -1645,11 +1657,12 @@ impl BoardView {
                     let [x, y] = frames.corner(id)?;
                     Some(((y, x), id))
                 });
-                corners.min().map(|(_, id)| id.clone())
+                corners.min().map(|(_, id)| Source::Node(id.clone()))
             })
         } else {
             let from = cursor.or_else(|| selection.iter().next().cloned());
-            from.and_then(|from| walk::next(&self.board, &from, dir))
+            let next = from.and_then(|from| walk::next(&self.board, from.id(), dir));
+            next.map(Source::Node)
         };
         let Some(target) = target else {
             return;
@@ -1673,11 +1686,11 @@ impl BoardView {
 
     /// Pan by the least amount that shows the element `id` with
     /// [`REVEAL_MARGIN`] around it.
-    fn reveal_element(&mut self, id: &Id) {
+    fn reveal_element(&mut self, element: &Source) {
         let Some(size) = self.size else {
             return;
         };
-        if let Some(bounds) = bounds(&self.board, self.scenes.scene(), id) {
+        if let Some(bounds) = bounds(&self.board, self.scenes.scene(), element) {
             self.jump(revealing(self.viewport, size, bounds));
         }
     }
@@ -1752,10 +1765,11 @@ fn scene_of<'c>(
 
 /// Where an element is drawn, in board units: a node's box, or the union
 /// of what the scene draws for a connector.
-pub(crate) fn bounds(board: &Board, scene: &Scene, id: &Id) -> Option<Rect> {
-    if board.nodes.contains_key(id) {
-        return hit::Frames::new(board).get(id);
-    }
+pub(crate) fn bounds(board: &Board, scene: &Scene, element: &Source) -> Option<Rect> {
+    let id = match element {
+        Source::Node(id) => return hit::Frames::new(board).get(id),
+        Source::Edge(id) => id,
+    };
     scene
         .items
         .iter()
@@ -1952,6 +1966,11 @@ mod tests {
     use wren_board::{Reason, Rgba, Side};
 
     use super::*;
+
+    /// The element `name` names on the view's board, with its kind.
+    fn pick(view: &BoardView, name: &str) -> Source {
+        Source::of(&view.board, &id(name)).expect("an element")
+    }
 
     fn open(text: &str) -> BoardView {
         fixtures::load_fonts();
@@ -2559,7 +2578,8 @@ mod tests {
     }
 
     fn selected(view: &BoardView) -> Vec<&str> {
-        view.machine().selection().iter().map(Id::as_str).collect()
+        let ids = view.machine().selection().iter().map(Source::id);
+        ids.map(Id::as_str).collect()
     }
 
     /// The view's scenes come from its cache, and each is the scene a
@@ -2754,7 +2774,7 @@ mod tests {
         assert_eq!(selected(&view), ["e"]);
         click(&mut view, (600.0, 400.0), now);
         assert!(selected(&view).is_empty());
-        assert_eq!(view.machine().cursor(), Some(&id("e")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("e")));
         assert!(view.pristine());
     }
 
@@ -2880,7 +2900,7 @@ mod tests {
         view.set_viewport(far);
         view.command(Command::Select(Dir::Right), now);
         assert_eq!(selected(&view), ["a"]);
-        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("a")));
         // Panned the least that shows `a` with the margin.
         assert_eq!(
             view.viewport(),
@@ -3035,7 +3055,7 @@ mod tests {
     /// Select `name` alone and open its label, as Enter does.
     fn open_label(view: &mut BoardView, name: &str, now: Instant) -> Update {
         view.machine
-            .select(BTreeSet::from([id(name)]), Some(id(name)));
+            .select(BTreeSet::from([pick(view, name)]), Some(pick(view, name)));
         input(view, Input::Focus(true), now);
         view.command(Command::EditLabel, now)
     }
@@ -3136,7 +3156,7 @@ mod tests {
         assert_eq!(edit(&mut view, LabelAction::Backspace, now), CHANGED);
         assert_eq!(view.board().nodes[&id("a")].text, "Star");
         // The label stays open through all of it, on the same element.
-        assert_eq!(view.machine().editing(), Some(&id("a")));
+        assert_eq!(view.machine().editing().map(Source::id), Some(&id("a")));
         assert_eq!(selected(&view), ["a"]);
         assert_eq!(view.board().nodes[&id("b")].text, "B");
     }
@@ -3162,7 +3182,11 @@ mod tests {
             for (name, close) in ways {
                 let mut view = sized(fixtures::HAND_WRITTEN);
                 open_label(&mut view, element, now);
-                assert_eq!(view.machine().editing(), Some(&id(element)), "{element}");
+                assert_eq!(
+                    view.machine().editing().map(Source::id),
+                    Some(&id(element)),
+                    "{element}"
+                );
                 for action in [
                     LabelAction::Move {
                         motion: Motion::Start,
@@ -3492,13 +3516,62 @@ mod tests {
         }
     }
 
+    /// A node and a connector that share an id (§4.12): what is done to the
+    /// one picked leaves the other as it is.
+    #[test]
+    fn a_node_and_a_connector_sharing_an_id_are_picked_apart() {
+        let now = Instant::now();
+        let board = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n\n[node.kid]\nkind = \"shape\"\nat = [0, 0]\nparent = \"shared\"\nsize = [40, 20]\nz = \"V\"\n\n[node.shared]\ntext = \"Node shared\"\nkind = \"shape\"\nat = [0, 300]\nsize = [120, 60]\nz = \"W\"\n\n[edge.shared]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { at = [400, 30] }\nlabels = [{ text = \"Edge shared\" }]\nz = \"X\"\n";
+        let on_edge = |view: &BoardView| view.viewport().to_screen((180.0, 30.0));
+        let shared = id("shared");
+        // Picked by a click on the connector.
+        let mut view = sized(board);
+        let at = on_edge(&view);
+        click(&mut view, at, now);
+        let picked = [Source::Edge(shared.clone())];
+        assert!(view.machine().selection().iter().eq(&picked));
+        // Enter opens the connector's label, not the node's.
+        view.command(Command::EditLabel, now);
+        assert_eq!(label(&view).element(), &picked[0]);
+        assert_eq!(label(&view).text(), "Edge shared");
+        key(&mut view, Key::Escape, now);
+        // A key move moves the connector's free end only.
+        view.command(Command::Move(Dir::Right), now);
+        assert_eq!(view.board().nodes[&shared].at, [0, 300]);
+        assert!(view.board().edges.contains_key(&shared));
+        // Delete removes the connector only.
+        let nodes = view.board().nodes.clone();
+        view.command(Command::Delete, now);
+        assert!(!view.board().edges.contains_key(&shared));
+        assert_eq!(view.board().nodes, nodes);
+        // Picked as the node: the node and its child go, the connector of
+        // the same name stays.
+        let mut view = sized(board);
+        click_node(&mut view, "shared", now);
+        let picked = [Source::Node(shared.clone())];
+        assert!(view.machine().selection().iter().eq(&picked));
+        view.command(Command::EditLabel, now);
+        assert_eq!(label(&view).text(), "Node shared");
+        key(&mut view, Key::Escape, now);
+        view.command(Command::Delete, now);
+        assert!(view.board().edges.contains_key(&shared));
+        let left: Vec<&str> = view.board().nodes.keys().map(Id::as_str).collect();
+        assert_eq!(left, ["a"]);
+        // Select all picks both, and delete takes both.
+        let mut view = sized(board);
+        input(&mut view, Input::Focus(true), now);
+        view.command(Command::SelectAll, now);
+        view.command(Command::Delete, now);
+        assert!(view.board().nodes.is_empty() && view.board().edges.is_empty());
+    }
+
     #[test]
     fn free_text_left_empty_is_deleted_when_this_edit_emptied_or_made_it() {
         let now = Instant::now();
         let deleted = |view: &BoardView, name: &str| {
             let asked = view.intents.last()
                 == Some(&Intent::Delete {
-                    ids: vec![id(name)],
+                    ids: vec![Source::Node(id(name))],
                 });
             asked && !view.board().nodes.contains_key(&id(name))
         };
@@ -3705,7 +3778,7 @@ z = "c"
             (10, 5..10)
         );
         assert_eq!(input(&mut view, RELEASE, now), Update::default());
-        assert_eq!(view.machine().editing(), Some(&id("first")));
+        assert_eq!(view.machine().editing().map(Source::id), Some(&id("first")));
         assert!(view.pristine());
         // What is typed replaces what the drag selected.
         typed(&mut view, "!", now);
@@ -3819,8 +3892,10 @@ z = "c"
         // Nor does a board that may not be edited open one.
         let mut view = sized(fixtures::FUTURE);
         let node = view.board().nodes.keys().next().expect("a node").clone();
-        view.machine
-            .select(BTreeSet::from([node.clone()]), Some(node));
+        view.machine.select(
+            BTreeSet::from([Source::Node(node.clone())]),
+            Some(Source::Node(node)),
+        );
         view.command(Command::EditLabel, now);
         assert_eq!(view.label(), None);
         assert_eq!(typed(&mut view, "x", now), Update::default());
@@ -4115,14 +4190,14 @@ z = "c"
         click_node(&mut view, "a", now);
         view.command(Command::ExtendSelection(Dir::Right), now);
         assert_eq!(selected(&view), ["a", "b"]);
-        assert_eq!(view.machine().cursor(), Some(&id("b")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("b")));
         assert_eq!(view.command(Command::Delete, now), CHANGED);
         assert!(selected(&view).is_empty());
         assert!(view.board().nodes.is_empty() && view.board().edges.is_empty());
 
         travel(&mut view, Command::Undo, now);
         assert_eq!(selected(&view), ["a", "b"]);
-        assert_eq!(view.machine().cursor(), Some(&id("b")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("b")));
         assert!(view.pristine());
         assert_eq!(view.draft(), TWO);
         // Redo returns to how it was when undo was asked for.
@@ -4293,7 +4368,7 @@ z = "c"
         // Nothing selected, or no node selected: nothing to copy.
         assert_eq!(view.command(Command::Copy, now), Update::default());
         view.machine
-            .select(BTreeSet::from([id("e")]), Some(id("e")));
+            .select(BTreeSet::from([pick(&view, "e")]), Some(pick(&view, "e")));
         assert_eq!(view.command(Command::Copy, now), Update::default());
         assert_eq!(view.command(Command::Cut, now), Update::default());
 
@@ -4359,6 +4434,7 @@ z = "c"
         assert_eq!(fresh.len(), 3);
         assert!(fresh.iter().all(|id| !["a", "b", "e"].contains(id)));
         let cursor = view.machine().cursor().expect("a cursor");
+        let cursor = cursor.node().expect("a node");
         assert!(fresh.contains(&cursor.as_str()) && view.board().nodes.contains_key(cursor));
         assert_eq!(view.label(), None, "a paste opens no label");
 
@@ -4399,7 +4475,7 @@ z = "c"
         let mut view = sized(TWO);
         assert_eq!(pasted(&mut view, "Ship it\r\ntoday\n\n", now), CHANGED);
         assert_eq!(view.board().nodes.len(), 3);
-        let made = view.machine().cursor().expect("a cursor").clone();
+        let made = view.machine().cursor().expect("a cursor").id().clone();
         assert_eq!(selected(&view), [made.as_str()]);
         let node = &view.board().nodes[&made];
         assert_eq!(node.text, "Ship it\ntoday");
@@ -4419,7 +4495,7 @@ z = "c"
         // Long text wraps at the paste width and grows downwards.
         let long = "word ".repeat(40);
         assert_eq!(pasted(&mut view, &long, now), CHANGED);
-        let made = view.machine().cursor().expect("a cursor").clone();
+        let made = view.machine().cursor().expect("a cursor").id().clone();
         let node = &view.board().nodes[&made];
         assert_eq!(node.size[0], PASTE_WRAP);
         assert!(node.size[1] > 40, "{:?}", node.size);
@@ -4518,7 +4594,9 @@ z = "c"
                     side: None,
                 },
             },
-            Intent::Delete { ids: vec![id("b")] },
+            Intent::Delete {
+                ids: vec![Source::Node(id("b"))],
+            },
         ];
         let update = view.apply(&intents, &mut Given(vec!["n9", "e9"]), now);
         assert_eq!(update, CHANGED);
@@ -4551,7 +4629,7 @@ z = "c"
             now,
         );
         let moved = [Intent::Move {
-            ids: vec![id("b")],
+            ids: vec![Source::Node(id("b"))],
             by: [20, 0],
         }];
         assert_eq!(view.apply(&moved, &mut Given(Vec::new()), now), CHANGED);
@@ -4565,7 +4643,7 @@ z = "c"
 
         // Nothing to change is no step.
         let still = [Intent::Move {
-            ids: vec![id("b")],
+            ids: vec![Source::Node(id("b"))],
             by: [0, 0],
         }];
         assert_eq!(
@@ -5210,29 +5288,31 @@ z = "c"
         let mut view = sized(&text);
         let now = Instant::now();
         view.machine
-            .select(BTreeSet::from([id("a")]), Some(id("a")));
+            .select(BTreeSet::from([pick(&view, "a")]), Some(pick(&view, "a")));
         assert_eq!(view.command(Command::Delete, now), CHANGED);
         assert!(selected(&view).is_empty());
-        assert_eq!(view.machine().cursor(), Some(&id("c")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("c")));
         // Undo puts the selection and the cursor back.
         travel(&mut view, Command::Undo, now);
         assert_eq!(selected(&view), ["a"]);
-        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("a")));
         // A tie goes to the lower id.
         view.machine
-            .select(BTreeSet::from([id("f")]), Some(id("f")));
+            .select(BTreeSet::from([pick(&view, "f")]), Some(pick(&view, "f")));
         view.command(Command::Delete, now);
-        assert_eq!(view.machine().cursor(), Some(&id("d")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("d")));
         // Cut moves it the same way.
         view.machine
-            .select(BTreeSet::from([id("d")]), Some(id("d")));
+            .select(BTreeSet::from([pick(&view, "d")]), Some(pick(&view, "d")));
         view.command(Command::Cut, now);
-        assert_eq!(view.machine().cursor(), Some(&id("e")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("e")));
         // A cursor the delete leaves stays where it is.
-        view.machine
-            .select(BTreeSet::from([id("b"), id("c")]), Some(id("a")));
+        view.machine.select(
+            BTreeSet::from([pick(&view, "b"), pick(&view, "c")]),
+            Some(pick(&view, "a")),
+        );
         view.command(Command::Delete, now);
-        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("a")));
         // With no node left there is no cursor.
         view.command(Command::SelectAll, now);
         view.command(Command::Delete, now);
@@ -5246,9 +5326,9 @@ z = "c"
         // `e` runs from 120,30 to 300,30, so its middle is as far from
         // either end's node, and the tie goes to `a`.
         view.machine
-            .select(BTreeSet::from([id("e")]), Some(id("e")));
+            .select(BTreeSet::from([pick(&view, "e")]), Some(pick(&view, "e")));
         view.command(Command::Delete, now);
-        assert_eq!(view.machine().cursor(), Some(&id("a")));
+        assert_eq!(view.machine().cursor().map(Source::id), Some(&id("a")));
     }
 
     #[test]

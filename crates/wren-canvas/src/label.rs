@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use wren_board::scene::{self, Face, Measure, Point, Rect};
+use wren_board::scene::{self, Face, Measure, Point, Rect, Source};
 use wren_board::{shape, Id, Named, Node, NodeKind, Rgba, Shape, GRID};
 
 /// One edit of the open label, stamped with the view's epoch in
@@ -174,7 +174,7 @@ pub(crate) enum Before {
 /// The open label: one element's text while it is edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
-    id: Id,
+    element: Source,
     text: String,
     /// The caret, and the other end of the selection: equal when nothing
     /// is selected. Both are byte offsets at grapheme boundaries.
@@ -201,10 +201,10 @@ pub struct Label {
 impl Label {
     /// The label of `id`, holding `text`, laid out in `place`. A label
     /// opens with all its text selected (§5.9 rule 1).
-    pub(crate) fn open(id: Id, text: &str, place: Place, measure: &dyn Measure) -> Self {
+    pub(crate) fn open(element: Source, text: &str, place: Place, measure: &dyn Measure) -> Self {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut label = Self {
-            id,
+            element,
             caret: text.len(),
             anchor: 0,
             began: text.clone(),
@@ -222,9 +222,14 @@ impl Label {
         label
     }
 
-    /// The element whose label this is.
+    /// The id of the element whose label this is.
     pub fn id(&self) -> &Id {
-        &self.id
+        self.element.id()
+    }
+
+    /// The element whose label this is, with its kind.
+    pub fn element(&self) -> &Source {
+        &self.element
     }
 
     /// The text as typed so far, trailing blank lines included.
@@ -765,8 +770,8 @@ mod tests {
     /// a line 20 tall.
     const M: &FixedMeasure = &FixedMeasure;
 
-    fn id() -> Id {
-        Id::new("a").expect("an id")
+    fn id() -> Source {
+        Source::Node(Id::new("a").expect("an id"))
     }
 
     /// Free text in a box 70 wide at (100, 50): ten graphemes to a line.

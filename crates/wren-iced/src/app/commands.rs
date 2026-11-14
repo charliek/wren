@@ -610,7 +610,8 @@ fn board_enabled(view: &wren_canvas::BoardView, command: BoardCommand) -> bool {
         C::EditLabel | C::Connect(_) | C::SelectConnector(_) => selection.len() == 1,
         C::Copy | C::Cut | C::Duplicate => {
             let nodes = &view.board().nodes;
-            selection.iter().any(|id| nodes.contains_key(id))
+            let mut picked = selection.iter().filter_map(wren_board::scene::Source::node);
+            picked.any(|id| nodes.contains_key(id))
         }
         _ => true,
     }

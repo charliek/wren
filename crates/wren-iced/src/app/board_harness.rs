@@ -170,8 +170,8 @@ impl App {
             })).collect::<Vec<_>>(),
             "state": state_name(machine, focused),
             "tool": tool_name(machine.tool()),
-            "selection": machine.selection().iter().map(Id::as_str).collect::<Vec<_>>(),
-            "cursor": machine.cursor().map(Id::as_str),
+            "selection": machine.selection().iter().map(|element| element.id().as_str()).collect::<Vec<_>>(),
+            "cursor": machine.cursor().map(|cursor| cursor.id().as_str()),
             "editing": view.label().map(|label| json!({
                 "id": label.id().as_str(), "text": label.text(), "caret": label.caret(),
             })),
@@ -632,6 +632,22 @@ fn intents_of(
             })
             .collect()
     };
+    // An id names its node, its connector, or both when they share it
+    // (§4.12), including what an earlier edit of this request made.
+    let elements = |given: &Given| -> Result<Vec<Source>, String> {
+        let mut found = Vec::new();
+        for id in ids()? {
+            let node = board.nodes.contains_key(&id) || given.nodes.contains_key(&id);
+            let edge = board.edges.contains_key(&id) || given.edges.contains(&id);
+            if node || !edge {
+                found.push(Source::Node(id.clone()));
+            }
+            if edge {
+                found.push(Source::Edge(id));
+            }
+        }
+        Ok(found)
+    };
     let cell = |name: &str| -> Result<[i32; 2], String> {
         let (x, y) = pair(
             edit.get(name)
@@ -686,10 +702,12 @@ fn intents_of(
             intents
         }
         "move" => vec![Intent::Move {
-            ids: ids()?,
+            ids: elements(given)?,
             by: cell("by")?,
         }],
-        "delete" => vec![Intent::Delete { ids: ids()? }],
+        "delete" => vec![Intent::Delete {
+            ids: elements(given)?,
+        }],
         "connect" => {
             let id = new_id(given)?;
             given.edges.insert(id);

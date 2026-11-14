@@ -658,7 +658,7 @@ A mode chip in a canvas corner names the state when it is not plain Idle ("Diamo
 
 ### 5.3 Selection and the cursor [P2]
 
-1. The **selection** is a set of element ids. The **cursor** is one element id: the element last selected. Both live in `BoardView`, are kept by id across reloads, and are never written to the file.
+1. The **selection** is a set of elements, each an id with its kind. The **cursor** is one such element: the element last selected. Both live in `BoardView`, are kept by id across reloads, and are never written to the file. The kind matters where a node and a connector share an id (§4.12): a command acts only on the one picked, and `board.select.all` picks both (phase-end fix of Phase 2; `boards-p2-edit` had an id remove both).
 2. The cursor survives deselection and may be a connector (*modelled*: without this, Esc after a distant connect loses the place). It is drawn as a ring distinct from the selection outline whenever the selection is not exactly `{cursor}`.
 3. Click selects the element under the pointer and clears the rest. Shift-click toggles it. A click on empty canvas clears the selection and keeps the cursor. A right-click selects as §5.17 rule 2 says; in Phase 2 it does nothing more.
 4. Hit order: resize handles of the selected node, connect handles, endpoint handles of the selected connector, nodes from the top of the stacking order down (inside the shape's outline, whatever its fill), connectors within 6 screen px of the routed path, canvas.

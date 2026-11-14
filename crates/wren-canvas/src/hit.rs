@@ -38,13 +38,12 @@ pub enum Hit {
 
 impl Hit {
     /// The element the point belongs to, a handle's included.
-    pub fn element(&self) -> Option<&Id> {
+    pub fn element(&self) -> Option<Source> {
         match self {
-            Self::Resize(id, _)
-            | Self::Connect(id, _)
-            | Self::End(id, _)
-            | Self::Node(id)
-            | Self::Edge(id) => Some(id),
+            Self::Resize(id, _) | Self::Connect(id, _) | Self::Node(id) => {
+                Some(Source::Node(id.clone()))
+            }
+            Self::End(id, _) | Self::Edge(id) => Some(Source::Edge(id.clone())),
             Self::Canvas => None,
         }
     }
@@ -209,7 +208,7 @@ pub fn attach(
 /// The nodes whose boxes, and the connectors whose drawn bounds, lie
 /// entirely inside `area`, in board units (§5.3 rule 5). A connector the
 /// scene draws nothing for is in no area.
-pub fn inside(board: &Board, scene: &Scene, area: Rect) -> BTreeSet<Id> {
+pub fn inside(board: &Board, scene: &Scene, area: Rect) -> BTreeSet<Source> {
     let covers = |bounds: Rect| {
         bounds.x >= area.x
             && bounds.y >= area.y
@@ -217,11 +216,11 @@ pub fn inside(board: &Board, scene: &Scene, area: Rect) -> BTreeSet<Id> {
             && bounds.bottom() <= area.bottom()
     };
     let frames = Frames::new(board);
-    let mut found: BTreeSet<Id> = board
+    let mut found: BTreeSet<Source> = board
         .nodes
         .keys()
         .filter(|&id| frames.get(id).is_some_and(covers))
-        .cloned()
+        .map(|id| Source::Node(id.clone()))
         .collect();
     let mut drawn: HashMap<&Id, Rect> = HashMap::new();
     for item in &scene.items {
@@ -236,7 +235,7 @@ pub fn inside(board: &Board, scene: &Scene, area: Rect) -> BTreeSet<Id> {
         drawn
             .into_iter()
             .filter(|(_, bounds)| covers(*bounds))
-            .map(|(id, _)| id.clone()),
+            .map(|(id, _)| Source::Edge(id.clone())),
     );
     found
 }
@@ -955,7 +954,7 @@ z = "J"
         let names = |area: Rect| -> Vec<String> {
             inside(&world.board, &world.scene, area)
                 .iter()
-                .map(ToString::to_string)
+                .map(|source| source.id().to_string())
                 .collect()
         };
         // `back` exactly, edge to edge: `front` and `over` reach outside.

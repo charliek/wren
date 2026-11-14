@@ -180,6 +180,29 @@ fn random_board(rng: &mut Rng) -> Board {
 }
 
 /// Some of the board's ids, now and then with one that names nothing.
+/// Elements of the board, each with its kind, or now and then a name of
+/// either kind that may name nothing.
+fn picked(board: &Board, rng: &mut Rng) -> Vec<Source> {
+    let nodes = board.nodes.keys().cloned().map(Source::Node);
+    let all: Vec<Source> = nodes
+        .chain(board.edges.keys().cloned().map(Source::Edge))
+        .collect();
+    let mut out = Vec::new();
+    for _ in 0..rng.below(4) {
+        if all.is_empty() || rng.one_in(8) {
+            let id = Id::new(rng.pick(NAMES)).unwrap();
+            out.push(if rng.one_in(2) {
+                Source::Node(id)
+            } else {
+                Source::Edge(id)
+            });
+        } else {
+            out.push(rng.pick(&all).clone());
+        }
+    }
+    out
+}
+
 fn chosen(board: &Board, rng: &mut Rng) -> Vec<Id> {
     let all: Vec<&Id> = board.nodes.keys().chain(board.edges.keys()).collect();
     let mut out = Vec::new();
@@ -257,7 +280,7 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             size: [length(rng), length(rng)],
         },
         2 => Intent::Move {
-            ids: chosen(board, rng),
+            ids: picked(board, rng),
             by: step(rng),
         },
         3 => {
@@ -278,7 +301,7 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             shape: *rng.pick(Shape::ALL),
         },
         5 => Intent::Delete {
-            ids: chosen(board, rng),
+            ids: picked(board, rng),
         },
         6 => Intent::Duplicate {
             ids: chosen(board, rng),
@@ -359,10 +382,14 @@ fn had(issue: &Issue, before: &[Issue], old: &Board) -> bool {
 }
 
 fn snapshot(board: &Board, selection: &BTreeSet<Id>) -> Snapshot {
+    let selection: BTreeSet<Source> = selection
+        .iter()
+        .filter_map(|id| Source::of(board, id))
+        .collect();
     Snapshot {
         board: board.clone(),
-        selection: selection.clone(),
         cursor: selection.iter().next().cloned(),
+        selection,
     }
 }
 
