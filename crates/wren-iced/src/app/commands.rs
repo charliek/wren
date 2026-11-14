@@ -70,6 +70,7 @@ pub enum CommandId {
     SwitchEngine,
     ExportSvg,
     ExportPng,
+    ExportDrawio,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -162,6 +163,13 @@ definitions![
         ExportPng,
         "note.export_png",
         "Export board as PNG…",
+        "This note",
+        App
+    ),
+    (
+        ExportDrawio,
+        "note.export_drawio",
+        "Export board as draw.io…",
         "This note",
         App
     ),
@@ -781,7 +789,11 @@ impl CommandId {
     pub fn boards(self) -> bool {
         matches!(
             self,
-            Self::ExportSvg | Self::ExportPng | Self::NewBoard | Self::Board(_)
+            Self::ExportSvg
+                | Self::ExportPng
+                | Self::ExportDrawio
+                | Self::NewBoard
+                | Self::Board(_)
         )
     }
 
@@ -940,7 +952,7 @@ impl App {
                     && self.surface() != Surface::Raw
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
-            ExportSvg | ExportPng => {
+            ExportSvg | ExportPng | ExportDrawio => {
                 self.surface() == Surface::Board && self.board_export.is_none()
             }
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
@@ -1217,6 +1229,7 @@ impl App {
             SwitchEngine => self.toggle_editor_engine(),
             ExportSvg => self.export_board(Format::Svg),
             ExportPng => self.export_board(Format::Png),
+            ExportDrawio => self.export_board(Format::Drawio),
             CommandPalette => self.open_palette(Mode::Commands),
             OpenSettings => self.open_settings(),
             ReloadSettings => {

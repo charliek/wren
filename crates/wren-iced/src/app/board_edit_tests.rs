@@ -1527,7 +1527,12 @@ fn the_board_menu_follows_its_commands_and_runs_them_as_the_keys_do() {
     open_board(&mut app, "Flow");
     lay_out(&mut app);
     let idle = board_menu(&app);
-    for key in ["note.new_board", "note.export_svg", "note.export_png"] {
+    for key in [
+        "note.new_board",
+        "note.export_svg",
+        "note.export_png",
+        "note.export_drawio",
+    ] {
         assert!(idle.contains(&key), "{key}");
     }
     for key in [
@@ -1574,7 +1579,12 @@ fn the_board_menu_greys_its_board_items_while_the_board_takes_text() {
         editing.iter().all(|key| !key.starts_with("board.")),
         "{editing:?}"
     );
-    for key in ["note.new_board", "note.export_svg", "note.export_png"] {
+    for key in [
+        "note.new_board",
+        "note.export_svg",
+        "note.export_png",
+        "note.export_drawio",
+    ] {
         assert!(editing.contains(&key), "{key}");
     }
     let revision = app.board_revision;

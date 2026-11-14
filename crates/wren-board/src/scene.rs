@@ -736,7 +736,10 @@ pub fn sides(board: &Board) -> BTreeMap<&Id, [Option<Side>; 2]> {
 }
 
 /// Each drawn node's box, by id.
-fn boxes<'a>(board: &'a Board, placed: &BTreeMap<&Id, Placed<'_>>) -> BTreeMap<&'a Id, Rect> {
+pub(crate) fn boxes<'a>(
+    board: &'a Board,
+    placed: &BTreeMap<&Id, Placed<'_>>,
+) -> BTreeMap<&'a Id, Rect> {
     board
         .nodes
         .iter()
@@ -885,7 +888,7 @@ fn node_box(corner: [i64; 2], size: [i32; 2]) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-fn clamp_point(at: [i32; 2]) -> Point {
+pub(crate) fn clamp_point(at: [i32; 2]) -> Point {
     let limit = COORDINATE_LIMIT;
     let [x, y] = at.map(|v| i64::from(v).clamp(-limit, limit) as f32);
     Point::new(x, y)
@@ -921,7 +924,7 @@ fn path_box(segments: &[Segment]) -> Rect {
 }
 
 /// The label drawn: at most [`MAX_LABEL_BYTES`], cut at a character.
-fn drawn_text(text: &str) -> &str {
+pub(crate) fn drawn_text(text: &str) -> &str {
     if text.len() <= MAX_LABEL_BYTES {
         return text;
     }

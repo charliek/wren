@@ -1,11 +1,13 @@
-"""Board export as PNG, with the `boards` setting on, and `wren export`
-(discovery/boards.md §3.8, §5.19, §6.8 Phase 3 items 5 and 6, §7.4 EX1
-and EX2).
+"""Board export as PNG and as draw.io, with the `boards` setting on, and
+`wren export` (discovery/boards.md §3.8, §5.19, §6.8 Phase 3 items 5, 6
+and 9, §7.4 EX1, EX2 and the draw.io paragraph).
 
 `board.export` writes what Export board as PNG… writes once its save dialog
 has closed: the board's SVG export, as drawn when the command ran, rendered
-by resvg at twice its size on the theme's canvas colour. `wren export`
-writes the same files from the command line with no display.
+by resvg at twice its size on the theme's canvas colour; and what Export
+board as draw.io… writes: the board as one draw.io page in Wren Light's
+colours. `wren export` writes the same files from the command line with no
+display.
 """
 
 from __future__ import annotations
@@ -64,12 +66,16 @@ def command(app: WrenApp, command_id: str) -> dict:
     return app.client.call("command.run", {"id": command_id})
 
 
-def export_rows(app: WrenApp) -> list[dict]:
-    """The PNG export command's rows in the Commands palette."""
+def export_rows(app: WrenApp, title: str = "Export board as PNG…") -> list[dict]:
+    """An export command's rows in the Commands palette, the PNG export's
+    unless another title is given."""
     app.client.call("palette.open", {"mode": "commands"})
     modal = app.client.call("palette.query", {"query": "Export board"})["navigation"]["modal"]
     app.client.call("palette.close")
-    return [row for row in modal["results"] if row["title"] == "Export board as PNG…"]
+    return [row for row in modal["results"] if row["title"] == title]
+
+
+DRAWIO = "Export board as draw.io…"
 
 
 def view_box(svg: Path) -> tuple[float, float, float, float]:
@@ -189,7 +195,7 @@ def test_a_png_export_of_the_flow_draws_its_labels(samples: Path, tmp_path: Path
             with pytest.raises(RemoteError, match="Did not export the board over .*: it is a note"):
                 app.client.call("board.export", {"format": "png", "path": str(target)})
         inside = samples / GROUP / "Flow.svg"
-        with pytest.raises(RemoteError, match=r"inside the workspace an export is an \.png file"):
+        with pytest.raises(RemoteError, match=r"inside the workspace an export must end in \.png"):
             app.client.call("board.export", {"format": "png", "path": str(inside)})
         assert not inside.exists()
         with pytest.raises(RemoteError, match="format"):
@@ -228,6 +234,58 @@ def test_with_the_setting_off_there_is_no_png_export(samples: Path) -> None:
         open_note(app, NOTES)
         assert export_rows(app) == []
         assert command(app, "note.export_png")["disposition"] == "blocked"
+        assert export_rows(app, DRAWIO) == []
+        assert command(app, "note.export_drawio")["disposition"] == "blocked"
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_a_drawio_export_is_the_board_as_one_draw_io_page(
+    samples: Path, tmp_path: Path, theme: str,
+) -> None:
+    """§7.4's draw.io paragraph and §6.8 Phase 3 item 9: the flow exports as
+    one uncompressed draw.io page, well-formed XML, one ``<object>`` for
+    each node and connector carrying its Wren id, built-in shapes only, in
+    Wren Light's colours whatever the app's theme: the bytes ``wren export
+    --format drawio`` writes. The board is untouched; inside the workspace
+    the export is only a .drawio file."""
+    flow = samples / FLOW
+    before = stamp(flow)
+    out = tmp_path / "flow.drawio"
+    with board_app(samples, f"board-export-drawio-{theme}") as app:
+        app.client.call("theme.set", {"id": theme})
+        open_note(app, NOTES)
+        assert [row["enabled"] for row in export_rows(app, DRAWIO)] == [False]
+        open_note(app, FLOW)
+        fitted(app)
+        assert [row["enabled"] for row in export_rows(app, DRAWIO)] == [True]
+        reply = app.client.call("board.export", {"format": "drawio", "path": str(out)})
+        assert reply["bytes"] == out.stat().st_size
+        state = board(app, elements=True)
+        inside = samples / GROUP / "Flow.svg"
+        with pytest.raises(RemoteError, match=r"inside the workspace an export must end in \.drawio"):
+            app.client.call("board.export", {"format": "drawio", "path": str(inside)})
+        assert not inside.exists()
+        assert app.client.call("session.get")["document"]["dirty"] is False
+
+    root = ElementTree.parse(out).getroot()
+    assert root.tag == "mxfile"
+    (diagram,) = root.findall("diagram")
+    assert diagram.get("name") == "Checkout flow"
+    cells = diagram.find("mxGraphModel/root")
+    assert [cell.get("id") for cell in cells[:2]] == ["0", "1"]
+    objects = cells.findall("object")
+    ids = [node["id"] for node in state["nodes"]] + [edge["id"] for edge in state["edges"]]
+    assert sorted(item.get("wrenId") for item in objects) == sorted(ids)
+    assert len(objects) == len(cells) - 2
+    for item in objects:
+        style = item.find("mxCell").get("style")
+        assert "mxgraph." not in style and "wren" not in style, style
+    labels = {item.get("label") for item in objects}
+    assert {"Start", "Check stock", "Payment ok?", "Yes", "No"} <= labels
+    result = wren_export(tmp_path / "home", flow, "-o", tmp_path / "cli.drawio")
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "cli.drawio").read_bytes() == out.read_bytes()
+    assert stamp(flow) == before
 
 
 def test_the_window_answers_while_a_large_png_export_renders(tmp_path: Path) -> None:

@@ -82,7 +82,7 @@ fn run() -> ExitCode {
     let options = match cli::parse(&args, std::env::var_os("WREN_TEST_MODE").as_deref()) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
-            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --board-spike N        Unsaved generated board of N shapes, to pan and zoom\n  wren export BOARD [OPTIONS] Write a board as SVG or PNG, with no window; see wren export --help\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike / --board-spike) are never saved to disk.");
+            println!("Wren\n\n  wren                        Restore the active workspace or choose a folder\n  wren --workspace /ABS/PATH   Browse and autosave Markdown notes\n  wren --editor               Small, unsaved in-memory editor evaluation\n  wren --editor-spike         Unsaved 5,000-line editor evaluation\n  wren --board-spike N        Unsaved generated board of N shapes, to pan and zoom\n  wren export BOARD [OPTIONS] Write a board as SVG, PNG or draw.io, with no window; see wren export --help\n  wren --font-licenses        Show bundled font notices\n\nEvaluation buffers (--editor / --editor-spike / --board-spike) are never saved to disk.");
             return ExitCode::SUCCESS;
         }
         Ok(cli::Command::FontLicenses) => {

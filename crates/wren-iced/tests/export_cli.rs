@@ -1,8 +1,10 @@
 //! `wren export` run as a program with no display (discovery/boards.md
 //! §7.4 EX2, §6.8 Phase 3 item 6): every option, every exit code, nothing
-//! written when it fails, and the Checkout flow's SVG byte for byte.
+//! written when it fails, the Checkout flow's SVG byte for byte, and the
+//! draw.io files of the Checkout flow and of the coverage board as parsed
+//! XML (§7.4's draw.io paragraph, §6.8 Phase 3 item 9).
 //!
-//! `WREN_BLESS=1` rewrites the golden SVG for review.
+//! `WREN_BLESS=1` rewrites the golden files for review.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,15 @@ const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/checkout-flow.svg"
 );
+
+/// The draw.io study's coverage board, in schema 1.
+const COVERAGE: &str = "Coverage.wren-board";
+
+fn golden(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name)
+}
 
 fn samples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -26,6 +37,9 @@ fn workspace() -> tempfile::TempDir {
     for name in [FLOW, "Shapes.wren-board", "Future.wren-board"] {
         std::fs::copy(samples().join(name), directory.path().join(name)).unwrap();
     }
+    let coverage = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../wren-board/golden/drawio/coverage.wren-board");
+    std::fs::copy(coverage, directory.path().join(COVERAGE)).unwrap();
     directory
 }
 
@@ -121,6 +135,103 @@ fn the_flow_exports_with_no_display_as_its_golden_svg() {
     assert!(names(directory.path())
         .iter()
         .all(|name| !name.contains(".tmp")));
+}
+
+/// An XML document as one line per element, its path of names, its
+/// attributes sorted and its text: what two files that draw.io would read
+/// alike share, whatever their attribute order and indentation.
+fn parsed(xml: &str) -> String {
+    use resvg::usvg::roxmltree;
+    let document = roxmltree::Document::parse(xml).unwrap_or_else(|e| panic!("{e}\n{xml}"));
+    let mut out = String::new();
+    let mut stack = vec![(document.root_element(), 0)];
+    while let Some((node, depth)) = stack.pop() {
+        let mut attributes: Vec<(&str, &str)> = node
+            .attributes()
+            .map(|attribute| (attribute.name(), attribute.value()))
+            .collect();
+        attributes.sort_unstable();
+        let text = node.text().map(str::trim).unwrap_or_default();
+        out += &format!(
+            "{}{} {attributes:?} {text:?}\n",
+            "  ".repeat(depth),
+            node.tag_name().name()
+        );
+        let children: Vec<_> = node.children().filter(|child| child.is_element()).collect();
+        stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+    }
+    out
+}
+
+/// The Checkout flow and the coverage board as draw.io files equal their
+/// golden files as parsed XML, in Wren Light by default; the same bytes go
+/// to standard output, and the file is written beside the board.
+#[test]
+fn the_flow_and_the_coverage_board_export_as_their_golden_drawio_files() {
+    let directory = workspace();
+    for (board, name) in [
+        (FLOW, "checkout-flow.drawio"),
+        (COVERAGE, "coverage.drawio"),
+    ] {
+        let output = wren(directory.path(), &["export", board, "--format", "drawio"]);
+        succeeded(&output);
+        let stem = board.trim_end_matches(".wren-board");
+        let written =
+            std::fs::read_to_string(directory.path().join(format!("{stem}.drawio"))).unwrap();
+        if std::env::var_os("WREN_BLESS").is_some_and(|value| value == "1") {
+            std::fs::write(golden(name), &written).unwrap();
+        }
+        let expected = std::fs::read_to_string(golden(name)).unwrap();
+        assert_eq!(
+            parsed(&written),
+            parsed(&expected),
+            "{name}: rerun with WREN_BLESS=1 to review a change"
+        );
+        assert!(written.contains(&format!("<diagram id=\"wren.board\" name=\"{stem}\">")));
+        let output = wren(
+            directory.path(),
+            &["export", board, "-o", "-", "--format", "drawio"],
+        );
+        succeeded(&output);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), written);
+        // By the name's extension, any case; in another theme's colours.
+        succeeded(&wren(
+            directory.path(),
+            &["export", board, "-o", "out.DRAWIO"],
+        ));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("out.DRAWIO")).unwrap(),
+            written
+        );
+        let dark = wren(
+            directory.path(),
+            &[
+                "export",
+                board,
+                "-o",
+                "-",
+                "--format",
+                "drawio",
+                "--theme",
+                "wren-dark",
+            ],
+        );
+        succeeded(&dark);
+        let dark = String::from_utf8(dark.stdout).unwrap();
+        assert_ne!(dark, written);
+        parsed(&dark);
+    }
+    // What the coverage board holds that does not draw is a warning, as
+    // for an image.
+    let output = wren(
+        directory.path(),
+        &["export", COVERAGE, "--format", "drawio"],
+    );
+    assert!(
+        stderr(&output).contains("connector x-dangling: its end names no node"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -385,7 +496,34 @@ fn a_failed_export_says_why_exits_with_its_code_and_writes_nothing() {
         (
             &["export", FLOW, "--format", "pdf"],
             2,
-            "--format is svg or png",
+            "--format is svg, png or drawio",
+        ),
+        (
+            &["export", FLOW, "--format", "drawio", "--scale", "2"],
+            2,
+            "--scale is for a PNG export",
+        ),
+        (
+            &[
+                "export",
+                FLOW,
+                "-o",
+                "x.drawio",
+                "--background",
+                "transparent",
+            ],
+            2,
+            "--background is for an SVG or PNG export",
+        ),
+        (
+            &["export", FLOW, "-o", "Note.md", "--format", "drawio"],
+            1,
+            "it is a note",
+        ),
+        (
+            &["export", "conflict.wren-board", "--format", "drawio"],
+            3,
+            "conflict.wren-board is not a board Wren can draw: line 2",
         ),
         (
             &["export", FLOW, "--theme", "sepia"],

@@ -318,12 +318,13 @@ impl App {
             "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
             | "board.apply" | "board.seed" => return self.board_request(request),
             "board.export" => {
-                // What `note.export_svg` or `note.export_png` writes once
-                // its save dialog closes.
+                // What `note.export_svg`, `note.export_png` or
+                // `note.export_drawio` writes once its save dialog closes.
                 let format = match string(params, "format")? {
                     "svg" => Format::Svg,
                     "png" => Format::Png,
-                    _ => return Err("format must be svg or png".into()),
+                    "drawio" => Format::Drawio,
+                    _ => return Err("format must be svg, png or drawio".into()),
                 };
                 let path = PathBuf::from(string(params, "path")?);
                 if !path.is_absolute() {
@@ -1423,8 +1424,8 @@ mod tests {
         assert!(error.contains("unavailable"), "{error}");
     }
 
-    /// `board.export` writes what `note.export_svg` or `note.export_png`
-    /// writes, and only for a board on screen.
+    /// `board.export` writes what `note.export_svg`, `note.export_png` or
+    /// `note.export_drawio` writes, and only for a board on screen.
     #[test]
     fn board_export_writes_the_shown_board_and_refuses_anything_else() {
         use super::super::board::{self, tests as boards};
@@ -1473,6 +1474,16 @@ mod tests {
             .unwrap()
         );
         assert_eq!(reply["bytes"], written.len());
+        let drawio = out.path().join("Flow.drawio");
+        let reply =
+            export(&mut app, json!({"format":"drawio","path":drawio})).expect("a draw.io export");
+        let file = std::fs::read_to_string(&drawio).unwrap();
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(
+            file,
+            crate::board_export::drawio(view, crate::board_export::DRAWIO_THEME, "Flow")
+        );
+        assert_eq!(reply["bytes"], file.len());
         // The reply waits for the worker, and no other export starts
         // until it has finished.
         let (request, mut first) =
