@@ -1305,6 +1305,7 @@ mod tests {
 
         // The app passes the launch value, not the file's later one.
         let (mut app, _) = App::new(Options::default());
+        app.preferences.boards = false;
         app.preferences.settings.boards = true;
         assert_eq!(app.session_options(), SessionOptions { boards: false });
         app.preferences.boards = true;

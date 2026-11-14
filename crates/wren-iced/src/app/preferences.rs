@@ -1153,6 +1153,7 @@ mod tests {
     fn missing_settings_use_platform_defaults_and_follow_the_system() {
         let preferences = Preferences::load(None);
         assert!(preferences.settings.warnings.is_empty());
+        assert!(preferences.boards);
         assert_eq!(preferences.theme(SystemMode::Light).0, definitions::LIGHT);
         assert_eq!(preferences.theme(SystemMode::Dark).0, definitions::DARK);
         let palette = keybind::parse_trigger(match Platform::current() {
@@ -1211,20 +1212,20 @@ mod tests {
             ..Default::default()
         };
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
-        assert!(!app.preferences.boards);
+        assert!(app.preferences.boards, "on by default");
         assert!(app.banner.is_none());
 
-        std::fs::write(&path, "boards = on\n").unwrap();
+        std::fs::write(&path, "boards = off\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
         assert_eq!(
             app.banner.as_deref(),
             Some("Restart Wren to apply `boards`.")
         );
-        assert!(!app.preferences.boards);
-        assert!(app.preferences.settings.boards);
+        assert!(app.preferences.boards);
+        assert!(!app.preferences.settings.boards);
 
         // A settings warning is still returned, with the notice beside it.
-        std::fs::write(&path, "boards = on\nmystery = 1\n").unwrap();
+        std::fs::write(&path, "boards = off\nmystery = 1\n").unwrap();
         let warning = app.reload_settings(false).unwrap();
         assert!(warning.contains("mystery") && !warning.contains("Restart"));
         let banner = app.banner.clone().unwrap();
@@ -1233,14 +1234,15 @@ mod tests {
         );
 
         // Back at the launch value there is nothing to wait for.
-        std::fs::write(&path, "boards = off\n").unwrap();
+        std::fs::write(&path, "boards = on\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
         assert!(app.banner.is_none());
 
-        // A launch with the setting on runs with it, and turning it off waits.
-        std::fs::write(&path, "boards = on\n").unwrap();
+        // A launch with the setting off runs with it, and removing the line
+        // waits for the default.
+        std::fs::write(&path, "boards = off\n").unwrap();
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
-        assert!(app.preferences.boards);
+        assert!(!app.preferences.boards);
         assert!(app.banner.is_none());
         std::fs::write(&path, "").unwrap();
         assert_eq!(app.reload_settings(false), None);
@@ -1248,7 +1250,7 @@ mod tests {
             app.banner.as_deref(),
             Some("Restart Wren to apply `boards`.")
         );
-        assert!(app.preferences.boards);
+        assert!(!app.preferences.boards);
     }
 
     #[test]
