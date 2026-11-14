@@ -176,6 +176,51 @@ fn a_board_key_is_one_draft_through_dispatch() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), FLOW);
 }
 
+/// §5.16 rule 1 through the app: a colour or fill key is one draft of
+/// one line per element, a value already held or nothing selected sends no
+/// draft, and undo drafts the opening bytes again.
+#[test]
+fn a_colour_or_fill_key_is_one_draft_and_a_value_already_held_none() {
+    use wren_board::{Fill, Token};
+    let (_directory, mut app) = fixture();
+    open_board(&mut app, "Flow");
+    lay_out(&mut app);
+
+    assert_eq!(key(&mut app, C::Color(Token::Red)), Disposition::Completed);
+    assert_eq!(app.board_revision, 0, "nothing selected, no draft");
+    click(&mut app, "pack");
+    assert_eq!(key(&mut app, C::Color(Token::Red)), Disposition::Completed);
+    assert_eq!(app.board_revision, 1);
+    let red = session_text(&app);
+    assert_eq!(
+        line_diff(FLOW, &red),
+        (vec![], vec!["style.color = \"red\""])
+    );
+    assert!(dirty(&app));
+    assert_eq!(key(&mut app, C::Color(Token::Red)), Disposition::Completed);
+    assert_eq!(app.board_revision, 1, "already red, no draft");
+
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    assert_eq!(
+        run(&mut app, C::Fill(Fill::Solid)),
+        (Disposition::Completed, 0)
+    );
+    assert_eq!(app.board_revision, 2);
+    let solid = session_text(&app);
+    assert_eq!(
+        line_diff(&red, &solid),
+        (vec![], vec!["style.fill = \"solid\""; 2]),
+        "the two shapes, and not the connector"
+    );
+
+    for text in [red.as_str(), FLOW] {
+        assert_eq!(key(&mut app, C::Undo), Disposition::Completed);
+        assert_eq!(session_text(&app), text);
+    }
+    assert_eq!(app.board_revision, 4);
+    assert_in_step(&app, Surface::Board);
+}
+
 #[test]
 fn a_hand_written_board_is_rewritten_only_by_an_edit_that_survives() {
     let (directory, mut app) = fixture();
