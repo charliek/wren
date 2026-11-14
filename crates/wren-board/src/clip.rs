@@ -34,7 +34,27 @@ pub fn copy(board: &Board, ids: &[Source]) -> Option<String> {
     if part.nodes.is_empty() {
         return None;
     }
-    let layout = Layout::of(board, &part);
+    Some(text(board, &part))
+}
+
+/// What cutting the selection `ids` does (§5.10 rule 5): the clipboard text
+/// of [`copy`], and the elements to delete, which are the fragment's own.
+/// Deleting them also takes every connector attached to a removed node
+/// (rule 1); a selected connector the fragment leaves out stays on the
+/// board. `None` when the selection holds no node.
+pub fn cut(board: &Board, ids: &[Source]) -> Option<(String, Vec<Source>)> {
+    let part = fragment(board, ids);
+    if part.nodes.is_empty() {
+        return None;
+    }
+    let nodes = part.nodes.iter().cloned().map(Source::Node);
+    let removed = nodes.chain(part.edges.iter().cloned().map(Source::Edge));
+    Some((text(board, &part), removed.collect()))
+}
+
+/// The clipboard text for the fragment `part` of `board`.
+fn text(board: &Board, part: &Fragment) -> String {
+    let layout = Layout::of(board, part);
     let roots = layout
         .order
         .iter()
@@ -63,7 +83,7 @@ pub fn copy(board: &Board, ids: &[Source]) -> Option<String> {
             }
         }
     }
-    Some(format!("{HEADER}\n{}", write(&out)))
+    format!("{HEADER}\n{}", write(&out))
 }
 
 /// Text from outside Wren as a label (§5.10 rule 9): line breaks as LF,
@@ -349,6 +369,47 @@ mod tests {
                  size = [120, 60]\nz = \"V\"\n"
             )
         );
+    }
+
+    /// Cut deletes what it copies: a selected connector the fragment leaves
+    /// out is not among the elements it removes (§5.10 rule 5). The
+    /// connectors attached to a removed node go with it in the delete.
+    #[test]
+    fn a_cut_removes_only_the_fragment() {
+        let board = parse(
+            "schema = 1\n\n\
+             [node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"a\"\n\n\
+             [node.b]\nkind = \"shape\"\nat = [0, 200]\nsize = [120, 60]\nz = \"b\"\n\n\
+             [node.c]\nkind = \"shape\"\nat = [300, 0]\nsize = [120, 60]\nz = \"c\"\n\n\
+             [edge.ab]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\nz = \"d\"\n\n\
+             [edge.bc]\nkind = \"edge\"\nfrom = { node = \"b\" }\nto = { node = \"c\" }\nz = \"e\"\n\n\
+             [edge.cf]\nkind = \"edge\"\nfrom = { node = \"c\" }\nto = { at = [600, 0] }\nz = \"f\"\n\n\
+             [edge.ff]\nkind = \"edge\"\nfrom = { at = [600, 200] }\nto = { at = [600, 400] }\nz = \"g\"\n",
+        )
+        .unwrap();
+        let cases = [
+            // A connector between two nodes that stay.
+            ([nodes(&["a"]), edges(&["bc"])].concat(), nodes(&["a"])),
+            // A connector with one free end, its node staying.
+            ([nodes(&["a"]), edges(&["cf"])].concat(), nodes(&["a"])),
+            // One end on a cut node, the other on a node that stays: the
+            // delete takes it with `a`, and the paste cannot give it back.
+            ([nodes(&["a"]), edges(&["ab"])].concat(), nodes(&["a"])),
+            (
+                [nodes(&["a", "b"]), edges(&["ff"])].concat(),
+                [nodes(&["a", "b"]), edges(&["ab", "ff"])].concat(),
+            ),
+            (
+                [nodes(&["c"]), edges(&["cf"])].concat(),
+                [nodes(&["c"]), edges(&["cf"])].concat(),
+            ),
+        ];
+        for (picked, removed) in cases {
+            let (text, taken) = cut(&board, &picked).unwrap();
+            assert_eq!(Some(text), copy(&board, &picked), "{picked:?}");
+            assert_eq!(taken, removed, "{picked:?}");
+        }
+        assert_eq!(cut(&board, &edges(&["ff"])), None);
     }
 
     #[test]

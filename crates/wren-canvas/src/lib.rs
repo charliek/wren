@@ -1519,11 +1519,13 @@ impl BoardView {
                     update.effects.push(Effect::ClipboardWrite(text));
                 }
             }
-            // Copy, then delete what was selected: one unit (rule 5).
+            // Copy, then delete what was copied: one unit (rule 5). A
+            // selected connector the fragment leaves out stays, since a
+            // paste could not give it back.
             Command::Cut if editable => {
-                if let Some(text) = wren_board::clip::copy(&self.board, &picked) {
+                if let Some((text, removed)) = wren_board::clip::cut(&self.board, &picked) {
                     update.effects.push(Effect::ClipboardWrite(text));
-                    self.delete(picked, now, update);
+                    self.delete(removed, now, update);
                 }
             }
             // The text comes back as `Message::Pasted`.
@@ -4422,10 +4424,13 @@ z = "c"
         assert_eq!(view.command(Command::Paste, now), Update::default());
     }
 
-    /// A connector with two free ends goes into the fragment when it is
-    /// selected as a connector, and never through a node of the same id
-    /// (§5.10 rule 2, §5.3 rule 1): for duplicate, copy and cut alike, and
-    /// cut then paste gives back all it took.
+    /// A connector goes into the fragment when its ends are each a fragment
+    /// node or a free point and it touches one or is selected as a
+    /// connector, never through a node of the same id (§5.10 rule 2, §5.3
+    /// rule 1): for duplicate, copy and cut alike. Cut deletes the fragment
+    /// and, as delete does, every connector attached to a node it removes;
+    /// a selected connector the fragment leaves out stays on the board
+    /// (rule 5), so cut then paste loses only the connectors rule 5 names.
     #[test]
     fn the_fragment_takes_each_connector_by_its_kind() {
         const FREE: &str = "schema = 1\n\n\
@@ -4435,6 +4440,23 @@ z = "c"
             labels = [{ text = \"Edge shared\" }]\nz = \"X\"\n\n\
             [edge.x]\nkind = \"edge\"\nfrom = { at = [400, 0] }\nto = { at = [400, 200] }\n\
             labels = [{ text = \"Free\" }]\nz = \"Y\"\n";
+        const CONNECTED: &str = "schema = 1\n\n\
+            [node.a]\ntext = \"A\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"a\"\n\n\
+            [node.b]\ntext = \"B\"\nkind = \"shape\"\nat = [0, 200]\nsize = [120, 60]\nz = \"b\"\n\n\
+            [node.c]\ntext = \"C\"\nkind = \"shape\"\nat = [300, 0]\nsize = [120, 60]\nz = \"c\"\n\n\
+            [node.p]\ntext = \"P\"\nkind = \"shape\"\nat = [600, 0]\nsize = [120, 60]\nz = \"d\"\n\n\
+            [node.q]\ntext = \"Q\"\nkind = \"shape\"\nat = [600, 200]\nsize = [120, 60]\nz = \"e\"\n\n\
+            [node.shared]\ntext = \"Node shared\"\nkind = \"shape\"\nat = [300, 400]\nsize = [120, 60]\nz = \"f\"\n\n\
+            [edge.shared]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\n\
+            labels = [{ text = \"Edge shared\" }]\nz = \"g\"\n\n\
+            [edge.cs]\nkind = \"edge\"\nfrom = { node = \"c\" }\nto = { node = \"shared\" }\n\
+            labels = [{ text = \"CS\" }]\nz = \"h\"\n\n\
+            [edge.one]\nkind = \"edge\"\nfrom = { node = \"c\" }\nto = { at = [360, 300] }\n\
+            labels = [{ text = \"One free\" }]\nz = \"i\"\n\n\
+            [edge.pq]\nkind = \"edge\"\nfrom = { node = \"p\" }\nto = { node = \"q\" }\n\
+            labels = [{ text = \"PQ\" }]\nz = \"j\"\n\n\
+            [edge.two]\nkind = \"edge\"\nfrom = { at = [900, 0] }\nto = { at = [900, 200] }\n\
+            labels = [{ text = \"Two free\" }]\nz = \"k\"\n";
         let now = Instant::now();
         // What a board holds, by text: its nodes' and its connectors'.
         let texts = |board: &Board| {
@@ -4445,28 +4467,98 @@ z = "c"
             edges.sort();
             (nodes, edges)
         };
-        let both = |nodes: &[&str], edges: &[&str]| {
-            let owned = |all: &[&str]| all.iter().map(|text| (*text).to_owned()).collect();
-            (owned(nodes), owned(edges))
+        let owned = |all: &[&str]| -> Vec<String> { all.iter().map(|t| (*t).to_owned()).collect() };
+        // `all` without each of `gone` once, or with each of `more` added.
+        let without = |all: &[String], gone: &[String]| {
+            let mut left = all.to_vec();
+            for text in gone {
+                let at = left.iter().position(|t| t == text).expect("present");
+                left.remove(at);
+            }
+            left
         };
-        let selected = |picked: &[Source]| {
-            let mut view = sized(FREE);
+        let with = |all: &[String], more: &[String]| {
+            let mut all = all.to_vec();
+            all.extend(more.iter().cloned());
+            all.sort();
+            all
+        };
+        let selected = |board: &str, picked: &[Source]| {
+            let mut view = sized(board);
             let cursor = picked.first().cloned();
             view.machine
                 .select(picked.iter().cloned().collect(), cursor);
             view
         };
-        let start = texts(&sized(FREE).board);
-        let (a, x) = (Source::Node(id("a")), Source::Edge(id("x")));
-        let (node, edge) = (Source::Node(id("shared")), Source::Edge(id("shared")));
-        let cases = [
-            (vec![a.clone(), x], both(&["A"], &["Free"])),
-            (vec![node], both(&["Node shared"], &[])),
-            (vec![a, edge], both(&["A"], &["Edge shared"])),
+        let node = |name: &str| Source::Node(id(name));
+        let edge = |name: &str| Source::Edge(id(name));
+        // The board, the selection, the fragment's nodes and connectors,
+        // and the connectors a cut deletes without copying.
+        type Case = (&'static str, Vec<Source>, Texts, Texts, Texts);
+        type Texts = &'static [&'static str];
+        let cases: [Case; 9] = [
+            (FREE, vec![node("a"), edge("x")], &["A"], &["Free"], &[]),
+            (FREE, vec![node("shared")], &["Node shared"], &[], &[]),
+            (
+                FREE,
+                vec![node("a"), edge("shared")],
+                &["A"],
+                &["Edge shared"],
+                &[],
+            ),
+            // A selected connector between two nodes that are not cut.
+            (
+                CONNECTED,
+                vec![node("shared"), edge("pq")],
+                &["Node shared"],
+                &[],
+                &["CS"],
+            ),
+            // A selected connector with one free end, its node not cut.
+            (
+                CONNECTED,
+                vec![node("a"), edge("one")],
+                &["A"],
+                &[],
+                &["Edge shared"],
+            ),
+            // A selected connector with one end on a cut node, the other
+            // on a node that is not: delete takes it with the node.
+            (
+                CONNECTED,
+                vec![node("b"), edge("shared")],
+                &["B"],
+                &[],
+                &["Edge shared"],
+            ),
+            (
+                CONNECTED,
+                vec![node("c"), edge("one")],
+                &["C"],
+                &["One free"],
+                &["CS"],
+            ),
+            (
+                CONNECTED,
+                vec![node("a"), edge("two")],
+                &["A"],
+                &["Two free"],
+                &["Edge shared"],
+            ),
+            (
+                CONNECTED,
+                vec![node("p"), node("q")],
+                &["P", "Q"],
+                &["PQ"],
+                &[],
+            ),
         ];
-        for (picked, fragment) in cases {
+        for (board, picked, nodes, edges, lost) in cases {
+            let start = texts(&sized(board).board);
+            let fragment = (owned(nodes), owned(edges));
+            let lost = owned(lost);
             // Copy writes the fragment and nothing else.
-            let mut view = selected(&picked);
+            let mut view = selected(board, &picked);
             let copied = view.command(Command::Copy, now);
             let [Effect::ClipboardWrite(text)] = copied.effects.as_slice() else {
                 panic!("{picked:?}: {copied:?}");
@@ -4474,37 +4566,34 @@ z = "c"
             let (_, rest) = text.split_once('\n').expect("two lines");
             let parsed = wren_board::parse(rest).expect("the fragment is a board");
             assert_eq!(texts(&parsed), fragment, "{picked:?}");
-            // Cut takes what it copies, and a paste gives it back.
+            // Cut takes what it copies and the connectors attached to the
+            // nodes it removes, and leaves every other element.
             let cut = view.command(Command::Cut, now);
             assert_eq!(cut.effects, [Effect::ClipboardWrite(text.clone())]);
-            let left = texts(&view.board);
-            for (all, gone) in [(&start.0, &fragment.0), (&start.1, &fragment.1)] {
-                let mut kept = all.clone();
-                kept.retain(|text| !gone.contains(text));
-                assert!(kept
-                    .iter()
-                    .all(|text| left.0.contains(text) || left.1.contains(text)));
-            }
-            assert_eq!(left.0.len() + fragment.0.len(), start.0.len(), "{picked:?}");
-            assert_eq!(left.1.len() + fragment.1.len(), start.1.len(), "{picked:?}");
+            let after = (
+                without(&start.0, &fragment.0),
+                without(&without(&start.1, &fragment.1), &lost),
+            );
+            assert_eq!(texts(&view.board), after, "{picked:?}");
+            // A paste gives back all it copied.
             pasted(&mut view, text, now);
-            assert_eq!(texts(&view.board), start, "{picked:?}");
+            assert_eq!(
+                texts(&view.board),
+                (start.0.clone(), without(&start.1, &lost)),
+                "{picked:?}"
+            );
             // Duplicate copies the same elements.
-            let mut view = selected(&picked);
+            let mut view = selected(board, &picked);
             view.command(Command::Duplicate, now);
-            let (mut nodes, mut edges) = start.clone();
-            nodes.extend(fragment.0.iter().cloned());
-            edges.extend(fragment.1.iter().cloned());
-            nodes.sort();
-            edges.sort();
-            assert_eq!(texts(&view.board), (nodes, edges), "{picked:?}");
+            let doubled = (with(&start.0, &fragment.0), with(&start.1, &fragment.1));
+            assert_eq!(texts(&view.board), doubled, "{picked:?}");
         }
         // A selected connector with no node has no fragment.
-        let mut view = selected(&[Source::Edge(id("x"))]);
+        let mut view = selected(FREE, &[Source::Edge(id("x"))]);
         for command in [Command::Copy, Command::Cut, Command::Duplicate] {
             assert_eq!(view.command(command, now), Update::default(), "{command:?}");
         }
-        assert_eq!(texts(&view.board), start);
+        assert_eq!(texts(&view.board), texts(&sized(FREE).board));
     }
 
     #[test]
