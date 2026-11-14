@@ -12,6 +12,7 @@ use super::board::Surface;
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
 use super::{focus_editor, App, Message};
+use crate::board_export::Format;
 use crate::panes::Pane;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -68,6 +69,7 @@ pub enum CommandId {
     ToggleMarkdownAssist,
     SwitchEngine,
     ExportSvg,
+    ExportPng,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -153,6 +155,13 @@ definitions![
         ExportSvg,
         "note.export_svg",
         "Export board as SVG…",
+        "This note",
+        App
+    ),
+    (
+        ExportPng,
+        "note.export_png",
+        "Export board as PNG…",
         "This note",
         App
     ),
@@ -770,7 +779,10 @@ impl CommandId {
     /// Whether the command exists only while the `boards` setting is on:
     /// with it off it is not listed anywhere.
     pub fn boards(self) -> bool {
-        matches!(self, Self::ExportSvg | Self::NewBoard | Self::Board(_))
+        matches!(
+            self,
+            Self::ExportSvg | Self::ExportPng | Self::NewBoard | Self::Board(_)
+        )
     }
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -928,7 +940,9 @@ impl App {
                     && self.surface() != Surface::Raw
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
-            ExportSvg => self.surface() == Surface::Board && self.board_export.is_none(),
+            ExportSvg | ExportPng => {
+                self.surface() == Surface::Board && self.board_export.is_none()
+            }
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 self.surface() == Surface::Text
                     && self.ensure_editor_ready().is_ok()
@@ -1201,7 +1215,8 @@ impl App {
             TextReset => self.step_text_size(None),
             ToggleMarkdownAssist => self.toggle_markdown_assist(),
             SwitchEngine => self.toggle_editor_engine(),
-            ExportSvg => self.export_board(),
+            ExportSvg => self.export_board(Format::Svg),
+            ExportPng => self.export_board(Format::Png),
             CommandPalette => self.open_palette(Mode::Commands),
             OpenSettings => self.open_settings(),
             ReloadSettings => {

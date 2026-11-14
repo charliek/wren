@@ -138,7 +138,7 @@ The board requests:
 | `board.type` `{"text": "…"}` | Text typed on the focused board: the open label's, else the connect query's. |
 | `board.apply` `{"edits": [...]}` | Edits with explicit ids (`add_node`, `move`, `set`, `connect`, `delete`), applied as one undo step and one draft, for arranging a board before what a test looks at. |
 | `board.seed` `{"seed": 7}` | The open board draws the ids of the elements it makes from this seed from now on, so a test or a scene that builds a board makes the same one each run. Ids decide which of two connectors that would share a line moves aside. |
-| `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG writes, without the save dialog, and refuses the paths it refuses: a note's, and any but an `.svg` inside the workspace. |
+| `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG (`"png"`: as PNG) writes, without the save dialog, and refuses the paths it refuses: a note's, and inside the workspace any but an `.svg` (or `.png`) file. |
 | `perf.board` | The board's scene, draw and frame timings, how long it took to open, how long each draft took (the canonical write, and with the Session's op), and how many times the view has parsed, built its scene and built geometry, optionally after a pan or zoom run of one step a redraw. |
 
 Every board request but `board.get` fails when the open note is not shown

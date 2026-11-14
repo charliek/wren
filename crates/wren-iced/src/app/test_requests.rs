@@ -10,6 +10,7 @@ use wren_board::Id;
 use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget, Scope};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
+use crate::board_export::Format;
 use crate::panes::{Pane, PANES};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
@@ -317,15 +318,18 @@ impl App {
             "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
             | "board.apply" | "board.seed" => return self.board_request(request),
             "board.export" => {
-                // What `note.export_svg` writes once its save dialog closes.
-                if string(params, "format")? != "svg" {
-                    return Err("format must be svg".into());
-                }
+                // What `note.export_svg` or `note.export_png` writes once
+                // its save dialog closes.
+                let format = match string(params, "format")? {
+                    "svg" => Format::Svg,
+                    "png" => Format::Png,
+                    _ => return Err("format must be svg or png".into()),
+                };
                 let path = PathBuf::from(string(params, "path")?);
                 if !path.is_absolute() {
                     return Err("path must be absolute".into());
                 }
-                let bytes = self.write_board_svg(&path)?;
+                let bytes = self.write_board_export(&path, format)?;
                 request.respond(Ok(json!({"path": path, "bytes": bytes})));
             }
             "focus.get" => {
@@ -1354,8 +1358,8 @@ mod tests {
         assert!(error.contains("unavailable"), "{error}");
     }
 
-    /// `board.export` writes what `note.export_svg` writes, and only for
-    /// a board on screen.
+    /// `board.export` writes what `note.export_svg` or `note.export_png`
+    /// writes, and only for a board on screen.
     #[test]
     fn board_export_writes_the_shown_board_and_refuses_anything_else() {
         use super::super::board::{self, tests as boards};
@@ -1379,7 +1383,8 @@ mod tests {
 
         boards::open_board(&mut app, "Flow");
         for params in [
-            json!({"format":"png","path":target}),
+            json!({"format":"pdf","path":target}),
+            json!({"format":"png","path":"relative.png"}),
             json!({"format":"svg","path":"relative.svg"}),
             json!({"format":"svg"}),
         ] {
@@ -1390,6 +1395,18 @@ mod tests {
         assert_eq!(written, board::svg_document(app.board.as_ref().unwrap()));
         assert_eq!(reply["bytes"], written.len());
         assert_eq!(reply["path"], json!(target));
+        let png = out.path().join("Flow.png");
+        let reply = export(&mut app, json!({"format":"png","path":png})).expect("a PNG export");
+        let written = std::fs::read(&png).unwrap();
+        assert_eq!(
+            written,
+            crate::board_export::png(
+                &board::svg_document(app.board.as_ref().unwrap()),
+                crate::board_export::PNG_SCALE
+            )
+            .unwrap()
+        );
+        assert_eq!(reply["bytes"], written.len());
         let missing = json!({"format":"svg","path":out.path().join("no/such/Flow.svg")});
         let error = export(&mut app, missing).expect_err("an unwritable path");
         assert!(

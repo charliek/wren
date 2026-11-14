@@ -2,3 +2,4 @@
 # purpose: no line-ending conversion and no whitespace checks.
 crates/wren-board/golden/** -text -whitespace
 tools/wrentest/fixtures/boards/** -text -whitespace
+crates/wren-iced/tests/golden/** -text -whitespace

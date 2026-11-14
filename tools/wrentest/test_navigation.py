@@ -48,6 +48,7 @@ COMMANDS = {
 # catalog test by name.
 BOARD_COMMANDS = {
     "note.export_svg": "board",
+    "note.export_png": "board",
     "note.new_board": "group",
 }
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}

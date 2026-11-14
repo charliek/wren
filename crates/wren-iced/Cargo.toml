@@ -27,6 +27,9 @@ rfd.workspace = true
 # Decodes the embedded window icon; its dependencies already ship via tiny-skia.
 png.workspace = true
 swash.workspace = true
+# Renders a board's SVG export as PNG. Already in the tree through iced's svg
+# feature, so it adds no package.
+resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }
@@ -37,9 +40,6 @@ wren-sparkle.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# Already in the tree through iced's svg feature: a test renders the board
-# SVG export's text to compare it with what the canvas measured.
-resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
 # The app's unit tests read the editor's and the board viewer's test
 # accessors too.
 wren-canvas = { workspace = true, features = ["test-support"] }
