@@ -34,8 +34,22 @@ pub fn wrap(
     size: f32,
     measure: &dyn Measure,
 ) -> Vec<Wrapped> {
+    wrap_at_most(text, width, face, size, measure, usize::MAX)
+}
+
+/// [`wrap`], stopping once it has `most` lines: the lines are the first
+/// `most` that [`wrap`] gives, and none after them is measured.
+pub(crate) fn wrap_at_most(
+    text: &str,
+    width: Option<f32>,
+    face: Face,
+    size: f32,
+    measure: &dyn Measure,
+    most: usize,
+) -> Vec<Wrapped> {
     let mut lines = Vec::new();
-    // `line` begins at byte `start` of the text.
+    // `line` begins at byte `start` of the text. Whether that makes `most`
+    // lines.
     let mut emit = |start: usize, line: &str| {
         let line = line.trim_end();
         let measured = if line.is_empty() {
@@ -47,13 +61,19 @@ pub fn wrap(
             range: start..start + line.len(),
             width: measured,
         });
+        lines.len() >= most
     };
+    if most == 0 {
+        return lines;
+    }
     let mut next = 0;
     for hard in text.split('\n') {
         let base = next;
         next += hard.len() + 1;
         let Some(width) = width else {
-            emit(base, hard);
+            if emit(base, hard) {
+                break;
+            }
             continue;
         };
         let fits = |candidate: &str| {
@@ -61,7 +81,9 @@ pub fn wrap(
             candidate.is_empty() || measure.width(candidate, face, size) <= width + SLACK
         };
         if fits(hard) {
-            emit(base, hard);
+            if emit(base, hard) {
+                break;
+            }
             continue;
         }
         // Each line is the longest run of whole words from `start` that
@@ -80,10 +102,14 @@ pub fn wrap(
                 // A word wider than the box alone is broken between
                 // graphemes, each line holding at least one; its last
                 // part starts the next line.
-                let mut parts = split_word(word, &fits);
+                // One part more than `most`: a word cut short then fills
+                // every line left, and its cut-off last part starts none.
+                let mut parts = split_word(word, &fits, most.saturating_add(1));
                 let last = parts.pop().unwrap_or(word);
                 for part in parts {
-                    emit(base + start, part);
+                    if emit(base + start, part) {
+                        return lines;
+                    }
                     start += part.len();
                 }
                 word = last;
@@ -100,7 +126,9 @@ pub fn wrap(
                 hard.get(start..ends[first + count - 1]).is_some_and(&fits)
             });
             let end = ends[first + count - 1];
-            emit(base + start, hard.get(start..end).unwrap_or_default());
+            if emit(base + start, hard.get(start..end).unwrap_or_default()) {
+                return lines;
+            }
             start = end;
             first += count;
         }
@@ -149,15 +177,16 @@ fn breaks_after(c: char) -> bool {
 /// fit, each holding at least one grapheme; the last part may be short.
 /// Each line is found by [`longest`], so a line of `k` graphemes costs
 /// about `2 log k` measurements of at most `2k` graphemes, and an enormous
-/// word costs no more than its length times a logarithm.
-fn split_word<'a>(word: &'a str, fits: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
+/// word costs no more than its length times a logarithm. It stops at
+/// `most` parts, the last of which is then not the word's end.
+fn split_word<'a>(word: &'a str, fits: &dyn Fn(&str) -> bool, most: usize) -> Vec<&'a str> {
     let ends: Vec<usize> = word
         .grapheme_indices(true)
         .map(|(index, grapheme)| index + grapheme.len())
         .collect();
     let mut parts = Vec::new();
     let (mut start, mut first) = (0, 0);
-    while first < ends.len() {
+    while first < ends.len() && parts.len() < most {
         let count = longest(ends.len() - first, |count| {
             fits(&word[start..ends[first + count - 1]])
         });
@@ -418,7 +447,7 @@ mod tests {
                         lines.push(line.trim_end().to_owned());
                     }
                     line.clear();
-                    let mut parts = split_word(word, &fits);
+                    let mut parts = split_word(word, &fits, usize::MAX);
                     let last = parts.pop().unwrap_or(word);
                     lines.extend(parts.iter().map(|part| part.trim_end().to_owned()));
                     line.push_str(last);

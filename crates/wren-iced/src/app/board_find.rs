@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use iced::Task;
 use wren_board::scene::{Draw, Scene, Source};
 use wren_board::{shape, Board, Named, NodeKind, Vocabulary};
-use wren_canvas::{hit, Viewport};
+use wren_canvas::{hit, SavedView};
 use wren_core::index::fuzzy_score;
 use wren_core::model::NoteId;
 
@@ -150,7 +150,7 @@ pub(super) fn first_containing<'a>(entries: &'a [Labelled], query: &str) -> Opti
 /// way but choosing an element puts it back.
 pub struct NodesOrigin {
     note: Option<NoteId>,
-    viewport: Viewport,
+    viewport: SavedView,
     selection: BTreeSet<Source>,
     cursor: Option<Source>,
     /// The board's draft count and its view's epoch when `entries` were
@@ -187,7 +187,7 @@ impl App {
         let machine = view.machine();
         self.board_nodes = Some(NodesOrigin {
             note: self.editor_note,
-            viewport: view.viewport(),
+            viewport: view.saved_view(),
             selection: machine.selection().clone(),
             cursor: machine.cursor().cloned(),
             stamp,
@@ -376,7 +376,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use wren_board::{Dir, Id};
-    use wren_canvas::{Command as C, Message as Sent};
+    use wren_canvas::{Command as C, Message as Sent, Viewport};
     use wren_core::kind::NoteKind;
     use wren_core::ops::Op;
 
@@ -879,6 +879,8 @@ to = { node = "bare" }
         let (_directory, mut app, path) = workspace();
         let mtime = modified(&path);
         let find = note_id(&app, "Find", NoteKind::Board);
+        // As the search palette does before it searches.
+        app.session.as_mut().unwrap().settle_search();
         let target = |app: &App, query: &str| {
             let session = app.session.as_ref().unwrap();
             let hits = session.index().query(

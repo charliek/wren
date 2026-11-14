@@ -329,8 +329,7 @@ impl App {
                 if !path.is_absolute() {
                     return Err("path must be absolute".into());
                 }
-                let bytes = self.write_board_export(&path, format)?;
-                request.respond(Ok(json!({"path": path, "bytes": bytes})));
+                return self.request_board_export(path, format, request);
             }
             "focus.get" => {
                 let request = Arc::clone(request);
@@ -648,7 +647,7 @@ impl App {
             "preferred_widths":preferred,"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
             "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>()},
             "history":self.session.as_ref().map(|session| session.state().history().iter().map(|path| path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"history_position":self.session.as_ref().and_then(|session|session.state().history_position()),"mru":self.session.as_ref().map(|session| session.state().recent().iter().map(|path|path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"can_back":self.session.as_ref().is_some_and(Session::can_back),"can_forward":self.session.as_ref().is_some_and(Session::can_forward),
-            "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"sort":self.note_sort(),
+            "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"index_unextracted":self.session.as_ref().map_or(0,|session| session.index().unextracted()),"sort":self.note_sort(),
             "registrations":self.config.as_ref().map(|config| config.workspaces().iter().map(|entry| json!({"name":entry.name,"path":entry.path})).collect::<Vec<_>>()).unwrap_or_default(),"active_registration":self.config.as_ref().and_then(|config| config.active()),"registry_warning":self.registry_warning,"metadata_warning":self.metadata_warning,"config_writable":self.config.as_ref().is_some_and(|config| config.writable()),"config_directory":self.config.as_ref().and_then(|config|config.directory()),"folder_request":self.folder_request,
             "generation":self.workspace_generation(),"gesture_generation":self.gesture_generation,"spring_section":self.spring_section.map(|section|section.0),"gesture_preview":gesture,
             "conflict_copy":self.conflict_copy.as_ref().map(|(generation,path)|json!({"generation":generation,"path":path.as_path().to_string_lossy(),"enabled":self.command_enabled(CommandId::OpenConflictCopy)})),
@@ -1370,6 +1369,7 @@ mod tests {
         let export = |app: &mut App, params: Value| {
             let (request, mut reply) = Request::detached("board.export", params);
             let _ = app.handle_test(request);
+            let _ = app.wait_for_export();
             reply.try_recv().unwrap()
         };
         let svg = json!({"format":"svg","path":target});
@@ -1407,6 +1407,21 @@ mod tests {
             .unwrap()
         );
         assert_eq!(reply["bytes"], written.len());
+        // The reply waits for the worker, and no other export starts
+        // until it has finished.
+        let (request, mut first) =
+            Request::detached("board.export", json!({"format":"png","path":png}));
+        let _ = app.handle_test(request);
+        assert!(first.try_recv().is_err(), "answered when written");
+        assert_eq!(app.export_state(), Some("writing"));
+        let (request, mut second) =
+            Request::detached("board.export", json!({"format":"svg","path":target}));
+        let _ = app.handle_test(request);
+        let error = second.try_recv().unwrap().expect_err("a second export");
+        assert!(error.contains("is still being written"), "{error}");
+        let _ = app.wait_for_export();
+        assert_eq!(first.try_recv().unwrap().unwrap()["bytes"], written.len());
+        assert_eq!(app.export_state(), None);
         let missing = json!({"format":"svg","path":out.path().join("no/such/Flow.svg")});
         let error = export(&mut app, missing).expect_err("an unwritable path");
         assert!(

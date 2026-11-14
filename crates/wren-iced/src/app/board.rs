@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use iced::Task;
 use wren_board::{Access, Palette, ParseError};
-use wren_canvas::{BoardView, Effect, Input, Viewport};
+use wren_canvas::{BoardView, Effect, Input, SavedView};
 use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
 use wren_core::ops::Op;
@@ -36,7 +36,7 @@ pub(super) enum Surface {
 
 /// Where each board opened in this run was last looked at from. It is
 /// never stored on disk.
-pub(super) type Viewports = HashMap<NoteId, Viewport>;
+pub(super) type Viewports = HashMap<NoteId, SavedView>;
 
 /// A view of the board `text` holds, looked at from where `note` was left,
 /// or fitted the first time it opens in this run.
@@ -51,7 +51,7 @@ pub(super) fn open(
     fonts::load();
     let mut view = BoardView::open(text, palette, fonts::UI)?;
     match viewports.get(&note) {
-        Some(viewport) => view.set_viewport(*viewport),
+        Some(saved) => view.return_to(*saved),
         None => view.fit(),
     }
     Ok(view)
@@ -61,7 +61,7 @@ pub(super) fn open(
 /// A view still waiting to be fitted was never looked at.
 pub(super) fn close(view: &BoardView, note: NoteId, viewports: &mut Viewports) {
     if !view.fit_pending() {
-        viewports.insert(note, view.viewport());
+        viewports.insert(note, view.saved_view());
     }
 }
 
@@ -302,14 +302,50 @@ pub(super) struct BoardDid {
 }
 
 /// An export of the open board, its SVG made when it was asked for and
-/// kept until its save dialog says where it goes. A PNG export renders that
-/// SVG once it has somewhere to go.
+/// kept until its save dialog says where it goes; then rendered and written
+/// on a thread of its own, so the window keeps answering however long a
+/// large PNG takes. One export is under way at a time.
 pub(super) struct Export {
     /// The correlation of the action that asked for it, which its
     /// completion reports as.
     tag: u64,
     format: Format,
-    svg: String,
+    stage: Stage,
+}
+
+enum Stage {
+    /// The save dialog is open; the SVG as drawn when the command ran.
+    Choosing(String),
+    Writing(Writing),
+}
+
+/// An export being rendered and written by its worker.
+struct Writing {
+    path: PathBuf,
+    /// The worker, which returns the bytes written or the warning to show.
+    worker: std::thread::JoinHandle<Result<u64, String>>,
+    /// The `board.export` request that asked for it, answered instead of a
+    /// banner and a completion.
+    #[cfg(feature = "smoke-test")]
+    reply: Option<std::sync::Arc<crate::test_ipc::Request>>,
+}
+
+/// Render `svg` in `format` and write it to `path`. Runs on the export's
+/// worker. Returns the bytes written, or the warning to show.
+fn render_and_write(path: &Path, format: Format, svg: &str) -> Result<u64, String> {
+    let failed = |error: &dyn std::fmt::Display| {
+        format!("Could not export the board to {}: {error}", path.display())
+    };
+    let png;
+    let contents = match format {
+        Format::Svg => svg.as_bytes(),
+        Format::Png => {
+            png =
+                board_export::png(svg, board_export::PNG_SCALE).map_err(|error| failed(&error))?;
+            &png
+        }
+    };
+    board_export::write(path, contents).map_err(|error| failed(&error))
 }
 
 /// The board as an SVG document, in the colours it is drawn in now, on a
@@ -365,8 +401,8 @@ impl App {
         let Some(view) = &self.board else {
             return self.blocked("The open note is not shown as a board");
         };
-        if self.board_export.is_some() {
-            return self.blocked("A board export is already waiting for its file");
+        if let Some(busy) = self.export_busy() {
+            return self.blocked(busy);
         }
         let svg = svg_document(view);
         let name = self
@@ -375,7 +411,11 @@ impl App {
             .map_or_else(|| "Board".to_owned(), |note| note.title.clone());
         self.palette = None;
         let tag = self.action_serial.wrapping_add(1);
-        self.board_export = Some(Export { tag, format, svg });
+        self.board_export = Some(Export {
+            tag,
+            format,
+            stage: Stage::Choosing(svg),
+        });
         let extension = format.extension();
         self.finish_action(
             Disposition::AsyncPending,
@@ -395,16 +435,36 @@ impl App {
         )
     }
 
+    /// Why another export cannot start now, if one is under way.
+    fn export_busy(&self) -> Option<String> {
+        Some(match &self.board_export.as_ref()?.stage {
+            Stage::Choosing(_) => "A board export is already waiting for its file".to_owned(),
+            Stage::Writing(writing) => format!(
+                "A board export to {} is still being written",
+                writing.path.display()
+            ),
+        })
+    }
+
     /// The save dialog of the export with `tag` closed, on `path` or on
-    /// nothing. A failed write is a banner and writes nothing.
+    /// nothing. With a path, the export is rendered and written on its
+    /// worker and completes when [`App::board_export_written`] runs; a
+    /// refused path is a banner and writes nothing.
     pub(super) fn board_export_chosen(&mut self, tag: u64, path: Option<PathBuf>) -> Gateway {
-        let Some(export) = self.board_export.take_if(|export| export.tag == tag) else {
+        let Some(Export {
+            format,
+            stage: Stage::Choosing(svg),
+            ..
+        }) = self
+            .board_export
+            .take_if(|export| export.tag == tag && matches!(export.stage, Stage::Choosing(_)))
+        else {
             return self.blocked("Ignored a stale board export");
         };
         let mut outcome = match path {
             None => self.finish_action(Disposition::Completed, None, Task::none()),
-            Some(path) => match self.export_to(&path, export.format, &export.svg) {
-                Ok(_) => self.finish_action(Disposition::Completed, None, Task::none()),
+            Some(path) => match self.start_export(tag, format, path, svg) {
+                Ok(task) => self.finish_action(Disposition::AsyncPending, None, task),
                 Err(warning) => {
                     self.banner = Some(warning.clone());
                     self.banner_kind = WarningKind::General;
@@ -412,43 +472,161 @@ impl App {
                 }
             },
         };
-        outcome.processed.correlation = export.tag;
+        outcome.processed.correlation = tag;
         self.last_processed = Some(outcome.processed.clone());
         outcome
     }
 
-    /// Write an export's `svg` to `path` in `format`, unless
-    /// [`export_refusal`] says no. Returns the bytes written, or the
-    /// warning to show.
-    fn export_to(&self, path: &Path, format: Format, svg: &str) -> Result<u64, String> {
+    /// Start the worker that renders `svg` in `format` and writes it to
+    /// `path`, unless [`export_refusal`] says no, and keep it as the export
+    /// with `tag`. The task reports [`Message::BoardExportWritten`] once
+    /// the worker has finished.
+    fn start_export(
+        &mut self,
+        tag: u64,
+        format: Format,
+        path: PathBuf,
+        svg: String,
+    ) -> Result<Task<Message>, String> {
         let workspace = self.model().map(|model| model.root.as_path());
-        if let Some(refusal) = export_refusal(path, workspace, format) {
+        if let Some(refusal) = export_refusal(&path, workspace, format) {
             return Err(refusal);
         }
-        let failed = |error: &dyn std::fmt::Display| {
-            format!("Could not export the board to {}: {error}", path.display())
-        };
-        let png;
-        let contents = match format {
-            Format::Svg => svg.as_bytes(),
-            Format::Png => {
-                png = board_export::png(svg, board_export::PNG_SCALE)
-                    .map_err(|error| failed(&error))?;
-                &png
-            }
-        };
-        board_export::write(path, contents).map_err(|error| failed(&error))
+        let (sender, receiver) = iced::futures::channel::oneshot::channel::<()>();
+        let target = path.clone();
+        let worker = std::thread::Builder::new()
+            .name("wren-export".into())
+            .spawn(move || {
+                let written = render_and_write(&target, format, &svg);
+                let _ = sender.send(());
+                written
+            })
+            .map_err(|error| {
+                format!("Could not export the board to {}: {error}", path.display())
+            })?;
+        self.board_export = Some(Export {
+            tag,
+            format,
+            stage: Stage::Writing(Writing {
+                path,
+                worker,
+                #[cfg(feature = "smoke-test")]
+                reply: None,
+            }),
+        });
+        Ok(Task::perform(
+            async move {
+                // A dropped sender, a worker that panicked, still reports.
+                let _ = receiver.await;
+            },
+            move |()| Message::BoardExportWritten(tag),
+        ))
     }
 
-    /// Write the open board to `path` in `format` as the command does once
-    /// its dialog closes, for the test harness, which has no dialog.
+    /// The worker of the export with `tag` has finished: the export
+    /// completes, or its warning is the banner. A quit asked for while it
+    /// was being written runs now.
+    pub(super) fn board_export_written(&mut self, tag: u64) -> Task<Message> {
+        let Some(Export {
+            stage: Stage::Writing(writing),
+            ..
+        }) = self
+            .board_export
+            .take_if(|export| export.tag == tag && matches!(export.stage, Stage::Writing(_)))
+        else {
+            return Task::none();
+        };
+        let written = writing.worker.join().unwrap_or_else(|_| {
+            Err(format!(
+                "Could not export the board to {}: the export stopped unexpectedly",
+                writing.path.display()
+            ))
+        });
+        #[cfg(feature = "smoke-test")]
+        if let Some(request) = writing.reply {
+            request.respond(
+                written.map(|bytes| serde_json::json!({"path": writing.path, "bytes": bytes})),
+            );
+            return self.quit_after_export();
+        }
+        let mut outcome = match written {
+            Ok(_) => self.finish_action(Disposition::Completed, None, Task::none()),
+            Err(warning) => {
+                self.banner = Some(warning.clone());
+                self.banner_kind = WarningKind::General;
+                self.blocked(warning)
+            }
+        };
+        outcome.processed.correlation = tag;
+        self.last_processed = Some(outcome.processed);
+        self.quit_after_export()
+    }
+
+    /// The quit that waited for an export, if one did: it flushes again,
+    /// since the window took edits while the export was written.
+    fn quit_after_export(&mut self) -> Task<Message> {
+        if std::mem::take(&mut self.quit_after_export) {
+            return self.request_quit().unwrap_or_else(|_| Task::none());
+        }
+        Task::none()
+    }
+
+    /// Whether an export's worker is rendering or writing it now.
+    pub(super) fn export_writing(&self) -> bool {
+        self.board_export
+            .as_ref()
+            .is_some_and(|export| matches!(export.stage, Stage::Writing(_)))
+    }
+
+    /// `board.export`: write the open board to `path` in `format` as the
+    /// command does once its dialog closes, on the same worker and under
+    /// the same one-export rule, answering `request` when it is written.
     #[cfg(feature = "smoke-test")]
-    pub(super) fn write_board_export(&self, path: &Path, format: Format) -> Result<u64, String> {
+    pub(super) fn request_board_export(
+        &mut self,
+        path: PathBuf,
+        format: Format,
+        request: &std::sync::Arc<crate::test_ipc::Request>,
+    ) -> Result<Task<Message>, String> {
         let view = self
             .board
             .as_ref()
             .ok_or("The open note is not shown as a board")?;
-        self.export_to(path, format, &svg_document(view))
+        if let Some(busy) = self.export_busy() {
+            return Err(busy);
+        }
+        let svg = svg_document(view);
+        let tag = self.action_serial.wrapping_add(1);
+        let task = self.start_export(tag, format, path, svg)?;
+        if let Some(Export {
+            stage: Stage::Writing(writing),
+            ..
+        }) = &mut self.board_export
+        {
+            writing.reply = Some(std::sync::Arc::clone(request));
+        }
+        Ok(task)
+    }
+
+    /// Wait for the export being written, as its worker's report would.
+    #[cfg(all(test, feature = "smoke-test"))]
+    pub(super) fn wait_for_export(&mut self) -> Task<Message> {
+        match &self.board_export {
+            Some(export) if matches!(export.stage, Stage::Writing(_)) => {
+                self.board_export_written(export.tag)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// What `board.get` says of an export under way: `waiting` for its
+    /// dialog, `writing` on its worker, or nothing.
+    #[cfg(any(test, feature = "smoke-test"))]
+    pub(super) fn export_state(&self) -> Option<&'static str> {
+        self.board_export.as_ref().map(|export| match export.stage {
+            Stage::Choosing(_) => "waiting",
+            Stage::Writing(_) => "writing",
+        })
     }
 }
 
@@ -509,6 +687,7 @@ pub(super) mod tests {
 
     use super::super::{Message, Options};
     use super::*;
+    use wren_canvas::Viewport;
 
     pub const FLOW: &str = r#"schema = 1
 
@@ -1422,6 +1601,8 @@ z = "c"
     fn a_search_hit_in_a_board_opens_it_without_touching_the_editor() {
         let (_directory, mut app) = fixture();
         open_markdown(&mut app, "Note");
+        // As the search palette does before it searches.
+        app.session.as_mut().unwrap().settle_search();
         let session = app.session.as_ref().unwrap();
         let hits = session.index().query(
             "receive",
@@ -2136,6 +2317,115 @@ z = "c"
         }
     }
 
+    /// What an export's dialog closing on `path` comes to: the dialog's
+    /// own outcome when nothing was started, else the completion its
+    /// worker reports once it has finished.
+    fn chosen(app: &mut App, tag: u64, path: Option<PathBuf>) -> Gateway {
+        let outcome = app.board_export_chosen(tag, path);
+        if outcome.processed.disposition != Disposition::AsyncPending {
+            return outcome;
+        }
+        assert_eq!(outcome.processed.correlation, tag);
+        assert!(app.export_writing());
+        let _ = app.board_export_written(tag);
+        assert!(app.board_export.is_none());
+        Gateway {
+            processed: app.last_processed.clone().unwrap(),
+            task: Task::none(),
+            core_error: None,
+        }
+    }
+
+    /// An export whose file is chosen is rendered and written on its own
+    /// thread, and completes as the action that asked for it; until then no
+    /// other export starts, and the board is still the user's.
+    #[test]
+    fn an_export_is_written_on_its_worker_and_one_runs_at_a_time() {
+        let (directory, mut app) = fixture();
+        let flow = file(&directory, "Flow.wren-board");
+        open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        let drawn = svg_document(app.board.as_ref().unwrap());
+        let asked = app.dispatch(Command::Run(CommandId::ExportPng));
+        let tag = asked.processed.correlation;
+        assert_eq!(app.export_state(), Some("waiting"));
+
+        let out = crate::test_support::tempdir();
+        let target = out.path().join("Flow.png");
+        let pending = app.board_export_chosen(tag, Some(target.clone()));
+        assert_eq!(pending.processed.disposition, Disposition::AsyncPending);
+        assert_eq!(pending.processed.correlation, tag);
+        assert_eq!(pending.task.units(), 1, "the worker's report");
+        assert_eq!(app.export_state(), Some("writing"));
+        for (id, format) in [
+            (CommandId::ExportPng, Format::Png),
+            (CommandId::ExportSvg, Format::Svg),
+        ] {
+            assert!(!app.command_enabled(id), "{id:?}");
+            let refused = app.dispatch(Command::Run(id));
+            assert_eq!(refused.processed.disposition, Disposition::Blocked);
+            let refused = app.export_board(format);
+            assert_eq!(refused.processed.disposition, Disposition::Blocked);
+            let warning = refused.processed.warning.unwrap();
+            assert!(warning.contains("is still being written"), "{warning}");
+        }
+        // The dialog's tag again, and another export's report, are stale.
+        assert_eq!(
+            app.board_export_chosen(tag, Some(target.clone()))
+                .processed
+                .disposition,
+            Disposition::Blocked
+        );
+        let _ = app.board_export_written(tag + 1);
+        assert!(app.export_writing());
+        // The board answers while the export is written.
+        let _ = app.update(Message::ChooseTheme(Some(definitions::DARK)));
+        assert!(app.command_enabled(CommandId::Board(wren_canvas::Command::SelectAll)));
+
+        let _ = app.board_export_written(tag);
+        let done = app.last_processed.clone().unwrap();
+        assert_eq!(done.disposition, Disposition::Completed);
+        assert_eq!(done.correlation, tag);
+        assert_eq!(app.export_state(), None);
+        assert!(app.command_enabled(CommandId::ExportPng));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            board_export::png(&drawn, board_export::PNG_SCALE).unwrap()
+        );
+        assert_eq!(files_in(out.path()), ["Flow.png"]);
+        assert_eq!(std::fs::read_to_string(&flow).unwrap(), FLOW);
+    }
+
+    /// A quit asked for while an export is written waits for the file, and
+    /// then flushes and quits; it is not lost.
+    #[test]
+    fn a_quit_while_an_export_is_written_waits_for_it() {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
+        let tag = app.board_export.as_ref().unwrap().tag;
+        let out = crate::test_support::tempdir();
+        let target = out.path().join("Flow.svg");
+        let _ = app.board_export_chosen(tag, Some(target.clone()));
+        assert!(app.export_writing());
+        let quit = app.dispatch(Command::Run(CommandId::Quit));
+        assert_eq!(quit.processed.disposition, Disposition::Completed);
+        assert_eq!(
+            quit.task.units(),
+            0,
+            "the window stays until the file is written"
+        );
+        assert!(app.quit_after_export);
+
+        let exit = app.board_export_written(tag);
+        assert!(!app.quit_after_export);
+        assert!(exit.units() > 0, "the quit runs");
+        assert!(std::fs::read_to_string(&target).unwrap().contains("<svg"));
+        // With no export under way a quit is at once.
+        assert!(app.dispatch(Command::Run(CommandId::Quit)).task.units() > 0);
+        assert!(!app.quit_after_export);
+    }
+
     fn files_in(directory: &Path) -> Vec<String> {
         let mut names: Vec<_> = std::fs::read_dir(directory)
             .unwrap()
@@ -2224,13 +2514,13 @@ z = "c"
         let out = crate::test_support::tempdir();
         let target = out.path().join("Flow.svg");
         assert_eq!(
-            app.board_export_chosen(tag + 1, Some(target.clone()))
+            chosen(&mut app, tag + 1, Some(target.clone()))
                 .processed
                 .disposition,
             Disposition::Blocked,
             "a stale tag"
         );
-        let done = app.board_export_chosen(tag, Some(target.clone()));
+        let done = chosen(&mut app, tag, Some(target.clone()));
         assert_eq!(done.processed.disposition, Disposition::Completed);
         assert_eq!(done.processed.correlation, tag);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), drawn);
@@ -2246,7 +2536,7 @@ z = "c"
         // nothing.
         let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
         let tag = app.board_export.as_ref().unwrap().tag;
-        let again = app.board_export_chosen(tag, Some(target.clone()));
+        let again = chosen(&mut app, tag, Some(target.clone()));
         assert_eq!(again.processed.disposition, Disposition::Completed);
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
@@ -2254,7 +2544,7 @@ z = "c"
         );
         let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
         let tag = app.board_export.as_ref().unwrap().tag;
-        let cancelled = app.board_export_chosen(tag, None);
+        let cancelled = chosen(&mut app, tag, None);
         assert_eq!(cancelled.processed.disposition, Disposition::Completed);
         assert_eq!(files_in(out.path()), ["Flow.svg"]);
         assert!(app.banner.is_none());
@@ -2309,7 +2599,7 @@ z = "c"
 
         let out = crate::test_support::tempdir();
         let target = out.path().join("Flow.png");
-        let done = app.board_export_chosen(tag, Some(target.clone()));
+        let done = chosen(&mut app, tag, Some(target.clone()));
         assert_eq!(done.processed.disposition, Disposition::Completed);
         assert_eq!(done.processed.correlation, tag);
         let written = std::fs::read(&target).unwrap();
@@ -2344,7 +2634,7 @@ z = "c"
         // Inside the workspace a PNG export is a .png file.
         let _ = app.dispatch(Command::Run(CommandId::ExportPng));
         let tag = app.board_export.as_ref().unwrap().tag;
-        let refused = app.board_export_chosen(tag, Some(file(&directory, "Flow.svg")));
+        let refused = chosen(&mut app, tag, Some(file(&directory, "Flow.svg")));
         assert_eq!(refused.processed.disposition, Disposition::Blocked);
         let banner = app.banner.take().unwrap();
         assert!(
@@ -2355,7 +2645,7 @@ z = "c"
         let _ = app.dispatch(Command::Run(CommandId::ExportPng));
         let tag = app.board_export.as_ref().unwrap().tag;
         let inside = file(&directory, "Flow.PNG");
-        let done = app.board_export_chosen(tag, Some(inside.clone()));
+        let done = chosen(&mut app, tag, Some(inside.clone()));
         assert_eq!(done.processed.disposition, Disposition::Completed);
         assert!(Pixmap::decode_png(&std::fs::read(&inside).unwrap()).is_ok());
 
@@ -2380,7 +2670,7 @@ z = "c"
         let _ = app.dispatch(Command::Run(CommandId::ExportPng));
         let tag = app.board_export.as_ref().unwrap().tag;
         let out = crate::test_support::tempdir();
-        let outcome = app.board_export_chosen(tag, Some(out.path().join("Flow.png")));
+        let outcome = chosen(&mut app, tag, Some(out.path().join("Flow.png")));
         assert_eq!(outcome.processed.disposition, Disposition::Blocked);
         let banner = app.banner.clone().unwrap();
         assert!(
@@ -2392,7 +2682,7 @@ z = "c"
         // The SVG of the same board has no such limit.
         let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
         let tag = app.board_export.as_ref().unwrap().tag;
-        let outcome = app.board_export_chosen(tag, Some(out.path().join("Flow.svg")));
+        let outcome = chosen(&mut app, tag, Some(out.path().join("Flow.svg")));
         assert_eq!(outcome.processed.disposition, Disposition::Completed);
     }
 
@@ -2420,7 +2710,7 @@ z = "c"
         for target in targets {
             let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
             let tag = app.board_export.as_ref().unwrap().tag;
-            let outcome = app.board_export_chosen(tag, Some(target.clone()));
+            let outcome = chosen(&mut app, tag, Some(target.clone()));
             assert_eq!(
                 outcome.processed.disposition,
                 Disposition::Blocked,
@@ -2478,7 +2768,7 @@ z = "c"
                 .map(|bytes| (bytes, modified(target)));
             let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
             let tag = app.board_export.as_ref().unwrap().tag;
-            let outcome = app.board_export_chosen(tag, Some(target.clone()));
+            let outcome = chosen(&mut app, tag, Some(target.clone()));
             assert_eq!(
                 outcome.processed.disposition,
                 Disposition::Blocked,
@@ -2512,7 +2802,7 @@ z = "c"
             app.banner = None;
             let _ = app.dispatch(Command::Run(CommandId::ExportSvg));
             let tag = app.board_export.as_ref().unwrap().tag;
-            let outcome = app.board_export_chosen(tag, Some(target.clone()));
+            let outcome = chosen(&mut app, tag, Some(target.clone()));
             assert_eq!(outcome.processed.disposition, Disposition::Completed);
             assert!(app.banner.is_none(), "{target:?}");
             assert!(std::fs::read_to_string(&target).unwrap().contains("<svg"));

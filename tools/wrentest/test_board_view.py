@@ -18,7 +18,8 @@ import pytest
 
 from tools.wrentest.boards import (
     CONFLICT, FLOW, FUTURE, NOTES, SHAPES, board, board_app, bounds, conflict_board, copy_samples,
-    distance_to_polyline, fitted, inside, midpoint, near, open_note, screenshot, stamp, wheel,
+    distance_to_polyline, fitted, grid_board, inside, midpoint, near, open_note, screenshot, stamp,
+    wheel,
 )
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_setup import artifact_directory
@@ -135,6 +136,65 @@ def test_a_board_opens_fitted_with_every_node_in_view(samples: Path) -> None:
             # The fit leaves 40 px around the content.
             root = placed["root"]
             assert visible["x"] >= root["x"] + 39 and visible["y"] >= root["y"] + 39, node
+
+
+def content_box(placed: dict) -> dict:
+    """The box around every node as drawn, in window pixels."""
+    nodes = [node["bounds"] for node in placed["nodes"]]
+    left = min(box["x"] for box in nodes)
+    top = min(box["y"] for box in nodes)
+    return {"x": left, "y": top,
+            "width": max(box["x"] + box["width"] for box in nodes) - left,
+            "height": max(box["y"] + box["height"] for box in nodes) - top}
+
+
+def intersects(box: dict, root: dict) -> bool:
+    return (box["x"] < root["x"] + root["width"] and root["x"] < box["x"] + box["width"]
+            and box["y"] < root["y"] + root["height"] and root["y"] < box["y"] + box["height"])
+
+
+@pytest.mark.native_x11
+def test_a_board_fitted_narrow_stays_in_view_once_the_canvas_widens(samples: Path) -> None:
+    """§5.13 rule 4: a fit follows a resize, so a board fitted beside the
+    browser columns of a 1024 by 640 window is still in view, fitted, once
+    they fold, and the keyboard zoom about the middle keeps it in view
+    (the `board-wide` scene's steps)."""
+    from tools.wrentest.test_editor import focus_native
+    from tools.wrentest.test_gestures import window_size
+
+    with board_app(samples, "board-resize-fit") as app:
+        window = focus_native(app)
+        window_size(app, window, 1024, 640)
+        open_note(app, FLOW)
+        app.client.call("editor.focus")
+        narrow = fitted(app)
+        for _ in range(3):
+            command(app, "navigation.column_left")
+        for _ in range(3):
+            command(app, "navigation.column_right")
+
+        def widened() -> dict | None:
+            placed = bounds(app)
+            return placed if placed["root"]["width"] > narrow["root"]["width"] + 100 else None
+
+        wait_for(widened, timeout=5, interval=0.05, description="the canvas widened")
+        # Still the fit, now for the wide canvas: every node in view and
+        # the board in the middle (the fit centres connectors and labels
+        # too, so the nodes' own box sits a little off it).
+        wait_for(lambda: all(node["visible"] == node["bounds"] for node in bounds(app)["nodes"]),
+                 timeout=5, interval=0.05, description="the board fitted to the wide canvas")
+        placed = bounds(app)
+        box, root = content_box(placed), placed["root"]
+        assert abs(box["x"] + box["width"] / 2 - (root["x"] + root["width"] / 2)) < 40, (box, root)
+        for step in ("font.reset", "font.decrease", "font.decrease"):
+            command(app, step)
+            placed = bounds(app)
+            box, root = content_box(placed), placed["root"]
+            assert intersects(box, root), (step, box, root)
+            # Zoomed about the middle of the board, which is in the middle
+            # of the canvas.
+            middle = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            assert inside(middle, root), (step, middle, root)
 
 
 def fill_point(node: dict, placed: dict) -> tuple[int, int] | None:
@@ -559,6 +619,75 @@ def test_searching_a_label_finds_the_board_and_its_syntax_does_not(samples: Path
         modal = app.client.call("palette.query", {"query": "schema"})["navigation"]["modal"]
         assert [row["path"] for row in modal["results"] if row["path"].endswith(".wren-board")] == []
         app.client.call("palette.close")
+
+
+def many_boards(root: Path, count: int = 60) -> Path:
+    """A workspace of ``count`` boards of 101 elements and a note; only
+    ``Board 7`` has the label ``Needle in the grid``."""
+    group = root / "Boards" / "Many"
+    group.mkdir(parents=True)
+    plain = grid_board(38)
+    for number in range(count):
+        text = plain.replace("Step 5: validate", "Needle in the grid") if number == 7 else plain
+        (group / f"Board {number}.wren-board").write_text(text)
+    (group / "Note.md").write_text("# Note\n\nNothing to see.\n")
+    return root
+
+
+def content_hits(app: WrenApp, query: str) -> list[str]:
+    """The paths of the search palette's content hits for ``query``."""
+    app.client.call("palette.open", {"mode": "search"})
+    modal = app.client.call("palette.query", {"query": query})["navigation"]["modal"]
+    app.client.call("palette.close")
+    return [row["path"] for row in modal["results"] if row["hit"] == "content"]
+
+
+def unextracted(app: WrenApp) -> int:
+    return app.client.call("navigation.get")["index_unextracted"]
+
+
+NEEDLE = "Boards/Many/Board 7.wren-board"
+
+
+def test_a_search_right_after_open_finds_a_board_label(tmp_path: Path) -> None:
+    """§3.6: opening a workspace parses no board for the index; a search
+    straight after the open still finds a board's label."""
+    first = tmp_path / "first"
+    (first / "Notes" / "Inbox").mkdir(parents=True)
+    (first / "Notes" / "Inbox" / "Hello.md").write_text("# Hello\n")
+    many = many_boards(tmp_path / "many")
+    with board_app(first, "board-search-open") as app:
+        # With the timer held no background job runs, so what the open
+        # left waiting is what it parsed none of.
+        app.client.call("test.timer.hold", {"held": True})
+        app.client.call("workspace.open", {"path": str(many)})
+        assert unextracted(app) == 60
+        assert content_hits(app, "needle in the") == [NEEDLE]
+        assert unextracted(app) == 0
+        app.client.call("test.timer.hold", {"held": False})
+
+        # Without a search the background job extracts them.
+        app.client.call("workspace.open", {"path": str(first)})
+        app.client.call("workspace.open", {"path": str(many)})
+        wait_for(lambda: unextracted(app) == 0, timeout=10, interval=0.05,
+                 description="every board's labels extracted")
+        assert content_hits(app, "needle in the") == [NEEDLE]
+        assert content_hits(app, "schema") == []
+
+
+def test_a_search_after_an_edit_outside_wren_finds_the_new_label(tmp_path: Path) -> None:
+    many = many_boards(tmp_path / "many", count=20)
+    with board_app(many, "board-search-external") as app:
+        assert content_hits(app, "needle in the") == [NEEDLE]
+        path = many / NEEDLE
+        path.write_text(path.read_text().replace("Needle in the grid", "Haystack moved"))
+
+        def moved() -> bool:
+            return content_hits(app, "haystack moved") == [NEEDLE]
+
+        wait_for(moved, timeout=10, interval=0.1, description="the edited label found")
+        assert content_hits(app, "needle in the") == []
+        assert unextracted(app) == 0
 
 
 ESCAPES = '''schema = 1

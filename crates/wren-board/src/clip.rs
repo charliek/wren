@@ -299,7 +299,8 @@ mod tests {
 
     /// Plans and applies a paste, checking that the board still writes,
     /// reads back, and has no integrity issue it did not have, except that
-    /// a pasted element may lack the `kind` its fragment gave it none of.
+    /// a pasted element may lack the `kind` its fragment gave it none of,
+    /// and may keep a value past a limit that its fragment held.
     fn pasted(board: &mut Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         let before: Vec<Issue> = check(board);
         let old = board.clone();
@@ -309,7 +310,11 @@ mod tests {
         assert_eq!(write(&parse(&written).unwrap()), written);
         for issue in check(board) {
             let new = !old.nodes.contains_key(issue.id()) && !old.edges.contains_key(issue.id());
-            let carried = new && issue.kind == crate::IssueKind::MissingKind;
+            let carried = new
+                && matches!(
+                    issue.kind,
+                    crate::IssueKind::MissingKind | crate::IssueKind::OutOfRange(_)
+                );
             assert!(before.contains(&issue) || carried, "new issue {issue:?}");
         }
         plan

@@ -44,20 +44,11 @@ def samples(tmp_path: Path) -> Path:
     return copy_samples(tmp_path / "work")
 
 
-# Where a board is looked at from before its first fit has the widget's size.
-UNFITTED = {"x": 0.0, "y": 0.0, "zoom": 1.0}
-
-
 def ready(app: WrenApp, path: str) -> dict:
-    """Open a board, give it the keyboard and wait for its fit. A board
-    small enough to show whole from its origin, as Overlap is, passes
-    `fitted` before the fit has run, so this waits for the view to move
-    too: both samples are fitted away from their origin."""
+    """Open a board, give it the keyboard and wait for its fit."""
     open_note(app, path)
     app.client.call("editor.focus")
     wait_focus(app, ["note-editor"])
-    wait_for(lambda: board(app)["viewport"] not in (None, UNFITTED), timeout=10,
-             interval=0.05, description="the first fit ran")
     return fitted(app)
 
 

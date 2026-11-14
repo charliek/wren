@@ -809,10 +809,7 @@ mod tests {
         let mut machine = Machine::default();
         let viewport = Viewport::default();
         let board = wren_board::Board::default();
-        let scene = wren_board::scene::Scene {
-            bounds: wren_board::scene::Rect::default(),
-            items: Vec::new(),
-        };
+        let scene = wren_board::scene::Scene::default();
         let view = View {
             viewport,
             now: Instant::now(),

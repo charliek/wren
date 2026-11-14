@@ -168,7 +168,7 @@ fn escape(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::scene::tests::{dump, golden_scenes};
     use crate::scene::{build, FixedMeasure, Item, Source};
@@ -176,13 +176,13 @@ mod tests {
     use crate::{fixtures, parse};
 
     /// An element's name, attributes and unescaped text.
-    type Element = (String, Vec<(String, String)>, String);
+    pub(crate) type Element = (String, Vec<(String, String)>, String);
 
     /// A well-formed XML document of elements, attributes, text and the
     /// five predefined entities: what this writer can emit. It returns the
     /// elements in order, each with its attributes and unescaped text, or
     /// what is wrong.
-    fn elements(xml: &str) -> Result<Vec<Element>, String> {
+    pub(crate) fn elements(xml: &str) -> Result<Vec<Element>, String> {
         fn unescape(text: &str) -> Result<String, String> {
             let mut out = String::new();
             let mut rest = text;
@@ -270,7 +270,7 @@ mod tests {
         Ok(found)
     }
 
-    fn texts(xml: &str) -> Vec<String> {
+    pub(crate) fn texts(xml: &str) -> Vec<String> {
         elements(xml)
             .unwrap_or_else(|e| panic!("{e}\n{xml}"))
             .into_iter()
@@ -279,7 +279,7 @@ mod tests {
             .collect()
     }
 
-    fn lines(scene: &Scene) -> Vec<&str> {
+    pub(crate) fn lines(scene: &Scene) -> Vec<&str> {
         scene
             .items
             .iter()
@@ -446,6 +446,7 @@ mod tests {
                     stroke: None,
                 },
             }],
+            ..Scene::default()
         };
         let plain = write(&scene, &Options::default());
         assert!(plain.contains("width=\"100\" height=\"50\" viewBox=\"-10 5 100 50\""));
@@ -506,7 +507,7 @@ mod tests {
     }
 
     /// A line as it reads back from the document.
-    fn escape_free(line: &str) -> String {
+    pub(crate) fn escape_free(line: &str) -> String {
         line.chars()
             .filter(|&c| c == '\t' || !matches!(c, '\u{0}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}'))
             .collect()
