@@ -5,7 +5,7 @@
 //! the element a workspace search hit lands on. None of it changes the
 //! board: the selection and the viewport are never written to the file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use iced::Task;
 use wren_board::scene::{Draw, Scene, Source};
@@ -35,6 +35,20 @@ pub(super) struct Labelled {
 /// space is no label, as search has it (§3.6).
 pub(super) fn labelled(board: &Board, scene: &Scene) -> Vec<Labelled> {
     let frames = hit::Frames::new(board);
+    // Each connector's top-left, of its drawn labels and of all it draws,
+    // in one pass over the scene, so the listing stays linear in its size.
+    let mut corners: HashMap<&Source, Corners> = HashMap::new();
+    for item in &scene.items {
+        if !matches!(item.source, Source::Edge(_)) {
+            continue;
+        }
+        let corner = (item.bounds.y, item.bounds.x);
+        let entry = corners.entry(&item.source).or_default();
+        earliest(&mut entry.any, corner);
+        if matches!(item.draw, Draw::Text { .. }) {
+            earliest(&mut entry.text, corner);
+        }
+    }
     let mut placed: Vec<((f32, f32), Labelled)> = Vec::new();
     for (id, node) in &board.nodes {
         if node.text.trim().is_empty() {
@@ -71,16 +85,10 @@ pub(super) fn labelled(board: &Board, scene: &Scene) -> Vec<Labelled> {
         let element = Source::Edge(id.clone());
         // Where its labels are drawn; a connector the scene could not
         // route draws none, and is placed by whatever it draws.
-        let drawn = |text: bool| {
-            scene
-                .items
-                .iter()
-                .filter(|item| item.source == element)
-                .filter(move |item| !text || matches!(item.draw, Draw::Text { .. }))
-                .map(|item| (item.bounds.y, item.bounds.x))
-                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
-        };
-        let corner = drawn(true).or_else(|| drawn(false)).unwrap_or_default();
+        let corner = corners
+            .get(&element)
+            .and_then(|drawn| drawn.text.or(drawn.any))
+            .unwrap_or_default();
         placed.push((
             corner,
             Labelled {
@@ -102,6 +110,26 @@ pub(super) fn labelled(board: &Board, scene: &Scene) -> Vec<Labelled> {
             .then_with(|| rank(first).cmp(&rank(second)))
     });
     placed.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// The top-left, as `(y, x)`, of what a connector draws.
+#[derive(Default)]
+struct Corners {
+    text: Option<(f32, f32)>,
+    any: Option<(f32, f32)>,
+}
+
+fn earliest(slot: &mut Option<(f32, f32)>, corner: (f32, f32)) {
+    let earlier = |seen: (f32, f32)| {
+        corner
+            .0
+            .total_cmp(&seen.0)
+            .then(corner.1.total_cmp(&seen.1))
+            .is_lt()
+    };
+    if slot.is_none_or(earlier) {
+        *slot = Some(corner);
+    }
 }
 
 /// The first element of `entries`, in their order, whose label contains
@@ -547,6 +575,52 @@ to = { node = "bare" }
         for nothing in ["", "   ", "diamond", "kind", "quiet", "schema"] {
             assert_eq!(found(nothing), None, "{nothing:?}");
         }
+    }
+
+    /// Listing a board's labels walks its scene once, not once per
+    /// connector: at about 10,000 elements the per-connector walk took
+    /// 1.4 s in a debug build, which every jump and search hit paid.
+    #[test]
+    fn listing_ten_thousand_elements_stays_linear() {
+        const COLUMNS: usize = 50;
+        const ROWS: usize = 100;
+        let mut text = String::from("schema = 1\n");
+        for row in 0..ROWS {
+            for column in 0..COLUMNS {
+                let (x, y) = (column * 200, row * 120);
+                text.push_str(&format!(
+                    "\n[node.n{row}x{column}]\ntext = \"Node {row} {column}\"\nkind = \"shape\"\nat = [{x}, {y}]\nsize = [120, 60]\n"
+                ));
+                if column > 0 {
+                    let from = column - 1;
+                    text.push_str(&format!(
+                        "\n[edge.e{row}x{column}]\nkind = \"edge\"\nfrom = {{ node = \"n{row}x{from}\" }}\nto = {{ node = \"n{row}x{column}\" }}\nlabels = [{{ text = \"to {column}\" }}]\n"
+                    ));
+                }
+            }
+        }
+        let (_directory, app, _) = workspace();
+        crate::fonts::load();
+        let palette = crate::theme::board_palette(app.definition);
+        let view = wren_canvas::BoardView::open(&text, palette, crate::fonts::UI).unwrap();
+        assert_eq!(
+            view.board().nodes.len() + view.board().edges.len(),
+            ROWS * (2 * COLUMNS - 1)
+        );
+        let started = std::time::Instant::now();
+        let entries = labelled(view.board(), view.scene());
+        let took = started.elapsed();
+        assert_eq!(entries.len(), ROWS * (2 * COLUMNS - 1));
+        // The first row's nodes, then its connectors' labels, drawn lower.
+        let element = |at: usize| &entries[at].element;
+        assert_eq!(element(COLUMNS - 1), &node(&format!("n0x{}", COLUMNS - 1)));
+        assert_eq!(element(COLUMNS), &edge("e0x1"));
+        assert_eq!(
+            element(2 * COLUMNS - 2),
+            &edge(&format!("e0x{}", COLUMNS - 1))
+        );
+        // Order-of-magnitude only, as the debug ceilings of §6.7.
+        assert!(took.as_millis() < 250, "listed in {took:?}");
     }
 
     #[test]
