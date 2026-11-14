@@ -908,15 +908,12 @@ impl App {
             }
             RenameNote | DeleteNote | RevealNote | MoveNote => self.selected_note.is_some(),
             // The find bar searches the editor's text and the outline reads
-            // its Markdown headings: neither has anything to show for a
-            // board, and a board's raw text has no headings.
-            Find => {
-                (self.selected_note.is_some() || !self.workspace_mode)
-                    && self.surface() != Surface::Board
-            }
+            // its Markdown headings; on a board both open the jump palette
+            // (§5.18 rule 3), and a board's raw text has no headings.
+            Find => self.selected_note.is_some() || !self.workspace_mode,
             Outline => {
                 (self.selected_note.is_some() || !self.workspace_mode)
-                    && self.surface() == Surface::Text
+                    && self.surface() != Surface::Raw
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
             ExportSvg => self.surface() == Surface::Board && self.board_export.is_none(),
@@ -1133,6 +1130,9 @@ impl App {
             }
             Jump => self.open_palette(Mode::Jump),
             Search => self.open_palette(Mode::Search),
+            Find | Outline | Board(BoardCommand::Jump) if self.surface() == Surface::Board => {
+                self.open_palette(Mode::BoardNodes)
+            }
             Outline => self.open_palette(Mode::Outline),
             Find => {
                 self.palette = None;

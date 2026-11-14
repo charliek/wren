@@ -90,6 +90,11 @@ pub const ZOOM_STOPS: [f32; 9] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0]
 /// brings it into view, in screen pixels (§5.7 rule 5).
 pub const REVEAL_MARGIN: f32 = 40.0;
 
+/// An element the host shows ([`BoardView::show_element`]) that would be shorter
+/// than this on screen, in logical pixels, is fitted instead of only
+/// centred (§5.18 rule 4).
+pub const SHOW_LEAST: f32 = 8.0;
+
 /// A label whose text would be smaller than this on screen, in logical
 /// pixels, is opened at 100 % instead (§5.9 rule 2).
 pub const MIN_LABEL_PX: f32 = 10.0;
@@ -400,6 +405,9 @@ pub struct BoardView {
     size: Option<(f32, f32)>,
     /// A fit asked for before the widget's size was known.
     fit_pending: bool,
+    /// An element shown before the widget's size was known, centred once
+    /// it is.
+    showing: Option<Source>,
     /// Bumped by each discrete change of view (a zoom step, a reset, a
     /// fit), which the widget draws in full at once instead of as a move.
     jumps: u64,
@@ -491,6 +499,7 @@ impl BoardView {
             epoch: epoch(),
             size: None,
             fit_pending: false,
+            showing: None,
             jumps: 0,
             key_policy: None,
             pressed: None,
@@ -669,6 +678,68 @@ impl BoardView {
         }
     }
 
+    /// Select `element` alone, as the cursor, and centre it in the widget
+    /// at the zoom it is looked at with; where it would be under
+    /// [`SHOW_LEAST`] pixels tall at that zoom, fit it instead (§5.18 rules
+    /// 2 and 4). Before the widget has said its size the centring waits
+    /// for it, after a fit that waits too. The board does not change. An
+    /// element the board does not hold, an open label or a gesture in
+    /// flight, which the host settles first, shows nothing and gives
+    /// false.
+    pub fn show_element(&mut self, element: Source) -> bool {
+        if !element.exists(&self.board)
+            || self.label.is_some()
+            || self.machine.dragging()
+            || self.preview.is_some()
+        {
+            return false;
+        }
+        self.machine
+            .select(BTreeSet::from([element.clone()]), Some(element.clone()));
+        match self.size {
+            Some(_) => self.centre_on(&element),
+            None => self.showing = Some(element),
+        }
+        true
+    }
+
+    /// Put back the selection, its cursor and the viewport the host took
+    /// before it showed elements (§5.18 rule 2), leaving out what the
+    /// board no longer holds. A centring still waiting is dropped.
+    pub fn restore(
+        &mut self,
+        selection: BTreeSet<Source>,
+        cursor: Option<Source>,
+        viewport: Viewport,
+    ) {
+        self.showing = None;
+        self.machine.select(selection, cursor);
+        self.machine.retain(&self.board);
+        self.jump(viewport);
+    }
+
+    /// Centre `element` in the widget, or fit it when it would be too
+    /// small to see; see [`BoardView::show_element`].
+    fn centre_on(&mut self, element: &Source) {
+        let (Some(size), Some(bounds)) =
+            (self.size, bounds(&self.board, self.scenes.scene(), element))
+        else {
+            return;
+        };
+        let zoom = self.viewport.zoom;
+        let viewport = if bounds.height * zoom < SHOW_LEAST {
+            Viewport::fitting(bounds, size)
+        } else {
+            let centre = bounds.center();
+            Viewport {
+                x: centre.x - size.0 / 2.0 / zoom,
+                y: centre.y - size.1 / 2.0 / zoom,
+                zoom,
+            }
+        };
+        self.jump(viewport);
+    }
+
     /// Apply a message from the widget at `now`. Input stamped with an
     /// earlier epoch is dropped.
     pub fn update(&mut self, message: Message, now: Instant) -> Update {
@@ -721,6 +792,9 @@ impl BoardView {
                     self.size = Some((width, height));
                     if self.fit_pending {
                         self.fit();
+                    }
+                    if let Some(element) = self.showing.take() {
+                        self.centre_on(&element);
                     }
                 }
             }
@@ -2980,6 +3054,171 @@ mod tests {
         let bounds = hit::Frames::new(view.board()).get(&first).expect("a node");
         assert_eq!(view.viewport(), Viewport::fitting(bounds, SIZE));
         assert_eq!(view.viewport().zoom, 1.0);
+    }
+
+    /// Where the middle of `element` is drawn in the widget.
+    fn drawn_middle(view: &BoardView, element: &Source) -> (f32, f32) {
+        let middle = bounds(view.board(), view.scene(), element)
+            .expect("drawn")
+            .center();
+        view.viewport().to_screen((middle.x, middle.y))
+    }
+
+    #[track_caller]
+    fn assert_centred(view: &BoardView, element: &Source) {
+        let (x, y) = drawn_middle(view, element);
+        let centre = (SIZE.0 / 2.0, SIZE.1 / 2.0);
+        assert!(
+            (x - centre.0).abs() < 0.01 && (y - centre.1).abs() < 0.01,
+            "{element:?} at {:?}",
+            (x, y)
+        );
+    }
+
+    #[test]
+    fn showing_an_element_selects_it_and_centres_it_at_its_zoom() {
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        let written = wren_board::write(view.board());
+        view.set_viewport(Viewport {
+            x: -900.0,
+            y: 400.0,
+            zoom: 1.5,
+        });
+        let node = Source::Node(view.board().nodes.keys().next().expect("a node").clone());
+        let labelled = view
+            .board()
+            .edges
+            .iter()
+            .find(|(_, edge)| !edge.labels.is_empty());
+        let edge = Source::Edge(labelled.expect("a labelled connector").0.clone());
+        for element in [&node, &edge] {
+            let jumps = view.jumps();
+            assert!(view.show_element(element.clone()));
+            assert_eq!(
+                *view.machine().selection(),
+                BTreeSet::from([element.clone()])
+            );
+            assert_eq!(view.machine().cursor(), Some(element));
+            assert_centred(&view, element);
+            assert_eq!(view.viewport().zoom, 1.5);
+            // One jump, drawn in full at once; showing it again moves nothing.
+            assert_eq!(view.jumps(), jumps + 1);
+            assert!(view.show_element(element.clone()));
+            assert_eq!(view.jumps(), jumps + 1);
+        }
+        // Under 8 pixels tall it is fitted instead: at 10 % a node 60 tall
+        // is 6.
+        view.set_viewport(Viewport {
+            zoom: 0.1,
+            ..view.viewport()
+        });
+        assert!(view.show_element(node.clone()));
+        let frame = hit::Frames::new(view.board())
+            .get(node.id())
+            .expect("a node");
+        assert_eq!(view.viewport(), Viewport::fitting(frame, SIZE));
+        assert_eq!(view.viewport().zoom, 1.0);
+        // An element the board does not hold shows nothing.
+        let viewport = view.viewport();
+        assert!(!view.show_element(Source::Node(id("nowhere"))));
+        assert!(!view.show_element(Source::Edge(node.id().clone())));
+        assert_eq!(view.viewport(), viewport);
+        assert_eq!(*view.machine().selection(), BTreeSet::from([node]));
+        // None of it is a change to the board.
+        assert_eq!(wren_board::write(view.board()), written);
+        assert!(view.pristine() && !view.can_undo());
+    }
+
+    #[test]
+    fn an_element_shown_before_the_widget_has_a_size_is_centred_once_it_has() {
+        let mut view = open(fixtures::CHECKOUT_FLOW);
+        view.fit();
+        let node = Source::Node(view.board().nodes.keys().next().expect("a node").clone());
+        assert!(view.show_element(node.clone()));
+        assert_eq!(view.machine().cursor(), Some(&node));
+        assert!(view.fit_pending());
+        let now = Instant::now();
+        view.update(
+            Message::Resized {
+                width: SIZE.0,
+                height: SIZE.1,
+            },
+            now,
+        );
+        // At the zoom the waiting fit gave.
+        let fitted = Viewport::fitting(view.scene().bounds, SIZE);
+        assert_eq!(view.viewport().zoom, fitted.zoom);
+        assert_centred(&view, &node);
+        // Only once: a later size keeps the view.
+        let moved = view.viewport().panned(50.0, 0.0);
+        view.set_viewport(moved);
+        view.update(
+            Message::Resized {
+                width: 900.0,
+                height: 500.0,
+            },
+            now,
+        );
+        assert_eq!(view.viewport(), moved);
+    }
+
+    #[test]
+    fn nothing_is_shown_while_a_label_is_open() {
+        let mut view = sized(TWO);
+        let now = Instant::now();
+        open_label(&mut view, "a", now);
+        let viewport = view.viewport();
+        assert!(!view.show_element(Source::Node(id("b"))));
+        assert_eq!(selected(&view), ["a"]);
+        assert_eq!(view.viewport(), viewport);
+    }
+
+    #[test]
+    fn a_restore_puts_back_the_selection_the_cursor_and_the_view() {
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        let now = Instant::now();
+        let mut ids = view.board().nodes.keys().cloned();
+        let (first, second) = (ids.next().expect("a node"), ids.next().expect("a node"));
+        click_node(&mut view, first.as_str(), now);
+        let selection = view.machine().selection().clone();
+        let cursor = view.machine().cursor().cloned();
+        let viewport = view.viewport();
+        assert!(view.show_element(Source::Node(second.clone())));
+        assert_ne!(view.viewport(), viewport);
+        let jumps = view.jumps();
+        view.restore(selection.clone(), cursor.clone(), viewport);
+        assert_eq!(*view.machine().selection(), selection);
+        assert_eq!(view.machine().cursor(), cursor.as_ref());
+        assert_eq!(view.viewport(), viewport);
+        assert_eq!(view.jumps(), jumps + 1);
+        // What the board no longer holds is left out.
+        let gone = Source::Node(id("gone"));
+        let kept = Source::Node(second);
+        view.restore(
+            BTreeSet::from([gone.clone(), kept.clone()]),
+            Some(gone),
+            viewport,
+        );
+        assert_eq!(*view.machine().selection(), BTreeSet::from([kept]));
+        assert_eq!(view.machine().cursor(), None);
+        // A centring still waiting for the widget's size is dropped.
+        let mut waiting = open(fixtures::CHECKOUT_FLOW);
+        let node = Source::Node(first);
+        assert!(waiting.show_element(node));
+        let at = Viewport {
+            x: 10.0,
+            y: 20.0,
+            zoom: 0.5,
+        };
+        waiting.restore(BTreeSet::new(), None, at);
+        waiting.update(
+            Message::Resized {
+                width: SIZE.0,
+                height: SIZE.1,
+            },
+            now,
+        );
+        assert_eq!(waiting.viewport(), at);
     }
 
     #[test]

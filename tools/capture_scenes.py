@@ -296,6 +296,13 @@ def board_scenes(client, shot_here, out: Path) -> None:
     client.call("palette.query", {"query": "payment"})
     shot_here("board-search")
     client.call("palette.close")
+    # Jump to node: the palette beside the flow, the highlighted node
+    # selected and centred behind it (§5.18).
+    open_board("Checkout flow")
+    client.call("command.run", {"id": "board.jump"})
+    client.call("palette.query", {"query": "pay"})
+    shot_here("board-jump")
+    client.call("palette.close")
     # The flow again, with the browser columns folded away.
     open_note(client, "Checkout flow.wren-board")
     for _ in range(3):

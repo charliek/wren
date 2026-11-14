@@ -14,6 +14,7 @@ pub use crate::cli::Options;
 use crate::{fonts, theme};
 
 mod board;
+mod board_find;
 mod board_spike;
 mod columns;
 mod workspace;
@@ -94,6 +95,8 @@ pub struct App {
     palette: Option<Palette>,
     /// Where the outline palette opened; see `sync_outline`.
     outline_origin: Option<palette::OutlineOrigin>,
+    /// Where the jump palette opened on a board; see `sync_board_nodes`.
+    board_nodes: Option<board_find::NodesOrigin>,
     widths: Widths,
     column: columns::Column,
     /// Browser panes folded from the left (0–2) by keyboard moves.
@@ -352,6 +355,7 @@ impl App {
             last_processed: None,
             palette: None,
             outline_origin: None,
+            board_nodes: None,
             widths: Widths::default(),
             column: columns::Column::Editor,
             fold: 0,

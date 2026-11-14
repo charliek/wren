@@ -4,6 +4,8 @@ use std::sync::Arc;
 use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 use iced::Task;
 use serde_json::{json, Value};
+use wren_board::scene::Source;
+use wren_board::Id;
 
 use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget, Scope};
 use super::palette::{Key, Mode};
@@ -441,6 +443,7 @@ impl App {
                     "themes" => Mode::Themes,
                     "fonts" => Mode::Fonts,
                     "outline" => Mode::Outline,
+                    "board_nodes" => Mode::BoardNodes,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -630,7 +633,7 @@ impl App {
                 )
             })
             .collect::<serde_json::Map<_, _>>();
-        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut,"state":match row.key { Key::Command(id) => self.command_state(id), _ => None }})).collect::<Vec<_>>()}));
+        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut,"tag":row.tag,"state":match row.key { Key::Command(id) => self.command_state(id), _ => None }})).collect::<Vec<_>>()}));
         let dialog = self.dialog.as_ref().map(|dialog| json!({"kind":format!("{:?}",dialog.kind),"name":dialog.name,"error":dialog.error}));
         let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
         let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
@@ -805,6 +808,26 @@ fn result_key(value: &Value) -> Result<Key, String> {
             line: usize::try_from(id(heading, "line")?).map_err(|_| "line must be usize")?,
         });
     }
+    if let Some(element) = object.get("element") {
+        let source = |kind: &str| -> Result<Option<Id>, String> {
+            element
+                .get(kind)
+                .map(|id| {
+                    id.as_str()
+                        .and_then(Id::new)
+                        .ok_or_else(|| format!("element {kind} must be an id"))
+                })
+                .transpose()
+        };
+        if element.as_object().is_none_or(|object| object.len() != 1) {
+            return Err("element requires one node or edge".into());
+        }
+        return match (source("node")?, source("edge")?) {
+            (Some(id), None) => Ok(Key::Element(Source::Node(id))),
+            (None, Some(id)) => Ok(Key::Element(Source::Edge(id))),
+            _ => Err("element requires one node or edge".into()),
+        };
+    }
     if let Some(action) = object.get("item_action") {
         let object = action
             .as_object()
@@ -844,6 +867,8 @@ fn key_json(key: &Key) -> Value {
         Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),
         Key::Font(family) => json!({"font":family}),
         Key::Heading { revision, line } => json!({"heading":{"revision":revision,"line":line}}),
+        Key::Element(Source::Node(id)) => json!({"element":{"node":id.as_str()}}),
+        Key::Element(Source::Edge(id)) => json!({"element":{"edge":id.as_str()}}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }
@@ -1203,6 +1228,8 @@ mod tests {
                 revision: 7,
                 line: 12,
             },
+            Key::Element(Source::Node(Id::new("a1").unwrap())),
+            Key::Element(Source::Edge(Id::new("a1").unwrap())),
             Key::ItemAction {
                 target: ItemTarget {
                     generation: 4,
