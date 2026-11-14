@@ -59,11 +59,13 @@ when one lands, move what users need into `docs/` and trim the note.
   `dict/SOURCE.md`) and the user's `WordList`.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
-- `vendor/`: patched copies of crates.io crates (`cosmic-text`, `iced_winit`,
-  `swash`), wired in by the root `[patch.crates-io]`; `make check-patches`
-  asserts they are the ones built. `cosmic-text` and `swash` each have a
-  `WREN.md` describing the change; `wren-editor`'s hanging indent needs the
-  cosmic-text one.
+- `vendor/`: patched copies of crates.io crates (`cosmic-text`,
+  `iced_tiny_skia`, `iced_winit`, `swash`), wired in by the root
+  `[patch.crates-io]`; `make check-patches` asserts they are the ones built.
+  `cosmic-text`, `iced_tiny_skia` and `swash` each have a `WREN.md`
+  describing the change; `wren-editor`'s hanging indent needs the
+  cosmic-text one, and the spelling zigzag's cost on tiny-skia the
+  iced_tiny_skia one.
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it
   in step with behavior changes: keybindings, settings, and on-disk rules.
 - `discovery/`: working design notes, deliberately outside `docs/` because
