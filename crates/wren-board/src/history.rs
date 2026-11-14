@@ -260,6 +260,13 @@ impl History {
         }
     }
 
+    /// Drops the open group without recording it and gives back the state
+    /// it opened from, for an edit that is taken back whole: free text
+    /// made and committed empty (§5.9 rule 8).
+    pub fn drop_group(&mut self) -> Option<Snapshot> {
+        self.group.take().map(|group| group.snapshot)
+    }
+
     /// Ends the open run of move or resize keys, so the next starts a new
     /// unit.
     pub fn break_run(&mut self) {
@@ -544,6 +551,23 @@ mod tests {
         history.record(state("a", &[]), Unit::Label, now);
         let back = history.undo(state("b", &[])).unwrap();
         assert_eq!(label(&back), "a");
+    }
+
+    #[test]
+    fn a_dropped_group_gives_back_its_start_and_records_nothing() {
+        let now = Instant::now();
+        let mut history = History::new();
+        history.record(state("first", &[]), Unit::One, now);
+        assert_eq!(history.drop_group(), None);
+        history.open_group(state("before", &["a"]));
+        history.record(state("made", &["a"]), Unit::Label, now);
+        let start = history.drop_group().unwrap();
+        assert_eq!(
+            (label(&start), start.cursor.as_ref()),
+            ("before", Id::new("a").as_ref())
+        );
+        assert!(!history.group_open());
+        assert_eq!(undo_all(&mut history, "before"), ["first"]);
     }
 
     #[test]

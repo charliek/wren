@@ -161,6 +161,16 @@ pub(crate) struct Outcome {
     pub(crate) full: bool,
 }
 
+/// A label as the board stored it when its edit began: a node's text and
+/// size, or a connector's labels. Undo in the label, or typing back to
+/// that text, puts it back as it was, trailing blank lines and auto-grow
+/// included, so the label leaves no unit and no draft (§5.9 rules 3 and 4).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Before {
+    Node { text: String, size: [i32; 2] },
+    Edge(Vec<wren_board::Label>),
+}
+
 /// The open label: one element's text while it is edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
@@ -178,8 +188,9 @@ pub struct Label {
     goal: Option<f32>,
     place: Place,
     rows: Vec<Row>,
-    /// The node's size when the edit began, which undo puts back.
-    pub(crate) size: Option<[i32; 2]>,
+    /// The element's label as the board stored it when the edit began,
+    /// which a label that ends as it began puts back verbatim.
+    pub(crate) before: Option<Before>,
     /// Whether this edit's own creation made the element, or for a
     /// connector its label (§5.9 rule 8).
     pub(crate) made: bool,
@@ -203,7 +214,7 @@ impl Label {
             goal: None,
             place,
             rows: Vec::new(),
-            size: None,
+            before: None,
             made: false,
             ink: Rgba::rgb(0, 0, 0),
         };

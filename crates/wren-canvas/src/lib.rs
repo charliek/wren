@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use iced::{Element, Font};
-use wren_board::edit::{self, Area, Intent};
+use wren_board::edit::{self, Area, Change, Intent, Plan};
 use wren_board::history::{History, Snapshot, Unit};
 use wren_board::ids::Random;
 use wren_board::scene::{self, Draw, Rect, Scene, Source};
@@ -71,6 +71,7 @@ mod widget;
 
 pub use command::{Command, Grow, Tool};
 pub use keys::{KeyPolicy, KeyRoute};
+use label::Before;
 pub use label::{Label, LabelAction, Motion, Preedit};
 pub use machine::{Button, Input, Key, Machine, Mods, Scroll};
 pub use measure::Measurer;
@@ -1069,10 +1070,15 @@ impl BoardView {
     /// takes the plan back, which is how a creation selects what it made.
     /// Returns whether the board changed.
     fn edit(&mut self, intent: &Intent, unit: Unit, now: Instant, update: &mut Update) -> bool {
-        let shown = self.preview.take();
         #[cfg(test)]
         self.intents.push(intent.clone());
         let plan = edit::plan(&self.board, intent, &mut self.ids);
+        self.carry_out(&plan, unit, now, update)
+    }
+
+    /// Apply `plan`, as [`BoardView::edit`] does once it has planned.
+    fn carry_out(&mut self, plan: &Plan, unit: Unit, now: Instant, update: &mut Update) -> bool {
+        let shown = self.preview.take();
         let changed = !plan.is_empty();
         if changed {
             // A creation that opens its label begins a group, which the
@@ -1097,7 +1103,7 @@ impl BoardView {
         if let Some(notice) = &plan.notice {
             update.effects.push(Effect::Notice(notice.clone()));
         }
-        let acts = self.machine.applied(&plan, &self.board);
+        let acts = self.machine.applied(plan, &self.board);
         self.making.clone_from(&plan.edit);
         self.carry(acts, Unit::One, now, update);
         self.making = None;
@@ -1157,7 +1163,14 @@ impl BoardView {
         self.labels_opened += 1;
         let mut label = Label::open(id.clone(), text, place, &self.measurer);
         label.ink = ink;
-        label.size = self.board.nodes.get(&id).map(|node| node.size);
+        label.before = match (self.board.nodes.get(&id), self.board.edges.get(&id)) {
+            (Some(node), _) => Some(Before::Node {
+                text: node.text.clone(),
+                size: node.size,
+            }),
+            (None, Some(edge)) => Some(Before::Edge(edge.labels.clone())),
+            (None, None) => None,
+        };
         label.made = self.making.as_ref() == Some(&id)
             || self
                 .board
@@ -1197,6 +1210,11 @@ impl BoardView {
         let Some(label) = self.label.take() else {
             return;
         };
+        // A label that ends as it began is the stored one again, verbatim:
+        // typing alone trims it and grows its node (§5.9 rule 4).
+        if !label.changed() {
+            self.put_back(&label, now, update);
+        }
         self.finish_label(&label, now, update);
         // The creation that opened the label and what was typed in it are
         // one unit, and none when the board is as it was (§3.4 rule 4).
@@ -1220,7 +1238,10 @@ impl BoardView {
                 .edges
                 .get(&id)
                 .is_some_and(|edge| !edge.labels.is_empty());
-        if free {
+        if free && label.made && self.unmake(update) {
+            // The creation and the label are taken back whole, keys the
+            // creation renumbered (§4.7) and all.
+        } else if free {
             self.edit(&Intent::Delete { ids: vec![id] }, Unit::Label, now, update);
         } else if labelled {
             let intent = Intent::SetEdgeLabel {
@@ -1259,14 +1280,17 @@ impl BoardView {
         let Some(label) = self.label.as_ref().filter(|_| outcome.changed) else {
             return;
         };
+        if outcome.restored {
+            let label = label.clone();
+            self.put_back(&label, now, update);
+            self.place_label();
+            return;
+        }
         let id = label.id().clone();
         let text = label.stored().to_owned();
         let intent = match self.board.nodes.get(&id) {
             Some(node) => {
-                let size = match label.size {
-                    Some(size) if outcome.restored => size,
-                    _ => label::grown(node, node.size, &text, &self.measurer),
-                };
+                let size = label::grown(node, node.size, &text, &self.measurer);
                 Intent::SetText { id, text, size }
             }
             None => Intent::SetEdgeLabel {
@@ -1277,6 +1301,66 @@ impl BoardView {
         };
         self.edit(&intent, Unit::Label, now, update);
         self.place_label();
+    }
+
+    /// Put `label`'s element back as the board stored it when the edit
+    /// began, untrimmed and at its old size: the label is as it began, so
+    /// the board is too (§5.9 rules 3 and 4). It joins the label's unit.
+    fn put_back(&mut self, label: &Label, now: Instant, update: &mut Update) {
+        let id = label.id();
+        let change = match &label.before {
+            Some(Before::Node { text, size }) => self
+                .board
+                .nodes
+                .get(id)
+                .filter(|node| node.text != *text || node.size != *size)
+                .map(|node| {
+                    let node = Node {
+                        text: text.clone(),
+                        size: *size,
+                        ..node.clone()
+                    };
+                    Change::PutNode(id.clone(), Box::new(node))
+                }),
+            Some(Before::Edge(labels)) => self
+                .board
+                .edges
+                .get(id)
+                .filter(|edge| edge.labels != *labels)
+                .map(|edge| {
+                    let edge = wren_board::Edge {
+                        labels: labels.clone(),
+                        ..edge.clone()
+                    };
+                    Change::PutEdge(id.clone(), Box::new(edge))
+                }),
+            None => None,
+        };
+        if let Some(change) = change.filter(|_| self.writable()) {
+            let plan = Plan {
+                changes: vec![change],
+                ..Plan::default()
+            };
+            self.carry_out(&plan, Unit::Label, now, update);
+        }
+    }
+
+    /// Take back the open group whole, the creation that opened it
+    /// included, to the board, selection and cursor it opened from (§5.9
+    /// rule 8). False when no group is open.
+    fn unmake(&mut self, update: &mut Update) -> bool {
+        let Some(before) = self.history.drop_group() else {
+            return false;
+        };
+        if before.board != self.board {
+            self.board = before.board;
+            self.issues = wren_board::check(&self.board);
+            self.build();
+            update.changed = true;
+        }
+        self.machine.select(before.selection, before.cursor);
+        self.machine.retain(&self.board);
+        true
     }
 
     /// Lay the open label out where the board now draws it.
@@ -3328,6 +3412,84 @@ mod tests {
         assert!(view.board().nodes.is_empty());
         assert!(view.machine().selection().is_empty());
         assert_eq!(view.draft(), wren_board::EMPTY);
+    }
+
+    /// §5.9 rule 8: free text made and left empty takes its creation with
+    /// it, including the renumbering of the root scope that its key on top
+    /// needed (§4.7), so the board is as it was and nothing is to undo.
+    #[test]
+    fn a_text_tool_click_left_empty_undoes_the_renumber_it_forced() {
+        let now = Instant::now();
+        let top = "z".repeat(64);
+        let full = format!(
+            "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"{top}\"\n"
+        );
+        let flagged = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"a-b\"\n\n[node.b]\nkind = \"shape\"\nat = [200, 0]\nsize = [120, 60]\nz = \"V\"\n";
+        for board in [full.as_str(), flagged] {
+            for typing in ["", "x"] {
+                let mut view = sized(board);
+                let nodes = view.board().nodes.len();
+                view.command(Command::Tool(Tool::Text), now);
+                click(&mut view, (400.0, 400.0), now);
+                assert_eq!(view.board().nodes.len(), nodes + 1);
+                assert_eq!(
+                    view.board().nodes[&id("a")].z.as_deref() == Some("V01"),
+                    board == full
+                );
+                if !typing.is_empty() {
+                    typed(&mut view, typing, now);
+                    edit(&mut view, LabelAction::Backspace, now);
+                }
+                key(&mut view, Key::Escape, now);
+                assert_eq!(view.label(), None);
+                assert!(view.pristine(), "{board} {typing:?}");
+                assert!(!view.can_undo(), "{board} {typing:?}");
+                assert_eq!(view.draft(), board);
+            }
+        }
+    }
+
+    /// §5.9 rules 3 and 4: a label put back by its own undo is the stored
+    /// text, trailing blank lines and all, so it leaves no unit and no
+    /// draft; the same for one typed back to how it began.
+    #[test]
+    fn a_label_put_back_keeps_its_trailing_blank_lines() {
+        let now = Instant::now();
+        let board = "schema = 1\n\n[node.a]\ntext = \"A\\n\\n\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n\n[node.b]\nkind = \"shape\"\nat = [400, 0]\nsize = [120, 60]\nz = \"W\"\n\n[edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\nlabels = [\n  { text = \"then\\n \\n\" },\n]\nz = \"X\"\n";
+        assert_eq!(
+            wren_board::write(&wren_board::parse(board).expect("a board")),
+            board
+        );
+        for (element, began) in [("a", "A\n\n"), ("e", "then\n \n")] {
+            // Undone in the label, at once and after a redo.
+            for redo in [false, true] {
+                let mut view = sized(board);
+                open_label(&mut view, element, now);
+                typed(&mut view, "B", now);
+                assert!(!view.pristine());
+                edit(&mut view, LabelAction::Undo, now);
+                assert_eq!(label(&view).text(), began);
+                assert!(view.pristine(), "{element}");
+                if redo {
+                    edit(&mut view, LabelAction::Redo, now);
+                    assert!(!view.pristine());
+                    edit(&mut view, LabelAction::Undo, now);
+                }
+                key(&mut view, Key::Escape, now);
+                assert!(view.pristine(), "{element} {redo}");
+                assert!(!view.can_undo(), "{element} {redo}");
+                assert_eq!(view.draft(), board);
+            }
+            // Typed back to what it was.
+            let mut view = sized(board);
+            open_label(&mut view, element, now);
+            typed(&mut view, began, now);
+            assert_eq!(label(&view).text(), began);
+            key(&mut view, Key::Escape, now);
+            assert!(view.pristine(), "{element} typed back");
+            assert!(!view.can_undo(), "{element} typed back");
+            assert_eq!(view.draft(), board);
+        }
     }
 
     #[test]

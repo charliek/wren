@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, HAND_WRITTEN, NOTES, board, board_app, click, copy_samples, fitted, flushed, key,
+    FLOW, GROUP, HAND_WRITTEN, NOTES, board, board_app, click, copy_samples, fitted, flushed, key,
     note_id, open_note, stamp, type_text,
 )
 from tools.wrentest.client import RemoteError
@@ -153,6 +153,43 @@ def test_a_sequence_that_changes_nothing_writes_nothing(samples: Path) -> None:
         key(app, "z", "mod")
         state = key(app, "escape")
         assert state["pristine"], state
+        # Past the autosave debounce.
+        time.sleep(1.2)
+        flushed(app)
+        assert not app.client.call("session.get")["document"]["dirty"]
+    assert stamp(path) == before
+
+
+# A flagged z key in the root scope, so a new element on top renumbers the
+# scope (§4.7), and a label stored with trailing blank lines.
+TAKEN_BACK = (
+    'schema = 1\n\n# Written by hand.\n[node.a]\nkind = "shape"\nat = [0, 0]\n'
+    'size = [120, 60]\nz = "a-b"\n\n[node.b]\ntext = "B\\n\\n"\nkind = "shape"\n'
+    'at = [200, 0]\nsize = [120, 60]\nz = "V"\n'
+)
+
+
+def test_an_edit_that_comes_to_nothing_writes_nothing(samples: Path) -> None:
+    """§5.9 rules 3, 4 and 8: free text made and left empty, and a label
+    put back by its own undo, leave the file's bytes and time as they were."""
+    path = samples / GROUP / "Taken back.wren-board"
+    path.write_text(TAKEN_BACK, encoding="utf-8")
+    before = stamp(path)
+    with board_app(samples, "board-safety-taken-back") as app:
+        ready(app, f"{GROUP}/Taken back.wren-board")
+        key(app, "t")
+        click(app, {"canvas": [160, 200]})
+        assert board(app)["counts"]["nodes"] == 3
+        state = key(app, "escape")
+        assert state["counts"]["nodes"] == 2, state
+        assert state["pristine"] and not state["can_undo"], state
+        click(app, {"node": "b"})
+        key(app, "enter")
+        type_text(app, "C")
+        assert not board(app)["pristine"]
+        key(app, "z", "mod")
+        state = key(app, "escape")
+        assert state["pristine"] and not state["can_undo"], state
         # Past the autosave debounce.
         time.sleep(1.2)
         flushed(app)
