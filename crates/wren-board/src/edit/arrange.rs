@@ -307,8 +307,14 @@ pub(super) fn align(board: &Board, ids: &[Id], to: Alignment) -> Plan {
 /// are taken in order of their centres, then their starts, then their ids;
 /// each is placed from the exact fraction, rounded once, half away from
 /// zero, and not snapped. Overlapping nodes give a negative gap.
+///
+/// Gaps negative enough can bring two nodes' centres level or past each
+/// other, and a second run would then take the nodes in another order and
+/// move them again, perhaps one of the outermost two. Spacing that result
+/// again need not settle either (on piled-up rows it cycles), so a row
+/// whose spacing a second run would change is left as it is.
 pub(super) fn distribute(board: &Board, ids: &[Id], axis: Axis) -> Plan {
-    let mut nodes = subjects(board, ids);
+    let nodes = subjects(board, ids);
     if nodes.len() < 3 {
         return Plan::default();
     }
@@ -316,30 +322,39 @@ pub(super) fn distribute(board: &Board, ids: &[Id], axis: Axis) -> Plan {
         Axis::Horizontal => 0,
         Axis::Vertical => 1,
     };
-    nodes.sort_by_key(|node| {
-        let start = node.at[axis];
+    let sizes: Vec<i64> = nodes.iter().map(|node| node.size[axis]).collect();
+    let starts: Vec<i64> = nodes.iter().map(|node| node.at[axis]).collect();
+    let next = spaced(&nodes, &starts, &sizes);
+    if next == starts || spaced(&nodes, &next, &sizes) != next {
+        return Plan::default();
+    }
+    let moves: Vec<(&Id, i64)> = nodes.iter().map(|node| node.id).zip(next).collect();
+    placed_at(board, axis, &moves)
+}
+
+/// One run of distribute on a row: the new start of each node, by index.
+fn spaced(nodes: &[Subject<'_>], starts: &[i64], sizes: &[i64]) -> Vec<i64> {
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&k| {
         (
-            2 * i128::from(start) + i128::from(node.size[axis]),
-            start,
-            node.id,
+            2 * i128::from(starts[k]) + i128::from(sizes[k]),
+            starts[k],
+            nodes[k].id,
         )
     });
-    let last = nodes.len() - 1;
-    let first = i128::from(nodes[0].at[axis]);
-    let sizes: i128 = nodes[..last]
-        .iter()
-        .map(|node| i128::from(node.size[axis]))
-        .sum();
-    let free = i128::from(nodes[last].at[axis]) - first - sizes;
+    let last = order.len() - 1;
+    let first = i128::from(starts[order[0]]);
+    let inner: i128 = order[..last].iter().map(|&k| i128::from(sizes[k])).sum();
+    let free = i128::from(starts[order[last]]) - first - inner;
     let gaps = last as i128;
+    let mut out = starts.to_vec();
     let mut before = 0_i128;
-    let mut moves = Vec::with_capacity(last - 1);
-    for (k, node) in nodes.iter().enumerate().take(last).skip(1) {
-        before += i128::from(nodes[k - 1].size[axis]);
-        let exact = (first + before) * gaps + k as i128 * free;
-        moves.push((node.id, rounded(exact, gaps)));
+    for place in 1..last {
+        before += i128::from(sizes[order[place - 1]]);
+        let exact = (first + before) * gaps + place as i128 * free;
+        out[order[place]] = rounded(exact, gaps);
     }
-    placed_at(board, axis, &moves)
+    out
 }
 
 #[cfg(test)]
@@ -1071,12 +1086,42 @@ z = "Z"
         assert!(moved(&three([7, 7, 7], 20), &all).is_empty());
     }
 
-    /// Random rows of nodes: align is idempotent always, and distribute
-    /// whenever its result keeps the nodes' order, which holds while no
-    /// two neighbours overlap by more than their sizes.
+    /// Three nodes on the x axis, each `(start, width)`.
+    fn row(nodes: [(i32, i32); 3]) -> String {
+        let mut text = String::from("schema = 1\n");
+        for (name, (x, width)) in ["n0", "n1", "n2"].iter().zip(nodes) {
+            text += &format!(
+                "\n[node.{name}]\nkind = \"shape\"\nat = [{x}, 0]\nsize = [{width}, 20]\nz = \"V\"\n"
+            );
+        }
+        text
+    }
+
+    #[test]
+    fn distribute_leaves_a_row_it_would_reorder() {
+        let all = Intent::Distribute {
+            ids: ids(&["n0", "n1", "n2"]),
+            axis: Axis::Horizontal,
+        };
+        // Piled on one spot, by centre n2, n1, n0. Gaps of -30 would put
+        // n1 at -20, its centre on n2's and its start before it, so that a
+        // second run would take n1 first and move n2, one of the outermost
+        // two. The row stays, and so does every later run.
+        let board = parse(&row([(0, 100), (0, 50), (0, 10)])).unwrap();
+        assert!(plan(&board, &all, &mut Listed(Vec::new())).is_empty());
+        // Overlapping less deeply, they keep their order: gaps of -40.
+        assert_eq!(
+            moved(&row([(0, 100), (40, 50), (70, 40)]), &all),
+            at(&[("n1", [60, 0])])
+        );
+    }
+
+    /// Random rows of nodes, some spaced out and some piled up: align and
+    /// distribute are both idempotent always.
     #[test]
     fn random_rows_align_and_distribute_once() {
         let mut rng = Rng(23);
+        let mut spread = [0, 0];
         let alignments = [
             Alignment::Left,
             Alignment::Center,
@@ -1089,6 +1134,7 @@ z = "Z"
             let mut text = String::from("schema = 1\n");
             let count = 2 + rng.below(6);
             let mut x = rng.below(400) as i32 - 200;
+            let piled = rng.one_in(3);
             for k in 0..count {
                 let (w, h) = (1 + rng.below(160) as i32, 1 + rng.below(160) as i32);
                 let y = rng.below(600) as i32 - 300;
@@ -1100,7 +1146,11 @@ z = "Z"
                 text += &format!(
                     "\n[node.n{k}]\nkind = \"shape\"\nat = [{x}, {y}]\n{parent}size = [{w}, {h}]\nz = \"V\"\n"
                 );
-                x += w + rng.below(100) as i32;
+                x += if piled {
+                    rng.below(40) as i32 - 20
+                } else {
+                    w + rng.below(100) as i32
+                };
             }
             let names: Vec<Id> = (0..count)
                 .filter(|_| !rng.one_in(5))
@@ -1123,28 +1173,12 @@ z = "Z"
                     Axis::Vertical
                 },
             };
-            let mut after = board.clone();
-            after.apply(&plan(&board, &intent, &mut Listed(Vec::new())).changes);
-            let again = plan(&after, &intent, &mut Listed(Vec::new()));
-            let order = |board: &Board| {
-                let Intent::Distribute { ids, axis } = &intent else {
-                    unreachable!()
-                };
-                let axis = usize::from(*axis == Axis::Vertical);
-                let mut nodes = subjects(board, ids);
-                nodes.sort_by_key(|node| {
-                    let start = node.at[axis];
-                    (
-                        2 * i128::from(start) + i128::from(node.size[axis]),
-                        start,
-                        node.id.clone(),
-                    )
-                });
-                nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>()
-            };
-            if order(&board) == order(&after) {
-                assert!(again.is_empty(), "{intent:?}\n{text}");
-            }
+            let first = plan(&board, &intent, &mut Listed(Vec::new()));
+            spread[usize::from(first.is_empty())] += 1;
+            twice(&text, &intent);
         }
+        // Both kinds of row were drawn: ones distribute moved and ones it
+        // left, already spaced or too crowded.
+        assert!(spread[0] > 100 && spread[1] > 100, "{spread:?}");
     }
 }
