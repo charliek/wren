@@ -399,7 +399,7 @@ pub(super) fn export_refusal(
     };
     (!own && inside()).then(|| {
         format!(
-            "Did not export the board to {}: inside the workspace an export is an .{extension} file",
+            "Did not export the board to {}: inside the workspace an export must end in .{extension}",
             path.display()
         )
     })
@@ -2538,7 +2538,11 @@ z = "c"
         let inside = directory.path().join(GROUP).join("Flow.svg");
         let refused = chosen(&mut app, tag, Some(inside.clone()));
         assert_eq!(refused.processed.disposition, Disposition::Blocked);
-        assert!(app.banner.as_deref().unwrap().contains("an .drawio file"));
+        assert!(app
+            .banner
+            .as_deref()
+            .unwrap()
+            .contains("an export must end in .drawio"));
         assert!(!inside.exists());
 
         let tag = app
@@ -2714,7 +2718,7 @@ z = "c"
         assert_eq!(refused.processed.disposition, Disposition::Blocked);
         let banner = app.banner.take().unwrap();
         assert!(
-            banner.ends_with("inside the workspace an export is an .png file"),
+            banner.ends_with("inside the workspace an export must end in .png"),
             "{banner}"
         );
         assert!(!file(&directory, "Flow.svg").exists());

@@ -195,7 +195,7 @@ def test_a_png_export_of_the_flow_draws_its_labels(samples: Path, tmp_path: Path
             with pytest.raises(RemoteError, match="Did not export the board over .*: it is a note"):
                 app.client.call("board.export", {"format": "png", "path": str(target)})
         inside = samples / GROUP / "Flow.svg"
-        with pytest.raises(RemoteError, match=r"inside the workspace an export is an \.png file"):
+        with pytest.raises(RemoteError, match=r"inside the workspace an export must end in \.png"):
             app.client.call("board.export", {"format": "png", "path": str(inside)})
         assert not inside.exists()
         with pytest.raises(RemoteError, match="format"):
@@ -262,7 +262,7 @@ def test_a_drawio_export_is_the_board_as_one_draw_io_page(
         assert reply["bytes"] == out.stat().st_size
         state = board(app, elements=True)
         inside = samples / GROUP / "Flow.svg"
-        with pytest.raises(RemoteError, match=r"inside the workspace an export is an \.drawio file"):
+        with pytest.raises(RemoteError, match=r"inside the workspace an export must end in \.drawio"):
             app.client.call("board.export", {"format": "drawio", "path": str(inside)})
         assert not inside.exists()
         assert app.client.call("session.get")["document"]["dirty"] is False

@@ -95,7 +95,7 @@ a window.
                   transparent; for SVG and PNG
 
 Exit status: 0 written (warnings about the board go to standard error);
-1 the board could not be read or the image not written; 2 bad usage;
+1 the board could not be read or the file not written; 2 bad usage;
 3 the file is not a board Wren can draw.
 ",
         themes.join(", "),
