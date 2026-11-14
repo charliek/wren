@@ -14,6 +14,7 @@ pub use crate::cli::Options;
 use crate::{fonts, theme};
 
 mod board;
+mod board_find;
 mod board_spike;
 mod columns;
 mod workspace;
@@ -94,6 +95,8 @@ pub struct App {
     palette: Option<Palette>,
     /// Where the outline palette opened; see `sync_outline`.
     outline_origin: Option<palette::OutlineOrigin>,
+    /// Where the jump palette opened on a board; see `sync_board_nodes`.
+    board_nodes: Option<board_find::NodesOrigin>,
     /// The board the actions palette opened on; see `sync_actions`.
     actions_origin: Option<palette::ActionsOrigin>,
     widths: Widths,
@@ -354,6 +357,7 @@ impl App {
             last_processed: None,
             palette: None,
             outline_origin: None,
+            board_nodes: None,
             actions_origin: None,
             widths: Widths::default(),
             column: columns::Column::Editor,

@@ -1260,8 +1260,10 @@ z = "c"
         for id in EDITOR_COMMANDS {
             assert!(!enabled(&app, id), "{id:?}");
         }
-        assert!(!enabled(&app, CommandId::Find));
-        assert!(!enabled(&app, CommandId::Outline));
+        // Find and Outline open the jump palette on a board (§5.18 rule
+        // 3); the Markdown outline itself has nothing to list.
+        assert!(enabled(&app, CommandId::Find));
+        assert!(enabled(&app, CommandId::Outline));
         assert_eq!(
             app.open_palette(super::super::palette::Mode::Outline)
                 .processed
@@ -1693,6 +1695,14 @@ z = "c"
         assert!(groups[..board].iter().all(|group| *group == "This note"));
         assert!(rows.iter().any(|(group, id, _)| *group == "View"
             && *id == CommandId::Board(wren_canvas::Command::ZoomFit)));
+        // Jump to node stands for Find and Outline there (§5.1 rule 8).
+        assert!(rows
+            .iter()
+            .any(|(group, id, _)| *group == "Go"
+                && *id == CommandId::Board(wren_canvas::Command::Jump)));
+        assert!(rows
+            .iter()
+            .all(|(_, id, _)| !matches!(id, CommandId::Find | CommandId::Outline)));
 
         // A text note and a board shown as text list none of them, and the
         // Markdown group again.
@@ -1708,6 +1718,7 @@ z = "c"
                 rows.iter().any(|(group, ..)| *group == "Markdown"),
                 "{title}"
             );
+            assert!(rows.iter().any(|(_, id, _)| *id == CommandId::Find));
         }
 
         // With the setting off no board row is listed anywhere.

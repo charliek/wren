@@ -314,6 +314,14 @@ def board_scenes(client, shot_here, out: Path) -> None:
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
+    # Jump to node (§5.18): the palette beside the flow, fitted, and the
+    # highlighted node selected and centred behind it. Last, so the view it
+    # leaves moves no other scene.
+    open_board("Checkout flow", fit=True)
+    client.call("command.run", {"id": "board.jump"})
+    client.call("palette.query", {"query": "pay"})
+    shot_here("board-jump")
+    client.call("palette.close")
     client.call("column.open", {"column": "sections"})
 
 
