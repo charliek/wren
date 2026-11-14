@@ -545,6 +545,16 @@ Deviations:
 3. *Autolinks are found by a pass that only excludes*: `<scheme:…>` (scheme as CommonMark's) and `<user@host>`, brackets included. It sets neither colour nor lock, so the look of a line does not change; the URL inside keeps the bare-URL colour it had.
 4. *Prose ranges are the maximal runs of text with nothing excluded*, so they hold white space and punctuation too, and consecutive ranges are separated by at least one excluded byte. An image's `!` is excluded with its brackets.
 
+*M2 and M3, marks and the zigzag.* One commit: `spell_frame()`'s rectangles are the zigzag's, so the two items share their geometry. The widget asks the proofreader once per drawn line (not per wrapped row), and the on-demand path (`EditorView::marks_at`, a fresh `MarkdownHighlighter` over lines `0..=line`) gives the same marks as a frame for every line of the acceptance note.
+
+Deviations:
+1. *`marks_at` is private and only tests call it until `spell-menu` does*, so it carries `#[cfg_attr(not(test), allow(dead_code))]`, which U1 removes. §3.2 names no public on-demand accessor and none was added.
+2. *`SpellFrame`, `DrawnMark` and `spell_frame()` compile under `any(test, feature = "test-support")`*, not the feature alone, so the crate's own tests can read them.
+3. *A hidden mark is still reported, with its rectangles*: `DrawnMark.rects` is where the zigzag goes on each drawn row, clipped to the rows, whether or not rule 4.3.3 hid it. A row on which the word covers no whole pixel gives no rectangle, but the mark is still listed.
+4. *What the editor accepts from a proofreader:* a line with no prose is not asked about, and a returned range that is empty or not on character boundaries of the line is dropped, so later code may slice the line with any mark.
+5. *Rule 4.3.3's apostrophes are `'` and `’`*, and "has focus" is the widget's keyboard focus, whatever the window's.
+6. *The zigzag's pixels are whole window pixels*: `L`, `R` and the top are rounded after adding the text origin, so the squares stay on the grid wherever the editor sits.
+
 #### `spell-menu`
 
 #### `spell-wire`

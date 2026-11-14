@@ -37,7 +37,7 @@ use iced::{Color, Element, Font};
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
 pub use keys::{KeyPolicy, KeyRoute};
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
 pub use proof::{Proofreader, SpellEvent, SpellMenu};
 pub use widget::Measure;
@@ -185,6 +185,10 @@ pub struct EditorView {
     front_matter_end: Option<usize>,
     markdown_assist: bool,
     key_policy: Option<KeyPolicy>,
+    proofreader: Option<Arc<dyn Proofreader>>,
+    /// The marks the widget last drew.
+    #[cfg(any(test, feature = "test-support"))]
+    spell_frame: std::cell::RefCell<SpellFrame>,
 }
 
 /// How the planner indents and renumbers.
@@ -214,6 +218,9 @@ impl EditorView {
             front_matter_end: None,
             markdown_assist: true,
             key_policy: None,
+            proofreader: None,
+            #[cfg(any(test, feature = "test-support"))]
+            spell_frame: Default::default(),
         };
         view.refresh_front_matter();
         view
@@ -288,7 +295,7 @@ impl EditorView {
     /// Returns `Element<'_, Message>` so the parent can map it to its own
     /// message type.
     pub fn view(&self, style: Style, palette: Palette, measure: Measure) -> Element<'_, Message> {
-        TextEditor::new(
+        let editor = TextEditor::new(
             &self.content,
             "note-editor",
             HighlighterSettings {
@@ -302,8 +309,11 @@ impl EditorView {
             self.markdown_assist,
         )
         .key_policy(self.key_policy.as_ref())
-        .measure(measure)
-        .into()
+        .proofreader(self.proofreader.as_deref())
+        .measure(measure);
+        #[cfg(any(test, feature = "test-support"))]
+        let editor = editor.spell_frame(&self.spell_frame);
+        editor.into()
     }
 
     // -----------------------------------------------------------------------
@@ -736,8 +746,11 @@ impl EditorView {
     // -----------------------------------------------------------------------
 
     /// The host's proofreader, or `None` to check nothing. Only the owned
-    /// engine uses it.
-    pub fn set_proofreader(&mut self, _proofreader: Option<Arc<dyn Proofreader>>) {}
+    /// engine uses it: the widget asks it about the rows it draws, each
+    /// frame, so a new one or a changed word list shows on the next frame.
+    pub fn set_proofreader(&mut self, proofreader: Option<Arc<dyn Proofreader>>) {
+        self.proofreader = proofreader;
+    }
 
     /// Carry out a suggestions-menu event. Returns whether the text changed,
     /// as [`EditorView::perform`] does.
@@ -756,9 +769,9 @@ impl EditorView {
     }
 
     /// The marks and the menu as the last frame drew them.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn spell_frame(&self) -> SpellFrame {
-        SpellFrame::default()
+        self.spell_frame.borrow().clone()
     }
 
     /// The editor's own key routing run on one press, without a window: the
@@ -770,6 +783,28 @@ impl EditorView {
         _modifiers: iced::keyboard::Modifiers,
     ) -> Option<Message> {
         None
+    }
+
+    /// The misspellings of `line`, found without the widget: its prose comes
+    /// from a fresh pass over the lines down to it (§3.3), the same marks a
+    /// frame draws there. Empty on the iced engine or with no proofreader,
+    /// which is then not asked.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn marks_at(&self, line: usize) -> Vec<Range<usize>> {
+        let Some(proofreader) = self
+            .proofreader
+            .as_deref()
+            .filter(|_| self.content.kind() == BackendKind::Owned)
+        else {
+            return Vec::new();
+        };
+        self.content.with_lines(|lines| {
+            let Some(text) = lines.get(line) else {
+                return Vec::new();
+            };
+            let prose = highlighter::prose_at(&lines, line, self.front_matter_end);
+            proof::line_marks(proofreader, &text.text, &prose)
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1050,6 +1085,130 @@ fn edit_kind(action: &Action) -> EditKind {
 mod tests {
     use super::*;
     use widget::Content;
+
+    // ── Spell check ─────────────────────────────────────────────────────────
+
+    /// `(line, range)` of every mark a frame of the whole text draws.
+    fn drawn(ev: &mut EditorView) -> Vec<(usize, Range<usize>)> {
+        let proofreader = ev.proofreader.clone();
+        ev.content
+            .drawn_marks(
+                iced::Size::new(2000.0, 2000.0),
+                ev.front_matter_end,
+                proofreader.as_deref(),
+                None,
+            )
+            .into_iter()
+            .map(|mark| (mark.line, mark.range))
+            .collect()
+    }
+
+    /// `(line, range)` of every mark [`EditorView::marks_at`] finds.
+    fn on_demand(ev: &EditorView) -> Vec<(usize, Range<usize>)> {
+        (0..ev.line_count())
+            .flat_map(|line| ev.marks_at(line).into_iter().map(move |mark| (line, mark)))
+            .collect()
+    }
+
+    #[test]
+    fn the_acceptance_note_is_marked_alike_on_demand_and_when_drawn() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&[
+            "Spel",
+            "chek",
+            "apear",
+            "replacments",
+            "spelbook",
+            "bundeled",
+            "desing",
+            "spel",
+            "CommonMark",
+            "mispelled",
+            "knwon",
+            "misteak",
+            "wrd",
+            "labl",
+            "Titel",
+        ]));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, fixtures::SPELL_NOTE);
+        ev.set_proofreader(Some(proofreader.clone()));
+        let marks = on_demand(&ev);
+        assert_eq!(drawn(&mut ev), marks);
+        let lines: Vec<&str> = fixtures::SPELL_NOTE.split('\n').collect();
+        let words: Vec<&str> = marks
+            .iter()
+            .map(|(line, range)| &lines[*line][range.clone()])
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "chek",
+                "apear",
+                "replacments",
+                "bundeled",
+                "desing",
+                "CommonMark",
+                "mispelled",
+                "knwon",
+                "misteak"
+            ]
+        );
+        assert_eq!(marks[0].0, 3, "the heading's, not the front matter's");
+    }
+
+    #[test]
+    fn on_demand_marks_need_the_owned_engine_and_a_proofreader() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh"]));
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "teh cat\n# teh");
+        assert!(ev.marks_at(0).is_empty());
+        ev.set_proofreader(Some(proofreader.clone()));
+        assert!(on_demand(&ev).is_empty());
+        assert!(drawn(&mut ev).is_empty());
+        assert_eq!(proofreader.calls(), 0);
+
+        let text = ev.text();
+        ev.set_backend(BackendKind::Owned, &text);
+        assert_eq!(on_demand(&ev), [(0, 0..3), (1, 2..5)]);
+        assert_eq!(ev.marks_at(2), []);
+        ev.set_proofreader(None);
+        assert!(on_demand(&ev).is_empty());
+        assert!(drawn(&mut ev).is_empty());
+    }
+
+    #[test]
+    fn marks_follow_the_text_through_edits_undo_and_replacement() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh", "cta"]));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "the cat\r\nteh dog");
+        ev.set_proofreader(Some(proofreader));
+        let check = |ev: &mut EditorView, expected: &[(usize, Range<usize>)]| {
+            assert_eq!(on_demand(ev), expected, "{:?}", ev.text());
+            assert_eq!(drawn(ev), expected, "{:?}", ev.text());
+        };
+        check(&mut ev, &[(1, 0..3)]);
+        ev.move_cursor(at(0, 0));
+        assert!(ev.perform(Action::Edit(Edit::Paste(Arc::new("cta ".into())))));
+        check(&mut ev, &[(0, 0..3), (1, 0..3)]);
+        assert!(ev.intent(Intent::Enter));
+        check(&mut ev, &[(0, 0..3), (2, 0..3)]);
+        assert!(ev.undo());
+        check(&mut ev, &[(0, 0..3), (1, 0..3)]);
+        assert!(ev.undo());
+        check(&mut ev, &[(1, 0..3)]);
+        assert!(ev.redo());
+        check(&mut ev, &[(0, 0..3), (1, 0..3)]);
+        // A line turned into code loses its marks; the text is replaced.
+        ev.move_cursor(at(0, 0));
+        assert!(ev.perform(Action::Edit(Edit::Paste(Arc::new("    ".into())))));
+        check(&mut ev, &[(1, 0..3)]);
+        ev.replace_text("---\ntitle: teh\n---\nfine", false);
+        check(&mut ev, &[]);
+    }
+
+    #[test]
+    fn spell_frame_starts_empty() {
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "teh");
+        ev.set_proofreader(Some(Arc::new(fixtures::Rejects::new(&["teh"]))));
+        assert_eq!(ev.spell_frame(), SpellFrame::default());
+    }
 
     // ── Paste action type ────────────────────────────────────────────────────
 

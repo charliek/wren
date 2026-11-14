@@ -312,6 +312,45 @@ impl MarkdownHighlighter {
     }
 }
 
+/// The prose ranges of line `index` of `lines`, from a fresh highlighter run
+/// over the lines down to it, for a caller that cannot see the widget's own.
+/// Prose depends on neither colour nor font, so only `front_matter_end` of
+/// the widget's [`Settings`] matters. Empty past the last line.
+pub fn prose_at(
+    lines: &impl wren_markdown::Lines,
+    index: usize,
+    front_matter_end: Option<usize>,
+) -> Vec<Range<usize>> {
+    if index >= lines.line_count() {
+        return Vec::new();
+    }
+    let ink = Color::BLACK;
+    let mut highlighter = <MarkdownHighlighter as highlighter::Highlighter>::new(&Settings {
+        palette: Palette {
+            text: ink,
+            muted: ink,
+            faint: ink,
+            accent: ink,
+            heading: ink,
+            heading2: ink,
+            link: ink,
+            code: ink,
+            quote: ink,
+            completed: ink,
+        },
+        font: Font::DEFAULT,
+        front_matter_end,
+    });
+    for line in 0..=index {
+        let _ = highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(line));
+    }
+    highlighter
+        .decor
+        .pop()
+        .map(|decor| decor.prose)
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Per-line highlight computation
 // ---------------------------------------------------------------------------
@@ -2054,7 +2093,7 @@ mod tests {
 
     #[test]
     fn the_acceptance_note_has_the_prose_the_plan_expects() {
-        let note = "---\ntitle: Spel chek\n---\n# Spell chek plan\n\nMarks apear under prose as you type, and a\nright-click on one offers replacments.\n\n- Engine: `spelbook` with a bundeled dictionary\n- See [the desing note](https://example.com/spel) or <https://example.com/chek>\n- README, README's, PRs and v0.1.1 stay unmarked; CommonMark does not\n- Catppuccin and Catppuccin’s are in the word list; mail me@exmaple.com\n- and/or, #tagg, snake_case_nmae, un*believ*able and <kbd>Ctrll</kbd> are skipped\n- [x] A done task with a mispelled word\n- It doesn’t mark don't, well-known or a b c; it marks well-knwon\n\n> A quote with a misteak.\n\n```rust\nlet chek = speller.check(wrd);\n```\n\n[ref-labl]: https://example.com \"Titel\"\n";
+        let note = fixtures::SPELL_NOTE;
         let none: Vec<&str> = Vec::new();
         assert_eq!(
             prose_of(note),
