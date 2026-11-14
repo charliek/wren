@@ -56,15 +56,16 @@ fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
 }
 
 /// Where the editor sends a press of `trigger`. Without Markdown assist the
-/// editor commands are off, so their keys keep the editor's own meaning:
-/// Ctrl+Enter breaks the line and Alt+↑ moves up.
+/// Markdown commands are off, so their keys keep the editor's own meaning:
+/// Ctrl+Enter breaks the line and Alt+↑ moves up. The suggest key is the
+/// editor's either way.
 pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool) -> KeyRoute {
     match keymap.action(trigger).and_then(CommandId::parse) {
         None => KeyRoute::Pass,
-        Some(id) => match id.intent() {
+        Some(id) => match id.editor_route() {
             None => KeyRoute::Host,
-            Some(intent) if markdown_assist => KeyRoute::Intent(intent),
-            Some(_) => KeyRoute::Pass,
+            Some(KeyRoute::Intent(_)) if !markdown_assist => KeyRoute::Pass,
+            Some(route) => route,
         },
     }
 }
@@ -419,6 +420,14 @@ impl App {
         self.save_toggle("markdown-assist", if enabled { "on" } else { "off" })
     }
 
+    /// Flip `spell-check`, apply it, and save it. On the classic engine it
+    /// still flips, for when the advanced one is chosen.
+    pub(super) fn toggle_spell_check(&mut self) -> Gateway {
+        let enabled = !self.preferences.settings.spell_check;
+        self.preferences.settings.spell_check = enabled;
+        self.save_toggle("spell-check", if enabled { "on" } else { "off" })
+    }
+
     /// Move the editor to the other engine, keeping its text and cursor
     /// (undo history is dropped), and save the choice.
     pub(super) fn toggle_editor_engine(&mut self) -> Gateway {
@@ -453,6 +462,7 @@ impl App {
                 "off"
             }),
             CommandId::SwitchEngine => Some(settings.editor_engine.value()),
+            CommandId::ToggleSpellCheck => Some(if settings.spell_check { "on" } else { "off" }),
             _ => None,
         }
     }
@@ -484,10 +494,26 @@ impl App {
 
     /// Open `config.conf` in the user's editor, creating it from the template.
     pub(super) fn open_settings(&mut self) -> Gateway {
-        let Some(path) = self.preferences.path.clone() else {
+        self.open_user_file(|path| path.to_path_buf(), settings::ensure_exists)
+    }
+
+    /// Open `words.txt` beside `config.conf` in the user's editor, creating
+    /// it with a comment header (rule 4.5.3).
+    pub(super) fn open_words(&mut self) -> Gateway {
+        self.open_user_file(settings::words_path, settings::ensure_words_exist)
+    }
+
+    /// Open the file `locate` finds from the settings path in the user's
+    /// editor, after `ensure` has created it if need be.
+    fn open_user_file(
+        &mut self,
+        locate: fn(&Path) -> PathBuf,
+        ensure: fn(&Path) -> std::io::Result<()>,
+    ) -> Gateway {
+        let Some(path) = self.preferences.path.as_deref().map(locate) else {
             return self.blocked("No settings location is available (set HOME or WREN_CONFIG)");
         };
-        if let Err(error) = settings::ensure_exists(&path) {
+        if let Err(error) = ensure(&path) {
             return self.blocked(format!("Could not create {}: {error}", path.display()));
         }
         #[cfg(target_os = "macos")]

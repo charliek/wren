@@ -79,19 +79,21 @@ impl App {
                     // a focused editor sees it.
                     let keymap = &self.preferences.keymap;
                     let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
-                    let wren_editor::KeyRoute::Intent(intent) =
-                        super::preferences::key_route(
-                            keymap,
-                            trigger,
-                            self.editor.markdown_assist(),
-                        )
-                    else {
+                    let route = super::preferences::key_route(
+                        keymap,
+                        trigger,
+                        self.editor.markdown_assist(),
+                    );
+                    if !matches!(
+                        route,
+                        wren_editor::KeyRoute::Intent(_) | wren_editor::KeyRoute::Suggest
+                    ) {
                         return Err("The editor does not route this command's key".into());
-                    };
+                    }
                     let request = Arc::clone(request);
                     return Ok(iced::widget::operation::is_focused("note-editor").map(
                         move |focused| {
-                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(intent))
+                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(route))
                         },
                     ));
                 }

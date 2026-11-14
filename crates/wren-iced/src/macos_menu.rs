@@ -57,6 +57,7 @@ pub fn install(keymap: &Keymap) {
             &updates,
             &PredefinedMenuItem::separator(),
             &item("settings.open", "Settings…"),
+            &item("settings.open_words", "Spelling Word List…"),
             &item("theme.choose", "Change Theme…"),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::services(None),

@@ -115,7 +115,6 @@ impl Spelling {
     }
 
     /// Whether the dictionary has loaded.
-    #[cfg(test)]
     pub(super) fn ready(&self) -> bool {
         self.dictionary.is_some()
     }
@@ -267,6 +266,8 @@ mod tests {
     use wren_editor::SpellEvent;
 
     use crate::app::columns::Column;
+    use crate::app::commands::{Command, CommandId, Disposition};
+    use crate::app::palette::Key;
     use crate::app::Options;
 
     /// An app with one note open, `settings` in its `config.conf`, and
@@ -441,6 +442,218 @@ mod tests {
             .unwrap()
             .ends_with("line 2: not one word"));
         assert_eq!(app.banner.as_deref(), Some(both.as_str()));
+    }
+
+    fn run(app: &mut App, id: CommandId) -> Disposition {
+        let _ = app.update(Message::Command(Command::Run(id)));
+        app.last_processed.as_ref().unwrap().disposition
+    }
+
+    fn palette_row(app: &App, id: CommandId) -> (bool, Option<&'static str>) {
+        let row = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .results
+            .iter()
+            .find(|row| row.key == Key::Command(id))
+            .unwrap();
+        (row.enabled, app.command_state(id))
+    }
+
+    #[test]
+    fn the_suggest_command_needs_the_advanced_engine_the_setting_the_dictionary_and_a_note() {
+        let (directory, mut app) = spell_app(ADVANCED, "A mispelled word\n", None);
+        let config = directory.path().join("config/config.conf");
+        assert!(!app.command_enabled(CommandId::SpellSuggest));
+        load(&mut app);
+        assert!(app.command_enabled(CommandId::SpellSuggest));
+        for id in [CommandId::ToggleSpellCheck, CommandId::OpenWords] {
+            assert!(app.command_enabled(id));
+        }
+        std::fs::write(&config, "editor-engine = advanced\nspell-check = off\n").unwrap();
+        let _ = app.reload_settings(false);
+        assert!(!app.command_enabled(CommandId::SpellSuggest));
+        std::fs::write(&config, "").unwrap();
+        let _ = app.reload_settings(false);
+        assert!(!app.command_enabled(CommandId::SpellSuggest));
+        std::fs::write(&config, ADVANCED).unwrap();
+        let _ = app.reload_settings(false);
+        assert!(app.command_enabled(CommandId::SpellSuggest));
+        let _ = app.process_core(Op::OpenNote { note: None });
+        assert!(!app.command_enabled(CommandId::SpellSuggest));
+        assert_eq!(run(&mut app, CommandId::SpellSuggest), Disposition::Blocked);
+        for id in [CommandId::ToggleSpellCheck, CommandId::OpenWords] {
+            assert!(app.command_enabled(id));
+        }
+    }
+
+    #[test]
+    fn suggest_from_the_palette_closes_it_focuses_the_editor_and_then_opens_the_menu() {
+        let (_directory, mut app) = spell_app(ADVANCED, "A mispelled word\n", None);
+        load(&mut app);
+        let cursor = caret(&mut app, 0, 11);
+        app.column = Column::Notes;
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        assert_eq!(palette_row(&app, CommandId::SpellSuggest), (true, None));
+        let outcome = app.dispatch(Command::Run(CommandId::SpellSuggest));
+        assert_eq!(outcome.processed.disposition, Disposition::Completed);
+        assert!(app.palette.is_none());
+        assert_eq!(app.column, Column::Editor);
+        // The focus operation comes first; the menu opens on the message
+        // chained after it.
+        assert!(outcome.task.units() >= 2);
+        assert!(app.editor.spell_menu().is_none());
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+        assert_eq!(app.editor.cursor(), cursor);
+
+        // With no misspelled word at the caret it does nothing.
+        let _ = app.update(Message::Escape);
+        let _ = caret(&mut app, 0, 0);
+        assert_eq!(
+            run(&mut app, CommandId::SpellSuggest),
+            Disposition::Completed
+        );
+        assert_eq!(open(&mut app), None);
+        assert_eq!(app.editor.text(), "A mispelled word\n");
+    }
+
+    #[test]
+    fn the_toggle_flips_saves_and_applies_the_setting_and_its_row_shows_it() {
+        let (directory, mut app) = spell_app(
+            "# mine\neditor-engine = advanced\n",
+            "A mispelled word\n",
+            None,
+        );
+        let config = directory.path().join("config/config.conf");
+        load(&mut app);
+        let _ = caret(&mut app, 0, 4);
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        assert_eq!(
+            palette_row(&app, CommandId::ToggleSpellCheck),
+            (true, Some("on"))
+        );
+        assert_eq!(
+            run(&mut app, CommandId::ToggleSpellCheck),
+            Disposition::Completed
+        );
+        assert!(app.palette.is_none());
+        assert!(app.editor.spell_menu().is_none());
+        assert!(app.wanted_proofreader().is_none());
+        assert_eq!(app.command_state(CommandId::ToggleSpellCheck), Some("off"));
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "# mine\neditor-engine = advanced\nspell-check = off\n"
+        );
+        assert_eq!(open(&mut app), None);
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        assert_eq!(
+            palette_row(&app, CommandId::ToggleSpellCheck),
+            (true, Some("off"))
+        );
+        assert_eq!(
+            run(&mut app, CommandId::ToggleSpellCheck),
+            Disposition::Completed
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "# mine\neditor-engine = advanced\nspell-check = on\n"
+        );
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+
+        // On the classic engine it still flips and saves.
+        let _ = app.update(Message::Escape);
+        assert_eq!(
+            run(&mut app, CommandId::SwitchEngine),
+            Disposition::Completed
+        );
+        assert_eq!(
+            run(&mut app, CommandId::ToggleSpellCheck),
+            Disposition::Completed
+        );
+        assert!(!app.preferences.settings.spell_check);
+        assert!(std::fs::read_to_string(&config)
+            .unwrap()
+            .ends_with("spell-check = off\n"));
+    }
+
+    #[test]
+    fn the_toggle_applies_with_nowhere_to_save_and_the_word_list_has_nowhere_to_open() {
+        let options = Options {
+            editor: true,
+            ..Options::default()
+        };
+        let (mut app, _) = App::with_config(options, None, None);
+        assert_eq!(
+            run(&mut app, CommandId::ToggleSpellCheck),
+            Disposition::Completed
+        );
+        assert!(!app.preferences.settings.spell_check);
+        assert_eq!(run(&mut app, CommandId::OpenWords), Disposition::Blocked);
+        let blocked = app.last_processed.as_ref().unwrap().warning.clone();
+        assert_eq!(run(&mut app, CommandId::OpenSettings), Disposition::Blocked);
+        assert_eq!(app.last_processed.as_ref().unwrap().warning, blocked);
+    }
+
+    #[test]
+    fn a_word_list_warning_survives_the_next_saved_toggle() {
+        let (directory, mut app) = spell_app(ADVANCED, "text\n", Some("not one\n"));
+        load(&mut app);
+        let words = directory.path().join("config/words.txt");
+        let warning = format!("{}: line 1: not one word", words.display());
+        assert_eq!(
+            run(&mut app, CommandId::ToggleSpellCheck),
+            Disposition::CommittedWarning
+        );
+        assert_eq!(
+            app.last_processed.as_ref().unwrap().warning.as_deref(),
+            Some(warning.as_str())
+        );
+        assert_eq!(app.banner.as_deref(), Some(warning.as_str()));
+    }
+
+    #[test]
+    fn the_suggest_key_routes_to_the_editor_with_or_without_markdown_assist() {
+        use iced::keyboard::{Key as Pressed, Modifiers};
+        use wren_core::keybind::Platform;
+        use wren_editor::KeyRoute;
+
+        let (_directory, mut app) = spell_app(ADVANCED, "A mispelled word\n", None);
+        let keymap = app.preferences.keymap.clone();
+        let trigger = keymap.accel(CommandId::SpellSuggest.key()).unwrap().clone();
+        assert_eq!(trigger.key, ".");
+        for assist in [true, false] {
+            assert_eq!(
+                super::super::preferences::key_route(&keymap, &trigger, assist),
+                KeyRoute::Suggest
+            );
+        }
+        let modifiers = match Platform::current() {
+            Platform::Mac => Modifiers::LOGO,
+            Platform::Linux => Modifiers::ALT,
+        };
+        let press = Pressed::Character(".".into());
+        let editor = |app: &App| {
+            app.editor
+                .key_message(press.clone(), modifiers)
+                .into_iter()
+                .map(|message| format!("{message:?}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(editor(&app), ["Spell(OpenAtCaret)"]);
+        let _ = app.update(Message::Command(Command::Run(
+            CommandId::ToggleMarkdownAssist,
+        )));
+        assert!(!app.editor.markdown_assist());
+        assert_eq!(editor(&app), ["Spell(OpenAtCaret)"]);
+
+        // The app leaves the key to the editor, so it never acts twice or
+        // outside the editor.
+        load(&mut app);
+        let _ = caret(&mut app, 0, 4);
+        let _ = app.update(crate::app::preferences::shortcut(CommandId::SpellSuggest));
+        assert!(app.editor.spell_menu().is_none());
     }
 
     #[test]

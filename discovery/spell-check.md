@@ -649,6 +649,14 @@ Checked live as well as by the unit tests, on X11 with tiny-skia, through a temp
 6. *A dictionary that fails to load* (it is bundled, so only a broken build) shows `Spell check is unavailable: …` in the banner, and there is no proofreader.
 7. *`App::edit`'s `Spell` arm makes the editor the active column only for `OpenAtCaret`, `OpenAt` and `Accept`.* The widget publishes `Close` for a press outside the editor too, and that press may choose another column; `Move` and `Hover` change nothing about where the keyboard is. `OpenAt` also returns the focus operation for `note-editor` (§7.5 `spell-menu` item 21); the unit test checks that the task exists, and the real-window check (the find field keeping no key) is W4's.
 
+*W2, the commands and the key.* Where §4.5 or §5.2 left a case open:
+
+8. *`CommandId::editor_route()` replaces `intent()` in the public use*: the Markdown commands route to `KeyRoute::Intent`, `editor.spell_suggest` to `KeyRoute::Suggest`; `intent()` stays as the private half. The rule test is now `editor_scoped_commands_are_exactly_those_with_an_editor_route`.
+9. *`editor.spell_suggest` from the palette* goes back to the editor as the Markdown commands do (`return_to_editor`, which also unfolds a folded browser), then chains `Message::Editor(Spell(OpenAtCaret))` after the focus operation. It reports `completed` whether or not a word was at the caret.
+10. *`settings.open_words` creates `words.txt` with `create_new`*, after creating the directory, so it never replaces a file that appeared in between; it fails, with `settings.open`'s `Could not create …` message, when the path is a directory. Opening is shared with `settings.open`. The menu-bar item reads "Spelling Word List…".
+11. *`config.conf`'s template documents `spell-check`* with the suggest key and `words.txt`.
+12. *`test_navigation.py` expects the toggle's state to be `on`*, the build's default, because the harness writes no `spell-check` line before W4; W4 makes it the lane's value.
+
 #### The end review
 
 #### The join

@@ -179,12 +179,12 @@ pub enum Message {
         std::sync::Arc<crate::test_ipc::Request>,
         Result<serde_json::Value, String>,
     ),
-    /// An editor command's shortcut, as the editor widget publishes it:
-    /// `Some` only while the editor has the keyboard.
+    /// An editor command's shortcut, routed as the editor widget routes
+    /// it: `Some` only while the editor has the keyboard.
     #[cfg(feature = "smoke-test")]
     EditorShortcut(
         std::sync::Arc<crate::test_ipc::Request>,
-        Option<wren_editor::Intent>,
+        Option<wren_editor::KeyRoute>,
     ),
 }
 
@@ -381,10 +381,18 @@ impl App {
             #[cfg(feature = "smoke-test")]
             Message::Reply(request, result) => request.respond(result),
             #[cfg(feature = "smoke-test")]
-            Message::EditorShortcut(request, intent) => {
-                let task = intent.map_or_else(Task::none, |intent| {
-                    self.update(Message::Editor(wren_editor::Message::Intent(intent)))
-                });
+            Message::EditorShortcut(request, route) => {
+                let message = match route {
+                    Some(wren_editor::KeyRoute::Intent(intent)) => {
+                        Some(wren_editor::Message::Intent(intent))
+                    }
+                    Some(wren_editor::KeyRoute::Suggest) => Some(wren_editor::Message::Spell(
+                        wren_editor::SpellEvent::OpenAtCaret,
+                    )),
+                    Some(wren_editor::KeyRoute::Host | wren_editor::KeyRoute::Pass) | None => None,
+                };
+                let task = message
+                    .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
                 request.respond(Ok(self.navigation_snapshot()));
                 return task;
             }
