@@ -9,10 +9,10 @@ use crate::edit::{
     because, copies, fragment, on_top, saturate, trim_label, Area, Change, Fragment, Layout, Plan,
 };
 use crate::ids::{fresh, Ids};
-use crate::scene::MAX_LABEL_BYTES;
+use crate::scene::{Source, MAX_LABEL_BYTES};
 use crate::z::Element;
 use crate::{
-    access, parse, placements, snap, write, Access, Board, End, Extra, Id, Named, Node, NodeKind,
+    access, parse, placements, snap, write, Access, Board, End, Extra, Named, Node, NodeKind,
     NodeStyle, Shape, GRID,
 };
 
@@ -20,20 +20,41 @@ use crate::{
 /// file.
 pub const HEADER: &str = "# wren-board fragment 1";
 
-/// The clipboard text for the selection `ids` (§5.10 rules 2 and 4), or
-/// `None` when the selection holds no node, which leaves nothing to copy.
+/// The clipboard text for the selection `ids` (§5.10 rules 2 and 4), each
+/// element named with its kind, or `None` when the selection holds no node,
+/// which leaves nothing to copy.
 ///
 /// A node whose parent is outside the fragment is written at the top level
 /// at its absolute place. Each scope is keyed afresh in the source's
 /// drawing order, so the fragment stacks as the copied elements did. The
 /// fragment keeps the source's `schema` and `requires`, so a build that may
 /// not edit the source cannot paste what came from it either.
-pub fn copy(board: &Board, ids: &[Id]) -> Option<String> {
+pub fn copy(board: &Board, ids: &[Source]) -> Option<String> {
     let part = fragment(board, ids);
     if part.nodes.is_empty() {
         return None;
     }
-    let layout = Layout::of(board, &part);
+    Some(text(board, &part))
+}
+
+/// What cutting the selection `ids` does (§5.10 rule 5): the clipboard text
+/// of [`copy`], and the elements to delete, which are the fragment's own.
+/// Deleting them also takes every connector attached to a removed node
+/// (rule 1); a selected connector the fragment leaves out stays on the
+/// board. `None` when the selection holds no node.
+pub fn cut(board: &Board, ids: &[Source]) -> Option<(String, Vec<Source>)> {
+    let part = fragment(board, ids);
+    if part.nodes.is_empty() {
+        return None;
+    }
+    let nodes = part.nodes.iter().cloned().map(Source::Node);
+    let removed = nodes.chain(part.edges.iter().cloned().map(Source::Edge));
+    Some((text(board, &part), removed.collect()))
+}
+
+/// The clipboard text for the fragment `part` of `board`.
+fn text(board: &Board, part: &Fragment) -> String {
+    let layout = Layout::of(board, part);
     let roots = layout
         .order
         .iter()
@@ -62,7 +83,7 @@ pub fn copy(board: &Board, ids: &[Id]) -> Option<String> {
             }
         }
     }
-    Some(format!("{HEADER}\n{}", write(&out)))
+    format!("{HEADER}\n{}", write(&out))
 }
 
 /// Text from outside Wren as a label (§5.10 rule 9): line breaks as LF,
@@ -255,7 +276,7 @@ fn centre(view: Area) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::tests::{ids, line_diff, Listed, BOARD};
+    use crate::edit::tests::{edges, ids, line_diff, nodes, Listed, BOARD, FREE_ENDS};
     use crate::edit::{plan, Intent};
     use crate::fixtures::Rng;
     use crate::ids::Seeded;
@@ -297,7 +318,7 @@ mod tests {
     #[test]
     fn a_copy_is_a_header_and_a_board_file() {
         let board = parse(BOARD).unwrap();
-        let text = copy(&board, &ids(&["a"])).unwrap();
+        let text = copy(&board, &nodes(&["a"])).unwrap();
         assert_eq!(
             text,
             "# wren-board fragment 1\nschema = 1\n\n\
@@ -311,16 +332,90 @@ mod tests {
         assert_eq!(write(&parse(rest).unwrap()), rest, "canonical");
         // A child copied without its parent is written at its absolute
         // place at the top level.
-        let text = copy(&board, &ids(&["b"])).unwrap();
+        let text = copy(&board, &nodes(&["b"])).unwrap();
         assert!(text.contains("at = [20, 20]\nsize") && !text.contains("parent"));
         // No node, no fragment.
-        assert_eq!(copy(&board, &ids(&["e", "f", "gone"])), None);
+        let unnoded = [edges(&["e", "f"]), nodes(&["gone"])].concat();
+        assert_eq!(copy(&board, &unnoded), None);
+    }
+
+    /// The clipboard carries a connector with two free ends when it is
+    /// selected as a connector, and never through a node of the same id
+    /// (§5.10 rule 2).
+    #[test]
+    fn a_copy_takes_a_free_connector_only_when_it_is_selected() {
+        let board = parse(FREE_ENDS).unwrap();
+        let a =
+            "[node.a]\ntext = \"A\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n";
+        // (a) A node and a selected free-ended connector.
+        let picked = [nodes(&["a"]), edges(&["x"])].concat();
+        assert_eq!(
+            copy(&board, &picked).unwrap(),
+            format!(
+                "{HEADER}\nschema = 1\n\n{a}\n\
+                 [edge.x]\nkind = \"edge\"\nfrom = {{ at = [400, 0] }}\nto = {{ at = [400, 200] }}\n\
+                 labels = [\n  {{ text = \"Free\" }},\n]\nz = \"V01\"\n"
+            )
+        );
+        // (b) The connector alone: no node, nothing to copy.
+        assert_eq!(copy(&board, &edges(&["x"])), None);
+        assert_eq!(copy(&board, &edges(&["shared"])), None);
+        // (c) The node `shared` alone leaves the connector `shared`.
+        assert_eq!(
+            copy(&board, &nodes(&["shared"])).unwrap(),
+            format!(
+                "{HEADER}\nschema = 1\n\n\
+                 [node.shared]\ntext = \"Node shared\"\nkind = \"shape\"\nat = [0, 300]\n\
+                 size = [120, 60]\nz = \"V\"\n"
+            )
+        );
+    }
+
+    /// Cut deletes what it copies: a selected connector the fragment leaves
+    /// out is not among the elements it removes (§5.10 rule 5). The
+    /// connectors attached to a removed node go with it in the delete.
+    #[test]
+    fn a_cut_removes_only_the_fragment() {
+        let board = parse(
+            "schema = 1\n\n\
+             [node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"a\"\n\n\
+             [node.b]\nkind = \"shape\"\nat = [0, 200]\nsize = [120, 60]\nz = \"b\"\n\n\
+             [node.c]\nkind = \"shape\"\nat = [300, 0]\nsize = [120, 60]\nz = \"c\"\n\n\
+             [edge.ab]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\nz = \"d\"\n\n\
+             [edge.bc]\nkind = \"edge\"\nfrom = { node = \"b\" }\nto = { node = \"c\" }\nz = \"e\"\n\n\
+             [edge.cf]\nkind = \"edge\"\nfrom = { node = \"c\" }\nto = { at = [600, 0] }\nz = \"f\"\n\n\
+             [edge.ff]\nkind = \"edge\"\nfrom = { at = [600, 200] }\nto = { at = [600, 400] }\nz = \"g\"\n",
+        )
+        .unwrap();
+        let cases = [
+            // A connector between two nodes that stay.
+            ([nodes(&["a"]), edges(&["bc"])].concat(), nodes(&["a"])),
+            // A connector with one free end, its node staying.
+            ([nodes(&["a"]), edges(&["cf"])].concat(), nodes(&["a"])),
+            // One end on a cut node, the other on a node that stays: the
+            // delete takes it with `a`, and the paste cannot give it back.
+            ([nodes(&["a"]), edges(&["ab"])].concat(), nodes(&["a"])),
+            (
+                [nodes(&["a", "b"]), edges(&["ff"])].concat(),
+                [nodes(&["a", "b"]), edges(&["ab", "ff"])].concat(),
+            ),
+            (
+                [nodes(&["c"]), edges(&["cf"])].concat(),
+                [nodes(&["c"]), edges(&["cf"])].concat(),
+            ),
+        ];
+        for (picked, removed) in cases {
+            let (text, taken) = cut(&board, &picked).unwrap();
+            assert_eq!(Some(text), copy(&board, &picked), "{picked:?}");
+            assert_eq!(taken, removed, "{picked:?}");
+        }
+        assert_eq!(cut(&board, &edges(&["ff"])), None);
     }
 
     #[test]
     fn a_copy_keeps_what_the_source_requires() {
         let board = parse("schema = 1\nrequires = [\"frames\"]\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [20, 20]\nz = \"V\"\n").unwrap();
-        let text = copy(&board, &ids(&["a"])).unwrap();
+        let text = copy(&board, &nodes(&["a"])).unwrap();
         assert!(text.starts_with("# wren-board fragment 1\nschema = 1\nrequires = [\"frames\"]\n"));
         let mut target = parse(BOARD).unwrap();
         let plan = pasted(
@@ -349,7 +444,7 @@ mod tests {
     #[test]
     fn pasting_twice_into_the_source_steps_a_cell_each_time() {
         let mut board = parse(BOARD).unwrap();
-        let text = copy(&board, &ids(&["a"])).unwrap();
+        let text = copy(&board, &nodes(&["a"])).unwrap();
         let mut source = Listed(vec!["p1", "p2", "p3", "q1", "q2", "q3"]);
         let first = pasted(&mut board, &paste_intent(&text, 1, VIEW), &mut source);
         assert_eq!(first.select, Some(ids(&["p1", "p2", "p3"])));
@@ -399,7 +494,7 @@ mod tests {
     #[test]
     fn pasted_ids_are_new_even_where_every_copied_id_is_taken() {
         let mut board = parse(BOARD).unwrap();
-        let text = copy(&board, &ids(&["a", "c"])).unwrap();
+        let text = copy(&board, &nodes(&["a", "c"])).unwrap();
         // The source draws the copied ids first; each is taken.
         let mut source = Listed(vec![
             "a", "b", "c", "e", "f", "t", "n1", "n2", "n3", "n4", "n5",
@@ -453,7 +548,7 @@ mod tests {
     #[test]
     fn a_fragment_out_of_view_is_centred_in_it() {
         let mut board = parse(BOARD).unwrap();
-        let text = copy(&board, &ids(&["b"])).unwrap();
+        let text = copy(&board, &nodes(&["b"])).unwrap();
         let view = Area {
             at: [1000, 1000],
             size: [610, 400],
@@ -537,7 +632,7 @@ mod tests {
             assert_eq!(is_fragment(text), fragment, "{text:?}");
         }
         let mut board = parse(BOARD).unwrap();
-        let text = copy(&board, &ids(&["t"])).unwrap().replace('\n', "\r\n");
+        let text = copy(&board, &nodes(&["t"])).unwrap().replace('\n', "\r\n");
         let plan = pasted(
             &mut board,
             &paste_intent(&text, 1, VIEW),
@@ -552,7 +647,7 @@ mod tests {
     /// pastes leaves a board that writes, reads back, and has no new issue.
     fn pastes_hold(count: usize, seed: u64) {
         let board = parse(BOARD).unwrap();
-        let copied = copy(&board, &ids(&["a", "c", "t"])).unwrap();
+        let copied = copy(&board, &nodes(&["a", "c", "t"])).unwrap();
         let pieces = [
             "\n",
             "\r",

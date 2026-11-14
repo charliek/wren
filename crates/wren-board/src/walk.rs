@@ -7,7 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::place::{boxes, node_of, Bounds};
-use crate::{scene, Board, Dir, Id, Side};
+use crate::scene::{self, Source};
+use crate::{Board, Dir, Id, Side};
 
 /// The element an arrow key selects from the element `from` going `dir`,
 /// or `None` when nothing lies that way (§5.7 rules 1 and 2).
@@ -23,13 +24,17 @@ use crate::{scene, Board, Dir, Id, Side};
 ///
 /// From a connector, the end node that lies further that way, by centre;
 /// the `from` end on a tie, and the one end that names a node when the
-/// other does not. An id that names both a node and a connector walks
-/// from the node.
-pub fn next(board: &Board, from: &Id, dir: Dir) -> Option<Id> {
+/// other does not. `from` is named with its kind, since a node and a
+/// connector may share an id (§4.12).
+pub fn next(board: &Board, from: &Source, dir: Dir) -> Option<Id> {
     let boxes = boxes(board);
-    if let Some(&origin) = boxes.get(from.as_str()) {
-        return from_node(board, &boxes, from, origin, dir);
-    }
+    let from = match from {
+        Source::Node(id) => {
+            let &origin = boxes.get(id.as_str())?;
+            return from_node(board, &boxes, id, origin, dir);
+        }
+        Source::Edge(id) => id,
+    };
     let edge = board.edges.get(from)?;
     let end = |end| {
         let (id, _) = board.nodes.get_key_value(node_of(end)?)?;
@@ -221,10 +226,10 @@ mod tests {
             ],
             &[],
         );
-        assert_eq!(next(&g, &id("a"), Dir::Down), Some(id("b")));
-        assert_eq!(next(&g, &id("b"), Dir::Up), Some(id("a")));
+        assert_eq!(next(&g, &Source::Node(id("a")), Dir::Down), Some(id("b")));
+        assert_eq!(next(&g, &Source::Node(id("b")), Dir::Up), Some(id("a")));
         // Nothing lies to the left.
-        assert_eq!(next(&g, &id("a"), Dir::Left), None);
+        assert_eq!(next(&g, &Source::Node(id("a")), Dir::Left), None);
     }
 
     #[test]
@@ -237,9 +242,12 @@ mod tests {
             ("r", [280, -200], S, ""),
         ];
         let joined = board(&nodes, &[("e", "{ node = \"p\" }", "{ node = \"q\" }")]);
-        assert_eq!(next(&joined, &id("q"), Dir::Up), Some(id("p")));
+        assert_eq!(
+            next(&joined, &Source::Node(id("q")), Dir::Up),
+            Some(id("p"))
+        );
         let apart = board(&nodes, &[]);
-        assert_eq!(next(&apart, &id("q"), Dir::Up), Some(id("r")));
+        assert_eq!(next(&apart, &Source::Node(id("q")), Dir::Up), Some(id("r")));
     }
 
     #[test]
@@ -251,13 +259,13 @@ mod tests {
         // Tier 3: past the edge but more across than along.
         let three = ("t3", [600, 80], S, "");
         let g = board(&[o, three, two], &[]);
-        assert_eq!(next(&g, &id("o"), Dir::Down), Some(id("t2")));
+        assert_eq!(next(&g, &Source::Node(id("o")), Dir::Down), Some(id("t2")));
         let g = board(&[o, three], &[]);
-        assert_eq!(next(&g, &id("o"), Dir::Down), Some(id("t3")));
+        assert_eq!(next(&g, &Source::Node(id("o")), Dir::Down), Some(id("t3")));
         // Ahead by centre but neither past the edge nor in the cone: no
         // candidate.
         let g = board(&[o, ("x", [600, 10], S, "")], &[]);
-        assert_eq!(next(&g, &id("o"), Dir::Down), None);
+        assert_eq!(next(&g, &Source::Node(id("o")), Dir::Down), None);
     }
 
     #[test]
@@ -270,7 +278,7 @@ mod tests {
             ],
             &[],
         );
-        assert_eq!(next(&g, &id("o"), Dir::Down), Some(id("k")));
+        assert_eq!(next(&g, &Source::Node(id("o")), Dir::Down), Some(id("k")));
     }
 
     #[test]
@@ -283,19 +291,34 @@ mod tests {
                 ("g", "{ at = [0, 0] }", "{ at = [9, 9] }"),
             ],
         );
-        assert_eq!(next(&g, &id("e"), Dir::Left), Some(id("a")));
-        assert_eq!(next(&g, &id("e"), Dir::Right), Some(id("b")));
-        assert_eq!(next(&g, &id("e"), Dir::Up), Some(id("a")));
-        assert_eq!(next(&g, &id("e"), Dir::Down), Some(id("b")));
-        assert_eq!(next(&g, &id("f"), Dir::Right), Some(id("a")));
-        assert_eq!(next(&g, &id("g"), Dir::Right), None);
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Left), Some(id("a")));
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Right), Some(id("b")));
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Up), Some(id("a")));
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Down), Some(id("b")));
+        assert_eq!(next(&g, &Source::Edge(id("f")), Dir::Right), Some(id("a")));
+        assert_eq!(next(&g, &Source::Edge(id("g")), Dir::Right), None);
         // A tie goes to the `from` end.
         let g = board(
             &[("a", [0, 0], S, ""), ("b", [0, 200], S, "")],
             &[("e", "{ node = \"b\" }", "{ node = \"a\" }")],
         );
-        assert_eq!(next(&g, &id("e"), Dir::Left), Some(id("b")));
-        assert_eq!(next(&g, &id("gone"), Dir::Left), None);
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Left), Some(id("b")));
+        assert_eq!(next(&g, &Source::Node(id("gone")), Dir::Left), None);
+        assert_eq!(next(&g, &Source::Edge(id("gone")), Dir::Left), None);
+        // An id that names a node and a connector (§4.12) walks from the
+        // one named: below the node `e` there is nothing, and the
+        // connector `e` leads to its ends.
+        let g = board(
+            &[
+                ("a", [0, 0], S, ""),
+                ("b", [300, 0], S, ""),
+                ("e", [0, 400], S, ""),
+            ],
+            &[("e", "{ node = \"a\" }", "{ node = \"b\" }")],
+        );
+        assert_eq!(next(&g, &Source::Node(id("e")), Dir::Down), None);
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Down), Some(id("a")));
+        assert_eq!(next(&g, &Source::Edge(id("e")), Dir::Right), Some(id("b")));
     }
 
     #[test]
@@ -304,7 +327,7 @@ mod tests {
                     [node.c]\nkind = \"shape\"\nat = [20, 20]\nparent = \"p\"\nsize = [120, 60]\nz = \"V\"\n\n\
                     [node.d]\nkind = \"shape\"\nat = [1020, 600]\nsize = [120, 60]\nz = \"V\"\n";
         let g = parse(text).unwrap();
-        assert_eq!(next(&g, &id("d"), Dir::Up), Some(id("c")));
+        assert_eq!(next(&g, &Source::Node(id("d")), Dir::Up), Some(id("c")));
     }
 
     #[test]

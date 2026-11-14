@@ -152,7 +152,8 @@ impl Driver {
                 _ => {
                     let dir = arrow(key).unwrap_or_else(|| panic!("{key} while connecting"));
                     let source = self.one_node().unwrap();
-                    let next = walk::next(&self.board, target.as_ref().unwrap_or(&source), dir);
+                    let from = Source::Node(target.clone().unwrap_or(source));
+                    let next = walk::next(&self.board, &from, dir);
                     self.state = State::Connecting {
                         target: next.or(target),
                         query: String::new(),
@@ -202,7 +203,10 @@ impl Driver {
             ("", name) => {
                 let dir = arrow(name).unwrap_or_else(|| panic!("unbound key {key}"));
                 let next = match self.one() {
-                    Some(from) => walk::next(&self.board, from, dir),
+                    Some(from) => {
+                        let from = Source::of(&self.board, from).expect("a selected element");
+                        walk::next(&self.board, &from, dir)
+                    }
                     None => self.cursor.clone().or_else(|| walk::first(&self.board)),
                 };
                 if let Some(next) = next {

@@ -40,8 +40,16 @@ COMMANDS = {
     "edit.move_line_up", "edit.move_line_down",
     "editor.toggle_markdown_assist", "editor.toggle_engine",
 }
-# Listed only with the `boards` setting on, and never enabled on a Markdown note.
-BOARD_COMMANDS = {"note.export_svg"} if os.environ.get("WRENTEST_BOARDS") == "on" else set()
+# The commands outside a board that exist only with the `boards` setting on
+# (plan §5.19; the `board.*` commands are listed only on a board), each with
+# where it is enabled: "board" only on a board's surface, "group" wherever a
+# group is selected, as `note.new` is (§5.4 rule 8). A command a phase adds
+# that the palette lists here, and that neither table names, fails the
+# catalog test by name.
+BOARD_COMMANDS = {
+    "note.export_svg": "board",
+    "note.new_board": "group",
+}
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
@@ -248,10 +256,21 @@ def unwritable(directory: Path):
 def test_full_command_catalog_and_context_availability(vault: Path) -> None:
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory("navigation-catalog")) as app:
         jump(app, FIRST)
+        # The setting as the app read it, so the expectation follows the app
+        # and a run that asked for one value cannot pass with the other.
+        boards = app.client.call("board.get")["enabled"]
+        if os.environ.get("WRENTEST_BOARDS"):
+            assert boards is (os.environ["WRENTEST_BOARDS"] == "on")
+        expected = COMMANDS | (set(BOARD_COMMANDS) if boards else set())
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
-        assert set(by_id) == COMMANDS | BOARD_COMMANDS
-        assert len(rows) == len(COMMANDS | BOARD_COMMANDS)
+        unexpected = sorted(set(by_id) - expected)
+        assert not unexpected, (
+            f"listed with boards={'on' if boards else 'off'} but not expected: {unexpected}; name each "
+            "in COMMANDS, or in BOARD_COMMANDS with where it is enabled if the setting gates it")
+        missing = sorted(expected - set(by_id))
+        assert not missing, f"expected with boards={'on' if boards else 'off'} but not listed: {missing}"
+        assert len(rows) == len(expected)
         assert {row["group"] for row in rows} == {"This note", "Markdown", "Go", "View", "Workspace",
                                                    "App"}
         assert all(row["title"] for row in rows)
@@ -261,8 +280,15 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
         assert by_id["note.open_conflict"]["enabled"] is False
-        for key in BOARD_COMMANDS:
-            assert by_id[key]["enabled"] is False, key
+        # A Markdown note is open in a group: a new board can be made here,
+        # and nothing is exported.
+        for key, where in BOARD_COMMANDS.items():
+            if boards:
+                assert by_id[key]["enabled"] is (where == "group"), key
+            else:
+                # Neither listed nor runnable from any path (§5.19).
+                command(app, key, disposition="blocked")
+                assert navigation(app)["dialog"] is None
         before = session(app)["document"]
         command(app, "navigation.forward", disposition="blocked")
         assert session(app)["document"] == before
@@ -279,6 +305,10 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is False, key
         for key in ("group.new", "section.rename"):
             assert by_id[key]["enabled"] is True, key
+        assert set(by_id) == expected
+        # No group is selected: a board can be neither made nor exported.
+        for key in BOARD_COMMANDS if boards else ():
+            assert by_id[key]["enabled"] is False, key
         activate(app, {"command": "note.rename"}, disposition="blocked")
         assert navigation(app)["dialog"] is None
         assert session(app)["document"] is None
@@ -811,8 +841,11 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
             blocked = response["navigation"]["processed"]
             assert "injected storage failure" in blocked["warning"]
         assert blocked["correlation"] > nav_before["processed"]["correlation"]
-        app.client.call("test.timer.hold", {"held": False})
-        # Freeze only subsequent timer retries, after the injected write was reached.
+        # The timer stays held until the explicit retry has run: autosave
+        # retries a failed write once its backoff has passed, and a retry
+        # here would replace the injected error with the real one, or save
+        # the draft before the explicit retry is what recovers. The folder
+        # is read-only besides, so nothing else may write it either.
         with unwritable(source.parent):
             after = session(app)
             assert after["root"] == before["root"]
@@ -833,6 +866,7 @@ def test_failed_write_blocks_each_navigation_gateway_and_explicit_retry_recovers
         core(app, "flush")
         assert source.read_bytes() == expected.encode()
         assert session(app)["document"]["dirty"] is False
+        app.client.call("test.timer.hold", {"held": False})
         if request[0] == "core.apply":
             app.client.call(*request)
             assert navigation(app)["processed"]["disposition"] == "completed"

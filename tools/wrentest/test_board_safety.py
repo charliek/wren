@@ -9,6 +9,7 @@ sequence that leaves nothing changed writes nothing.
 from __future__ import annotations
 
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from tools.wrentest.test_board_view import focused, wait_focus
 from tools.wrentest.ui import WrenApp, wait_for
 
 PACK = "3qrg4kv1"
+HEADER = "# wren-board fragment 1"
 
 
 @pytest.fixture
@@ -254,3 +256,159 @@ def test_a_connector_named_as_a_node_is_acted_on_alone(samples: Path) -> None:
         assert state["counts"] == {"nodes": 3, "edges": 0}, state
         flushed(app)
     assert blocks(path.read_bytes()) == ["[node.a]", "[node.kid]", "[node.shared]"]
+
+
+# A node beside a connector with two free ends, and a node that shares a
+# free-ended connector's id (§4.12).
+FREE_ENDS = (
+    'schema = 1\n\n[node.a]\ntext = "A"\nkind = "shape"\nat = [0, 0]\nsize = [120, 60]\nz = "V"\n\n'
+    '[node.shared]\ntext = "Node shared"\nkind = "shape"\nat = [0, 300]\nsize = [120, 60]\nz = "W"\n\n'
+    '[edge.shared]\nkind = "edge"\nfrom = { at = [400, 300] }\nto = { at = [400, 500] }\n'
+    'labels = [\n  { text = "Edge shared" },\n]\nz = "X"\n\n'
+    '[edge.x]\nkind = "edge"\nfrom = { at = [400, 0] }\nto = { at = [400, 200] }\n'
+    'labels = [\n  { text = "Free" },\n]\nz = "Y"\n'
+)
+
+
+def clipboard(app: WrenApp) -> None:
+    """Headless Weston gives the app no clipboard; there it keeps its own."""
+    app.client.call("clipboard.write", {"text": "probe"})
+    try:
+        wait_for(lambda: app.client.call("clipboard.read") == "probe", timeout=2,
+                 interval=0.05, description="the clipboard")
+    except TimeoutError:
+        app.client.call("test.clipboard", {"own": True})
+
+
+def copied_fragment(app: WrenApp, after: str | None = None) -> dict:
+    """The fragment the board put on the clipboard, once it differs from *after*."""
+    text = wait_for(lambda: (lambda text: text if text.startswith(HEADER) and text != after else None)(
+        app.client.call("clipboard.read")), timeout=5, description="the fragment on the clipboard")
+    return {"text": text, **tomllib.loads(text.split("\n", 1)[1])}
+
+
+def test_a_selected_free_connector_is_cut_and_pasted_back(samples: Path) -> None:
+    """§5.10 rules 2, 3 and 5: a connector with two free ends selected beside
+    a node is in the fragment, so duplicate copies it and cut then paste
+    gives it back; a node that shares a free-ended connector's id carries
+    only itself."""
+    path = samples / GROUP / "Free.wren-board"
+    path.write_text(FREE_ENDS, encoding="utf-8")
+
+    def labels(state: dict) -> list[str]:
+        return sorted(label["text"] for edge in state["edges"] for label in edge["labels"])
+
+    with board_app(samples, "board-safety-free-ends") as app:
+        ready(app, f"{GROUP}/Free.wren-board")
+        clipboard(app)
+
+        def picked() -> None:
+            click(app, {"node": "a"})
+            assert click(app, {"edge": "x"}, mods=("shift",))["selection"] == ["a", "x"]
+
+        picked()
+        key(app, "d", "mod")
+        state = board(app, elements=True)
+        assert state["counts"] == {"nodes": 3, "edges": 3}, state
+        assert labels(state) == ["Edge shared", "Free", "Free"]
+        key(app, "z", "mod")
+        assert board(app)["pristine"]
+
+        picked()
+        state = key(app, "x", "mod")
+        assert state["counts"] == {"nodes": 1, "edges": 1}, state
+        fragment = copied_fragment(app)
+        assert (list(fragment["node"]), list(fragment["edge"])) == (["a"], ["x"]), fragment["text"]
+        key(app, "v", "mod")
+        state = wait_for(lambda: (lambda s: s if s["counts"] == {"nodes": 2, "edges": 2} else None)(
+            board(app, elements=True)), timeout=5, description="the paste")
+        assert labels(state) == ["Edge shared", "Free"]
+        flushed(app)
+        written = tomllib.loads(path.read_text(encoding="utf-8"))
+        assert sorted(label["text"] for e in written["edge"].values() for label in e["labels"]) == [
+            "Edge shared", "Free"]
+
+        # The node `shared` alone: the connector `shared` stays out.
+        click(app, {"node": "shared"})
+        key(app, "c", "mod")
+        fragment = copied_fragment(app, after=fragment["text"])
+        assert list(fragment["node"]) == ["shared"] and "edge" not in fragment, fragment["text"]
+
+
+def _shape(name: str, text: str, at: tuple[int, int], z: str) -> str:
+    return (f'[node.{name}]\ntext = "{text}"\nkind = "shape"\nat = [{at[0]}, {at[1]}]\n'
+            f'size = [120, 60]\nz = "{z}"\n\n')
+
+
+def _edge(name: str, ends: tuple[str, str], text: str, z: str) -> str:
+    return (f'[edge.{name}]\nkind = "edge"\nfrom = {ends[0]}\nto = {ends[1]}\n'
+            f'labels = [\n  {{ text = "{text}" }},\n]\nz = "{z}"\n\n')
+
+
+CONNECTED = "schema = 1\n\n" + "".join([
+    _shape("a", "A", (0, 0), "a"), _shape("b", "B", (0, 200), "b"),
+    _shape("c", "C", (300, 0), "c"), _shape("p", "P", (700, 0), "d"),
+    _shape("q", "Q", (700, 200), "e"), _shape("shared", "Node shared", (300, 300), "f"),
+    _edge("shared", ('{ node = "a" }', '{ node = "b" }'), "Edge shared", "g"),
+    _edge("cs", ('{ node = "c" }', '{ node = "shared" }'), "CS", "h"),
+    _edge("one", ('{ node = "c" }', "{ at = [540, 140] }"), "One free", "i"),
+    _edge("pq", ('{ node = "p" }', '{ node = "q" }'), "PQ", "j"),
+    _edge("two", ("{ at = [1000, 0] }", "{ at = [1000, 200] }"), "Two free", "k"),
+]).rstrip("\n") + "\n"
+
+
+def test_a_cut_deletes_only_what_a_paste_gives_back(samples: Path) -> None:
+    """§5.10 rules 1, 2 and 5: cut deletes the fragment it copies and, as
+    delete does, the connectors attached to a node it removes; a selected
+    connector the fragment leaves out stays on the board. After cut then
+    paste the file holds every connector but those rule 5 names."""
+    path = samples / GROUP / "Connected.wren-board"
+    path.write_text(CONNECTED, encoding="utf-8")
+    start = sorted(label["text"] for edge in tomllib.loads(CONNECTED)["edge"].values()
+                   for label in edge["labels"])
+    # The selection, what the clipboard holds, and the connectors cut takes
+    # without copying.
+    cases = [
+        ([{"node": "shared"}, {"edge": "pq"}], (["shared"], []), ["CS"]),
+        ([{"node": "a"}, {"edge": "one"}], (["a"], []), ["Edge shared"]),
+        ([{"node": "b"}, {"edge": "shared"}], (["b"], []), ["Edge shared"]),
+        ([{"node": "c"}, {"edge": "one"}], (["c"], ["one"]), ["CS"]),
+        ([{"node": "a"}, {"edge": "two"}], (["a"], ["two"]), ["Edge shared"]),
+    ]
+
+    def labels(edges: dict) -> list[str]:
+        return sorted(label["text"] for edge in edges.values() for label in edge["labels"])
+
+    def on_board() -> list[str]:
+        return sorted(label["text"] for edge in board(app, elements=True)["edges"]
+                      for label in edge["labels"])
+
+    with board_app(samples, "board-safety-cut") as app:
+        ready(app, f"{GROUP}/Connected.wren-board")
+        clipboard(app)
+        after = None
+        for picked, (nodes, edges), lost in cases:
+            first, *rest = picked
+            click(app, first)
+            for at in rest:
+                click(app, at, mods=("shift",))
+            assert len(board(app)["selection"]) == len(picked), picked
+            count = board(app)["counts"]["nodes"]
+            key(app, "x", "mod")
+            fragment = copied_fragment(app, after=after)
+            after = fragment["text"]
+            assert (list(fragment["node"]), list(fragment.get("edge", {}))) == (nodes, edges), after
+            gone = labels(fragment.get("edge", {})) + lost
+            assert on_board() == [text for text in start if text not in gone], picked
+            key(app, "v", "mod")
+            wait_for(lambda: board(app)["counts"]["nodes"] == count, timeout=5,
+                     description="the paste")
+            flushed(app)
+            written = tomllib.loads(path.read_text(encoding="utf-8"))
+            assert labels(written["edge"]) == [text for text in start if text not in lost], picked
+            # Back to the start for the next case: undo the paste and the cut.
+            key(app, "z", "mod")
+            key(app, "z", "mod")
+            assert board(app)["pristine"], picked
+            flushed(app)
+            assert path.read_text(encoding="utf-8") == CONNECTED

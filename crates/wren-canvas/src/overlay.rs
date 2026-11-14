@@ -221,7 +221,10 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
     }
     if let Some(label) = view.label() {
         let measurer = view.measurer();
-        let connector = picture.board.edges.contains_key(label.id());
+        let connector = label
+            .element()
+            .edge()
+            .is_some_and(|id| picture.board.edges.contains_key(id));
         if connector && label.stored().is_empty() {
             let [across, down] = scene::EDGE_LABEL_PAD;
             let lines = label.bounds(measurer);
@@ -671,6 +674,19 @@ mod tests {
             assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Blank(_))), 0);
             assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 1);
         }
+        // Nor does a node's blank label where a connector shares its id
+        // (§4.12).
+        let board = "schema = 1\n\n[node.s]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n\n\
+                     [edge.s]\nkind = \"edge\"\nfrom = { at = [400, 0] }\nto = { at = [400, 200] }\nz = \"W\"\n";
+        let mut view = open(board);
+        input(&mut view, Input::Focus(true));
+        let node = Source::Node(wren_board::Id::new("s").expect("an id"));
+        view.machine
+            .select(std::collections::BTreeSet::from([node.clone()]), Some(node));
+        view.command(Command::EditLabel, Instant::now());
+        let overlay = marks(&view);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Blank(_))), 0);
+        assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Caret(..))), 1);
     }
 
     #[test]

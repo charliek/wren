@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::{dangling_names, on_top, saturate, Change, Plan};
 use crate::ids::{fresh, Ids};
+use crate::scene::Source;
 use crate::z::{self, Element};
 use crate::{placements, Board, Edge, End, Id, Node, Placed};
 
@@ -12,7 +13,8 @@ use crate::{placements, Board, Edge, End, Id, Node, Placed};
 /// nodes, their descendants (the [`super::delete::family`] that delete
 /// removes), and every connector whose ends are
 /// each one of those nodes or a free point, provided one end is such a node
-/// or the connector itself is selected. A selection with no node has none.
+/// or the connector itself is selected, as a connector. A selection with no
+/// node has none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Fragment {
     pub nodes: BTreeSet<Id>,
@@ -37,10 +39,13 @@ impl Fragment {
     }
 }
 
-/// The fragment of the selection `ids` on `board`.
-pub(crate) fn fragment(board: &Board, ids: &[Id]) -> Fragment {
+/// The fragment of the selection `ids` on `board`. Each element is named
+/// with its kind, since a node and a connector may share an id (§4.12): a
+/// node never brings in a connector of its own id, nor a connector a node.
+pub(crate) fn fragment(board: &Board, ids: &[Source]) -> Fragment {
+    let nodes: Vec<Id> = ids.iter().filter_map(Source::node).cloned().collect();
     let mut part = Fragment {
-        nodes: super::delete::family(board, ids)
+        nodes: super::delete::family(board, &nodes)
             .into_iter()
             .cloned()
             .collect(),
@@ -49,7 +54,7 @@ pub(crate) fn fragment(board: &Board, ids: &[Id]) -> Fragment {
     if part.nodes.is_empty() {
         return part;
     }
-    let chosen: BTreeSet<&Id> = ids.iter().collect();
+    let chosen: BTreeSet<&Id> = ids.iter().filter_map(Source::edge).collect();
     let edges: BTreeSet<Id> = board
         .edges
         .iter()
@@ -67,7 +72,7 @@ pub(crate) fn fragment(board: &Board, ids: &[Id]) -> Fragment {
 
 /// Copies of the fragment of `ids`, offset by `by`, on top in the same
 /// relative order, selected (§5.10 rule 3; a duplicate-drag, §5.8 rule 3).
-pub(super) fn duplicate(board: &Board, ids: &[Id], by: [i32; 2], source: &mut dyn Ids) -> Plan {
+pub(super) fn duplicate(board: &Board, ids: &[Source], by: [i32; 2], source: &mut dyn Ids) -> Plan {
     let part = fragment(board, ids);
     if part.nodes.is_empty() {
         return Plan::default();
