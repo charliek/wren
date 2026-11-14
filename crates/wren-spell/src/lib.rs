@@ -6,8 +6,12 @@
 //! language or a file: a second dictionary or a system checker is another
 //! source.
 
+mod hunspell;
+
 use std::fmt;
 use std::ops::Range;
+
+pub use hunspell::Hunspell;
 
 /// Why a source could not be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,30 +39,6 @@ pub trait WordSource: Send + Sync {
     fn accepts(&self, word: &str) -> bool;
     /// Corrections for `word`, best first, appended to `out`.
     fn suggest(&self, word: &str, out: &mut Vec<String>);
-}
-
-/// A Hunspell dictionary: one `.aff`/`.dic` pair, read by `spellbook`.
-#[non_exhaustive]
-pub struct Hunspell {}
-
-impl Hunspell {
-    /// The bundled dictionary, SCOWL's `en_US`.
-    pub fn en_us() -> Result<Self, Error> {
-        Ok(Self {})
-    }
-
-    /// Any Hunspell pair, from the text of its `.aff` and `.dic` files.
-    pub fn from_text(_aff: &str, _dic: &str) -> Result<Self, Error> {
-        Ok(Self {})
-    }
-}
-
-impl WordSource for Hunspell {
-    fn accepts(&self, _word: &str) -> bool {
-        false
-    }
-
-    fn suggest(&self, _word: &str, _out: &mut Vec<String>) {}
 }
 
 /// The words the user lists in `words.txt`, one per line.
