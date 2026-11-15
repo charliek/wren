@@ -922,4 +922,27 @@ mod tests {
         let _ = caret(&mut app, 0, 4);
         assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
     }
+
+    #[test]
+    fn one_escape_on_a_text_surface_beside_boards_closes_only_the_menu() {
+        use crate::app::board::Surface;
+        use crate::keys::{Input, Nav};
+
+        let (_directory, mut app) = board_app();
+        assert_eq!(run(&mut app, CommandId::Find), Disposition::Completed);
+        let _ = caret(&mut app, 0, 4);
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+        let cursor = app.editor.cursor();
+        let task = app.update(Message::Key(Input::Nav(Nav::Escape)));
+        assert!(app.editor.spell_menu().is_none());
+        assert_eq!(app.surface(), Surface::Text);
+        assert!(app.find_open);
+        assert_eq!(app.column, Column::Editor);
+        assert_eq!(app.editor.cursor(), cursor);
+        assert_eq!(app.editor.text(), "A mispelled word\n");
+        assert_eq!(task.units(), 0);
+        // The next Escape is the rest of the ladder: it closes the find bar.
+        let _ = app.update(Message::Key(Input::Nav(Nav::Escape)));
+        assert!(!app.find_open);
+    }
 }
