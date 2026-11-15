@@ -4,7 +4,6 @@
 //! image shows the lines the canvas drew; the draw.io file is the model's,
 //! for draw.io to draw. `wren export` writes the same files with no window.
 
-use std::ffi::OsString;
 use std::io::{Read as _, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -258,21 +257,23 @@ fn image_size(width: f32, height: f32, scale: f32) -> Result<(u32, u32), String>
 /// it, renamed over it once written. Returns the bytes written.
 pub fn write(path: &Path, contents: &[u8]) -> std::io::Result<u64> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the path names no file")
-    })?;
+    if path.file_name().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path names no file",
+        ));
+    }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut temporary = OsString::from(".");
-    temporary.push(name);
-    temporary.push(format!(
-        ".{}-{}.tmp",
+    // Named apart from the target, so a target name near the file
+    // system's limit is not pushed past it.
+    let temporary = parent.join(format!(
+        ".wren-export-{}-{}.tmp",
         std::process::id(),
         SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
-    let temporary = parent.join(temporary);
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

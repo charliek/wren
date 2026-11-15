@@ -646,3 +646,22 @@ fn an_unwritable_folder_fails_and_leaves_nothing() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(names(&locked).is_empty());
 }
+
+/// A target whose name is near the file system's 255-byte limit is
+/// written: the temporary file beside it is named apart from it (the
+/// phase-end review's finding, where the temporary name passed the limit).
+#[test]
+fn a_long_target_name_is_written() {
+    let directory = workspace();
+    let long = format!("{}.svg", "n".repeat(250));
+    let output = wren(directory.path(), &["export", FLOW, "-o", long.as_str()]);
+    succeeded(&output);
+    let svg = std::fs::read_to_string(directory.path().join(&long)).unwrap();
+    assert!(
+        svg.starts_with("<svg") || svg.starts_with("<?xml"),
+        "{svg:.40}"
+    );
+    assert!(!names(directory.path())
+        .iter()
+        .any(|name| name.ends_with(".tmp")));
+}
