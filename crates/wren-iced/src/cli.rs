@@ -210,6 +210,12 @@ fn parse_export(args: &[OsString]) -> Result<Command, Refusal> {
             board = Some(PathBuf::from(arg));
             continue;
         };
+        if !matches!(
+            flag,
+            "-o" | "--format" | "--theme" | "--scale" | "--background"
+        ) {
+            return Err(usage(format!("wren export has no option {flag}")));
+        }
         let value = rest
             .next()
             .ok_or_else(|| usage(format!("{flag} needs a value")))?;
@@ -556,6 +562,23 @@ mod tests {
             1
         );
         assert!(export_usage().contains("wren-light"));
+        // An unknown option is unknown, last or not.
+        for values in [
+            vec!["export", "b", "--frob"],
+            vec!["export", "b", "--frob", "x"],
+        ] {
+            assert_eq!(
+                parse(&args(&values), None).unwrap_err().message,
+                "wren export has no option --frob; see wren export --help",
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            parse(&args(&["export", "b", "--theme"]), None)
+                .unwrap_err()
+                .message,
+            "--theme needs a value; see wren export --help"
+        );
     }
 
     #[cfg(feature = "smoke-test")]
