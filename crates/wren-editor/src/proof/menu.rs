@@ -175,8 +175,6 @@ pub(crate) struct MenuOverlay<'a> {
     pub labels: &'a [String],
     /// Where the menu is, in window coordinates.
     pub bounds: Rectangle,
-    /// Where the editor is, in window coordinates.
-    pub editor: Rectangle,
     pub style: MenuStyle,
     /// The menu as the editor's events have left it; see [`OpenMenu`].
     pub now: &'a Cell<Option<OpenMenu>>,
@@ -212,6 +210,10 @@ impl MenuOverlay<'_> {
                     shell.capture_event();
                 }
             }
+            // A press off the menu is the editor widget's, which closes the
+            // menu for it in its order with the batch's keys: the overlay
+            // sees the whole batch first, so a key before the press that
+            // closed the menu would not have closed it yet here.
             Event::Mouse(mouse::Event::ButtonPressed(button)) => match cursor.position() {
                 Some(point) if self.bounds.contains(point) => {
                     if *button == mouse::Button::Left {
@@ -225,12 +227,7 @@ impl MenuOverlay<'_> {
                     }
                     shell.capture_event();
                 }
-                Some(point) if self.editor.contains(point) => {
-                    tell(SpellEvent::Close);
-                    shell.capture_event();
-                }
-                // Outside the editor the press goes on to do what it does.
-                _ => tell(SpellEvent::Close),
+                _ => {}
             },
             _ => {}
         }
@@ -505,7 +502,6 @@ mod tests {
                 Point::new(300.0, 128.0),
                 Size::new(200.0, height(labels.len())),
             ),
-            editor: EDITOR,
             style: fixtures::STYLE.menu,
             now,
             frame: None,
@@ -594,23 +590,15 @@ mod tests {
     }
 
     #[test]
-    fn a_press_elsewhere_closes_the_menu_and_only_reaches_beyond_the_editor() {
+    fn a_press_off_the_menu_is_left_to_the_editor() {
         let three = menu(&["the", "ten", "tea"], 0);
         for button in [mouse::Button::Left, mouse::Button::Right] {
-            // Inside the editor: closed, and nothing more.
-            let (messages, captured) = send(&three, pressed(button), Point::new(250.0, 300.0));
-            assert!(matches!(
-                messages.as_slice(),
-                [Message::Spell(SpellEvent::Close)]
-            ));
-            assert!(captured, "{button:?}");
-            // Outside it: closed, and the press goes on.
-            let (messages, captured) = send(&three, pressed(button), Point::new(100.0, 300.0));
-            assert!(matches!(
-                messages.as_slice(),
-                [Message::Spell(SpellEvent::Close)]
-            ));
-            assert!(!captured, "{button:?}");
+            // Inside the editor and outside it, the editor widget closes the
+            // menu in the press's order with the batch's keys.
+            for point in [Point::new(250.0, 300.0), Point::new(100.0, 300.0)] {
+                let (messages, captured) = send(&three, pressed(button), point);
+                assert!(messages.is_empty() && !captured, "{button:?} {point:?}");
+            }
         }
     }
 

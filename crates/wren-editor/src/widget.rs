@@ -896,7 +896,6 @@ impl<'a> TextEditor<'a> {
                 text_bounds.y + bottom,
                 size,
             ),
-            editor: bounds,
             style,
             now: &self.menu_now,
             #[cfg(any(test, feature = "test-support"))]
@@ -3679,7 +3678,6 @@ mod tests {
             editor.lay_out(&mut state, bounds.size());
         }
         let overlay = editor.menu_overlay(&mut state, bounds)?;
-        assert_eq!(overlay.editor, bounds);
         Some((overlay.bounds, overlay.labels.to_vec()))
     }
 
@@ -3906,6 +3904,105 @@ mod tests {
         );
         // Nor is it drawn again.
         assert!(editor.menu_overlay(&mut state, BOUNDS).is_none());
+    }
+
+    /// What one batch of `events` publishes as iced hands it over with the
+    /// menu open: the overlay sees every event first, and the widget each
+    /// one the overlay did not capture.
+    fn over_open_menu(
+        editor: &mut TextEditor<'_>,
+        state: &mut State,
+        events: Vec<(Event, Option<Point>)>,
+    ) -> Vec<Message> {
+        let mut published = Vec::new();
+        let mut captured = Vec::new();
+        {
+            let overlay = editor.menu_overlay(state, BOUNDS).unwrap();
+            for (event, pointer) in &events {
+                let mut shell = Shell::new(&mut published);
+                let cursor = pointer.map_or(mouse::Cursor::Unavailable, mouse::Cursor::Available);
+                overlay.on_event(event, cursor, &mut shell);
+                captured.push(shell.event_status() == iced::event::Status::Captured);
+            }
+        }
+        for ((event, pointer), captured) in events.into_iter().zip(captured) {
+            if !captured {
+                published.extend(send(editor, state, event, pointer).0);
+            }
+        }
+        published
+    }
+
+    #[test]
+    fn a_press_off_an_open_menu_comes_in_its_order_with_the_keys() {
+        use keyboard::key::Named;
+        let proofreader = rejects();
+        let content = Content::new(BackendKind::Owned, "cat teh");
+        let menu = three();
+        // A key that closes the menu, then a press on `cat`: the press is
+        // a click, as with no menu.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let messages = over_open_menu(
+            &mut editor,
+            &mut state,
+            vec![
+                (named(Named::ArrowLeft), None),
+                (press(mouse::Button::Left), Some(over(1.0, 0.0))),
+            ],
+        );
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Spell(SpellEvent::Close),
+                    Message::Action(Action::Move(_)),
+                    Message::Action(Action::Click(_)),
+                ]
+            ),
+            "{messages:?}"
+        );
+        // The press first: it only closes the menu, and the key after it
+        // is the text's.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let messages = over_open_menu(
+            &mut editor,
+            &mut state,
+            vec![
+                (press(mouse::Button::Left), Some(over(1.0, 0.0))),
+                (named(Named::ArrowLeft), None),
+            ],
+        );
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Spell(SpellEvent::Close),
+                    Message::Action(Action::Move(_)),
+                ]
+            ),
+            "{messages:?}"
+        );
+        // A press on a row is still the menu's, ahead of the keys.
+        let (mut editor, mut state) = focused(&content, &proofreader, &menu);
+        let row = menu_row(&editor, &mut state, 1);
+        let messages = over_open_menu(
+            &mut editor,
+            &mut state,
+            vec![
+                (named(Named::ArrowDown), None),
+                (press(mouse::Button::Left), Some(row)),
+            ],
+        );
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Spell(SpellEvent::Accept(1)),
+                    Message::Action(Action::Move(_)),
+                ]
+            ),
+            "{messages:?}"
+        );
     }
 
     #[test]
