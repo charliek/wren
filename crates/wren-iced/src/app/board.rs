@@ -665,8 +665,15 @@ impl BoardFooter {
         if !view.issues().is_empty() {
             flags.push(count(view.issues().len(), "issue", "issues"));
         }
-        if matches!(view.access(), Access::ReadOnly(_)) {
-            flags.push("Read-only".into());
+        // Why, the schema first when both apply (§4.10).
+        match view.access() {
+            Access::ReadOnly(wren_board::Reason::Schema(schema)) => {
+                flags.push(format!("Read-only: schema {schema}"));
+            }
+            Access::ReadOnly(wren_board::Reason::Requires(features)) => {
+                flags.push(format!("Read-only: needs {}", features.join(", ")));
+            }
+            Access::Editable => {}
         }
         Self {
             stats: format!(
@@ -1682,9 +1689,18 @@ z = "c"
 
         let read_only =
             open(&CLEAN.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1));
-        assert_eq!(BoardFooter::of(&read_only).flags, ["Read-only"]);
+        assert_eq!(
+            BoardFooter::of(&read_only).flags,
+            ["Read-only: needs frames"]
+        );
         let both = open(&FLOW.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1));
-        assert_eq!(BoardFooter::of(&both).flags, ["3 issues", "Read-only"]);
+        assert_eq!(
+            BoardFooter::of(&both).flags,
+            ["3 issues", "Read-only: needs frames"]
+        );
+        let newer =
+            open(&CLEAN.replacen("schema = 1\n", "schema = 2\nrequires = [\"frames\"]\n", 1));
+        assert_eq!(BoardFooter::of(&newer).flags, ["Read-only: schema 2"]);
 
         let one = open("schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n");
         assert_eq!(BoardFooter::of(&one).stats, "Board · 1 node · 0 connectors");

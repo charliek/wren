@@ -975,9 +975,23 @@ fn what_a_board_may_do_is_decided_again_whenever_its_text_changes_underneath() {
     input(&mut app, wheel());
     assert_ne!(view(&app).viewport(), before);
     assert!(app.command_enabled(CommandId::ExportSvg));
+    // Refused by key and by command, saying why (§5.15 rule 5).
+    let why = "This board is read-only: it needs features this build does not have: frames.";
     for command in [C::Move(Dir::Right), C::Delete, C::EditLabel, C::ConnectNext] {
+        app.banner = None;
         assert_eq!(key(&mut app, command), Disposition::Blocked, "{command:?}");
+        assert_eq!(app.banner.as_deref(), Some(why), "{command:?}");
+        app.banner = None;
+        assert_eq!(
+            run(&mut app, command).0,
+            Disposition::Blocked,
+            "{command:?}"
+        );
+        assert_eq!(app.banner.as_deref(), Some(why), "{command:?}");
     }
+    app.banner = None;
+    assert_eq!(key(&mut app, C::SelectAll), Disposition::Completed);
+    assert_eq!(app.banner, None, "what does not change it says nothing");
     drag(&mut app);
     label(&mut app, LabelAction::Insert("x".into()));
     let epoch = view(&app).epoch();

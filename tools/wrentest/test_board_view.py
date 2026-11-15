@@ -18,8 +18,8 @@ import pytest
 
 from tools.wrentest.boards import (
     CONFLICT, FLOW, FUTURE, NOTES, SHAPES, board, board_app, bounds, conflict_board, copy_samples,
-    distance_to_polyline, fitted, grid_board, inside, midpoint, near, open_note, screenshot, stamp,
-    wheel,
+    distance_to_polyline, fitted, grid_board, inside, key, midpoint, near, open_note, screenshot,
+    stamp, wheel,
 )
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_setup import artifact_directory
@@ -603,6 +603,20 @@ def test_a_raw_board_is_edited_in_the_focused_editor_and_flips_back(samples: Pat
 
         open_note(app, FUTURE)
         assert board(app)["read_only"] is True
+        # An edit, by key or by command, is refused and says why (§5.15
+        # rule 5); the file is left as it was.
+        before = stamp(samples / FUTURE)
+        app.client.call("editor.focus")
+        why = "This board is read-only: it needs features this build does not have: frames."
+        app.client.call("command.run", {"id": "board.select.all"})
+        assert board(app)["banner"] != why
+        assert key(app, "delete")["banner"] == why
+        assert board(app)["counts"]["nodes"] > 0
+        outcome = app.client.call("command.run", {"id": "board.duplicate"})
+        assert outcome["disposition"] == "blocked" and outcome["warning"] == why, outcome
+        assert board(app)["banner"] == why
+        app.client.call("window.blur")
+        assert stamp(samples / FUTURE) == before
         open_note(app, SHAPES)
         issues = board(app)["issues"]
         assert {"kind": "dangling_edge"} in [{"kind": issue["kind"]} for issue in issues], issues

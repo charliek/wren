@@ -256,7 +256,7 @@ impl Plan {
 /// No intent consults `locked` (§4.5): ring 0 gives it no effect.
 pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
     if let Access::ReadOnly(reason) = access(board) {
-        return Plan::notice(format!("This board is read-only: it {}.", because(&reason)));
+        return Plan::notice(read_only(&reason));
     }
     match intent {
         Intent::AddNode {
@@ -299,6 +299,11 @@ impl Plan {
             ..Self::default()
         }
     }
+}
+
+/// What an edit of a read-only board is told (§4.10, §5.15 rule 5).
+pub fn read_only(reason: &Reason) -> String {
+    format!("This board is read-only: it {}.", because(reason))
 }
 
 /// Why a board, or a pasted fragment, may not be edited, to follow "it" or

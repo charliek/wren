@@ -915,6 +915,20 @@ impl App {
         self.finish_action(Disposition::Blocked, Some(warning.into()), Task::none())
     }
 
+    /// What a board command that would change a read-only board is told,
+    /// when it is one.
+    fn board_read_only(&self, id: CommandId) -> Option<String> {
+        let (CommandId::Board(command), Some(view)) = (id, &self.board) else {
+            return None;
+        };
+        match view.access() {
+            Access::ReadOnly(reason) if board_mutates(command) => {
+                Some(wren_board::edit::read_only(reason))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn command_enabled(&self, id: CommandId) -> bool {
         use CommandId::*;
         if self.loading.is_some() {
@@ -986,6 +1000,11 @@ impl App {
         match command {
             Command::Run(id) => {
                 if !self.command_enabled(id) {
+                    // An edit of a read-only board says why (§5.15 rule 5).
+                    if let Some(notice) = self.board_read_only(id) {
+                        self.banner = Some(notice.clone());
+                        return self.blocked(notice);
+                    }
                     let needs_group = matches!(
                         id,
                         CommandId::NewNote | CommandId::NewDatedNote | CommandId::NewBoard

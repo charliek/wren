@@ -28,8 +28,8 @@ Back/Forward like any note. The notes list marks them with a board icon,
 and its second line shows a board's first label.
 
 The footer reads `Board · 15 nodes · 17 connectors`, then, when there are
-any, the number of issues and `Read-only`, then the zoom and the save
-status.
+any, the number of issues and why the board is read-only, then the zoom
+and the save status.
 
 ## Shapes and text
 
@@ -364,7 +364,9 @@ program makes it valid. Merge conflict markers left by git show this way.
 
 A board that names a feature this version does not know (`requires`), or a
 newer `schema`, opens **read-only**: you can select, copy, jump, zoom, and
-export, and nothing is written.
+export, and nothing is written. The footer says why (`Read-only: schema 2`,
+or `Read-only: needs` and the features), and an edit you try says so in
+the banner.
 
 ## Limits
 
