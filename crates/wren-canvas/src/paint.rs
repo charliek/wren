@@ -81,7 +81,7 @@ impl Cull {
     }
 
     /// The rectangle paths are cut to, in widget-local pixels.
-    fn window(&self) -> Window {
+    pub(crate) fn window(&self) -> Window {
         let zoom = f64::from(self.viewport.zoom);
         Window {
             left: -CUT_MARGIN,
@@ -211,6 +211,32 @@ pub(crate) fn trace(frame: &mut Frame, item: &Item, cull: &Cull, stroke: Stroke<
         path(&clip::outline(&pieces, &window, None))
     };
     frame.stroke(&path, stroke);
+}
+
+/// Stroke `pieces`, in widget-local pixels, with `stroke`, cut as an
+/// item's stroke is; `period` is the length of the stroke's dash pattern
+/// when it is dashed. The overlay's marks are drawn this way: whole, the
+/// dashed ring around an element millions of pixels across is tessellated
+/// dash by dash, past the largest vertex buffer wgpu allows.
+pub(crate) fn outline(
+    frame: &mut Frame,
+    pieces: &[Piece],
+    cull: &Cull,
+    stroke: Stroke<'_>,
+    period: Option<f64>,
+) {
+    frame.stroke(&path(&outlined(pieces, cull, period)), stroke);
+}
+
+/// `pieces` as [`outline`] strokes them: whole when they are inside the
+/// window, else cut to it.
+pub(crate) fn outlined(pieces: &[Piece], cull: &Cull, period: Option<f64>) -> Vec<Piece> {
+    let window = cull.window();
+    if clip::inside(pieces, &window) {
+        pieces.to_vec()
+    } else {
+        clip::outline(pieces, &window, period)
+    }
 }
 
 /// `segments` in widget-local pixels at `viewport`, in double precision:

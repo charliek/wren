@@ -25,6 +25,7 @@ CROWDED = f"{GROUP}/Crowded.wren-board"
 FAR = f"{GROUP}/Far.wren-board"
 CAP = f"{GROUP}/At the cap.wren-board"
 FULL = f"{GROUP}/Full.wren-board"
+REACH = f"{GROUP}/Reach.wren-board"
 NOTE = f"{GROUP}/Note.md"
 
 MAX_BOARD_BYTES = 8 * 1024 * 1024
@@ -105,12 +106,21 @@ def full_board() -> str:
     return head.replace('pad = ""', f'pad = "{"x" * (MAX_BOARD_BYTES - len(head))}"', 1)
 
 
+def reach_board() -> str:
+    """A connector to a node 16,000,000 units out, within every limit."""
+    return ('schema = 1\n\n[node.a]\ntext = "Near"\nkind = "shape"\nat = [0, 0]\n'
+            'size = [120, 60]\nz = "V"\n\n[node.far]\ntext = "Far"\nkind = "shape"\n'
+            'at = [16000000, 0]\nsize = [120, 60]\nz = "W"\n\n[edge.e]\nkind = "edge"\n'
+            'from = { node = "a" }\nto = { node = "far" }\nz = "X"\n')
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     group = tmp_path / "work" / GROUP
     group.mkdir(parents=True)
     for path, text in ((LARGE, large_board()), (CROWDED, crowded_board(MAX_ELEMENTS + 1)),
-                       (FAR, far_board()), (CAP, cap_board()), (FULL, full_board())):
+                       (FAR, far_board()), (CAP, cap_board()), (FULL, full_board()),
+                       (REACH, reach_board())):
         (tmp_path / "work" / path).write_text(text, encoding="utf-8")
     (tmp_path / "work" / NOTE).write_text("# Note\n", encoding="utf-8")
     return tmp_path / "work"
@@ -240,3 +250,24 @@ def test_an_edit_past_the_byte_cap_is_refused_and_the_board_still_opens(workspac
         state = wait_for(lambda: (lambda s: s if s["surface"] in ("board", "raw") else None)(
             board(app)), timeout=30, interval=0.1, description="the board reopened")
         assert state["surface"] == "board", state
+
+
+def test_the_cursor_ring_around_a_far_connector_is_drawn(workspace: Path, tmp_path: Path) -> None:
+    """The phase-end review's blocker: the dashed ring around the cursor, a
+    connector millions of pixels long, while the selection is more than it,
+    aborted the app on wgpu. It is cut to the window as an item is."""
+    with board_app(workspace, "board-limits-reach") as app:
+        open_row(app, notes(app)[REACH])
+        state = wait_for(lambda: (lambda s: s if s["surface"] == "board" else None)(board(app)),
+                         timeout=10, interval=0.05, description="the board shown")
+        assert state["issues"] == [], state
+        app.client.call("editor.focus")
+        click(app, {"node": "a"})
+        app.client.call("command.run", {"id": "board.zoom.selection"})
+        click(app, {"edge": "e"})
+        app.client.call("command.run", {"id": "board.select.all"})
+        state = board(app)
+        assert (sorted(state["selection"]), state["cursor"]) == (["a", "e", "far"], "e"), state
+        # A frame with the ring is drawn, and the app is still there.
+        app.client.call("app.screenshot", {"path": str(tmp_path / "reach.png")})
+        assert board(app)["cursor"] == "e"

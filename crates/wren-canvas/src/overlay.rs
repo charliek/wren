@@ -17,6 +17,7 @@ use wren_board::edit::EdgeEnd;
 use wren_board::scene::{self, Draw, Face, Measure as _, Rect, Source};
 use wren_board::Rgba;
 
+use crate::clip::Piece;
 use crate::command::Tool;
 use crate::hit::Frames;
 use crate::paint::{self, Cull};
@@ -296,6 +297,26 @@ fn grown(bounds: Rect, by: f32) -> Rect {
 }
 
 /// Draw `overlay` over the view in a widget of `size`, framed by `cull`.
+/// The dash of the cursor's ring and of a band: on, then off, in pixels.
+const DASH: [f32; 2] = [4.0, 3.0];
+
+/// The outline of `bounds`, a box in widget-local pixels, as a closed path
+/// in double precision.
+fn ring(bounds: Rect) -> [Piece; 5] {
+    let (left, top) = (f64::from(bounds.x), f64::from(bounds.y));
+    let (right, bottom) = (
+        left + f64::from(bounds.width),
+        top + f64::from(bounds.height),
+    );
+    [
+        Piece::Move((left, top)),
+        Piece::Line((right, top)),
+        Piece::Line((right, bottom)),
+        Piece::Line((left, bottom)),
+        Piece::Close,
+    ]
+}
+
 pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull: &Cull) {
     let palette = view.palette();
     let colour = paint::color(if overlay.focused {
@@ -309,6 +330,14 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
         width,
         ..Stroke::default()
     };
+    let dashed = Stroke {
+        line_dash: LineDash {
+            segments: &DASH,
+            offset: 0,
+        },
+        ..solid(1.5)
+    };
+    let period = Some(f64::from(DASH[0] + DASH[1]));
     let rect = |bounds: Rect| {
         Path::rectangle(
             iced::Point::new(bounds.x, bounds.y),
@@ -327,7 +356,7 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
     let size = frame.size();
     for mark in &overlay.marks {
         match mark {
-            Mark::Outline(bounds) => frame.stroke(&rect(*bounds), solid(1.5)),
+            Mark::Outline(bounds) => paint::outline(frame, &ring(*bounds), cull, solid(1.5), None),
             Mark::Line(index) => {
                 if let Some(item) = scene.items.get(*index) {
                     paint::trace(frame, item, cull, solid(3.0));
@@ -339,16 +368,7 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
                 }
             }
             Mark::Blank(bounds) => frame.fill(&rect(*bounds), canvas_colour),
-            Mark::Ring(bounds) => frame.stroke(
-                &rect(*bounds),
-                Stroke {
-                    line_dash: LineDash {
-                        segments: &[4.0, 3.0],
-                        offset: 0,
-                    },
-                    ..solid(1.5)
-                },
-            ),
+            Mark::Ring(bounds) => paint::outline(frame, &ring(*bounds), cull, dashed, period),
             Mark::Handle(at) => {
                 let path = square(*at);
                 frame.fill(&path, canvas_colour);
@@ -365,19 +385,11 @@ pub(crate) fn paint(frame: &mut Frame, overlay: &Overlay, view: &BoardView, cull
                 frame.fill(&path, canvas_colour);
                 frame.stroke(&path, solid(1.5));
             }
-            Mark::Band(from, to) => frame.stroke(
-                &Path::line(
-                    iced::Point::new(from.0, from.1),
-                    iced::Point::new(to.0, to.1),
-                ),
-                Stroke {
-                    line_dash: LineDash {
-                        segments: &[4.0, 3.0],
-                        offset: 0,
-                    },
-                    ..solid(1.5)
-                },
-            ),
+            Mark::Band(from, to) => {
+                let pixel = |(x, y): (f32, f32)| (f64::from(x), f64::from(y));
+                let line = [Piece::Move(pixel(*from)), Piece::Line(pixel(*to))];
+                paint::outline(frame, &line, cull, dashed, period);
+            }
             Mark::Marquee(bounds) => {
                 let path = rect(*bounds);
                 frame.fill(&path, colour.scale_alpha(0.12));
@@ -510,6 +522,59 @@ mod tests {
         assert_eq!(handles[4], &Mark::Handle((120.0, 60.0)));
         // The selection is the cursor alone: no ring, no chip, no hint.
         assert_eq!(overlay.marks.len(), 9);
+    }
+
+    /// The cursor's ring around a connector to a node 16,000,000 units out
+    /// is cut to the window an item's stroke is cut to, so wgpu is not
+    /// given its dashes along the whole length (the phase-end review's
+    /// blocker, an abort on a vertex buffer of 512 MiB).
+    #[test]
+    fn a_ring_millions_of_pixels_across_is_cut_to_the_window() {
+        let mut view = open(
+            "schema = 1\n\n\
+             [node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n\n\
+             [node.far]\nkind = \"shape\"\nat = [16000000, 0]\nsize = [120, 60]\nz = \"W\"\n\n\
+             [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"far\" }\nz = \"X\"\n",
+        );
+        click(&mut view, (400.0, 30.0));
+        view.command(Command::SelectAll, Instant::now());
+        let overlay = marks(&view);
+        let rings: Vec<Rect> = overlay
+            .marks
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Ring(bounds) => Some(*bounds),
+                _ => None,
+            })
+            .collect();
+        let [bounds] = rings.as_slice() else {
+            panic!("{:?}", overlay.marks);
+        };
+        assert!(bounds.width > 15_000_000.0, "{bounds:?}");
+        let cull = Cull::new(
+            view.viewport(),
+            (800.0, 600.0),
+            crate::Labels::ALWAYS,
+            false,
+        );
+        let window = cull.window();
+        let cut = paint::outlined(&ring(*bounds), &cull, Some(7.0));
+        assert!(!cut.is_empty());
+        let points = cut.iter().flat_map(|piece| match *piece {
+            Piece::Move(at) | Piece::Line(at) => vec![at],
+            Piece::Quad(a, b) => vec![a, b],
+            Piece::Cubic(a, b, c) => vec![a, b, c],
+            Piece::Close => Vec::new(),
+        });
+        // A cut dash starts on a whole period, so up to one past the edge.
+        for (x, y) in points {
+            let within = |low: f64, at: f64, high: f64| low - 7.0 <= at && at <= high + 7.0;
+            assert!(
+                within(window.left, x, window.right) && within(window.top, y, window.bottom),
+                "({x}, {y}) outside {window:?}"
+            );
+        }
+        assert!(window.right - window.left < 800.0 + 2.0 * 2048.0 + 1.0);
     }
 
     #[test]
