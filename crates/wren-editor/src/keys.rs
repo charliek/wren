@@ -55,7 +55,8 @@ pub(crate) enum Routed {
 /// modifier move its selection and Enter with no modifier accepts the row
 /// the host's menu has selected, or closes a menu with nothing to offer; on
 /// a menu opened earlier in the batch, which may not have opened, the three
-/// go to the host as [`SpellEvent::Key`]. Escape is the host's: the editor
+/// go to the host as [`SpellEvent::Key`], except that one the policy gives
+/// the host closes the menu and goes to the host uncaptured. Escape is the host's: the editor
 /// gives it no binding, so it neither drops focus nor captures the press,
 /// and the host closes the menu (rule 4.4.8). A modifier key alone does
 /// nothing. Any other press closes the menu and is then routed by
@@ -81,6 +82,14 @@ pub(crate) fn route(
         _ => return Some(Routed::Close(key_binding(key_press, context))),
     };
     let event = if menu.opening {
+        // With no menu open the host would take the key, so it must not
+        // be captured for a menu the host may not have opened.
+        let host = context.policy.is_some_and(|policy| {
+            policy(&key_press.key, key_press.physical_key, key_press.modifiers) == KeyRoute::Host
+        });
+        if host {
+            return Some(Routed::Close(None));
+        }
         SpellEvent::Key(key)
     } else {
         key.event()
@@ -828,6 +837,43 @@ mod tests {
             routed(Named::ArrowDown, Modifiers::SHIFT),
             Some(Routed::Close(Some(Binding::Select(Motion::Down))))
         ));
+    }
+
+    #[test]
+    fn a_key_the_host_takes_is_left_to_it_after_an_opening_in_the_batch() {
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if *key == Key::Named(Named::Enter) && modifiers.is_empty() {
+                KeyRoute::Host
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        let context = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        let enter = |opening| {
+            route(
+                KeyPress {
+                    modified_key: Key::Named(Named::Enter),
+                    key: Key::Named(Named::Enter),
+                    physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                    modifiers: Modifiers::empty(),
+                    text: None,
+                    status: text_editor::Status::Focused { is_hovered: false },
+                },
+                context,
+                Some(OpenMenu {
+                    selected: Some(0),
+                    items: 1,
+                    opening,
+                }),
+            )
+        };
+        // Uncaptured, so the host still runs its command if nothing opened.
+        assert!(matches!(enter(true), Some(Routed::Close(None))));
+        // A menu open when the batch starts takes Enter, as before.
+        assert_eq!(menu_event(enter(false)), Some(SpellEvent::AcceptSelected));
     }
 
     #[test]
