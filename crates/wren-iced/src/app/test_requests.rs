@@ -762,9 +762,15 @@ impl App {
     }
 
     /// Spell check as the last frame drew it: the marks of its rows and the
-    /// menu, with rectangles in window coordinates for a native click.
+    /// menu, with rectangles in window coordinates for a native click. The
+    /// editor draws nothing while a board is shown, so its last frame is
+    /// then an earlier note's and is not reported.
     fn spell_snapshot(&self) -> Value {
-        let frame = self.editor.spell_frame();
+        let frame = if self.surface() == super::board::Surface::Board {
+            wren_editor::SpellFrame::default()
+        } else {
+            self.editor.spell_frame()
+        };
         let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
         let marks = frame
             .marks
