@@ -143,10 +143,11 @@ nothing a board names.
 - A command that moves elements in the stacking order rewrites only the
   moved elements' `z` lines, except when no key fits between their new
   neighbours, the key would pass 64 characters, or a neighbour's key is
-  not valid. Then it renumbers the whole scope, in drawing order, as
-  `V01`, `V03`, … in the same undo step, and only then places the moved
-  elements. A missing `z` counts as the empty key, so nothing goes below
-  it without a renumber.
+  not valid. Then, in the same undo step, it renumbers the rest of the
+  scope, in drawing order and leaving the moved elements out, as `V01`,
+  `V03`, …, and places the moved elements in the gaps that leaves. A
+  missing `z` counts as the empty key, so nothing goes below it without a
+  renumber.
 
 How Wren picks a key between two neighbours, either of which may be
 absent, reading each character as a digit from 0 to 61 in that order:
