@@ -15,6 +15,9 @@ window regains focus, or immediately with **Reload settings**. Problems
 such as an unknown key or an invalid value show in the warning banner and
 never stop Wren from starting.
 
+The same directory holds `words.txt`, the [spell check](spell-check.md)
+word list, which Wren re-reads on the same occasions.
+
 The syntax matches Ghostty and Roost: one `key = value` per line, with `#`
 comments. When Wren saves a setting itself (choosing a theme or editor
 font in the palette, or changing the text size with ⌘+ / ⌘-), it rewrites
@@ -37,6 +40,7 @@ only that one line.
 | `line-numbers` | `true` / `false` | `true` | Show the editor's line-number gutter, in focus mode too. |
 | `editor-engine` | `classic` / `advanced` | `classic` | The editor engine. `classic` is the current editor; `advanced` is Wren's new editor engine, which is still being evaluated. It keeps the exact scroll position through undo, places outline jumps precisely, sets H1–H3 headings larger (1.35, 1.18, and 1.05 times the text size, in taller rows), and wraps a list item's or a quote's long lines under its text instead of under the marker; ↑ and ↓ keep the caret's horizontal position across those rows. `classic` draws every line at the text size and wraps every row at the left edge. A change applies on reload: the open note moves to the new engine with its text and cursor, but its undo history is cleared. The palette command **Switch editor engine (classic / advanced)** (`editor.toggle_engine`) flips it, saves it here, and applies it at once; its row shows the engine in use. |
 | `markdown-assist` | `on` / `off` | `on` | The Markdown-aware editing keys: Enter continues lists and quotes, Tab and Shift+Tab nest list items, Backspace removes markup, and Home stops after the markup. It also enables the [Markdown commands](../getting-started/keybindings.md#markdown-commands) (toggle task, bold, italic, inline code, move line). Off, Enter and Home are plain and the Markdown commands are unavailable; Tab still inserts spaces (or indents the lines of a selection) and Backspace still deletes a whole character. See [Inside the editor](../getting-started/keybindings.md#inside-the-editor). Applies on reload. The palette command **Toggle Markdown assist** (`editor.toggle_markdown_assist`) flips it, saves it here, and applies it at once; its row shows `on` or `off`. |
+| `spell-check` | `on` / `off` | `on` | Underline misspelled words and offer corrections, on the `advanced` engine only; `classic` checks nothing. Your own words go in `words.txt`, beside this file. See [Spell check](spell-check.md). The palette command **Toggle spell check** (`editor.toggle_spell_check`) flips it, saves it here, and applies it at once; its row shows `on` or `off`. |
 | `boards` | `on` / `off` | `on` | [Boards](boards.md): `.wren-board` notes of shapes and connectors. Off, boards are neither listed, opened, searched, nor created, no board command or New note pill appears, and their files are left alone. Applies when Wren restarts; until then the banner says "Restart Wren to apply `boards`." `wren export` works either way. |
 | `keybind` | `<trigger> = <action>` | see [Keybindings](../getting-started/keybindings.md) | Add, replace, or remove a shortcut. Repeatable; later lines win. Board shortcuts are listed under [On a board](../getting-started/keybindings.md#on-a-board). |
 

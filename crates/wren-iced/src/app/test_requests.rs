@@ -83,19 +83,21 @@ impl App {
                     // a focused editor sees it.
                     let keymap = &self.preferences.keymap;
                     let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
-                    let wren_editor::KeyRoute::Intent(intent) =
-                        super::preferences::key_route(
-                            keymap,
-                            trigger,
-                            self.editor.markdown_assist(),
-                        )
-                    else {
+                    let route = super::preferences::key_route(
+                        keymap,
+                        trigger,
+                        self.editor.markdown_assist(),
+                    );
+                    if !matches!(
+                        route,
+                        wren_editor::KeyRoute::Intent(_) | wren_editor::KeyRoute::Suggest
+                    ) {
                         return Err("The editor does not route this command's key".into());
-                    };
+                    }
                     let request = Arc::clone(request);
                     return Ok(iced::widget::operation::is_focused("note-editor").map(
                         move |focused| {
-                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(intent))
+                            Message::EditorShortcut(Arc::clone(&request), focused.then_some(route))
                         },
                     ));
                 }
@@ -278,6 +280,22 @@ impl App {
                 let task = self.edit(wren_editor::Message::Intent(intent));
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
+            }
+            "editor.spell" => request.respond(Ok(self.spell_snapshot())),
+            "editor.spell_event" => {
+                // A suggestions-menu event as the editor widget publishes it.
+                self.ensure_editor_ready()?;
+                let event = spell_event(params)?;
+                let task = self.update(Message::Editor(wren_editor::Message::Spell(event)));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task);
+            }
+            "editor.key" => {
+                self.ensure_editor_ready()?;
+                let (key, modifiers) = key_press(params)?;
+                let task = self.editor_key(key, modifiers);
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task);
             }
             "editor.cursor" => {
                 self.ensure_editor_ready()?;
@@ -742,6 +760,151 @@ impl App {
             },
         })
     }
+
+    /// Spell check as the last frame drew it: the marks of its rows and the
+    /// menu, with rectangles in window coordinates for a native click.
+    fn spell_snapshot(&self) -> Value {
+        let frame = self.editor.spell_frame();
+        let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
+        let marks = frame
+            .marks
+            .iter()
+            .map(|mark| {
+                let word = self
+                    .editor
+                    .line_text(mark.line)
+                    .and_then(|line| line.get(mark.range.clone()).map(str::to_owned));
+                json!({
+                    "line":mark.line,"start":mark.range.start,"end":mark.range.end,"word":word,
+                    "shown":mark.shown,"rects":mark.rects.iter().copied().map(rectangle).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let menu = self.editor.spell_menu().map(|menu| {
+            json!({
+                "line":menu.line(),"start":menu.mark().start,"end":menu.mark().end,
+                "word":menu.word(),"items":menu.items(),"selected":menu.selected(),
+                "bounds":frame.menu.map(rectangle),
+            })
+        });
+        json!({
+            "enabled":self.preferences.settings.spell_check
+                && self.editor.backend() == wren_editor::BackendKind::Owned,
+            "ready":self.spelling.ready(),"marks":marks,"menu":menu,
+        })
+    }
+
+    /// One key press as the focused editor and then the app would see it:
+    /// the editor's own routing, each message it publishes applied in order,
+    /// then the app's key handling for a key that reaches it. The editor
+    /// captures every key it publishes for, and Escape unless its menu is
+    /// open (it then drops focus, which this cannot show).
+    fn editor_key(
+        &mut self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Message> {
+        let menu_open = self.editor.spell_menu().is_some();
+        let messages = self.editor.key_message(key.clone(), modifiers);
+        let escape = key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
+        let status = if messages.is_empty() && (!escape || menu_open) {
+            iced::event::Status::Ignored
+        } else {
+            iced::event::Status::Captured
+        };
+        let mut tasks: Vec<Task<Message>> = messages
+            .into_iter()
+            .map(|message| self.update(Message::Editor(message)))
+            .collect();
+        let event = iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        if let Some(input) =
+            crate::keys::input(&event).filter(|input| crate::keys::reaches_app(input, status))
+        {
+            tasks.push(self.update(Message::Key(crate::keys::with_status(input, status))));
+        }
+        Task::batch(tasks)
+    }
+}
+
+fn spell_event(params: &Value) -> Result<wren_editor::SpellEvent, String> {
+    use wren_editor::SpellEvent;
+    let index = || {
+        params
+            .get("arg")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or("arg must be usize")
+    };
+    Ok(match string(params, "event")? {
+        "open_at_caret" => SpellEvent::OpenAtCaret,
+        "move" => SpellEvent::Move(
+            params
+                .get("arg")
+                .and_then(Value::as_i64)
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or("arg must be i32")?,
+        ),
+        "hover" => SpellEvent::Hover(index()?),
+        "accept" => SpellEvent::Accept(index()?),
+        "close" => SpellEvent::Close,
+        _ => return Err("event must be open_at_caret, move, hover, accept, or close".into()),
+    })
+}
+
+/// A key press for `editor.key`: a named key, or one character, and the
+/// modifiers held.
+fn key_press(params: &Value) -> Result<(iced::keyboard::Key, iced::keyboard::Modifiers), String> {
+    use iced::keyboard::key::Named;
+    use iced::keyboard::{Key, Modifiers};
+    let name = string(params, "key")?;
+    let named = match name {
+        "up" => Some(Named::ArrowUp),
+        "down" => Some(Named::ArrowDown),
+        "left" => Some(Named::ArrowLeft),
+        "right" => Some(Named::ArrowRight),
+        "enter" => Some(Named::Enter),
+        "escape" => Some(Named::Escape),
+        "tab" => Some(Named::Tab),
+        "space" => Some(Named::Space),
+        "backspace" => Some(Named::Backspace),
+        "delete" => Some(Named::Delete),
+        "home" => Some(Named::Home),
+        "end" => Some(Named::End),
+        "shift" => Some(Named::Shift),
+        "control" => Some(Named::Control),
+        "alt" => Some(Named::Alt),
+        "super" => Some(Named::Super),
+        "caps_lock" => Some(Named::CapsLock),
+        _ => None,
+    };
+    let key = match named {
+        Some(named) => Key::Named(named),
+        None if name.chars().count() == 1 => Key::Character(name.into()),
+        None => return Err(format!("unknown key {name:?}")),
+    };
+    let mut modifiers = Modifiers::empty();
+    if let Some(mods) = params.get("mods") {
+        for modifier in mods.as_array().ok_or("mods must be a list")? {
+            modifiers |= match modifier.as_str().ok_or("mods must be strings")? {
+                "shift" => Modifiers::SHIFT,
+                "ctrl" => Modifiers::CTRL,
+                "alt" => Modifiers::ALT,
+                "logo" => Modifiers::LOGO,
+                other => return Err(format!("unknown modifier {other:?}")),
+            };
+        }
+    }
+    Ok((key, modifiers))
 }
 
 fn intent(name: &str) -> Result<wren_editor::Intent, String> {
@@ -1726,6 +1889,142 @@ mod tests {
         );
         assert_eq!(app.navigation_snapshot()["filters"]["notes"], "First");
         assert_eq!(app.editor.text(), before);
+    }
+
+    /// An app on the advanced engine with one note open and the dictionary
+    /// loaded, the caret in the note's misspelled word.
+    fn spell_fixture() -> (tempfile::TempDir, App) {
+        let directory = crate::test_support::tempdir();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("Section/Group")).unwrap();
+        std::fs::write(
+            workspace.join("Section/Group/Note.md"),
+            "A mispelled word\n",
+        )
+        .unwrap();
+        let config = directory.path().join("config/config.conf");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "editor-engine = advanced\n").unwrap();
+        let (mut app, _) = App::with_config(
+            Options {
+                editor: true,
+                ..Options::default()
+            },
+            None,
+            Some(config),
+        );
+        app.workspace_mode = true;
+        app.session = Some(Session::open(&workspace).unwrap());
+        app.sync_editor(true);
+        let note = app.model().unwrap().notes[0].id;
+        let _ = app.process_core(Op::OpenNote { note: Some(note) });
+        let loaded =
+            super::super::spelling::Loaded::new(super::super::spelling::dictionary(), None);
+        let _ = app.update(Message::SpellLoaded(loaded));
+        app.editor.move_cursor(Cursor {
+            position: Position { line: 0, column: 4 },
+            selection: None,
+        });
+        (directory, app)
+    }
+
+    fn press(app: &mut App, key: &str) {
+        let (key, modifiers) = key_press(&json!({ "key": key })).unwrap();
+        let _ = app.editor_key(key, modifiers);
+    }
+
+    #[test]
+    fn spell_requests_parse_their_events_keys_and_modifiers() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+        use wren_editor::SpellEvent;
+        for (params, event) in [
+            (json!({"event":"open_at_caret"}), SpellEvent::OpenAtCaret),
+            (json!({"event":"move","arg":-1}), SpellEvent::Move(-1)),
+            (json!({"event":"hover","arg":2}), SpellEvent::Hover(2)),
+            (json!({"event":"accept","arg":0}), SpellEvent::Accept(0)),
+            (json!({"event":"close"}), SpellEvent::Close),
+        ] {
+            assert_eq!(spell_event(&params).unwrap(), event, "{params}");
+        }
+        for params in [
+            json!({"event":"accept"}),
+            json!({"event":"accept","arg":-1}),
+            json!({"event":"open_at"}),
+            json!({"event":"move","arg":"up"}),
+        ] {
+            assert!(spell_event(&params).is_err(), "{params}");
+        }
+        assert_eq!(
+            key_press(&json!({"key":"down"})).unwrap(),
+            (Key::Named(Named::ArrowDown), Modifiers::empty())
+        );
+        assert_eq!(
+            key_press(&json!({"key":".","mods":["alt","shift"]})).unwrap(),
+            (
+                Key::Character(".".into()),
+                Modifiers::ALT | Modifiers::SHIFT
+            )
+        );
+        for params in [
+            json!({"key":"pageup"}),
+            json!({"key":"ab"}),
+            json!({"key":"a","mods":["hyper"]}),
+            json!({"key":"a","mods":"alt"}),
+        ] {
+            assert!(key_press(&params).is_err(), "{params}");
+        }
+    }
+
+    #[test]
+    fn editor_key_drives_the_menu_and_leaves_escape_to_the_app() {
+        use wren_editor::SpellEvent;
+        let (_directory, mut app) = spell_fixture();
+        let _ = app.update(Message::Editor(wren_editor::Message::Spell(
+            SpellEvent::OpenAtCaret,
+        )));
+        assert_eq!(app.editor.spell_menu().unwrap().word(), "mispelled");
+        app.find_open = true;
+        press(&mut app, "down");
+        assert_eq!(app.editor.spell_menu().unwrap().selected(), Some(1));
+        press(&mut app, "up");
+        assert_eq!(app.editor.spell_menu().unwrap().selected(), Some(0));
+        // The first Escape is the menu's alone; the next one is the find bar's.
+        press(&mut app, "escape");
+        assert!(app.editor.spell_menu().is_none());
+        assert!(app.find_open);
+        press(&mut app, "escape");
+        assert!(!app.find_open);
+        assert_eq!(app.editor.text(), "A mispelled word\n");
+
+        let _ = app.update(Message::Editor(wren_editor::Message::Spell(
+            SpellEvent::OpenAtCaret,
+        )));
+        press(&mut app, "enter");
+        assert!(app.editor.spell_menu().is_none());
+        assert_eq!(app.editor.text(), "A misspelled word\n");
+        assert_eq!(
+            app.session.as_ref().unwrap().document().unwrap().text,
+            "A misspelled word\n"
+        );
+    }
+
+    #[test]
+    fn editor_key_closes_the_menu_on_another_key_and_then_types_it() {
+        use wren_editor::SpellEvent;
+        let (_directory, mut app) = spell_fixture();
+        let _ = app.update(Message::Editor(wren_editor::Message::Spell(
+            SpellEvent::OpenAtCaret,
+        )));
+        press(&mut app, "shift");
+        assert!(app.editor.spell_menu().is_some(), "a modifier alone");
+        press(&mut app, "x");
+        assert!(app.editor.spell_menu().is_none());
+        assert_eq!(app.editor.text(), "A mixspelled word\n");
+        let snapshot = app.spell_snapshot();
+        assert_eq!(snapshot["enabled"], true);
+        assert_eq!(snapshot["ready"], true);
+        assert!(snapshot["menu"].is_null());
     }
 
     #[test]

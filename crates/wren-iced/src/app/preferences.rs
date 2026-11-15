@@ -88,15 +88,16 @@ fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
 }
 
 /// Where the editor sends a press of `trigger`. Without Markdown assist the
-/// editor commands are off, so their keys keep the editor's own meaning:
-/// Ctrl+Enter breaks the line and Alt+↑ moves up.
+/// Markdown commands are off, so their keys keep the editor's own meaning:
+/// Ctrl+Enter breaks the line and Alt+↑ moves up. The suggest key is the
+/// editor's either way.
 pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool) -> KeyRoute {
     match keymap.action(trigger).and_then(CommandId::parse) {
         None => KeyRoute::Pass,
-        Some(id) => match id.intent() {
+        Some(id) => match id.editor_route() {
             None => KeyRoute::Host,
-            Some(intent) if markdown_assist => KeyRoute::Intent(intent),
-            Some(_) => KeyRoute::Pass,
+            Some(KeyRoute::Intent(_)) if !markdown_assist => KeyRoute::Pass,
+            Some(route) => route,
         },
     }
 }
@@ -393,6 +394,7 @@ impl App {
                 .unwrap_or_else(|| self.preferences.theme(self.system_mode).0),
         };
         if theme != self.definition {
+            self.editor.close_spell_menu();
             self.definition = theme;
             self.toolkit_theme = crate::theme::from_definition(theme);
             let palette = self.board_palette();
@@ -402,28 +404,53 @@ impl App {
         }
     }
 
-    /// Re-read `config.conf` and apply it. Returns any settings warning.
+    /// Re-read `config.conf` and `words.txt` and apply them. Returns any
+    /// settings warning, or `None` when neither changed.
     ///
     /// An engine switch keeps the editor widget's tree state, and with it
     /// keyboard focus, so nothing is refocused here.
     pub(super) fn reload_settings(&mut self, force: bool) -> Option<String> {
         #[cfg(target_os = "macos")]
         let keymap = self.preferences.keymap.clone();
-        if !self.preferences.reload(force) {
+        let words = self.spelling.reload_words();
+        if self.preferences.reload(force) {
+            self.apply_preferences();
+        } else if words {
+            self.sync_proofreader();
+        } else {
             return None;
         }
-        self.apply_preferences();
         #[cfg(target_os = "macos")]
         if self.window.is_some() && self.preferences.keymap != keymap {
             self.install_menu();
         }
-        let warning = self.preferences.warning();
-        // The restart notice is shown like a warning and retracted like one,
-        // but a setting that waits for a restart has not failed.
-        let shown = match (&warning, self.preferences.restart_notice()) {
+        self.show_settings_warning()
+    }
+
+    /// The warnings of `config.conf` and of `words.txt`, each after its path.
+    fn settings_warning(&self) -> Option<String> {
+        let warnings: Vec<String> = [self.preferences.warning(), self.spelling.warning()]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!warnings.is_empty()).then(|| warnings.join("; "))
+    }
+
+    /// The settings warning with the restart notice after it. The notice is
+    /// shown like a warning and retracted like one, but a setting that waits
+    /// for a restart has not failed.
+    fn shown_settings_warning(&self) -> Option<String> {
+        match (self.settings_warning(), self.preferences.restart_notice()) {
             (Some(warning), Some(notice)) => Some(format!("{warning} {notice}")),
-            (warning, notice) => warning.clone().or(notice),
-        };
+            (warning, notice) => warning.or(notice),
+        }
+    }
+
+    /// Show the settings warning in the banner, or retract the one shown
+    /// before when there is none. Returns the warning.
+    pub(super) fn show_settings_warning(&mut self) -> Option<String> {
+        let warning = self.settings_warning();
+        let shown = self.shown_settings_warning();
         match &shown {
             Some(shown) => {
                 self.banner = Some(shown.clone());
@@ -438,8 +465,10 @@ impl App {
         warning
     }
 
-    /// Apply the settings to the theme and editor.
+    /// Apply the settings to the theme and editor. A change of settings
+    /// closes the suggestions menu (rule 4.4.8).
     pub(super) fn apply_preferences(&mut self) {
+        self.editor.close_spell_menu();
         self.apply_shown();
         let settings = &self.preferences.settings;
         self.editor.set_line_height(settings.editor_line_height);
@@ -453,6 +482,7 @@ impl App {
             view.set_key_policy(board_policy(&self.preferences.keymap));
         }
         self.apply_editor_engine();
+        self.sync_proofreader();
     }
 
     /// Whether the editor's Markdown keys act: as the setting says, and
@@ -532,8 +562,13 @@ impl App {
         Task::batch([self.sync_outline(), self.sync_board_nodes(), actions])
     }
 
+    /// Whether the settings warning differs from the one last shown.
+    pub(super) fn settings_warning_changed(&self) -> bool {
+        self.shown_settings_warning() != self.preferences.shown_warning
+    }
+
     pub(super) fn startup_settings_warning(&mut self) -> Option<String> {
-        let warning = self.preferences.warning();
+        let warning = self.settings_warning();
         self.preferences.shown_warning = warning.clone();
         warning
     }
@@ -604,6 +639,14 @@ impl App {
         self.save_toggle("markdown-assist", if enabled { "on" } else { "off" })
     }
 
+    /// Flip `spell-check`, apply it, and save it. On the classic engine it
+    /// still flips, for when the advanced one is chosen.
+    pub(super) fn toggle_spell_check(&mut self) -> Gateway {
+        let enabled = !self.preferences.settings.spell_check;
+        self.preferences.settings.spell_check = enabled;
+        self.save_toggle("spell-check", if enabled { "on" } else { "off" })
+    }
+
     /// Move the editor to the other engine, keeping its text and cursor
     /// (undo history is dropped), and save the choice.
     pub(super) fn toggle_editor_engine(&mut self) -> Gateway {
@@ -638,6 +681,7 @@ impl App {
                 "off"
             }),
             CommandId::SwitchEngine => Some(settings.editor_engine.value()),
+            CommandId::ToggleSpellCheck => Some(if settings.spell_check { "on" } else { "off" }),
             _ => None,
         }
     }
@@ -669,10 +713,26 @@ impl App {
 
     /// Open `config.conf` in the user's editor, creating it from the template.
     pub(super) fn open_settings(&mut self) -> Gateway {
-        let Some(path) = self.preferences.path.clone() else {
+        self.open_user_file(|path| path.to_path_buf(), settings::ensure_exists)
+    }
+
+    /// Open `words.txt` beside `config.conf` in the user's editor, creating
+    /// it with a comment header (rule 4.5.3).
+    pub(super) fn open_words(&mut self) -> Gateway {
+        self.open_user_file(settings::words_path, settings::ensure_words_exist)
+    }
+
+    /// Open the file `locate` finds from the settings path in the user's
+    /// editor, after `ensure` has created it if need be.
+    fn open_user_file(
+        &mut self,
+        locate: fn(&Path) -> PathBuf,
+        ensure: fn(&Path) -> std::io::Result<()>,
+    ) -> Gateway {
+        let Some(path) = self.preferences.path.as_deref().map(locate) else {
             return self.blocked("No settings location is available (set HOME or WREN_CONFIG)");
         };
-        if let Err(error) = settings::ensure_exists(&path) {
+        if let Err(error) = ensure(&path) {
             return self.blocked(format!("Could not create {}: {error}", path.display()));
         }
         #[cfg(target_os = "macos")]
@@ -841,6 +901,10 @@ impl App {
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
         let accel = match input {
+            // The editor leaves Escape to the app while its menu is open.
+            Input::Nav(Nav::Escape | Nav::FieldEscape) if self.editor.close_spell_menu() => {
+                return Task::none();
+            }
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),
             // A filter box handed back the keyboard: stay in its column. The
             // palette, a dialog, and the find bar still close as with Esc.

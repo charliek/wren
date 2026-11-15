@@ -998,6 +998,7 @@ impl App {
     }
 
     pub(super) fn window_unfocused(&mut self) -> Result<(), String> {
+        self.editor.close_spell_menu();
         self.cancel_file_drag();
         self.settle_resize();
         self.cancel_gestures();

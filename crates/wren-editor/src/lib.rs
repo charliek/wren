@@ -19,6 +19,7 @@ mod highlighter;
 mod history;
 mod keys;
 mod plain;
+mod proof;
 mod widget;
 
 #[cfg(test)]
@@ -36,6 +37,9 @@ use iced::{Color, Element, Font};
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
 pub use keys::{KeyPolicy, KeyRoute};
+#[cfg(any(test, feature = "test-support"))]
+pub use proof::{DrawnMark, SpellFrame};
+pub use proof::{MenuKey, MenuPress, Proofreader, SpellEvent, SpellMenu};
 pub use widget::Measure;
 pub use wren_markdown::Intent;
 
@@ -70,6 +74,25 @@ pub struct Style {
     pub caret: Color,
     /// The line through completed tasks and struck text.
     pub strike: Color,
+    /// The zigzag under a misspelled word.
+    pub misspelling: Color,
+    /// The suggestions menu.
+    pub menu: MenuStyle,
+}
+
+/// Colours and type of the suggestions menu. The editor knows no UI font of
+/// its own, so the host supplies it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuStyle {
+    pub background: Color,
+    pub border: Color,
+    /// The fill behind the selected row.
+    pub selected: Color,
+    pub text: Color,
+    /// The inactive "No suggestions" row.
+    pub muted: Color,
+    pub font: Font,
+    pub text_size: f32,
 }
 
 /// Colours of the Markdown syntax highlighting.
@@ -115,6 +138,8 @@ pub enum Message {
     /// An editing key that depends on the text around the cursor: Enter,
     /// Tab, Backspace, Home, and the like. See [`EditorView::intent`].
     Intent(Intent),
+    /// The suggestions menu. See [`EditorView::spell`].
+    Spell(SpellEvent),
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +185,23 @@ pub struct EditorView {
     front_matter_end: Option<usize>,
     markdown_assist: bool,
     key_policy: Option<KeyPolicy>,
+    proofreader: Option<Arc<dyn Proofreader>>,
+    /// The open suggestions menu.
+    menu: Option<SpellMenu>,
+    /// The left press being held was resolved here as no single click: it
+    /// only closed the menu, so its drag selects nothing either (rule
+    /// 4.4.5), or it was a double or triple click, which drags nothing.
+    drop_drags: bool,
+    /// What the widget makes of the left presses it leaves here, which it
+    /// counts from in the next batch.
+    resolved_press: proof::ResolvedPress,
+    /// What the last left press resolved here was taken as, while the
+    /// widget's guess at it was wrong: the widget counts the presses after
+    /// it in the same batch from that guess, so they are counted again.
+    press_chain: Option<Option<iced::advanced::mouse::click::Kind>>,
+    /// The marks the widget last drew.
+    #[cfg(any(test, feature = "test-support"))]
+    spell_frame: std::cell::RefCell<SpellFrame>,
 }
 
 /// How the planner indents and renumbers.
@@ -189,6 +231,13 @@ impl EditorView {
             front_matter_end: None,
             markdown_assist: true,
             key_policy: None,
+            proofreader: None,
+            menu: None,
+            drop_drags: false,
+            resolved_press: proof::ResolvedPress::default(),
+            press_chain: None,
+            #[cfg(any(test, feature = "test-support"))]
+            spell_frame: Default::default(),
         };
         view.refresh_front_matter();
         view
@@ -204,6 +253,9 @@ impl EditorView {
     /// and Home are iced's own, and the other editing keys work on plain
     /// text; see [`EditorView::intent`].
     pub fn set_markdown_assist(&mut self, on: bool) {
+        if on != self.markdown_assist {
+            self.menu = None;
+        }
         self.markdown_assist = on;
     }
 
@@ -213,19 +265,29 @@ impl EditorView {
 
     /// Editor text size in points; row and caret heights scale with it.
     pub fn set_font_size(&mut self, size: f32) {
-        self.metrics = widget::Metrics::new(size, self.line_height);
+        self.set_metrics(widget::Metrics::new(size, self.line_height));
     }
 
     /// Row height as a multiple of the text size (1.7 by default), kept
     /// across text size changes.
     pub fn set_line_height(&mut self, ratio: f32) {
         self.line_height = ratio;
-        self.metrics = widget::Metrics::new(self.metrics.text, ratio);
+        self.set_metrics(widget::Metrics::new(self.metrics.text, ratio));
+    }
+
+    fn set_metrics(&mut self, metrics: widget::Metrics) {
+        if metrics != self.metrics {
+            self.menu = None;
+        }
+        self.metrics = metrics;
     }
 
     /// The editor font; bold and italic spans use its variants. Defaults to
     /// [`Font::MONOSPACE`].
     pub fn set_font(&mut self, font: Font) {
+        if font != self.font {
+            self.menu = None;
+        }
         self.font = font;
     }
 
@@ -247,6 +309,9 @@ impl EditorView {
 
     /// Show or hide the line-number gutter (shown by default).
     pub fn set_line_numbers(&mut self, line_numbers: bool) {
+        if line_numbers != self.line_numbers {
+            self.menu = None;
+        }
         self.line_numbers = line_numbers;
     }
 
@@ -263,7 +328,7 @@ impl EditorView {
     /// Returns `Element<'_, Message>` so the parent can map it to its own
     /// message type.
     pub fn view(&self, style: Style, palette: Palette, measure: Measure) -> Element<'_, Message> {
-        TextEditor::new(
+        let editor = TextEditor::new(
             &self.content,
             "note-editor",
             HighlighterSettings {
@@ -277,8 +342,13 @@ impl EditorView {
             self.markdown_assist,
         )
         .key_policy(self.key_policy.as_ref())
-        .measure(measure)
-        .into()
+        .proofreader(self.proofreader.as_deref())
+        .spell_menu(self.menu.as_ref())
+        .resolved_press(self.resolved_press)
+        .measure(measure);
+        #[cfg(any(test, feature = "test-support"))]
+        let editor = editor.spell_frame(&self.spell_frame);
+        editor.into()
     }
 
     // -----------------------------------------------------------------------
@@ -290,6 +360,20 @@ impl EditorView {
     /// Returns `true` only when the text changes. Non-edit actions break typing
     /// coalescing without discarding history; no-op edits also preserve redo.
     pub fn perform(&mut self, action: Action) -> bool {
+        self.menu = None;
+        if matches!(action, Action::Drag(_)) {
+            if self.drop_drags {
+                return false;
+            }
+        } else {
+            self.drop_drags = false;
+        }
+        if matches!(
+            action,
+            Action::Click(_) | Action::SelectWord | Action::SelectLine
+        ) {
+            self.press_chain = None;
+        }
         if action.is_edit() {
             let kind = edit_kind(&action);
             let now = Instant::now();
@@ -328,6 +412,7 @@ impl EditorView {
     /// Returns whether the text changed. A plan with an edit off the text,
     /// inside a character, backwards, or overlapping another changes nothing.
     pub fn apply(&mut self, edits: &[Replace], selection: Cursor) -> bool {
+        self.menu = None;
         let Some(order) = self.content.with_lines(|lines| edit::ordered(edits, lines)) else {
             return false;
         };
@@ -368,6 +453,7 @@ impl EditorView {
     ///
     /// Returns whether the text changed.
     pub fn intent(&mut self, intent: Intent) -> bool {
+        self.menu = None;
         // A double- or triple-click selection reports its click point, not
         // its bounds, until it is normalized.
         let cursor = self.snapshot_cursor();
@@ -420,6 +506,7 @@ impl EditorView {
     /// Returns `true` if something was restored: the text, the cursor and
     /// selection, and on the owned engine the scroll position.
     pub fn undo(&mut self) -> bool {
+        self.menu = None;
         if !self.history.can_undo() {
             return false;
         }
@@ -437,6 +524,7 @@ impl EditorView {
     ///
     /// Returns `true` if something was restored.
     pub fn redo(&mut self) -> bool {
+        self.menu = None;
         if !self.history.can_redo() {
             return false;
         }
@@ -485,6 +573,7 @@ impl EditorView {
     ///
     /// Ends the current typing group without discarding history.
     pub fn move_cursor(&mut self, cursor: Cursor) {
+        self.menu = None;
         self.history.break_group();
         self.select(cursor);
     }
@@ -534,6 +623,7 @@ impl EditorView {
     /// as one row, so a wrapped line between the view and the target leaves
     /// the target off by that line's extra rows.
     pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
+        self.menu = None;
         self.history.break_group();
         self.content.scroll_to_line(line, placement);
     }
@@ -567,6 +657,7 @@ impl EditorView {
     /// once the cursor has moved its next update scrolls to it, so a view
     /// that has to move up past the cursor puts the cursor's line on top.
     pub fn restore_viewport(&mut self, viewport: Viewport) {
+        self.menu = None;
         self.history.break_group();
         let cursor = self.clamped(viewport.cursor);
         if cursor.selection.is_none() && self.content.cursor().selection.is_some() {
@@ -644,6 +735,7 @@ impl EditorView {
     ///
     /// Returns `true` if at least one match exists.
     pub fn find_next(&mut self) -> bool {
+        self.menu = None;
         self.history.break_group();
         if self.find_matches.is_empty() {
             return false;
@@ -661,6 +753,7 @@ impl EditorView {
     ///
     /// Returns `true` if at least one match exists.
     pub fn find_previous(&mut self) -> bool {
+        self.menu = None;
         self.history.break_group();
         if self.find_matches.is_empty() {
             return false;
@@ -704,6 +797,309 @@ impl EditorView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
+    }
+
+    // -----------------------------------------------------------------------
+    // Spell check
+    // -----------------------------------------------------------------------
+
+    /// The host's proofreader, or `None` to check nothing. Only the owned
+    /// engine uses it: the widget asks it about the rows it draws, each
+    /// frame, so a new one or a changed word list shows on the next frame.
+    pub fn set_proofreader(&mut self, proofreader: Option<Arc<dyn Proofreader>>) {
+        let same = match (&self.proofreader, &proofreader) {
+            (Some(old), Some(new)) => std::ptr::addr_eq(Arc::as_ptr(old), Arc::as_ptr(new)),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.menu = None;
+        }
+        self.proofreader = proofreader;
+    }
+
+    /// Carry out a suggestions-menu event. Returns whether the text changed,
+    /// as [`EditorView::perform`] does.
+    ///
+    /// Opening finds the misspelled word that contains or touches the caret
+    /// ([`SpellEvent::OpenAtCaret`]) or lies under a point relative to the
+    /// text origin ([`SpellEvent::OpenAt`]), asks the proofreader for its
+    /// suggestions, and scrolls the word's first row into view if it is
+    /// not; the caret and the selection stay where they are. With no such
+    /// word, on the iced engine, or with no proofreader, nothing opens.
+    /// Accepting replaces the word through [`EditorView::apply`], so it is
+    /// one undo step. A menu key ([`SpellEvent::Key`]) acts on the open menu,
+    /// or with none open is handled as the editor handles that press, which
+    /// may edit the text too; these two are the events that can return
+    /// true. A pointer press ([`SpellEvent::Press`]) closes the open menu,
+    /// or with none open clicks or opens one as that press would.
+    pub fn spell(&mut self, event: SpellEvent) -> bool {
+        match event {
+            SpellEvent::Key(key) if self.menu.is_some() => return self.spell(key.event()),
+            SpellEvent::Key(key) => return self.press_without_menu(key),
+            SpellEvent::Press(press) => return self.press(press),
+            SpellEvent::OpenAtCaret => {
+                let caret = self.content.cursor().position;
+                let mark = proof::mark_at_caret(self.marks_at(caret.line), caret.column);
+                self.open_menu(mark.map(|mark| (caret.line, mark)));
+            }
+            SpellEvent::OpenAt(point) => {
+                let target = self
+                    .content
+                    .mark_under(point, |line, _| self.marks_at(line));
+                self.open_menu(target);
+            }
+            SpellEvent::Move(delta) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.step(delta);
+                }
+            }
+            SpellEvent::Hover(row) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.hover(row);
+                }
+            }
+            SpellEvent::Accept(row) => return self.accept(row),
+            SpellEvent::AcceptSelected => match self.menu.as_ref().and_then(SpellMenu::selected) {
+                Some(row) => return self.accept(row),
+                None => self.menu = None,
+            },
+            SpellEvent::Close => {
+                self.menu = None;
+            }
+        }
+        false
+    }
+
+    /// Replace the menu's word with its suggestion in `row`, as one undo
+    /// step with the caret after it, and close the menu. A row with no
+    /// suggestion, or a word no longer at its mark, closes it and changes
+    /// nothing.
+    fn accept(&mut self, row: usize) -> bool {
+        let Some(menu) = self.menu.take() else {
+            return false;
+        };
+        let Some(suggestion) = menu.items().get(row) else {
+            return false;
+        };
+        let line = menu.line();
+        let mark = menu.mark();
+        let unchanged = self.content.with_lines(|lines| {
+            lines
+                .get(line)
+                .is_some_and(|text| text.text.get(mark.clone()) == Some(menu.word()))
+        });
+        if !unchanged {
+            return false;
+        }
+        let at = |column| Position { line, column };
+        let edit = Replace {
+            start: at(mark.start),
+            end: at(mark.end),
+            text: suggestion.clone(),
+        };
+        let caret = Cursor {
+            position: at(mark.start + suggestion.len()),
+            selection: None,
+        };
+        self.apply(&[edit], caret)
+    }
+
+    /// The open suggestions menu, if any.
+    pub fn spell_menu(&self) -> Option<&SpellMenu> {
+        self.menu.as_ref()
+    }
+
+    /// Close the suggestions menu. Returns whether one was open.
+    pub fn close_spell_menu(&mut self) -> bool {
+        self.menu.take().is_some()
+    }
+
+    /// Open the menu for the misspelled word at `target`, a line and a byte
+    /// range of it; with no target, or none the proofreader can still be
+    /// asked about, whatever menu was open closes.
+    fn open_menu(&mut self, target: Option<(usize, Range<usize>)>) {
+        self.menu = None;
+        let Some((line, mark)) = target else {
+            return;
+        };
+        let Some(proofreader) = self.proofreader.clone() else {
+            return;
+        };
+        let Some(text) = self
+            .content
+            .with_lines(|lines| lines.get(line).map(|line| line.text.into_owned()))
+        else {
+            return;
+        };
+        let Some(word) = text.get(mark.clone()) else {
+            return;
+        };
+        let items = proof::offered(
+            word,
+            proofreader.suggestions(&text, mark.clone(), proof::SUGGESTIONS),
+        );
+        self.content.reveal(Position {
+            line,
+            column: mark.start,
+        });
+        self.menu = Some(SpellMenu::new(line, mark, word.to_owned(), items));
+    }
+
+    /// The marks and the menu as the last frame drew them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spell_frame(&self) -> SpellFrame {
+        self.spell_frame.borrow().clone()
+    }
+
+    /// The text of `line` without its ending, so a host can name the word a
+    /// mark of [`spell_frame`](Self::spell_frame) covers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn line_text(&self, line: usize) -> Option<String> {
+        self.content
+            .with_lines(|lines| lines.get(line).map(|text| text.text.to_string()))
+    }
+
+    /// The editor's own key routing run on one press, without a window: the
+    /// messages the focused editor would publish for `key` with `modifiers`,
+    /// in order. A key that closes the open menu and is then handled as if
+    /// it had not been open gives two (rule 4.4.4); Escape with the menu
+    /// open gives none. The key is its own physical key, and a character
+    /// types unless Ctrl or the logo key is held (or Alt, off macOS). The
+    /// clipboard is not there, so Copy and Paste give nothing and Cut only
+    /// its delete; dropping focus is no message.
+    #[cfg(feature = "test-support")]
+    pub fn key_message(
+        &self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Vec<Message> {
+        let menu = self.menu.as_ref().map(proof::OpenMenu::of);
+        let selection = self.has_selection();
+        let mut out = Vec::new();
+        match keys::route(key_press(key, modifiers), self.key_context(), menu) {
+            None => {}
+            Some(keys::Routed::Binding(binding)) => keys::messages(binding, selection, &mut out),
+            Some(keys::Routed::Close(binding)) => {
+                out.push(Message::Spell(SpellEvent::Close));
+                if let Some(binding) = binding {
+                    keys::messages(binding, selection, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// Close the open menu for a pointer press in the editor, which does
+    /// nothing more (rule 4.4.5), or with none open carry the press out as
+    /// the widget does with no menu, the left press after one that only
+    /// closed the menu being a single click. Returns whether the text
+    /// changed.
+    fn press(&mut self, press: MenuPress) -> bool {
+        use iced::advanced::mouse::click::Kind;
+
+        let (point, guess) = match press {
+            MenuPress::Left(point, kind) => (point, kind),
+            MenuPress::Right(point) => {
+                if self.menu.take().is_some() {
+                    self.drop_drags = false;
+                    return false;
+                }
+                return self.spell(SpellEvent::OpenAt(point));
+            }
+        };
+        let kind = if self.menu.take().is_some() {
+            None
+        } else {
+            Some(match self.press_chain {
+                Some(previous) => proof::click_kind(guess, previous),
+                None => guess,
+            })
+        };
+        let changed = match kind {
+            None => false,
+            Some(Kind::Single) => self.perform(Action::Click(point)),
+            Some(Kind::Double) => self.perform(Action::SelectWord),
+            Some(Kind::Triple) => self.perform(Action::SelectLine),
+        };
+        self.drop_drags = kind != Some(Kind::Single);
+        self.press_chain = (kind != Some(guess)).then_some(kind);
+        self.resolved_press = proof::ResolvedPress {
+            count: self.resolved_press.count.wrapping_add(1),
+            kind,
+        };
+        changed
+    }
+
+    /// Handle a press of `key` as the focused editor does with no menu
+    /// open, carrying out what it publishes. Returns whether the text
+    /// changed.
+    fn press_without_menu(&mut self, key: MenuKey) -> bool {
+        use iced::keyboard::key::Named;
+
+        let named = match key {
+            MenuKey::Up => Named::ArrowUp,
+            MenuKey::Down => Named::ArrowDown,
+            MenuKey::Enter => Named::Enter,
+        };
+        let press = key_press(
+            iced::keyboard::Key::Named(named),
+            iced::keyboard::Modifiers::empty(),
+        );
+        let Some(binding) = keys::key_binding(press, self.key_context()) else {
+            return false;
+        };
+        let mut messages = Vec::new();
+        keys::messages(binding, self.has_selection(), &mut messages);
+        let mut changed = false;
+        for message in messages {
+            changed |= match message {
+                Message::Action(action) => self.perform(action),
+                Message::Intent(intent) => self.intent(intent),
+                Message::Spell(event) => self.spell(event),
+                Message::Undo => self.undo(),
+                Message::Redo => self.redo(),
+                // Only Ctrl or Cmd+F routes to Find, never a plain key.
+                Message::Find => false,
+            };
+        }
+        changed
+    }
+
+    /// What key routing needs from the editor, as no input method composes.
+    fn key_context(&self) -> keys::Context<'_> {
+        keys::Context {
+            markdown_assist: self.markdown_assist,
+            composing: false,
+            policy: self.key_policy.as_ref(),
+        }
+    }
+
+    fn has_selection(&self) -> bool {
+        self.content
+            .selection()
+            .is_some_and(|text| !text.is_empty())
+    }
+
+    /// The misspellings of `line`, found without the widget: its prose comes
+    /// from a fresh pass over the lines down to it (§3.3), the same marks a
+    /// frame draws there. Empty on the iced engine or with no proofreader,
+    /// which is then not asked.
+    fn marks_at(&self, line: usize) -> Vec<Range<usize>> {
+        let Some(proofreader) = self
+            .proofreader
+            .as_deref()
+            .filter(|_| self.content.kind() == BackendKind::Owned)
+        else {
+            return Vec::new();
+        };
+        self.content.with_lines(|lines| {
+            let Some(text) = lines.get(line) else {
+                return Vec::new();
+            };
+            let prose = highlighter::prose_at(&lines, line, self.front_matter_end);
+            proof::line_marks(proofreader, &text.text, &prose)
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -880,6 +1276,7 @@ impl EditorView {
 
     /// Refresh what derives from the text after it changed.
     fn text_changed(&mut self) {
+        self.menu = None;
         self.refresh_front_matter();
         self.recompute_find();
     }
@@ -922,6 +1319,36 @@ impl EditorView {
 // ---------------------------------------------------------------------------
 // Cursor clamping
 // ---------------------------------------------------------------------------
+
+/// A focused press of `key` with `modifiers`, as a window would deliver it:
+/// its own physical key, and the text it types, which a character types
+/// unless Ctrl or the logo key is held (or Alt, off macOS).
+fn key_press(
+    key: iced::keyboard::Key,
+    modifiers: iced::keyboard::Modifiers,
+) -> text_editor::KeyPress {
+    use iced::keyboard::key::{Named, NativeCode, Physical};
+    use iced::keyboard::Key;
+
+    let typing = !(modifiers.control()
+        || modifiers.logo()
+        || (modifiers.alt() && !cfg!(target_os = "macos")));
+    let text = match key.as_ref() {
+        Key::Character(c) if typing => Some(c.into()),
+        Key::Named(Named::Space) if typing => Some(" ".into()),
+        Key::Named(Named::Enter) => Some("\r".into()),
+        Key::Named(Named::Tab) => Some("\t".into()),
+        _ => None,
+    };
+    text_editor::KeyPress {
+        modified_key: key.clone(),
+        key,
+        physical_key: Physical::Unidentified(NativeCode::Unidentified),
+        modifiers,
+        text,
+        status: text_editor::Status::Focused { is_hovered: false },
+    }
+}
 
 fn markdown_selection(cursor: Cursor) -> wren_markdown::Selection {
     let pos = |at: Position| wren_markdown::Pos::new(at.line, at.column);
@@ -984,6 +1411,847 @@ fn edit_kind(action: &Action) -> EditKind {
 mod tests {
     use super::*;
     use widget::Content;
+
+    // ── Spell check ─────────────────────────────────────────────────────────
+
+    /// `(line, range)` of every mark a frame of the whole text draws.
+    fn drawn(ev: &mut EditorView) -> Vec<(usize, Range<usize>)> {
+        let proofreader = ev.proofreader.clone();
+        ev.content
+            .drawn_marks(
+                iced::Size::new(2000.0, 2000.0),
+                ev.front_matter_end,
+                proofreader.as_deref(),
+                None,
+            )
+            .into_iter()
+            .map(|mark| (mark.line, mark.range))
+            .collect()
+    }
+
+    /// `(line, range)` of every mark [`EditorView::marks_at`] finds.
+    fn on_demand(ev: &EditorView) -> Vec<(usize, Range<usize>)> {
+        (0..ev.line_count())
+            .flat_map(|line| ev.marks_at(line).into_iter().map(move |mark| (line, mark)))
+            .collect()
+    }
+
+    #[test]
+    fn the_acceptance_note_is_marked_alike_on_demand_and_when_drawn() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&[
+            "Spel",
+            "chek",
+            "apear",
+            "replacments",
+            "spelbook",
+            "bundeled",
+            "desing",
+            "spel",
+            "CommonMark",
+            "mispelled",
+            "knwon",
+            "misteak",
+            "wrd",
+            "labl",
+            "Titel",
+        ]));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, fixtures::SPELL_NOTE);
+        ev.set_proofreader(Some(proofreader.clone()));
+        let marks = on_demand(&ev);
+        assert_eq!(drawn(&mut ev), marks);
+        let lines: Vec<&str> = fixtures::SPELL_NOTE.split('\n').collect();
+        let words: Vec<&str> = marks
+            .iter()
+            .map(|(line, range)| &lines[*line][range.clone()])
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "chek",
+                "apear",
+                "replacments",
+                "bundeled",
+                "desing",
+                "CommonMark",
+                "mispelled",
+                "knwon",
+                "misteak"
+            ]
+        );
+        assert_eq!(marks[0].0, 3, "the heading's, not the front matter's");
+    }
+
+    #[test]
+    fn on_demand_marks_need_the_owned_engine_and_a_proofreader() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh"]));
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "teh cat\n# teh");
+        assert!(ev.marks_at(0).is_empty());
+        ev.set_proofreader(Some(proofreader.clone()));
+        assert!(on_demand(&ev).is_empty());
+        assert!(drawn(&mut ev).is_empty());
+        assert_eq!(proofreader.calls(), 0);
+
+        let text = ev.text();
+        ev.set_backend(BackendKind::Owned, &text);
+        assert_eq!(on_demand(&ev), [(0, 0..3), (1, 2..5)]);
+        assert_eq!(ev.marks_at(2), []);
+        ev.set_proofreader(None);
+        assert!(on_demand(&ev).is_empty());
+        assert!(drawn(&mut ev).is_empty());
+    }
+
+    #[test]
+    fn marks_follow_the_text_through_edits_undo_and_replacement() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh", "cta"]));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "the cat\r\nteh dog");
+        ev.set_proofreader(Some(proofreader));
+        let check = |ev: &mut EditorView, expected: &[(usize, Range<usize>)]| {
+            assert_eq!(on_demand(ev), expected, "{:?}", ev.text());
+            assert_eq!(drawn(ev), expected, "{:?}", ev.text());
+        };
+        check(&mut ev, &[(1, 0..3)]);
+        ev.move_cursor(at(0, 0));
+        assert!(ev.perform(Action::Edit(Edit::Paste(Arc::new("cta ".into())))));
+        check(&mut ev, &[(0, 0..3), (1, 0..3)]);
+        assert!(ev.intent(Intent::Enter));
+        check(&mut ev, &[(0, 0..3), (2, 0..3)]);
+        assert!(ev.undo());
+        check(&mut ev, &[(0, 0..3), (1, 0..3)]);
+        assert!(ev.undo());
+        check(&mut ev, &[(1, 0..3)]);
+        assert!(ev.redo());
+        check(&mut ev, &[(0, 0..3), (1, 0..3)]);
+        // A line turned into code loses its marks; the text is replaced.
+        ev.move_cursor(at(0, 0));
+        assert!(ev.perform(Action::Edit(Edit::Paste(Arc::new("    ".into())))));
+        check(&mut ev, &[(1, 0..3)]);
+        ev.replace_text("---\ntitle: teh\n---\nfine", false);
+        check(&mut ev, &[]);
+    }
+
+    // ── The suggestions menu ───────────────────────────────────────────────
+
+    const TEH: &[(&str, &[&str])] = &[("teh", &["the", "tech", "ten", "tea", "tee", "Ted"])];
+
+    /// An owned-engine editor over `text`, checked by a proofreader that
+    /// rejects `teh` and `zzz` and corrects `teh`.
+    fn checked(text: &str) -> (EditorView, Arc<fixtures::Rejects>) {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh", "zzz"]).suggesting(TEH));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, text);
+        ev.set_proofreader(Some(proofreader.clone()));
+        (ev, proofreader)
+    }
+
+    /// `(line, mark, word, items, selected)` of an open menu.
+    type MenuState = (usize, Range<usize>, String, Vec<String>, Option<usize>);
+
+    /// The state of the open menu.
+    fn menu_of(ev: &EditorView) -> Option<MenuState> {
+        ev.spell_menu().map(|menu| {
+            (
+                menu.line(),
+                menu.mark(),
+                menu.word().to_owned(),
+                menu.items().to_vec(),
+                menu.selected(),
+            )
+        })
+    }
+
+    fn select(anchor: (usize, usize), head: (usize, usize)) -> Cursor {
+        Cursor {
+            position: Position {
+                line: head.0,
+                column: head.1,
+            },
+            selection: Some(Position {
+                line: anchor.0,
+                column: anchor.1,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_keyboard_opens_the_menu_for_the_word_containing_or_touching_the_caret() {
+        let text = "a cat\nteh cat teh";
+        let five: Vec<String> = ["the", "tech", "ten", "tea", "tee"]
+            .map(String::from)
+            .into();
+        for (column, mark) in [(0, 0..3), (2, 0..3), (3, 0..3), (8, 8..11), (11, 8..11)] {
+            let (mut ev, proofreader) = checked(text);
+            ev.move_cursor(at(1, column));
+            assert!(!ev.spell(SpellEvent::OpenAtCaret));
+            assert_eq!(
+                menu_of(&ev),
+                Some((1, mark.clone(), "teh".into(), five.clone(), Some(0))),
+                "{column}"
+            );
+            // Five at most, asked of the proofreader with the whole line.
+            assert_eq!(proofreader.asked(), [("teh cat teh".into(), mark, 5)]);
+            // Nothing moves, the caret at a mark's end included (rule
+            // 4.3.3 hides that mark, but it is still the target).
+            assert_eq!(ev.cursor(), at(1, column), "{column}");
+            assert_eq!(ev.text(), text);
+        }
+        // Past the space after a word, inside a correct one, or on a line
+        // with no mark, nothing opens and nobody is asked.
+        for (line, column) in [(1, 4), (1, 6), (0, 3)] {
+            let (mut ev, proofreader) = checked(text);
+            ev.move_cursor(at(line, column));
+            assert!(!ev.spell(SpellEvent::OpenAtCaret));
+            assert!(ev.spell_menu().is_none(), "{line}:{column}");
+            assert!(proofreader.asked().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_caret_of_a_selection_is_its_moving_end() {
+        let text = "teh cat teh";
+        let (mut ev, _) = checked(text);
+        for (selection, mark) in [
+            (select((0, 1), (0, 9)), 8..11),
+            (select((0, 9), (0, 1)), 0..3),
+            (select((0, 5), (0, 3)), 0..3),
+        ] {
+            ev.move_cursor(selection);
+            ev.spell(SpellEvent::OpenAtCaret);
+            assert_eq!(ev.spell_menu().map(SpellMenu::mark), Some(mark));
+            assert_eq!(ev.cursor(), selection, "the selection stays");
+            assert!(ev.close_spell_menu());
+        }
+        // A selection ending inside a correct word opens nothing.
+        ev.move_cursor(select((0, 0), (0, 5)));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_none());
+    }
+
+    #[test]
+    fn a_word_without_suggestions_opens_a_menu_with_nothing_selected() {
+        let (mut ev, _) = checked("zzz");
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert_eq!(
+            menu_of(&ev),
+            Some((0, 0..3, "zzz".into(), Vec::new(), None))
+        );
+        // Moving does nothing: there is no row to select.
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Hover(0));
+        assert_eq!(ev.spell_menu().and_then(SpellMenu::selected), None);
+    }
+
+    #[test]
+    fn the_menu_opens_only_on_the_owned_engine_with_a_proofreader() {
+        let proofreader = Arc::new(fixtures::Rejects::new(&["teh"]).suggesting(TEH));
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "teh");
+        ev.set_proofreader(Some(proofreader.clone()));
+        ev.content.lay_out(iced::Size::new(400.0, 200.0));
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::OpenAt(iced::Point::new(10.0, 5.0)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(proofreader.calls(), 0);
+        assert!(proofreader.asked().is_empty());
+
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "teh");
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_none(), "no proofreader");
+    }
+
+    #[test]
+    fn the_selection_moves_and_stops_at_the_ends() {
+        let (mut ev, _) = checked("teh");
+        ev.spell(SpellEvent::OpenAtCaret);
+        let selected = |ev: &EditorView| ev.spell_menu().and_then(SpellMenu::selected);
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Move(-1));
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Move(1));
+        assert_eq!(selected(&ev), Some(2));
+        ev.spell(SpellEvent::Move(i32::MAX));
+        assert_eq!(selected(&ev), Some(4));
+        ev.spell(SpellEvent::Move(1));
+        assert_eq!(selected(&ev), Some(4));
+        ev.spell(SpellEvent::Move(i32::MIN));
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Hover(3));
+        assert_eq!(selected(&ev), Some(3));
+        ev.spell(SpellEvent::Hover(5));
+        assert_eq!(selected(&ev), Some(3), "past the last row");
+        assert_eq!(ev.text(), "teh");
+
+        assert!(!ev.spell(SpellEvent::Close));
+        assert!(ev.spell_menu().is_none());
+        assert!(!ev.close_spell_menu());
+        // Events for a closed menu do nothing.
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Hover(1));
+        assert!(ev.spell_menu().is_none());
+    }
+
+    #[test]
+    fn opening_again_reads_the_word_afresh() {
+        let (mut ev, proofreader) = checked("teh teh");
+        ev.move_cursor(at(0, 0));
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::Move(2));
+        ev.move_cursor(at(0, 5));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert_eq!(
+            ev.spell_menu().map(|menu| (menu.mark(), menu.selected())),
+            Some((4..7, Some(0)))
+        );
+        assert_eq!(proofreader.asked().len(), 2);
+        // An opening that finds no word closes the open menu.
+        ev.content.lay_out(iced::Size::new(600.0, 400.0));
+        ev.spell(SpellEvent::OpenAt(iced::Point::new(1.0, 12.0)));
+        assert_eq!(ev.spell_menu().map(SpellMenu::mark), Some(0..3));
+        ev.spell(SpellEvent::OpenAt(iced::Point::new(3.5 * CELL, 12.0)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(ev.cursor(), at(0, 5));
+    }
+
+    /// The JetBrains Mono advance at 14 px.
+    const CELL: f32 = 8.4;
+
+    #[test]
+    fn a_point_opens_the_menu_for_the_word_under_it() {
+        let (mut ev, _) = checked("cat teh\n\n- [x] done teh\nzzz");
+        ev.content.lay_out(iced::Size::new(600.0, 400.0));
+        let point = |cells: f32, row: f32| iced::Point::new(cells * CELL, row * 24.0 + 12.0);
+        for (at_point, target) in [
+            (point(4.5, 0.0), Some((0, 4..7))),
+            (point(4.05, 0.0), Some((0, 4..7))),
+            (point(6.9, 0.0), Some((0, 4..7))),
+            (point(1.0, 0.0), None),
+            (point(3.5, 0.0), None),
+            (point(7.5, 0.0), None),
+            (point(1.0, 1.0), None),
+            (point(12.0, 2.0), Some((2, 11..14))),
+            (point(1.0, 3.0), Some((3, 0..3))),
+            (point(1.0, 4.0), None),
+            (iced::Point::new(10.0, -2.0), None),
+        ] {
+            ev.close_spell_menu();
+            ev.spell(SpellEvent::OpenAt(at_point));
+            assert_eq!(
+                ev.spell_menu().map(|menu| (menu.line(), menu.mark())),
+                target,
+                "{at_point:?}"
+            );
+        }
+        assert_eq!(ev.cursor(), at(0, 0));
+    }
+
+    #[test]
+    fn opening_scrolls_the_words_first_row_into_view() {
+        let mut text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        text.push_str("teh end");
+        let (mut ev, _) = checked(&text);
+        let size = iced::Size::new(400.0, 240.0);
+        ev.content.lay_out(size);
+        // The caret on the last line, the view back at the top.
+        let top = ev.content.scroll();
+        ev.content.return_to(at(60, 1), top);
+        ev.content.lay_out(size);
+        assert_eq!(ev.first_visible_line(), 0);
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_some());
+        ev.content.lay_out(size);
+        // Ten rows in view, the last of them the word's.
+        assert_eq!(ev.content.scroll().line, 51, "{:?}", ev.content.scroll());
+        assert_eq!(ev.content.scroll().vertical, 0.0);
+        assert_eq!(ev.cursor(), at(60, 1));
+
+        // A word already in view does not scroll it.
+        let scroll = ev.content.scroll();
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll(), scroll);
+    }
+
+    #[test]
+    fn opening_brings_a_half_hidden_row_fully_into_view() {
+        let text = format!("teh {}", "word ".repeat(200));
+        let (mut ev, _) = checked(&text);
+        let size = iced::Size::new(400.0, 240.0);
+        ev.content.lay_out(size);
+        // Half the first row scrolled off the top, the caret on it.
+        let mut scroll = ev.content.scroll();
+        scroll.vertical = 12.0;
+        ev.content.return_to(at(0, 1), scroll);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll().vertical, 12.0);
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll().vertical, 0.0);
+        assert_eq!(ev.cursor(), at(0, 1));
+    }
+
+    /// The menu open on `teh` at the start of "teh cat".
+    fn opened() -> (EditorView, Arc<fixtures::Rejects>) {
+        let (mut ev, proofreader) = checked("teh cat");
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_some());
+        (ev, proofreader)
+    }
+
+    #[cfg(feature = "test-support")]
+    mod keys_on_a_menu {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+
+        use super::*;
+
+        /// Carry out `message` as the host does, returning whether the text
+        /// changed.
+        fn handle(ev: &mut EditorView, message: Message) -> bool {
+            match message {
+                Message::Action(action) => ev.perform(action),
+                Message::Intent(intent) => ev.intent(intent),
+                Message::Spell(event) => ev.spell(event),
+                Message::Undo => ev.undo(),
+                Message::Redo => ev.redo(),
+                Message::Find => false,
+            }
+        }
+
+        fn spell_events(messages: &[Message]) -> Vec<SpellEvent> {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::Spell(event) => Some(*event),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn up_down_and_enter_drive_the_menu_and_never_the_text() {
+            let (mut ev, _) = opened();
+            let none = Modifiers::empty();
+            let down = ev.key_message(Key::Named(Named::ArrowDown), none);
+            assert_eq!(spell_events(&down), [SpellEvent::Move(1)]);
+            assert_eq!(down.len(), 1);
+            for message in down {
+                handle(&mut ev, message);
+            }
+            assert_eq!(ev.spell_menu().and_then(SpellMenu::selected), Some(1));
+            let up = ev.key_message(Key::Named(Named::ArrowUp), none);
+            assert_eq!(spell_events(&up), [SpellEvent::Move(-1)]);
+            let enter = ev.key_message(Key::Named(Named::Enter), none);
+            assert_eq!(spell_events(&enter), [SpellEvent::AcceptSelected]);
+            assert_eq!(ev.text(), "teh cat");
+            assert_eq!(ev.cursor(), at(0, 1));
+            assert_eq!(enter.len(), 1);
+            for message in enter {
+                assert!(handle(&mut ev, message));
+            }
+            assert_eq!(ev.text(), "tech cat");
+            assert_eq!(ev.cursor(), at(0, 4));
+            assert!(ev.spell_menu().is_none());
+        }
+
+        #[test]
+        fn escape_with_the_menu_open_produces_nothing_and_keeps_it_open() {
+            let (mut ev, _) = opened();
+            for modifiers in [Modifiers::empty(), Modifiers::SHIFT] {
+                assert!(ev
+                    .key_message(Key::Named(Named::Escape), modifiers)
+                    .is_empty());
+            }
+            // A modifier pressed alone, the same.
+            assert!(ev
+                .key_message(Key::Named(Named::Shift), Modifiers::SHIFT)
+                .is_empty());
+            assert!(ev.spell_menu().is_some());
+            // The host closes it, then Escape is the editor's again, which
+            // drops focus: no message.
+            assert!(ev.close_spell_menu());
+            assert!(ev
+                .key_message(Key::Named(Named::Escape), Modifiers::empty())
+                .is_empty());
+        }
+
+        #[test]
+        fn enter_with_nothing_to_offer_closes_the_menu_and_leaves_the_text() {
+            let (mut ev, _) = checked("zzz");
+            ev.spell(SpellEvent::OpenAtCaret);
+            for key in [Named::ArrowDown, Named::ArrowUp] {
+                for message in ev.key_message(Key::Named(key), Modifiers::empty()) {
+                    assert!(!handle(&mut ev, message));
+                }
+            }
+            assert!(ev.spell_menu().is_some());
+            let enter = ev.key_message(Key::Named(Named::Enter), Modifiers::empty());
+            assert_eq!(spell_events(&enter), [SpellEvent::AcceptSelected]);
+            assert_eq!(enter.len(), 1);
+            for message in enter {
+                assert!(!handle(&mut ev, message));
+            }
+            assert!(ev.spell_menu().is_none());
+            assert_eq!(ev.text(), "zzz");
+        }
+
+        #[test]
+        fn any_other_key_closes_the_menu_and_then_acts_once() {
+            let none = Modifiers::empty();
+            for (key, modifiers, text, column) in [
+                (Key::Character("x".into()), none, "txeh cat", 2),
+                (Key::Named(Named::ArrowRight), none, "teh cat", 2),
+                (
+                    Key::Named(Named::ArrowRight),
+                    Modifiers::SHIFT,
+                    "teh cat",
+                    2,
+                ),
+                (Key::Named(Named::Enter), Modifiers::SHIFT, "t\neh cat", 0),
+                (Key::Named(Named::Backspace), none, "eh cat", 0),
+            ] {
+                let (mut ev, _) = opened();
+                let messages = ev.key_message(key.clone(), modifiers);
+                assert!(
+                    matches!(messages.first(), Some(Message::Spell(SpellEvent::Close))),
+                    "{key:?}: {messages:?}"
+                );
+                assert_eq!(messages.len(), 2, "{key:?}: {messages:?}");
+                for message in messages {
+                    handle(&mut ev, message);
+                }
+                assert!(ev.spell_menu().is_none(), "{key:?}");
+                assert_eq!(ev.text(), text, "{key:?}");
+                assert_eq!(ev.cursor().position.column, column, "{key:?}");
+            }
+            // Undo, after an edit: closed, then one undo step.
+            let (mut ev, _) = checked("teh cat");
+            ev.move_cursor(at(0, 7));
+            ev.perform(Action::Edit(Edit::Insert('s')));
+            ev.spell(SpellEvent::OpenAtCaret);
+            ev.move_cursor(at(0, 1));
+            ev.spell(SpellEvent::OpenAtCaret);
+            let undo = ev.key_message(Key::Character("z".into()), Modifiers::COMMAND);
+            assert!(matches!(
+                undo.as_slice(),
+                [Message::Spell(SpellEvent::Close), Message::Undo]
+            ));
+            for message in undo {
+                handle(&mut ev, message);
+            }
+            assert_eq!(ev.text(), "teh cat");
+        }
+
+        #[test]
+        fn a_host_shortcut_closes_the_menu_and_is_left_to_the_host() {
+            let (mut ev, _) = opened();
+            ev.set_key_policy(Arc::new(|key: &Key, _, modifiers: Modifiers| {
+                if modifiers == Modifiers::ALT && *key == Key::Character("p".into()) {
+                    KeyRoute::Host
+                } else if modifiers == Modifiers::ALT && *key == Key::Character(".".into()) {
+                    KeyRoute::Suggest
+                } else {
+                    KeyRoute::Pass
+                }
+            }));
+            let host = ev.key_message(Key::Character("p".into()), Modifiers::ALT);
+            assert_eq!(spell_events(&host), [SpellEvent::Close]);
+            assert_eq!(host.len(), 1);
+            // The suggest key closes the menu and opens it again.
+            let again = ev.key_message(Key::Character(".".into()), Modifiers::ALT);
+            assert_eq!(
+                spell_events(&again),
+                [SpellEvent::Close, SpellEvent::OpenAtCaret]
+            );
+            for message in again {
+                handle(&mut ev, message);
+            }
+            assert!(ev.spell_menu().is_some());
+            // With no menu open, it only opens.
+            ev.close_spell_menu();
+            let open = ev.key_message(Key::Character(".".into()), Modifiers::ALT);
+            assert_eq!(spell_events(&open), [SpellEvent::OpenAtCaret]);
+        }
+    }
+
+    #[test]
+    fn closing_without_accepting_leaves_the_text_caret_and_selection() {
+        let (mut ev, _) = checked("teh cat teh");
+        let selection = select((0, 9), (0, 1));
+        ev.move_cursor(selection);
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::Move(2));
+        assert!(!ev.spell(SpellEvent::Close));
+        assert_eq!(ev.text(), "teh cat teh");
+        assert_eq!(ev.cursor(), selection);
+        assert!(!ev.can_undo());
+    }
+
+    #[test]
+    fn accepting_replaces_the_word_as_one_undo_step_with_the_caret_after_it() {
+        let (mut ev, _) = checked("cat teh dog");
+        let selection = select((0, 0), (0, 5));
+        ev.move_cursor(selection);
+        ev.spell(SpellEvent::OpenAtCaret);
+        ev.spell(SpellEvent::Move(1));
+        assert!(ev.spell(SpellEvent::Accept(1)));
+        assert_eq!(ev.text(), "cat tech dog");
+        assert_eq!(ev.cursor(), at(0, 8), "after the word, nothing selected");
+        assert!(ev.spell_menu().is_none());
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "cat teh dog");
+        assert!(!ev.can_undo(), "one step");
+        assert!(ev.redo());
+        assert_eq!(ev.text(), "cat tech dog");
+        // With the menu shut, accepting does nothing.
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "cat tech dog");
+    }
+
+    #[test]
+    fn accepting_closes_a_typing_group_and_is_undone_alone() {
+        let (mut ev, _) = checked("teh cat");
+        ev.move_cursor(at(0, 7));
+        assert!(ev.perform(Action::Edit(Edit::Insert('s'))));
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "the cats");
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "teh cats");
+        assert!(ev.undo());
+        assert_eq!(ev.text(), "teh cat");
+    }
+
+    /// A text, the caret's line and column, the row accepted, the text
+    /// after, and the caret's column after.
+    type Replacement = (&'static str, (usize, usize), usize, &'static str, usize);
+
+    #[test]
+    fn a_replacement_changes_only_the_words_bytes_under_any_line_endings() {
+        let cases: [Replacement; 9] = [
+            // The start of a line and of the text.
+            ("teh cat\ndog\n", (0, 0), 0, "the cat\ndog\n", 3),
+            ("teh cat\r\ndog\r\n", (0, 2), 1, "tech cat\r\ndog\r\n", 4),
+            // The end of a line, under each ending.
+            ("cat teh\ndog", (0, 7), 1, "cat tech\ndog", 8),
+            ("cat teh\r\ndog", (0, 7), 1, "cat tech\r\ndog", 8),
+            // Mixed endings: the line between them, and the end of the text.
+            ("one\r\ncat teh\nend", (1, 5), 0, "one\r\ncat the\nend", 7),
+            (
+                "one\r\ncat teh\nlast teh",
+                (2, 8),
+                1,
+                "one\r\ncat teh\nlast tech",
+                9,
+            ),
+            ("one\ncat\r\nteh", (2, 3), 0, "one\ncat\r\nthe", 3),
+            // Multi-byte neighbours.
+            ("«teh» —teh—\r\n", (0, 12), 1, "«teh» —tech—\r\n", 15),
+            ("«teh» —teh—\r\n", (0, 2), 0, "«the» —teh—\r\n", 5),
+        ];
+        for (text, (line, column), row, after, caret) in cases {
+            let (mut ev, _) = checked(text);
+            ev.move_cursor(at(line, column));
+            ev.spell(SpellEvent::OpenAtCaret);
+            assert!(ev.spell_menu().is_some(), "{text:?}");
+            assert!(ev.spell(SpellEvent::Accept(row)), "{text:?}");
+            assert_eq!(ev.text(), after, "{text:?}");
+            assert_eq!(ev.cursor(), at(line, caret), "{text:?}");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_with_a_curly_apostrophe_is_corrected_with_curly_ones() {
+        let proofreader = Arc::new(
+            fixtures::Rejects::new(&["dosen’t"])
+                .suggesting(&[("dosen’t", &["doesn't", "dozen", "doesn’t"])]),
+        );
+        let text = "It dosen’t work\r\nok";
+        let mut ev = EditorView::with_backend(BackendKind::Owned, text);
+        ev.set_proofreader(Some(proofreader));
+        ev.move_cursor(at(0, 4));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert_eq!(
+            menu_of(&ev),
+            Some((
+                0,
+                3..12,
+                "dosen’t".into(),
+                vec!["doesn’t".into(), "dozen".into()],
+                Some(0)
+            ))
+        );
+        assert!(ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "It doesn’t work\r\nok");
+        assert_eq!(ev.cursor(), at(0, 3 + "doesn’t".len()));
+    }
+
+    #[test]
+    fn accepting_changes_nothing_when_the_word_is_no_longer_at_its_mark() {
+        let position = |line, column| Position { line, column };
+        // Changed behind the view's back, so the menu stays open.
+        let (mut ev, _) = opened();
+        ev.content
+            .replace_range(position(0, 0), position(0, 3), "ten");
+        assert!(ev.spell_menu().is_some());
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "ten cat");
+        assert!(ev.spell_menu().is_none());
+        assert!(!ev.can_undo());
+        // Moved along its line.
+        let (mut ev, _) = opened();
+        ev.content
+            .replace_range(position(0, 0), position(0, 0), "x");
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "xteh cat");
+        // Its line gone.
+        let (mut ev, _) = opened();
+        ev.content.replace_text("");
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert_eq!(ev.text(), "");
+
+        // Through the view, any change closes the menu first.
+        let undone = |ev: &mut EditorView| {
+            ev.undo();
+        };
+        let steps: [(&str, Step); 3] = [
+            ("replaced text", |ev| ev.replace_text("teh teh", true)),
+            ("undo", undone),
+            ("typing", |ev| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            }),
+        ];
+        for (name, step) in steps {
+            let (mut ev, _) = checked("cat");
+            ev.move_cursor(at(0, 3));
+            ev.perform(Action::Edit(Edit::Insert(' ')));
+            ev.perform(Action::Edit(Edit::Insert('t')));
+            ev.perform(Action::Edit(Edit::Insert('e')));
+            ev.perform(Action::Edit(Edit::Insert('h')));
+            ev.spell(SpellEvent::OpenAtCaret);
+            assert!(ev.spell_menu().is_some(), "{name}");
+            step(&mut ev);
+            let text = ev.text();
+            let cursor = ev.cursor();
+            assert!(!ev.spell(SpellEvent::Accept(0)), "{name}");
+            assert_eq!((ev.text(), ev.cursor()), (text, cursor), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_row_without_a_suggestion_closes_the_menu_and_changes_nothing() {
+        let (mut ev, _) = opened();
+        assert!(!ev.spell(SpellEvent::Accept(5)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!((ev.text(), ev.cursor()), ("teh cat".into(), at(0, 1)));
+        let (mut ev, _) = checked("zzz");
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(!ev.spell(SpellEvent::Accept(0)));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(ev.text(), "zzz");
+        assert!(!ev.can_undo());
+    }
+
+    /// Something done to an editor.
+    type Step = fn(&mut EditorView);
+
+    #[test]
+    fn whatever_moves_or_changes_the_text_closes_the_menu() {
+        let steps: [(&str, Step); 14] = [
+            ("typing", |ev| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            }),
+            ("a motion", |ev| {
+                ev.perform(Action::Move(Motion::Right));
+            }),
+            ("a scroll", |ev| {
+                ev.perform(Action::Scroll { lines: 1 });
+            }),
+            ("an intent", |ev| {
+                ev.intent(Intent::Home { extend: false });
+            }),
+            ("an applied edit", |ev| {
+                ev.apply(&[], at(0, 0));
+            }),
+            ("undo", |ev| {
+                ev.undo();
+            }),
+            ("redo", |ev| {
+                ev.redo();
+            }),
+            ("a moved cursor", |ev| ev.move_cursor(at(0, 2))),
+            ("a scrolled line", |ev| ev.scroll_to_line(0, Placement::Top)),
+            ("a restored viewport", |ev| {
+                let viewport = ev.viewport();
+                ev.restore_viewport(viewport);
+            }),
+            ("find", |ev| {
+                ev.set_find_query("cat");
+                ev.find_next();
+            }),
+            ("replaced text", |ev| ev.replace_text("teh cat", true)),
+            ("a new note", |ev| ev.replace_text("teh dog", false)),
+            ("a new engine", |ev| {
+                ev.set_backend(BackendKind::Iced, "teh cat");
+            }),
+        ];
+        for (name, step) in steps {
+            let (mut ev, _) = opened();
+            step(&mut ev);
+            assert!(ev.spell_menu().is_none(), "{name}");
+        }
+        // Setting the query alone, with the find bar taking the keyboard,
+        // is the host's to close for.
+        let (mut ev, _) = opened();
+        ev.set_find_query("cat");
+        ev.break_group();
+        assert!(ev.spell_menu().is_some());
+    }
+
+    #[test]
+    fn a_changed_setting_closes_the_menu_and_an_unchanged_one_does_not() {
+        let unchanged: [fn(&mut EditorView); 6] = [
+            |ev| ev.set_font_size(14.0),
+            |ev| ev.set_line_height(widget::DEFAULT_LINE_HEIGHT),
+            |ev| ev.set_font(Font::MONOSPACE),
+            |ev| ev.set_line_numbers(true),
+            |ev| ev.set_markdown_assist(true),
+            |ev| {
+                let same = ev.proofreader.clone();
+                ev.set_proofreader(same);
+            },
+        ];
+        for step in unchanged {
+            let (mut ev, _) = opened();
+            step(&mut ev);
+            assert!(ev.spell_menu().is_some());
+        }
+        let changed: [fn(&mut EditorView); 7] = [
+            |ev| ev.set_font_size(16.0),
+            |ev| ev.set_line_height(2.0),
+            |ev| ev.set_font(Font::with_name("JetBrains Mono")),
+            |ev| ev.set_line_numbers(false),
+            |ev| ev.set_markdown_assist(false),
+            |ev| ev.set_proofreader(None),
+            |ev| ev.set_proofreader(Some(Arc::new(fixtures::Rejects::new(&["teh"])))),
+        ];
+        for (i, step) in changed.into_iter().enumerate() {
+            let (mut ev, _) = opened();
+            step(&mut ev);
+            assert!(ev.spell_menu().is_none(), "{i}");
+        }
+    }
+
+    #[test]
+    fn spell_frame_starts_empty() {
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "teh");
+        ev.set_proofreader(Some(Arc::new(fixtures::Rejects::new(&["teh"]))));
+        assert_eq!(ev.spell_frame(), SpellFrame::default());
+    }
 
     // ── Paste action type ────────────────────────────────────────────────────
 

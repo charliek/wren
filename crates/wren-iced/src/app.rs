@@ -25,6 +25,7 @@ mod gestures;
 mod navigation;
 mod palette;
 mod preferences;
+mod spelling;
 mod workspaces;
 
 use crate::panes::Widths;
@@ -47,6 +48,7 @@ pub struct App {
     /// The theme or font picker row shown live; see `sync_preview`.
     preview: preferences::Preview,
     preferences: preferences::Preferences,
+    spelling: spelling::Spelling,
     editor: EditorView,
     /// The open note as a board, when it is one and its text parses; see
     /// `board::Surface`. The editor is empty meanwhile.
@@ -196,6 +198,9 @@ pub enum Message {
     Resize(u64, crate::panes::ResizeEvent),
     Tick,
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
+    /// The dictionary and the first read of `words.txt`, loaded off the UI
+    /// thread at launch.
+    SpellLoaded(spelling::Loaded),
     Reconciled(wren_core::reconcile::ReconcileResult),
     DialogName(String),
     /// A kind pill of the New note dialog was clicked.
@@ -244,12 +249,12 @@ pub enum Message {
         std::sync::Arc<crate::test_ipc::Request>,
         board_harness::Placement,
     ),
-    /// An editor command's shortcut, as the editor widget publishes it:
-    /// `Some` only while the editor has the keyboard.
+    /// An editor command's shortcut, routed as the editor widget routes
+    /// it: `Some` only while the editor has the keyboard.
     #[cfg(feature = "smoke-test")]
     EditorShortcut(
         std::sync::Arc<crate::test_ipc::Request>,
-        Option<wren_editor::Intent>,
+        Option<wren_editor::KeyRoute>,
     ),
     /// A board command's shortcut, as the board widget publishes it:
     /// `Some` only while a board has the keyboard.
@@ -296,6 +301,9 @@ impl App {
         let theme_override = options.smoke.as_ref().map(|request| request.theme);
         #[cfg(not(feature = "smoke-test"))]
         let theme_override: Option<Theme> = None;
+        let words_path = settings_path
+            .as_deref()
+            .map(wren_core::settings::words_path);
         #[cfg(feature = "smoke-test")]
         let launched = Instant::now();
         let board_spike = options.board_spike;
@@ -332,6 +340,7 @@ impl App {
             theme_override,
             preview: preferences::Preview::default(),
             preferences,
+            spelling: spelling::Spelling::new(words_path.clone()),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
             board_error: None,
@@ -441,12 +450,24 @@ impl App {
         });
         (
             app,
-            Task::batch([iced::system::theme().map(Message::SystemTheme), opening]),
+            Task::batch([
+                iced::system::theme().map(Message::SystemTheme),
+                opening,
+                spelling::load(words_path),
+            ]),
         )
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        // The palette and the dialogs take the keyboard, so the suggestions
+        // menu never stays open under one (rule 4.4.8).
+        if self.palette.is_some() || self.dialog.is_some() {
+            self.editor.close_spell_menu();
+        }
+        // The note, the loading state and the setting can each change on any
+        // message, and the editor must see the proofreader before it draws.
+        self.sync_proofreader();
         // Every way a picker row gets highlighted, or the picker closes,
         // arrives as a message, so the preview follows from here.
         let preview = self.sync_preview();
@@ -478,10 +499,18 @@ impl App {
                 return self.board_probed(&request, placement)
             }
             #[cfg(feature = "smoke-test")]
-            Message::EditorShortcut(request, intent) => {
-                let task = intent.map_or_else(Task::none, |intent| {
-                    self.update(Message::Editor(wren_editor::Message::Intent(intent)))
-                });
+            Message::EditorShortcut(request, route) => {
+                let message = match route {
+                    Some(wren_editor::KeyRoute::Intent(intent)) => {
+                        Some(wren_editor::Message::Intent(intent))
+                    }
+                    Some(wren_editor::KeyRoute::Suggest) => Some(wren_editor::Message::Spell(
+                        wren_editor::SpellEvent::OpenAtCaret,
+                    )),
+                    Some(wren_editor::KeyRoute::Host | wren_editor::KeyRoute::Pass) | None => None,
+                };
+                let task = message
+                    .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
                 request.respond(Ok(self.navigation_snapshot()));
                 return task;
             }
@@ -568,6 +597,7 @@ impl App {
             Message::Loaded(generation, outcome) => {
                 return self.workspace_loaded(generation, outcome)
             }
+            Message::SpellLoaded(loaded) => self.spell_loaded(loaded),
             Message::DialogName(name) => {
                 if let Some(dialog) = &mut self.dialog {
                     dialog.name = name;
@@ -609,6 +639,11 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
+                // An open suggestions menu is the topmost thing Escape
+                // closes; the editor keeps the keyboard and the find bar stays.
+                if self.editor.close_spell_menu() {
+                    return Task::none();
+                }
                 self.cancel_gestures();
                 // Esc closes the topmost overlay and keeps the active column;
                 // with none open, it returns the keyboard to the editor.
@@ -711,6 +746,7 @@ impl App {
             return Task::none();
         }
         let started = Instant::now();
+        let mut task = Task::none();
         let changed = match message {
             wren_editor::Message::Action(action) => {
                 // Scrolling reaches an unfocused editor; anything else means
@@ -724,6 +760,28 @@ impl App {
                 self.column = columns::Column::Editor;
                 self.editor.intent(intent)
             }
+            wren_editor::Message::Spell(event) => {
+                use wren_editor::SpellEvent;
+                // Only these mean the editor has the keyboard; a close also
+                // comes from a press elsewhere that may pick another column.
+                if matches!(
+                    event,
+                    SpellEvent::OpenAtCaret
+                        | SpellEvent::OpenAt(_)
+                        | SpellEvent::Accept(_)
+                        | SpellEvent::AcceptSelected
+                        | SpellEvent::Key(_)
+                        | SpellEvent::Press(_)
+                ) {
+                    self.column = columns::Column::Editor;
+                }
+                // A right-click takes the keyboard from a text field too,
+                // which a right press alone does not unfocus.
+                if matches!(event, SpellEvent::OpenAt(_)) {
+                    task = focus_editor();
+                }
+                self.editor.spell(event)
+            }
             wren_editor::Message::Undo => self.editor.undo(),
             wren_editor::Message::Redo => self.editor.redo(),
             wren_editor::Message::Find => {
@@ -735,7 +793,7 @@ impl App {
         if changed {
             self.text_changed(started);
         }
-        Task::none()
+        task
     }
 
     /// What follows every change to the editor's text: the session draft,

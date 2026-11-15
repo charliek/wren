@@ -21,7 +21,7 @@ import pytest
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture
 from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, spell_setting, wait_for
 
 
 COMMANDS = {
@@ -39,6 +39,7 @@ COMMANDS = {
     "markdown.toggle_task", "markdown.bold", "markdown.italic", "markdown.code",
     "edit.move_line_up", "edit.move_line_down",
     "editor.toggle_markdown_assist", "editor.toggle_engine",
+    "editor.toggle_spell_check", "editor.spell_suggest", "settings.open_words",
 }
 # The commands outside a board that exist only with the `boards` setting on
 # (plan §5.19; the `board.*` commands are listed only on a board), each with
@@ -277,8 +278,12 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
                                                    "App"}
         assert all(row["title"] for row in rows)
         assert {key: row["state"] for key, row in by_id.items() if row["state"]} == {
-            "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic"}
-        for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict"}:
+            "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic",
+            "editor.toggle_spell_check": spell_setting()}
+        # Suggesting needs the advanced engine, and this runs on the classic.
+        assert by_id["editor.spell_suggest"]["enabled"] is False
+        for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict",
+                               "editor.spell_suggest"}:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
         assert by_id["note.open_conflict"]["enabled"] is False
@@ -987,6 +992,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
             "font.choose", "font.increase", "font.decrease", "font.reset",
             "settings.open", "settings.reload", "app.quit",
             "editor.toggle_markdown_assist", "editor.toggle_engine",
+            "editor.toggle_spell_check", "settings.open_words",
         }
         gateway(app, "palette.close")
         command(app, "note.new", disposition="blocked")

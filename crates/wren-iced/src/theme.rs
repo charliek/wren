@@ -34,6 +34,16 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
         code_block: color(c.code_block),
         caret: color(c.accent),
         strike: color(c.faint),
+        misspelling: color(c.danger),
+        menu: wren_editor::MenuStyle {
+            background: color(c.raised),
+            border: color(c.dialog_border),
+            selected: color(c.selected),
+            text: color(c.text),
+            muted: color(c.muted),
+            font: crate::fonts::UI,
+            text_size: 13.0,
+        },
     };
     let palette = wren_editor::Palette {
         text: color(c.text),
@@ -59,6 +69,27 @@ pub fn board_palette(definition: theme::Theme) -> wren_board::Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spell_check_takes_the_danger_colour_and_the_menu_the_raised_surface() {
+        for definition in theme::BUILT_INS {
+            let c = definition.colors;
+            let (style, _) = editor_colors(*definition);
+            assert_eq!(style.misspelling, color(c.danger), "{}", definition.id);
+            assert_ne!(style.misspelling, style.background, "{}", definition.id);
+            let menu = style.menu;
+            assert_eq!(menu.background, color(c.raised), "{}", definition.id);
+            assert_eq!(menu.border, color(c.dialog_border), "{}", definition.id);
+            assert_eq!(menu.selected, color(c.selected), "{}", definition.id);
+            assert_eq!(menu.text, color(c.text), "{}", definition.id);
+            assert_eq!(menu.muted, color(c.muted), "{}", definition.id);
+            assert_eq!(menu.font, crate::fonts::UI);
+            assert_eq!(menu.text_size, 13.0);
+            for shown in [menu.selected, menu.text, menu.muted, menu.border] {
+                assert_ne!(shown, menu.background, "{}", definition.id);
+            }
+        }
+    }
 
     #[test]
     fn a_board_takes_the_editor_surface_and_text_of_every_theme() {

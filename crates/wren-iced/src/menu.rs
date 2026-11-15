@@ -65,6 +65,7 @@ pub const MENUS: [Menu; 5] = {
                 N(Native::CheckForUpdates),
                 S,
                 C("settings.open", "Settings…"),
+                C("settings.open_words", "Spelling Word List…"),
                 C("theme.choose", "Change Theme…"),
                 S,
                 N(Native::Services),

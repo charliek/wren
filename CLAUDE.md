@@ -47,7 +47,8 @@ when one lands, move what users need into `docs/` and trim the note.
   `theme.rs` (built-in palettes, with each theme's board hues).
 - `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
   types so it can be extracted later. It must not depend on `wren-core` or
-  know app messages; the host passes in a `Style`, a `Palette`, and the font.
+  `wren-spell`, or know app messages; the host passes in a `Style`, a
+  `Palette`, the font, and spell check's `Proofreader`.
   `lib.rs` holds `EditorView` and `Message`; `widget.rs` is a fork of iced's
   text editor with the gutter, current line, and caret; `backend/` holds
   the two text engines behind `Content` (`iced.rs`, iced's own editor, and
@@ -56,18 +57,21 @@ when one lands, move what users need into `docs/` and trim the note.
   endings their breaks take), `plain.rs` (the keys' plain plans while
   Markdown assist is off), `highlighter.rs` (spans and per-line
   decorations from `wren_markdown::block`), `history.rs` (snapshot
-  undo), `find.rs`, and `keys.rs` (the editor's own shortcuts). Test-only
+  undo), `find.rs`, `keys.rs` (the editor's own shortcuts), and
+  `proof.rs` (the `Proofreader` trait and the suggestions menu). Test-only
   accessors sit behind its `test-support` feature, which
   `wren-iced/smoke-test` enables.
 - `crates/wren-iced/`: the desktop app (binary `wren`).
   - `app.rs` holds `App`, `Message`, `update`, `view`, and `subscription`;
     its submodules live in `app/`: `commands.rs` (the command table and
     gateway), `palette.rs`, `preferences.rs` (settings, keymap, and theme),
-    `workspace.rs` (loading and core events), `workspace_view.rs`,
-    `navigation.rs`, `board.rs` (the board surface, the single writer and
-    the export commands), `board_find.rs` (the jump palette and search
-    reveal), `board_harness.rs` (the `board.*` test requests),
-    `board_edit_tests.rs`, and `board_spike.rs` (`--board-spike N`).
+    `spelling.rs` (the dictionary, `words.txt`, and the editor's
+    proofreader), `workspace.rs` (loading and core events),
+    `workspace_view.rs`, `navigation.rs`, `board.rs` (the board surface,
+    the single writer and the export commands), `board_find.rs` (the jump
+    palette and search reveal), `board_harness.rs` (the `board.*` test
+    requests), `board_edit_tests.rs`, and `board_spike.rs`
+    (`--board-spike N`).
   - `board_export.rs` writes a board as SVG, PNG (through resvg) or
     draw.io, for the app and for `wren export`, which `cli.rs` parses;
     `tests/export_cli.rs` runs that command with no display.
@@ -85,13 +89,20 @@ when one lands, move what users need into `docs/` and trim the note.
   editing `Intent` as an `EditPlan` of replacements. `block` is Wren's one
   classifier: the editor's highlighter and the search index's previews use
   it.
+- `crates/wren-spell/`: spell checking, with no iced or Wren dependency
+  (only `spellbook` and `unicode-segmentation`), so it can be extracted
+  later. A `Speller` asks its `WordSource`s in order: a `Hunspell`
+  dictionary (the bundled SCOWL `en_US` in `dict/`, described by
+  `dict/SOURCE.md`) and the user's `WordList`.
 - `crates/wren-sparkle/`: the macOS Sparkle updater bridge (`dlopen` plus
   Objective-C calls), the only crate allowed `unsafe`. It is empty on Linux.
-- `vendor/`: patched copies of crates.io crates (`cosmic-text`, `iced_winit`,
-  `swash`), wired in by the root `[patch.crates-io]`; `make check-patches`
-  asserts they are the ones built. `cosmic-text` and `swash` each have a
-  `WREN.md` describing the change; `wren-editor`'s hanging indent needs the
-  cosmic-text one.
+- `vendor/`: patched copies of crates.io crates (`cosmic-text`,
+  `iced_tiny_skia`, `iced_winit`, `swash`), wired in by the root
+  `[patch.crates-io]`; `make check-patches` asserts they are the ones built.
+  `cosmic-text`, `iced_tiny_skia` and `swash` each have a `WREN.md`
+  describing the change; `wren-editor`'s hanging indent needs the
+  cosmic-text one, and the spelling zigzag's cost on tiny-skia the
+  iced_tiny_skia one.
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it
   in step with behavior changes: keybindings, settings, and on-disk rules.
 - `discovery/`: working design notes, deliberately outside `docs/` because

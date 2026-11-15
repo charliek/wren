@@ -68,6 +68,9 @@ pub enum CommandId {
     MoveLineDown,
     ToggleMarkdownAssist,
     SwitchEngine,
+    ToggleSpellCheck,
+    SpellSuggest,
+    OpenWords,
     ExportSvg,
     ExportPng,
     ExportDrawio,
@@ -80,8 +83,9 @@ pub enum CommandId {
 pub enum Scope {
     /// The app, wherever the keyboard is.
     App,
-    /// The focused editor, through its key policy. The app ignores the
-    /// shortcut, so it acts only while the editor has the keyboard.
+    /// The focused editor, through its key policy: the command has an
+    /// [`CommandId::editor_route`]. The app ignores the shortcut, so it acts
+    /// only while the editor has the keyboard.
     Editor,
     /// The focused board, through its key policy and the keymap's board
     /// layer. The base layer holds none of these, so the app never sees
@@ -203,6 +207,20 @@ definitions![
         "Toggle Markdown assist",
         "Markdown",
         App
+    ),
+    (
+        ToggleSpellCheck,
+        "editor.toggle_spell_check",
+        "Toggle spell check",
+        "Markdown",
+        App
+    ),
+    (
+        SpellSuggest,
+        "editor.spell_suggest",
+        "Suggest spelling",
+        "Markdown",
+        Editor
     ),
     (NewGroup, "group.new", "New group…", "Workspace", App),
     (NewSection, "section.new", "New section…", "Workspace", App),
@@ -347,6 +365,13 @@ definitions![
         OpenSettings,
         "settings.open",
         "Open settings file",
+        "App",
+        App
+    ),
+    (
+        OpenWords,
+        "settings.open_words",
+        "Open spelling word list",
         "App",
         App
     ),
@@ -762,8 +787,16 @@ impl CommandId {
         self.definition().scope
     }
 
-    /// What an Editor-scoped command asks the editor to do.
-    pub fn intent(self) -> Option<wren_editor::Intent> {
+    /// Where the editor sends an Editor-scoped command's key.
+    pub fn editor_route(self) -> Option<wren_editor::KeyRoute> {
+        match self {
+            Self::SpellSuggest => Some(wren_editor::KeyRoute::Suggest),
+            _ => self.intent().map(wren_editor::KeyRoute::Intent),
+        }
+    }
+
+    /// The editing intent of a Markdown command.
+    fn intent(self) -> Option<wren_editor::Intent> {
         use wren_editor::Intent;
         Some(match self {
             Self::ToggleTask => Intent::ToggleTask,
@@ -938,7 +971,7 @@ impl App {
             AddWorkspace => self.folder_request.is_none(),
             SwitchWorkspace | ChooseTheme | ChooseFont | TextBigger | TextSmaller | TextReset
             | OpenSettings | ReloadSettings | CommandPalette | Quit | ToggleMarkdownAssist
-            | SwitchEngine => true,
+            | SwitchEngine | ToggleSpellCheck | OpenWords => true,
             RemoveWorkspace => self
                 .config
                 .as_ref()
@@ -973,6 +1006,12 @@ impl App {
                 self.surface() == Surface::Text
                     && self.ensure_editor_ready().is_ok()
                     && self.editor.markdown_assist()
+            }
+            SpellSuggest => {
+                self.editor.backend() == wren_editor::BackendKind::Owned
+                    && self.preferences.settings.spell_check
+                    && self.spelling.ready()
+                    && self.ensure_editor_ready().is_ok()
             }
             Back => self
                 .session
@@ -1246,6 +1285,18 @@ impl App {
             TextReset => self.step_text_size(None),
             ToggleMarkdownAssist => self.toggle_markdown_assist(),
             SwitchEngine => self.toggle_editor_engine(),
+            ToggleSpellCheck => self.toggle_spell_check(),
+            OpenWords => self.open_words(),
+            SpellSuggest => {
+                // The editor takes the keyboard before the menu opens, so
+                // the focus change cannot close it (rule 4.5.2).
+                self.palette = None;
+                let focus = self.return_to_editor();
+                let open = Task::done(Message::Editor(wren_editor::Message::Spell(
+                    wren_editor::SpellEvent::OpenAtCaret,
+                )));
+                self.finish_action(Disposition::Completed, None, focus.chain(open))
+            }
             ExportSvg => self.export_board(Format::Svg),
             ExportPng => self.export_board(Format::Png),
             ExportDrawio => self.export_board(Format::Drawio),
@@ -1656,11 +1707,11 @@ mod tests {
     }
 
     #[test]
-    fn editor_scoped_commands_are_exactly_the_editor_intents() {
+    fn editor_scoped_commands_are_exactly_those_with_an_editor_route() {
         for definition in definitions() {
             assert_eq!(
                 definition.scope == Scope::Editor,
-                definition.id.intent().is_some(),
+                definition.id.editor_route().is_some(),
                 "{}",
                 definition.key
             );

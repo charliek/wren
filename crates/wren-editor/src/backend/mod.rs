@@ -190,6 +190,16 @@ impl Backend {
         }
     }
 
+    /// Scroll as little as needed to show the whole row holding `position`,
+    /// without moving the cursor. Only the owned engine scrolls; the
+    /// suggestions menu, which needs it, never opens on iced's.
+    pub fn reveal(&mut self, position: Position) {
+        match self {
+            Self::Iced(_) => {}
+            Self::Owned(engine) => engine.reveal(position),
+        }
+    }
+
     /// The selected text, with every line ending copied as LF.
     pub fn copy(&self) -> Option<String> {
         match self {

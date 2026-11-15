@@ -114,6 +114,7 @@ clippy:
 	cargo clippy -p wren-editor --all-targets --locked -- -D warnings
 	cargo clippy -p wren-board --all-targets --locked -- -D warnings
 	cargo clippy -p wren-canvas --all-targets --locked -- -D warnings
+	cargo clippy -p wren-spell --all-targets --locked -- -D warnings
 
 check: fmt-check clippy test test-python check-patches
 
@@ -124,6 +125,8 @@ check-patches:
 		( echo "swash [patch.crates-io] not applied"; exit 1 )
 	@cargo tree --locked -p wren-iced | grep -q 'cosmic-text v0.15.0 (.*vendor/cosmic-text)' || \
 		( echo "cosmic-text [patch.crates-io] not applied"; exit 1 )
+	@cargo tree --locked -p wren-iced | grep -q 'iced_tiny_skia v0.14.1 (.*vendor/iced_tiny_skia)' || \
+		( echo "iced_tiny_skia [patch.crates-io] not applied"; exit 1 )
 
 build-smoke:
 	cargo build --locked -p wren-iced --features smoke-test

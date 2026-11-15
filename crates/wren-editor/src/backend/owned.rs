@@ -604,6 +604,22 @@ impl Engine {
         buffer_mut(&mut self.editor).shape_until_cursor(font_system.raw(), cursor, false);
     }
 
+    /// Scroll as little as needed to show the row holding `position`, which
+    /// is clamped into the text; the cursor stays where it is.
+    pub fn reveal(&mut self, position: Position) {
+        self.debug_assert_unshared();
+        if self.bounds == Size::ZERO {
+            return;
+        }
+        let mut font_system = font_system();
+        let buffer = buffer_mut(&mut self.editor);
+        let mut at = clamp(buffer, to_cursor(position));
+        // A word that starts a wrapped row belongs to that row, not the end
+        // of the one before.
+        at.affinity = cosmic_text::Affinity::After;
+        buffer.shape_until_cursor(font_system.raw(), at, false);
+    }
+
     /// Hand the buffer to the renderer. The weak reference is taken last, so
     /// no later mutation in this frame detaches it. tiny-skia ignores
     /// `Raw::clip_bounds`, so the caller clips with a layer.

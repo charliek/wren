@@ -356,9 +356,13 @@ def test_native_engine_switch_on_focus_keeps_keyboard_focus(engine, editor_app) 
         call("editor.set", {"text": "café"})
         window = focus_native(app)
 
+        written = config.read_text()
+
         def switch_on_refocus(to: str) -> None:
             xdo("windowfocus", "--sync", "0")
-            config.write_text(f"editor-engine = {to}\n")
+            # Only the engine changes: the lane's other lines stay.
+            config.write_text(written.replace(f"editor-engine = {engine}\n",
+                                              f"editor-engine = {to}\n"))
             xdo("windowfocus", "--sync", window)
             wait_for(lambda: call("editor.get")["engine"] == to, description=f"switch to {to}")
 

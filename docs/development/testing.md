@@ -46,9 +46,13 @@ never attaches to or kills a normal instance. Cases marked `native_x11` use
 real OS keyboard and pointer input and run only in the X11 lanes.
 
 `WrenApp(settings="…")` writes that text to the sandbox's `config.conf`
-before the first launch, so a case can start Wren with any setting. Restarts
-keep whatever the app has written there since, and `app.settings_path` names
-the file.
+before the first launch, so a case can start Wren with any setting. Unless
+the text sets `spell-check` itself, the harness appends the lane's
+`spell-check` line (see [Spell check](#spell-check) below), and without
+settings the file holds only that line. Restarts keep whatever the app has
+written there since, and `app.settings_path` names the file.
+`WrenApp(words="…")` writes `words.txt` beside it the same way, and
+`app.words_path` names that file.
 
 ### Editor engines
 
@@ -92,6 +96,39 @@ The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor
 cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four Linux
 smoke lanes.
+
+### Spell check
+
+`WRENTEST_SPELL` sets the `spell-check` setting the harness writes for
+every case that does not name it: `off` (the default when unset, so sample
+notes full of names keep their look) or `on`. Any other value fails the
+case. Spell check runs only on the advanced engine, so `on` matters only
+to the cases `WRENTEST_ENGINE` runs there:
+
+```bash
+WRENTEST_SPELL=on ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced make smoke-x11
+```
+
+`tools/wrentest/test_spell.py` sets `spell-check` itself. It runs the
+acceptance note `tools/wrentest/fixtures/spell.md` with `catppuccin` in the
+word list, and checks its marks, the menu, replacing a word, the toggle,
+the word list, and the classic engine. Its `native_x11` cases right-click
+and press the real suggest key. These requests drive it:
+
+| Request | Parameters | Returns |
+|---|---|---|
+| `editor.spell` | none | `enabled` (the setting on the advanced engine), `ready` (the dictionary has loaded), `marks` as the last frame drew them, and `menu`, or `null` when it is closed. |
+| `editor.spell_event` | `event`: `open_at_caret`, `move`, `hover`, `accept`, or `close`; `arg`: a row for `hover` and `accept`, a step for `move` | The `editor.get` snapshot, after the event went through the app as the widget would send it. |
+| `editor.key` | `key`: a name (`up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `shift`, `control`, `alt`, `super`, `caps_lock`) or one character; `mods`: a list of `shift`, `ctrl`, `alt`, `logo` | The `editor.get` snapshot, after the editor's own key routing and then the app's key handling, as a real press in the focused editor. |
+
+Each mark has its `line`, its `start` and `end` byte offsets in the line,
+its `word`, whether it is `shown` (the caret at its end hides it), and the
+`rects` of its zigzag in window coordinates. The menu has the `word`, its
+`line`, `start`, and `end`, the `items`, the `selected` row, and its
+`bounds` in window coordinates once a frame has drawn it. A frame must be
+drawn before marks appear, so poll `editor.spell` with `wait_for`. The
+`shortcut` request runs `editor.spell_suggest` as its key does, and
+`command.run` runs it as the palette does.
 
 ### Boards
 
@@ -212,6 +249,19 @@ shoots just these editor scenes:
 ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
   python3 tools/capture_scenes.py --engine advanced --theme light \
   --setting editor-line-height=2 --label tall --only markdown
+```
+
+`--only spell`, which needs `--engine advanced`, turns spell check on and
+shoots the acceptance note: `spell-marks` (its marks, with the caret
+hiding one), `spell-menu` (the menu under a word), `spell-menu-empty`
+("No suggestions"), and `spell-menu-above` (the menu above a word on the
+last visible row). Every other mode keeps the lane's `WRENTEST_SPELL`
+setting. Check them in every theme after changing the zigzag or the menu:
+
+```bash
+ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
+  python3 tools/capture_scenes.py --only spell --engine advanced \
+  --label tiny-skia --theme wren-dark
 ```
 
 `--only boards` opens the board samples with `boards = on` and writes the

@@ -261,6 +261,9 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{e}+e"), "markdown.code"),
         ("alt+up".to_string(), "edit.move_line_up"),
         ("alt+down".to_string(), "edit.move_line_down"),
+        // Ctrl+., the usual "quick fix" key, is the emoji key of IBus on
+        // GNOME and never reaches the app there.
+        (format!("{p}+period"), "editor.spell_suggest"),
     ]);
     match platform {
         Platform::Mac => bindings.extend([
@@ -558,8 +561,9 @@ mod tests {
         defaults
     }
 
-    /// `default_bindings` as Wren 0.1.1 shipped it. Boards add a layer and
-    /// must not change this one.
+    /// `default_bindings` as Wren 0.1.1 shipped it, plus spell check's
+    /// suggest key, its one addition. Boards add a layer and must not change
+    /// this one.
     fn frozen_base(platform: Platform) -> Vec<(&'static str, &'static str)> {
         let mut bindings = match platform {
             Platform::Mac => vec![
@@ -619,6 +623,10 @@ mod tests {
             ("alt+up", "edit.move_line_up"),
             ("alt+down", "edit.move_line_down"),
         ]);
+        bindings.push(match platform {
+            Platform::Mac => ("super+period", "editor.spell_suggest"),
+            Platform::Linux => ("alt+period", "editor.spell_suggest"),
+        });
         bindings.extend(match platform {
             Platform::Mac => [("super+comma", "settings.open"), ("super+q", "app.quit")],
             Platform::Linux => [("ctrl+f", "navigation.find"), ("ctrl+q", "app.quit")],
@@ -693,6 +701,21 @@ mod tests {
             assert_eq!(
                 keymap.action(&accel("alt+down")),
                 Some("edit.move_line_down")
+            );
+        }
+    }
+
+    #[test]
+    fn the_suggest_key_is_alt_period_on_linux_and_command_period_on_mac() {
+        for (platform, trigger, label) in [
+            (Platform::Linux, "alt+.", "Alt+."),
+            (Platform::Mac, "super+period", "⌘."),
+        ] {
+            let (keymap, _) = Keymap::build(default_bindings(platform), &[], base);
+            assert_eq!(keymap.action(&accel(trigger)), Some("editor.spell_suggest"));
+            assert_eq!(
+                keymap.label("editor.spell_suggest", platform).as_deref(),
+                Some(label)
             );
         }
     }

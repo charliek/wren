@@ -12,6 +12,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub const FILE_NAME: &str = "config.conf";
+/// The user's spelling word list, beside the settings file.
+pub const WORDS_FILE_NAME: &str = "words.txt";
 const MAX_BYTES: u64 = 1024 * 1024;
 pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
@@ -131,6 +133,8 @@ pub struct Settings {
     pub editor_engine: EditorEngine,
     /// The Markdown-aware Enter, Tab, Backspace, and Home.
     pub markdown_assist: bool,
+    /// Spell check, which the advanced engine alone carries out.
+    pub spell_check: bool,
     /// Whether board notes are listed and opened, read when a workspace
     /// opens.
     pub boards: bool,
@@ -150,6 +154,7 @@ impl Default for Settings {
             line_numbers: true,
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
+            spell_check: true,
             boards: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
@@ -245,6 +250,10 @@ impl Settings {
                     Some(enabled) => settings.markdown_assist = enabled,
                     None => invalid(),
                 },
+                "spell-check" => match parse_bool(value) {
+                    Some(enabled) => settings.spell_check = enabled,
+                    None => invalid(),
+                },
                 "boards" => match parse_bool(value) {
                     Some(enabled) => settings.boards = enabled,
                     None => invalid(),
@@ -276,18 +285,39 @@ impl Settings {
     }
 }
 
-/// Read the settings text; `None` when the file does not exist. Files over
-/// 1 MiB and invalid UTF-8 are errors.
+/// Read the settings text; `None` when the file does not exist. Anything but
+/// a regular file (a symlink to one is fine), files over 1 MiB and invalid
+/// UTF-8 are errors. The file is opened without blocking, so a FIFO with no
+/// writer cannot hang the caller.
 pub fn read_text(path: &Path) -> io::Result<Option<String>> {
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.len() > MAX_BYTES => Err(io::Error::other(format!(
-            "larger than {} KiB",
-            MAX_BYTES / 1024
-        ))),
-        Ok(_) => fs::read_to_string(path).map(Some),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+
+    let too_large = || io::Error::other(format!("larger than {} KiB", MAX_BYTES / 1024));
+    let file = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(file) => fs::File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("not a regular file"));
     }
+    if metadata.len() > MAX_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// The settings file location: `WREN_CONFIG`, else the XDG config directory.
@@ -301,6 +331,41 @@ pub fn path() -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("wren").join(FILE_NAME))
+}
+
+/// The spelling word list for the settings file at `settings`: `words.txt`
+/// in the same directory.
+pub fn words_path(settings: &Path) -> PathBuf {
+    settings.with_file_name(WORDS_FILE_NAME)
+}
+
+/// What a new `words.txt` holds: comments only, so it adds no word.
+pub const WORDS_TEMPLATE: &str = "\
+# Wren's spelling word list: one word per line, each accepted as correctly
+# spelled. A word in lower case is also accepted capitalised and in capitals;
+# one with a capital letter is accepted exactly as written.
+# Lines starting with # are comments. Changes apply when Wren regains focus
+# or on “Reload settings”.
+";
+
+/// Create the word list at `path`, with only [`WORDS_TEMPLATE`], if there is
+/// no such file yet. An existing file is never written.
+pub fn ensure_words_exist(path: &Path) -> io::Result<()> {
+    if read_text(path)?.is_some() {
+        return Ok(());
+    }
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    match created {
+        Ok(mut file) => file.write_all(WORDS_TEMPLATE.as_bytes()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Replace the last active `key = …` line, or append one, keeping every
@@ -429,6 +494,11 @@ pub const TEMPLATE: &str = "\
 # Backspace removes markup, and Home stops at the text after the markup.
 # Off, the Markdown commands (toggle task, bold, move line, ...) are disabled.
 # markdown-assist = on
+
+# Spell check: misspelled words are underlined, and Alt+. (Cmd+. on macOS)
+# or a right-click offers corrections. It needs editor-engine = advanced.
+# Your own words go in words.txt, beside this file, one per line.
+# spell-check = on
 
 # Boards: `.wren-board` notes of shapes and connectors, drawn on a canvas.
 # Off, boards are neither listed nor opened, and their files are left alone.
@@ -576,6 +646,54 @@ mod tests {
     }
 
     #[test]
+    fn spell_check_defaults_on_and_parses_booleans() {
+        assert!(Settings::default().spell_check);
+        for (value, enabled) in [("off", false), ("on", true), ("no", false), ("TRUE", true)] {
+            let settings = Settings::parse(&format!("spell-check = {value}\n"));
+            assert_eq!(settings.spell_check, enabled, "{value}");
+            assert!(settings.warnings.is_empty());
+        }
+        let settings = Settings::parse("spell-check = off\nspell-check = maybe\n");
+        assert!(!settings.spell_check);
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("spell-check"));
+        assert_eq!(
+            with_value("theme = nord\n", "spell-check", "off"),
+            "theme = nord\nspell-check = off\n"
+        );
+    }
+
+    #[test]
+    fn the_word_list_sits_beside_the_settings_file() {
+        let settings = Path::new("/home/someone/.config/wren/config.conf");
+        assert_eq!(
+            words_path(settings),
+            Path::new("/home/someone/.config/wren/words.txt")
+        );
+        assert_eq!(
+            words_path(Path::new("elsewhere.conf")),
+            Path::new("words.txt")
+        );
+    }
+
+    #[test]
+    fn a_new_word_list_holds_only_comments_and_an_existing_one_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/words.txt");
+        ensure_words_exist(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), WORDS_TEMPLATE);
+        assert!(WORDS_TEMPLATE
+            .lines()
+            .all(|line| line.trim_start().starts_with('#')));
+        fs::write(&path, "wren\n").unwrap();
+        ensure_words_exist(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "wren\n");
+        let folder = directory.path().join("folder.txt");
+        fs::create_dir(&folder).unwrap();
+        assert!(ensure_words_exist(&folder).is_err());
+    }
+
+    #[test]
     fn boards_default_on_and_parse_booleans() {
         assert!(Settings::default().boards);
         assert!(Settings::parse("").boards);
@@ -686,6 +804,29 @@ mod tests {
         assert_eq!(Settings::load(&path).warnings.len(), 1);
         fs::write(&path, vec![b'#'; MAX_BYTES as usize + 1]).unwrap();
         assert!(read_text(&path).is_err());
+    }
+
+    #[test]
+    fn a_fifo_or_a_directory_is_an_error_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("config.conf");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // A FIFO with no writer would block a plain read for good.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read_text(&fifo).is_err()));
+        let read = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        assert_eq!(read, Ok(true), "still blocked after 3 s, or read");
+        assert!(read_text(directory.path()).is_err());
+        // A symlink to a regular file still reads.
+        let target = directory.path().join("real.conf");
+        fs::write(&target, "theme = nord\n").unwrap();
+        let link = directory.path().join("linked.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(read_text(&link).unwrap().as_deref(), Some("theme = nord\n"));
     }
 
     #[test]
