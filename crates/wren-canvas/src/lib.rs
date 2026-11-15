@@ -793,6 +793,10 @@ impl BoardView {
     /// Put back the selection, its cursor and the view the host took
     /// before it showed elements (§5.18 rule 2), leaving out what the
     /// board no longer holds. A centring still waiting is dropped.
+    ///
+    /// The view comes back as it was, a fit included, even when an edit has
+    /// changed the board's bounds since; only a widget that has changed
+    /// size since fits again.
     pub fn restore(
         &mut self,
         selection: BTreeSet<Source>,
@@ -802,7 +806,14 @@ impl BoardView {
         self.showing = None;
         self.machine.select(selection, cursor);
         self.machine.retain(&self.board);
-        self.return_to(saved);
+        if saved.fitted && self.size.is_some() && self.size == saved.size {
+            self.jump(saved.viewport);
+            self.fit_pending = false;
+            self.anchor = None;
+            self.fitted = true;
+        } else {
+            self.return_to(saved);
+        }
     }
 
     /// Centre `element` in the widget, or fit it when it would be too
@@ -2913,6 +2924,47 @@ mod tests {
         assert_eq!(
             view.viewport(),
             Viewport::fitting(view.scene().bounds, narrow)
+        );
+    }
+
+    /// Closing the jump palette without a choice puts the fitted view back
+    /// where it was, though an edit since has grown the board's bounds (the
+    /// phase-end review's major, §5.18 rule 2).
+    #[test]
+    fn a_restored_fit_is_the_saved_viewport_after_the_bounds_change() {
+        let now = Instant::now();
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        view.fit();
+        let saved = view.saved_view();
+        assert!(saved.fitted);
+        let far = Intent::AddNode {
+            kind: NodeKind::Shape,
+            shape: Shape::Rect,
+            at: [3000, -2000],
+            size: [120, 60],
+            from: None,
+        };
+        assert!(view.apply(&[far], &mut Given(vec!["far"]), now).changed);
+        assert_eq!(view.viewport(), saved.viewport, "an edit moves no view");
+        let picked = view.machine().selection().clone();
+        let cursor = view.machine().cursor().cloned();
+        assert!(view.show_element(pick(&view, "far")));
+        assert_ne!(view.viewport(), saved.viewport);
+        view.restore(picked, cursor, saved);
+        assert_eq!(view.viewport(), saved.viewport);
+        assert_eq!(view.saved_view(), saved);
+        // A widget of another size since fits the board as it is now.
+        view.show_element(pick(&view, "far"));
+        let mut moved = saved;
+        moved.size = Some((400.0, 600.0));
+        let (picked, cursor) = (
+            view.machine().selection().clone(),
+            view.machine().cursor().cloned(),
+        );
+        view.restore(picked, cursor, moved);
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(view.scene().bounds, SIZE)
         );
     }
 
