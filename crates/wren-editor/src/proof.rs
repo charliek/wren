@@ -40,7 +40,48 @@ pub enum SpellEvent {
     /// host's menu holds even when keys of one batch were routed before the
     /// host had opened it.
     AcceptSelected,
+    /// A press of Up, Down or Enter with no modifier, made after an opening
+    /// earlier in the same batch of events, when the widget cannot know
+    /// whether the host's opening found a word. An open menu takes it as
+    /// [`MenuKey::event`]; with none open the editor handles the press as it
+    /// would any other.
+    Key(MenuKey),
+    /// A press of the left or right button inside the editor, made after an
+    /// opening earlier in the same batch, for the same reason as
+    /// [`SpellEvent::Key`]. An open menu only closes (rule 4.4.5); with none
+    /// open the editor handles the press as it would any other.
+    Press(MenuPress),
     Close,
+}
+
+/// A pointer press the host resolves against its menu; see
+/// [`SpellEvent::Press`]. Positions are relative to the text origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MenuPress {
+    /// A left press, with the kind of click it makes.
+    Left(Point, iced::advanced::mouse::click::Kind),
+    /// A right press, which opens the menu on a misspelled word.
+    Right(Point),
+}
+
+/// A key the open menu takes for itself (rule 4.4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKey {
+    Up,
+    Down,
+    Enter,
+}
+
+impl MenuKey {
+    /// What the key does to an open menu: Up and Down move its selection,
+    /// and Enter accepts the selected row.
+    pub fn event(self) -> SpellEvent {
+        match self {
+            Self::Up => SpellEvent::Move(-1),
+            Self::Down => SpellEvent::Move(1),
+            Self::Enter => SpellEvent::AcceptSelected,
+        }
+    }
 }
 
 /// The open suggestions menu: the word it was opened for and what it offers.
@@ -142,31 +183,47 @@ pub(crate) struct OpenMenu {
     pub selected: Option<usize>,
     /// How many suggestions it has.
     pub items: usize,
+    /// Opened by a message of this batch. The host opens it against the
+    /// caret and the text as the batch's earlier messages leave them, which
+    /// the widget does not have, so whether it opens and what it offers are
+    /// unknown until the next batch: the menu's keys go to the host as
+    /// [`SpellEvent::Key`], which it resolves against its real menu.
+    pub opening: bool,
 }
 
 impl OpenMenu {
+    /// A menu opened in this batch; see [`Self::opening`].
+    const OPENING: Self = Self {
+        selected: None,
+        items: 0,
+        opening: true,
+    };
+
     pub(crate) fn of(menu: &SpellMenu) -> Self {
         Self {
             selected: menu.selected(),
             items: menu.items().len(),
+            opening: false,
         }
     }
 
     /// The menu `message` leaves `menu` as, once the host applies it. An
-    /// opening is taken as the menu it opens when it finds a word (the
-    /// widget clears the copy when the keyboard's opening finds none), with
-    /// as many suggestions as there may be and the first selected. The row
-    /// count is a guess, so the copy's selection can run past the host's
-    /// last row; Enter therefore accepts the host's own selection
-    /// ([`SpellEvent::AcceptSelected`]). Every message but a move, a hover
-    /// or an opening closes the menu: the host closes it on any action,
-    /// intent, undo or redo (rule 4.4.8).
+    /// opening may or may not open a menu ([`Self::opening`]), and so may a
+    /// right press the host resolves: with no menu open, it opens one on a
+    /// misspelled word. A move or a hover moves the selection, and a menu
+    /// key acts as it does on an open menu. Every other message closes the
+    /// menu: the host closes it on any action, intent, undo or redo (rule
+    /// 4.4.8), and with no menu open a menu key leaves none.
     pub(crate) fn after(menu: Option<Self>, message: &crate::Message) -> Option<Self> {
         match message {
-            crate::Message::Spell(SpellEvent::OpenAtCaret | SpellEvent::OpenAt(_)) => Some(Self {
-                selected: Some(0),
-                items: SUGGESTIONS,
-            }),
+            crate::Message::Spell(
+                SpellEvent::OpenAtCaret
+                | SpellEvent::OpenAt(_)
+                | SpellEvent::Press(MenuPress::Right(_)),
+            ) => Some(Self::OPENING),
+            crate::Message::Spell(SpellEvent::Key(key)) => {
+                Self::after(menu, &crate::Message::Spell(key.event()))
+            }
             crate::Message::Spell(SpellEvent::Move(delta)) => menu.map(|menu| Self {
                 selected: stepped(menu.selected, menu.items, *delta),
                 ..menu
@@ -386,7 +443,13 @@ mod tests {
     #[test]
     fn the_widgets_copy_follows_each_message_as_the_hosts_menu_will() {
         use crate::Message;
-        let open = |selected| Some(OpenMenu { selected, items: 3 });
+        let open = |selected| {
+            Some(OpenMenu {
+                selected,
+                items: 3,
+                opening: false,
+            })
+        };
         let spell = |event| Message::Spell(event);
         let after = |menu, event| OpenMenu::after(menu, &spell(event));
         assert_eq!(after(open(Some(0)), SpellEvent::Move(1)), open(Some(1)));
@@ -399,13 +462,34 @@ mod tests {
         assert_eq!(after(open(Some(1)), SpellEvent::Accept(1)), None);
         assert_eq!(after(open(Some(1)), SpellEvent::AcceptSelected), None);
         assert_eq!(after(open(Some(1)), SpellEvent::Close), None);
-        let opening = Some(OpenMenu {
-            selected: Some(0),
-            items: SUGGESTIONS,
-        });
+        let opening = Some(OpenMenu::OPENING);
         assert_eq!(after(None, SpellEvent::OpenAtCaret), opening);
         assert_eq!(
             after(open(Some(2)), SpellEvent::OpenAt(Point::ORIGIN)),
+            opening
+        );
+        // A menu key acts as on an open menu; on one opened in this batch,
+        // the opening stays unknown until Enter closes it.
+        assert_eq!(
+            after(open(Some(0)), SpellEvent::Key(MenuKey::Down)),
+            open(Some(1))
+        );
+        assert_eq!(after(opening, SpellEvent::Key(MenuKey::Down)), opening);
+        assert_eq!(after(opening, SpellEvent::Key(MenuKey::Up)), opening);
+        assert_eq!(after(opening, SpellEvent::Key(MenuKey::Enter)), None);
+        assert_eq!(after(None, SpellEvent::Key(MenuKey::Down)), None);
+        // A left press leaves no menu whatever the host had; a right press
+        // may open one.
+        let single = iced::advanced::mouse::click::Kind::Single;
+        assert_eq!(
+            after(
+                opening,
+                SpellEvent::Press(MenuPress::Left(Point::ORIGIN, single))
+            ),
+            None
+        );
+        assert_eq!(
+            after(opening, SpellEvent::Press(MenuPress::Right(Point::ORIGIN))),
             opening
         );
         // Every other message closes it, as the host closes its menu.

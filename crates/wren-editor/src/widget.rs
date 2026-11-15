@@ -32,6 +32,7 @@
 //! editor's cosmic-text buffer, so this module owns its own `Content`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::{DerefMut, Range};
 use std::sync::Arc;
 
@@ -57,7 +58,9 @@ use iced::{
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::keys::{KeyPolicy, Routed};
-use crate::proof::{self, publish, MenuOverlay, OpenMenu, Proofreader, SpellEvent, SpellMenu};
+use crate::proof::{
+    self, publish, MenuOverlay, MenuPress, OpenMenu, Proofreader, SpellEvent, SpellMenu,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::proof::{DrawnMark, SpellFrame};
 use crate::{Message, Style};
@@ -662,6 +665,29 @@ impl<'a> TextEditor<'a> {
                     publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
                     shell.capture_event();
                 }
+                Update::Press(press) => {
+                    // Only the host knows whether a menu opened. The press
+                    // is taken as it would be with none, and the host only
+                    // closes the menu if one did.
+                    let event = match press {
+                        Pressed::Left(click) => {
+                            state.focus = Some(Focus::now());
+                            state.last_click = Some(click);
+                            state.drag_click = Some(click.kind());
+                            MenuPress::Left(click.position(), click.kind())
+                        }
+                        Pressed::Right(position) => {
+                            state.drag_click = None;
+                            MenuPress::Right(position)
+                        }
+                    };
+                    publish(
+                        shell,
+                        &self.menu_now,
+                        Message::Spell(SpellEvent::Press(event)),
+                    );
+                    shell.capture_event();
+                }
                 Update::Drag(position) => {
                     publish(
                         shell,
@@ -729,13 +755,6 @@ impl<'a> TextEditor<'a> {
                         if !matches!(binding, Binding::Unfocus) {
                             shell.capture_event();
                         }
-                        // The host opens nothing without a word at the
-                        // caret, and the later keys of this batch must then
-                        // reach the text.
-                        let opens_nothing = matches!(
-                            binding,
-                            Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret))
-                        ) && !self.misspelling_at_caret(state);
                         apply_binding(
                             binding,
                             self.content,
@@ -744,9 +763,6 @@ impl<'a> TextEditor<'a> {
                             shell,
                             &self.menu_now,
                         );
-                        if opens_nothing {
-                            self.menu_now.set(None);
-                        }
                         if let Some(focus) = &mut state.focus {
                             focus.updated_at = Instant::now();
                         }
@@ -863,38 +879,6 @@ impl<'a> TextEditor<'a> {
                 .map(|decor| proof::line_marks(proofreader, text, &decor.prose))
                 .unwrap_or_default()
         })
-    }
-
-    /// Whether a misspelled word contains or touches the caret, as
-    /// [`crate::EditorView::spell`] finds the keyboard's target: from the
-    /// widget's highlighter when it has reached the caret's line, or a fresh
-    /// pass over the lines down to it.
-    fn misspelling_at_caret(&self, state: &State) -> bool {
-        let Some(proofreader) = self
-            .proofreader
-            .filter(|_| self.content.kind() == BackendKind::Owned)
-        else {
-            return false;
-        };
-        let caret = self.content.cursor().position;
-        let highlighter = state.highlighter.borrow();
-        let marks = self.content.with_lines(|lines| {
-            let Some(text) = lines.get(caret.line) else {
-                return Vec::new();
-            };
-            let prose = highlighter.decor(caret.line).map_or_else(
-                || {
-                    crate::highlighter::prose_at(
-                        &lines,
-                        caret.line,
-                        self.highlighter_settings.front_matter_end,
-                    )
-                },
-                |decor| decor.prose.clone(),
-            );
-            proof::line_marks(proofreader, &text.text, &prose)
-        });
-        proof::mark_at_caret(marks, caret.column).is_some()
     }
 
     fn input_method<'b>(&self, state: &'b State, bounds: Rectangle) -> InputMethod<&'b str> {
@@ -1310,23 +1294,19 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
         // Over the selection, which must not hide a mark, and under the
         // glyphs, which paint over it.
         let origin = text_bounds.position();
-        let squares: Vec<Rectangle> = rows
-            .iter()
-            .flat_map(|row| {
-                row.marks
-                    .iter()
-                    .filter(|mark| mark.shown)
-                    .filter_map(move |mark| mark.zigzag(row, origin))
-            })
-            .flat_map(Zigzag::squares)
-            .filter_map(|square| square.intersection(&rows_clip))
-            .collect();
-        if let Some(picture) = state
-            .zigzags
-            .borrow_mut()
-            .update(squares, style.misspelling)
+        let zigzags = rows.iter().flat_map(|row| {
+            row.marks
+                .iter()
+                .filter(|mark| mark.shown)
+                .filter_map(move |mark| mark.zigzag(row, origin))
+        });
+        for (bounds, handle) in
+            state
+                .zigzags
+                .borrow_mut()
+                .frame(zigzags, rows_clip, style.misspelling)
         {
-            renderer.draw_svg(Svg::new(picture.handle.clone()), picture.bounds, rows_clip);
+            renderer.draw_svg(Svg::new(handle), bounds, rows_clip);
         }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(frame) = self.spell_frame {
@@ -1508,11 +1488,20 @@ enum Update {
     RightClick(Point),
     /// A press in the editor while the menu is open.
     Dismiss,
+    /// A left or right press in the editor after an opening earlier in the
+    /// batch, which may not have opened a menu.
+    Press(Pressed),
     Drag(Point),
     Release,
     Scroll(f32),
     InputMethod(Ime),
     Key(Routed),
+}
+
+enum Pressed {
+    Left(mouse::Click),
+    /// Relative to the text origin.
+    Right(Point),
 }
 
 enum Ime {
@@ -1536,8 +1525,25 @@ impl Update {
     ) -> Option<Self> {
         match event {
             Event::Mouse(event) => match event {
-                mouse::Event::ButtonPressed(_) if menu.is_some() && cursor.is_over(bounds) => {
-                    Some(Update::Dismiss)
+                mouse::Event::ButtonPressed(button) if menu.is_some() && cursor.is_over(bounds) => {
+                    let position = cursor
+                        .position_in(bounds)
+                        .map(|position| position - Vector::new(padding.left, padding.top));
+                    Some(
+                        match (menu.is_some_and(|menu| menu.opening), button, position) {
+                            (true, mouse::Button::Left, Some(position)) => {
+                                Update::Press(Pressed::Left(mouse::Click::new(
+                                    position,
+                                    mouse::Button::Left,
+                                    state.last_click,
+                                )))
+                            }
+                            (true, mouse::Button::Right, Some(position)) => {
+                                Update::Press(Pressed::Right(position))
+                            }
+                            _ => Update::Dismiss,
+                        },
+                    )
                 }
                 mouse::Event::ButtonPressed(mouse::Button::Left) => {
                     if let Some(cursor_position) = cursor.position_in(bounds) {
@@ -1820,7 +1826,6 @@ impl Zigzag {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn bounds(self) -> Rectangle {
         Rectangle {
             x: self.left,
@@ -1842,37 +1847,85 @@ impl Zigzag {
     }
 }
 
-/// A frame's zigzag squares, drawn as one SVG picture. tiny-skia damages
-/// and repaints every changed primitive separately, so a screen of marks
-/// drawn as 1 px quads took seconds a frame there; one picture is one
-/// primitive, and it keeps its handle while the squares stay the same, so
-/// an unchanged frame damages nothing.
+/// The zigzag pictures of a frame, one per word and row, each shared by
+/// every zigzag that draws the same squares in the same colour. tiny-skia
+/// damages every changed primitive on its own and blits a picture's whole
+/// extent each time it repaints a region the picture touches, so one picture
+/// of a whole frame's squares cost a large blit per region on a note switch,
+/// and 1 px quads seconds a frame. A picture per word keeps each blit to the
+/// word's few pixels, and the vendored iced_tiny_skia merges the words'
+/// damage into the text's. A picture is kept while frames draw it, so an
+/// unchanged frame repeats the same handles at the same bounds and damages
+/// nothing, and a word of a width already drawn reuses its picture.
 #[derive(Debug, Default)]
 struct Zigzags {
-    squares: Vec<Rectangle>,
-    color: Option<Color>,
-    picture: Option<ZigzagPicture>,
+    pictures: HashMap<ZigzagKey, Option<ZigzagPicture>>,
+}
+
+/// What a zigzag picture draws: the squares of a zigzag `width` pixels wide
+/// inside `cut` (relative to its left and top, as `f32` bits), in `color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ZigzagKey {
+    width: u32,
+    cut: [u32; 4],
+    color: [u8; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct ZigzagPicture {
+    /// Where it is drawn, relative to its zigzag's left and top.
     bounds: Rectangle,
     handle: svg::Handle,
 }
 
 impl Zigzags {
-    /// The picture of `squares` in `color`, built again only when either
-    /// changed; `None` when there are no squares.
-    fn update(&mut self, squares: Vec<Rectangle>, color: Color) -> Option<&ZigzagPicture> {
-        if self.squares != squares || self.color != Some(color) {
-            self.picture = zigzag_svg(&squares, color).map(|(bounds, source)| ZigzagPicture {
-                bounds,
-                handle: svg::Handle::from_memory(source.into_bytes()),
-            });
-            self.squares = squares;
-            self.color = Some(color);
+    /// Where to draw each of `zigzags`, cut to `clip`, in `color`, and the
+    /// picture that draws it. Pictures no zigzag of this frame draws are
+    /// dropped.
+    fn frame(
+        &mut self,
+        zigzags: impl IntoIterator<Item = Zigzag>,
+        clip: Rectangle,
+        color: Color,
+    ) -> Vec<(Rectangle, svg::Handle)> {
+        let mut kept = HashMap::new();
+        let mut drawn = Vec::new();
+        for zigzag in zigzags {
+            let Some(visible) = zigzag.bounds().intersection(&clip) else {
+                continue;
+            };
+            let origin = Vector::new(zigzag.left, zigzag.top);
+            let cut = visible - origin;
+            let width = zigzag.right - zigzag.left;
+            let key = ZigzagKey {
+                width: width as u32,
+                cut: [cut.x, cut.y, cut.width, cut.height].map(f32::to_bits),
+                color: color.into_rgba8(),
+            };
+            let picture = match kept.get(&key) {
+                Some(picture) => Option::clone(picture),
+                None => self.pictures.remove(&key).unwrap_or_else(|| {
+                    let squares: Vec<Rectangle> = Zigzag {
+                        left: 0.0,
+                        right: width,
+                        top: 0.0,
+                    }
+                    .squares()
+                    .filter_map(|square| square.intersection(&cut))
+                    .collect();
+                    zigzag_svg(&squares, color).map(|(bounds, source)| ZigzagPicture {
+                        bounds,
+                        handle: svg::Handle::from_memory(source.into_bytes()),
+                    })
+                }),
+            };
+            if let Some(picture) = &picture {
+                drawn.push((picture.bounds + origin, picture.handle.clone()));
+            }
+            kept.insert(key, picture);
         }
-        self.picture.as_ref()
+        self.pictures = kept;
+        drawn
     }
 }
 
@@ -2903,60 +2956,79 @@ mod tests {
     }
 
     #[test]
-    fn a_frames_zigzags_are_one_picture_of_their_squares_on_the_pixel_grid() {
+    fn each_zigzag_is_a_picture_of_its_squares_on_the_pixel_grid() {
         // Two words' zigzags, the second cut by the rows' clip at y = 41.5.
         let clip = Rectangle::new(Point::new(0.0, 0.0), Size::new(400.0, 41.5));
-        let squares: Vec<Rectangle> = [
+        let zigzags = [
             Zigzag::new(10.3, 14.0, 30.4, 48.0).unwrap(),
             Zigzag::new(20.0, 22.0, 37.0, 48.0).unwrap(),
-        ]
-        .into_iter()
-        .flat_map(Zigzag::squares)
-        .filter_map(|square| square.intersection(&clip))
-        .collect();
+        ];
         let color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
-        let (bounds, source) = zigzag_svg(&squares, color).unwrap();
-        // From the first square's left and the top step to the cut half
-        // pixel, rounded out to whole pixels.
+        let drawn = Zigzags::default().frame(zigzags, clip, color);
+        // Each from its first square's left and its top step to its last
+        // square or the cut half pixel, rounded out to whole pixels.
         assert_eq!(
-            bounds,
-            Rectangle::new(Point::new(11.0, 32.0), Size::new(11.0, 10.0))
+            drawn.iter().map(|(bounds, _)| *bounds).collect::<Vec<_>>(),
+            [
+                Rectangle::new(Point::new(11.0, 32.0), Size::new(3.0, 3.0)),
+                Rectangle::new(Point::new(20.0, 40.0), Size::new(2.0, 2.0)),
+            ]
         );
+        let sources: Vec<String> = drawn
+            .iter()
+            .map(|(_, handle)| match handle.data() {
+                svg::Data::Bytes(bytes) => String::from_utf8(bytes.to_vec()).unwrap(),
+                svg::Data::Path(path) => panic!("a picture from a file: {path:?}"),
+            })
+            .collect();
         assert_eq!(
-            source,
-            "<svg xmlns='http://www.w3.org/2000/svg' width='11' height='10' \
-             viewBox='0 0 11 10'><path fill='#e06c6c' fill-opacity='1' \
-             d='M0 2h1v1h-1zM1 1h1v1h-1zM2 0h1v1h-1zM9 9h1v0.5h-1zM10 8h1v1h-1z'/></svg>"
+            sources,
+            [
+                "<svg xmlns='http://www.w3.org/2000/svg' width='3' height='3' \
+                 viewBox='0 0 3 3'><path fill='#e06c6c' fill-opacity='1' \
+                 d='M0 2h1v1h-1zM1 1h1v1h-1zM2 0h1v1h-1z'/></svg>",
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2' \
+                 viewBox='0 0 2 2'><path fill='#e06c6c' fill-opacity='1' \
+                 d='M0 1h1v0.5h-1zM1 0h1v1h-1z'/></svg>",
+            ]
         );
         assert_eq!(zigzag_svg(&[], color), None);
+        // A cut that holds no square draws nothing.
+        let above = Rectangle::new(Point::new(0.0, 0.0), Size::new(400.0, 40.0));
+        let lone = Zigzag::new(20.0, 21.0, 37.0, 48.0).unwrap();
+        assert_eq!(Zigzags::default().frame([lone], above, color), []);
     }
 
     #[test]
-    fn the_zigzag_picture_is_kept_while_its_squares_and_colour_are() {
-        let squares: Vec<Rectangle> = Zigzag::new(10.0, 30.0, 30.0, 48.0)
-            .unwrap()
-            .squares()
-            .collect();
+    fn zigzag_pictures_are_shared_by_what_they_draw_and_kept_while_drawn() {
+        let clip = Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0));
         let red = Color::from_rgb8(0xe0, 0x6c, 0x6c);
-        let mut zigzags = Zigzags::default();
-        let first = zigzags.update(squares.clone(), red).cloned().unwrap();
-        // The same handle, so the renderer sees an unchanged primitive.
-        assert_eq!(
-            zigzags.update(squares.clone(), red).unwrap().handle.id(),
-            first.handle.id()
-        );
         let blue = Color::from_rgb8(0x40, 0x60, 0xe0);
+        // Two words of one width on two rows, and a wider one.
+        let words = [
+            Zigzag::new(10.0, 30.0, 30.0, 48.0).unwrap(),
+            Zigzag::new(50.0, 70.0, 54.0, 72.0).unwrap(),
+            Zigzag::new(10.0, 40.0, 78.0, 96.0).unwrap(),
+        ];
+        let mut zigzags = Zigzags::default();
+        let first = zigzags.frame(words, clip, red);
+        assert_eq!(first[0].1.id(), first[1].1.id());
+        assert_ne!(first[0].1.id(), first[2].1.id());
+        assert_eq!(first[1].0, first[0].0 + Vector::new(40.0, 24.0));
+        // An unchanged frame draws the same handles at the same bounds, so
+        // the renderer sees unchanged primitives.
+        assert_eq!(zigzags.frame(words, clip, red), first);
+        // Another note's word of the same width reuses the picture.
+        let other = Zigzag::new(100.0, 120.0, 200.0, 218.0).unwrap();
+        let moved = zigzags.frame([other], clip, red);
+        assert_eq!(moved[0].1.id(), first[0].1.id());
+        assert_eq!(zigzags.pictures.len(), 1);
         assert_ne!(
-            zigzags.update(squares.clone(), blue).unwrap().handle.id(),
-            first.handle.id()
+            zigzags.frame([other], clip, blue)[0].1.id(),
+            first[0].1.id()
         );
-        let moved: Vec<Rectangle> = squares
-            .iter()
-            .map(|square| *square + Vector::new(0.0, 24.0))
-            .collect();
-        let picture = zigzags.update(moved, red).cloned().unwrap();
-        assert_eq!(picture.bounds, first.bounds + Vector::new(0.0, 24.0));
-        assert_eq!(zigzags.update(Vec::new(), red), None);
+        assert_eq!(zigzags.frame([], clip, red), []);
+        assert!(zigzags.pictures.is_empty());
     }
 
     #[test]
@@ -3806,10 +3878,13 @@ mod tests {
             spell_events(&messages).as_slice(),
             [SpellEvent::OpenAt(_)]
         ));
-        // The host opens it with the first row selected.
+        // The host resolves the menu's keys against what it opened.
         for (event, expected) in [
-            (named(Named::ArrowDown), SpellEvent::Move(1)),
-            (named(Named::Enter), SpellEvent::AcceptSelected),
+            (
+                named(Named::ArrowDown),
+                SpellEvent::Key(proof::MenuKey::Down),
+            ),
+            (named(Named::Enter), SpellEvent::Key(proof::MenuKey::Enter)),
         ] {
             let (messages, _) = send(&mut editor, &mut state, event, None);
             assert_eq!(spell_events(&messages), [expected]);
@@ -3853,7 +3928,16 @@ mod tests {
     /// Send `events` to one focused widget over `ev`, as iced hands over a
     /// frame's events, then carry out what it published as the host does.
     fn one_batch(ev: &mut crate::EditorView, events: Vec<Event>) -> Vec<Message> {
+        one_batch_at(ev, events.into_iter().map(|event| (event, None)).collect())
+    }
+
+    /// [`one_batch`] with the pointer where each event names it.
+    fn one_batch_at(
+        ev: &mut crate::EditorView,
+        events: Vec<(Event, Option<Point>)>,
+    ) -> Vec<Message> {
         let policy = suggest_policy();
+        ev.set_key_policy(policy.clone());
         let messages: Vec<Message> = {
             let mut editor = editor_with(&ev.content, true, Measure::default())
                 .key_policy(Some(&policy))
@@ -3863,7 +3947,7 @@ mod tests {
             state.focus = Some(Focus::now());
             events
                 .into_iter()
-                .flat_map(|event| send(&mut editor, &mut state, event, None).0)
+                .flat_map(|(event, pointer)| send(&mut editor, &mut state, event, pointer).0)
                 .collect()
         };
         for message in messages.clone() {
@@ -3888,27 +3972,157 @@ mod tests {
             &mut ev,
             vec![suggest_key(), named(Named::Enter), named(Named::ArrowDown)],
         );
+        // The host, which opened nothing, handles Enter as a plain key, and
+        // Enter leaves no menu either way, so Down is the text's.
         assert!(
             matches!(
                 messages.as_slice(),
                 [
                     Message::Spell(SpellEvent::OpenAtCaret),
-                    Message::Intent(crate::Intent::Enter),
+                    Message::Spell(SpellEvent::Key(proof::MenuKey::Enter)),
                     Message::Action(Action::Move(iced::widget::text_editor::Motion::Down)),
                 ]
             ),
             "{messages:?}"
         );
         assert_eq!(ev.text(), "c\nat teh");
+        assert_eq!(ev.cursor().position, Position { line: 1, column: 0 });
         assert!(ev.spell_menu().is_none());
         // A word at the caret still opens the menu for the keys after it.
         let mut ev = host("cat teh", 7);
         let messages = one_batch(&mut ev, vec![suggest_key(), named(Named::Enter)]);
         assert_eq!(
             spell_events(&messages),
-            [SpellEvent::OpenAtCaret, SpellEvent::AcceptSelected]
+            [
+                SpellEvent::OpenAtCaret,
+                SpellEvent::Key(proof::MenuKey::Enter)
+            ]
         );
         assert_eq!(ev.text(), "cat the");
+    }
+
+    #[test]
+    fn a_press_after_an_opening_in_one_batch_clicks_unless_a_menu_opened() {
+        let left = || press(mouse::Button::Left);
+        // The caret is on `cat`, which is spelled right, so the opening
+        // finds nothing and the click moves the caret as it does alone.
+        let mut alone = host("cat teh", 1);
+        one_batch_at(&mut alone, vec![(left(), Some(over(5.0, 0.0)))]);
+        let mut ev = host("cat teh", 1);
+        let messages = one_batch_at(
+            &mut ev,
+            vec![(suggest_key(), None), (left(), Some(over(5.0, 0.0)))],
+        );
+        assert!(
+            matches!(
+                spell_events(&messages).as_slice(),
+                [
+                    SpellEvent::OpenAtCaret,
+                    SpellEvent::Press(MenuPress::Left(_, mouse::click::Kind::Single))
+                ]
+            ),
+            "{messages:?}"
+        );
+        assert_ne!(alone.cursor().position.column, 1);
+        assert_eq!(ev.cursor(), alone.cursor());
+        assert!(ev.spell_menu().is_none());
+
+        // At the end of `teh` a menu opens, and the press only closes it:
+        // neither it nor the drag it starts moves the caret (rule 4.4.5).
+        let mut ev = host("cat teh", 7);
+        one_batch_at(
+            &mut ev,
+            vec![
+                (suggest_key(), None),
+                (left(), Some(over(1.0, 0.0))),
+                (moved_to(over(3.0, 0.0)), Some(over(3.0, 0.0))),
+            ],
+        );
+        assert_eq!(ev.text(), "cat teh");
+        assert_eq!(
+            ev.cursor(),
+            Cursor {
+                position: Position { line: 0, column: 7 },
+                selection: None
+            }
+        );
+        assert!(ev.spell_menu().is_none());
+
+        // A right press on `teh` after an opening that found nothing opens
+        // the menu there.
+        let mut ev = host("cat teh", 1);
+        one_batch_at(
+            &mut ev,
+            vec![
+                (suggest_key(), None),
+                (press(mouse::Button::Right), Some(over(5.0, 0.0))),
+            ],
+        );
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        assert_eq!(ev.cursor().position.column, 1);
+    }
+
+    #[test]
+    fn a_suggest_press_after_a_caret_move_in_one_batch_opens_where_the_caret_went() {
+        use keyboard::key::Named;
+        // From the end of `teh` onto `line`, which is spelled right: Enter
+        // breaks the line where the caret went, and nothing is lost.
+        let mut ev = host("another teh line", 11);
+        let messages = one_batch(
+            &mut ev,
+            vec![named(Named::ArrowRight), suggest_key(), named(Named::Enter)],
+        );
+        assert_eq!(
+            spell_events(&messages),
+            [
+                SpellEvent::OpenAtCaret,
+                SpellEvent::Key(proof::MenuKey::Enter)
+            ]
+        );
+        assert_eq!(ev.text(), "another teh \nline");
+        assert_eq!(ev.cursor().position, Position { line: 1, column: 0 });
+        assert!(ev.spell_menu().is_none());
+        // From `line` back to the end of `teh`: Enter accepts the first
+        // suggestion and breaks no line.
+        let mut ev = host("another teh line", 12);
+        one_batch(
+            &mut ev,
+            vec![named(Named::ArrowLeft), suggest_key(), named(Named::Enter)],
+        );
+        assert_eq!(ev.text(), "another the line");
+        assert_eq!(
+            ev.cursor().position,
+            Position {
+                line: 0,
+                column: 11
+            }
+        );
+        assert!(ev.spell_menu().is_none());
+        // Up and Down after the move reach the menu the host opened.
+        let mut ev = host("another teh line", 12);
+        one_batch(
+            &mut ev,
+            vec![
+                named(Named::ArrowLeft),
+                suggest_key(),
+                named(Named::ArrowDown),
+                named(Named::Enter),
+            ],
+        );
+        assert_eq!(ev.text(), "another ten line");
+        // And to the text when it opened nothing.
+        let mut ev = host("another teh line\nnext", 11);
+        one_batch(
+            &mut ev,
+            vec![
+                named(Named::ArrowRight),
+                suggest_key(),
+                named(Named::ArrowDown),
+            ],
+        );
+        assert_eq!(ev.text(), "another teh line\nnext");
+        assert_eq!(ev.cursor().position.line, 1);
+        assert!(ev.spell_menu().is_none());
     }
 
     #[test]
