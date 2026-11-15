@@ -127,6 +127,8 @@ check-patches:
 		( echo "cosmic-text [patch.crates-io] not applied"; exit 1 )
 	@cargo tree --locked -p wren-iced | grep -q 'iced_tiny_skia v0.14.1 (.*vendor/iced_tiny_skia)' || \
 		( echo "iced_tiny_skia [patch.crates-io] not applied"; exit 1 )
+	@cargo tree --locked -p wren-iced | grep -q 'iced_winit v0.14.1 (.*vendor/iced_winit)' || \
+		( echo "iced_winit [patch.crates-io] not applied"; exit 1 )
 
 build-smoke:
 	cargo build --locked -p wren-iced --features smoke-test
