@@ -4284,6 +4284,21 @@ mod tests {
         );
         assert_eq!(word(&ev).as_deref(), Some("at"));
 
+        // The widget lets every press it leaves to the host drag, so the
+        // host drops the drag of a double click after an opening that found
+        // nothing, which keeps the word selected.
+        let mut ev = host("cat teh", 1);
+        one_batch_at(
+            &mut ev,
+            vec![
+                (suggest_key(), None),
+                left(),
+                left(),
+                (moved_to(over(5.0, 0.0)), Some(over(5.0, 0.0))),
+            ],
+        );
+        assert_eq!(word(&ev).as_deref(), Some("cat"));
+
         // A menu open when the batch starts: the press closes it, and the
         // press after it is a click, even right after a click there.
         let mut ev = host("cat teh", 7);
