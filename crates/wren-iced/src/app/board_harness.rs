@@ -532,7 +532,7 @@ impl App {
             .collect();
         let event = iced::keyboard::Event::KeyPressed {
             key: pressed.key.clone(),
-            modified_key: pressed.key,
+            modified_key: pressed.modified,
             physical_key: pressed.physical,
             location: iced::keyboard::Location::Standard,
             modifiers: pressed.modifiers,
@@ -787,7 +787,10 @@ fn intents_of(
 /// A key `board.key` presses: the key as iced names it, its physical key,
 /// the modifiers held, the text it types and whether it repeats.
 struct Pressed {
+    /// The key without its modifiers, as winit gives a real press.
     key: iced::keyboard::Key,
+    /// The key as the modifiers make it: a letter's capital with Shift.
+    modified: iced::keyboard::Key,
     physical: iced::keyboard::key::Physical,
     modifiers: iced::keyboard::Modifiers,
     text: Option<String>,
@@ -854,6 +857,7 @@ fn pressed_key(params: &Value) -> Result<Pressed, String> {
         let text = (named == Named::Space && !chord).then(|| " ".to_owned());
         return Ok(Pressed {
             key: Key::Named(named),
+            modified: Key::Named(named),
             physical: Physical::Code(code),
             modifiers,
             text,
@@ -865,17 +869,20 @@ fn pressed_key(params: &Value) -> Result<Pressed, String> {
         return Err(format!("no key {name}"));
     };
     // Shift types a letter's capital; any other character is as given.
-    let typed = if modifiers.shift() {
-        c.to_uppercase().collect()
+    // A real press names the key without its modifiers, the letter itself
+    // (`key_without_modifiers`), and the label's Shift+Mod+Z reads that.
+    let (unmodified, typed) = if modifiers.shift() {
+        (c.to_lowercase().collect(), c.to_uppercase().collect())
     } else {
-        c.to_string()
+        (c.to_string(), c.to_string())
     };
     let physical = character_code(c.to_ascii_lowercase()).map_or(
         Physical::Unidentified(NativeCode::Unidentified),
         Physical::Code,
     );
     Ok(Pressed {
-        key: Key::Character(typed.as_str().into()),
+        key: Key::Character(unmodified.as_str().into()),
+        modified: Key::Character(typed.as_str().into()),
         physical,
         modifiers,
         text: (!chord).then_some(typed),
@@ -1617,6 +1624,16 @@ mod tests {
             (typed["editing"]["text"].clone(), typed["tool"].clone()),
             (json!("r"), json!("select"))
         );
+        // The label's own undo and redo, Shift+Mod+Z as a real press gives
+        // it: the letter without its modifiers, and the capital typed.
+        let undone = key(&mut app, json!({"key": "z", "mods": ["mod"]}));
+        assert_ne!(undone["editing"]["text"], "r");
+        for letter in ["z", "Z"] {
+            let redone = key(&mut app, json!({"key": letter, "mods": ["mod", "shift"]}));
+            assert_eq!(redone["editing"]["text"], "r", "{letter}");
+            key(&mut app, json!({"key": "z", "mods": ["mod"]}));
+        }
+        key(&mut app, json!({"key": "z", "mods": ["mod", "shift"]}));
         let done = key(&mut app, json!({"key": "enter", "mods": ["mod"]}));
         assert_eq!(done["state"], "idle");
         assert_eq!(done["editing"], Value::Null);
