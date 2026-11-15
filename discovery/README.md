@@ -9,5 +9,5 @@ what users need into `docs/` and delete or trim the note here.
 |---|---|
 | [Keyboard drill-down navigation](keyboard-drill-down.md) | Implemented 2026-11-08 |
 | [Markdown editor](markdown-editor.md) | In progress (branch `markdown-editor`) |
-| [Boards](boards.md) | Built and documented on branch `boards` (`docs/reference/boards.md`, `board-format.md`); the final review and the merge to `main` remain |
-| [Spell check](spell-check.md) | In progress (branch `spell`) |
+| [Boards](boards.md) | Built, reviewed and joined with spell check on branch `boards` (`docs/reference/boards.md`, `board-format.md`); pull request 6 open; the owner's hands-on checks remain |
+| [Spell check](spell-check.md) | Merged to `main` 2026-11-14 (`4446483`); documented in `docs/reference/spell-check.md` |
