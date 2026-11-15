@@ -198,6 +198,10 @@ class WrenApp:
         line. ``WRENTEST_BOARDS`` adds a ``boards`` line after it unless the
         text has one. Restarts keep whatever the app has written there
         since.
+    lane_settings:
+        Set to ``False`` to add neither lane line: ``config.conf`` is then
+        the test's own text, and is not written at all without it, as a
+        fresh install has none.
     words:
         Text for ``words.txt`` beside ``config.conf``, written before the
         first launch.
@@ -213,6 +217,7 @@ class WrenApp:
         evaluation: bool = True,
         settings: str | None = None,
         words: str | None = None,
+        lane_settings: bool = True,
     ) -> None:
         _validate_positive_finite(readiness_timeout, "readiness_timeout")
         if type(evaluation) is not bool:
@@ -221,6 +226,8 @@ class WrenApp:
             raise ValueError("settings must be str or None")
         if words is not None and not isinstance(words, str):
             raise ValueError("words must be str or None")
+        if type(lane_settings) is not bool:
+            raise ValueError("lane_settings must be bool")
         self._binary = _find_binary()
         env_artifacts = os.environ.get("WREN_TEST_ARTIFACT_DIR")
         self._artifacts_base = (
@@ -233,7 +240,8 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
-        self._settings = _boards_setting(_spell_setting(settings))
+        self._settings = (_boards_setting(_spell_setting(settings)) if lane_settings
+                          else settings)
         self._words = words
 
         self._ownroot: Path | None = None
@@ -416,7 +424,8 @@ class WrenApp:
         self._atexit_registered = True
 
         try:
-            self._write_config(self.settings_path, self._settings)
+            if self._settings is not None:
+                self._write_config(self.settings_path, self._settings)
             if self._words is not None:
                 self._write_config(self.words_path, self._words)
             self._start_process()

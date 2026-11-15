@@ -102,7 +102,9 @@ smoke lanes.
 `WRENTEST_SPELL` sets the `spell-check` setting the harness writes for
 every case that does not name it: `off` (the default when unset, so sample
 notes full of names keep their look) or `on`. Any other value fails the
-case. Spell check runs only on the advanced engine, so `on` matters only
+case. A case that needs no settings file at all, as a fresh install has
+none, passes `WrenApp(lane_settings=False)`, which adds neither this line
+nor the `WRENTEST_BOARDS` one. Spell check runs only on the advanced engine, so `on` matters only
 to the cases `WRENTEST_ENGINE` runs there:
 
 ```bash

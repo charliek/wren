@@ -467,6 +467,21 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                         self.assertEqual(app.settings_path.read_text(encoding="utf-8"), expected)
                         self.assertEqual(ui.spell_setting(), lane or "off")
 
+    def test_without_lane_settings_the_file_is_the_tests_own_or_absent(self) -> None:
+        factory = self._make_popen(_good_identify())
+        os.environ["WRENTEST_SPELL"] = "on"
+        os.environ["WRENTEST_BOARDS"] = "off"
+        with patch.object(subprocess, "Popen", side_effect=factory):
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                         lane_settings=False) as app:
+                self.assertFalse(app.settings_path.exists())
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                         settings="editor-engine = advanced\n", lane_settings=False) as app:
+                self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
+                                 "editor-engine = advanced\n")
+        with self.assertRaisesRegex(ValueError, "lane_settings"):
+            WrenApp(lane_settings=1)
+
     def test_an_unknown_lane_spell_setting_is_an_error(self) -> None:
         for value in ("", "yes", "ON", "true"):
             with self.subTest(value=value):

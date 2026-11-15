@@ -87,7 +87,8 @@ def test_the_setting_on_lists_the_board(small: Path) -> None:
 def test_with_no_settings_file_boards_are_on(small: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The setting's default, as a fresh install has it: no `config.conf`."""
     monkeypatch.delenv("WRENTEST_BOARDS", raising=False)
-    with WrenApp(workspace=small, artifacts_dir=artifact_directory("board-gate-default")) as app:
+    with WrenApp(workspace=small, artifacts_dir=artifact_directory("board-gate-default"),
+                 lane_settings=False) as app:
         assert not app.settings_path.exists()
         notes = {row["path"] for row in app.client.call("session.get")["notes"]}
         assert notes == {"Plans/Q1/Flow.wren-board", "Plans/Q1/Note.md"}
