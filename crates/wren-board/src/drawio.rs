@@ -5,8 +5,9 @@
 //!
 //! Written from draw.io's file format (the `mxfile` XML and its style
 //! strings) as the plan's study recorded it, with no draw.io code copied;
-//! draw.io is Apache-2.0. Which shape style draws which Wren shape, and why
-//! each key is written, is in the plan, `discovery/boards.md` §7.4.
+//! draw.io is Apache-2.0. The plan's §7.4 has the study's rules; which
+//! shape style draws which Wren shape, and why each key is written, is in
+//! its log, `discovery/boards.md` §8.5 `boards-p3-drawio`, "The mapping".
 //!
 //! What a board holds that draw.io cannot draw, or that draw.io would
 //! change on an ordinary edit, is not in a style string: Wren's id, an

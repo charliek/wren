@@ -13,7 +13,9 @@ make perf-board                         # board parse, write, scene and edit tim
 
 Run `make fuzz-board` and `make perf-board` after changing `wren-board`.
 `make perf-board` asserts release budgets, so run it on a quiet machine: a
-loaded one misses them. `make check` and `cargo build` without
+loaded one misses them. `tools/board_spike.py` looks at and times the board
+viewer in a real window by hand, through `wren --board-spike N` and the
+`spike.board` request; its docstring has the commands. `make check` and `cargo build` without
 `--features smoke-test` replace the smoke binary too, so never run them
 during a smoke suite.
 
@@ -160,6 +162,7 @@ The board requests:
 | `board.apply` `{"edits": [...]}` | Edits with explicit ids (`add_node`, `move`, `set`, `connect`, `delete`), applied as one undo step and one draft, for arranging a board before what a test looks at. |
 | `board.seed` `{"seed": 7}` | The open board draws the ids of the elements it makes from this seed from now on, so a test or a scene that builds a board makes the same one each run. Ids decide which of two connectors that would share a line moves aside. |
 | `board.export` `{"format": "svg", "path": "/abs/out.svg"}` | Writes what Export board as SVG (`"png"`: as PNG; `"drawio"`: as draw.io) writes, without the save dialog, on the same worker thread, and answers once the file is written. It refuses the paths the command refuses (a note's, and inside the workspace any but a file of the format's extension, `.svg`, `.png` or `.drawio`), and any export while another is under way. |
+| `spike.board` | Only under `wren --board-spike N`: shows a generated grid or given board text, and sets the label rule, the layer cap and the viewport, for `tools/board_spike.py`. |
 | `perf.board` | The board's scene, draw and frame timings, how long it took to open, how long each draft took (the canonical write, and with the Session's op), and how many times the view has parsed, built its scene and built geometry, optionally after a pan or zoom run of one step a redraw. |
 
 Every board request but `board.get` fails when the open note is not shown

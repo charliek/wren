@@ -100,10 +100,12 @@ when one lands, move what users need into `docs/` and trim the note.
   window over a private test socket), its unit tests (`wrentest_unit/`),
   packaging (`package.py`), `capture_scenes.py` for visual review,
   `check_updater.py` (the Sparkle check on a Mac), `update_appcast.py`
-  (the release's appcast entry), and `board_format.py`, a second
-  implementation of the board file format, with which `board_fixtures.py`
-  writes the board fixtures (`wrentest/fixtures/boards/`, a sample
-  workspace) and `wren-board`'s format golden files.
+  (the release's appcast entry), `board_spike.py` (looks at and times
+  the board viewer through `wren --board-spike N`), and `board_format.py`,
+  a second implementation of the board file format, with which
+  `board_fixtures.py` writes the board fixtures
+  (`wrentest/fixtures/boards/`, a sample workspace) and `wren-board`'s
+  format golden files.
 
 ## Architecture rules
 
@@ -120,7 +122,9 @@ when one lands, move what users need into `docs/` and trim the note.
   keymap); `App::key_input` ignores Editor keys. A `board.*` command is
   `Board` scope: its key lives in the keymap's board layer, which only a
   focused board reads, and no board default shares a trigger with an App
-  command.
+  command. A board command is a `wren_canvas::Command` variant with its
+  `key()`, a `BOARD_DEFINITIONS` row in `app/commands.rs` and, if it has a
+  key, a `keybind::default_board_bindings` entry.
 - macOS uses Command as the app modifier; Linux uses Alt, leaving Ctrl to
   text editing. `keys::alt_filter` drops the text of Alt presses on Linux
   so shortcuts never type their letter.
@@ -135,8 +139,10 @@ when one lands, move what users need into `docs/` and trim the note.
   label, cancels a gesture and drops a preview before a note switch, a
   palette or dialog, a blur, or quit, so a flush never writes half a drag.
 - With `boards = off` no board is listed, opened or written, and the state
-  file stays byte-identical to what Wren 0.1 writes; its v1 keys hold
-  Markdown paths only, boards going in `[navigation]`.
+  file stays byte-identical to what Wren 0.1 writes. Its v1 keys
+  `history`, `history_position`, `recent` and `last_open_note` hold
+  Markdown paths only (`selection` may name a board); the mixed lists go
+  in `[navigation]`.
 
 ## Style
 
