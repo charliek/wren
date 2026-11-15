@@ -11,6 +11,7 @@ use iced::Task;
 use wren_editor::Proofreader;
 use wren_spell::{Hunspell, Speller, WordList, WordSource};
 
+use super::board::Surface;
 use super::workspace::WarningKind;
 use super::{App, Message};
 
@@ -186,14 +187,18 @@ impl Spelling {
 
 impl App {
     /// Hand the editor the proofreader only while the setting is on and a
-    /// note is open for editing in it (§3.4); before the dictionary loads
-    /// there is none to hand. The same proofreader again keeps an open menu.
+    /// Markdown note is open for editing in it (§3.4); before the dictionary
+    /// loads there is none to hand. A board shown as raw text is not
+    /// Markdown, so it gets none, and the menu closes when the surface
+    /// changes. The same proofreader again keeps an open menu.
     pub(super) fn sync_proofreader(&mut self) {
         self.editor.set_proofreader(self.wanted_proofreader());
     }
 
     fn wanted_proofreader(&self) -> Option<Arc<dyn Proofreader>> {
-        let wanted = self.preferences.settings.spell_check && self.ensure_editor_ready().is_ok();
+        let wanted = self.preferences.settings.spell_check
+            && self.surface() == Surface::Text
+            && self.ensure_editor_ready().is_ok();
         wanted
             .then(|| self.spelling.proofreader().cloned())
             .flatten()
@@ -844,5 +849,77 @@ mod tests {
         let loaded = iced::futures::executor::block_on(threaded_load(Some(path)));
         assert!(loaded.dictionary.is_ok());
         assert_eq!(loaded.words, Ok(Some("wren\n".into())));
+    }
+
+    /// A workspace of a Markdown note, a board and a board that does not
+    /// parse, with boards and spell check on and the dictionary loaded.
+    /// The Markdown note is open.
+    fn board_app() -> (tempfile::TempDir, App) {
+        use crate::app::board::tests::{conflicted, open_markdown, FLOW};
+
+        let directory = crate::test_support::tempdir();
+        let workspace = directory.path().join("workspace");
+        let group = workspace.join("Alpha/Inbox");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("First.md"), "A mispelled word\n").unwrap();
+        std::fs::write(group.join("Flow.wren-board"), FLOW).unwrap();
+        let broken = format!("# A mispelled word\n{}", conflicted());
+        std::fs::write(group.join("Broken.wren-board"), broken).unwrap();
+        let config = directory.path().join("config/config.conf");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, ADVANCED).unwrap();
+        let options = Options {
+            editor: true,
+            ..Options::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(config));
+        app.preferences.boards = true;
+        app.workspace_mode = true;
+        app.session = Some(Session::open_with(&workspace, app.session_options()).unwrap());
+        app.sync_editor(true);
+        load(&mut app);
+        let _ = open_markdown(&mut app, "First");
+        (directory, app)
+    }
+
+    #[test]
+    fn spell_check_is_for_markdown_text_and_never_a_board_or_its_raw_text() {
+        use crate::app::board::tests::{open_board, open_markdown};
+        use crate::app::board::Surface;
+
+        let (_directory, mut app) = board_app();
+        assert_eq!(app.surface(), Surface::Text);
+        assert!(app.command_enabled(CommandId::SpellSuggest));
+        let _ = caret(&mut app, 0, 4);
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
+
+        // Opening a board withdraws the proofreader, which closes the menu,
+        // without waiting for a message to pass through `update`.
+        let _ = open_board(&mut app, "Flow");
+        assert_eq!(app.surface(), Surface::Board);
+        assert!(app.editor.spell_menu().is_none());
+        assert!(app.wanted_proofreader().is_none());
+        assert!(!app.command_enabled(CommandId::SpellSuggest));
+
+        // A board that does not parse is edited as text, but it is not
+        // Markdown: no proofreader, no menu, and the command is disabled.
+        let _ = open_board(&mut app, "Broken");
+        assert_eq!(app.surface(), Surface::Raw);
+        assert!(app.ensure_editor_ready().is_ok());
+        assert!(app.editor.text().starts_with("# A mispelled word\n"));
+        assert!(app.wanted_proofreader().is_none());
+        assert!(!app.command_enabled(CommandId::SpellSuggest));
+        let _ = caret(&mut app, 0, 6);
+        assert_eq!(open(&mut app), None);
+        assert_eq!(run(&mut app, CommandId::SpellSuggest), Disposition::Blocked);
+        assert!(app.editor.spell_menu().is_none());
+
+        // Back on Markdown the proofreader returns.
+        let _ = open_markdown(&mut app, "First");
+        assert_eq!(app.surface(), Surface::Text);
+        assert!(app.wanted_proofreader().is_some());
+        assert!(app.command_enabled(CommandId::SpellSuggest));
+        let _ = caret(&mut app, 0, 4);
+        assert_eq!(open(&mut app).as_deref(), Some("mispelled"));
     }
 }

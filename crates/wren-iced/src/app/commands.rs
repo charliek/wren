@@ -1008,7 +1008,8 @@ impl App {
                     && self.editor.markdown_assist()
             }
             SpellSuggest => {
-                self.editor.backend() == wren_editor::BackendKind::Owned
+                self.surface() == Surface::Text
+                    && self.editor.backend() == wren_editor::BackendKind::Owned
                     && self.preferences.settings.spell_check
                     && self.spelling.ready()
                     && self.ensure_editor_ready().is_ok()

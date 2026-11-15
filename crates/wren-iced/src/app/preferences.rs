@@ -491,7 +491,8 @@ impl App {
         self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
     }
 
-    /// Bring the editor's Markdown keys in step with the surface.
+    /// Bring the editor's Markdown keys, and its proofreader, in step with
+    /// the surface.
     pub(super) fn apply_markdown_assist(&mut self) {
         let assist = self.markdown_assist();
         if assist != self.editor.markdown_assist() {
@@ -499,6 +500,7 @@ impl App {
             self.editor
                 .set_key_policy(key_policy(&self.preferences.keymap, assist));
         }
+        self.sync_proofreader();
     }
 
     /// Rebuild the editor on the configured engine from the session draft,

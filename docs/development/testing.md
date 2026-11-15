@@ -112,7 +112,8 @@ WRENTEST_SPELL=on ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced make s
 `tools/wrentest/test_spell.py` sets `spell-check` itself. It runs the
 acceptance note `tools/wrentest/fixtures/spell.md` with `catppuccin` in the
 word list, and checks its marks, the menu, replacing a word, the toggle,
-the word list, and the classic engine. Its `native_x11` cases right-click
+the word list, the classic engine, and a board shown as raw text, which is
+never checked. Its `native_x11` cases right-click
 and press the real suggest key. These requests drive it:
 
 | Request | Parameters | Returns |
