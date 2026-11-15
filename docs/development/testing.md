@@ -94,8 +94,8 @@ re-reading every note's preview, shows up there first.
 
 The `make smoke-*` targets pass the variable through, so
 `WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor
-cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four Linux
-smoke lanes.
+cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on
+all four Linux smoke lanes.
 
 ### Spell check
 
@@ -104,8 +104,8 @@ every case that does not name it: `off` (the default when unset, so sample
 notes full of names keep their look) or `on`. Any other value fails the
 case. A case that needs no settings file at all, as a fresh install has
 none, passes `WrenApp(lane_settings=False)`, which adds neither this line
-nor the `WRENTEST_BOARDS` one. Spell check runs only on the advanced engine, so `on` matters only
-to the cases `WRENTEST_ENGINE` runs there:
+nor the `WRENTEST_BOARDS` one. Spell check runs only on the advanced engine,
+so `on` matters only to the cases `WRENTEST_ENGINE` runs there:
 
 ```bash
 WRENTEST_SPELL=on ICED_BACKEND=tiny-skia WRENTEST_ENGINE=classic,advanced make smoke-x11
@@ -120,7 +120,7 @@ and press the real suggest key. These requests drive it:
 
 | Request | Parameters | Returns |
 |---|---|---|
-| `editor.spell` | none | `enabled` (the setting on the advanced engine), `ready` (the dictionary has loaded), `marks` as the last frame drew them, and `menu`, or `null` when it is closed. |
+| `editor.spell` | none | `enabled` (the setting on the advanced engine), `ready` (the dictionary has loaded), `marks` as the last frame drew them (none while a board is shown, since the editor draws nothing then), and `menu`, or `null` when it is closed. |
 | `editor.spell_event` | `event`: `open_at_caret`, `move`, `hover`, `accept`, or `close`; `arg`: a row for `hover` and `accept`, a step for `move` | The `editor.get` snapshot, after the event went through the app as the widget would send it. |
 | `editor.key` | `key`: a name (`up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `shift`, `control`, `alt`, `super`, `caps_lock`) or one character; `mods`: a list of `shift`, `ctrl`, `alt`, `logo` | The `editor.get` snapshot, after the editor's own key routing and then the app's key handling, as a real press in the focused editor. |
 
