@@ -188,9 +188,17 @@ pub struct EditorView {
     proofreader: Option<Arc<dyn Proofreader>>,
     /// The open suggestions menu.
     menu: Option<SpellMenu>,
-    /// The left press being held only closed the menu, so its drag selects
-    /// nothing either (rule 4.4.5).
-    press_closed_menu: bool,
+    /// The left press being held was resolved here as no single click: it
+    /// only closed the menu, so its drag selects nothing either (rule
+    /// 4.4.5), or it was a double or triple click, which drags nothing.
+    drop_drags: bool,
+    /// What the widget makes of the left presses it leaves here, which it
+    /// counts from in the next batch.
+    resolved_press: proof::ResolvedPress,
+    /// What the last left press resolved here was taken as, while the
+    /// widget's guess at it was wrong: the widget counts the presses after
+    /// it in the same batch from that guess, so they are counted again.
+    press_chain: Option<Option<iced::advanced::mouse::click::Kind>>,
     /// The marks the widget last drew.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: std::cell::RefCell<SpellFrame>,
@@ -225,7 +233,9 @@ impl EditorView {
             key_policy: None,
             proofreader: None,
             menu: None,
-            press_closed_menu: false,
+            drop_drags: false,
+            resolved_press: proof::ResolvedPress::default(),
+            press_chain: None,
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: Default::default(),
         };
@@ -334,6 +344,7 @@ impl EditorView {
         .key_policy(self.key_policy.as_ref())
         .proofreader(self.proofreader.as_deref())
         .spell_menu(self.menu.as_ref())
+        .resolved_press(self.resolved_press)
         .measure(measure);
         #[cfg(any(test, feature = "test-support"))]
         let editor = editor.spell_frame(&self.spell_frame);
@@ -351,11 +362,17 @@ impl EditorView {
     pub fn perform(&mut self, action: Action) -> bool {
         self.menu = None;
         if matches!(action, Action::Drag(_)) {
-            if self.press_closed_menu {
+            if self.drop_drags {
                 return false;
             }
         } else {
-            self.press_closed_menu = false;
+            self.drop_drags = false;
+        }
+        if matches!(
+            action,
+            Action::Click(_) | Action::SelectWord | Action::SelectLine
+        ) {
+            self.press_chain = None;
         }
         if action.is_edit() {
             let kind = edit_kind(&action);
@@ -975,20 +992,43 @@ impl EditorView {
 
     /// Close the open menu for a pointer press in the editor, which does
     /// nothing more (rule 4.4.5), or with none open carry the press out as
-    /// the widget does with no menu. Returns whether the text changed.
+    /// the widget does with no menu, the left press after one that only
+    /// closed the menu being a single click. Returns whether the text
+    /// changed.
     fn press(&mut self, press: MenuPress) -> bool {
-        if self.menu.take().is_some() {
-            self.press_closed_menu = matches!(press, MenuPress::Left(..));
-            return false;
-        }
-        match press {
-            MenuPress::Left(point, kind) => self.perform(match kind {
-                iced::advanced::mouse::click::Kind::Single => Action::Click(point),
-                iced::advanced::mouse::click::Kind::Double => Action::SelectWord,
-                iced::advanced::mouse::click::Kind::Triple => Action::SelectLine,
-            }),
-            MenuPress::Right(point) => self.spell(SpellEvent::OpenAt(point)),
-        }
+        use iced::advanced::mouse::click::Kind;
+
+        let (point, guess) = match press {
+            MenuPress::Left(point, kind) => (point, kind),
+            MenuPress::Right(point) => {
+                if self.menu.take().is_some() {
+                    self.drop_drags = false;
+                    return false;
+                }
+                return self.spell(SpellEvent::OpenAt(point));
+            }
+        };
+        let kind = if self.menu.take().is_some() {
+            None
+        } else {
+            Some(match self.press_chain {
+                Some(previous) => proof::click_kind(guess, previous),
+                None => guess,
+            })
+        };
+        let changed = match kind {
+            None => false,
+            Some(Kind::Single) => self.perform(Action::Click(point)),
+            Some(Kind::Double) => self.perform(Action::SelectWord),
+            Some(Kind::Triple) => self.perform(Action::SelectLine),
+        };
+        self.drop_drags = kind != Some(Kind::Single);
+        self.press_chain = (kind != Some(guess)).then_some(kind);
+        self.resolved_press = proof::ResolvedPress {
+            count: self.resolved_press.count.wrapping_add(1),
+            kind,
+        };
+        changed
     }
 
     /// Handle a press of `key` as the focused editor does with no menu
