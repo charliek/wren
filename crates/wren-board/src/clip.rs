@@ -41,7 +41,8 @@ pub fn copy(board: &Board, ids: &[Source]) -> Option<String> {
 /// of [`copy`], and the elements to delete, which are the fragment's own.
 /// Deleting them also takes every connector attached to a removed node
 /// (rule 1); a selected connector the fragment leaves out stays on the
-/// board. `None` when the selection holds no node.
+/// board. `None` when the selection holds no node. The caller asks
+/// [`refused`] of the text before it deletes anything.
 pub fn cut(board: &Board, ids: &[Source]) -> Option<(String, Vec<Source>)> {
     let part = fragment(board, ids);
     if part.nodes.is_empty() {
@@ -50,6 +51,23 @@ pub fn cut(board: &Board, ids: &[Source]) -> Option<(String, Vec<Source>)> {
     let nodes = part.nodes.iter().cloned().map(Source::Node);
     let removed = nodes.chain(part.edges.iter().cloned().map(Source::Edge));
     Some((text(board, &part), removed.collect()))
+}
+
+/// Why a paste would refuse `text`, which [`copy`] or [`cut`] gave, if it
+/// would: the fragment after its header is over a cap of the loader
+/// (§3.8). Keys written afresh can make a fragment longer than the board
+/// it came from, so a selection on a board near the byte cap can give one.
+/// Such text is not put on the clipboard, and a cut deletes nothing, since
+/// the content could not be pasted back.
+pub fn refused(text: &str) -> Option<String> {
+    let body = split(text).unwrap_or(text);
+    let elements = body
+        .lines()
+        .filter(|line| line.starts_with("[node.") || line.starts_with("[edge."))
+        .count();
+    let over = crate::read::over_bytes(body.len(), "would be")
+        .or_else(|| crate::read::over_elements(elements, "would have"))?;
+    Some(over.replacen("the board", "the selection", 1))
 }
 
 /// The clipboard text for the fragment `part` of `board`.
@@ -415,6 +433,48 @@ mod tests {
             assert_eq!(taken, removed, "{picked:?}");
         }
         assert_eq!(cut(&board, &edges(&["ff"])), None);
+    }
+
+    /// A selection whose fragment a paste would refuse is said so before
+    /// anything is cut: on a board at the byte cap the fragment's fresh
+    /// keys make it longer than the board (the phase-end review's blocker,
+    /// where a cut lost the board's content). Whatever is let through
+    /// pastes.
+    #[test]
+    fn a_fragment_too_large_to_paste_is_refused() {
+        let node = |i: usize, label: &str| {
+            format!(
+                "\n[node.b{i:04}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [{x}, 0]\n\
+                 size = [120, 60]\nz = \"V\"\n",
+                x = i * 130
+            )
+        };
+        let head = "schema = 1\n";
+        let mut blocks: Vec<String> = (0..515).map(|i| node(i, &"w".repeat(16_000))).collect();
+        let short = crate::MAX_BOARD_BYTES - head.len() - blocks.concat().len();
+        blocks.push(node(515, &"w".repeat(short - node(515, "").len())));
+        let text = format!("{head}{}", blocks.concat());
+        assert_eq!(text.len(), crate::MAX_BOARD_BYTES);
+        let board = parse(&text).unwrap();
+
+        let all: Vec<Source> = board.nodes.keys().cloned().map(Source::Node).collect();
+        let (fragment, _) = cut(&board, &all).unwrap();
+        let body = split(&fragment).unwrap();
+        assert!(parse(body).is_err());
+        assert_eq!(
+            refused(&fragment).as_deref(),
+            Some(
+                "the selection would be 8,389,638 bytes, over the 8,388,608 (8 MiB) a board \
+                 may have"
+            )
+        );
+        let some = &all[..all.len() - 2];
+        let fragment = copy(&board, some).unwrap();
+        assert_eq!(refused(&fragment), None);
+        assert_eq!(
+            parse(split(&fragment).unwrap()).unwrap().nodes.len(),
+            some.len()
+        );
     }
 
     #[test]

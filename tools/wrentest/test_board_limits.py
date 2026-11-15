@@ -4,7 +4,7 @@ on (discovery/boards.md §3.8, §4.12, §6.8 Phase 3 item 7, §7.4 H1).
 A board over 8 MiB or 50,000 elements opens as raw text and is searched as
 written; one at the element cap opens as a board. A value past one of the
 limits the scene draws within is listed as an issue, drawn clamped or cut,
-and never written.
+and never written. An edit that would take a board past a cap is refused.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.wrentest.boards import board, board_app, grid_board, grid_elements, stamp
+from tools.wrentest.boards import board, board_app, click, grid_board, grid_elements, stamp
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import wait_for
 
@@ -24,6 +24,7 @@ LARGE = f"{GROUP}/Large.wren-board"
 CROWDED = f"{GROUP}/Crowded.wren-board"
 FAR = f"{GROUP}/Far.wren-board"
 CAP = f"{GROUP}/At the cap.wren-board"
+FULL = f"{GROUP}/Full.wren-board"
 NOTE = f"{GROUP}/Note.md"
 
 MAX_BOARD_BYTES = 8 * 1024 * 1024
@@ -95,12 +96,21 @@ def cap_board() -> str:
                           for i in range(extra))
 
 
+def full_board() -> str:
+    """Exactly 8 MiB, canonical: two labelled shapes, and unknown content
+    that fills the rest on one line the raw text editor never shows."""
+    head = ('schema = 1\npad = ""\n\n[node.a]\ntext = "First"\nkind = "shape"\nat = [0, 0]\n'
+            'size = [120, 60]\nz = "V"\n\n[node.b]\ntext = "Second"\nkind = "shape"\n'
+            'at = [200, 0]\nsize = [120, 60]\nz = "W"\n')
+    return head.replace('pad = ""', f'pad = "{"x" * (MAX_BOARD_BYTES - len(head))}"', 1)
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     group = tmp_path / "work" / GROUP
     group.mkdir(parents=True)
     for path, text in ((LARGE, large_board()), (CROWDED, crowded_board(MAX_ELEMENTS + 1)),
-                       (FAR, far_board()), (CAP, cap_board())):
+                       (FAR, far_board()), (CAP, cap_board()), (FULL, full_board())):
         (tmp_path / "work" / path).write_text(text, encoding="utf-8")
     (tmp_path / "work" / NOTE).write_text("# Note\n", encoding="utf-8")
     return tmp_path / "work"
@@ -196,3 +206,37 @@ def test_a_board_at_the_element_cap_opens_as_a_board(workspace: Path) -> None:
     if RELEASE:
         median = sorted(samples)[len(samples) // 2] / 1000
         assert median <= OPEN_AT_THE_CAP_MS, measured
+
+
+def test_an_edit_past_the_byte_cap_is_refused_and_the_board_still_opens(workspace: Path) -> None:
+    """The phase-end review's blocker: on a board at the byte cap, a recolour,
+    a duplicate, Tab and a paste are refused with a banner, nothing is
+    written, and after a restart the board still opens as a board."""
+    before = stamp(workspace / FULL)
+    assert len(before[0]) == MAX_BOARD_BYTES
+    with board_app(workspace, "board-limits-full") as app:
+        rows = notes(app)
+        open_row(app, rows[FULL])
+        wait_for(lambda: board(app)["surface"] == "board", timeout=30, interval=0.1,
+                 description="the board at the cap shown")
+        app.client.call("test.clipboard", {"own": True})
+        app.client.call("editor.focus")
+        for action in ("board.color.red", "board.duplicate", "board.connect.next", "board.copy",
+                       "board.paste"):
+            click(app, {"node": "a"})
+            app.client.call("command.run", {"id": action})
+            state = board(app)
+            assert state["counts"] == {"nodes": 2, "edges": 0}, (action, state)
+            assert state["can_undo"] is False, (action, state)
+            if action != "board.copy":
+                banner = wait_for(lambda: board(app)["banner"], timeout=5,
+                                  interval=0.02, description=f"the banner after {action}")
+                assert "Cannot make this change: the board would be" in banner, (action, banner)
+        # Leaving the board flushes whatever it drafted.
+        open_row(app, rows[NOTE])
+    assert stamp(workspace / FULL) == before
+    with board_app(workspace, "board-limits-full-again") as app:
+        open_row(app, notes(app)[FULL])
+        state = wait_for(lambda: (lambda s: s if s["surface"] in ("board", "raw") else None)(
+            board(app)), timeout=30, interval=0.1, description="the board reopened")
+        assert state["surface"] == "board", state

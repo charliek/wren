@@ -427,12 +427,59 @@ impl Board {
             }
         }
     }
+
+    /// Why the board the changes would leave is one [`crate::parse`]
+    /// refuses, which would open as raw text: more than
+    /// [`crate::MAX_ELEMENTS`] nodes and connectors, or a canonical text
+    /// over [`crate::MAX_BOARD_BYTES`]. `None` when it would load. The
+    /// board is left as it was either way.
+    ///
+    /// The canonical text is what a draft writes, and it can be longer than
+    /// a hand-written file under the cap, so a first edit of such a file is
+    /// refused here too.
+    pub fn refuses(&mut self, changes: &[Change]) -> Option<String> {
+        enum Was {
+            Node(Id, Option<Node>),
+            Edge(Id, Option<Edge>),
+        }
+        let was: Vec<Was> = changes
+            .iter()
+            .map(|change| match change {
+                Change::PutNode(id, _) | Change::RemoveNode(id) => {
+                    Was::Node(id.clone(), self.nodes.get(id).cloned())
+                }
+                Change::PutEdge(id, _) | Change::RemoveEdge(id) => {
+                    Was::Edge(id.clone(), self.edges.get(id).cloned())
+                }
+            })
+            .collect();
+        self.apply(changes);
+        let refused = crate::read::over_elements(self.nodes.len() + self.edges.len(), "would have")
+            .or_else(|| crate::read::over_bytes(crate::write(self).len(), "would be"));
+        for was in was.into_iter().rev() {
+            match was {
+                Was::Node(id, Some(node)) => {
+                    self.nodes.insert(id, node);
+                }
+                Was::Node(id, None) => {
+                    self.nodes.remove(&id);
+                }
+                Was::Edge(id, Some(edge)) => {
+                    self.edges.insert(id, edge);
+                }
+                Was::Edge(id, None) => {
+                    self.edges.remove(&id);
+                }
+            }
+        }
+        refused
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{check, parse, write};
+    use crate::{check, parse, write, MAX_BOARD_BYTES, MAX_ELEMENTS};
 
     /// Draws ids from a fixed list, as a test's explicit ids.
     pub(crate) struct Listed(pub Vec<&'static str>);
@@ -1356,5 +1403,79 @@ z = "Y"
         ]);
         assert!(!board.nodes.contains_key("c") && !board.edges.contains_key("f"));
         assert_eq!((&board.nodes[&n], &board.edges[&e]), (&node, &edge));
+    }
+
+    /// One node and unknown top-level content that brings the canonical
+    /// text to `bytes`.
+    pub(crate) fn padded(bytes: usize) -> String {
+        let head = "schema = 1\npad = \"\"\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n";
+        let pad = "x".repeat(bytes - head.len());
+        head.replacen("pad = \"\"", &format!("pad = \"{pad}\""), 1)
+    }
+
+    /// An edit is refused when the board it leaves would not load again:
+    /// over the element cap, or over the byte cap written canonically,
+    /// which a hand-written file under the cap can be. The board is left as
+    /// it was (§3.8).
+    #[test]
+    fn a_change_past_a_cap_of_the_loader_is_refused() {
+        let text = padded(MAX_BOARD_BYTES);
+        let mut board = parse(&text).unwrap();
+        assert_eq!(write(&board), text);
+        let red = plan(
+            &board,
+            &Intent::SetStyle {
+                ids: vec![Source::Node(Id::new("a").unwrap())],
+                field: StyleField::Color(Token::Red),
+            },
+            &mut Listed(Vec::new()),
+        );
+        assert_eq!(
+            board.refuses(&red.changes).as_deref(),
+            Some(
+                "the board would be 8,388,628 bytes, over the 8,388,608 (8 MiB) a board may \
+                 have"
+            )
+        );
+        assert_eq!(write(&board), text, "left as it was");
+        // A removal that brings it back under is let through.
+        let gone = [Change::RemoveNode(Id::new("a").unwrap())];
+        assert_eq!(board.refuses(&gone), None);
+        assert_eq!(write(&board), text);
+
+        // A compact file under the cap whose canonical form is over it.
+        let compact = padded(MAX_BOARD_BYTES + 2).replace("at = [0, 0]\n", "at=[0,0]\n");
+        let mut board = parse(&compact).unwrap();
+        assert!(compact.len() < MAX_BOARD_BYTES && write(&board).len() > MAX_BOARD_BYTES);
+        let moved = plan(
+            &board,
+            &Intent::Move {
+                ids: vec![Source::Node(Id::new("a").unwrap())],
+                by: [20, 0],
+            },
+            &mut Listed(Vec::new()),
+        );
+        assert!(board.refuses(&moved.changes).is_some());
+
+        // At the element cap one more is refused; a change of one is not.
+        let mut board = Board::default();
+        let node = parse(BOARD).unwrap().nodes["a"].clone();
+        for i in 0..MAX_ELEMENTS {
+            board
+                .nodes
+                .insert(Id::new(&format!("n{i}")).unwrap(), node.clone());
+        }
+        let more = [Change::PutNode(
+            Id::new("extra").unwrap(),
+            Box::new(node.clone()),
+        )];
+        assert_eq!(
+            board.refuses(&more).as_deref(),
+            Some("the board would have 50,001 nodes and connectors, over the 50,000 a board may have")
+        );
+        assert_eq!(board.nodes.len(), MAX_ELEMENTS);
+        assert!(!board.nodes.contains_key("extra"));
+        let again = [Change::PutNode(Id::new("n0").unwrap(), Box::new(node))];
+        assert_eq!(board.refuses(&again), None);
     }
 }

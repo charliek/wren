@@ -431,6 +431,10 @@ pub struct BoardView {
     /// rule 4): shown through `preview`, never in the model, an undo
     /// snapshot or a draft.
     patch: Option<Command>,
+    /// How many edits were refused because the board they would leave is
+    /// over a cap of the loader; the open label goes back to its text
+    /// before the keystroke one refused.
+    refusals: u64,
     ids: Draws,
     viewport: Viewport,
     revision: u64,
@@ -536,6 +540,7 @@ impl BoardView {
             cap: layers::CAP,
             preview: None,
             patch: None,
+            refusals: 0,
             ids: Draws::Random(Random::new()),
             viewport: Viewport::default(),
             revision: 0,
@@ -858,8 +863,9 @@ impl BoardView {
                 let opened = self.labels_opened;
                 match (self.paste_for, &mut self.label) {
                     (Some(PasteFor::Label(n)), Some(label)) if n == opened => {
+                        let was = label.clone();
                         let outcome = label.paste(&text, &self.measurer);
-                        self.label_did(&outcome, now, &mut update);
+                        self.label_did(&outcome, was, now, &mut update);
                     }
                     (Some(PasteFor::Board(n)), None) if n == opened => {
                         self.paste(text, now, &mut update);
@@ -1248,6 +1254,11 @@ impl BoardView {
         if wren_board::write(&board) == wren_board::write(&self.board) {
             return update;
         }
+        if let Some(over) = board.refuses(&[]) {
+            let notice = format!("Cannot make this change: {over}.");
+            update.effects.push(Effect::Notice(notice));
+            return update;
+        }
         self.history.break_run();
         self.history.record(self.snapshot(), Unit::One, now);
         self.board = board;
@@ -1397,6 +1408,19 @@ impl BoardView {
 
     /// Apply `plan`, as [`BoardView::edit`] does once it has planned.
     fn carry_out(&mut self, plan: &Plan, unit: Unit, now: Instant, update: &mut Update) -> bool {
+        // A board the loader would refuse is never drafted: autosave would
+        // write it, and it would open again only as raw text (§3.8).
+        if let Some(over) = (!plan.is_empty())
+            .then(|| self.board.refuses(&plan.changes))
+            .flatten()
+        {
+            self.refusals += 1;
+            let refused = Plan {
+                notice: Some(format!("Cannot make this change: {over}.")),
+                ..Plan::default()
+            };
+            return self.carry_out(&refused, unit, now, update);
+        }
         let shown = self.preview.take();
         self.patch = None;
         let changed = !plan.is_empty();
@@ -1585,16 +1609,24 @@ impl BoardView {
     /// and what a harness types.
     fn label_action(&mut self, action: LabelAction, now: Instant, update: &mut Update) {
         if let Some(label) = &mut self.label {
+            let was = label.clone();
             let outcome = label.apply(action, &self.measurer);
-            self.label_did(&outcome, now, update);
+            self.label_did(&outcome, was, now, update);
         }
     }
 
     /// Carry out what an action on the label asked for. A change of its
     /// text is an edit of the board at once (§5.9 rule 6), with the size
     /// the node needs for it (rule 7); undoing the typing puts the size
-    /// back as well.
-    fn label_did(&mut self, outcome: &label::Outcome, now: Instant, update: &mut Update) {
+    /// back as well. `was` is the label before the action, which it goes
+    /// back to when the board refuses the edit.
+    fn label_did(
+        &mut self,
+        outcome: &label::Outcome,
+        was: Label,
+        now: Instant,
+        update: &mut Update,
+    ) {
         if let Some(text) = &outcome.copied {
             update.effects.push(Effect::ClipboardWrite(text.clone()));
         }
@@ -1628,7 +1660,11 @@ impl BoardView {
                 commit: false,
             },
         };
+        let refusals = self.refusals;
         self.edit(&intent, Unit::Label, now, update);
+        if self.refusals != refusals && self.label.is_some() {
+            self.label = Some(was);
+        }
         self.place_label();
     }
 
@@ -1873,16 +1909,26 @@ impl BoardView {
             // (§5.10 rule 2). A read-only board copies too.
             Command::Copy => {
                 if let Some(text) = wren_board::clip::copy(&self.board, &picked) {
-                    update.effects.push(Effect::ClipboardWrite(text));
+                    update.effects.push(match wren_board::clip::refused(&text) {
+                        Some(over) => Effect::Notice(format!("Cannot copy: {over}.")),
+                        None => Effect::ClipboardWrite(text),
+                    });
                 }
             }
             // Copy, then delete what was copied: one unit (rule 5). A
             // selected connector the fragment leaves out stays, since a
-            // paste could not give it back.
+            // paste could not give it back. A fragment a paste would refuse
+            // deletes nothing.
             Command::Cut if editable => {
                 if let Some((text, removed)) = wren_board::clip::cut(&self.board, &picked) {
-                    update.effects.push(Effect::ClipboardWrite(text));
-                    self.delete(removed, now, update);
+                    if let Some(over) = wren_board::clip::refused(&text) {
+                        let notice =
+                            format!("Cannot cut, since it could not be pasted back: {over}.");
+                        update.effects.push(Effect::Notice(notice));
+                    } else {
+                        update.effects.push(Effect::ClipboardWrite(text));
+                        self.delete(removed, now, update);
+                    }
                 }
             }
             // The text comes back as `Message::Pasted`.
@@ -5167,6 +5213,134 @@ z = "c"
         ));
         assert_eq!(view.command(Command::Cut, now), Update::default());
         assert_eq!(view.command(Command::Paste, now), Update::default());
+    }
+
+    /// A board at the byte cap: one node, and unknown content that fills
+    /// the rest. Any edit that grows it would leave a file the loader
+    /// refuses.
+    fn at_the_cap() -> String {
+        let head = "schema = 1\npad = \"\"\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\nz = \"V\"\n";
+        let pad = "x".repeat(wren_board::MAX_BOARD_BYTES - head.len());
+        head.replacen("pad = \"\"", &format!("pad = \"{pad}\""), 1)
+    }
+
+    fn refused(update: &Update) -> bool {
+        !update.changed
+            && matches!(
+                update.effects.as_slice(),
+                [Effect::Notice(notice)] if notice.starts_with("Cannot make this change: the board would be")
+            )
+    }
+
+    /// At the element cap, an edit that adds an element is refused; one
+    /// that changes one is not.
+    #[test]
+    fn an_edit_past_the_element_cap_is_refused() {
+        let now = Instant::now();
+        let mut text = String::from("schema = 1\n");
+        for i in 0..wren_board::MAX_ELEMENTS {
+            text.push_str(&format!(
+                "\n[node.n{i:05}]\nkind = \"shape\"\nat = [{x}, 0]\nsize = [2, 2]\nz = \"V\"\n",
+                x = i * 4
+            ));
+        }
+        let mut view = sized(&text);
+        let first = pick(&view, "n00000");
+        let select = |view: &mut BoardView| {
+            view.machine
+                .select(BTreeSet::from([first.clone()]), Some(first.clone()));
+        };
+        for command in [Command::Duplicate, Command::ConnectNext] {
+            select(&mut view);
+            let update = view.command(command, now);
+            assert!(
+                !update.changed
+                    && matches!(update.effects.as_slice(), [Effect::Notice(notice)]
+                        if notice.starts_with("Cannot make this change: the board would have 50,00")),
+                "{command:?}: {update:?}"
+            );
+        }
+        assert!(!pasted(&mut view, "Ship it", now).changed);
+        assert!(!view.can_undo() && view.board().nodes.len() == wren_board::MAX_ELEMENTS);
+        select(&mut view);
+        assert!(
+            view.command(Command::Color(wren_board::Token::Red), now)
+                .changed
+        );
+    }
+
+    /// No edit takes a board past a cap of the loader, by any path: it is
+    /// refused with a notice and the board stays as it was, so autosave
+    /// never writes a file that opens only as raw text (the phase-end
+    /// review's blocker).
+    #[test]
+    fn an_edit_past_the_byte_cap_is_refused() {
+        let now = Instant::now();
+        let text = at_the_cap();
+        let mut view = sized(&text);
+        let a = pick(&view, "a");
+        let select = |view: &mut BoardView| {
+            view.machine
+                .select(BTreeSet::from([a.clone()]), Some(a.clone()))
+        };
+        for command in [
+            Command::Color(wren_board::Token::Red),
+            Command::Duplicate,
+            Command::ConnectNext,
+            Command::Shape(Shape::Diamond),
+        ] {
+            select(&mut view);
+            let update = view.command(command, now);
+            assert!(refused(&update), "{command:?}: {update:?}");
+            assert_eq!(view.draft(), text, "{command:?}");
+            assert!(view.label().is_none() && !view.can_undo(), "{command:?}");
+        }
+        assert!(refused(&pasted(&mut view, "Ship it", now)));
+        select(&mut view);
+        let moved = view.apply(
+            &[Intent::Move {
+                ids: vec![a.clone()],
+                by: [20, 0],
+            }],
+            &mut Given(Vec::new()),
+            now,
+        );
+        assert!(!moved.changed && matches!(moved.effects.as_slice(), [Effect::Notice(_)]));
+        // A keystroke in the open label is refused, and the label shows the
+        // text the board holds.
+        open_label(&mut view, "a", now);
+        let update = typed(&mut view, "x", now);
+        assert!(refused(&update), "{update:?}");
+        assert_eq!(view.label().map(Label::text), Some(""));
+        key(&mut view, Key::Escape, now);
+        assert_eq!(view.draft(), text);
+        assert!(!view.can_undo());
+
+        // A cut whose fragment a paste would refuse deletes nothing.
+        let node = |id: &str, label: &str| {
+            format!("\n[node.{id}]\ntext = \"{label}\"\nkind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n")
+        };
+        let short = wren_board::MAX_BOARD_BYTES - "schema = 1\n".len() - 2 * node("a", "").len();
+        let text = format!(
+            "schema = 1\n{}{}",
+            node("a", &"w".repeat(short / 2)),
+            node("b", &"w".repeat(short - short / 2))
+        );
+        assert_eq!(text.len(), wren_board::MAX_BOARD_BYTES);
+        let mut view = sized(&text);
+        view.command(Command::SelectAll, now);
+        let cut = view.command(Command::Cut, now);
+        assert!(
+            !cut.changed
+                && matches!(cut.effects.as_slice(), [Effect::Notice(notice)] if notice.starts_with("Cannot cut")),
+            "{cut:?}"
+        );
+        assert_eq!(view.board().nodes.len(), 2);
+        let copied = view.command(Command::Copy, now);
+        assert!(
+            matches!(copied.effects.as_slice(), [Effect::Notice(notice)] if notice.starts_with("Cannot copy")),
+            "{copied:?}"
+        );
     }
 
     /// A connector goes into the fragment when its ends are each a fragment

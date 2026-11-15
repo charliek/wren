@@ -183,6 +183,7 @@ impl App {
             "counts": null,
             "patch": null,
             "export": self.export_state(),
+            "banner": self.banner,
         });
         let Some(view) = &self.board else {
             return snapshot;

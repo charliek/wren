@@ -51,12 +51,8 @@ impl std::error::Error for ParseError {}
 /// it, and one with more than [`MAX_ELEMENTS`] nodes and connectors before
 /// any record is read: both at line 1, since no one line is at fault.
 pub fn parse(source: &str) -> Result<Board, ParseError> {
-    if source.len() > MAX_BOARD_BYTES {
-        return Err(whole(format!(
-            "the board is {} bytes, over the {} (8 MiB) a board may have",
-            thousands(source.len()),
-            thousands(MAX_BOARD_BYTES)
-        )));
+    if let Some(over) = over_bytes(source.len(), "is") {
+        return Err(whole(over));
     }
     let table = source
         .parse::<Table>()
@@ -68,14 +64,34 @@ pub fn parse(source: &str) -> Result<Board, ParseError> {
             .map_or(0, Table::len)
     };
     let elements = records("node").saturating_add(records("edge"));
-    if elements > MAX_ELEMENTS {
-        return Err(whole(format!(
-            "the board has {} nodes and connectors, over the {} a board may have",
-            thousands(elements),
-            thousands(MAX_ELEMENTS)
-        )));
+    if let Some(over) = over_elements(elements, "has") {
+        return Err(whole(over));
     }
     board(table).map_err(|fault| fault.locate(source))
+}
+
+/// Why a board file of `bytes` bytes is refused, if it is: "the board
+/// `is` …", with `is` the verb the sentence needs.
+pub(crate) fn over_bytes(bytes: usize, is: &str) -> Option<String> {
+    (bytes > MAX_BOARD_BYTES).then(|| {
+        format!(
+            "the board {is} {} bytes, over the {} (8 MiB) a board may have",
+            thousands(bytes),
+            thousands(MAX_BOARD_BYTES)
+        )
+    })
+}
+
+/// Why a board of `elements` nodes and connectors is refused, if it is:
+/// "the board `has` …".
+pub(crate) fn over_elements(elements: usize, has: &str) -> Option<String> {
+    (elements > MAX_ELEMENTS).then(|| {
+        format!(
+            "the board {has} {} nodes and connectors, over the {} a board may have",
+            thousands(elements),
+            thousands(MAX_ELEMENTS)
+        )
+    })
 }
 
 /// An error about the whole file, placed at its start.

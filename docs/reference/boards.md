@@ -382,6 +382,12 @@ export, and nothing is written.
 Values past a limit are drawn within it and kept in the file as they are.
 Wren opens no note over 64 MiB.
 
+An edit that would take a board past the file size or the count of shapes
+and connectors, as Wren writes the file, is refused with a message and
+the board is left as it was, so a board never saves into one that opens as
+text. Copy and cut likewise refuse a selection too large to paste back, and
+a refused cut deletes nothing.
+
 ## The setting
 
 Boards are on by default. `boards = off` in
