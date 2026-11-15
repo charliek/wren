@@ -208,6 +208,9 @@ connectors follow the shapes they join.
 / or Shift+F10, or a right-click (Ctrl-click on macOS), opens the actions
 palette for the selection. A right-click on an element outside the
 selection selects it alone first; on empty canvas it clears the selection.
+The palette sits over the browser columns when they are wide enough, and
+otherwise on the side of the window away from the selection, so what it
+previews stays in view.
 
 It lists only what applies to the selection, grouped: Shape, Colour, Fill,
 Stroke, Connector, Arrange, Align, Distribute, and Edit (Edit label,

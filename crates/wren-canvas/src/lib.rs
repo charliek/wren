@@ -1300,6 +1300,19 @@ impl BoardView {
         self.label.as_ref()
     }
 
+    /// The box around what is selected as drawn, in widget-local pixels:
+    /// where a host keeps a panel off the selection it previews on.
+    pub fn selection_box(&self) -> Option<Rect> {
+        let scene = self.scenes.scene();
+        let drawn = self.machine.selection().iter();
+        let around = drawn
+            .filter_map(|element| bounds(&self.board, scene, element))
+            .reduce(union)?;
+        let zoom = self.viewport.zoom;
+        let (x, y) = self.viewport.to_screen((around.x, around.y));
+        Some(Rect::new(x, y, around.width * zoom, around.height * zoom))
+    }
+
     /// The box around the open label's lines, in board units.
     pub fn label_box(&self) -> Option<Rect> {
         let label = self.label.as_ref()?;
@@ -2925,6 +2938,35 @@ mod tests {
             view.viewport(),
             Viewport::fitting(view.scene().bounds, narrow)
         );
+    }
+
+    /// The selection's box on screen, which the host keeps the actions
+    /// palette off: none with nothing selected, else every selected
+    /// element's drawn box at the view's zoom.
+    #[test]
+    fn the_selection_box_is_on_screen() {
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        assert_eq!(view.selection_box(), None);
+        click_node(&mut view, "a", now);
+        let a = bounds(view.board(), view.scene(), &pick(&view, "a")).unwrap();
+        view.set_viewport(Viewport {
+            x: -100.0,
+            y: -50.0,
+            zoom: 0.5,
+        });
+        assert_eq!(
+            view.selection_box(),
+            Some(Rect::new(
+                (a.x + 100.0) * 0.5,
+                (a.y + 50.0) * 0.5,
+                a.width * 0.5,
+                a.height * 0.5
+            ))
+        );
+        view.command(Command::SelectAll, now);
+        let all = view.selection_box().unwrap();
+        assert!(all.width > a.width * 0.5, "{all:?}");
     }
 
     /// Closing the jump palette without a choice puts the fitted view back

@@ -1241,6 +1241,20 @@ impl App {
         .map(|_| Message::PaletteRevealed)
     }
 
+    /// Whether the open board's selection has its middle in the right half
+    /// of the window, so a panel at the left leaves it in view.
+    fn selection_on_the_right(&self) -> bool {
+        let Some(selected) = self
+            .board
+            .as_ref()
+            .and_then(wren_canvas::BoardView::selection_box)
+        else {
+            return false;
+        };
+        let middle = self.browser_width() + selected.x + selected.width / 2.0;
+        middle >= self.viewport.width / 2.0
+    }
+
     pub(super) fn palette_view<'a>(&'a self, base: Element<'a, Message>) -> Element<'a, Message> {
         let Some(palette) = &self.palette else {
             return base;
@@ -1258,12 +1272,16 @@ impl App {
         // The outline previews headings in the editor and the actions their
         // style on the board, so they sit beside it: over the browser
         // columns when they are wide enough, else at the right, away from
-        // where lines start. The jump palette centres its element in the
-        // board, to the right of the browser columns, so at the left it
-        // covers that middle on any window it fits beside.
+        // where lines start, and the actions on the side of the window away
+        // from the selection they preview. The jump palette centres its
+        // element in the board, to the right of the browser columns, so at
+        // the left it covers that middle on any window it fits beside.
         let align = if !beside {
             iced::alignment::Horizontal::Center
-        } else if palette.mode == Mode::BoardNodes || self.browser_width() >= width + 32.0 {
+        } else if palette.mode == Mode::BoardNodes
+            || self.browser_width() >= width + 32.0
+            || (palette.mode == Mode::BoardActions && self.selection_on_the_right())
+        {
             iced::alignment::Horizontal::Left
         } else {
             iced::alignment::Horizontal::Right
