@@ -6,7 +6,8 @@ use iced::keyboard::key::{self, Named};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text_editor::{self, Binding, KeyPress, Motion};
 
-use crate::{Intent, Message};
+use crate::proof::{MenuKey, OpenMenu};
+use crate::{Intent, Message, SpellEvent};
 
 /// Where the host sends a key press that reaches the focused editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,9 @@ pub enum KeyRoute {
     Host,
     /// A host-bound editor command, carried out as [`Message::Intent`].
     Intent(Intent),
+    /// A host-bound request for corrections at the caret, carried out as
+    /// [`Message::Spell`] with [`SpellEvent::OpenAtCaret`].
+    Suggest,
     /// Not the host's: the editor handles the key itself.
     Pass,
 }
@@ -34,6 +38,114 @@ pub(crate) struct Context<'a> {
     /// An input method has preedit text, so the keys that edit it are its own.
     pub composing: bool,
     pub policy: Option<&'a KeyPolicy>,
+}
+
+/// Where a key press goes.
+pub(crate) enum Routed {
+    /// To the editor, which captures the press unless the binding is
+    /// [`Binding::Unfocus`].
+    Binding(Binding<Message>),
+    /// Close the open menu, then handle the press as if it had not been
+    /// open: through this binding, or, with none, not at all and without
+    /// capturing it, so it still reaches the host.
+    Close(Option<Binding<Message>>),
+}
+
+/// Route a key press, with `menu` open (rule 4.4.4). Up and Down with no
+/// modifier move its selection and Enter with no modifier accepts the row
+/// the host's menu has selected, or closes a menu with nothing to offer; on
+/// a menu opened earlier in the batch, which may not have opened, the three
+/// go to the host as [`SpellEvent::Key`], except that one the policy gives
+/// the host closes the menu and goes to the host uncaptured. Escape is the host's: the editor
+/// gives it no binding, so it neither drops focus nor captures the press,
+/// and the host closes the menu (rule 4.4.8). A modifier key alone does
+/// nothing. Any other press closes the menu and is then routed by
+/// [`key_binding`]. With no menu, routing is [`key_binding`]'s alone.
+pub(crate) fn route(
+    key_press: KeyPress,
+    context: Context,
+    menu: Option<OpenMenu>,
+) -> Option<Routed> {
+    if !matches!(key_press.status, text_editor::Status::Focused { .. }) {
+        return None;
+    }
+    let Some(menu) = menu else {
+        return key_binding(key_press, context).map(Routed::Binding);
+    };
+    let plain = key_press.modifiers.is_empty();
+    let key = match key_press.key.as_ref() {
+        Key::Named(Named::Escape) => return None,
+        Key::Named(named) if is_modifier(named) => return None,
+        Key::Named(Named::ArrowUp) if plain => MenuKey::Up,
+        Key::Named(Named::ArrowDown) if plain => MenuKey::Down,
+        Key::Named(Named::Enter) if plain => MenuKey::Enter,
+        _ => return Some(Routed::Close(key_binding(key_press, context))),
+    };
+    let event = if menu.opening {
+        // With no menu open the host would take the key, so it must not
+        // be captured for a menu the host may not have opened.
+        let host = context.policy.is_some_and(|policy| {
+            policy(&key_press.key, key_press.physical_key, key_press.modifiers) == KeyRoute::Host
+        });
+        if host {
+            return Some(Routed::Close(None));
+        }
+        SpellEvent::Key(key)
+    } else {
+        key.event()
+    };
+    Some(Routed::Binding(Binding::Custom(Message::Spell(event))))
+}
+
+/// Whether `named` is a modifier key, which pressed alone leaves an open
+/// menu alone.
+fn is_modifier(named: Named) -> bool {
+    matches!(
+        named,
+        Named::Alt
+            | Named::AltGraph
+            | Named::CapsLock
+            | Named::Control
+            | Named::Fn
+            | Named::FnLock
+            | Named::Hyper
+            | Named::Meta
+            | Named::NumLock
+            | Named::Shift
+            | Named::Super
+            | Named::Symbol
+            | Named::SymbolLock
+    )
+}
+
+/// The messages a binding publishes, for key routing run without the
+/// widget: what [`crate::widget`] publishes for it, except that the
+/// clipboard is not there to copy to or paste from, and dropping focus is
+/// no message. `selection` is whether text is selected, which Cut needs.
+pub(crate) fn messages(binding: Binding<Message>, selection: bool, out: &mut Vec<Message>) {
+    use iced::widget::text_editor::{Action, Edit};
+
+    let action = match binding {
+        Binding::Custom(message) => return out.push(message),
+        Binding::Sequence(sequence) => {
+            for binding in sequence {
+                messages(binding, selection, out);
+            }
+            return;
+        }
+        Binding::Move(motion) => Action::Move(motion),
+        Binding::Select(motion) => Action::Select(motion),
+        Binding::SelectWord => Action::SelectWord,
+        Binding::SelectLine => Action::SelectLine,
+        Binding::SelectAll => Action::SelectAll,
+        Binding::Insert(c) => Action::Edit(Edit::Insert(c)),
+        Binding::Enter => Action::Edit(Edit::Enter),
+        Binding::Backspace => Action::Edit(Edit::Backspace),
+        Binding::Delete => Action::Edit(Edit::Delete),
+        Binding::Cut if selection => Action::Edit(Edit::Delete),
+        Binding::Cut | Binding::Copy | Binding::Paste | Binding::Unfocus => return,
+    };
+    out.push(Message::Action(action));
 }
 
 /// Custom key-binding handler.  Leaves an input method its editing keys
@@ -83,6 +195,11 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         // An editor command never edits the text under an open preedit.
         KeyRoute::Intent(_) if context.composing => return None,
         KeyRoute::Intent(wanted) => return Some(intent(wanted)),
+        // An open menu would close at once: composing closes it.
+        KeyRoute::Suggest if context.composing => return None,
+        KeyRoute::Suggest => {
+            return Some(Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret)));
+        }
         KeyRoute::Pass => {}
     }
 
@@ -424,6 +541,339 @@ mod tests {
         );
         assert!(unfocused.is_none());
         assert!(!asked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_suggest_route_asks_for_the_menu_at_the_caret_with_or_without_assist() {
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if modifiers == Modifiers::ALT && *key == Key::Character(".".into()) {
+                KeyRoute::Suggest
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        for context in [ASSIST, PLAIN] {
+            let context = Context {
+                policy: Some(&policy),
+                ..context
+            };
+            assert!(matches!(
+                press(
+                    Key::Character(".".into()),
+                    Modifiers::ALT,
+                    Some("."),
+                    context
+                ),
+                Some(Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret)))
+            ));
+            // Any other press of the key types it.
+            assert!(matches!(
+                press(
+                    Key::Character(".".into()),
+                    Modifiers::empty(),
+                    Some("."),
+                    context
+                ),
+                Some(Binding::Insert('.'))
+            ));
+        }
+        let composing = Context {
+            policy: Some(&policy),
+            ..COMPOSING
+        };
+        assert!(press(
+            Key::Character(".".into()),
+            Modifiers::ALT,
+            Some("."),
+            composing
+        )
+        .is_none());
+    }
+
+    /// How a focused press routes with a menu open whose selected row is
+    /// `selected`.
+    fn routed(
+        key: Key,
+        modifiers: Modifiers,
+        text: Option<&str>,
+        context: Context,
+        selected: Option<usize>,
+    ) -> Option<Routed> {
+        route(
+            KeyPress {
+                modified_key: key.clone(),
+                physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                key,
+                modifiers,
+                text: text.map(Into::into),
+                status: text_editor::Status::Focused { is_hovered: false },
+            },
+            context,
+            Some(OpenMenu {
+                selected,
+                items: 3,
+                opening: false,
+            }),
+        )
+    }
+
+    /// The menu event a press routes to, if it routes to one.
+    fn menu_event(routed: Option<Routed>) -> Option<SpellEvent> {
+        match routed {
+            Some(Routed::Binding(Binding::Custom(Message::Spell(event)))) => Some(event),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_open_menu_takes_plain_up_down_and_enter() {
+        let none = Modifiers::empty();
+        let named =
+            |named, selected| menu_event(routed(Key::Named(named), none, None, ASSIST, selected));
+        assert_eq!(named(Named::ArrowUp, Some(1)), Some(SpellEvent::Move(-1)));
+        assert_eq!(named(Named::ArrowDown, Some(1)), Some(SpellEvent::Move(1)));
+        // Enter accepts whatever the host's menu has selected, which closes
+        // a menu with only the inactive row; Up and Down are still the
+        // menu's then, so neither reaches the text.
+        assert_eq!(
+            named(Named::Enter, Some(2)),
+            Some(SpellEvent::AcceptSelected)
+        );
+        assert_eq!(named(Named::Enter, None), Some(SpellEvent::AcceptSelected));
+        assert_eq!(named(Named::ArrowDown, None), Some(SpellEvent::Move(1)));
+        // The same without Markdown assist.
+        assert_eq!(
+            menu_event(routed(
+                Key::Named(Named::Enter),
+                none,
+                Some("\r"),
+                PLAIN,
+                Some(0)
+            )),
+            Some(SpellEvent::AcceptSelected)
+        );
+    }
+
+    #[test]
+    fn escape_and_a_lone_modifier_leave_an_open_menu_alone() {
+        for (key, modifiers) in [
+            (Named::Escape, Modifiers::empty()),
+            (Named::Escape, Modifiers::SHIFT),
+            (Named::Escape, Modifiers::COMMAND),
+            (Named::Shift, Modifiers::SHIFT),
+            (Named::Control, Modifiers::CTRL),
+            (Named::Alt, Modifiers::ALT),
+            (Named::Super, Modifiers::LOGO),
+            (Named::Meta, Modifiers::empty()),
+            (Named::CapsLock, Modifiers::empty()),
+        ] {
+            // No binding: Escape neither unfocuses nor is captured.
+            assert!(
+                routed(Key::Named(key), modifiers, None, ASSIST, Some(0)).is_none(),
+                "{key:?} {modifiers:?}"
+            );
+        }
+        // Without a menu, Escape drops focus as before.
+        assert!(matches!(
+            press(Key::Named(Named::Escape), Modifiers::empty(), None, ASSIST),
+            Some(Binding::Unfocus)
+        ));
+    }
+
+    #[test]
+    fn any_other_key_closes_the_menu_then_routes_as_if_it_were_shut() {
+        let close = |key: Key, modifiers, text: Option<&str>, context| match routed(
+            key,
+            modifiers,
+            text,
+            context,
+            Some(0),
+        ) {
+            Some(Routed::Close(binding)) => binding,
+            _ => panic!("not closed"),
+        };
+        assert!(matches!(
+            close(
+                Key::Character("a".into()),
+                Modifiers::empty(),
+                Some("a"),
+                ASSIST
+            ),
+            Some(Binding::Insert('a'))
+        ));
+        // Modified arrows and a modified Enter.
+        assert!(matches!(
+            close(Key::Named(Named::ArrowDown), Modifiers::SHIFT, None, ASSIST),
+            Some(Binding::Select(Motion::Down))
+        ));
+        assert!(matches!(
+            close(
+                Key::Named(Named::Enter),
+                Modifiers::SHIFT,
+                Some("\r"),
+                ASSIST
+            ),
+            Some(Binding::Custom(Message::Intent(Intent::ShiftEnter)))
+        ));
+        assert!(matches!(
+            close(
+                Key::Named(Named::ArrowLeft),
+                Modifiers::empty(),
+                None,
+                ASSIST
+            ),
+            Some(Binding::Move(Motion::Left))
+        ));
+        assert!(matches!(
+            close(
+                Key::Named(Named::Backspace),
+                Modifiers::empty(),
+                None,
+                ASSIST
+            ),
+            Some(Binding::Custom(Message::Intent(Intent::Backspace)))
+        ));
+        assert!(matches!(
+            close(Key::Character("z".into()), Modifiers::COMMAND, None, ASSIST),
+            Some(Binding::Custom(Message::Undo))
+        ));
+        // A host shortcut closes the menu and still reaches the host.
+        let policy = host_policy();
+        let hosted = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        assert!(close(Key::Character("f".into()), Modifiers::COMMAND, None, hosted).is_none());
+        // A key the editor ignores closes it too.
+        assert!(close(Key::Named(Named::F5), Modifiers::empty(), None, ASSIST).is_none());
+    }
+
+    #[test]
+    fn the_suggest_key_on_an_open_menu_closes_and_opens_it_again() {
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if modifiers == Modifiers::ALT && *key == Key::Character(".".into()) {
+                KeyRoute::Suggest
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        let context = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        assert!(matches!(
+            routed(
+                Key::Character(".".into()),
+                Modifiers::ALT,
+                None,
+                context,
+                Some(0)
+            ),
+            Some(Routed::Close(Some(Binding::Custom(Message::Spell(
+                SpellEvent::OpenAtCaret
+            )))))
+        ));
+    }
+
+    #[test]
+    fn an_unfocused_editor_routes_nothing_to_its_menu() {
+        let routed = route(
+            KeyPress {
+                key: Key::Named(Named::ArrowDown),
+                modified_key: Key::Named(Named::ArrowDown),
+                physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                modifiers: Modifiers::empty(),
+                text: None,
+                status: text_editor::Status::Active,
+            },
+            ASSIST,
+            Some(OpenMenu {
+                selected: Some(0),
+                items: 3,
+                opening: false,
+            }),
+        );
+        assert!(routed.is_none());
+    }
+
+    #[test]
+    fn a_menu_opened_earlier_in_the_batch_sends_its_keys_to_the_host() {
+        let opening = Some(OpenMenu {
+            selected: None,
+            items: 0,
+            opening: true,
+        });
+        let routed = |named, modifiers| {
+            route(
+                KeyPress {
+                    modified_key: Key::Named(named),
+                    key: Key::Named(named),
+                    physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                    modifiers,
+                    text: None,
+                    status: text_editor::Status::Focused { is_hovered: false },
+                },
+                ASSIST,
+                opening,
+            )
+        };
+        let none = Modifiers::empty();
+        for (named, key) in [
+            (Named::ArrowUp, MenuKey::Up),
+            (Named::ArrowDown, MenuKey::Down),
+            (Named::Enter, MenuKey::Enter),
+        ] {
+            assert_eq!(
+                menu_event(routed(named, none)),
+                Some(SpellEvent::Key(key)),
+                "{named:?}"
+            );
+        }
+        // Escape and a lone modifier stay as with any open menu, and any
+        // other press closes it first.
+        assert!(routed(Named::Escape, none).is_none());
+        assert!(routed(Named::Shift, Modifiers::SHIFT).is_none());
+        assert!(matches!(
+            routed(Named::ArrowDown, Modifiers::SHIFT),
+            Some(Routed::Close(Some(Binding::Select(Motion::Down))))
+        ));
+    }
+
+    #[test]
+    fn a_key_the_host_takes_is_left_to_it_after_an_opening_in_the_batch() {
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if *key == Key::Named(Named::Enter) && modifiers.is_empty() {
+                KeyRoute::Host
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        let context = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        let enter = |opening| {
+            route(
+                KeyPress {
+                    modified_key: Key::Named(Named::Enter),
+                    key: Key::Named(Named::Enter),
+                    physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                    modifiers: Modifiers::empty(),
+                    text: None,
+                    status: text_editor::Status::Focused { is_hovered: false },
+                },
+                context,
+                Some(OpenMenu {
+                    selected: Some(0),
+                    items: 1,
+                    opening,
+                }),
+            )
+        };
+        // Uncaptured, so the host still runs its command if nothing opened.
+        assert!(matches!(enter(true), Some(Routed::Close(None))));
+        // A menu open when the batch starts takes Enter, as before.
+        assert_eq!(menu_event(enter(false)), Some(SpellEvent::AcceptSelected));
     }
 
     #[test]

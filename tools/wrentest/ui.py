@@ -27,7 +27,7 @@ from typing import Any
 
 from tools.wrentest.client import Client, ProtocolError, RemoteError, TransportError
 
-__all__ = ["WrenApp", "wait_for"]
+__all__ = ["WrenApp", "spell_setting", "wait_for"]
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -91,6 +91,34 @@ def wait_for(
     return last
 
 
+def spell_setting() -> str:
+    """The lane's ``spell-check`` value: ``WRENTEST_SPELL``, ``off`` when unset.
+
+    The build defaults to on, so a lane runs with spell check only when it
+    asks for it.
+    """
+    value = os.environ.get("WRENTEST_SPELL", "off")
+    if value not in ("off", "on"):
+        raise ValueError(f"WRENTEST_SPELL must be off or on, got {value!r}")
+    return value
+
+
+def _names_spell_check(settings: str) -> bool:
+    return any(line.split("=", 1)[0].strip() == "spell-check"
+               for line in settings.splitlines() if "=" in line)
+
+
+def _with_spell_setting(settings: str | None) -> str:
+    """The first launch's ``config.conf``: the test's own text, plus the
+    lane's ``spell-check`` line unless the test already names it."""
+    if settings is not None and _names_spell_check(settings):
+        return settings
+    line = f"spell-check = {spell_setting()}\n"
+    if not settings:
+        return line
+    return settings + ("" if settings.endswith("\n") else "\n") + line
+
+
 def _find_binary() -> Path:
     override = os.environ.get("WREN_TEST_BIN")
     binary = Path(override) if override else ROOT / "target" / "debug" / "wren"
@@ -143,7 +171,12 @@ class WrenApp:
         ``False`` to exercise normal registry restoration and onboarding.
     settings:
         Text for the sandbox's ``config.conf``, written before the first
-        launch. Restarts keep whatever the app has written there since.
+        launch, with ``spell-check = <WRENTEST_SPELL>`` appended unless it
+        names ``spell-check`` itself; without it the file holds only that
+        line. Restarts keep whatever the app has written there since.
+    words:
+        Text for ``words.txt`` beside ``config.conf``, written before the
+        first launch.
     """
 
     def __init__(
@@ -155,12 +188,15 @@ class WrenApp:
         extra_args: tuple[str, ...] = (),
         evaluation: bool = True,
         settings: str | None = None,
+        words: str | None = None,
     ) -> None:
         _validate_positive_finite(readiness_timeout, "readiness_timeout")
         if type(evaluation) is not bool:
             raise ValueError("evaluation must be bool")
         if settings is not None and not isinstance(settings, str):
             raise ValueError("settings must be str or None")
+        if words is not None and not isinstance(words, str):
+            raise ValueError("words must be str or None")
         self._binary = _find_binary()
         env_artifacts = os.environ.get("WREN_TEST_ARTIFACT_DIR")
         self._artifacts_base = (
@@ -173,7 +209,8 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
-        self._settings = settings
+        self._settings = _with_spell_setting(settings)
+        self._words = words
 
         self._ownroot: Path | None = None
         self._socket_path: Path | None = None
@@ -243,6 +280,11 @@ class WrenApp:
     def settings_path(self) -> Path:
         """The sandboxed ``config.conf`` the app reads (it may not exist)."""
         return self.sandbox / "home_root" / _XDG_DIRS["XDG_CONFIG_HOME"] / "wren" / "config.conf"
+
+    @property
+    def words_path(self) -> Path:
+        """The sandboxed ``words.txt`` beside ``config.conf`` (it may not exist)."""
+        return self.settings_path.with_name("words.txt")
 
     def quit(self) -> None:
         """Request a clean exit and tear down."""
@@ -350,8 +392,9 @@ class WrenApp:
         self._atexit_registered = True
 
         try:
-            if self._settings is not None:
-                self._write_settings(self._settings)
+            self._write_config(self.settings_path, self._settings)
+            if self._words is not None:
+                self._write_config(self.words_path, self._words)
             self._start_process()
             self._wait_ready()
         except BaseException as exc:
@@ -365,8 +408,7 @@ class WrenApp:
                 )
             raise exc
 
-    def _write_settings(self, text: str) -> None:
-        path = self.settings_path
+    def _write_config(self, path: Path, text: str) -> None:
         directory = self.sandbox
         for part in path.relative_to(self.sandbox).parts[:-1]:
             directory /= part

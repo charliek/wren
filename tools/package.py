@@ -59,14 +59,20 @@ ICON_ICNS = Path("assets/icon/AppIcon.icns")
 ICON_CATALOG = Path("assets/icon/AppIcon.icon")
 # Rust's own default for aarch64-apple-darwin; actool needs some target.
 MACOS_ICON_DEPLOYMENT_TARGET = "11.0"
-# License texts shipped beside the binary: the embedded fonts', and iced's
-# for the source copied into crates/wren-editor (crates.io's iced_widget and
-# iced_graphics packages carry none, so DEPENDENCY_NOTICES.txt cannot).
+# License texts shipped beside the binary: the embedded fonts' and
+# dictionary's, and iced's for the source copied into crates/wren-editor
+# (crates.io's iced_widget and iced_graphics packages carry none, so
+# DEPENDENCY_NOTICES.txt cannot).
 LICENSE_NOTICES = (
     Path("third_party/inter/LICENSE.txt"),
     Path("third_party/jetbrains-mono/OFL.txt"),
     Path("third_party/iced/LICENSE"),
+    Path("third_party/scowl/README_en_US.txt"),
 )
+# The release of crates/wren-spell/dict/, as its SOURCE.md records it.
+SCOWL_RELEASE = "2026.02.25"
+# Pinned in the root Cargo.toml.
+SPELLBOOK_VERSION = "0.4.2"
 NOTICES = (
     "Wren embeds Inter and JetBrains Mono fonts in its executable.\n"
     "Their copyright and SIL Open Font License notices accompany this bundle:\n"
@@ -86,6 +92,15 @@ NOTICES = (
     "\nWren builds with a modified cosmic-text 0.15.0 (a hanging indent for\n"
     "wrapped rows), used under its MIT license option. cosmic-text's MIT and\n"
     "Apache-2.0 texts are in DEPENDENCY_NOTICES.txt, under cosmic-text.\n"
+    f"\nWren embeds the en_US Hunspell dictionary of SCOWL (Spell Checker\n"
+    f"Oriented Word Lists), release {SCOWL_RELEASE}, in its executable. Its\n"
+    "copyright and permission notices, and those of its affix file, accompany\n"
+    "this bundle:\n"
+    "  third_party/scowl/README_en_US.txt\n"
+    f"\nWren uses spellbook {SPELLBOOK_VERSION}, unmodified, under the Mozilla Public\n"
+    "License 2.0. Its source code is available from\n"
+    f"https://crates.io/crates/spellbook/{SPELLBOOK_VERSION}, and its license text\n"
+    "is in DEPENDENCY_NOTICES.txt, under spellbook.\n"
     "\nWren itself is released under the MIT License; see LICENSE.\n"
 )
 PROJECT_LICENSE = Path("LICENSE")

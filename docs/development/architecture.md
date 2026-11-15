@@ -5,9 +5,10 @@ core and a thin desktop crate on top.
 
 | Crate | Role |
 |---|---|
-| `crates/wren-core` | The model, scanning, storage, autosave, search index, settings, and keybindings. No iced dependency. |
+| `crates/wren-core` | The model, scanning, storage, autosave, search index, settings (including where `words.txt` lives), and keybindings. No iced dependency. |
 | `crates/wren-markdown` | Markdown structure with no UI dependency: the one block classifier (`block`), the heading outline, and the edit planner, which turns an editing intent (Enter, Tab, Backspace, Home, …) at a selection into replacements. The search index's note previews and the editor's highlighting both classify lines with `block`. The app's outline palette lists its headings. |
-| `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, and find. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends only on iced (a minimal feature set of its own), `wren-markdown`, and `unicode-segmentation`; the app passes in colours and the font. It is not yet extractable: the advanced engine's hanging indent needs Wren's patched cosmic-text (`vendor/cosmic-text`), the crate has no publish metadata, and its glyph metrics assume JetBrains Mono. |
+| `crates/wren-editor` | The Markdown editor widget: a fork of iced's text editor with the gutter, current line, caret, highlighting, undo, find, and spelling marks and suggestions through a `Proofreader` the host passes in. Undo, redo, and multi-range edits (`EditorView::apply`) replace only the text that changes, and inserted line breaks take the note's line ending. It runs on iced's own text engine or on a cosmic-text editor it owns (the `editor-engine` setting). Depends only on iced (a minimal feature set of its own), `wren-markdown`, and `unicode-segmentation`; the app passes in colours and the font. It is not yet extractable: the advanced engine's hanging indent needs Wren's patched cosmic-text (`vendor/cosmic-text`), the crate has no publish metadata, and its glyph metrics assume JetBrains Mono. |
+| `crates/wren-spell` | Spell checking with no UI or Wren dependency (only `spellbook` and `unicode-segmentation`): which words of a line are checked, and whether a dictionary or the user's word list accepts them. Bundles SCOWL's Hunspell `en_US` dictionary. |
 | `crates/wren-iced` | The desktop app (binary `wren`): views, widgets, the command table, gestures, and the macOS menu bar. |
 | `crates/wren-sparkle` | The macOS Sparkle updater bridge. The only crate allowed `unsafe`; empty on Linux. |
 | `tools/` | The Python functional harness, packaging, scene capture, and release helpers. |
@@ -43,17 +44,22 @@ Alt, leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
 presses on Linux so shortcuts never type their letter.
 
 The scope says who runs a command from its key. An **App** command runs
-wherever the keyboard is. An **Editor** command (`markdown.*`, `edit.*`)
-runs only in the focused editor: `App::key_input` ignores its key, and the
-editor widget turns it into an intent instead. The editor learns which key
+wherever the keyboard is. An **Editor** command (`markdown.*`, `edit.*`,
+`editor.spell_suggest`) runs only in the focused editor: `App::key_input`
+ignores its key, and the editor widget handles it instead. Each Editor
+command has an editor route (`CommandId::editor_route`, a
+`wren_editor::KeyRoute`): an editing intent for the Markdown commands, or
+`KeyRoute::Suggest` for the spelling menu. The editor learns which key
 is which from a `wren_editor::KeyPolicy` that the app builds from the
 keymap, reading keys through the same `keys::shortcut` as its own
 shortcuts. The widget asks the policy before handling any key: an App
 command's key is ignored, so a shortcut never also edits the text, and an
-Editor command's key becomes its `Message::Intent`. From the palette, an
+Editor command's key becomes its route's message (`Message::Intent`, or
+`Message::Spell` to open the menu). From the palette, an
 enabled Editor command runs wherever the keyboard is, through `App::edit`
 at the editor's cursor; the Markdown commands are disabled while
-`markdown-assist` is off.
+`markdown-assist` is off, and Suggest spelling while spell check cannot
+run.
 
 ## Editing keys
 
@@ -135,6 +141,60 @@ iced, so it wraps every row at the left edge.
 version, so `make check` (`check-patches`) fails unless the vendored `swash`
 and `cosmic-text` are the ones in the build.
 
+## Spell check
+
+Spell check is split across three crates so that neither the word rules
+nor the editor knows the other ([behaviour](../reference/spell-check.md)).
+
+- **`wren-spell` judges words.** A `Speller` asks its `WordSource`s in
+  order: `Hunspell` (`spellbook` over a `.aff` and `.dic` pair; `en_us()`
+  is the bundled dictionary in `crates/wren-spell/dict/`, whose source and
+  hashes are in `dict/SOURCE.md`) and the user's `WordList`.
+  `Speller::marks` takes one line and the byte ranges of it that are prose,
+  splits them into words, skips the ones the rules never check (addresses,
+  paths, identifiers, capitals, digits, non-Latin scripts), and returns the
+  byte ranges of the rest that no source accepts. `Speller::suggestions`
+  asks the sources for corrections, best first, without duplicates. A
+  second language, a system checker, or a grammar engine would be another
+  `WordSource`.
+- **The editor finds prose and draws.** The highlighter's per-line
+  `LineDecor` carries `prose`, the line's checkable byte ranges, from the
+  same inline scan that styles it: the scan marks code spans, comments,
+  link destinations, URLs, and emphasis delimiters as excluded, and also
+  runs over heading and done-task text for this alone. The editor defines
+  the `Proofreader` trait and is handed one with
+  `EditorView::set_proofreader`; it never depends on `wren-spell`. Marks
+  are computed while a row is drawn, from the line, its prose ranges, and
+  the proofreader, and nothing is cached between frames, so an edit or a
+  new word list is right on the next frame. The zigzag is one 1 px square
+  per pixel of the word in a 4 px period, after the selection and before
+  the text. Each word's squares on a row are one small SVG picture,
+  shared by every word that draws the same squares in the same colour and
+  kept while frames draw it: tiny-skia repaints every layer once for each
+  group of changed primitives it cannot merge, and blits a picture's whole
+  extent wherever it repaints, so a quad per square cost seconds a frame
+  with a screen of marks and one picture of a frame's squares a few
+  milliseconds a note switch. Wren vendors `iced_tiny_skia` to merge damage
+  groups in any order, which folds the words' pictures into the repaint of
+  the text (`vendor/iced_tiny_skia/WREN.md`). The suggestions menu is the
+  widget's `overlay()`, placed at layout time from the word's glyph
+  extents. Opening it (`EditorView::spell`, with a `SpellEvent`) runs a
+  fresh highlighter over the lines down to the target to find its prose,
+  then asks the proofreader for suggestions on the UI thread. Accepting is
+  an ordinary range edit through `EditorView::apply`, so undo, find, the
+  outline, and autosave see it as typing. Only the owned engine marks or
+  opens anything; with `BackendKind::Iced` the proofreader is never asked.
+- **The app wires them.** `app/spelling.rs` loads the dictionary and the
+  first read of `words.txt` on a thread of its own at launch, then re-reads
+  `words.txt` beside `config.conf` whenever the settings are reloaded,
+  rebuilding the word list only when the file's text changed. Its warnings
+  join the settings warnings in the banner. The app adapts a `Speller` over
+  both sources to `Proofreader` and hands it to the editor only while
+  `spell-check` is on and a note is open for editing. Escape, which always
+  reaches `App::key_input`, closes an open menu before it does anything
+  else, and the app also closes the menu when the palette or a dialog
+  opens, the settings or the theme change, or the window loses focus.
+
 ## Themes
 
 A theme is a `wren_core::theme::Colors` value: plain RGB tokens with no
@@ -153,7 +213,7 @@ the tokens directly.
 | `current_line`, `text_selection`, `code_block` | Editor bands: the cursor's line, the selection, and fenced code. |
 | `heading`, `heading2` | H1 and H2 text. H3 to H6 use `text`. |
 | `link`, `code`, `quote`, `completed` | Link text, inline code, quote text, and done tasks and struck words. |
-| `success`, `warning`, `danger` | Status only: saved, warnings, and errors. |
+| `success`, `warning`, `danger` | Status: saved, warnings, and errors. `danger` also draws the spell-check zigzag. |
 
 Markdown markers (`#`, `**`, `>`, link destinations, strike lines) use
 `faint`, so the words stay the loudest thing on a line. The tests in
@@ -202,7 +262,9 @@ synchronous there. Workspace loading and reconciliation run off it: a
 reconcile job scans through a duplicated root descriptor on a worker thread
 and returns only changed notes, which the owner merges in order. Results from
 an older job, another workspace, or a tree changed in the meantime are
-dropped and rescanned.
+dropped and rescanned. The spelling dictionary loads on a thread of its own
+at launch; until it arrives the editor has no proofreader. Spelling
+suggestions are computed on the main thread when the menu opens.
 
 ## Search
 

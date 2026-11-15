@@ -1,6 +1,7 @@
 """Bundle-layout and safety tests, not evidence of native application execution."""
 
 from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -182,11 +184,34 @@ class PackageTests(unittest.TestCase):
         self.assertIn("Copyright 2019 Héctor Ramón, Iced contributors",
                       (directory / "third_party/iced/LICENSE").read_text())
         self.assertIn("modified cosmic-text 0.15.0", text)
+        self.assertIn(f"SCOWL (Spell Checker\nOriented Word Lists), release {package.SCOWL_RELEASE}", text)
+        scowl = (directory / "third_party/scowl/README_en_US.txt").read_text(encoding="utf-8")
+        for holder in ("Copyright 2000-2026 by Kevin Atkinson", "Copyright 1993, Geoff Kuenning"):
+            self.assertIn(holder, scowl)
+        self.assertIn(f"spellbook {package.SPELLBOOK_VERSION}, unmodified, under the Mozilla Public\nLicense 2.0", text)
         self.assertIn("MIT License", text)
         self.assertEqual((directory / "DEPENDENCY_NOTICES.txt").read_bytes(), self.dependency_text)
         self.assertIn("fixture-dependency", self.dependency_text.decode("utf-8"))
         self.assertNotIn(str(self.base), self.dependency_text.decode("utf-8"))
         self.assertFalse(list(directory.rglob("*.ttf")))
+
+    def test_dictionary_notices_name_what_is_bundled(self):
+        readme = (ROOT / "third_party/scowl/README_en_US.txt").read_text(encoding="utf-8")
+        self.assertIn(f"en_US Hunspell Dictionary\nVersion {package.SCOWL_RELEASE}\n", readme)
+        source = (ROOT / "crates/wren-spell/dict/SOURCE.md").read_text(encoding="utf-8")
+        self.assertIn(f"- Release: {package.SCOWL_RELEASE} ", source)
+        recorded = dict(re.findall(r"`([^`]+)` \| `([0-9a-f]{64})`", source))
+        self.assertEqual(sorted(recorded), ["en_US.aff", "en_US.dic"])
+        for name, digest in recorded.items():
+            data = (ROOT / "crates/wren-spell/dict" / name).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest, name)
+        readme_digest = hashlib.sha256((ROOT / "third_party/scowl/README_en_US.txt").read_bytes()).hexdigest()
+        self.assertIn(f"`{readme_digest}`", source)
+        manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["workspace"]["dependencies"]["spellbook"], f"={package.SPELLBOOK_VERSION}")
+        lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+        self.assertEqual([entry["version"] for entry in lock["package"] if entry["name"] == "spellbook"],
+                         [package.SPELLBOOK_VERSION])
 
     def test_linux_layout_desktop_icon_permissions_and_notices(self):
         output = self.assemble()
