@@ -59,7 +59,8 @@ use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::keys::{KeyPolicy, Routed};
 use crate::proof::{
-    self, publish, MenuOverlay, MenuPress, OpenMenu, Proofreader, SpellEvent, SpellMenu,
+    self, publish, MenuOverlay, MenuPress, OpenMenu, Proofreader, ResolvedPress, SpellEvent,
+    SpellMenu,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::proof::{DrawnMark, SpellFrame};
@@ -377,6 +378,11 @@ pub struct TextEditor<'a> {
     /// The open menu as the events this widget has handled leave it; see
     /// [`OpenMenu`]. The host builds a new widget once it has applied them.
     menu_now: Cell<Option<OpenMenu>>,
+    /// The host's verdict on the presses it resolved.
+    resolved_press: ResolvedPress,
+    /// A left press of this batch was left to the host, so the widget cannot
+    /// tell what the left presses after it make until the next batch.
+    left_to_host: Cell<bool>,
     /// Where the last frame's marks are recorded for the host's tests.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: Option<&'a RefCell<SpellFrame>>,
@@ -406,6 +412,8 @@ impl<'a> TextEditor<'a> {
             proofreader: None,
             spell_menu: None,
             menu_now: Cell::new(None),
+            resolved_press: ResolvedPress::default(),
+            left_to_host: Cell::new(false),
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: None,
             last_status: None,
@@ -437,6 +445,13 @@ impl<'a> TextEditor<'a> {
     pub fn spell_menu(mut self, menu: Option<&'a SpellMenu>) -> Self {
         self.spell_menu = menu;
         self.menu_now.set(menu.map(OpenMenu::of));
+        self
+    }
+
+    /// What the host made of the presses it resolved, which the next left
+    /// press counts from.
+    pub(crate) fn resolved_press(mut self, resolved: ResolvedPress) -> Self {
+        self.resolved_press = resolved;
         self
     }
 
@@ -565,6 +580,10 @@ impl<'a> TextEditor<'a> {
         shell: &mut Shell<'_, Message>,
     ) {
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)));
+        if state.resolved_seen != self.resolved_press.count {
+            state.resolved_seen = self.resolved_press.count;
+            state.click_kind = self.resolved_press.kind;
+        }
         // A size or look changed since the open menu was laid out closes it
         // before the event is handled, which then acts as if it had not
         // been open.
@@ -632,16 +651,24 @@ impl<'a> TextEditor<'a> {
             },
             menu,
         ) {
+            let update = match update {
+                Update::Click(click) if self.left_to_host.get() => {
+                    Update::Press(Pressed::Left(click))
+                }
+                update => update,
+            };
             match update {
                 Update::Click(click) => {
-                    let action = match click.kind() {
+                    let kind = proof::click_kind(click.kind(), state.click_kind);
+                    let action = match kind {
                         mouse::click::Kind::Single => Action::Click(click.position()),
                         mouse::click::Kind::Double => Action::SelectWord,
                         mouse::click::Kind::Triple => Action::SelectLine,
                     };
                     state.focus = Some(Focus::now());
                     state.last_click = Some(click);
-                    state.drag_click = Some(click.kind());
+                    state.click_kind = Some(kind);
+                    state.drag_click = Some(kind);
                     publish(shell, &self.menu_now, Message::Action(action));
                     shell.capture_event();
                 }
@@ -659,9 +686,13 @@ impl<'a> TextEditor<'a> {
                         shell.capture_event();
                     }
                 }
-                Update::Dismiss => {
+                Update::Dismiss(button) => {
                     // A press in the editor closes the menu and does
-                    // nothing more, so the caret stays (rule 4.4.5).
+                    // nothing more, so the caret stays (rule 4.4.5), and
+                    // the press after it is no double click.
+                    if button == mouse::Button::Left {
+                        state.click_kind = None;
+                    }
                     publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
                     shell.capture_event();
                 }
@@ -671,10 +702,18 @@ impl<'a> TextEditor<'a> {
                     // closes the menu if one did.
                     let event = match press {
                         Pressed::Left(click) => {
+                            let kind = proof::click_kind(click.kind(), state.click_kind);
                             state.focus = Some(Focus::now());
                             state.last_click = Some(click);
-                            state.drag_click = Some(click.kind());
-                            MenuPress::Left(click.position(), click.kind())
+                            // Until the host's verdict arrives with the next
+                            // batch, the left presses after this one are its
+                            // to resolve too.
+                            state.click_kind = Some(kind);
+                            self.left_to_host.set(true);
+                            // The host drops the drag unless it takes the
+                            // press as a single click.
+                            state.drag_click = Some(mouse::click::Kind::Single);
+                            MenuPress::Left(click.position(), kind)
                         }
                         Pressed::Right(position) => {
                             state.drag_click = None;
@@ -909,7 +948,13 @@ impl<'a> TextEditor<'a> {
 struct State {
     focus: Option<Focus>,
     preedit: Option<input_method::Preedit>,
+    /// The last left press inside the editor, as iced counts clicks.
     last_click: Option<mouse::Click>,
+    /// What the last left press was taken as, `None` when it only closed
+    /// the menu.
+    click_kind: Option<mouse::click::Kind>,
+    /// The host verdicts already taken into `click_kind`.
+    resolved_seen: u64,
     drag_click: Option<mouse::click::Kind>,
     partial_scroll: f32,
     highlighter: RefCell<MarkdownHighlighter>,
@@ -983,6 +1028,8 @@ impl State {
             focus: None,
             preedit: None,
             last_click: None,
+            click_kind: None,
+            resolved_seen: 0,
             drag_click: None,
             partial_scroll: 0.0,
             highlighter: RefCell::new(MarkdownHighlighter::new(&highlighter_settings)),
@@ -1486,8 +1533,8 @@ enum Update {
     Click(mouse::Click),
     /// A right-click, relative to the text origin.
     RightClick(Point),
-    /// A press in the editor while the menu is open.
-    Dismiss,
+    /// A press of this button in the editor while the menu is open.
+    Dismiss(mouse::Button),
     /// A left or right press in the editor after an opening earlier in the
     /// batch, which may not have opened a menu.
     Press(Pressed),
@@ -1541,7 +1588,7 @@ impl Update {
                             (true, mouse::Button::Right, Some(position)) => {
                                 Update::Press(Pressed::Right(position))
                             }
-                            _ => Update::Dismiss,
+                            _ => Update::Dismiss(*button),
                         },
                     )
                 }
@@ -3936,18 +3983,33 @@ mod tests {
         ev: &mut crate::EditorView,
         events: Vec<(Event, Option<Point>)>,
     ) -> Vec<Message> {
+        let mut state = None;
+        batch_in(ev, &mut state, events)
+    }
+
+    /// [`one_batch_at`] on the tree state `state` holds, laid out afresh
+    /// when it holds none, so that batches in turn see one widget's state.
+    fn batch_in(
+        ev: &mut crate::EditorView,
+        state: &mut Option<State>,
+        events: Vec<(Event, Option<Point>)>,
+    ) -> Vec<Message> {
         let policy = suggest_policy();
         ev.set_key_policy(policy.clone());
         let messages: Vec<Message> = {
             let mut editor = editor_with(&ev.content, true, Measure::default())
                 .key_policy(Some(&policy))
                 .proofreader(ev.proofreader.as_deref())
-                .spell_menu(ev.menu.as_ref());
-            let mut state = laid_out_state(&editor);
-            state.focus = Some(Focus::now());
+                .spell_menu(ev.menu.as_ref())
+                .resolved_press(ev.resolved_press);
+            let state = state.get_or_insert_with(|| {
+                let mut state = laid_out_state(&editor);
+                state.focus = Some(Focus::now());
+                state
+            });
             events
                 .into_iter()
-                .flat_map(|(event, pointer)| send(&mut editor, &mut state, event, pointer).0)
+                .flat_map(|(event, pointer)| send(&mut editor, state, event, pointer).0)
                 .collect()
         };
         for message in messages.clone() {
@@ -4060,6 +4122,90 @@ mod tests {
         );
         assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
         assert_eq!(ev.cursor().position.column, 1);
+    }
+
+    #[test]
+    fn a_press_that_only_closed_the_menu_starts_no_double_click() {
+        let left = || (press(mouse::Button::Left), Some(over(1.0, 0.0)));
+        let caret = |ev: &crate::EditorView| ev.cursor();
+        let at = |column| Cursor {
+            position: Position { line: 0, column },
+            selection: None,
+        };
+        let word = |ev: &crate::EditorView| ev.selected_text();
+
+        // The menu opens at the end of `teh` and the press only closes it,
+        // so the press at the same point in the next batch is a click.
+        let mut ev = host("cat teh", 7);
+        let mut state = None;
+        batch_in(&mut ev, &mut state, vec![(suggest_key(), None), left()]);
+        assert_eq!(caret(&ev), at(7));
+        let messages = batch_in(&mut ev, &mut state, vec![left()]);
+        assert!(
+            matches!(messages.as_slice(), [Message::Action(Action::Click(_))]),
+            "{messages:?}"
+        );
+        assert_eq!(caret(&ev), at(1));
+        // And the one after that a double click on `cat`.
+        let messages = batch_in(&mut ev, &mut state, vec![left()]);
+        assert!(
+            matches!(messages.as_slice(), [Message::Action(Action::SelectWord)]),
+            "{messages:?}"
+        );
+        assert_eq!(word(&ev).as_deref(), Some("cat"));
+
+        // In one batch the same: close, click, then a double click.
+        let mut ev = host("cat teh", 7);
+        let mut state = None;
+        batch_in(
+            &mut ev,
+            &mut state,
+            vec![(suggest_key(), None), left(), left()],
+        );
+        assert_eq!(caret(&ev), at(1));
+        batch_in(&mut ev, &mut state, vec![left()]);
+        assert_eq!(word(&ev).as_deref(), Some("cat"));
+        let mut ev = host("cat teh", 7);
+        one_batch_at(&mut ev, vec![(suggest_key(), None), left(), left(), left()]);
+        assert_eq!(word(&ev).as_deref(), Some("cat"));
+
+        // An opening that finds nothing leaves the presses a double click.
+        let mut ev = host("cat teh", 1);
+        one_batch_at(&mut ev, vec![(suggest_key(), None), left(), left()]);
+        assert_eq!(word(&ev).as_deref(), Some("cat"));
+
+        // The press after the one that closed drags as a single click does.
+        let mut ev = host("cat teh", 7);
+        one_batch_at(
+            &mut ev,
+            vec![
+                (suggest_key(), None),
+                left(),
+                left(),
+                (moved_to(over(3.0, 0.0)), Some(over(3.0, 0.0))),
+            ],
+        );
+        assert_eq!(word(&ev).as_deref(), Some("at"));
+
+        // A menu open when the batch starts: the press closes it, and the
+        // press after it is a click, even right after a click there.
+        let mut ev = host("cat teh", 7);
+        let mut state = None;
+        batch_in(&mut ev, &mut state, vec![left()]);
+        batch_in(
+            &mut ev,
+            &mut state,
+            vec![(press(mouse::Button::Right), Some(over(5.0, 0.0)))],
+        );
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        batch_in(&mut ev, &mut state, vec![left()]);
+        assert!(ev.spell_menu().is_none());
+        let messages = batch_in(&mut ev, &mut state, vec![left()]);
+        assert!(
+            matches!(messages.as_slice(), [Message::Action(Action::Click(_))]),
+            "{messages:?}"
+        );
+        assert_eq!(caret(&ev), at(1));
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod menu;
 
 use std::ops::Range;
 
+use iced::advanced::mouse::click::Kind;
 use iced::Point;
 #[cfg(any(test, feature = "test-support"))]
 use iced::Rectangle;
@@ -48,8 +49,10 @@ pub enum SpellEvent {
     Key(MenuKey),
     /// A press of the left or right button inside the editor, made after an
     /// opening earlier in the same batch, for the same reason as
-    /// [`SpellEvent::Key`]. An open menu only closes (rule 4.4.5); with none
-    /// open the editor handles the press as it would any other.
+    /// [`SpellEvent::Key`], or a left press after such a press in the same
+    /// batch, which may have only closed a menu. An open menu only closes
+    /// (rule 4.4.5); with none open the editor handles the press as it
+    /// would any other.
     Press(MenuPress),
     Close,
 }
@@ -58,10 +61,37 @@ pub enum SpellEvent {
 /// [`SpellEvent::Press`]. Positions are relative to the text origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MenuPress {
-    /// A left press, with the kind of click it makes.
-    Left(Point, iced::advanced::mouse::click::Kind),
+    /// A left press, with the kind of click it makes if each press before
+    /// it in its batch that the host resolves is a click. The host takes it
+    /// as a single click when the press it follows only closed the menu.
+    Left(Point, Kind),
     /// A right press, which opens the menu on a misspelled word.
     Right(Point),
+}
+
+/// How the host resolved the left presses the widget left to it
+/// ([`SpellEvent::Press`]), which the widget learns only in a later batch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ResolvedPress {
+    /// How many such presses the host has resolved, so the widget takes
+    /// each verdict once.
+    pub count: u64,
+    /// What the last one was taken as: a click of this kind, or `None` when
+    /// it only closed a menu.
+    pub kind: Option<Kind>,
+}
+
+/// The click a left press makes that iced counts as a click of kind `raw`,
+/// after a press taken as `previous`. A press that only closed a menu
+/// (`previous` is `None`) is never the first half of a double or triple
+/// click, so the press after it is a single click.
+pub(crate) fn click_kind(raw: Kind, previous: Option<Kind>) -> Kind {
+    match (raw, previous) {
+        (Kind::Single, _) | (_, None) => Kind::Single,
+        (_, Some(Kind::Single)) => Kind::Double,
+        (_, Some(Kind::Double)) => Kind::Triple,
+        (_, Some(Kind::Triple)) => Kind::Double,
+    }
 }
 
 /// A key the open menu takes for itself (rule 4.4.4).
@@ -438,6 +468,24 @@ mod tests {
             ["doesn't", "doesn’t"]
         );
         assert_eq!(offered("teh", given(&["t'he"])), ["t'he"]);
+    }
+
+    #[test]
+    fn a_press_after_one_that_only_closed_a_menu_is_a_single_click() {
+        use Kind::{Double, Single, Triple};
+        for raw in [Single, Double, Triple] {
+            assert_eq!(click_kind(raw, None), Single);
+        }
+        // After a click, iced's own count stands.
+        for previous in [Single, Double, Triple] {
+            assert_eq!(click_kind(Single, Some(previous)), Single);
+        }
+        assert_eq!(click_kind(Double, Some(Single)), Double);
+        assert_eq!(click_kind(Triple, Some(Double)), Triple);
+        assert_eq!(click_kind(Double, Some(Triple)), Double);
+        // Counted from the press the host took, not iced's count.
+        assert_eq!(click_kind(Triple, Some(Single)), Double);
+        assert_eq!(click_kind(Double, Some(Double)), Triple);
     }
 
     #[test]
