@@ -1,7 +1,7 @@
 """Capture the main Wren screens for visual review against the mockup.
 
-Builds the mockup's sample workspace in a private directory, launches the
-smoke-test build under the test harness, and writes one PNG per scene:
+Builds the mockup's sample workspace in `target/scene-workspace/`, launches
+the smoke-test build under the test harness, and writes one PNG per scene:
 
     cargo build --locked -p wren-iced --features smoke-test
     python3 tools/capture_scenes.py --theme wren-dark --out target/scenes
@@ -16,6 +16,11 @@ wider than its column. `--only spell` (with `--engine advanced`) turns spell
 check on, seeds `words.txt` and shoots the spell-check acceptance note: its
 marks with one hidden at the caret, the suggestions menu under a word, the
 menu with no suggestions, and the menu above a word on the last visible row.
+`--only boards` opens the board sample workspace
+(`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
+scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
+them; the last of them select, drag a marquee, arm a tool, open a label and
+make an empty board, through the harness's `board.*` requests.
 
 On Linux run it inside `tools/run_display.py x11 -- ...` for a private
 display. On macOS it uses the logged-in window server directly.
@@ -26,13 +31,18 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
-import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
+from tools.wrentest.boards import SAMPLES as BOARD_SAMPLES  # noqa: E402
+from tools.wrentest.boards import ACCEPTANCE, conflict_board, script_steps  # noqa: E402
 from tools.wrentest.ui import WrenApp, wait_for  # noqa: E402
 
 # Every construct the highlighter draws, for the `markdown` scene.
@@ -162,16 +172,28 @@ SAMPLE["Inbox/Triage/Long items.md"] = LONG_ITEMS
 EMPTY_SECTION = "Archive"
 
 
+@contextmanager
+def scene_workspaces() -> Iterator[Path]:
+    """An emptied `target/scene-workspace/`. The header draws the workspace
+    path, so a fixed one lets two captures of one build match byte for byte."""
+    root = ROOT / "target" / "scene-workspace"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    yield root
+
+
 def build_workspace(root: Path) -> None:
     (root / EMPTY_SECTION).mkdir(parents=True)
     for relative, text in SAMPLE.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    # Stagger modification times so "modified" order matches the mockup.
+    # Stagger modification times so "modified" order matches the mockup. Each
+    # sits half an hour from an hour boundary, so its "h ago" label holds for
+    # the whole capture.
     now = time.time()
     for offset, relative in enumerate(SAMPLE):
-        mtime = now - offset * 3600
+        mtime = now - (offset + 1.5) * 3600
         os.utime(root / relative, (mtime, mtime))
 
 
@@ -291,6 +313,378 @@ def spell_scenes(client, shot_here) -> None:
     close_menu()
 
 
+BOARD_GROUP = "Boards/Samples"
+
+
+def build_board_workspace(root: Path) -> None:
+    """The board samples, a board with conflict markers, and fixed
+    modification times, so the notes list reads the same each capture."""
+    shutil.copytree(BOARD_SAMPLES, root)
+    (root / BOARD_GROUP / "Conflict.wren-board").write_text(conflict_board(), encoding="utf-8")
+    now = time.time()
+    names = sorted(path.name for path in (root / BOARD_GROUP).iterdir())
+    for offset, name in enumerate(names):
+        mtime = now - (offset + 1.5) * 3600
+        os.utime(root / BOARD_GROUP / name, (mtime, mtime))
+
+
+def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
+    """discovery/boards.md §6.3, Phase 1."""
+
+    def open_board(name: str, fit: bool = False) -> None:
+        open_note(client, f"{name}.wren-board")
+        client.call("editor.focus")
+        if fit:
+            # A board that is already open keeps the view it had, which on a
+            # small window need not show every node.
+            client.call("command.run", {"id": "board.zoom.fit"})
+
+        def fitted():
+            state = client.call("board.get")
+            # A small board shows whole from its origin before its first fit.
+            if state["surface"] != "board" or state["fit_pending"]:
+                return False
+            placed = client.call("board.bounds")
+            return all(node["visible"] == node["bounds"] for node in placed["nodes"])
+
+        wait_for(fitted, timeout=10, description=f"{name} fitted")
+
+    open_board("Checkout flow")
+    shot_here("board-flow")
+    svg = out / "board-flow.svg"
+    svg.unlink(missing_ok=True)
+    client.call("board.export", {"format": "svg", "path": str(svg)})
+    print(svg)
+    # Beside the window's own `board-flow.png`, which it must not replace.
+    png = out / "board-flow-export.png"
+    png.unlink(missing_ok=True)
+    client.call("board.export", {"format": "png", "path": str(png)})
+    print(png)
+    # The kind icon, with the notes list holding the keyboard.
+    client.call("column.open", {"column": "notes"})
+    shot_here("board-notes-list")
+    client.call("column.open", {"column": "editor"})
+    client.call("editor.focus")
+    client.call("command.run", {"id": "font.reset"})
+    for _ in range(2):
+        client.call("command.run", {"id": "font.increase"})
+    shot_here("board-zoom-in")
+    client.call("command.run", {"id": "font.reset"})
+    for _ in range(3):
+        client.call("command.run", {"id": "font.decrease"})
+    shot_here("board-zoom-out")
+    open_board("Shapes")
+    shot_here("board-shapes")
+    open_board("Overlap")
+    shot_here("board-overlap")
+    open_note(client, "Conflict.wren-board")
+    client.call("editor.focus")
+    shot_here("board-raw")
+    client.call("palette.open", {"mode": "search"})
+    client.call("palette.query", {"query": "payment"})
+    shot_here("board-search")
+    client.call("palette.close")
+    # The flow again, with the browser columns folded away.
+    open_note(client, "Checkout flow.wren-board")
+    for _ in range(3):
+        client.call("command.run", {"id": "navigation.column_left"})
+    for _ in range(3):
+        client.call("command.run", {"id": "navigation.column_right"})
+    client.call("command.run", {"id": "font.reset"})
+    client.call("command.run", {"id": "font.decrease"})
+    client.call("command.run", {"id": "font.decrease"})
+    shot_here("board-wide")
+    # The New note dialog with its kind pills, opened on Board.
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Release plan"})
+    shot_here("board-new-dialog")
+    client.call("dialog.close")
+    board_edit_scenes(client, shot_here, open_board)
+    board_arrange_scenes(client, shot_here, open_board)
+    board_style_scenes(client, shot_here)
+    # Jump to node (§5.18): the palette beside the flow, fitted, and the
+    # highlighted node selected and centred behind it. Last, so the view it
+    # leaves moves no other scene.
+    open_board("Checkout flow", fit=True)
+    client.call("command.run", {"id": "board.jump"})
+    client.call("palette.query", {"query": "pay"})
+    shot_here("board-jump")
+    client.call("palette.close")
+    board_limits_scene(client, shot_here, workspace)
+    client.call("column.open", {"column": "sections"})
+
+
+# Values past the limits the scene draws within (§3.8, §4.12): a shape of
+# no height, an anchor and a label position outside 0 to 1000, seventeen
+# labels and a 65-character z on a connector, and a chain one level deeper
+# than a board draws inside its parents. Each is drawn clamped, with an
+# issue marker at its top-left corner.
+LIMITS_BOARD = "".join(
+    ["schema = 1\n",
+     '\n[node.base]\ntext = "Base"\nkind = "shape"\nat = [0, 0]\nsize = [160, 80]\nz = "V"\n',
+     '\n[node.flat]\ntext = "No height"\nkind = "shape"\nat = [320, 0]\nsize = [160, 0]\n'
+     'z = "V"\n',
+     '\n[node.right]\ntext = "Labels"\nkind = "shape"\nat = [320, 200]\nsize = [160, 80]\n'
+     'z = "V"\n',
+     '\n[node.c01]\ntext = "Chain"\nkind = "shape"\nat = [0, 360]\nsize = [200, 120]\n'
+     'z = "V"\n']
+    + [f'\n[node.c{level:02}]\nkind = "shape"\nat = [3, 3]\nparent = "c{level - 1:02}"\n'
+       f'size = [100, 60]\nz = "V"\n' for level in range(2, 34)]
+    + ['\n[edge.anchored]\nkind = "edge"\nfrom = { anchor = [2000, 500], node = "base" }\n'
+       'to = { node = "flat" }\nlabels = [\n  { at = 5000, text = "past the end" },\n]\n'
+       'z = "W"\n',
+       '\n[edge.many]\nkind = "edge"\nfrom = { node = "base" }\nto = { node = "right" }\n'
+       'labels = [\n' + "".join(f'  {{ at = {i * 60}, text = "{i}" }},\n' for i in range(17))
+       + f']\nz = "{"W" * 65}"\n'])
+
+
+def board_limits_scene(client, shot_here, workspace: Path) -> None:
+    """A board whose values pass the limits, added last so that no other
+    scene's notes list holds it."""
+    path = workspace / BOARD_GROUP / "Limits.wren-board"
+    path.write_text(LIMITS_BOARD, encoding="utf-8")
+
+    def listed() -> bool:
+        client.call("core.apply", {"op": "reconcile"})
+        return any(row["path"] == f"{BOARD_GROUP}/Limits.wren-board"
+                   for row in client.call("session.get")["notes"])
+
+    wait_for(listed, timeout=10, interval=0.2, description="the limits board listed")
+    # Not `open_board`: its fit check reads stored sizes, and a shape of no
+    # height never shows a whole box.
+    open_note(client, "Limits.wren-board")
+    client.call("editor.focus")
+    wait_for(lambda: client.call("board.get")["surface"] == "board", timeout=10,
+             description="the limits board shown")
+    client.call("command.run", {"id": "board.zoom.fit"})
+    shot_here("board-limits")
+
+
+def board_edit_scenes(client, shot_here, open_board) -> None:
+    """discovery/boards.md §6.3, Phase 2: what editing draws over a board.
+    These change the board, so they come last."""
+    pack, receive, reject, into_receive = "3qrg4kv1", "12axfsny", "pa6md7qp", "4x2tte9d"
+    start, notify, charge = "ahj860xh", "c51ksbz1", "8wcf01q2"
+    into_check, reject_no = "8va037pc", "4xtwed1c"
+
+    def key(name: str, *mods: str) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods)})
+
+    def pointer(kind: str, at: dict | None = None, mods: tuple[str, ...] = ()) -> dict:
+        params = {"kind": kind, "button": "left", "mods": list(mods)}
+        if at is not None:
+            params["at"] = at
+        return client.call("board.pointer", params)
+
+    def focused():
+        wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+                 description="the board focused")
+
+    open_board("Checkout flow", fit=True)
+    focused()
+    client.call("command.run", {"id": "board.zoom.fit"})
+    # One node selected: its outline and eight handles.
+    pointer("click", {"node": pack})
+    focused()
+    shot_here("board-selected")
+    # The cursor ring: the selection cleared, the cursor kept, and then
+    # two selected with the cursor on the second.
+    key("escape")
+    shot_here("board-cursor")
+    pointer("click", {"node": receive})
+    pointer("click", {"node": pack}, ("shift",))
+    shot_here("board-multiple")
+    key("escape")
+    # A marquee being dragged from empty canvas.
+    placed = client.call("board.bounds")
+    box = next(node["bounds"] for node in placed["nodes"] if node["id"] == receive)
+    view, root = placed["viewport"], placed["root"]
+    corner = [view["x"] + (box["x"] - 30 - root["x"]) / view["zoom"],
+              view["y"] + (box["y"] - 30 - root["y"]) / view["zoom"]]
+    pointer("press", {"canvas": corner})
+    pointer("move", {"canvas": [corner[0] + 120, corner[1] + 200]})
+    pointer("move", {"canvas": [corner[0] + 260, corner[1] + 330]})
+    shot_here("board-marquee")
+    pointer("release")
+    key("escape")
+    # An armed tool's mode chip.
+    key("d")
+    shot_here("board-armed")
+    key("escape")
+    # The connect handles of the node the pointer has rested on.
+    pointer("move", {"node": receive})
+    wait_for(lambda: len(client.call("board.bounds")["handles"]) == 4, timeout=5,
+             description="the connect handles shown")
+    shot_here("board-connect-handles")
+    # A connector dragged from one: over a node, which is outlined and
+    # shows its side handles, the one in reach taken; and over empty
+    # canvas, where a release would make a node. Both routes run clear of
+    # every other connector: where a new one would share a line, which of
+    # the two moves aside follows its id, which is drawn at random.
+    pointer("press", {"node": receive, "handle": "connect_right"})
+    pointer("move", {"node": reject})
+    pointer("move", {"node": reject, "handle": "side_top"})
+    shot_here("board-connect-target")
+    pointer("move", {"canvas": [420, 300]})
+    shot_here("board-connect-new")
+    key("escape")
+    # An end of a connector dragged off its node, where a release would
+    # leave it as it was.
+    pointer("click", {"edge": into_receive})
+    pointer("press", {"edge": into_receive, "handle": "to"})
+    pointer("move", {"canvas": [420, 300]})
+    shot_here("board-connect-end")
+    key("escape")
+    key("escape")
+    # Keyboard Connecting from Pack: the query in the mode chip and the
+    # node it found outlined.
+    pointer("click", {"node": pack})
+    key("c")
+    client.call("board.type", {"text": "che"})
+    shot_here("board-connecting")
+    key("escape")
+    key("escape")
+    # A label open, its text replaced and the caret after it.
+    pointer("double_click", {"node": pack})
+    client.call("board.type", {"text": "Pack the order"})
+    shot_here("board-editing")
+    key("escape")
+    # Connectors styled by the style commands, beside the labelled and
+    # elbow ones the flow has: a straight diagonal with a head at each end,
+    # a dashed branch, and one with no head.
+    for connector, commands in (
+        (into_check, ("board.edge.routing", "board.edge.start")),
+        (reject_no, ("board.stroke.dashed",)),
+        (into_receive, ("board.edge.end",)),
+    ):
+        pointer("click", {"edge": connector})
+        for command in commands:
+            client.call("command.run", {"id": command})
+    pointer("click", {"node": start})
+    for node in (reject, notify, charge):
+        pointer("click", {"node": node}, ("shift",))
+    client.call("command.run", {"id": "board.zoom.selection"})
+    # Away and back: the view is kept, the selection and its cursor are not.
+    open_note(client, "Notes.md")
+    open_note(client, "Checkout flow.wren-board")
+    client.call("editor.focus")
+    wait_for(lambda: client.call("board.get")["surface"] == "board", timeout=10,
+             description="the flow open again")
+    shot_here("board-edges")
+    # A new board: empty, with the hint.
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Empty board"})
+    client.call("dialog.submit")
+    focused()
+    shot_here("board-empty-hint")
+    # The flowchart the acceptance script builds on it, fitted, the last
+    # connector still selected as the script leaves it. Its ids are drawn
+    # from a seed: where two connectors would share a line, which moves
+    # aside follows their ids.
+    client.call("board.seed", {"seed": 20})
+    for step in script_steps(ACCEPTANCE):
+        if step[0] == "key":
+            key(step[1], *step[2:])
+        else:
+            client.call("board.type", {"text": step[1]})
+    client.call("command.run", {"id": "board.zoom.fit"})
+    shot_here("board-built")
+
+
+def board_arrange_scenes(client, shot_here, open_board) -> None:
+    """discovery/boards.md §6.3, Phase 3: the stacking order changed. The
+    shape at the back of Overlap, picked where no other covers it, is
+    brought to the front, over the other two, and the selection cleared."""
+    open_board("Overlap", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "left", "mods": [],
+                                  "at": {"canvas": [20, 10]}})
+    client.call("board.key", {"key": "]", "mods": []})
+    client.call("board.key", {"key": "escape", "mods": []})
+    shot_here("board-stacking")
+
+    # §5.17: a right-click on Pack opens the actions palette on its shape,
+    # the current value; the highlight moved to blue previews it on the
+    # board, which nothing has written.
+    open_board("Checkout flow", fit=True)
+    client.call("board.pointer", {"kind": "click", "button": "right", "mods": [],
+                                  "at": {"node": "3qrg4kv1"}})
+    modal = client.call("navigation.get")["modal"]
+    keys = [row["key"]["command"] for row in modal["results"]]
+    client.call("palette.step",
+                {"delta": keys.index("board.color.blue") - modal["active_index"]})
+    shot_here("board-actions")
+    client.call("palette.close")
+
+
+# The colour tokens in the order of their keys, 0 to 7.
+BOARD_COLORS = ("neutral", "red", "orange", "yellow", "green", "cyan", "purple", "blue")
+
+
+def board_style_scenes(client, shot_here) -> None:
+    """discovery/boards.md §6.3, Phase 3 styling: every colour at every
+    fill level, set through the digit keys and the fill commands on a new
+    board. A column per colour: a shape with each fill, then a text node,
+    and a labelled connector from the unfilled shape to it."""
+    client.call("command.run", {"id": "note.new_board"})
+    client.call("dialog.name", {"name": "Colours"})
+    client.call("dialog.submit")
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    fills = ("tint", "solid", "none")
+    edits = []
+    for column, color in enumerate(BOARD_COLORS):
+        x = column * 140
+        for row, fill in enumerate(fills):
+            edits.append({"op": "add_node", "id": f"{fill}-{color}", "kind": "shape",
+                          "shape": "rounded", "at": [x, row * 100], "size": [120, 60],
+                          "text": f"{color.capitalize()}\n{fill}"})
+        edits.append({"op": "add_node", "id": f"text-{color}", "kind": "text",
+                      "at": [x, 420], "size": [120, 20], "text": f"{color.capitalize()} text"})
+        edits.append({"op": "connect", "id": f"edge-{color}", "from": {"node": f"none-{color}"},
+                      "to": {"node": f"text-{color}"}})
+    client.call("board.apply", {"edits": edits})
+    client.call("board.apply", {"edits": [
+        {"op": "set", "id": f"edge-{color}", "field": "text", "value": "yes"}
+        for color in BOARD_COLORS]})
+
+    def pick(ids: list[str]) -> None:
+        def at(id_: str) -> dict:
+            return {"edge": id_} if id_.startswith("edge-") else {"node": id_}
+
+        for index, id_ in enumerate(ids):
+            client.call("board.pointer", {"kind": "click", "at": at(id_), "button": "left",
+                                          "mods": [] if index == 0 else ["shift"]})
+
+    client.call("command.run", {"id": "board.zoom.fit"})
+    for digit, color in enumerate(BOARD_COLORS):
+        pick([f"{fill}-{color}" for fill in fills] + [f"text-{color}", f"edge-{color}"])
+        client.call("board.key", {"key": str(digit), "mods": []})
+    for fill in fills[1:]:
+        pick([f"{fill}-{color}" for color in BOARD_COLORS])
+        client.call("command.run", {"id": f"board.fill.{fill}"})
+    client.call("command.run", {"id": "board.select.none"})
+    client.call("command.run", {"id": "board.zoom.fit"})
+    # An unfocused board draws no cursor ring (§5.3 rule 7).
+    client.call("column.open", {"column": "notes"})
+    shot_here("board-colors")
+
+
+def window_size(app: WrenApp, size: str) -> None:
+    """Resize the app's window to ``WIDTHxHEIGHT`` logical pixels with
+    xdotool, so X11 only, and wait until the app lays itself out at it."""
+    width, height = (int(part) for part in size.split("x"))
+
+    def xdo(*args: str) -> str:
+        return subprocess.run(["xdotool", *args], check=True, capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+
+    window = xdo("search", "--onlyvisible", "--pid", str(app.pid)).splitlines()[0]
+    xdo("windowsize", window, str(width), str(height))
+    wait_for(lambda: app.client.call("navigation.get")["viewport"]
+             == {"width": width, "height": height},
+             timeout=5, description=f"the window at {size}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
@@ -300,10 +694,17 @@ def main() -> int:
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown", "spell"), help="shoot only these scenes")
+    parser.add_argument("--only", choices=("markdown", "spell", "boards"),
+                        help="shoot only these scenes")
+    parser.add_argument("--window", metavar="WIDTHxHEIGHT",
+                        help="with --only boards, resize the window first (X11 only); "
+                             "pair it with --label")
     args = parser.parse_args()
     if args.only == "spell" and args.engine != "advanced":
         parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
+    if args.window and (args.only != "boards" or sys.platform == "darwin"
+                        or "x" not in args.window):
+        parser.error("--window takes WIDTHxHEIGHT, with --only boards, on X11")
     out = args.out if args.engine == "classic" else args.out / args.engine
     if args.label:
         out = out / args.label
@@ -316,14 +717,40 @@ def main() -> int:
         settings += f"{key.strip()} = {value.strip()}\n"
     out.mkdir(parents=True, exist_ok=True)
 
+    def settled(client) -> bool:
+        session = client.call("session.get")
+        document = session["document"]
+        return not session["pending_durability"] and not (document and document["dirty"])
+
     def shot(client, name: str) -> None:
+        # Autosave and the caret blink run on wall-clock time; each scene
+        # waits for the save and shoots with the caret freshly shown.
         path = out / f"{name}.png"
         path.unlink(missing_ok=True)
         time.sleep(0.3)
+        wait_for(lambda: settled(client), timeout=10, description="autosave")
+        client.call("test.caret.restart")
         client.call("app.screenshot", {"path": str(path)})
         print(path)
 
-    with tempfile.TemporaryDirectory() as temp:
+    with scene_workspaces() as temp:
+        if args.only == "boards":
+            workspace = Path(temp).resolve() / "boards"
+            build_board_workspace(workspace)
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "boards = on\n") as app:
+                if args.window:
+                    window_size(app, args.window)
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_board(name: str) -> None:
+                    shot(app.client, name)
+
+                board_scenes(app.client, shot_board, out, workspace)
+            return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"
             (workspace / "Notes/Inbox").mkdir(parents=True)
@@ -340,7 +767,6 @@ def main() -> int:
 
                 spell_scenes(app.client, shot_spell)
             return 0
-
         if args.only == "markdown":
             workspace = Path(temp).resolve() / "work"
             build_workspace(workspace)

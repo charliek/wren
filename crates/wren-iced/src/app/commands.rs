@@ -1,12 +1,18 @@
 use std::path::PathBuf;
 
 use iced::Task;
+use wren_board::edit::{Alignment, Axis, Stack};
+use wren_board::{Access, Dir, Fill, Shape, Token};
+use wren_canvas::{Command as BoardCommand, Grow, Tool};
+use wren_core::kind::NoteKind;
 use wren_core::model::{ItemRef, Parent};
 use wren_core::ops::Op;
 
+use super::board::Surface;
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
 use super::{focus_editor, App, Message};
+use crate::board_export::Format;
 use crate::panes::Pane;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,6 +24,7 @@ pub enum CommandId {
     NewGroup,
     NewNote,
     NewDatedNote,
+    NewBoard,
     RenameNote,
     RenameGroup,
     RenameSection,
@@ -64,6 +71,11 @@ pub enum CommandId {
     ToggleSpellCheck,
     SpellSuggest,
     OpenWords,
+    ExportSvg,
+    ExportPng,
+    ExportDrawio,
+    /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
+    Board(BoardCommand),
 }
 
 /// Who runs a command from its shortcut.
@@ -75,6 +87,10 @@ pub enum Scope {
     /// [`CommandId::editor_route`]. The app ignores the shortcut, so it acts
     /// only while the editor has the keyboard.
     Editor,
+    /// The focused board, through its key policy and the keymap's board
+    /// layer. The base layer holds none of these, so the app never sees
+    /// their keys.
+    Board,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,7 +124,15 @@ const REVEAL_GROUP: &str = "Reveal group in Files";
 const REVEAL_SECTION: &str = "Reveal section in Files";
 
 /// Palette section order; `Hidden` commands are bindable but not listed.
-pub const GROUPS: [&str; 6] = ["This note", "Markdown", "Go", "View", "Workspace", "App"];
+pub const GROUPS: [&str; 7] = [
+    "This note",
+    "Markdown",
+    "Board",
+    "Go",
+    "View",
+    "Workspace",
+    "App",
+];
 
 // These keys are the stable production/test protocol, independent of labels.
 definitions![
@@ -120,6 +144,7 @@ definitions![
         "This note",
         App
     ),
+    (NewBoard, "note.new_board", "New board…", "This note", App),
     (RenameNote, "note.rename", "Rename note…", "This note", App),
     (DeleteNote, "note.delete", "Delete note…", "This note", App),
     (RevealNote, "note.reveal", REVEAL_NOTE, "This note", App),
@@ -128,6 +153,27 @@ definitions![
         OpenConflictCopy,
         "note.open_conflict",
         "Open conflict copy",
+        "This note",
+        App
+    ),
+    (
+        ExportSvg,
+        "note.export_svg",
+        "Export board as SVG…",
+        "This note",
+        App
+    ),
+    (
+        ExportPng,
+        "note.export_png",
+        "Export board as PNG…",
+        "This note",
+        App
+    ),
+    (
+        ExportDrawio,
+        "note.export_drawio",
+        "Export board as draw.io…",
         "This note",
         App
     ),
@@ -353,10 +399,382 @@ definitions![
     ),
 ];
 
+const fn board(command: BoardCommand, key: &'static str, label: &'static str) -> Definition {
+    Definition {
+        id: CommandId::Board(command),
+        key,
+        label,
+        group: "Board",
+        scope: Scope::Board,
+    }
+}
+
+const fn board_view(command: BoardCommand, key: &'static str, label: &'static str) -> Definition {
+    Definition {
+        group: "View",
+        ..board(command, key, label)
+    }
+}
+
+const fn board_go(command: BoardCommand, key: &'static str, label: &'static str) -> Definition {
+    Definition {
+        group: "Go",
+        ..board(command, key, label)
+    }
+}
+
+/// The board's rows, in the order of the plan's command table (§5.19). Each
+/// key is the one `wren_canvas::Command::key` gives; a test holds them
+/// together.
+pub const BOARD_DEFINITIONS: [Definition; 89] = {
+    use BoardCommand as C;
+    use Dir::{Down, Left, Right, Up};
+    [
+        board(C::Tool(Tool::Select), "board.tool.select", "Select tool"),
+        board(C::Tool(Tool::Hand), "board.tool.hand", "Hand tool"),
+        board(
+            C::Tool(Tool::Shape(Shape::Rect)),
+            "board.tool.rectangle",
+            "Rectangle tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Ellipse)),
+            "board.tool.ellipse",
+            "Ellipse tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Diamond)),
+            "board.tool.diamond",
+            "Diamond tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Pill)),
+            "board.tool.pill",
+            "Pill tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Cylinder)),
+            "board.tool.cylinder",
+            "Cylinder tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Parallelogram)),
+            "board.tool.parallelogram",
+            "Parallelogram tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Rounded)),
+            "board.tool.rounded",
+            "Rounded rectangle tool",
+        ),
+        board(
+            C::Tool(Tool::Shape(Shape::Document)),
+            "board.tool.document",
+            "Document tool",
+        ),
+        board(C::Tool(Tool::Text), "board.tool.text", "Text tool"),
+        board(
+            C::Tool(Tool::Connector),
+            "board.tool.connector",
+            "Connector tool",
+        ),
+        board(
+            C::Shape(Shape::Rect),
+            "board.shape.rectangle",
+            "Change shape to rectangle",
+        ),
+        board(
+            C::Shape(Shape::Ellipse),
+            "board.shape.ellipse",
+            "Change shape to ellipse",
+        ),
+        board(
+            C::Shape(Shape::Diamond),
+            "board.shape.diamond",
+            "Change shape to diamond",
+        ),
+        board(
+            C::Shape(Shape::Pill),
+            "board.shape.pill",
+            "Change shape to pill",
+        ),
+        board(
+            C::Shape(Shape::Cylinder),
+            "board.shape.cylinder",
+            "Change shape to cylinder",
+        ),
+        board(
+            C::Shape(Shape::Parallelogram),
+            "board.shape.parallelogram",
+            "Change shape to parallelogram",
+        ),
+        board(
+            C::Shape(Shape::Rounded),
+            "board.shape.rounded",
+            "Change shape to rounded rectangle",
+        ),
+        board(
+            C::Shape(Shape::Document),
+            "board.shape.document",
+            "Change shape to document",
+        ),
+        board(C::EditLabel, "board.label.edit", "Edit label"),
+        board(C::CommitLabel, "board.label.commit", "Finish label"),
+        board(C::ConnectNext, "board.connect.next", "Add next shape"),
+        board(C::Connect(Left), "board.connect.left", "Connect left"),
+        board(C::Connect(Right), "board.connect.right", "Connect right"),
+        board(C::Connect(Up), "board.connect.up", "Connect up"),
+        board(C::Connect(Down), "board.connect.down", "Connect down"),
+        board(C::Select(Left), "board.select.left", "Select left"),
+        board(C::Select(Right), "board.select.right", "Select right"),
+        board(C::Select(Up), "board.select.up", "Select up"),
+        board(C::Select(Down), "board.select.down", "Select down"),
+        board(
+            C::ExtendSelection(Left),
+            "board.select.extend_left",
+            "Extend selection left",
+        ),
+        board(
+            C::ExtendSelection(Right),
+            "board.select.extend_right",
+            "Extend selection right",
+        ),
+        board(
+            C::ExtendSelection(Up),
+            "board.select.extend_up",
+            "Extend selection up",
+        ),
+        board(
+            C::ExtendSelection(Down),
+            "board.select.extend_down",
+            "Extend selection down",
+        ),
+        board(
+            C::SelectConnector(Left),
+            "board.select.connector_left",
+            "Select connector on the left",
+        ),
+        board(
+            C::SelectConnector(Right),
+            "board.select.connector_right",
+            "Select connector on the right",
+        ),
+        board(
+            C::SelectConnector(Up),
+            "board.select.connector_up",
+            "Select connector above",
+        ),
+        board(
+            C::SelectConnector(Down),
+            "board.select.connector_down",
+            "Select connector below",
+        ),
+        board(C::SelectAll, "board.select.all", "Select all"),
+        board(
+            C::SelectConnected,
+            "board.select.connected",
+            "Select connected",
+        ),
+        board(C::SelectNone, "board.select.none", "Clear selection"),
+        board(C::Move(Left), "board.move.left", "Move left"),
+        board(C::Move(Right), "board.move.right", "Move right"),
+        board(C::Move(Up), "board.move.up", "Move up"),
+        board(C::Move(Down), "board.move.down", "Move down"),
+        board(C::Resize(Grow::Wider), "board.resize.wider", "Make wider"),
+        board(
+            C::Resize(Grow::Narrower),
+            "board.resize.narrower",
+            "Make narrower",
+        ),
+        board(
+            C::Resize(Grow::Taller),
+            "board.resize.taller",
+            "Make taller",
+        ),
+        board(
+            C::Resize(Grow::Shorter),
+            "board.resize.shorter",
+            "Make shorter",
+        ),
+        board(C::Delete, "board.delete", "Delete selection"),
+        board(C::Duplicate, "board.duplicate", "Duplicate"),
+        board(C::Copy, "board.copy", "Copy"),
+        board(C::Cut, "board.cut", "Cut"),
+        board(C::Paste, "board.paste", "Paste"),
+        board(C::Undo, "board.undo", "Undo"),
+        board(C::Redo, "board.redo", "Redo"),
+        board(
+            C::EdgeRouting,
+            "board.edge.routing",
+            "Connector: straight or elbow",
+        ),
+        board(C::EdgeStart, "board.edge.start", "Connector: start head"),
+        board(C::EdgeEnd, "board.edge.end", "Connector: end head"),
+        board(C::EdgeReverse, "board.edge.reverse", "Connector: reverse"),
+        board(C::StrokeDashed, "board.stroke.dashed", "Solid or dashed"),
+        board_view(C::ZoomFit, "board.zoom.fit", "Zoom to fit"),
+        board_view(
+            C::ZoomSelection,
+            "board.zoom.selection",
+            "Zoom to selection",
+        ),
+        board(
+            C::Arrange(Stack::Front),
+            "board.arrange.front",
+            "Bring to front",
+        ),
+        board(
+            C::Arrange(Stack::Back),
+            "board.arrange.back",
+            "Send to back",
+        ),
+        board(
+            C::Arrange(Stack::Forward),
+            "board.arrange.forward",
+            "Bring forward",
+        ),
+        board(
+            C::Arrange(Stack::Backward),
+            "board.arrange.backward",
+            "Send backward",
+        ),
+        board(C::Align(Alignment::Left), "board.align.left", "Align left"),
+        board(
+            C::Align(Alignment::Center),
+            "board.align.center",
+            "Align centre",
+        ),
+        board(
+            C::Align(Alignment::Right),
+            "board.align.right",
+            "Align right",
+        ),
+        board(C::Align(Alignment::Top), "board.align.top", "Align top"),
+        board(
+            C::Align(Alignment::Middle),
+            "board.align.middle",
+            "Align middle",
+        ),
+        board(
+            C::Align(Alignment::Bottom),
+            "board.align.bottom",
+            "Align bottom",
+        ),
+        board(
+            C::Distribute(Axis::Horizontal),
+            "board.distribute.horizontal",
+            "Distribute horizontally",
+        ),
+        board(
+            C::Distribute(Axis::Vertical),
+            "board.distribute.vertical",
+            "Distribute vertically",
+        ),
+        board(
+            C::Color(Token::Neutral),
+            "board.color.neutral",
+            "Colour: neutral",
+        ),
+        board(C::Color(Token::Red), "board.color.red", "Colour: red"),
+        board(
+            C::Color(Token::Orange),
+            "board.color.orange",
+            "Colour: orange",
+        ),
+        board(
+            C::Color(Token::Yellow),
+            "board.color.yellow",
+            "Colour: yellow",
+        ),
+        board(C::Color(Token::Green), "board.color.green", "Colour: green"),
+        board(C::Color(Token::Cyan), "board.color.cyan", "Colour: cyan"),
+        board(
+            C::Color(Token::Purple),
+            "board.color.purple",
+            "Colour: purple",
+        ),
+        board(C::Color(Token::Blue), "board.color.blue", "Colour: blue"),
+        board(C::Fill(Fill::None), "board.fill.none", "Fill: none"),
+        board(C::Fill(Fill::Tint), "board.fill.tint", "Fill: tint"),
+        board(C::Fill(Fill::Solid), "board.fill.solid", "Fill: solid"),
+        board(C::Actions, "board.actions", "Board actions…"),
+        board_go(C::Jump, "board.jump", "Jump to node…"),
+    ]
+};
+
+/// Every command row: the app's, then the board's.
+pub fn definitions() -> impl Iterator<Item = &'static Definition> {
+    DEFINITIONS.iter().chain(&BOARD_DEFINITIONS)
+}
+
+/// Whether a board command changes the board, so a read-only board
+/// refuses it. Arming a tool that creates counts: it leads nowhere else.
+fn board_mutates(command: BoardCommand) -> bool {
+    use BoardCommand as C;
+    !matches!(
+        command,
+        C::Tool(Tool::Select | Tool::Hand)
+            | C::Select(_)
+            | C::ExtendSelection(_)
+            | C::SelectConnector(_)
+            | C::SelectAll
+            | C::SelectConnected
+            | C::SelectNone
+            | C::Copy
+            | C::ZoomFit
+            | C::ZoomSelection
+            | C::Actions
+            | C::Jump
+    )
+}
+
+/// Whether `view`'s board takes `command` as it stands. A read-only board
+/// takes only what does not change it (§5.2). A command for one element
+/// needs exactly one selected (§5.3 rule 7). Copy, cut and duplicate need
+/// a node selected, since a selection without one has no fragment (§5.10
+/// rule 2). Align needs two nodes and distribute three, a node carried by
+/// a selected ancestor not counting (§5.16 rule 3).
+fn board_enabled(view: &wren_canvas::BoardView, command: BoardCommand) -> bool {
+    use BoardCommand as C;
+    if board_mutates(command) && *view.access() != Access::Editable {
+        return false;
+    }
+    let selection = view.machine().selection();
+    let nodes = || {
+        let nodes = &view.board().nodes;
+        let picked = selection.iter().filter_map(wren_board::scene::Source::node);
+        picked.filter(|id| nodes.contains_key(*id)).count()
+    };
+    let arranged = || {
+        let ids: Vec<wren_board::Id> = selection
+            .iter()
+            .filter_map(wren_board::scene::Source::node)
+            .cloned()
+            .collect();
+        wren_board::edit::arranged_count(view.board(), &ids)
+    };
+    match command {
+        C::EditLabel | C::Connect(_) | C::SelectConnector(_) => selection.len() == 1,
+        C::Copy | C::Cut | C::Duplicate => nodes() >= 1,
+        C::Align(_) => arranged() >= 2,
+        C::Distribute(_) => arranged() >= 3,
+        _ => true,
+    }
+}
+
+/// Whether a held key repeats the command (§5.1 rule 4): walking,
+/// extending, moving and resizing do; holding Tab or Delete does one thing.
+pub(super) fn board_repeats(command: BoardCommand) -> bool {
+    use BoardCommand as C;
+    matches!(
+        command,
+        C::Select(_) | C::ExtendSelection(_) | C::Move(_) | C::Resize(_)
+    )
+}
+
 impl CommandId {
     fn definition(self) -> &'static Definition {
-        DEFINITIONS
-            .iter()
+        definitions()
             .find(|definition| definition.id == self)
             .expect("complete command table")
     }
@@ -391,9 +809,29 @@ impl CommandId {
         })
     }
 
+    /// What a Board-scoped command asks the board to do.
+    pub fn board_command(self) -> Option<BoardCommand> {
+        match self {
+            Self::Board(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    /// Whether the command exists only while the `boards` setting is on:
+    /// with it off it is not listed anywhere.
+    pub fn boards(self) -> bool {
+        matches!(
+            self,
+            Self::ExportSvg
+                | Self::ExportPng
+                | Self::ExportDrawio
+                | Self::NewBoard
+                | Self::Board(_)
+        )
+    }
+
     pub fn parse(key: &str) -> Option<Self> {
-        DEFINITIONS
-            .iter()
+        definitions()
             .find(|definition| definition.key == key)
             .map(|definition| definition.id)
     }
@@ -510,6 +948,20 @@ impl App {
         self.finish_action(Disposition::Blocked, Some(warning.into()), Task::none())
     }
 
+    /// What a board command that would change a read-only board is told,
+    /// when it is one.
+    fn board_read_only(&self, id: CommandId) -> Option<String> {
+        let (CommandId::Board(command), Some(view)) = (id, &self.board) else {
+            return None;
+        };
+        match view.access() {
+            Access::ReadOnly(reason) if board_mutates(command) => {
+                Some(wren_board::edit::read_only(reason))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn command_enabled(&self, id: CommandId) -> bool {
         use CommandId::*;
         if self.loading.is_some() {
@@ -534,16 +986,30 @@ impl App {
             | RevealGroup | MoveGroup | ReorderGroup => {
                 self.selected_group.is_some() && self.session.is_some()
             }
-            RenameNote | DeleteNote | RevealNote | MoveNote | Find | Outline => {
-                self.selected_note.is_some()
-                    || (!self.workspace_mode && matches!(id, Find | Outline))
+            NewBoard => {
+                self.preferences.boards && self.selected_group.is_some() && self.session.is_some()
+            }
+            RenameNote | DeleteNote | RevealNote | MoveNote => self.selected_note.is_some(),
+            // The find bar searches the editor's text and the outline reads
+            // its Markdown headings; on a board both open the jump palette
+            // (§5.18 rule 3), and a board's raw text has no headings.
+            Find => self.selected_note.is_some() || !self.workspace_mode,
+            Outline => {
+                (self.selected_note.is_some() || !self.workspace_mode)
+                    && self.surface() != Surface::Raw
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
+            ExportSvg | ExportPng | ExportDrawio => {
+                self.surface() == Surface::Board && self.board_export.is_none()
+            }
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
-                self.ensure_editor_ready().is_ok() && self.editor.markdown_assist()
+                self.surface() == Surface::Text
+                    && self.ensure_editor_ready().is_ok()
+                    && self.editor.markdown_assist()
             }
             SpellSuggest => {
-                self.editor.backend() == wren_editor::BackendKind::Owned
+                self.surface() == Surface::Text
+                    && self.editor.backend() == wren_editor::BackendKind::Owned
                     && self.preferences.settings.spell_check
                     && self.spelling.ready()
                     && self.ensure_editor_ready().is_ok()
@@ -556,6 +1022,11 @@ impl App {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.can_forward()),
+            // Only on a board, which exists only on the Board surface.
+            Board(command) => self
+                .board
+                .as_ref()
+                .is_some_and(|view| board_enabled(view, command)),
         }
     }
 
@@ -569,8 +1040,16 @@ impl App {
         match command {
             Command::Run(id) => {
                 if !self.command_enabled(id) {
-                    let needs_group = matches!(id, CommandId::NewNote | CommandId::NewDatedNote)
-                        && self.selected_section.is_some();
+                    // An edit of a read-only board says why (§5.15 rule 5).
+                    if let Some(notice) = self.board_read_only(id) {
+                        self.banner = Some(notice.clone());
+                        return self.blocked(notice);
+                    }
+                    let needs_group = matches!(
+                        id,
+                        CommandId::NewNote | CommandId::NewDatedNote | CommandId::NewBoard
+                    ) && self.selected_section.is_some()
+                        && self.selected_group.is_none();
                     return self.blocked(if needs_group {
                         "Create a group first; notes live in groups"
                     } else {
@@ -687,13 +1166,19 @@ impl App {
             NewGroup => self.command_dialog(DialogKind::CreateGroup(
                 self.selected_section.expect("enabled section"),
             )),
-            NewNote => self.command_dialog(DialogKind::CreateNote(
+            NewNote | NewBoard => self.command_dialog(DialogKind::CreateNote(
                 self.selected_group.expect("enabled group"),
+                if id == NewBoard {
+                    NoteKind::Board
+                } else {
+                    NoteKind::Markdown
+                },
             )),
             NewDatedNote => {
                 let outcome = self.process_core(Op::CreateNote {
                     group: self.selected_group.expect("enabled group"),
                     title: wren_core::ops::dated_title(),
+                    kind: NoteKind::Markdown,
                 });
                 if outcome.processed.disposition.committed() {
                     self.palette = None;
@@ -742,6 +1227,9 @@ impl App {
             }
             Jump => self.open_palette(Mode::Jump),
             Search => self.open_palette(Mode::Search),
+            Find | Outline | Board(BoardCommand::Jump) if self.surface() == Surface::Board => {
+                self.open_palette(Mode::BoardNodes)
+            }
             Outline => self.open_palette(Mode::Outline),
             Find => {
                 self.palette = None;
@@ -810,6 +1298,9 @@ impl App {
                 )));
                 self.finish_action(Disposition::Completed, None, focus.chain(open))
             }
+            ExportSvg => self.export_board(Format::Svg),
+            ExportPng => self.export_board(Format::Png),
+            ExportDrawio => self.export_board(Format::Drawio),
             CommandPalette => self.open_palette(Mode::Commands),
             OpenSettings => self.open_settings(),
             ReloadSettings => {
@@ -833,6 +1324,21 @@ impl App {
                 let intent = id.intent().expect("an editor command");
                 let task = self.edit(wren_editor::Message::Intent(intent));
                 self.finish_action(Disposition::Completed, None, task.chain(focus))
+            }
+            // A right-click reaches it too, through the board's effect.
+            Board(BoardCommand::Actions) => self.open_palette(Mode::BoardActions),
+            Board(command) => {
+                // From the palette, the menu or the harness: act on the
+                // board as it stands, then give it the keyboard (§5.1 rule 5).
+                self.palette = None;
+                let focus = self.return_to_editor();
+                let did = self.board_command(command);
+                let task = Task::batch([did.task, focus]);
+                // A notice says why the command did nothing.
+                match did.failed.or(did.notice) {
+                    Some(warning) => self.finish_action(Disposition::Blocked, Some(warning), task),
+                    None => self.finish_action(Disposition::Completed, None, task),
+                }
             }
             Quit => {
                 self.palette = None;
@@ -1146,9 +1652,12 @@ mod tests {
     #[test]
     fn full_command_protocol_is_unique_and_round_trips() {
         let mut keys = HashSet::new();
-        for definition in DEFINITIONS {
+        let mut labels = HashSet::new();
+        for definition in definitions() {
             assert!(keys.insert(definition.key));
+            assert!(labels.insert(definition.label), "{}", definition.label);
             assert_eq!(CommandId::parse(definition.key), Some(definition.id));
+            assert_eq!(definition.id.key(), definition.key);
         }
         for key in [
             "workspace.add",
@@ -1200,7 +1709,7 @@ mod tests {
 
     #[test]
     fn editor_scoped_commands_are_exactly_those_with_an_editor_route() {
-        for definition in DEFINITIONS {
+        for definition in definitions() {
             assert_eq!(
                 definition.scope == Scope::Editor,
                 definition.id.editor_route().is_some(),
@@ -1213,6 +1722,40 @@ mod tests {
                 definition.key
             );
         }
+    }
+
+    #[test]
+    fn board_scoped_commands_are_exactly_the_board_commands() {
+        for definition in definitions() {
+            assert_eq!(
+                definition.scope == Scope::Board,
+                definition.id.board_command().is_some(),
+                "{}",
+                definition.key
+            );
+            assert_eq!(
+                definition.key.starts_with("board."),
+                definition.scope == Scope::Board,
+                "{}",
+                definition.key
+            );
+            assert!(definition.id.board_command().is_none() || definition.id.boards());
+        }
+        // The board's rows are the canvas's commands, key for key, in its
+        // order, all in the Board group but the two zooms and the jump.
+        assert!(BOARD_DEFINITIONS
+            .iter()
+            .map(|definition| (definition.id, definition.key))
+            .eq(BoardCommand::all().map(|command| (CommandId::Board(command), command.key()))));
+        for definition in &BOARD_DEFINITIONS {
+            let group = match definition.id {
+                CommandId::Board(BoardCommand::ZoomFit | BoardCommand::ZoomSelection) => "View",
+                CommandId::Board(BoardCommand::Jump) => "Go",
+                _ => "Board",
+            };
+            assert_eq!(definition.group, group, "{}", definition.key);
+        }
+        assert_eq!(GROUPS[..3], ["This note", "Markdown", "Board"]);
     }
 
     #[test]

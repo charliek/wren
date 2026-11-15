@@ -200,13 +200,15 @@ class _WrenAppTestBase(unittest.TestCase):
             ui, "_find_binary", return_value=Path("/bin/true"),
         )
         self._binary_patch.start()
-        # The lane's spell setting is part of every config.conf written.
-        self._env_patch = patch.dict(os.environ)
-        self._env_patch.start()
+        # The lane's spell and board settings are part of every config.conf
+        # written; the settings cases assume neither is set from outside.
+        self._environment = patch.dict(os.environ)
+        self._environment.start()
         os.environ.pop("WRENTEST_SPELL", None)
+        os.environ.pop("WRENTEST_BOARDS", None)
 
     def tearDown(self) -> None:
-        self._env_patch.stop()
+        self._environment.stop()
         self._binary_patch.stop()
         for s in self._servers:
             s.close()
@@ -465,6 +467,21 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                         self.assertEqual(app.settings_path.read_text(encoding="utf-8"), expected)
                         self.assertEqual(ui.spell_setting(), lane or "off")
 
+    def test_without_lane_settings_the_file_is_the_tests_own_or_absent(self) -> None:
+        factory = self._make_popen(_good_identify())
+        os.environ["WRENTEST_SPELL"] = "on"
+        os.environ["WRENTEST_BOARDS"] = "off"
+        with patch.object(subprocess, "Popen", side_effect=factory):
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                         lane_settings=False) as app:
+                self.assertFalse(app.settings_path.exists())
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                         settings="editor-engine = advanced\n", lane_settings=False) as app:
+                self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
+                                 "editor-engine = advanced\n")
+        with self.assertRaisesRegex(ValueError, "lane_settings"):
+            WrenApp(lane_settings=1)
+
     def test_an_unknown_lane_spell_setting_is_an_error(self) -> None:
         for value in ("", "yes", "ON", "true"):
             with self.subTest(value=value):
@@ -493,6 +510,40 @@ class TestWrenAppReadiness(_WrenAppTestBase):
         for value in (b"catppuccin", 1, ["catppuccin"]):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "words"):
                 WrenApp(words=value)
+
+    def test_wrentest_boards_writes_an_explicit_boards_line(self) -> None:
+        factory = self._make_popen(_good_identify())
+        cases = [
+            ("on", None, "spell-check = off\nboards = on\n"),
+            ("off", "editor-engine = advanced\n",
+             "editor-engine = advanced\nspell-check = off\nboards = off\n"),
+            ("on", "editor-engine = advanced",
+             "editor-engine = advanced\nspell-check = off\nboards = on\n"),
+            # A case that sets it itself keeps its own.
+            ("on", "boards = off\n", "boards = off\nspell-check = off\n"),
+            ("off", "  boards=on\n", "  boards=on\nspell-check = off\n"),
+            # Both lane lines, after the test's own text, spell check first.
+            ("off", "spell-check = on\n", "spell-check = on\nboards = off\n"),
+        ]
+        for value, settings, expected in cases:
+            with self.subTest(value=value, settings=settings), \
+                    patch.dict(os.environ, {"WRENTEST_BOARDS": value}), \
+                    patch.object(subprocess, "Popen", side_effect=factory):
+                with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                             settings=settings) as app:
+                    self.assertEqual(app.settings_path.read_text(encoding="utf-8"), expected)
+
+    def test_wrentest_boards_unset_or_empty_adds_nothing(self) -> None:
+        for environment in ({}, {"WRENTEST_BOARDS": ""}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                self.assertIsNone(ui._boards_setting(None))
+                self.assertEqual(ui._boards_setting("x = 1\n"), "x = 1\n")
+
+    def test_wrentest_boards_must_be_off_or_on(self) -> None:
+        for value in ("yes", "ON", "1"):
+            with self.subTest(value=value), patch.dict(os.environ, {"WRENTEST_BOARDS": value}), \
+                    self.assertRaisesRegex(ValueError, "WRENTEST_BOARDS"):
+                WrenApp(settings=None)
 
     def test_settings_must_be_text(self) -> None:
         for value in (b"editor-engine = advanced", 1, ["editor-engine = advanced"]):

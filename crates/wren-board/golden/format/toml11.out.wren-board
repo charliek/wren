@@ -1,0 +1,21 @@
+schema = 1
+
+[node.a]
+text = "Escape \u001B[0m and Aé"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V01"
+
+[node.b]
+text = "B"
+kind = "shape"
+at = [0, 120]
+size = [120, 60]
+z = "V02"
+
+[edge.e]
+kind = "edge"
+from = { node = "a", side = "bottom" }
+to = { node = "b" }
+z = "V03"

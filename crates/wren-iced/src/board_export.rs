@@ -1,0 +1,731 @@
+//! A board's export as a file: the SVG the scene writes, that SVG
+//! rendered by resvg as a PNG image, and the board as a draw.io file. The
+//! widget, the SVG and the PNG all come from one `scene::build`, so the
+//! image shows the lines the canvas drew; the draw.io file is the model's,
+//! for draw.io to draw. `wren export` writes the same files with no window.
+
+use std::io::{Read as _, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::usvg::{self, fontdb, ImageHrefResolver};
+use wren_board::scene::{self, Source};
+use wren_board::{svg as svg_writer, Access, IssueKind, Limit};
+use wren_canvas::BoardView;
+use wren_core::fs_store::MAX_FILE_BYTES;
+use wren_core::kind::NoteKind;
+
+use crate::cli::{ExportArgs, Output};
+use crate::fonts;
+
+/// What an export writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Svg,
+    Png,
+    Drawio,
+}
+
+impl Format {
+    pub const ALL: [Self; 3] = [Self::Svg, Self::Png, Self::Drawio];
+
+    /// The file name extension, which an export inside the workspace must
+    /// have, and the format's name on the command line.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+            Self::Png => "png",
+            Self::Drawio => wren_board::drawio::EXTENSION,
+        }
+    }
+
+    /// The format's name as a person reads it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Svg => "SVG",
+            Self::Png => "PNG",
+            Self::Drawio => "draw.io",
+        }
+    }
+
+    /// What a file of the format is, for a save dialog's filter.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Svg => "SVG image",
+            Self::Png => "PNG image",
+            Self::Drawio => "draw.io diagram",
+        }
+    }
+}
+
+/// The theme whose colours a draw.io export from the app is in, whatever
+/// the app's own: draw.io draws on a light page, and works out its own dark
+/// colours from light ones.
+pub const DRAWIO_THEME: wren_core::theme::Theme = wren_core::theme::LIGHT;
+
+/// The board `view` shows as a draw.io file, its page called `name`, in
+/// the colours of `theme`.
+pub fn drawio(view: &BoardView, theme: wren_core::theme::Theme, name: &str) -> String {
+    wren_board::drawio::write(view.board(), &crate::theme::board_palette(theme), name)
+}
+
+/// What is behind the board in an export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Background {
+    /// The theme's canvas colour, as on screen.
+    Theme,
+    Transparent,
+}
+
+/// How many image pixels a board unit takes in a PNG export.
+pub const PNG_SCALE: f32 = 2.0;
+
+/// The board `view` shows as an SVG document, in the colours it is drawn
+/// in now. The margin is the one a fitted board has on screen.
+pub fn svg(view: &BoardView, background: Background) -> String {
+    svg_writer::write(
+        view.scene(),
+        &svg_writer::Options {
+            background: match background {
+                Background::Theme => Some(view.palette().canvas),
+                Background::Transparent => None,
+            },
+            padding: wren_canvas::FIT_MARGIN,
+        },
+    )
+}
+
+/// The largest PNG export, in pixels: 64 megapixels, 256 MB of pixels
+/// before encoding.
+pub const MAX_PIXELS: u64 = 64_000_000;
+
+/// The faces resvg lays an export's labels out in: the bundled Inter faces
+/// the canvas measured with, then the system's, which give the glyphs Inter
+/// has not (CJK among them). A system copy of Inter is left out, so a label
+/// is never drawn in another version of the font than the one measured.
+fn faces() -> Arc<fontdb::Database> {
+    static FACES: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
+    Arc::clone(FACES.get_or_init(|| {
+        let mut faces = fontdb::Database::new();
+        faces.load_system_fonts();
+        let inter: Vec<fontdb::ID> = faces
+            .faces()
+            .filter(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family.eq_ignore_ascii_case("Inter"))
+            })
+            .map(|face| face.id)
+            .collect();
+        for id in inter {
+            faces.remove_face(id);
+        }
+        for face in &fonts::FACES[..fonts::INTER_FACES] {
+            faces.load_font_data(face.to_vec());
+        }
+        Arc::new(faces)
+    }))
+}
+
+/// How well a face suits a character Inter lacks, best first: a colour
+/// emoji face, a sans-serif one, any other but serif and monospace, then
+/// those. resvg's own choice is the first face that has the character,
+/// which on a common Linux system draws Japanese in a serif face.
+fn fallback_rank(face: &fontdb::FaceInfo) -> u8 {
+    let name = face
+        .families
+        .first()
+        .map(|(family, _)| family.to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.contains("emoji") {
+        0
+    } else if face.monospaced || name.contains("mono") {
+        3
+    } else if name.contains("sans") {
+        1
+    } else if name.contains("serif") {
+        3
+    } else {
+        2
+    }
+}
+
+/// The face a character Inter lacks is drawn in: the first that has it of
+/// the best [`fallback_rank`], in the label's style before another. Faces
+/// are tried a rank at a time, so a character found early looks at few.
+fn fallback() -> usvg::FallbackSelectionFn<'static> {
+    Box::new(|character, used, faces| {
+        let faces: &fontdb::Database = faces;
+        let style = faces.face(*used.first()?)?.style;
+        (0..4u8)
+            .flat_map(|rank| [(rank, true), (rank, false)])
+            .find_map(|(rank, same_style)| {
+                faces
+                    .faces()
+                    .filter(|face| {
+                        fallback_rank(face) == rank
+                            && (face.style == style) == same_style
+                            && !used.contains(&face.id)
+                    })
+                    .find(|face| has_char(faces, face.id, character))
+                    .map(|face| face.id)
+            })
+    })
+}
+
+/// Whether the face `id` maps `character` to a glyph.
+fn has_char(faces: &fontdb::Database, id: fontdb::ID, character: char) -> bool {
+    faces
+        .with_face_data(id, |data, index| {
+            swash::FontRef::from_index(data, index as usize)
+                .is_some_and(|font| font.charmap().map(character) != 0)
+        })
+        .unwrap_or(false)
+}
+
+/// `svg`, a board's SVG export, as a PNG image `scale` pixels to the board
+/// unit, its size the SVG's rounded up. An image over [`MAX_PIXELS`] is
+/// refused before anything is drawn. No image or other file the document
+/// names is read: a board's export names none, and this one never will.
+pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, String> {
+    // Reading the document lays every label out as paths, which on a large
+    // board takes seconds; the size the root declares is refused first.
+    if let Some((width, height)) = declared_size(svg) {
+        image_size(width, height, scale)?;
+    }
+    let options = usvg::Options {
+        font_family: "Inter".to_owned(),
+        fontdb: faces(),
+        font_resolver: usvg::FontResolver {
+            select_font: usvg::FontResolver::default_font_selector(),
+            select_fallback: fallback(),
+        },
+        image_href_resolver: ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_str(svg, &options)
+        .map_err(|error| format!("the board's SVG could not be read: {error}"))?;
+    let size = tree.size();
+    let (columns, rows) = image_size(size.width(), size.height(), scale)?;
+    let mut pixmap = Pixmap::new(columns, rows)
+        .ok_or_else(|| format!("{columns} by {rows} pixels could not be allocated"))?;
+    // The SVG's size scaled exactly to the whole pixels, so its background
+    // reaches every edge.
+    let transform =
+        Transform::from_scale(columns as f32 / size.width(), rows as f32 / size.height());
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    pixmap
+        .encode_png()
+        .map_err(|error| format!("the image could not be encoded: {error}"))
+}
+
+/// The `width` and `height` the document's root element gives in plain
+/// numbers, if it gives both.
+fn declared_size(svg: &str) -> Option<(f32, f32)> {
+    let document = usvg::roxmltree::Document::parse(svg).ok()?;
+    let root = document.root_element();
+    let number = |name: &str| root.attribute(name)?.trim().parse::<f32>().ok();
+    Some((number("width")?, number("height")?))
+}
+
+/// The whole pixels of an image `width` by `height` board units at
+/// `scale`, each side rounded up, or why there can be no such image.
+fn image_size(width: f32, height: f32, scale: f32) -> Result<(u32, u32), String> {
+    let (width, height) = (
+        f64::from(width * scale).ceil(),
+        f64::from(height * scale).ceil(),
+    );
+    if !(width.is_finite() && height.is_finite() && width >= 1.0 && height >= 1.0) {
+        return Err(format!("{width} by {height} pixels is no image"));
+    }
+    if width * height > MAX_PIXELS as f64 {
+        return Err(format!(
+            "{width} by {height} pixels is over the {} megapixels a PNG export may have",
+            MAX_PIXELS / 1_000_000
+        ));
+    }
+    // Both are whole numbers from 1 to 64 million here.
+    Ok((width as u32, height as u32))
+}
+
+/// Write `contents` to `path` whole or not at all: into a new file beside
+/// it, renamed over it once written. Returns the bytes written.
+pub fn write(path: &Path, contents: &[u8]) -> std::io::Result<u64> {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    if path.file_name().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path names no file",
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // Named apart from the target, so a target name near the file
+    // system's limit is not pushed past it.
+    let temporary = parent.join(format!(
+        ".wren-export-{}-{}.tmp",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        // The write's own error is the one to report; the half-written
+        // file is removed if it was made.
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written.map(|()| contents.len() as u64)
+}
+
+/// Why `wren export` wrote nothing, and its exit code.
+#[derive(Debug)]
+pub struct Failure {
+    pub code: u8,
+    pub message: String,
+}
+
+/// The exit code for a board that could not be read or an image that
+/// could not be made or written.
+pub const EXIT_FAILED: u8 = 1;
+/// The exit code for a file that is not a board Wren can draw.
+pub const EXIT_NOT_A_BOARD: u8 = 3;
+
+fn failed(message: String) -> Failure {
+    Failure {
+        code: EXIT_FAILED,
+        message,
+    }
+}
+
+/// `wren export`: draw the board `args` names as the app would, or write
+/// it as a draw.io file, whole or not at all. Nothing here needs a display: the labels are
+/// measured in the bundled faces through iced's font system, which needs
+/// no renderer. What is wrong with the board but still draws goes to
+/// `warn`, one line at a time; `stdout` takes the image for `-o -`.
+pub fn run(
+    args: &ExportArgs,
+    stdout: &mut dyn Write,
+    warn: &mut dyn FnMut(String),
+) -> Result<(), Failure> {
+    let board = args.board.display();
+    let text = read_board(&args.board)?;
+    fonts::load();
+    let view = BoardView::open(&text, crate::theme::board_palette(args.theme), fonts::UI).map_err(
+        |error| Failure {
+            code: EXIT_NOT_A_BOARD,
+            message: format!("{board} is not a board Wren can draw: {error}"),
+        },
+    )?;
+    if let Access::ReadOnly(reason) = view.access() {
+        warn(format!(
+            "{board} would open read-only in this version of Wren: {reason}"
+        ));
+    }
+    for issue in view.issues() {
+        warn(format!("{board}: {}", describe(&issue.element, issue.kind)));
+    }
+    if let Output::File(path) = &args.output {
+        refuse_output(path, &args.board)?;
+    }
+    let contents = match args.format {
+        Format::Svg => svg(&view, args.background).into_bytes(),
+        Format::Png => png(&svg(&view, args.background), args.scale)
+            .map_err(|error| failed(format!("Could not draw {board} as PNG: {error}")))?,
+        Format::Drawio => {
+            let name = args.board.file_name().unwrap_or(args.board.as_os_str());
+            drawio(&view, args.theme, &NoteKind::Board.title(name)).into_bytes()
+        }
+    };
+    match &args.output {
+        Output::Stdout => stdout
+            .write_all(&contents)
+            .and_then(|()| stdout.flush())
+            .map_err(|error| failed(format!("Could not write to standard output: {error}"))),
+        Output::File(path) => write(path, &contents)
+            .map(drop)
+            .map_err(|error| failed(format!("Could not write {}: {error}", path.display()))),
+    }
+}
+
+/// The text of the board at `path`, read whole. A file over the size any
+/// note may have is not a board Wren draws.
+fn read_board(path: &Path) -> Result<String, Failure> {
+    let board = path.display();
+    let unreadable = |error: std::io::Error| failed(format!("Could not read {board}: {error}"));
+    let too_large = || Failure {
+        code: EXIT_NOT_A_BOARD,
+        message: format!(
+            "{board} is not a board Wren can draw: it is over {} MiB",
+            MAX_FILE_BYTES / (1024 * 1024)
+        ),
+    };
+    let not_a_file = |metadata: &std::fs::Metadata| {
+        if metadata.is_dir() {
+            Some(failed(format!("Could not read {board}: it is a folder")))
+        } else if !metadata.is_file() {
+            Some(failed(format!("Could not read {board}: it is not a file")))
+        } else {
+            None
+        }
+    };
+    // Checked before the open too: opening a named pipe waits for a writer.
+    if let Some(refused) = not_a_file(&std::fs::metadata(path).map_err(unreadable)?) {
+        return Err(refused);
+    }
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let metadata = file.metadata().map_err(unreadable)?;
+    if let Some(refused) = not_a_file(&metadata) {
+        return Err(refused);
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes).map_err(|_| Failure {
+        code: EXIT_NOT_A_BOARD,
+        message: format!("{board} is not a board Wren can draw: it is not UTF-8 text"),
+    })
+}
+
+/// Why an export may not be written to `path`: it is a folder or a device,
+/// the board itself, or a note, which an export never replaces.
+fn refuse_output(path: &Path, board: &Path) -> Result<(), Failure> {
+    let refused = |why: &str| {
+        Err(failed(format!(
+            "Did not export the board to {}: {why}",
+            path.display()
+        )))
+    };
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return refused("it is a folder"),
+        // A device or a pipe cannot be replaced by renaming a file over it.
+        Ok(metadata) if !metadata.is_file() => {
+            return refused("it is not a file; -o - writes to standard output")
+        }
+        _ => {}
+    }
+    // The board is read by now, so it exists; an output that does not yet
+    // exist cannot be it.
+    if let (Ok(output), Ok(board)) = (path.canonicalize(), board.canonicalize()) {
+        if output == board {
+            return refused("it is the board being exported");
+        }
+    }
+    if path.file_name().and_then(NoteKind::from_name).is_some() {
+        return refused("it is a note");
+    }
+    Ok(())
+}
+
+/// What is wrong with `element`, as a line of `wren export`'s warnings.
+fn describe(element: &Source, kind: IssueKind) -> String {
+    let (what, id) = match element {
+        Source::Node(id) => ("node", id),
+        Source::Edge(id) => ("connector", id),
+    };
+    let problem = match kind {
+        IssueKind::DanglingEdge {
+            from: true,
+            to: true,
+        } => "neither end names a node",
+        IssueKind::DanglingEdge { from: true, .. } => "its start names no node",
+        IssueKind::DanglingEdge { .. } => "its end names no node",
+        IssueKind::MissingParent => "its parent names no node; drawn as a top-level node",
+        IssueKind::ParentCycle => "its parents form a cycle; drawn as a top-level node",
+        IssueKind::TooDeep => "it is nested too deep; drawn as a top-level node",
+        IssueKind::SharedId => "a node and a connector share its id",
+        IssueKind::MissingKind => "it has no kind",
+        IssueKind::MissingZ => "it has no z",
+        IssueKind::InvalidZ => "its z is not letters and digits",
+        IssueKind::OutOfRange(limit) => return format!("{what} {id}: {}", past(limit)),
+    };
+    format!("{what} {id}: {problem}")
+}
+
+/// What passing `limit` means for how the element is drawn.
+fn past(limit: Limit) -> String {
+    match limit {
+        Limit::Coordinates => format!(
+            "it reaches past ±{} on the board; drawn within it",
+            scene::COORDINATE_LIMIT
+        ),
+        Limit::Size => "a side is shorter than 1; drawn 1 long".into(),
+        Limit::Anchor => "an anchor is outside 0 to 1000; drawn at the box's edge".into(),
+        Limit::LabelAt => "a label's position is outside 0 to 1000; drawn at the line's end".into(),
+        Limit::LabelBytes => format!(
+            "a label or caption is over {} KiB; only that much is drawn",
+            scene::MAX_LABEL_BYTES / 1024
+        ),
+        Limit::Labels => format!(
+            "it has more than {0} labels; only the first {0} are drawn",
+            scene::MAX_LABELS
+        ),
+        Limit::ZLength => format!(
+            "its z is over {0} characters; stacked by the first {0}",
+            scene::MAX_Z
+        ),
+        Limit::LabelLines => format!(
+            "a label has more lines than are drawn ({} a label, {} a board); \
+             only those are drawn",
+            scene::MAX_LABEL_LINES,
+            scene::MAX_BOARD_LINES
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pixel at `(x, y)` of a decoded RGBA image `width` pixels wide.
+    fn pixel(image: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let at = ((y * width + x) * 4) as usize;
+        [image[at], image[at + 1], image[at + 2], image[at + 3]]
+    }
+
+    /// `png`'s image decoded: its width, height and RGBA pixels.
+    fn decode(png: &[u8]) -> (u32, u32, Vec<u8>) {
+        let pixmap = Pixmap::decode_png(png).expect("a PNG image");
+        let (width, height) = (pixmap.width(), pixmap.height());
+        let pixels = pixmap
+            .pixels()
+            .iter()
+            .flat_map(|pixel| {
+                let color = pixel.demultiply();
+                [color.red(), color.green(), color.blue(), color.alpha()]
+            })
+            .collect();
+        (width, height, pixels)
+    }
+
+    #[test]
+    fn the_image_is_the_svg_scaled_and_rounded_up() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100.5\" height=\"40\" \
+                   viewBox=\"-10 -10 100.5 40\"><rect x=\"-10\" y=\"-10\" width=\"100.5\" \
+                   height=\"40\" fill=\"#102030\"/><rect x=\"0\" y=\"0\" width=\"20\" \
+                   height=\"10\" fill=\"#c04020\"/></svg>";
+        let (width, height, pixels) = decode(&png(svg, 2.0).unwrap());
+        assert_eq!((width, height), (201, 80));
+        // The background reaches every corner, and the shape is where the
+        // view box puts it.
+        for (x, y) in [(0, 0), (200, 0), (0, 79), (200, 79)] {
+            assert_eq!(pixel(&pixels, width, x, y), [0x10, 0x20, 0x30, 255]);
+        }
+        assert_eq!(pixel(&pixels, width, 40, 30), [0xc0, 0x40, 0x20, 255]);
+        let (width, height, _) = decode(&png(svg, 1.0).unwrap());
+        assert_eq!((width, height), (101, 40));
+    }
+
+    #[test]
+    fn an_image_over_the_limit_is_refused_and_a_document_that_is_not_svg_fails() {
+        let side = |side: u32| {
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{side}\" height=\"{side}\" \
+                 viewBox=\"0 0 {side} {side}\"/>"
+            )
+        };
+        // 8,000 by 8,000 pixels is 64 megapixels; one more row is over.
+        let over = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4000\" \
+                    height=\"4000.5\" viewBox=\"0 0 4000 4000.5\"/>";
+        let error = png(over, 2.0).unwrap_err();
+        assert!(error.contains("over the 64 megapixels"), "{error}");
+        let error = png(&side(16_000_000), 4.0).unwrap_err();
+        assert!(error.contains("megapixels"), "{error}");
+        assert!(png("not an image", 2.0).is_err());
+        // The declared size is refused before the document is read: here
+        // reading it would fail, its root being outside the SVG namespace.
+        let unreadable = "<svg xmlns=\"urn:not-svg\" width=\"4000\" height=\"4000.5\">\
+                          <text>label</text></svg>";
+        let error = png(unreadable, 2.0).unwrap_err();
+        assert!(error.contains("over the 64 megapixels"), "{error}");
+        let error = png(&unreadable.replace("4000.5", "4000"), 2.0).unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
+        let (width, height, _) = decode(&png(&side(1), 2.0).unwrap());
+        assert_eq!((width, height), (2, 2));
+    }
+
+    #[test]
+    fn no_image_the_document_names_is_drawn() {
+        // A red square as SVG, inline and in a file. resvg's defaults would
+        // draw both.
+        const RED: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+        const INLINE: &str = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSJyZWQiLz48L3N2Zz4=";
+        let directory = crate::test_support::tempdir();
+        let file = directory.path().join("red.svg");
+        std::fs::write(&file, RED).unwrap();
+        let red = |pixels: &[u8]| pixels.chunks(4).filter(|pixel| pixel[3] > 0).count();
+        for href in [INLINE.to_owned(), file.display().to_string()] {
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+                 xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"10\" height=\"10\">\
+                 <image width=\"10\" height=\"10\" xlink:href=\"{href}\"/></svg>"
+            );
+            let (_, _, pixels) = decode(&png(&svg, 1.0).unwrap());
+            assert_eq!(red(&pixels), 0, "{href}");
+
+            let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
+            let mut pixmap = Pixmap::new(10, 10).unwrap();
+            resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+            let (_, _, pixels) = decode(&pixmap.encode_png().unwrap());
+            assert_eq!(red(&pixels), 100, "the defaults draw {href}");
+        }
+    }
+
+    /// What a board file holds reaches an export only as escaped text in
+    /// `<text>`: markup is escaped, what XML cannot carry is dropped, and
+    /// no unknown colour, kind name markup or `link` becomes an attribute.
+    /// An XML parser reads the document, and the PNG is drawn from it.
+    #[test]
+    fn hostile_content_exports_as_a_document_xml_reads() {
+        use wren_board::{Color, Named};
+        fonts::load();
+        let controls: String = ('\u{0}'..='\u{1f}')
+            .filter(|c| !matches!(c, '\n' | '\r'))
+            .collect();
+        let hostile = format!(
+            "a < b & \"c\" 'd' ]]> <![CDATA[x]]> <!-- c --> <?pi?> &amp; &#0; \
+             {controls}\u{fffe}\u{ffff}\u{7f}\u{85}\u{feff}\u{10ffff} שלום 漢字 👩🏽‍💻"
+        );
+        let template = "schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\n\
+                        link = \"javascript:alert(1)\"\nsize = [4000, 200]\nz = \"V\"\n\n\
+                        [node.b]\nkind = \"shape\"\nat = [0, 400]\n\
+                        link = \"javascript:alert(1)\"\nsize = [4000, 200]\nz = \"V\"\n\n\
+                        [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\n\
+                        to = { node = \"b\" }\nlabels = [\n  { text = \"x\" },\n]\nz = \"W\"\n";
+        let mut board = wren_board::parse(template).unwrap();
+        for (id, node) in &mut board.nodes {
+            node.text.clone_from(&hostile);
+            node.style.color = Color::Unknown("#12\"/><script>alert(1)</script>".into());
+            if id.as_str() == "b" {
+                node.kind = Some(Named::Other(format!("<kind>{hostile}")));
+            }
+        }
+        for edge in board.edges.values_mut() {
+            edge.labels[0].text.clone_from(&hostile);
+            edge.style.color = Color::Unknown("url(#x)".into());
+        }
+        let text = wren_board::write(&board);
+        let view = BoardView::open(
+            &text,
+            crate::theme::board_palette(wren_core::theme::WREN_LIGHT),
+            fonts::UI,
+        )
+        .expect("the board");
+        let svg = svg(&view, Background::Theme);
+        let document = usvg::roxmltree::Document::parse(&svg).expect("well-formed XML");
+        let drawn: Vec<&str> = document
+            .descendants()
+            .filter(|node| node.has_tag_name("text"))
+            .map(|node| node.text().unwrap_or_default())
+            .collect();
+        let carried: String = hostile
+            .chars()
+            .filter(|&c| c == '\t' || !matches!(c, '\u{0}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}'))
+            .collect();
+        // Two node labels, the placeholder's caption and the connector's.
+        assert_eq!(
+            drawn.iter().filter(|line| **line == carried).count(),
+            3,
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.contains(&format!("<kind>{carried}").as_str()),
+            "{drawn:?}"
+        );
+        for absent in ["javascript", "script", "#12", "url(", "href"] {
+            assert!(!svg.contains(absent), "{absent} in the export");
+        }
+        let attributes = document
+            .descendants()
+            .flat_map(|node| node.attributes())
+            .filter(|attribute| matches!(attribute.name(), "fill" | "stroke"));
+        for attribute in attributes {
+            let value = attribute.value();
+            let hex = value.len() == 7
+                && value.starts_with('#')
+                && value[1..].bytes().all(|b| b.is_ascii_hexdigit());
+            assert!(hex || value == "none", "{value}");
+        }
+        assert!(png(&svg, 1.0).is_ok());
+    }
+
+    #[test]
+    fn labels_are_drawn_in_the_bundled_inter() {
+        let faces = faces();
+        let inter: Vec<_> = faces
+            .faces()
+            .filter(|face| face.families.iter().any(|(family, _)| family == "Inter"))
+            .collect();
+        assert_eq!(inter.len(), fonts::INTER_FACES);
+        assert!(inter
+            .iter()
+            .all(|face| matches!(face.source, fontdb::Source::Binary(_))));
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"30\">\
+                   <text x=\"4\" y=\"20\" font-family=\"Inter, system-ui, sans-serif\" \
+                   font-size=\"14\" fill=\"#000000\">Inter</text></svg>";
+        let (_, _, pixels) = decode(&png(svg, 1.0).unwrap());
+        assert!(pixels.chunks(4).filter(|pixel| pixel[3] > 0).count() > 20);
+    }
+
+    #[test]
+    fn a_character_inter_lacks_takes_an_emoji_then_a_sans_serif_face() {
+        let face = |family: &str, monospaced: bool| fontdb::FaceInfo {
+            id: fontdb::ID::dummy(),
+            source: fontdb::Source::Binary(Arc::new(Vec::<u8>::new())),
+            index: 0,
+            families: vec![(family.to_owned(), fontdb::Language::English_UnitedStates)],
+            post_script_name: String::new(),
+            style: fontdb::Style::Normal,
+            weight: fontdb::Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal,
+            monospaced,
+        };
+        let ranks = [
+            ("Noto Color Emoji", false),
+            ("Noto Sans CJK JP", false),
+            ("Noto Sans Mono CJK JP", false),
+            ("Noto Serif CJK JP", false),
+            ("Unifont", true),
+            ("Lohit Devanagari", false),
+            ("DejaVu Sans", false),
+        ]
+        .map(|(family, monospaced)| fallback_rank(&face(family, monospaced)));
+        assert_eq!(ranks, [0, 1, 3, 3, 3, 2, 1]);
+    }
+
+    #[test]
+    fn a_write_replaces_the_file_whole_and_leaves_nothing_on_failure() {
+        let directory = crate::test_support::tempdir();
+        let target = directory.path().join("out.png");
+        std::fs::write(&target, "old").unwrap();
+        assert_eq!(write(&target, b"new bytes").unwrap(), 9);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new bytes");
+        assert!(write(&directory.path().join("missing/out.png"), b"x").is_err());
+        let names: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["out.png"]);
+    }
+}

@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::fs_store::{RelPath, StoreReader};
-use crate::index::NOT_UTF8;
+use crate::index::{searchable, NOT_UTF8};
+use crate::kind::NoteKind;
 use crate::model::{NoteId, Workspace};
-use crate::scan;
+use crate::scan::{self, Kinds};
 
 // Process-wide so a result can never match a different Session, including a
 // replacement Session that reuses the same root and generation number.
@@ -34,6 +35,10 @@ pub(crate) struct Scanned {
     /// Notes whose disk contents differ from the snapshot's indexed text, or
     /// whose contents are unavailable; unchanged notes are omitted.
     pub contents: Vec<(NoteId, RelPath, Result<String, String>)>,
+    /// Board labels taken on the job's thread: of each source the index
+    /// waited on, and of each board in `contents`. Each names the source it
+    /// was taken from, which the index checks before it keeps the labels.
+    pub extracted: Vec<(NoteId, Arc<str>, Option<String>)>,
 }
 
 type Payload = Option<Result<Scanned, String>>;
@@ -42,8 +47,10 @@ type Payload = Option<Result<Scanned, String>>;
 /// descriptor. Running it never mutates the Session.
 pub struct ReconcileJob {
     reader: StoreReader,
+    kinds: Kinds,
     previous: Workspace,
     indexed: HashMap<NoteId, Arc<str>>,
+    waiting: Vec<(NoteId, Arc<str>)>,
     result: ReconcileResult,
 }
 
@@ -60,13 +67,17 @@ impl ReconcileJob {
     pub(crate) fn new(
         tags: Tags,
         reader: StoreReader,
+        kinds: Kinds,
         previous: Workspace,
         indexed: HashMap<NoteId, Arc<str>>,
+        waiting: Vec<(NoteId, Arc<str>)>,
     ) -> Self {
         Self {
             reader,
+            kinds,
             previous,
             indexed,
+            waiting,
             result: ReconcileResult {
                 tags,
                 payload: Arc::new(Mutex::new(None)),
@@ -85,12 +96,21 @@ impl ReconcileJob {
     pub fn run(self) -> ReconcileResult {
         let Self {
             reader,
+            kinds,
             previous,
             indexed,
+            waiting,
             result,
         } = self;
         let mut contents = Vec::new();
-        let scanned = scan::scan_with_contents(&reader, Some(&previous), |note, file| {
+        let mut extracted: Vec<_> = waiting
+            .into_iter()
+            .map(|(note, source)| {
+                let text = searchable(NoteKind::Board, &source);
+                (note, source, text)
+            })
+            .collect();
+        let scanned = scan::scan_with_contents(&reader, Some(&previous), kinds, |note, file| {
             let update = match file {
                 Ok(file)
                     if indexed
@@ -102,6 +122,13 @@ impl ReconcileJob {
                 Ok(file) => String::from_utf8(file.bytes.clone()).map_err(|_| NOT_UTF8.to_owned()),
                 Err(reason) => Err(reason.to_owned()),
             };
+            if let (NoteKind::Board, Ok(source)) = (note.kind, &update) {
+                extracted.push((
+                    note.id,
+                    Arc::from(source.as_str()),
+                    searchable(NoteKind::Board, source),
+                ));
+            }
             contents.push((note.id, note.path.clone(), update));
         });
         let outcome = scanned
@@ -109,6 +136,7 @@ impl ReconcileJob {
                 changed: tree_differs(&previous, &model),
                 model,
                 contents,
+                extracted,
             })
             .map_err(|error| error.to_string());
         *result
@@ -137,6 +165,30 @@ impl std::fmt::Debug for ReconcileResult {
 }
 
 impl ReconcileResult {
+    /// How many notes' contents a finished job sends back.
+    #[cfg(test)]
+    pub(crate) fn sent_contents(&self) -> Option<usize> {
+        self.payload
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()?
+            .as_ref()
+            .ok()
+            .map(|scanned| scanned.contents.len())
+    }
+
+    /// How many boards' labels a finished job extracted.
+    #[cfg(test)]
+    pub(crate) fn sent_extractions(&self) -> Option<usize> {
+        self.payload
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()?
+            .as_ref()
+            .ok()
+            .map(|scanned| scanned.extracted.len())
+    }
+
     pub(crate) fn take(&self) -> Payload {
         self.payload
             .lock()

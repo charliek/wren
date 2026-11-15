@@ -4,13 +4,17 @@ use std::sync::Arc;
 use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 use iced::Task;
 use serde_json::{json, Value};
+use wren_board::scene::Source;
+use wren_board::Id;
 
 use super::commands::{Command, CommandId, Gateway, ItemTarget, ReorderTarget, Scope};
 use super::palette::{Key, Mode};
 use super::{focus_editor, App, Message};
+use crate::board_export::Format;
 use crate::panes::{Pane, PANES};
 use crate::test_ipc::Request;
 use wren_core::fs_store::Fault;
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::{Op, Session};
 
@@ -97,6 +101,32 @@ impl App {
                         },
                     ));
                 }
+                if id.scope() == Scope::Board {
+                    // The board's key policy routes the bound key, and only
+                    // a focused board sees it; it is mounted under the
+                    // editor's focus id. The board defaults are always in
+                    // the keymap, so the setting is checked here.
+                    if !self.preferences.boards {
+                        return Err("The command is unavailable".into());
+                    }
+                    let keymap = &self.preferences.keymap;
+                    let trigger = keymap.accel(id.key()).ok_or("The command has no key bound")?;
+                    let super::preferences::BoardRoute::Command(command) =
+                        super::preferences::board_route(keymap, trigger, false)
+                    else {
+                        return Err("The board does not route this command's key".into());
+                    };
+                    let request = Arc::clone(request);
+                    let board = self.surface() == super::board::Surface::Board;
+                    return Ok(iced::widget::operation::is_focused("note-editor").map(
+                        move |focused| {
+                            Message::BoardShortcut(
+                                Arc::clone(&request),
+                                (board && focused).then_some(command),
+                            )
+                        },
+                    ));
+                }
                 let task = self.run_shortcut(id);
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
@@ -110,6 +140,13 @@ impl App {
                     crate::drag::DragEvent::Activate { generation, row }
                 };
                 let task = self.drag_event(generation, event);
+                request.respond(Ok(self.navigation_snapshot()));
+                return Ok(task);
+            }
+            "dialog.tab" => {
+                // A Tab no widget took, as the keyboard subscription sends it.
+                let reverse = params.get("reverse").and_then(Value::as_bool).unwrap_or(false);
+                let task = self.update(Message::DialogTab(reverse));
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }
@@ -163,6 +200,12 @@ impl App {
                     times.clear();
                 }
                 request.respond(Ok(serde_json::json!({ "view_micros": recent })));
+            }
+            "perf.board" => return self.perf_board(request),
+            "spike.board" => {
+                request.respond(Ok(self.spike_board(params)?));
+                // A board shown afresh is timed until it is painted.
+                return Ok(self.time_board_open());
             }
             "editor.set" => {
                 if self.workspace_mode || self.session.is_some() || self.loading.is_some() {
@@ -290,6 +333,23 @@ impl App {
                 }
                 request.respond(Ok(self.editor_snapshot()));
             }
+            "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
+            | "board.apply" | "board.seed" => return self.board_request(request),
+            "board.export" => {
+                // What `note.export_svg`, `note.export_png` or
+                // `note.export_drawio` writes once its save dialog closes.
+                let format = match string(params, "format")? {
+                    "svg" => Format::Svg,
+                    "png" => Format::Png,
+                    "drawio" => Format::Drawio,
+                    _ => return Err("format must be svg, png or drawio".into()),
+                };
+                let path = PathBuf::from(string(params, "path")?);
+                if !path.is_absolute() {
+                    return Err("path must be absolute".into());
+                }
+                return self.request_board_export(path, format, request);
+            }
             "focus.get" => {
                 let request = Arc::clone(request);
                 return Ok(iced::advanced::widget::operate(Focused::default()).map(move |focused| {
@@ -301,6 +361,12 @@ impl App {
                 request.respond(Ok(Value::Null));
                 return Ok(focus_editor());
             }
+            "test.caret.restart" => {
+                let request = Arc::clone(request);
+                return Ok(iced::advanced::widget::operate(RestartCaret).map(move |()| {
+                    Message::Reply(Arc::clone(&request), Ok(Value::Null))
+                }));
+            }
             "theme.set" => {
                 let definition =
                     wren_core::theme::builtin(string(params, "id")?).ok_or("unknown theme")?;
@@ -310,16 +376,21 @@ impl App {
             }
             "clipboard.write" => {
                 return Ok(
-                    iced::clipboard::write(string(params, "text")?.into()).chain(Task::done(
+                    self.clipboard_write(string(params, "text")?.into()).chain(Task::done(
                         Message::Reply(Arc::clone(request), Ok(Value::Null)),
                     )),
                 );
             }
             "clipboard.read" => {
                 let request = Arc::clone(request);
-                return Ok(iced::clipboard::read().map(move |contents| {
+                return Ok(self.clipboard_read().map(move |contents| {
                     Message::Reply(Arc::clone(&request), Ok(json!(contents)))
                 }));
+            }
+            "test.clipboard" => {
+                let own = params.get("own").and_then(Value::as_bool).ok_or("own must be a boolean")?;
+                self.test_clipboard = own.then(String::new);
+                request.respond(Ok(Value::Null));
             }
             "app.screenshot" | "test.capture.after_layout" => {
                 let path = PathBuf::from(string(params, "path")?);
@@ -351,6 +422,14 @@ impl App {
                 } else {
                     request.respond(Ok(Value::Null));
                 }
+                return Ok(task);
+            }
+            "menu.get" => request.respond(Ok(self.menu_snapshot())),
+            "menu.run" => {
+                // An item chosen from the macOS menu bar, which sends back
+                // its command key.
+                let task = self.menu_command(string(params, "key")?);
+                request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }
             #[cfg(target_os = "macos")]
@@ -394,6 +473,8 @@ impl App {
                     "themes" => Mode::Themes,
                     "fonts" => Mode::Fonts,
                     "outline" => Mode::Outline,
+                    "board_nodes" => Mode::BoardNodes,
+                    "board_actions" => Mode::BoardActions,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -583,7 +664,7 @@ impl App {
                 )
             })
             .collect::<serde_json::Map<_, _>>();
-        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut,"state":match row.key { Key::Command(id) => self.command_state(id), _ => None }})).collect::<Vec<_>>()}));
+        let modal = self.palette.as_ref().map(|palette| json!({"mode":palette.mode.key(),"purpose":if palette.workspace_removal {"remove_workspace"} else {"navigate"},"generation":palette.generation,"source":palette.source.map(item_target_json),"query":palette.query,"active_index":palette.active,"active_key":palette.active.and_then(|index| palette.results.get(index)).map(|row| key_json(&row.key)),"error":palette.error,"results":palette.results.iter().map(|row| json!({"key":key_json(&row.key),"note":match row.key { Key::Note(note) => Some(note.0), _ => None },"title":row.title,"path":row.path,"snippet":row.snippet,"highlight":row.highlight.as_ref().map(|range| json!({"start":range.start,"end":range.end})),"hit":if row.content_hit { "content" } else { "title" },"content_match":match &row.action { super::palette::Action::Note(target) => target.content_match.as_ref().map(|range|json!({"start":range.start,"end":range.end})), _ => None },"index_revision":match &row.action { super::palette::Action::Note(target) => Some(target.index_revision), _ => None },"current":row.current,"enabled":row.enabled,"group":row.group,"shortcut":row.shortcut,"tag":row.tag,"state":match row.key { Key::Command(id) => self.command_state(id), _ => None }})).collect::<Vec<_>>()}));
         let dialog = self.dialog.as_ref().map(|dialog| json!({"kind":format!("{:?}",dialog.kind),"name":dialog.name,"error":dialog.error}));
         let gesture = self.drag_preview.as_ref().map(|preview| json!({"source":row_json(preview.source),"position":{"x":preview.position.x,"y":preview.position.y},"target":preview.target.as_ref().map(|target|row_json(target.row)),"insertion":preview.target.as_ref().and_then(|target|target.insertion).map(|line|json!({"x":line.line.x,"y":line.line.y,"width":line.line.width,"height":line.line.height})),"spring":preview.spring.map(|spring|format!("{spring:?}"))}));
         let processed = self.last_processed.as_ref().map(|processed|json!({"correlation":processed.correlation,"disposition":processed.disposition.key(),"warning":processed.warning}));
@@ -593,7 +674,7 @@ impl App {
             "preferred_widths":preferred,"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
             "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>()},
             "history":self.session.as_ref().map(|session| session.state().history().iter().map(|path| path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"history_position":self.session.as_ref().and_then(|session|session.state().history_position()),"mru":self.session.as_ref().map(|session| session.state().recent().iter().map(|path|path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"can_back":self.session.as_ref().is_some_and(Session::can_back),"can_forward":self.session.as_ref().is_some_and(Session::can_forward),
-            "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"sort":self.note_sort(),
+            "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"index_unextracted":self.session.as_ref().map_or(0,|session| session.index().unextracted()),"sort":self.note_sort(),
             "registrations":self.config.as_ref().map(|config| config.workspaces().iter().map(|entry| json!({"name":entry.name,"path":entry.path})).collect::<Vec<_>>()).unwrap_or_default(),"active_registration":self.config.as_ref().and_then(|config| config.active()),"registry_warning":self.registry_warning,"metadata_warning":self.metadata_warning,"config_writable":self.config.as_ref().is_some_and(|config| config.writable()),"config_directory":self.config.as_ref().and_then(|config|config.directory()),"folder_request":self.folder_request,
             "generation":self.workspace_generation(),"gesture_generation":self.gesture_generation,"spring_section":self.spring_section.map(|section|section.0),"gesture_preview":gesture,
             "conflict_copy":self.conflict_copy.as_ref().map(|(generation,path)|json!({"generation":generation,"path":path.as_path().to_string_lossy(),"enabled":self.command_enabled(CommandId::OpenConflictCopy)})),
@@ -681,9 +762,15 @@ impl App {
     }
 
     /// Spell check as the last frame drew it: the marks of its rows and the
-    /// menu, with rectangles in window coordinates for a native click.
+    /// menu, with rectangles in window coordinates for a native click. The
+    /// editor draws nothing while a board is shown, so its last frame is
+    /// then an earlier note's and is not reported.
     fn spell_snapshot(&self) -> Value {
-        let frame = self.editor.spell_frame();
+        let frame = if self.surface() == super::board::Surface::Board {
+            wren_editor::SpellFrame::default()
+        } else {
+            self.editor.spell_frame()
+        };
         let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
         let marks = frame
             .marks
@@ -903,6 +990,26 @@ fn result_key(value: &Value) -> Result<Key, String> {
             line: usize::try_from(id(heading, "line")?).map_err(|_| "line must be usize")?,
         });
     }
+    if let Some(element) = object.get("element") {
+        let source = |kind: &str| -> Result<Option<Id>, String> {
+            element
+                .get(kind)
+                .map(|id| {
+                    id.as_str()
+                        .and_then(Id::new)
+                        .ok_or_else(|| format!("element {kind} must be an id"))
+                })
+                .transpose()
+        };
+        if element.as_object().is_none_or(|object| object.len() != 1) {
+            return Err("element requires one node or edge".into());
+        }
+        return match (source("node")?, source("edge")?) {
+            (Some(id), None) => Ok(Key::Element(Source::Node(id))),
+            (None, Some(id)) => Ok(Key::Element(Source::Edge(id))),
+            _ => Err("element requires one node or edge".into()),
+        };
+    }
     if let Some(action) = object.get("item_action") {
         let object = action
             .as_object()
@@ -932,7 +1039,7 @@ fn result_key(value: &Value) -> Result<Key, String> {
 fn key_json(key: &Key) -> Value {
     match key {
         Key::Command(id) => {
-            json!({"command":super::commands::DEFINITIONS.iter().find(|definition| definition.id == *id).map(|definition| definition.key)})
+            json!({"command":id.key()})
         }
         Key::Note(note) => json!({"note":note.0}),
         Key::Section(section) => json!({"section":section.0}),
@@ -942,6 +1049,8 @@ fn key_json(key: &Key) -> Value {
         Key::Theme(id) => json!({"theme":id.unwrap_or("system")}),
         Key::Font(family) => json!({"font":family}),
         Key::Heading { revision, line } => json!({"heading":{"revision":revision,"line":line}}),
+        Key::Element(Source::Node(id)) => json!({"element":{"node":id.as_str()}}),
+        Key::Element(Source::Edge(id)) => json!({"element":{"edge":id.as_str()}}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }
@@ -1009,6 +1118,11 @@ fn core_op(params: &Value) -> Result<Op, String> {
         "create_note" => Op::CreateNote {
             group: group(params.get("parent").ok_or("parent is required")?)?,
             title: string(params, "title")?.into(),
+            kind: match params.get("kind").map(|kind| kind.as_str()) {
+                None | Some(Some("markdown")) => NoteKind::Markdown,
+                Some(Some("board")) => NoteKind::Board,
+                Some(_) => return Err("kind must be \"markdown\" or \"board\"".into()),
+            },
         },
         "select_parent" => Op::SelectParent {
             parent: parent(params.get("parent").ok_or("parent is required")?)?,
@@ -1137,10 +1251,10 @@ const FOCUS_NAMES: &[&str] = &[
 /// grips during a resize) as a count. `bounds` places each known widget on
 /// screen, focused or not, so a test can click it.
 #[derive(Debug, Clone, Default)]
-struct Focused {
-    named: Vec<&'static str>,
-    unnamed: usize,
-    bounds: Vec<(&'static str, iced::Rectangle)>,
+pub(super) struct Focused {
+    pub(super) named: Vec<&'static str>,
+    pub(super) unnamed: usize,
+    pub(super) bounds: Vec<(&'static str, iced::Rectangle)>,
 }
 
 impl iced::advanced::widget::Operation<Focused> for Focused {
@@ -1176,6 +1290,94 @@ impl iced::advanced::widget::Operation<Focused> for Focused {
 
     fn finish(&self) -> iced::advanced::widget::operation::Outcome<Focused> {
         iced::advanced::widget::operation::Outcome::Some(self.clone())
+    }
+}
+
+/// Focuses the focused widget again. A caret blinks on wall-clock time from
+/// its last focus or edit, so a scene capture restarts it and shoots inside
+/// the first, visible half-second.
+#[derive(Debug, Clone, Copy)]
+struct RestartCaret;
+
+impl iced::advanced::widget::Operation<()> for RestartCaret {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+    ) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+    ) {
+        if state.is_focused() {
+            state.focus();
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<()> {
+        iced::advanced::widget::operation::Outcome::Some(())
+    }
+}
+
+impl App {
+    /// The menu bar as the table builds it with the setting the app runs
+    /// with: each command item with the trigger a Mac would show for this
+    /// keymap and whether it is enabled. Only the Board menu's items follow
+    /// their commands; the rest are always enabled. On macOS `native` holds
+    /// the Board items' enabled state as AppKit has it.
+    fn menu_snapshot(&self) -> Value {
+        use crate::menu::{self, Kind, Row};
+        fn listed(
+            rows: &'static [Row],
+            kind: Kind,
+            keymap: &wren_core::keybind::Keymap,
+            enabled: &mut dyn FnMut(&str) -> bool,
+        ) -> Vec<Value> {
+            rows.iter()
+                .map(|row| match *row {
+                    Row::Command(key, title) => json!({
+                        "key": key,
+                        "title": title,
+                        "trigger": menu::triggers(keymap, key, kind)
+                            .next()
+                            .map(ToString::to_string),
+                        "enabled": kind != Kind::Board || enabled(key),
+                    }),
+                    Row::Native(native) => json!({"native": format!("{native:?}")}),
+                    Row::Separator => json!({"separator": true}),
+                    Row::Submenu(title, inner) => json!({
+                        "submenu": title,
+                        "items": listed(inner, kind, keymap, enabled),
+                    }),
+                })
+                .collect()
+        }
+        let mut enabled = self.menu_enabled();
+        let menus: Vec<Value> = menu::menus(self.preferences.boards)
+            .map(|spec| {
+                let kind = match spec.kind {
+                    Kind::Plain => "plain",
+                    Kind::Board => "board",
+                    Kind::Window => "window",
+                };
+                let items = listed(spec.rows, spec.kind, &self.preferences.keymap, &mut enabled);
+                json!({"title": spec.title, "kind": kind, "items": items})
+            })
+            .collect();
+        #[cfg(target_os = "macos")]
+        let native = Some(
+            crate::macos_menu::board_enabled()
+                .into_iter()
+                .map(|(key, enabled)| json!({"key": key, "enabled": enabled}))
+                .collect::<Vec<_>>(),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let native: Option<Vec<Value>> = None;
+        json!({"menus": menus, "native": native})
     }
 }
 
@@ -1233,9 +1435,26 @@ mod tests {
             core_op(&json!({"op":"create_note","parent":{"group":2},"title":"Note"})).unwrap(),
             Op::CreateNote {
                 group: GroupId(2),
+                kind: NoteKind::Markdown,
                 ..
             }
         ));
+        assert!(matches!(
+            core_op(
+                &json!({"op":"create_note","parent":{"group":2},"title":"Flow","kind":"board"})
+            )
+            .unwrap(),
+            Op::CreateNote {
+                kind: NoteKind::Board,
+                ..
+            }
+        ));
+        for kind in [json!("Board"), json!(1), Value::Null] {
+            assert!(core_op(
+                &json!({"op":"create_note","parent":{"group":2},"title":"Flow","kind":kind})
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -1249,6 +1468,8 @@ mod tests {
                 revision: 7,
                 line: 12,
             },
+            Key::Element(Source::Node(Id::new("a1").unwrap())),
+            Key::Element(Source::Edge(Id::new("a1").unwrap())),
             Key::ItemAction {
                 target: ItemTarget {
                     generation: 4,
@@ -1312,6 +1533,152 @@ mod tests {
         ] {
             assert!(core_op(&params).is_err(), "{params}");
         }
+    }
+
+    /// §6.8 Phase 1 item 6, without a window: every harness request that
+    /// writes through the editor is refused on a board, and the palette's
+    /// Bold is blocked.
+    #[test]
+    fn editor_requests_are_refused_on_a_board() {
+        use super::super::board::tests as boards;
+
+        let (directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        let path = directory.path().join("Boards/Samples/Flow.wren-board");
+        for (op, params) in [
+            ("editor.insert", json!({"text":"bypass"})),
+            ("editor.undo", json!({})),
+            ("editor.redo", json!({})),
+            ("editor.action", json!({"kind":"enter"})),
+            ("editor.action", json!({"kind":"select_all"})),
+            ("editor.command", json!({"intent":"bold"})),
+            ("editor.cursor", json!({"line":0,"column":0})),
+            ("editor.find", json!({"query":"schema"})),
+        ] {
+            let (request, mut reply) = Request::detached(op, params);
+            let _ = app.handle_test(request);
+            let error = reply.try_recv().unwrap().expect_err(op);
+            assert!(error.contains("board"), "{op}: {error}");
+        }
+        let outcome = app
+            .navigation_request("command.run", &json!({"id":"markdown.bold"}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "blocked");
+        let outcome = app
+            .navigation_request("command.run", &json!({"id":"editor.toggle_engine"}))
+            .unwrap();
+        assert_eq!(outcome.processed.disposition.key(), "completed");
+
+        assert_eq!(app.editor.text(), "");
+        assert!(!app.find_open);
+        let document = app.session.as_ref().unwrap().document().unwrap();
+        assert_eq!(document.text, boards::FLOW);
+        assert!(!document.dirty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), boards::FLOW);
+        // The editor snapshot reads the empty editor, never the board's text.
+        assert_eq!(app.editor_snapshot()["text"], "");
+    }
+
+    /// With `boards` off a board key is no shortcut, as `command.run`
+    /// blocks the command.
+    #[test]
+    fn a_board_shortcut_is_refused_with_boards_off() {
+        use super::super::board::tests as boards;
+
+        let (_directory, mut app) = boards::fixture();
+        app.preferences.boards = false;
+        let (request, mut reply) = Request::detached("shortcut", json!({"id":"board.tool.select"}));
+        let _ = app.handle_test(request);
+        let error = reply.try_recv().unwrap().expect_err("shortcut");
+        assert!(error.contains("unavailable"), "{error}");
+    }
+
+    /// `board.export` writes what `note.export_svg`, `note.export_png` or
+    /// `note.export_drawio` writes, and only for a board on screen.
+    #[test]
+    fn board_export_writes_the_shown_board_and_refuses_anything_else() {
+        use super::super::board::{self, tests as boards};
+
+        let (directory, mut app) = boards::fixture();
+        let out = crate::test_support::tempdir();
+        let target = out.path().join("Flow.svg");
+        let export = |app: &mut App, params: Value| {
+            let (request, mut reply) = Request::detached("board.export", params);
+            let _ = app.handle_test(request);
+            let _ = app.wait_for_export();
+            reply.try_recv().unwrap()
+        };
+        let svg = json!({"format":"svg","path":target});
+
+        // No board on screen: no note, a Markdown note, raw text.
+        let error = export(&mut app, svg.clone()).expect_err("no note");
+        assert!(error.contains("board"), "{error}");
+        boards::open_board(&mut app, "Broken");
+        assert!(export(&mut app, svg.clone()).is_err());
+        assert!(!target.exists());
+
+        boards::open_board(&mut app, "Flow");
+        for params in [
+            json!({"format":"pdf","path":target}),
+            json!({"format":"png","path":"relative.png"}),
+            json!({"format":"svg","path":"relative.svg"}),
+            json!({"format":"svg"}),
+        ] {
+            assert!(export(&mut app, params.clone()).is_err(), "{params}");
+        }
+        let reply = export(&mut app, svg).expect("an export");
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, board::svg_document(app.board.as_ref().unwrap()));
+        assert_eq!(reply["bytes"], written.len());
+        assert_eq!(reply["path"], json!(target));
+        let png = out.path().join("Flow.png");
+        let reply = export(&mut app, json!({"format":"png","path":png})).expect("a PNG export");
+        let written = std::fs::read(&png).unwrap();
+        assert_eq!(
+            written,
+            crate::board_export::png(
+                &board::svg_document(app.board.as_ref().unwrap()),
+                crate::board_export::PNG_SCALE
+            )
+            .unwrap()
+        );
+        assert_eq!(reply["bytes"], written.len());
+        let drawio = out.path().join("Flow.drawio");
+        let reply =
+            export(&mut app, json!({"format":"drawio","path":drawio})).expect("a draw.io export");
+        let file = std::fs::read_to_string(&drawio).unwrap();
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(
+            file,
+            crate::board_export::drawio(view, crate::board_export::DRAWIO_THEME, "Flow")
+        );
+        assert_eq!(reply["bytes"], file.len());
+        // The reply waits for the worker, and no other export starts
+        // until it has finished.
+        let (request, mut first) =
+            Request::detached("board.export", json!({"format":"png","path":png}));
+        let _ = app.handle_test(request);
+        assert!(first.try_recv().is_err(), "answered when written");
+        assert_eq!(app.export_state(), Some("writing"));
+        let (request, mut second) =
+            Request::detached("board.export", json!({"format":"svg","path":target}));
+        let _ = app.handle_test(request);
+        let error = second.try_recv().unwrap().expect_err("a second export");
+        assert!(error.contains("is still being written"), "{error}");
+        let _ = app.wait_for_export();
+        assert_eq!(first.try_recv().unwrap().unwrap()["bytes"], written.len());
+        assert_eq!(app.export_state(), None);
+        let missing = json!({"format":"svg","path":out.path().join("no/such/Flow.svg")});
+        let error = export(&mut app, missing).expect_err("an unwritable path");
+        assert!(
+            error.starts_with("Could not export the board to "),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("Boards/Samples/Flow.wren-board"))
+                .unwrap(),
+            boards::FLOW
+        );
     }
 
     fn navigation_fixture() -> (tempfile::TempDir, App) {

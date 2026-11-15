@@ -19,6 +19,13 @@ palette.
         └── Cutover checklist.md
 ```
 
+A note can also be a **board**: a canvas of shapes and connectors for
+flowcharts and small diagrams, saved as `Name.wren-board` beside the
+Markdown notes in a plain text format with one field per line, so its
+changes read well in git. Boards are built with the mouse or entirely from
+the keyboard, and export to SVG, PNG, and draw.io, in the app or with
+`wren export` on the command line. See [Boards](reference/boards.md).
+
 ## Principles
 
 - **Files are the truth.** There is no database. Obsidian, `grep`, git, and
@@ -58,6 +65,8 @@ and building from source.
   corrections menu, and your word list.
 - [Workspace folder](reference/workspace-folder.md): what Wren reads and
   writes on disk.
+- [Boards](reference/boards.md) and the
+  [board file format](reference/board-format.md): diagrams as notes.
 - [Autosave and external edits](reference/autosave.md): when notes are
   written and how conflicts are kept.
 - [Architecture](development/architecture.md): how the code is organized,

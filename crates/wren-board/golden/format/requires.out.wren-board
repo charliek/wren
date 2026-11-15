@@ -1,0 +1,9 @@
+schema = 1
+requires = ["frames", "zz-feature"]
+
+[node.a]
+text = "Needs features"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V01"

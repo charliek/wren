@@ -1,0 +1,20 @@
+schema = 1
+"top level" = 1
+"x.y".z = true
+
+[node.a]
+text = "Quoted keys"
+kind = "shape"
+at = [0, 0]
+ext."my tool"."" = 2
+ext."my tool"."a.b" = 1
+ext."my tool"."café" = 3
+ext."my tool"."say \"hi\"" = 4
+size = [120, 60]
+z = "V01"
+
+[edge.e]
+kind = "edge"
+from = { "my port" = "west", node = "a" }
+to = { at = [200, 0] }
+z = "V02"

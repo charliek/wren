@@ -936,6 +936,7 @@ mod tests {
             id: NoteId(100),
             group: GroupId(10),
             title: "Source".into(),
+            kind: wren_core::kind::NoteKind::Markdown,
             path: RelPath::new("One/Origin/Source.md").unwrap(),
             subtitle: None,
             modified: std::time::SystemTime::UNIX_EPOCH,

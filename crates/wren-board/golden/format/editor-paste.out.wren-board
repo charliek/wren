@@ -1,0 +1,73 @@
+schema = 1
+
+[node.draft]
+text = "Draft"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V"
+
+[node.grbmrfks]
+text = "Review?"
+kind = "shape"
+at = [40, 160]
+shape = "diamond"
+size = [120, 60]
+z = "V07"
+
+[node.jydm16yr]
+text = "Draft"
+kind = "shape"
+at = [40, 40]
+size = [120, 60]
+z = "V06"
+
+[node.mh1e4hka]
+text = "Review?"
+kind = "shape"
+at = [20, 140]
+shape = "diamond"
+size = [120, 60]
+z = "V04"
+
+[node.review]
+text = "Review?"
+kind = "shape"
+at = [0, 120]
+shape = "diamond"
+size = [120, 60]
+z = "V01"
+
+[node.tps227j9]
+text = "Draft"
+kind = "shape"
+at = [20, 20]
+size = [120, 60]
+z = "V03"
+
+[edge.b4vnbpb8]
+kind = "edge"
+from = { node = "jydm16yr" }
+to = { node = "grbmrfks" }
+labels = [
+  { text = "submit" },
+]
+z = "V08"
+
+[edge.dtd716cc]
+kind = "edge"
+from = { node = "tps227j9" }
+to = { node = "mh1e4hka" }
+labels = [
+  { text = "submit" },
+]
+z = "V05"
+
+[edge.submit]
+kind = "edge"
+from = { node = "draft" }
+to = { node = "review" }
+labels = [
+  { text = "submit" },
+]
+z = "V02"

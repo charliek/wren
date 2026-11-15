@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest import test_gestures as gestures
+from tools.wrentest.boards import conflict_board, grid_board
 from tools.wrentest.test_editor import focus_native, xdo
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, spell_setting, wait_for
@@ -262,6 +263,70 @@ def test_the_classic_engine_shows_nothing(tmp_path: Path) -> None:
         suggest(app)
         app.client.call("editor.spell_event", {"event": "open_at_caret"})
         assert menu(app) is None
+
+
+def test_a_board_shown_as_raw_text_reports_no_marks(tmp_path: Path) -> None:
+    """Spell check is for Markdown text: a board that does not parse opens
+    as raw text in the editor, and nothing in it is marked or suggested."""
+    raw = "Notes/Inbox/Broken.wren-board"
+    root = tmp_path / "workspace"
+    (root / "Notes/Inbox").mkdir(parents=True)
+    (root / NOTE).write_text(original(), encoding="utf-8")
+    (root / raw).write_text("# A mispelled heding\n" + conflict_board(), encoding="utf-8")
+    with WrenApp(workspace=root, settings=ADVANCED + "boards = on\n", words=WORDS,
+                 artifacts_dir=artifact_directory("spell-raw-board")) as app:
+        wait_for(lambda: spell(app)["ready"], description="the dictionary loads")
+        open_note(app, NOTE)
+        wait_marks(app, MARKS, "the Markdown note's marks")
+
+        open_note(app, raw)
+        assert app.client.call("board.get", {"elements": False})["surface"] == "raw"
+        assert lines(app)[0] == "# A mispelled heding"
+        app.client.call("editor.focus")
+        wait_for(lambda: "note-editor" in focused(app), description="the editor is focused")
+        caret(app, 0, len("# A mispelled heding"))
+        app.client.call("editor.insert", {"text": " wrod "})
+        drawn_frame(app, "spell-raw-board-frame")
+        assert marks(app) == []
+        caret(app, 0, 6)
+        suggest(app)
+        app.client.call("editor.spell_event", {"event": "open_at_caret"})
+        drawn_frame(app, "spell-raw-board-menu")
+        assert menu(app) is None
+        assert marks(app) == []
+        command_state = {row["key"]["command"]: row["enabled"]
+                         for row in app.client.call("palette.open", {"mode": "commands"})
+                         ["navigation"]["modal"]["results"]}
+        app.client.call("palette.close")
+        assert command_state["editor.spell_suggest"] is False
+
+        # The Markdown note next to it is still checked.
+        open_note(app, NOTE)
+        wait_marks(app, MARKS, "the marks return on Markdown")
+
+
+def test_a_board_reports_no_marks_left_from_a_markdown_note(tmp_path: Path) -> None:
+    """The editor draws nothing while a board is shown, so the marks of the
+    Markdown note open before it are not reported as the board's."""
+    board = "Notes/Inbox/Grid.wren-board"
+    root = tmp_path / "workspace"
+    (root / "Notes/Inbox").mkdir(parents=True)
+    (root / NOTE).write_text(original(), encoding="utf-8")
+    (root / board).write_text(grid_board(4), encoding="utf-8")
+    with WrenApp(workspace=root, settings=ADVANCED + "boards = on\n", words=WORDS,
+                 artifacts_dir=artifact_directory("spell-board")) as app:
+        wait_for(lambda: spell(app)["ready"], description="the dictionary loads")
+        open_note(app, NOTE)
+        wait_marks(app, MARKS, "the Markdown note's marks")
+
+        open_note(app, board)
+        assert app.client.call("board.get", {"elements": False})["surface"] == "board"
+        drawn_frame(app, "spell-board-frame")
+        assert spell(app)["marks"] == []
+        assert menu(app) is None
+
+        open_note(app, NOTE)
+        wait_marks(app, MARKS, "the marks return on Markdown")
 
 
 def test_the_lanes_setting_decides_when_the_test_names_none(tmp_path: Path) -> None:

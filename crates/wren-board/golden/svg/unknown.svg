@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="321.5" height="61.5" viewBox="-0.75 -0.75 321.5 61.5">
+<path d="M0 0L120 0L120 60L0 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="11" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Unknown values</text>
+<path d="M200 0L320 0L320 60L200 60Z" fill="none" stroke="#808890" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="204" y="16.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#808890" xml:space="preserve">sticky</text>
+<text x="218" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Unknown kind</text>
+<path d="M130 30L190 30" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M120 30L130 26L130 34ZM200 30L190 34L190 26Z" fill="#202428"/>
+<path d="M138 20L182 20L182 40L138 40Z" fill="#ffffff"/>
+<text x="142" y="34.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">styled</text>
+</svg>

@@ -135,6 +135,9 @@ pub struct Settings {
     pub markdown_assist: bool,
     /// Spell check, which the advanced engine alone carries out.
     pub spell_check: bool,
+    /// Whether board notes are listed and opened, read when a workspace
+    /// opens.
+    pub boards: bool,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -152,6 +155,7 @@ impl Default for Settings {
             editor_engine: EditorEngine::default(),
             markdown_assist: true,
             spell_check: true,
+            boards: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -248,6 +252,10 @@ impl Settings {
                 },
                 "spell-check" => match parse_bool(value) {
                     Some(enabled) => settings.spell_check = enabled,
+                    None => invalid(),
+                },
+                "boards" => match parse_bool(value) {
+                    Some(enabled) => settings.boards = enabled,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -492,6 +500,11 @@ pub const TEMPLATE: &str = "\
 # Your own words go in words.txt, beside this file, one per line.
 # spell-check = on
 
+# Boards: `.wren-board` notes of shapes and connectors, drawn on a canvas.
+# Off, boards are neither listed nor opened, and their files are left alone.
+# Applies when Wren restarts.
+# boards = on
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -678,6 +691,36 @@ mod tests {
         let folder = directory.path().join("folder.txt");
         fs::create_dir(&folder).unwrap();
         assert!(ensure_words_exist(&folder).is_err());
+    }
+
+    #[test]
+    fn boards_default_on_and_parse_booleans() {
+        assert!(Settings::default().boards);
+        assert!(Settings::parse("").boards);
+        for (value, enabled) in [
+            ("on", true),
+            ("yes", true),
+            ("true", true),
+            ("ON", true),
+            ("\"on\"", true),
+            ("off", false),
+            ("no", false),
+            ("false", false),
+        ] {
+            let settings = Settings::parse(&format!("boards = {value}\n"));
+            assert_eq!(settings.boards, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        for bad in ["sometimes", "1", ""] {
+            let settings = Settings::parse(&format!("boards = off\nboards = {bad}\n"));
+            assert!(!settings.boards, "{bad:?} keeps the earlier value");
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid boards value"));
+        }
+        assert!(TEMPLATE.contains("\n# boards = on\n"));
+        let off = with_value(TEMPLATE, "boards", "off");
+        assert!(!Settings::parse(&off).boards);
+        assert!(off.contains("\n# boards = on\n") && off.ends_with("boards = off\n"));
     }
 
     #[test]

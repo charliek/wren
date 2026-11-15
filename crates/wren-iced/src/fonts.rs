@@ -43,6 +43,9 @@ const CURATED: &[&str] = &[
     "Monaco",
 ];
 
+/// How many of [`FACES`], from the first, are Inter's.
+pub const INTER_FACES: usize = 4;
+
 pub const FACES: &[&[u8]] = &[
     include_bytes!("../../../third_party/inter/Inter-Regular.ttf"),
     include_bytes!("../../../third_party/inter/Inter-Medium.ttf"),
@@ -53,6 +56,18 @@ pub const FACES: &[&[u8]] = &[
     include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-Italic.ttf"),
     include_bytes!("../../../third_party/jetbrains-mono/JetBrainsMono-BoldItalic.ttf"),
 ];
+
+/// Load the bundled faces now. iced loads them once a window exists, which
+/// is too late for text measured while the app is still being built; it
+/// then skips these same bytes.
+pub fn load() {
+    let mut fonts = font_system()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    for face in FACES {
+        fonts.load_font(std::borrow::Cow::Borrowed(face));
+    }
+}
 
 pub const LICENSES: &str = concat!(
     "Inter\n\n",

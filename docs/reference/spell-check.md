@@ -19,7 +19,10 @@ editor works as usual.
 
 ## What is checked
 
-Spell check knows Markdown and reads only the text a reader sees.
+Spell check knows Markdown and reads only the text a reader sees. It
+checks Markdown notes only: [boards](boards.md) are not checked, and
+neither is a board that does not parse and opens as text in the editor,
+where **Suggest spelling** is unavailable too.
 
 | Checked | Not checked |
 |---|---|
@@ -131,7 +134,7 @@ always come from the dictionary.
 | Command | Action name | Default key | Available |
 |---|---|---|---|
 | Toggle spell check | `editor.toggle_spell_check` | none | Always. Its palette row shows `on` or `off`. |
-| Suggest spelling | `editor.spell_suggest` | Alt+. (Linux), ⌘. (macOS) | On the advanced engine with spell check on, once the dictionary has loaded and a note is open. |
+| Suggest spelling | `editor.spell_suggest` | Alt+. (Linux), ⌘. (macOS) | On the advanced engine with spell check on, once the dictionary has loaded and a Markdown note is open (not a board, nor a board shown as text). |
 | Open spelling word list | `settings.open_words` | none | Always. Like **Open settings file**, it stops with a message when there is no settings location (neither `HOME` nor `WREN_CONFIG` is set). |
 
 All three can be bound with `keybind` lines (see

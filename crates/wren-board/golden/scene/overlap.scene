@@ -1,0 +1,12 @@
+bounds -0.75,-0.75 401.5x161.5
+node back path in -0.75,-0.75 241.5x81.5 fill #3060d0 stroke #3060d0 1.5: M 0,0 L 240,0 L 240,80 L 0,80 Z
+node back text in 32.5,20 175x40 Regular 14 #ffffff
+  32.5,20 w 175 "The back shape's label is"
+  95.5,40 w 49 "covered"
+node middle path in 79.25,39.25 241.5x81.5 fill #309040 stroke #309040 1.5: M 80,40 L 320,40 L 320,120 L 80,120 Z
+node middle text in 105.5,60 189x40 Regular 14 #ffffff
+  105.5,60 w 189 "The middle shape's label is"
+  175.5,80 w 49 "covered"
+node front path in 159.25,79.25 241.5x81.5 fill #c03030 stroke #c03030 1.5: M 160,80 L 400,80 L 400,160 L 160,160 Z
+node front text in 178.5,110 203x20 Regular 14 #ffffff
+  178.5,110 w 203 "The front shape is drawn last"

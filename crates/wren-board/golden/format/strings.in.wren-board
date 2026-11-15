@@ -1,0 +1,23 @@
+schema = 1
+
+[node.a]
+text = """
+Multi-line \
+basic, with a line \
+   continuation"""
+kind = 'shape'
+at = [0, 0]
+size = [120, 60]
+z = 'V01'
+ext.paths.windows = 'C:\Users\wren'
+ext.paths.raw = '''
+two
+lines'''
+
+[node.b]
+text = "Escapes: \u00E9 \U0001F680, CRLF\r\nand a lone CR\rbecome line feeds"
+kind = "shape"
+at = [0, 120]
+size = [120, 60]
+z = "V02"
+ext.kept.cr = "a\rb"

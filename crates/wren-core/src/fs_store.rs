@@ -18,6 +18,8 @@ use std::time::SystemTime;
 use rustix::fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, Stat};
 use rustix::io::Errno;
 
+use crate::kind::NoteKind;
+
 const LOCK_NAME: &str = ".wren.lock";
 const MAX_NAME_BYTES: usize = 240;
 // macOS gives GUI processes a 256-descriptor soft limit; retained directory
@@ -29,6 +31,14 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct RelPath(PathBuf);
+
+/// What a created or relocated leaf is. A note keeps its kind's extension
+/// through create, rename and move, so a rename never changes its kind.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Leaf {
+    Directory,
+    Note(NoteKind),
+}
 
 impl RelPath {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -505,13 +515,15 @@ impl FsStore {
         &mut self,
         parent: &RelPath,
         title: &str,
+        kind: NoteKind,
         bytes: &[u8],
     ) -> Result<WriteReceipt, StoreError> {
-        let stem = sanitized_name(title, true)?;
+        let leaf = Leaf::Note(kind);
+        let stem = sanitized_name(title, leaf)?;
         let directory = self.open_directory(Some(parent))?;
         let (mut temporary, file) = self.prepare_file(&directory, bytes, None)?;
         for number in 1..=u64::MAX {
-            let name = candidate_name(&stem, number, true);
+            let name = candidate_name(&stem, number, leaf);
             let path = parent.join(&name)?;
             self.inject(Fault::BeforePublish)?;
             self.check_directory(Some(parent), &directory)?;
@@ -546,12 +558,12 @@ impl FsStore {
         parent: Option<&RelPath>,
         name: &str,
     ) -> Result<RelPath, StoreError> {
-        let stem = sanitized_name(name, false)?;
+        let stem = sanitized_name(name, Leaf::Directory)?;
         let directory = self.open_directory(parent)?;
         let mut temporary = Temporary::directory(&directory)?;
         fs::fsync(&temporary.file)?;
         for number in 1..=u64::MAX {
-            let name = candidate_name(&stem, number, false);
+            let name = candidate_name(&stem, number, Leaf::Directory);
             let path = child_path(parent, &name)?;
             self.inject(Fault::BeforePublish)?;
             self.check_directory(parent, &directory)?;
@@ -618,10 +630,11 @@ impl FsStore {
         source: &RelPath,
         parent: Option<&RelPath>,
         new_name: &str,
-        note: bool,
+        leaf: Leaf,
     ) -> Result<MoveReceipt, StoreError> {
         reject_lock_target(source)?;
-        let stem = sanitized_name(new_name, note)?;
+        let note = matches!(leaf, Leaf::Note(_));
+        let stem = sanitized_name(new_name, leaf)?;
         if !note && parent.is_some_and(|parent| parent.as_path().starts_with(source.as_path())) {
             return Err(StoreError::InvalidPath(
                 "cannot move a directory into itself".into(),
@@ -642,7 +655,7 @@ impl FsStore {
             &source.as_path().display().to_string(),
         )?;
         for number in 1..=u64::MAX {
-            let name = candidate_name(&stem, number, note);
+            let name = candidate_name(&stem, number, leaf);
             let path = child_path(parent, &name)?;
             self.check_directory(old_parent.as_ref(), &old_directory)?;
             self.check_directory(parent, &new_directory)?;
@@ -985,7 +998,7 @@ fn child_path(parent: Option<&RelPath>, name: &str) -> Result<RelPath, StoreErro
     }
 }
 
-fn sanitized_name(name: &str, note: bool) -> Result<String, StoreError> {
+fn sanitized_name(name: &str, leaf: Leaf) -> Result<String, StoreError> {
     let name = name.trim();
     if name.is_empty() || name.starts_with('.') {
         return Err(StoreError::InvalidName(name.to_owned()));
@@ -1006,12 +1019,13 @@ fn sanitized_name(name: &str, note: bool) -> Result<String, StoreError> {
         })
         .collect();
     let mut stem = stem.trim_end_matches([' ', '.']);
-    if note {
+    if let Leaf::Note(kind) = leaf {
+        let extension = kind.extension();
         while stem
-            .get(stem.len().saturating_sub(3)..)
-            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".md"))
+            .get(stem.len().saturating_sub(extension.len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(extension))
         {
-            stem = stem[..stem.len() - 3].trim_end_matches([' ', '.']);
+            stem = stem[..stem.len() - extension.len()].trim_end_matches([' ', '.']);
         }
     }
     if stem.is_empty() {
@@ -1020,13 +1034,16 @@ fn sanitized_name(name: &str, note: bool) -> Result<String, StoreError> {
     Ok(stem.to_owned())
 }
 
-fn candidate_name(stem: &str, number: u64, note: bool) -> String {
+fn candidate_name(stem: &str, number: u64, leaf: Leaf) -> String {
     let suffix = if number == 1 {
         String::new()
     } else {
         format!(" {number}")
     };
-    let extension = if note { ".md" } else { "" };
+    let extension = match leaf {
+        Leaf::Directory => "",
+        Leaf::Note(kind) => kind.extension(),
+    };
     let mut end = stem
         .len()
         .min(MAX_NAME_BYTES - suffix.len() - extension.len());
@@ -1190,7 +1207,9 @@ mod tests {
     fn directory_listings_include_root_and_restart_each_enumeration() {
         let (_temp, mut store, section) = workspace();
         store.create_dir(Some(&section), "Group").unwrap();
-        store.create_file(&section, "Note", b"note bytes").unwrap();
+        store
+            .create_file(&section, "Note", NoteKind::Markdown, b"note bytes")
+            .unwrap();
         for _ in 0..3 {
             assert_eq!(
                 listed_kinds(store.list_dir(None).unwrap()),
@@ -1261,7 +1280,9 @@ mod tests {
     #[test]
     fn directory_listings_retain_partial_enumeration_and_entry_metadata_errors() {
         let (_temp, mut store, section) = workspace();
-        store.create_file(&section, "Note", b"note bytes").unwrap();
+        store
+            .create_file(&section, "Note", NoteKind::Markdown, b"note bytes")
+            .unwrap();
         let directory = store.open_directory(Some(&section)).unwrap();
         let listing = collect_directory_entries(
             &directory,
@@ -1380,34 +1401,237 @@ mod tests {
     #[test]
     fn invalid_user_names_are_not_hidden_or_empty() {
         let (_temp, mut store, section) = workspace();
-        for name in ["", "  ", ".", "..", ".hidden", ".md"] {
-            assert!(store.create_file(&section, name, b"").is_err());
+        for name in [
+            "",
+            "  ",
+            ".",
+            "..",
+            ".hidden",
+            ".md",
+            ".wren-board",
+            ".wren-board.wren-board",
+        ] {
+            for kind in NoteKind::ALL {
+                assert!(store.create_file(&section, name, kind, b"").is_err());
+            }
             assert!(store.create_dir(None, name).is_err());
         }
-        let created = store
-            .create_file(&section, " a/b\\c:*?\"<>|.md.md ", b"text")
-            .unwrap();
-        assert_eq!(created.path.file_name(), "a-b-c-------.md");
-        assert_eq!(store.read(&created.path).unwrap().bytes, b"text");
+        for (kind, title, expected) in [
+            (
+                NoteKind::Markdown,
+                " a/b\\c:*?\"<>|.md.md ",
+                "a-b-c-------.md",
+            ),
+            (
+                NoteKind::Board,
+                " a/b\\c:*?\"<>|.wren-board.wren-board ",
+                "a-b-c-------.wren-board",
+            ),
+        ] {
+            let created = store.create_file(&section, title, kind, b"text").unwrap();
+            assert_eq!(created.path.file_name(), expected);
+            assert_eq!(store.read(&created.path).unwrap().bytes, b"text");
+        }
+        for (kind, name) in [(NoteKind::Markdown, "md"), (NoteKind::Board, "wren-board")] {
+            let created = store.create_file(&section, name, kind, b"").unwrap();
+            assert_eq!(
+                created.path.file_name(),
+                &*format!("{name}{}", kind.extension())
+            );
+        }
     }
 
     #[test]
     fn note_extension_is_normalized_once_after_trimming() {
         let (_temp, mut store, section) = workspace();
-        for (title, expected) in [
-            ("Note.MD", "Note.md"),
-            ("Note.md.", "Note 2.md"),
-            ("Note.md .md", "Note 3.md"),
+        for (kind, title, expected) in [
+            (NoteKind::Markdown, "Note.MD", "Note.md"),
+            (NoteKind::Markdown, "Note.md.", "Note 2.md"),
+            (NoteKind::Markdown, "Note.md .md", "Note 3.md"),
+            (NoteKind::Board, "Flow.WREN-BOARD", "Flow.wren-board"),
+            (NoteKind::Board, "Flow.wren-board.", "Flow 2.wren-board"),
+            (
+                NoteKind::Board,
+                "Flow.wren-board .Wren-Board",
+                "Flow 3.wren-board",
+            ),
         ] {
-            let created = store.create_file(&section, title, b"text").unwrap();
+            let created = store.create_file(&section, title, kind, b"text").unwrap();
             assert_eq!(created.path.file_name(), expected);
         }
     }
 
     #[test]
+    fn only_the_kinds_own_extension_is_stripped() {
+        let (_temp, mut store, section) = workspace();
+        for (kind, title, expected) in [
+            (NoteKind::Board, "x.md", "x.md.wren-board"),
+            (NoteKind::Board, "x.md.md", "x.md.md.wren-board"),
+            (
+                NoteKind::Board,
+                "x.wren-board.md",
+                "x.wren-board.md.wren-board",
+            ),
+            (NoteKind::Markdown, "y.wren-board", "y.wren-board.md"),
+            (NoteKind::Markdown, "y.md.wren-board", "y.md.wren-board.md"),
+        ] {
+            let created = store.create_file(&section, title, kind, b"").unwrap();
+            assert_eq!(created.path.file_name(), expected);
+            assert_eq!(NoteKind::from_name(created.path.file_name()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn a_long_board_stem_is_cut_on_a_character_boundary_before_its_extension() {
+        let (_temp, mut store, section) = workspace();
+        for title in ["a".repeat(250), "界".repeat(84), "é\u{1d400}".repeat(50)] {
+            let first = store
+                .create_file(&section, &title, NoteKind::Board, b"one")
+                .unwrap();
+            let second = store
+                .create_file(&section, &title, NoteKind::Board, b"two")
+                .unwrap();
+            for (receipt, tail) in [(&first, ".wren-board"), (&second, " 2.wren-board")] {
+                let name = receipt.path.file_name().to_str().unwrap();
+                assert!(name.len() <= MAX_NAME_BYTES, "{name}");
+                assert!(name.len() > MAX_NAME_BYTES - 4, "{name}");
+                assert!(name.ends_with(tail), "{name}");
+                let stem = &name[..name.len() - tail.len()];
+                assert!(title.starts_with(stem), "{name}");
+                assert_eq!(
+                    NoteKind::Board.title(receipt.path.file_name()),
+                    name[..name.len() - ".wren-board".len()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn same_title_in_two_kinds_collides_only_by_full_name() {
+        let (temp, mut store, section) = workspace();
+        let markdown = store
+            .create_file(&section, "Flow", NoteKind::Markdown, b"note")
+            .unwrap();
+        let board = store
+            .create_file(&section, "Flow", NoteKind::Board, b"schema = 1\n")
+            .unwrap();
+        assert_eq!(markdown.path, rel("Section/Flow.md"));
+        assert_eq!(board.path, rel("Section/Flow.wren-board"));
+        assert_eq!(
+            names(&temp.path().join("Section")),
+            ["Flow.md", "Flow.wren-board"]
+        );
+
+        let renamed = store
+            .relocate(
+                &board.path,
+                Some(&section),
+                "Flow",
+                Leaf::Note(NoteKind::Board),
+            )
+            .unwrap();
+        assert_eq!(renamed.path, board.path);
+        let other = store
+            .create_file(&section, "Other", NoteKind::Board, b"")
+            .unwrap();
+        let renamed = store
+            .relocate(
+                &other.path,
+                Some(&section),
+                "Flow.md",
+                Leaf::Note(NoteKind::Board),
+            )
+            .unwrap();
+        assert_eq!(renamed.path, rel("Section/Flow.md.wren-board"));
+        let renamed = store
+            .relocate(
+                &renamed.path,
+                Some(&section),
+                "Flow",
+                Leaf::Note(NoteKind::Board),
+            )
+            .unwrap();
+        assert_eq!(renamed.path, rel("Section/Flow 2.wren-board"));
+
+        let destination = store.create_dir(None, "Destination").unwrap();
+        fs::write(temp.path().join("Destination/Flow.md"), b"keep").unwrap();
+        let moved = store
+            .relocate(
+                &board.path,
+                Some(&destination),
+                "Flow",
+                Leaf::Note(NoteKind::Board),
+            )
+            .unwrap();
+        assert_eq!(moved.path, rel("Destination/Flow.wren-board"));
+        let moved = store
+            .relocate(
+                &markdown.path,
+                Some(&destination),
+                "Flow",
+                Leaf::Note(NoteKind::Markdown),
+            )
+            .unwrap();
+        assert_eq!(moved.path, rel("Destination/Flow 2.md"));
+        assert_eq!(
+            names(&temp.path().join("Destination")),
+            ["Flow 2.md", "Flow.md", "Flow.wren-board"]
+        );
+        assert_eq!(
+            fs::read(temp.path().join("Destination/Flow.md")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn a_rename_keeps_the_kind() {
+        let (_temp, mut store, section) = workspace();
+        let board = store
+            .create_file(&section, "Flow", NoteKind::Board, b"")
+            .unwrap();
+        for (name, expected) in [
+            ("x.md", "x.md.wren-board"),
+            ("x.wren-board.wren-board", "x.wren-board"),
+            ("Plain", "Plain.wren-board"),
+        ] {
+            let renamed = store
+                .relocate(
+                    &board.path,
+                    Some(&section),
+                    name,
+                    Leaf::Note(NoteKind::Board),
+                )
+                .unwrap();
+            assert_eq!(renamed.path.file_name(), expected);
+            store
+                .relocate(
+                    &renamed.path,
+                    Some(&section),
+                    "Flow",
+                    Leaf::Note(NoteKind::Board),
+                )
+                .unwrap();
+        }
+        let long = "b".repeat(250);
+        let renamed = store
+            .relocate(
+                &board.path,
+                Some(&section),
+                &long,
+                Leaf::Note(NoteKind::Board),
+            )
+            .unwrap();
+        let name = renamed.path.file_name().to_str().unwrap();
+        assert_eq!(name.len(), MAX_NAME_BYTES);
+        assert!(name.ends_with("b.wren-board"));
+    }
+
+    #[test]
     fn exact_bytes_not_length_control_conflicts() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"first").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"first")
+            .unwrap();
         fs::write(temp.path().join(note.path.as_path()), b"other").unwrap();
         let error = store
             .write(&note.path, b"new", Expected::Bytes(b"first"))
@@ -1467,7 +1691,9 @@ mod tests {
     #[test]
     fn writes_cannot_publish_a_document_too_large_to_read_back() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"baseline").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"baseline")
+            .unwrap();
         let oversized = vec![0; MAX_FILE_BYTES as usize + 1];
         store.fail_next(Fault::Write);
         let error = store
@@ -1475,7 +1701,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("size limit"));
         assert!(store
-            .create_file(&section, "Large", &oversized)
+            .create_file(&section, "Large", NoteKind::Markdown, &oversized)
             .unwrap_err()
             .to_string()
             .contains("size limit"));
@@ -1526,7 +1752,9 @@ mod tests {
     #[test]
     fn writes_preserve_ordinary_permissions_but_not_special_bits() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"old").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"old")
+            .unwrap();
         fs::set_permissions(
             temp.path().join(note.path.as_path()),
             fs::Permissions::from_mode(0o6750),
@@ -1566,7 +1794,9 @@ mod tests {
             assert!(store.write(&path, b"damage", Expected::Missing).is_err());
             assert!(store.validate_target(&path).is_err());
         }
-        assert!(store.create_file(&rel("alias"), "new", b"damage").is_err());
+        assert!(store
+            .create_file(&rel("alias"), "new", NoteKind::Markdown, b"damage")
+            .is_err());
         assert!(store.create_dir(Some(&rel("alias")), "new").is_err());
         assert!(store.ensure_dir(&rel("alias/inner")).is_err());
         assert_eq!(
@@ -1597,7 +1827,9 @@ mod tests {
         fs::create_dir(temp.path().join("Section/Note 2.md")).unwrap();
         symlink("missing", temp.path().join("Section/Note 3.md")).unwrap();
         make_fifo(&temp.path().join("Section/Note 4.md"));
-        let note = store.create_file(&section, "Note.md", b"new").unwrap();
+        let note = store
+            .create_file(&section, "Note.md", NoteKind::Markdown, b"new")
+            .unwrap();
         assert_eq!(note.path, rel("Section/Note 5.md"));
         assert_eq!(
             fs::read(temp.path().join("Section/Note.md")).unwrap(),
@@ -1621,8 +1853,12 @@ mod tests {
     fn unicode_names_are_bounded_including_collision_suffix() {
         let (_temp, mut store, section) = workspace();
         let title = "界é\u{1d400}".repeat(100);
-        let first = store.create_file(&section, &title, b"one").unwrap();
-        let second = store.create_file(&section, &title, b"two").unwrap();
+        let first = store
+            .create_file(&section, &title, NoteKind::Markdown, b"one")
+            .unwrap();
+        let second = store
+            .create_file(&section, &title, NoteKind::Markdown, b"two")
+            .unwrap();
         for receipt in [&first, &second] {
             let name = receipt.path.file_name().to_str().unwrap();
             assert!(name.len() <= MAX_NAME_BYTES);
@@ -1637,7 +1873,9 @@ mod tests {
     #[test]
     fn moving_is_same_inode_and_never_overwrites() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"move me").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"move me")
+            .unwrap();
         let inode = fs::metadata(temp.path().join(note.path.as_path()))
             .unwrap()
             .ino();
@@ -1646,7 +1884,12 @@ mod tests {
         fs::create_dir(temp.path().join("Destination/Note 2.md")).unwrap();
         symlink("missing", temp.path().join("Destination/Note 3.md")).unwrap();
         let moved = store
-            .relocate(&note.path, Some(&destination), "Note.md", true)
+            .relocate(
+                &note.path,
+                Some(&destination),
+                "Note.md",
+                Leaf::Note(NoteKind::Markdown),
+            )
             .unwrap();
         assert_eq!(moved.path, rel("Destination/Note 4.md"));
         assert_eq!(
@@ -1669,10 +1912,12 @@ mod tests {
         let (temp, mut store, section) = workspace();
         let group = store.create_dir(Some(&section), "Group").unwrap();
         assert!(store
-            .relocate(&section, Some(&group), "bad", false)
+            .relocate(&section, Some(&group), "bad", Leaf::Directory)
             .is_err());
         fs::create_dir(temp.path().join("Taken")).unwrap();
-        let moved = store.relocate(&section, None, "Taken", false).unwrap();
+        let moved = store
+            .relocate(&section, None, "Taken", Leaf::Directory)
+            .unwrap();
         assert_eq!(moved.path, rel("Taken 2"));
         assert!(temp.path().join("Taken 2/Group").is_dir());
         assert!(temp.path().join("Taken").is_dir());
@@ -1681,12 +1926,19 @@ mod tests {
     #[test]
     fn same_path_move_is_noop() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"same").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"same")
+            .unwrap();
         let before = fs::metadata(temp.path().join(note.path.as_path()))
             .unwrap()
             .ino();
         let moved = store
-            .relocate(&note.path, Some(&section), "Note", true)
+            .relocate(
+                &note.path,
+                Some(&section),
+                "Note",
+                Leaf::Note(NoteKind::Markdown),
+            )
             .unwrap();
         assert_eq!(moved.path, note.path);
         assert_eq!(
@@ -1701,7 +1953,9 @@ mod tests {
     #[test]
     fn prepublication_faults_leave_original_intact_and_no_temporary() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"old").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"old")
+            .unwrap();
         for fault in [
             Fault::Write,
             Fault::Permissions,
@@ -1719,7 +1973,9 @@ mod tests {
                 .write(&note.path, b"old", Expected::Bytes(b"old"))
                 .unwrap();
             store.fail_next(fault);
-            assert!(store.create_file(&section, "Failed", b"new").is_err());
+            assert!(store
+                .create_file(&section, "Failed", NoteKind::Markdown, b"new")
+                .is_err());
             assert_eq!(names(&temp.path().join("Section")), ["Note.md"]);
         }
     }
@@ -1742,7 +1998,7 @@ mod tests {
         assert_eq!(store.read(&path).unwrap().bytes, b"saved");
         store.fail_next(Fault::DirectorySync);
         let another = store
-            .create_file(&section, "Another", b"also published")
+            .create_file(&section, "Another", NoteKind::Markdown, b"also published")
             .unwrap();
         assert!(another.durability_error.is_some());
         assert_eq!(store.read(&another.path).unwrap().bytes, b"also published");
@@ -1752,7 +2008,12 @@ mod tests {
         let destination = store.create_dir(None, "Destination").unwrap();
         store.fail_next(Fault::DirectorySync);
         let moved = store
-            .relocate(&path, Some(&destination), "Moved", true)
+            .relocate(
+                &path,
+                Some(&destination),
+                "Moved",
+                Leaf::Note(NoteKind::Markdown),
+            )
             .unwrap();
         assert!(moved.durability_error.is_some());
         assert!(store.pending_durability());
@@ -1809,7 +2070,9 @@ mod tests {
     fn durability_retry_attempts_every_descriptor_and_retains_failed_ones() {
         let (temp, mut store, section) = workspace();
         store.fail_next(Fault::DirectorySync);
-        store.create_file(&section, "Note", b"published").unwrap();
+        store
+            .create_file(&section, "Note", NoteKind::Markdown, b"published")
+            .unwrap();
         store.fail_next(Fault::DirectorySync);
         store.create_dir(None, "Published").unwrap();
         assert_eq!(store.pending_directories.len(), 2);
@@ -1832,7 +2095,9 @@ mod tests {
         let (temp, mut store, section) = workspace();
         let outside = TempDir::new().unwrap();
         store.fail_next(Fault::DirectorySync);
-        let created = store.create_file(&section, "Note", b"published").unwrap();
+        let created = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"published")
+            .unwrap();
         assert!(created.durability_error.is_some());
         fs::rename(temp.path().join("Section"), temp.path().join("Renamed")).unwrap();
         symlink(outside.path(), temp.path().join("Section")).unwrap();
@@ -1848,7 +2113,9 @@ mod tests {
     #[test]
     fn reads_and_failed_writes_do_not_clear_pending_durability_or_change_baseline() {
         let (_temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"old").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"old")
+            .unwrap();
         store.fail_next(Fault::DirectorySync);
         let published = store
             .write(&note.path, b"published", Expected::Bytes(b"old"))
@@ -1910,7 +2177,9 @@ mod tests {
             let path = rel(&format!("Directory {number}"));
             fs::create_dir(temp.path().join(path.as_path())).unwrap();
             store.fail_next(Fault::DirectorySync);
-            let published = store.create_file(&path, "Note", b"published").unwrap();
+            let published = store
+                .create_file(&path, "Note", NoteKind::Markdown, b"published")
+                .unwrap();
             assert_eq!(store.read(&published.path).unwrap().bytes, b"published");
             last_error = published.durability_error;
             assert!(last_error.is_some());
@@ -1971,7 +2240,9 @@ mod tests {
     #[test]
     fn duplicated_readers_revalidate_the_root_and_never_hold_the_lock() {
         let (temp, mut store, section) = workspace();
-        store.create_file(&section, "Note", b"note bytes").unwrap();
+        store
+            .create_file(&section, "Note", NoteKind::Markdown, b"note bytes")
+            .unwrap();
         let reader = store.reader().try_clone().unwrap();
         let note = rel("Section/Note.md");
         let bytes = std::thread::spawn(move || reader.read(&note).unwrap().bytes)
@@ -2005,7 +2276,14 @@ mod tests {
         assert!(store
             .write(&path, b"replacement", Expected::Bytes(b""))
             .is_err());
-        assert!(store.relocate(&path, Some(&section), "Lock", true).is_err());
+        assert!(store
+            .relocate(
+                &path,
+                Some(&section),
+                "Lock",
+                Leaf::Note(NoteKind::Markdown)
+            )
+            .is_err());
         assert!(store.validate_target(&path).is_err());
         assert_eq!(
             fs::metadata(temp.path().join(LOCK_NAME)).unwrap().ino(),
@@ -2020,19 +2298,31 @@ mod tests {
     #[test]
     fn directory_and_move_failures_do_not_publish_or_leave_staging_entries() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"keep").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"keep")
+            .unwrap();
         let root_names = names(temp.path());
         store.fail_next(Fault::BeforePublish);
         assert!(store.create_dir(None, "Failed").is_err());
         assert_eq!(names(temp.path()), root_names);
         store.fail_next(Fault::BeforePublish);
         assert!(store
-            .relocate(&note.path, Some(&section), "Changed", true)
+            .relocate(
+                &note.path,
+                Some(&section),
+                "Changed",
+                Leaf::Note(NoteKind::Markdown)
+            )
             .is_err());
         assert_eq!(names(&temp.path().join("Section")), ["Note.md"]);
         assert_eq!(store.read(&note.path).unwrap().bytes, b"keep");
         assert!(store
-            .relocate(&note.path, Some(&section), "Changed", true)
+            .relocate(
+                &note.path,
+                Some(&section),
+                "Changed",
+                Leaf::Note(NoteKind::Markdown)
+            )
             .is_ok());
         store.fail_next(Fault::DirectorySync);
         let directory = store.create_dir(None, "Published").unwrap();
@@ -2042,18 +2332,30 @@ mod tests {
     #[test]
     fn moves_reject_symlink_sources_and_destination_ancestors() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"keep").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"keep")
+            .unwrap();
         let outside = TempDir::new().unwrap();
         symlink(outside.path(), temp.path().join("alias")).unwrap();
         symlink("Note.md", temp.path().join("Section/link.md")).unwrap();
         assert!(store
-            .relocate(&rel("Section/link.md"), Some(&section), "Moved", true)
+            .relocate(
+                &rel("Section/link.md"),
+                Some(&section),
+                "Moved",
+                Leaf::Note(NoteKind::Markdown)
+            )
             .is_err());
         assert!(store
-            .relocate(&note.path, Some(&rel("alias")), "Moved", true)
+            .relocate(
+                &note.path,
+                Some(&rel("alias")),
+                "Moved",
+                Leaf::Note(NoteKind::Markdown)
+            )
             .is_err());
         assert!(store
-            .relocate(&section, Some(&rel("alias")), "Moved", false)
+            .relocate(&section, Some(&rel("alias")), "Moved", Leaf::Directory)
             .is_err());
         assert_eq!(store.read(&note.path).unwrap().bytes, b"keep");
         assert!(names(outside.path()).is_empty());
@@ -2076,7 +2378,9 @@ mod tests {
     #[test]
     fn equal_bytes_in_a_replacement_inode_are_not_the_same_baseline() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"same").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"same")
+            .unwrap();
         let directory = store.open_directory(Some(&section)).unwrap();
         let original = snapshot(&directory, note.path.file_name()).unwrap();
         fs::write(temp.path().join("replacement"), b"same").unwrap();
@@ -2135,7 +2439,9 @@ mod tests {
     #[test]
     fn target_validation_accepts_only_current_real_files_and_directories() {
         let (temp, mut store, section) = workspace();
-        let note = store.create_file(&section, "Note", b"ok").unwrap();
+        let note = store
+            .create_file(&section, "Note", NoteKind::Markdown, b"ok")
+            .unwrap();
         assert_eq!(
             store.validate_target(&section).unwrap(),
             store.root().join("Section")

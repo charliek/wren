@@ -1,0 +1,414 @@
+"""What a board never loses and never writes by mistake (discovery/boards.md
+§3.4, §5.9 rule 6, §6.8 Phase 2 item 3, and §7.3's attacks 1, 6 and 7).
+
+A label is part of the draft from its first keystroke, the board settles
+before anything that is not passive, only the board writes a board, and a
+sequence that leaves nothing changed writes nothing.
+"""
+
+from __future__ import annotations
+
+import time
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from tools.wrentest.boards import (
+    FLOW, GROUP, HAND_WRITTEN, NOTES, blocks, board, board_app, click, copy_samples, fitted, flushed,
+    key, note_id, open_note, stamp, type_text,
+)
+from tools.wrentest.client import RemoteError
+from tools.wrentest.test_board_view import focused, wait_focus
+from tools.wrentest.ui import WrenApp, wait_for
+
+PACK = "3qrg4kv1"
+HEADER = "# wren-board fragment 1"
+
+
+@pytest.fixture
+def samples(tmp_path: Path) -> Path:
+    return copy_samples(tmp_path / "work")
+
+
+def ready(app: WrenApp, path: str = FLOW) -> dict:
+    open_note(app, path)
+    app.client.call("editor.focus")
+    wait_focus(app, ["note-editor"])
+    return fitted(app)
+
+
+def label_typed(app: WrenApp, text: str) -> None:
+    """Open Pack's label and type into it, leaving it open."""
+    click(app, {"node": PACK})
+    key(app, "enter")
+    assert type_text(app, text)["editing"]["text"] == text
+
+
+@pytest.mark.parametrize("leave", ["note", "blur", "quit"])
+def test_a_label_being_typed_is_on_disk_before_the_board_is_left(samples: Path, leave: str) -> None:
+    """Item 3: type into a label, then at once open another note, blur the
+    window or quit."""
+    flow = samples / FLOW
+    with board_app(samples, f"board-safety-{leave}") as app:
+        ready(app)
+        # Autosave must not be what saves it.
+        app.client.call("test.timer.hold", {"held": True})
+        label_typed(app, "Packed fast")
+        if leave == "note":
+            open_note(app, NOTES)
+            assert board(app)["surface"] == "text"
+        elif leave == "blur":
+            app.client.call("window.blur")
+            state = board(app)
+            assert state["editing"] is None and state["state"] in ("idle", "unfocused"), state
+        else:
+            app.quit()
+        if leave != "quit":
+            wait_for(lambda: not app.client.call("session.get")["pending_durability"], timeout=10,
+                     interval=0.02, description="the flush")
+            assert not app.client.call("session.get")["document"]["dirty"]
+    assert b'text = "Packed fast"' in flow.read_bytes()
+
+
+def test_a_failed_write_blocks_the_switch_and_keeps_the_label(samples: Path) -> None:
+    """Item 3: with a write fault the note switch is blocked, the label
+    committed and the draft kept; the next flush saves it."""
+    flow = samples / FLOW
+    with board_app(samples, "board-safety-fault") as app:
+        ready(app)
+        app.client.call("test.timer.hold", {"held": True})
+        label_typed(app, "Kept")
+        original = flow.read_bytes()
+        app.client.call("test.fail_next", {"fault": "write"})
+        with pytest.raises(RemoteError, match="injected storage failure"):
+            app.client.call("core.apply", {"op": "open_note", "note": note_id(app, NOTES)})
+        state = board(app)
+        assert state["surface"] == "board" and state["editing"] is None, state
+        document = app.client.call("session.get")["document"]
+        assert document["dirty"] and 'text = "Kept"' in document["text"]
+        assert flow.read_bytes() == original
+        app.client.call("test.timer.hold", {"held": False})
+        flushed(app)
+        assert b'text = "Kept"' in flow.read_bytes()
+
+
+def test_only_the_board_writes_a_board(samples: Path) -> None:
+    """Attack 7: the editor's requests and commands, with a board open and
+    edited, and a board command on a Markdown note."""
+    flow = samples / FLOW
+    with board_app(samples, "board-safety-writer") as app:
+        ready(app)
+        click(app, {"node": PACK})
+        key(app, "right", "alt")
+        flushed(app)
+        edited = flow.read_bytes()
+        for op, params in [
+            ("editor.insert", {"text": "bypass"}),
+            ("editor.command", {"intent": "bold"}),
+        ]:
+            with pytest.raises(RemoteError):
+                app.client.call(op, params)
+        app.client.call("command.run", {"id": "markdown.bold"})
+        app.client.call("command.run", {"id": "editor.toggle_engine"})
+        app.client.call("command.run", {"id": "editor.toggle_engine"})
+        time.sleep(1.0)
+        flushed(app)
+        assert flow.read_bytes() == edited
+        assert board(app)["surface"] == "board"
+
+        # A board command with a Markdown note open changes nothing.
+        notes = samples / NOTES
+        before = stamp(notes)
+        open_note(app, NOTES)
+        for command in ("board.delete", "board.select.all", "board.paste", "board.undo"):
+            app.client.call("command.run", {"id": command})
+        time.sleep(1.0)
+        flushed(app)
+        assert stamp(notes) == before
+        assert flow.read_bytes() == edited
+
+
+def test_a_sequence_that_changes_nothing_writes_nothing(samples: Path) -> None:
+    """Attack 6, on the hand-written board, whose bytes are not canonical:
+    any write would show."""
+    path = samples / HAND_WRITTEN
+    before = stamp(path)
+    with board_app(samples, "board-safety-pristine") as app:
+        ready(app, HAND_WRITTEN)
+        click(app, {"node": "first"})
+        for arrow in ("right", "left", "down"):
+            key(app, arrow)
+        key(app, "enter")
+        key(app, "escape")
+        key(app, "right", "alt")
+        key(app, "left", "alt")
+        key(app, "down", "alt")
+        key(app, "z", "mod")
+        key(app, "z", "mod", "shift")
+        state = key(app, "z", "mod")
+        assert state["pristine"], state
+        # A label changed and changed back.
+        click(app, {"node": "second"})
+        key(app, "enter")
+        type_text(app, "Other")
+        key(app, "z", "mod")
+        state = key(app, "escape")
+        assert state["pristine"], state
+        # Past the autosave debounce.
+        time.sleep(1.2)
+        flushed(app)
+        assert not app.client.call("session.get")["document"]["dirty"]
+    assert stamp(path) == before
+
+
+# A flagged z key in the root scope, so a new element on top renumbers the
+# scope (§4.7), and a label stored with trailing blank lines.
+TAKEN_BACK = (
+    'schema = 1\n\n# Written by hand.\n[node.a]\nkind = "shape"\nat = [0, 0]\n'
+    'size = [120, 60]\nz = "a-b"\n\n[node.b]\ntext = "B\\n\\n"\nkind = "shape"\n'
+    'at = [200, 0]\nsize = [120, 60]\nz = "V"\n'
+)
+
+
+def test_an_edit_that_comes_to_nothing_writes_nothing(samples: Path) -> None:
+    """§5.9 rules 3, 4 and 8: free text made and left empty, and a label
+    put back by its own undo, leave the file's bytes and time as they were."""
+    path = samples / GROUP / "Taken back.wren-board"
+    path.write_text(TAKEN_BACK, encoding="utf-8")
+    before = stamp(path)
+    with board_app(samples, "board-safety-taken-back") as app:
+        ready(app, f"{GROUP}/Taken back.wren-board")
+        key(app, "t")
+        click(app, {"canvas": [160, 200]})
+        assert board(app)["counts"]["nodes"] == 3
+        state = key(app, "escape")
+        assert state["counts"]["nodes"] == 2, state
+        assert state["pristine"] and not state["can_undo"], state
+        click(app, {"node": "b"})
+        key(app, "enter")
+        type_text(app, "C")
+        assert not board(app)["pristine"]
+        key(app, "z", "mod")
+        state = key(app, "escape")
+        assert state["pristine"] and not state["can_undo"], state
+        # Past the autosave debounce.
+        time.sleep(1.2)
+        flushed(app)
+        assert not app.client.call("session.get")["document"]["dirty"]
+    assert stamp(path) == before
+
+
+@pytest.mark.parametrize("notice", ["blocked paste", "label full"])
+def test_a_notice_leaves_the_keyboard_where_it_was(samples: Path, notice: str) -> None:
+    """§5.15 rule 4: a banner is not among what may take the keyboard, so
+    the board keeps it, and an open label stays open, after a notice."""
+    with board_app(samples, f"board-safety-notice-{notice.replace(' ', '-')}") as app:
+        ready(app)
+        app.client.call("test.clipboard", {"own": True})
+        if notice == "blocked paste":
+            click(app, {"node": PACK})
+            app.client.call("clipboard.write", {"text": "# wren-board fragment 1\nschema = 2\n"})
+        else:
+            label_typed(app, "abc")
+            app.client.call("clipboard.write", {"text": "y" * 20_000})
+        key(app, "v", "mod")
+        wait_for(lambda: app.client.call("session.get")["banner"], timeout=5, interval=0.02,
+                 description="the notice")
+        # Let the frame that shows the banner be drawn.
+        time.sleep(0.3)
+        assert focused(app) == ["note-editor"]
+        if notice == "blocked paste":
+            before = board(app, elements=True)
+            state = key(app, "right", "alt")
+            assert state["handled"], state
+            after = board(app, elements=True)
+            assert before["nodes"] != after["nodes"]
+        else:
+            state = type_text(app, "def")
+            assert state["editing"]["text"] == "abcdef", state
+
+
+# A node and a connector named alike (§4.12), the node with a child.
+SHARED = (
+    'schema = 1\n\n[node.a]\nkind = "shape"\nat = [0, 0]\nsize = [120, 60]\nz = "V"\n\n'
+    '[node.kid]\nkind = "shape"\nat = [0, 0]\nparent = "shared"\nsize = [40, 20]\nz = "V"\n\n'
+    '[node.shared]\ntext = "Node shared"\nkind = "shape"\nat = [0, 300]\nsize = [120, 60]\n'
+    'z = "W"\n\n[edge.shared]\nkind = "edge"\nfrom = { node = "a" }\nto = { at = [400, 30] }\n'
+    'labels = [{ text = "Edge shared" }]\nz = "X"\n'
+)
+
+
+def test_a_connector_named_as_a_node_is_acted_on_alone(samples: Path) -> None:
+    """§5.10 rule 1: delete removes what is selected, so a connector that
+    shares a node's id goes alone, and Enter and a key move are its own."""
+    path = samples / GROUP / "Shared.wren-board"
+    path.write_text(SHARED, encoding="utf-8")
+    with board_app(samples, "board-safety-shared-id") as app:
+        ready(app, f"{GROUP}/Shared.wren-board")
+        click(app, {"edge": "shared"})
+        assert key(app, "enter")["editing"]["text"] == "Edge shared"
+        key(app, "escape")
+        key(app, "right", "alt")
+        node = next(n for n in board(app, elements=True)["nodes"] if n["id"] == "shared")
+        assert node["at"] == [0, 300]
+        state = key(app, "delete")
+        assert state["counts"] == {"nodes": 3, "edges": 0}, state
+        flushed(app)
+    assert blocks(path.read_bytes()) == ["[node.a]", "[node.kid]", "[node.shared]"]
+
+
+# A node beside a connector with two free ends, and a node that shares a
+# free-ended connector's id (§4.12).
+FREE_ENDS = (
+    'schema = 1\n\n[node.a]\ntext = "A"\nkind = "shape"\nat = [0, 0]\nsize = [120, 60]\nz = "V"\n\n'
+    '[node.shared]\ntext = "Node shared"\nkind = "shape"\nat = [0, 300]\nsize = [120, 60]\nz = "W"\n\n'
+    '[edge.shared]\nkind = "edge"\nfrom = { at = [400, 300] }\nto = { at = [400, 500] }\n'
+    'labels = [\n  { text = "Edge shared" },\n]\nz = "X"\n\n'
+    '[edge.x]\nkind = "edge"\nfrom = { at = [400, 0] }\nto = { at = [400, 200] }\n'
+    'labels = [\n  { text = "Free" },\n]\nz = "Y"\n'
+)
+
+
+def clipboard(app: WrenApp) -> None:
+    """Headless Weston gives the app no clipboard; there it keeps its own."""
+    app.client.call("clipboard.write", {"text": "probe"})
+    try:
+        wait_for(lambda: app.client.call("clipboard.read") == "probe", timeout=2,
+                 interval=0.05, description="the clipboard")
+    except TimeoutError:
+        app.client.call("test.clipboard", {"own": True})
+
+
+def copied_fragment(app: WrenApp, after: str | None = None) -> dict:
+    """The fragment the board put on the clipboard, once it differs from *after*."""
+    text = wait_for(lambda: (lambda text: text if text.startswith(HEADER) and text != after else None)(
+        app.client.call("clipboard.read")), timeout=5, description="the fragment on the clipboard")
+    return {"text": text, **tomllib.loads(text.split("\n", 1)[1])}
+
+
+def test_a_selected_free_connector_is_cut_and_pasted_back(samples: Path) -> None:
+    """§5.10 rules 2, 3 and 5: a connector with two free ends selected beside
+    a node is in the fragment, so duplicate copies it and cut then paste
+    gives it back; a node that shares a free-ended connector's id carries
+    only itself."""
+    path = samples / GROUP / "Free.wren-board"
+    path.write_text(FREE_ENDS, encoding="utf-8")
+
+    def labels(state: dict) -> list[str]:
+        return sorted(label["text"] for edge in state["edges"] for label in edge["labels"])
+
+    with board_app(samples, "board-safety-free-ends") as app:
+        ready(app, f"{GROUP}/Free.wren-board")
+        clipboard(app)
+
+        def picked() -> None:
+            click(app, {"node": "a"})
+            assert click(app, {"edge": "x"}, mods=("shift",))["selection"] == ["a", "x"]
+
+        picked()
+        key(app, "d", "mod")
+        state = board(app, elements=True)
+        assert state["counts"] == {"nodes": 3, "edges": 3}, state
+        assert labels(state) == ["Edge shared", "Free", "Free"]
+        key(app, "z", "mod")
+        assert board(app)["pristine"]
+
+        picked()
+        state = key(app, "x", "mod")
+        assert state["counts"] == {"nodes": 1, "edges": 1}, state
+        fragment = copied_fragment(app)
+        assert (list(fragment["node"]), list(fragment["edge"])) == (["a"], ["x"]), fragment["text"]
+        key(app, "v", "mod")
+        state = wait_for(lambda: (lambda s: s if s["counts"] == {"nodes": 2, "edges": 2} else None)(
+            board(app, elements=True)), timeout=5, description="the paste")
+        assert labels(state) == ["Edge shared", "Free"]
+        flushed(app)
+        written = tomllib.loads(path.read_text(encoding="utf-8"))
+        assert sorted(label["text"] for e in written["edge"].values() for label in e["labels"]) == [
+            "Edge shared", "Free"]
+
+        # The node `shared` alone: the connector `shared` stays out.
+        click(app, {"node": "shared"})
+        key(app, "c", "mod")
+        fragment = copied_fragment(app, after=fragment["text"])
+        assert list(fragment["node"]) == ["shared"] and "edge" not in fragment, fragment["text"]
+
+
+def _shape(name: str, text: str, at: tuple[int, int], z: str) -> str:
+    return (f'[node.{name}]\ntext = "{text}"\nkind = "shape"\nat = [{at[0]}, {at[1]}]\n'
+            f'size = [120, 60]\nz = "{z}"\n\n')
+
+
+def _edge(name: str, ends: tuple[str, str], text: str, z: str) -> str:
+    return (f'[edge.{name}]\nkind = "edge"\nfrom = {ends[0]}\nto = {ends[1]}\n'
+            f'labels = [\n  {{ text = "{text}" }},\n]\nz = "{z}"\n\n')
+
+
+CONNECTED = "schema = 1\n\n" + "".join([
+    _shape("a", "A", (0, 0), "a"), _shape("b", "B", (0, 200), "b"),
+    _shape("c", "C", (300, 0), "c"), _shape("p", "P", (700, 0), "d"),
+    _shape("q", "Q", (700, 200), "e"), _shape("shared", "Node shared", (300, 300), "f"),
+    _edge("shared", ('{ node = "a" }', '{ node = "b" }'), "Edge shared", "g"),
+    _edge("cs", ('{ node = "c" }', '{ node = "shared" }'), "CS", "h"),
+    _edge("one", ('{ node = "c" }', "{ at = [540, 140] }"), "One free", "i"),
+    _edge("pq", ('{ node = "p" }', '{ node = "q" }'), "PQ", "j"),
+    _edge("two", ("{ at = [1000, 0] }", "{ at = [1000, 200] }"), "Two free", "k"),
+]).rstrip("\n") + "\n"
+
+
+def test_a_cut_deletes_only_what_a_paste_gives_back(samples: Path) -> None:
+    """§5.10 rules 1, 2 and 5: cut deletes the fragment it copies and, as
+    delete does, the connectors attached to a node it removes; a selected
+    connector the fragment leaves out stays on the board. After cut then
+    paste the file holds every connector but those rule 5 names."""
+    path = samples / GROUP / "Connected.wren-board"
+    path.write_text(CONNECTED, encoding="utf-8")
+    start = sorted(label["text"] for edge in tomllib.loads(CONNECTED)["edge"].values()
+                   for label in edge["labels"])
+    # The selection, what the clipboard holds, and the connectors cut takes
+    # without copying.
+    cases = [
+        ([{"node": "shared"}, {"edge": "pq"}], (["shared"], []), ["CS"]),
+        ([{"node": "a"}, {"edge": "one"}], (["a"], []), ["Edge shared"]),
+        ([{"node": "b"}, {"edge": "shared"}], (["b"], []), ["Edge shared"]),
+        ([{"node": "c"}, {"edge": "one"}], (["c"], ["one"]), ["CS"]),
+        ([{"node": "a"}, {"edge": "two"}], (["a"], ["two"]), ["Edge shared"]),
+    ]
+
+    def labels(edges: dict) -> list[str]:
+        return sorted(label["text"] for edge in edges.values() for label in edge["labels"])
+
+    def on_board() -> list[str]:
+        return sorted(label["text"] for edge in board(app, elements=True)["edges"]
+                      for label in edge["labels"])
+
+    with board_app(samples, "board-safety-cut") as app:
+        ready(app, f"{GROUP}/Connected.wren-board")
+        clipboard(app)
+        after = None
+        for picked, (nodes, edges), lost in cases:
+            first, *rest = picked
+            click(app, first)
+            for at in rest:
+                click(app, at, mods=("shift",))
+            assert len(board(app)["selection"]) == len(picked), picked
+            count = board(app)["counts"]["nodes"]
+            key(app, "x", "mod")
+            fragment = copied_fragment(app, after=after)
+            after = fragment["text"]
+            assert (list(fragment["node"]), list(fragment.get("edge", {}))) == (nodes, edges), after
+            gone = labels(fragment.get("edge", {})) + lost
+            assert on_board() == [text for text in start if text not in gone], picked
+            key(app, "v", "mod")
+            wait_for(lambda: board(app)["counts"]["nodes"] == count, timeout=5,
+                     description="the paste")
+            flushed(app)
+            written = tomllib.loads(path.read_text(encoding="utf-8"))
+            assert labels(written["edge"]) == [text for text in start if text not in lost], picked
+            # Back to the start for the next case: undo the paste and the cut.
+            key(app, "z", "mod")
+            key(app, "z", "mod")
+            assert board(app)["pristine"], picked
+            flushed(app)
+            assert path.read_text(encoding="utf-8") == CONNECTED

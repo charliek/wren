@@ -1,15 +1,18 @@
 """
-Minimal PNG decoder for RGBA8, non-interlaced, no-filter images.
+Minimal PNG decoder for RGBA8, non-interlaced images.
 
-Supports only the subset that the Wren smoke-capture path produces:
+Supports only the subset that the Wren smoke-capture path and the board
+PNG export produce:
   - RGBA (color type 6), 8-bit depth
   - No interlacing (interlace_method = 0)
-  - NoFilter (every row's filter byte is 0x00)
+  - The five standard row filters (None, Sub, Up, Average, Paeth); the
+    window capture writes None and the board export Sub
 
-No third-party libraries; only stdlib ``struct`` and ``zlib``.
+No third-party libraries; only stdlib ``itertools``, ``struct`` and ``zlib``.
 """
 from __future__ import annotations
 
+import itertools
 import struct
 import zlib
 
@@ -184,18 +187,56 @@ def read_png(data: bytes) -> PNG:
             f"(for {width}x{height} RGBA8)"
         )
 
-    # --- unfilter scanlines (only filter type 0 = None is supported) ---
+    # --- unfilter scanlines ---
+    line_bytes = width * 4
     pixels = bytearray(width * height * 4)
+    previous = bytes(line_bytes)
     for y in range(height):
         row_start = y * row_stride
         filter_type = raw[row_start]
-        if filter_type != 0:
-            raise PNGDecodeError(
-                f"unsupported filter type {filter_type} at row {y} "
-                "(only NoFilter=0 is supported)"
-            )
+        if filter_type > 4:
+            raise PNGDecodeError(f"unsupported filter type {filter_type} at row {y}")
         src = row_start + 1
-        dst = y * width * 4
-        pixels[dst : dst + width * 4] = raw[src : src + width * 4]
+        line = _unfilter(filter_type, bytearray(raw[src : src + line_bytes]), previous)
+        dst = y * line_bytes
+        pixels[dst : dst + line_bytes] = line
+        previous = line
 
     return PNG(width, height, bytes(pixels))
+
+
+def _add(a: int, b: int) -> int:
+    return (a + b) & 0xFF
+
+
+def _unfilter(filter_type: int, line: bytearray, previous: bytes) -> bytearray:
+    """One row's bytes with its filter undone (PNG spec §9.2), given the row
+    above it already unfiltered; each pixel is 4 bytes."""
+    if filter_type == 0:
+        return line
+    if filter_type == 1:  # Sub: each byte adds the same channel to its left.
+        for channel in range(4):
+            line[channel::4] = bytes(itertools.accumulate(line[channel::4], _add))
+        return line
+    if filter_type == 2:  # Up: each byte adds the byte above it.
+        return bytearray(map(_add, line, previous))
+    for i in range(len(line)):
+        left = line[i - 4] if i >= 4 else 0
+        up = previous[i]
+        if filter_type == 3:  # Average of left and up.
+            line[i] = (line[i] + ((left + up) >> 1)) & 0xFF
+            continue
+        # Paeth: whichever of left, up and upper-left is nearest
+        # left + up - upper-left, in that order on a tie.
+        upper_left = previous[i - 4] if i >= 4 else 0
+        estimate = left + up - upper_left
+        near_left, near_up = abs(estimate - left), abs(estimate - up)
+        near_upper_left = abs(estimate - upper_left)
+        if near_left <= near_up and near_left <= near_upper_left:
+            predictor = left
+        elif near_up <= near_upper_left:
+            predictor = up
+        else:
+            predictor = upper_left
+        line[i] = (line[i] + predictor) & 0xFF
+    return line

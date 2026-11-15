@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="431.5" height="1341.5" viewBox="-40.75 -40.75 431.5 1341.5">
+<rect x="-40.75" y="-40.75" width="431.5" height="1341.5" fill="#f7f8fa"/>
+<path d="M30 0L90 0C106.56854 0 120 13.4314575 120 30C120 46.568542 106.56854 60 90 60L30 60C13.4314575 60 0 46.568542 0 30C0 13.4314575 13.4314575 0 30 0Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="44.21924" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Start</text>
+<path d="M0 120L120 120L120 180L0 180Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="14.175293" y="155.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Receive order</text>
+<path d="M60 60L60 110" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 120L56 110L64 110Z" fill="#20242d"/>
+<path d="M60 240L120 270L60 300L0 270Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="40.339844" y="275.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Valid?</text>
+<path d="M60 180L60 230" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 240L56 230L64 230Z" fill="#20242d"/>
+<path d="M200 240L320 240L320 300L200 300Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="219.76367" y="275.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Reject order</text>
+<path d="M120 270L190 270" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M200 270L190 274L190 266Z" fill="#20242d"/>
+<path d="M147.88184 260L172.11816 260L172.11816 280L147.88184 280Z" fill="#f7f8fa"/>
+<text x="151.88184" y="274.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#20242d" xml:space="preserve">No</text>
+<path d="M0 360L120 360L120 420L0 420Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="18.902344" y="395.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Check stock</text>
+<path d="M60 300L60 350" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 360L56 350L64 350Z" fill="#20242d"/>
+<path d="M45.722656 320L74.27734 320L74.27734 340L45.722656 340Z" fill="#f7f8fa"/>
+<text x="49.722656" y="334.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#20242d" xml:space="preserve">Yes</text>
+<path d="M60 480L120 510L60 540L0 510Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="30.482422" y="515.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">In stock?</text>
+<path d="M60 420L60 470" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 480L56 470L64 470Z" fill="#20242d"/>
+<path d="M200 480L320 480L320 540L200 540Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="226.08691" y="515.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Backorder</text>
+<path d="M120 510L190 510" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M200 510L190 514L190 506Z" fill="#20242d"/>
+<path d="M147.88184 500L172.11816 500L172.11816 520L147.88184 520Z" fill="#f7f8fa"/>
+<text x="151.88184" y="514.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#20242d" xml:space="preserve">No</text>
+<path d="M200 600L320 600L320 660L200 660Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="240.01855" y="625.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Notify</text>
+<text x="228.8999" y="645.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">customer</text>
+<path d="M260 540L260 590" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M260 600L256 590L264 590Z" fill="#20242d"/>
+<path d="M320 630L340 630L340 390L130 390" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M120 390L130 386L130 394Z" fill="#20242d"/>
+<path d="M0 600L120 600L120 660L0 660Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="19.151855" y="635.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Charge card</text>
+<path d="M60 540L60 590" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 600L56 590L64 590Z" fill="#20242d"/>
+<path d="M45.722656 560L74.27734 560L74.27734 580L45.722656 580Z" fill="#f7f8fa"/>
+<text x="49.722656" y="574.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#20242d" xml:space="preserve">Yes</text>
+<path d="M60 720L120 750L60 780L0 750Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="31.128418" y="745.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Payment</text>
+<text x="48.382324" y="765.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">ok?</text>
+<path d="M60 660L60 710" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 720L56 710L64 710Z" fill="#20242d"/>
+<path d="M200 720L320 720L320 780L200 780Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="211.82373" y="755.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Retry payment</text>
+<path d="M120 750L190 750" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M200 750L190 754L190 746Z" fill="#20242d"/>
+<path d="M147.88184 740L172.11816 740L172.11816 760L147.88184 760Z" fill="#f7f8fa"/>
+<text x="151.88184" y="754.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#20242d" xml:space="preserve">No</text>
+<path d="M260 720L260 700L140 700L140 630L130 630" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M120 630L130 626L130 634Z" fill="#20242d"/>
+<path d="M0 840L120 840L120 900L0 900Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="43.757813" y="875.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Pack</text>
+<path d="M60 780L60 830" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 840L56 830L64 830Z" fill="#20242d"/>
+<path d="M45.722656 800L74.27734 800L74.27734 820L45.722656 820Z" fill="#f7f8fa"/>
+<text x="49.722656" y="814.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#20242d" xml:space="preserve">Yes</text>
+<path d="M0 960L120 960L120 1020L0 1020Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="45.388184" y="995.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Ship</text>
+<path d="M60 900L60 950" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 960L56 950L64 950Z" fill="#20242d"/>
+<path d="M0 1080L120 1080L120 1140L0 1140Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="18.08545" y="1115.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">Send receipt</text>
+<path d="M60 1020L60 1070" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 1080L56 1070L64 1070Z" fill="#20242d"/>
+<path d="M30 1200L90 1200C106.56854 1200 120 1213.4314 120 1230C120 1246.5686 106.56854 1260 90 1260L30 1260C13.4314575 1260 0 1246.5686 0 1230C0 1213.4314 13.4314575 1200 30 1200Z" fill="#dddfe1" stroke="#20242d" stroke-width="1.5"/>
+<text x="47.370605" y="1235.0928" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#20242d" xml:space="preserve">End</text>
+<path d="M60 1140L60 1190" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M60 1200L56 1190L64 1190Z" fill="#20242d"/>
+<path d="M320 270L350 270L350 1230L130 1230" fill="none" stroke="#20242d" stroke-width="1.5"/>
+<path d="M120 1230L130 1226L130 1234Z" fill="#20242d"/>
+</svg>

@@ -50,6 +50,17 @@ pub struct Colors {
     /// The editor's text-selection fill, kept apart from list rows so faint
     /// markers stay legible inside a selection.
     pub text_selection: Rgb,
+    /// The board's colour tokens, `red` to `blue`: a shape's outline and
+    /// solid fill, and a connector with its label. Each theme takes them
+    /// from its own palette where it has one, each at its own lightness, so
+    /// that every pair stays apart under colour blindness (the tests below).
+    pub red: Rgb,
+    pub orange: Rgb,
+    pub yellow: Rgb,
+    pub green: Rgb,
+    pub cyan: Rgb,
+    pub purple: Rgb,
+    pub blue: Rgb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +106,13 @@ pub const WREN_DARK: Theme = Theme {
         completed: Rgb(0xa3, 0xaa, 0xb5),
         selected_inactive: Rgb(0x20, 0x24, 0x2c),
         text_selection: Rgb(0x28, 0x30, 0x42),
+        red: Rgb(0xfd, 0x94, 0x94),
+        orange: Rgb(0xe4, 0x7d, 0x3d),
+        yellow: Rgb(0xf3, 0xdf, 0x8c),
+        green: Rgb(0x8f, 0xcf, 0x70),
+        cyan: Rgb(0x72, 0xd6, 0xe3),
+        purple: Rgb(0xa9, 0x77, 0xde),
+        blue: Rgb(0x7e, 0xb1, 0xe7),
     },
 };
 
@@ -133,6 +151,13 @@ pub const WREN_LIGHT: Theme = Theme {
         completed: Rgb(0x58, 0x61, 0x70),
         selected_inactive: Rgb(0xe2, 0xe7, 0xed),
         text_selection: Rgb(0xd3, 0xde, 0xf0),
+        red: Rgb(0xbd, 0x36, 0x3d),
+        orange: Rgb(0x90, 0x3c, 0x01),
+        yellow: Rgb(0x80, 0x70, 0x02),
+        green: Rgb(0x3e, 0x68, 0x27),
+        cyan: Rgb(0x04, 0x7b, 0x89),
+        purple: Rgb(0x7f, 0x3d, 0xc7),
+        blue: Rgb(0x04, 0x4e, 0xa4),
     },
 };
 
@@ -171,6 +196,13 @@ pub const NORD: Theme = Theme {
         completed: Rgb(0xa8, 0xb2, 0xc3),
         selected_inactive: Rgb(0x3d, 0x44, 0x56),
         text_selection: Rgb(0x40, 0x48, 0x60),
+        red: Rgb(0xed, 0x7b, 0x8e),
+        orange: Rgb(0xd7, 0x8d, 0x6d),
+        yellow: Rgb(0xec, 0xce, 0x89),
+        green: Rgb(0xae, 0xc8, 0x9b),
+        cyan: Rgb(0x92, 0xd3, 0xe3),
+        purple: Rgb(0xbe, 0x93, 0xba),
+        blue: Rgb(0x83, 0xb4, 0xe0),
     },
 };
 
@@ -209,6 +241,13 @@ pub const GRUVBOX_DARK: Theme = Theme {
         completed: Rgb(0xbd, 0xae, 0x93),
         selected_inactive: Rgb(0x3c, 0x38, 0x36),
         text_selection: Rgb(0x45, 0x40, 0x3a),
+        red: Rgb(0xff, 0x56, 0x3d),
+        orange: Rgb(0xff, 0x82, 0x1b),
+        yellow: Rgb(0xf8, 0xbb, 0x2d),
+        green: Rgb(0x9f, 0xcc, 0x5e),
+        cyan: Rgb(0x4e, 0xb1, 0xa0),
+        purple: Rgb(0xd1, 0xa6, 0xcd),
+        blue: Rgb(0x6d, 0x99, 0xb9),
     },
 };
 
@@ -247,6 +286,13 @@ pub const SOLARIZED_LIGHT: Theme = Theme {
         completed: Rgb(0x58, 0x6e, 0x75),
         selected_inactive: Rgb(0xeb, 0xe3, 0xca),
         text_selection: Rgb(0xe9, 0xe0, 0xc0),
+        red: Rgb(0x85, 0x00, 0x04),
+        orange: Rgb(0x94, 0x39, 0x00),
+        yellow: Rgb(0x90, 0x68, 0x0b),
+        green: Rgb(0x5b, 0x74, 0x37),
+        cyan: Rgb(0x02, 0x69, 0x60),
+        purple: Rgb(0x5b, 0x49, 0x93),
+        blue: Rgb(0x22, 0x73, 0xb1),
     },
 };
 
@@ -285,6 +331,13 @@ pub const ROSE_PINE: Theme = Theme {
         completed: Rgb(0x98, 0x93, 0xb2),
         selected_inactive: Rgb(0x26, 0x23, 0x3a),
         text_selection: Rgb(0x2f, 0x2b, 0x45),
+        red: Rgb(0xec, 0x72, 0x93),
+        orange: Rgb(0xe0, 0xa0, 0x66),
+        yellow: Rgb(0xe8, 0xc3, 0x6f),
+        green: Rgb(0x6c, 0xef, 0x91),
+        cyan: Rgb(0x88, 0xcc, 0xd5),
+        purple: Rgb(0xc1, 0xa5, 0xe8),
+        blue: Rgb(0x57, 0x89, 0xac),
     },
 };
 
@@ -323,6 +376,13 @@ pub const EVERFOREST_DARK: Theme = Theme {
         completed: Rgb(0xa9, 0xb4, 0xab),
         selected_inactive: Rgb(0x3a, 0x44, 0x49),
         text_selection: Rgb(0x40, 0x50, 0x4a),
+        red: Rgb(0xe2, 0x83, 0x89),
+        orange: Rgb(0xf1, 0xa6, 0x86),
+        yellow: Rgb(0xef, 0xcd, 0x7d),
+        green: Rgb(0x8f, 0xae, 0x63),
+        cyan: Rgb(0x8e, 0xd2, 0xcd),
+        purple: Rgb(0xc4, 0x9b, 0xc0),
+        blue: Rgb(0x82, 0xa9, 0xe6),
     },
 };
 
@@ -361,6 +421,13 @@ pub const TOKYO_NIGHT: Theme = Theme {
         completed: Rgb(0x9a, 0xa5, 0xce),
         selected_inactive: Rgb(0x26, 0x2a, 0x3d),
         text_selection: Rgb(0x25, 0x2d, 0x49),
+        red: Rgb(0xf4, 0x6d, 0x86),
+        orange: Rgb(0xe7, 0x8f, 0x58),
+        yellow: Rgb(0xdf, 0xbc, 0x6d),
+        green: Rgb(0xc6, 0xf6, 0x8d),
+        cyan: Rgb(0xa3, 0xf5, 0xff),
+        purple: Rgb(0xc2, 0xa0, 0xfe),
+        blue: Rgb(0x69, 0x92, 0xe3),
     },
 };
 
@@ -399,6 +466,13 @@ pub const DRACULA: Theme = Theme {
         completed: Rgb(0xb8, 0xbc, 0xd8),
         selected_inactive: Rgb(0x34, 0x37, 0x46),
         text_selection: Rgb(0x3a, 0x3d, 0x4e),
+        red: Rgb(0xfe, 0x60, 0x61),
+        orange: Rgb(0xe7, 0x9b, 0x4c),
+        yellow: Rgb(0xf0, 0xe5, 0x86),
+        green: Rgb(0x17, 0xf2, 0x62),
+        cyan: Rgb(0x8e, 0xe9, 0xfd),
+        purple: Rgb(0xa8, 0x81, 0xe7),
+        blue: Rgb(0x84, 0xb1, 0xff),
     },
 };
 
@@ -437,6 +511,13 @@ pub const CATPPUCCIN_MOCHA: Theme = Theme {
         completed: Rgb(0xa6, 0xad, 0xc8),
         selected_inactive: Rgb(0x2e, 0x2f, 0x41),
         text_selection: Rgb(0x31, 0x32, 0x4c),
+        red: Rgb(0xe9, 0x7d, 0x9d),
+        orange: Rgb(0xde, 0x9c, 0x70),
+        yellow: Rgb(0xff, 0xe8, 0xb4),
+        green: Rgb(0x9e, 0xd9, 0x98),
+        cyan: Rgb(0x79, 0xc5, 0xd2),
+        purple: Rgb(0xd3, 0xae, 0xff),
+        blue: Rgb(0x72, 0xa0, 0xe7),
     },
 };
 
@@ -475,6 +556,13 @@ pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
         completed: Rgb(0xa5, 0xad, 0xcb),
         selected_inactive: Rgb(0x31, 0x35, 0x4a),
         text_selection: Rgb(0x36, 0x3a, 0x53),
+        red: Rgb(0xee, 0x84, 0x94),
+        orange: Rgb(0xda, 0x98, 0x71),
+        yellow: Rgb(0xff, 0xe8, 0xb3),
+        green: Rgb(0x9b, 0xd7, 0x8f),
+        cyan: Rgb(0x77, 0xc1, 0xce),
+        purple: Rgb(0xcc, 0xa6, 0xfe),
+        blue: Rgb(0x78, 0x99, 0xdb),
     },
 };
 
@@ -514,19 +602,44 @@ pub fn for_appearance(appearance: Appearance) -> Theme {
     }
 }
 
+/// The colours a board is drawn in under a theme with these colours: the
+/// theme's seven board hues, and the editor's surface and text.
+pub fn board_palette(colors: &Colors) -> wren_board::Palette {
+    let rgba = |Rgb(r, g, b): Rgb| wren_board::Rgba::rgb(r, g, b);
+    let c = colors;
+    let hues = [c.red, c.orange, c.yellow, c.green, c.cyan, c.purple, c.blue].map(rgba);
+    wren_board::Palette {
+        canvas: rgba(colors.editor),
+        ink: rgba(colors.text),
+        muted: rgba(colors.muted),
+        raised: rgba(colors.raised),
+        accent: rgba(colors.accent),
+        issue: rgba(colors.danger),
+        hues,
+        dark: luma(colors.editor) < luma(colors.text),
+    }
+}
+
+/// A rough brightness, enough to tell a dark surface from its light text.
+fn luma(Rgb(r, g, b): Rgb) -> u32 {
+    2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// An sRGB channel as linear light, 0 to 1.
+    fn linear(value: u8) -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
     fn luminance(color: Rgb) -> f64 {
-        let linear = |value: u8| {
-            let value = f64::from(value) / 255.0;
-            if value <= 0.04045 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        };
         0.2126 * linear(color.0) + 0.7152 * linear(color.1) + 0.0722 * linear(color.2)
     }
 
@@ -729,5 +842,266 @@ mod tests {
             assert_eq!(for_appearance(appearance).appearance, appearance);
         }
         assert!(luminance(DARK.colors.editor) < luminance(LIGHT.colors.editor));
+    }
+
+    #[test]
+    fn every_board_token_resolves_in_every_theme() {
+        use wren_board::{style, Color, Fill, Token, Vocabulary};
+
+        assert_eq!(BUILT_INS.len(), 11);
+        for theme in BUILT_INS {
+            let name = theme.name;
+            let c = theme.colors;
+            let palette = board_palette(&c);
+            let rgba = |Rgb(r, g, b): Rgb| wren_board::Rgba::rgb(r, g, b);
+            assert_eq!(palette.dark, theme.appearance == Appearance::Dark, "{name}");
+            assert_eq!(palette.canvas, rgba(c.editor), "{name}");
+            assert_eq!(palette.ink, rgba(c.text), "{name}");
+            let hues = [c.red, c.orange, c.yellow, c.green, c.cyan, c.purple, c.blue];
+            assert_eq!(palette.hues, hues.map(rgba), "{name}");
+            assert_eq!(palette.issue, rgba(c.danger), "{name}");
+            for (index, hue) in palette.hues.iter().enumerate() {
+                assert!(!palette.hues[..index].contains(hue), "{name}: hue {index}");
+                assert!(![palette.canvas, palette.ink].contains(hue), "{name}");
+            }
+            for token in Token::ALL {
+                for fill in Fill::ALL {
+                    let colors = style::resolve(&Color::Token(*token), *fill, &palette);
+                    let what = format!("{name}: {} at {}", token.name(), fill.name());
+                    assert_ne!(colors.stroke, palette.canvas, "{what}");
+                    let expected = match token {
+                        Token::Neutral => palette.ink,
+                        hue => palette.hues[*hue as usize - 1],
+                    };
+                    assert_eq!(colors.stroke, expected, "{what}");
+                    match (fill, colors.fill) {
+                        (Fill::None, None) => assert_eq!(colors.label, palette.ink, "{what}"),
+                        (Fill::None, Some(_)) | (_, None) => panic!("{what}: fill"),
+                        (Fill::Tint, Some(fill)) => {
+                            assert_ne!(fill, palette.canvas, "{what}");
+                            assert_eq!(colors.label, palette.ink, "{what}");
+                        }
+                        (Fill::Solid, Some(fill)) => {
+                            assert_ne!(colors.label, fill, "{what}");
+                            assert!(
+                                style::contrast(colors.label, fill) >= 3.0,
+                                "{what}: label on fill"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn rgb(color: wren_board::Rgba) -> Rgb {
+        Rgb(color.r, color.g, color.b)
+    }
+
+    /// Every colour token at every fill, in every theme: a label reads on
+    /// what it is drawn on, outlines and connectors stand out from the
+    /// canvas, a tint is a visible step from the canvas, and so is the
+    /// selection. The selection outline is drawn 3 px outside the shape
+    /// (`wren-canvas`'s overlay and its outline test), so no fill touches it.
+    #[test]
+    fn board_colours_are_readable_in_every_theme() {
+        use wren_board::{style, Color, Fill, Token, Vocabulary};
+
+        for theme in BUILT_INS {
+            let name = theme.name;
+            let palette = board_palette(&theme.colors);
+            let canvas = rgb(palette.canvas);
+            for token in Token::ALL {
+                for fill in Fill::ALL {
+                    let colors = style::resolve(&Color::Token(*token), *fill, &palette);
+                    let what = format!("{name}: {} at {}", token.name(), fill.name());
+                    let (label, stroke) = (rgb(colors.label), rgb(colors.stroke));
+                    let under = colors.fill.map_or(canvas, rgb);
+                    let on_fill = contrast(label, under);
+                    assert!(on_fill >= 4.5, "{what}: label on its fill {on_fill:.2}");
+                    let outline = contrast(stroke, canvas);
+                    assert!(outline >= 3.0, "{what}: stroke {outline:.2}");
+                    // A connector's label is drawn in its stroke colour, on
+                    // the canvas.
+                    assert!(outline >= 4.5, "{what}: connector label {outline:.2}");
+                    if *fill == Fill::Tint {
+                        let tint = step(under, canvas);
+                        assert!(tint >= 4.0, "{what}: tint {tint:.2} L* from the canvas");
+                    }
+                }
+            }
+            let c = theme.colors;
+            for (ring, colour) in [("focused", c.accent), ("unfocused", c.muted)] {
+                let ratio = contrast(colour, canvas);
+                assert!(ratio >= 3.0, "{name}: {ring} selection {ratio:.2}");
+            }
+        }
+    }
+
+    /// Two board hues must differ by at least this CIE76 ΔE…
+    const APART_DELTA_E: f64 = 15.0;
+    /// …or by at least this much lightness (L*), for every kind of vision.
+    const APART_DELTA_L: f64 = 8.0;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Vision {
+        Normal,
+        Deuteranopia,
+        Protanopia,
+        Tritanopia,
+    }
+
+    /// The colour `vision` sees in place of `color`, as linear light: the
+    /// severity-1.0 matrices of Machado, Oliveira and Fernandes (2009),
+    /// clamped to the gamut.
+    fn simulated(color: Rgb, vision: Vision) -> [f64; 3] {
+        let light = [linear(color.0), linear(color.1), linear(color.2)];
+        let matrix = match vision {
+            Vision::Normal => return light,
+            Vision::Deuteranopia => [
+                [0.367322, 0.860646, -0.227968],
+                [0.280085, 0.672501, 0.047413],
+                [-0.011820, 0.042940, 0.968881],
+            ],
+            Vision::Protanopia => [
+                [0.152286, 1.052583, -0.204868],
+                [0.114503, 0.786281, 0.099216],
+                [-0.003882, -0.048116, 1.051998],
+            ],
+            Vision::Tritanopia => [
+                [1.255528, -0.076749, -0.178779],
+                [-0.078411, 0.930809, 0.147602],
+                [0.004733, 0.691367, 0.303900],
+            ],
+        };
+        matrix.map(|row| {
+            let sum: f64 = row.iter().zip(light).map(|(m, c)| m * c).sum();
+            sum.clamp(0.0, 1.0)
+        })
+    }
+
+    /// CIE L*a*b* under D65 of what `vision` sees in place of `color`.
+    fn lab(color: Rgb, vision: Vision) -> [f64; 3] {
+        let [r, g, b] = simulated(color, vision);
+        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+        let f = |t: f64| {
+            if t > 0.008856 {
+                t.cbrt()
+            } else {
+                7.787 * t + 16.0 / 116.0
+            }
+        };
+        [
+            116.0 * f(y) - 16.0,
+            500.0 * (f(x) - f(y)),
+            200.0 * (f(y) - f(z)),
+        ]
+    }
+
+    /// Each pair of the eight colour tokens, as a solid fill and as an
+    /// outline, stays apart for normal vision and under deuteranopia,
+    /// protanopia and tritanopia. `neutral` counts: it is a colour a user
+    /// picks, drawn in `ink` (or filled with `raised`), so it must not pass
+    /// for a hue.
+    #[test]
+    fn board_hues_stay_apart_under_colour_blindness() {
+        use wren_board::{style, Color, Fill, Token, Vocabulary};
+
+        let visions = [
+            Vision::Normal,
+            Vision::Deuteranopia,
+            Vision::Protanopia,
+            Vision::Tritanopia,
+        ];
+        let hues = Token::ALL;
+        assert_eq!(hues.len(), 8);
+        for theme in BUILT_INS {
+            let palette = board_palette(&theme.colors);
+            for (drawn, fill) in [("solid", Fill::Solid), ("stroke", Fill::None)] {
+                let colours: Vec<Rgb> = hues
+                    .iter()
+                    .map(|token| {
+                        let colors = style::resolve(&Color::Token(*token), fill, &palette);
+                        rgb(match fill {
+                            Fill::Solid => colors.fill.expect("a solid fill"),
+                            _ => colors.stroke,
+                        })
+                    })
+                    .collect();
+                for vision in visions {
+                    for (i, j) in (0..8).flat_map(|i| (i + 1..8).map(move |j| (i, j))) {
+                        let (a, b) = (lab(colours[i], vision), lab(colours[j], vision));
+                        let delta_e = a
+                            .iter()
+                            .zip(b)
+                            .map(|(p, q)| (p - q).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        let delta_l = (a[0] - b[0]).abs();
+                        assert!(
+                            delta_e >= APART_DELTA_E || delta_l >= APART_DELTA_L,
+                            "{}: {} and {} at {drawn} under {vision:?}: ΔE {delta_e:.1}, ΔL* {delta_l:.1}",
+                            theme.name,
+                            hues[i].name(),
+                            hues[j].name(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A yellow darker than its theme's red or orange reads as khaki or
+    /// olive, not yellow.
+    #[test]
+    fn board_yellow_is_the_lightest_warm_hue() {
+        for theme in BUILT_INS {
+            let c = theme.colors;
+            let yellow = lightness(c.yellow);
+            for (name, hue) in [("red", c.red), ("orange", c.orange)] {
+                let other = lightness(hue);
+                assert!(
+                    yellow > other,
+                    "{}: yellow L* {yellow:.1} not above {name} L* {other:.1}",
+                    theme.name
+                );
+            }
+        }
+    }
+
+    /// The reference script's values for two colours under each vision.
+    #[test]
+    fn the_vision_simulation_matches_its_reference_values() {
+        let rows = [
+            (
+                Vision::Normal,
+                [67.96, 39.54, 17.54],
+                [54.72, 18.79, -70.92],
+            ),
+            (
+                Vision::Deuteranopia,
+                [70.85, -2.82, 21.6],
+                [52.77, 21.97, -72.72],
+            ),
+            (
+                Vision::Protanopia,
+                [63.13, -1.25, 9.83],
+                [58.91, 12.12, -64.14],
+            ),
+            (
+                Vision::Tritanopia,
+                [67.4, 51.52, 16.66],
+                [60.07, -27.33, -20.24],
+            ),
+        ];
+        for (vision, salmon, azure) in rows {
+            for (color, want) in [(Rgb(240, 136, 136), salmon), (Rgb(0, 128, 255), azure)] {
+                let got = lab(color, vision);
+                let close = got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01);
+                assert!(close, "{color:?} under {vision:?}: {got:?}");
+            }
+        }
     }
 }

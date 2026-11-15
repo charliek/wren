@@ -1,0 +1,26 @@
+schema = 1
+requires = ["alpha", "zeta"]
+a_top = "unknown, top level"
+zz_top = "unknown, top level"
+
+[node.a]
+text = "A"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+style.color = "red"
+style.fill = "solid"
+z = "V01"
+
+[node.b]
+text = "B"
+kind = "shape"
+at = [0, 120]
+size = [120, 60]
+z = "V02"
+
+[edge.e]
+kind = "edge"
+from = { node = "b" }
+to = { node = "a" }
+z = "V03"

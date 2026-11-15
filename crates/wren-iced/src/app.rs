@@ -13,6 +13,9 @@ use wren_editor::EditorView;
 pub use crate::cli::Options;
 use crate::{fonts, theme};
 
+mod board;
+mod board_find;
+mod board_spike;
 mod columns;
 mod workspace;
 mod workspace_view;
@@ -32,6 +35,8 @@ use palette::Palette;
 use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
+mod board_harness;
+#[cfg(feature = "smoke-test")]
 mod test_requests;
 
 pub struct App {
@@ -45,6 +50,25 @@ pub struct App {
     preferences: preferences::Preferences,
     spelling: spelling::Spelling,
     editor: EditorView,
+    /// The open note as a board, when it is one and its text parses; see
+    /// `board::Surface`. The editor is empty meanwhile.
+    board: Option<wren_canvas::BoardView>,
+    /// Why the open board is shown as raw text in the editor instead.
+    board_error: Option<wren_board::ParseError>,
+    board_viewports: board::Viewports,
+    /// How many drafts the open board has sent, plus its reloads.
+    board_revision: u64,
+    /// The generated board of `--board-spike`, shown in place of the editor.
+    board_spike: Option<wren_canvas::BoardView>,
+    /// What the Board menu's items were last enabled from; `None` until the
+    /// first sync and after the menu is built again.
+    #[cfg(any(target_os = "macos", test))]
+    menu_inputs: Option<preferences::MenuInputs>,
+    /// How many times the Board menu was recomputed, and what it showed.
+    #[cfg(test)]
+    menu_syncs: usize,
+    #[cfg(test)]
+    menu_synced: Vec<(&'static str, bool)>,
     find_open: bool,
     find_query: String,
     words: usize,
@@ -75,11 +99,21 @@ pub struct App {
     folder_serial: u64,
     folder_request: Option<u64>,
     folder_correlation: Option<u64>,
+    /// A board export waiting for its save dialog or being written; see
+    /// `board::Export`.
+    board_export: Option<board::Export>,
+    /// A quit asked for while an export was being written, which runs
+    /// once it is.
+    quit_after_export: bool,
     action_serial: u64,
     last_processed: Option<Processed>,
     palette: Option<Palette>,
     /// Where the outline palette opened; see `sync_outline`.
     outline_origin: Option<palette::OutlineOrigin>,
+    /// Where the jump palette opened on a board; see `sync_board_nodes`.
+    board_nodes: Option<board_find::NodesOrigin>,
+    /// The board the actions palette opened on; see `sync_actions`.
+    actions_origin: Option<palette::ActionsOrigin>,
     widths: Widths,
     column: columns::Column,
     /// Browser panes folded from the left (0–2) by keyboard moves.
@@ -87,6 +121,9 @@ pub struct App {
     focus: bool,
     filters: Filters,
     viewport: iced::Size,
+    /// The window's scale factor, which a board needs for precise wheel
+    /// deltas and iced does not give a widget.
+    scale_factor: f32,
     spring_section: Option<SectionId>,
     gesture_generation: u64,
     drag_preview: Option<crate::drag::Preview>,
@@ -115,6 +152,16 @@ pub struct App {
     /// and per-key ceilings. `view` takes `&self`, hence the cell.
     #[cfg(feature = "smoke-test")]
     view_micros: std::cell::RefCell<std::collections::VecDeque<u64>>,
+    #[cfg(feature = "smoke-test")]
+    board_perf: board_spike::Perf,
+    /// A clipboard of the app's own, which the harness turns on where the
+    /// display server gives the app none (headless Weston): its text, or
+    /// `None` for the system clipboard.
+    #[cfg(feature = "smoke-test")]
+    test_clipboard: Option<String>,
+    /// When the app was built, which `perf.board` times a board's opening from.
+    #[cfg(feature = "smoke-test")]
+    launched: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +169,9 @@ pub enum Message {
     SystemTheme(Mode),
     ChooseTheme(Option<Theme>),
     Editor(wren_editor::Message),
+    /// Input from the board viewer that shows the open note.
+    Board(wren_canvas::Message),
+    BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
     PaletteOpen(palette::Mode),
@@ -134,6 +184,11 @@ pub enum Message {
     #[cfg(target_os = "macos")]
     MenuCommand(String),
     FolderChosen(u64, Option<PathBuf>),
+    /// Where the save dialog of the board export with this tag was told
+    /// to write, if anywhere.
+    BoardExportChosen(u64, Option<PathBuf>),
+    /// The worker of the board export with this tag has finished.
+    BoardExportWritten(u64),
     Revealed {
         correlation: u64,
         generation: u64,
@@ -148,6 +203,11 @@ pub enum Message {
     SpellLoaded(spelling::Loaded),
     Reconciled(wren_core::reconcile::ReconcileResult),
     DialogName(String),
+    /// A kind pill of the New note dialog was clicked.
+    DialogNoteKind(wren_core::kind::NoteKind),
+    /// Tab (`false`) or Shift+Tab (`true`) that no widget took: the New
+    /// note dialog steps its kind pills.
+    DialogTab(bool),
     SubmitDialog,
     ConfirmTrash,
     CancelDialog,
@@ -160,6 +220,9 @@ pub enum Message {
     Window(iced::window::Id, iced::window::Event),
     #[cfg(feature = "smoke-test")]
     FirstFrame(Result<(), String>),
+    /// A redraw began while `perf.board` was timing the board.
+    #[cfg(feature = "smoke-test")]
+    BoardPulse(Result<(), String>),
     #[cfg(feature = "smoke-test")]
     CaptureFailed(std::sync::Arc<crate::test_ipc::Request>, String),
     #[cfg(feature = "smoke-test")]
@@ -179,12 +242,26 @@ pub enum Message {
         std::sync::Arc<crate::test_ipc::Request>,
         Result<serde_json::Value, String>,
     ),
+    /// Where the board widget sits and whether it has the keyboard, read
+    /// for a `board.*` harness request.
+    #[cfg(feature = "smoke-test")]
+    BoardProbed(
+        std::sync::Arc<crate::test_ipc::Request>,
+        board_harness::Placement,
+    ),
     /// An editor command's shortcut, routed as the editor widget routes
     /// it: `Some` only while the editor has the keyboard.
     #[cfg(feature = "smoke-test")]
     EditorShortcut(
         std::sync::Arc<crate::test_ipc::Request>,
         Option<wren_editor::KeyRoute>,
+    ),
+    /// A board command's shortcut, as the board widget publishes it:
+    /// `Some` only while a board has the keyboard.
+    #[cfg(feature = "smoke-test")]
+    BoardShortcut(
+        std::sync::Arc<crate::test_ipc::Request>,
+        Option<wren_canvas::Command>,
     ),
 }
 
@@ -227,6 +304,9 @@ impl App {
         let words_path = settings_path
             .as_deref()
             .map(wren_core::settings::words_path);
+        #[cfg(feature = "smoke-test")]
+        let launched = Instant::now();
+        let board_spike = options.board_spike;
         let preferences = preferences::Preferences::load(settings_path);
         let definition = preferences.theme(Mode::None).0;
         let mut registry_warning = config
@@ -262,6 +342,17 @@ impl App {
             preferences,
             spelling: spelling::Spelling::new(words_path.clone()),
             editor: EditorView::with_backend(engine, &contents),
+            board: None,
+            board_error: None,
+            board_viewports: board::Viewports::new(),
+            board_revision: 0,
+            board_spike: None,
+            #[cfg(any(target_os = "macos", test))]
+            menu_inputs: None,
+            #[cfg(test)]
+            menu_syncs: 0,
+            #[cfg(test)]
+            menu_synced: Vec::new(),
             find_open: false,
             find_query: String::new(),
             words,
@@ -291,16 +382,21 @@ impl App {
             folder_serial: 0,
             folder_request: None,
             folder_correlation: None,
+            board_export: None,
+            quit_after_export: false,
             action_serial: 0,
             last_processed: None,
             palette: None,
             outline_origin: None,
+            board_nodes: None,
+            actions_origin: None,
             widths: Widths::default(),
             column: columns::Column::Editor,
             fold: 0,
             focus: false,
             filters: Filters::default(),
             viewport: iced::Size::new(1280.0, 800.0),
+            scale_factor: 1.0,
             spring_section: None,
             gesture_generation: 1,
             drag_preview: None,
@@ -329,8 +425,19 @@ impl App {
             frames: crate::test_capture::Frames::default(),
             #[cfg(feature = "smoke-test")]
             view_micros: Default::default(),
+            #[cfg(feature = "smoke-test")]
+            board_perf: Default::default(),
+            #[cfg(feature = "smoke-test")]
+            test_clipboard: None,
+            #[cfg(feature = "smoke-test")]
+            launched,
         };
         app.apply_preferences();
+        if let Some(count) = board_spike {
+            if let Err(error) = app.open_board_spike(count) {
+                app.banner = Some(error);
+            }
+        }
         if let Some(warning) = app.startup_settings_warning() {
             app.banner = Some(warning);
         }
@@ -364,6 +471,8 @@ impl App {
         // Every way a picker row gets highlighted, or the picker closes,
         // arrives as a message, so the preview follows from here.
         let preview = self.sync_preview();
+        #[cfg(any(target_os = "macos", test))]
+        self.sync_menu();
         Task::batch([task, preview])
     }
 
@@ -386,6 +495,10 @@ impl App {
             #[cfg(feature = "smoke-test")]
             Message::Reply(request, result) => request.respond(result),
             #[cfg(feature = "smoke-test")]
+            Message::BoardProbed(request, placement) => {
+                return self.board_probed(&request, placement)
+            }
+            #[cfg(feature = "smoke-test")]
             Message::EditorShortcut(request, route) => {
                 let message = match route {
                     Some(wren_editor::KeyRoute::Intent(intent)) => {
@@ -401,15 +514,30 @@ impl App {
                 request.respond(Ok(self.navigation_snapshot()));
                 return task;
             }
+            #[cfg(feature = "smoke-test")]
+            Message::BoardShortcut(request, command) => {
+                let epoch = self.board.as_ref().map_or(0, wren_canvas::BoardView::epoch);
+                let task = command.map_or_else(Task::none, |command| {
+                    self.update(Message::Board(wren_canvas::Message::Command(
+                        epoch, command,
+                    )))
+                });
+                request.respond(Ok(self.navigation_snapshot()));
+                return task;
+            }
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
                 self.apply_theme();
+                self.retheme_board_spike();
             }
             Message::ChooseTheme(definition) => {
                 self.theme_override = definition;
                 self.apply_theme();
+                self.retheme_board_spike();
             }
             Message::Editor(message) => return self.edit(message),
+            Message::Board(message) => return self.board_edit(message),
+            Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
             Message::PaletteOpen(mode) => return self.open_palette(mode).task,
@@ -420,6 +548,10 @@ impl App {
             Message::PaletteClose => return self.close_palette().task,
             Message::PaletteRevealed => {}
             Message::FolderChosen(tag, path) => return self.folder_chosen(tag, path).task,
+            Message::BoardExportChosen(tag, path) => {
+                return self.board_export_chosen(tag, path).task
+            }
+            Message::BoardExportWritten(tag) => return self.board_export_written(tag),
             Message::Revealed {
                 correlation,
                 generation,
@@ -471,6 +603,8 @@ impl App {
                     dialog.name = name;
                 }
             }
+            Message::DialogNoteKind(kind) => return self.choose_note_kind(kind),
+            Message::DialogTab(reverse) => self.step_note_kind(reverse),
             Message::SubmitDialog => return self.submit_dialog(false),
             Message::ConfirmTrash => return self.submit_dialog(true),
             Message::CancelDialog => {
@@ -523,9 +657,13 @@ impl App {
                 iced::window::Event::Opened { size, .. } => {
                     self.viewport = size;
                     self.window = Some(id);
+                    // A window opened at its scale says nothing of it.
+                    let scale = iced::window::scale_factor(id).map(move |factor| {
+                        Message::Window(id, iced::window::Event::Rescaled(factor))
+                    });
                     #[cfg(target_os = "macos")]
                     {
-                        crate::macos_menu::install(&self.preferences.keymap);
+                        self.install_menu();
                         // A missing framework (a bare binary, a bundle built
                         // without Sparkle) only leaves the menu item disabled.
                         let _ = wren_sparkle::start();
@@ -538,17 +676,23 @@ impl App {
                                 .map(move |info| Message::RendererReady(id, info));
                         }
                         if self.endpoint.is_some() {
-                            return focus_editor().chain(
-                                Task::future(self.frames.next(id)).map(Message::FirstFrame),
-                            );
+                            return Task::batch([
+                                focus_editor().chain(
+                                    Task::future(self.frames.next(id)).map(Message::FirstFrame),
+                                ),
+                                scale,
+                            ]);
                         }
-                        return focus_editor();
+                        return Task::batch([focus_editor(), scale]);
                     }
                     #[cfg(not(feature = "smoke-test"))]
-                    return focus_editor();
+                    return Task::batch([focus_editor(), scale]);
                 }
                 iced::window::Event::Resized(size) => {
                     self.viewport = size;
+                }
+                iced::window::Event::Rescaled(factor) => {
+                    self.scale_factor = factor;
                 }
                 iced::window::Event::CloseRequested => {
                     return self.request_quit().unwrap_or_else(|_| Task::none());
@@ -565,9 +709,14 @@ impl App {
             },
             #[cfg(feature = "smoke-test")]
             Message::FirstFrame(result) => match result {
-                Ok(()) => self.ready = true,
+                Ok(()) => {
+                    self.ready = true;
+                    return self.time_board_open();
+                }
                 Err(error) => eprintln!("Wren test readiness: {error}"),
             },
+            #[cfg(feature = "smoke-test")]
+            Message::BoardPulse(pulse) => return self.board_pulse(pulse),
             #[cfg(feature = "smoke-test")]
             Message::CaptureFailed(request, error) => {
                 self.capture_pending = false;
@@ -651,6 +800,10 @@ impl App {
     /// which autosave saves, the edit revision, and a word recount on a
     /// later tick.
     fn text_changed(&mut self, started: Instant) {
+        // The editor behind a board is not its writer, whatever changed it.
+        if self.surface() == board::Surface::Board {
+            return;
+        }
         if let Some(note) = self.selected_note {
             let _ = self.apply_core(Op::EditDraft {
                 note,
@@ -721,6 +874,9 @@ impl App {
         }
         if self.workspace_mode {
             return self.workspace_view();
+        }
+        if let Some(view) = &self.board_spike {
+            return self.board_spike_view(view);
         }
         let colors = self.definition.colors;
         let header = container(
@@ -846,7 +1002,13 @@ impl App {
             iced::event::listen_with(|event, status, _| match event {
                 iced::Event::Keyboard(event) => crate::keys::input(&event)
                     .filter(|input| crate::keys::reaches_app(input, status))
-                    .map(|input| Message::Key(crate::keys::with_status(input, status))),
+                    .map(|input| Message::Key(crate::keys::with_status(input, status)))
+                    .or_else(|| {
+                        (status == iced::event::Status::Ignored)
+                            .then(|| workspace::tab(&event))
+                            .flatten()
+                            .map(Message::DialogTab)
+                    }),
                 _ => None,
             }),
         ];
@@ -873,6 +1035,9 @@ fn focus_editor() -> Task<Message> {
 }
 
 #[cfg(test)]
+mod board_edit_tests;
+
+#[cfg(test)]
 mod navigation_tests;
 
 #[cfg(test)]
@@ -892,6 +1057,24 @@ mod tests {
         assert_eq!(app.definition, definitions::DARK);
         let _ = app.update(Message::ChooseTheme(None));
         assert_eq!(app.definition, definitions::LIGHT);
+    }
+
+    /// iced's column leaves out a child whose size is fixed at 0, so a
+    /// banner slot of that size would move the editor to a new place in
+    /// the widget tree when a banner appears, and the editor or the board
+    /// would lose the keyboard to it (§5.15 rule 4).
+    #[test]
+    fn the_warning_slot_keeps_its_place_in_the_widget_tree() {
+        let (mut app, _) = App::new(Options {
+            editor: true,
+            ..Options::default()
+        });
+        for banner in [None, Some("A notice".to_owned())] {
+            app.registry_warning = None;
+            app.banner = banner;
+            let slot = app.warning_slot();
+            assert!(!slot.as_widget().size_hint().is_void(), "{:?}", app.banner);
+        }
     }
 
     #[test]

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="401.5" height="161.5" viewBox="-0.75 -0.75 401.5 161.5">
+<path d="M0 0L240 0L240 80L0 80Z" fill="#3060d0" stroke="#3060d0" stroke-width="1.5"/>
+<text x="32.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">The back shape&apos;s label is</text>
+<text x="95.5" y="55.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">covered</text>
+<path d="M80 40L320 40L320 120L80 120Z" fill="#309040" stroke="#309040" stroke-width="1.5"/>
+<text x="105.5" y="75.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">The middle shape&apos;s label is</text>
+<text x="175.5" y="95.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">covered</text>
+<path d="M160 80L400 80L400 160L160 160Z" fill="#c03030" stroke="#c03030" stroke-width="1.5"/>
+<text x="178.5" y="125.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">The front shape is drawn last</text>
+</svg>

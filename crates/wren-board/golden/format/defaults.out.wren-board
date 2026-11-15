@@ -1,0 +1,29 @@
+schema = 1
+
+[node.a]
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V01"
+
+[node.b]
+text = "B"
+kind = "shape"
+at = [0, 120]
+size = [120, 60]
+z = "V02"
+
+[edge.e]
+kind = "edge"
+from = { node = "a" }
+to = { node = "b" }
+labels = [
+  { text = "middle" },
+]
+z = "V03"
+
+[edge.f]
+kind = "edge"
+from = { node = "b" }
+to = { node = "a" }
+z = "V04"

@@ -11,9 +11,10 @@ use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::Op;
 use wren_editor::{Placement, Viewport};
 
+use super::board::Surface;
 use super::commands::{
-    item_commands, Command, CommandId, Disposition, Gateway, ItemTarget, ReorderTarget,
-    DEFINITIONS, GROUPS,
+    definitions, item_commands, Command, CommandId, Disposition, Gateway, ItemTarget,
+    ReorderTarget, Scope as CommandScope, GROUPS,
 };
 use super::{App, Message};
 use crate::ellipsis::ellipsis;
@@ -38,6 +39,10 @@ pub enum Mode {
     Fonts,
     /// The open note's headings.
     Outline,
+    /// The board commands enabled for the open board's selection (§5.17).
+    BoardActions,
+    /// The open board's labelled nodes and connectors (§5.18).
+    BoardNodes,
 }
 
 impl Mode {
@@ -56,6 +61,8 @@ impl Mode {
             Self::Themes => "themes",
             Self::Fonts => "fonts",
             Self::Outline => "outline",
+            Self::BoardActions => "board_actions",
+            Self::BoardNodes => "board_nodes",
         }
     }
 
@@ -73,6 +80,8 @@ impl Mode {
             Self::Themes => "Choose a theme…",
             Self::Fonts => "Choose an editor font…",
             Self::Outline => "Jump to a heading…",
+            Self::BoardActions => "Choose an action for the selection…",
+            Self::BoardNodes => "Jump to a node…",
         }
     }
 
@@ -89,6 +98,8 @@ impl Mode {
             Self::Themes => Some("Theme"),
             Self::Fonts => Some("Editor font"),
             Self::Outline => Some("Outline"),
+            Self::BoardActions => Some("Board actions"),
+            Self::BoardNodes => Some("Jump to node"),
             _ => None,
         }
     }
@@ -116,6 +127,8 @@ pub enum Key {
         revision: u64,
         line: usize,
     },
+    /// A labelled node or connector of the open board.
+    Element(wren_board::scene::Source),
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +160,7 @@ pub enum Action {
         revision: u64,
         line: usize,
     },
+    Element(wren_board::scene::Source),
 }
 
 /// How an outline row draws its heading.
@@ -171,6 +185,9 @@ pub struct ResultRow {
     pub enabled: bool,
     pub action: Action,
     pub heading: Option<HeadingRow>,
+    /// A word naming what the row is, drawn at its end: a board element's
+    /// shape, or `connector`.
+    pub tag: Option<String>,
 }
 
 /// Where the editor was when the outline opened, so leaving the outline any
@@ -189,6 +206,14 @@ pub struct OutlineOrigin {
     /// Whether the editor still shows the origin: no row has been previewed,
     /// or none has been highlighted since.
     at_origin: bool,
+}
+
+/// The board the actions palette opened on, and the row the board last
+/// followed, so a preview begins only when the highlight moves and one a
+/// settle dropped stays dropped until it moves again (§5.17 rule 4).
+pub struct ActionsOrigin {
+    note: Option<NoteId>,
+    highlighted: Option<Key>,
 }
 
 /// One heading of the open note, as the outline lists it.
@@ -268,8 +293,10 @@ impl Palette {
         // A picker of settings opens on the saved choice, and the outline on
         // the cursor's section, so browsing starts from it and the live
         // preview begins only when the highlight moves.
-        let saved = (matches!(self.mode, Mode::Themes | Mode::Fonts | Mode::Outline)
-            && self.query.trim().is_empty())
+        let saved = (matches!(
+            self.mode,
+            Mode::Themes | Mode::Fonts | Mode::Outline | Mode::BoardActions | Mode::BoardNodes
+        ) && self.query.trim().is_empty())
         .then(|| results.iter().position(|row| row.current))
         .flatten();
         self.active = retained
@@ -309,8 +336,16 @@ impl App {
         {
             return self.blocked("Open a workspace first");
         }
-        if mode == Mode::Outline && self.ensure_editor_ready().is_err() {
+        if mode == Mode::Outline
+            && (self.ensure_editor_ready().is_err() || self.surface() != Surface::Text)
+        {
             return self.blocked("Open a note to see its outline");
+        }
+        if mode == Mode::BoardActions && self.surface() != Surface::Board {
+            return self.blocked("Open a board to act on its selection");
+        }
+        if mode == Mode::BoardNodes && self.surface() != Surface::Board {
+            return self.blocked("Open a board to jump to its nodes");
         }
         if matches!(mode, Mode::MoveNote(note) if self.model().and_then(|model| model.note(note)).is_none())
             || matches!(mode, Mode::MoveGroup(group) if self.model().and_then(|model| model.group(group)).is_none())
@@ -330,6 +365,9 @@ impl App {
         if matches!(mode, Mode::Reorder(ItemRef::Note(_))) {
             return self.blocked("Only sections and groups can be reordered");
         }
+        if let Err(error) = self.put_board_away() {
+            return self.blocked(error);
+        }
         self.settle_resize();
         self.cancel_gestures();
         self.editor.break_group();
@@ -347,6 +385,9 @@ impl App {
                 at_origin: true,
             });
         }
+        if mode == Mode::BoardNodes {
+            self.begin_board_nodes();
+        }
         let mut palette = Palette::new(mode, self.workspace_generation());
         palette.source = source;
         self.palette = Some(palette);
@@ -356,6 +397,15 @@ impl App {
             if let Some(origin) = &mut self.outline_origin {
                 origin.highlighted = active;
             }
+        }
+        if mode == Mode::BoardActions {
+            self.actions_origin = Some(ActionsOrigin {
+                note: self.editor_note,
+                highlighted: self.highlighted_key(),
+            });
+        }
+        if mode == Mode::BoardNodes {
+            self.board_nodes_opened();
         }
         self.finish_action(
             Disposition::Completed,
@@ -417,6 +467,11 @@ impl App {
         let source = palette.source;
         let query = palette.query.trim().to_owned();
         let generation = palette.generation;
+        if mode == Mode::Search && !query.is_empty() {
+            if let Some(session) = &mut self.session {
+                session.settle_search();
+            }
+        }
         let revision = self
             .session
             .as_ref()
@@ -424,11 +479,22 @@ impl App {
         let mut rows = Vec::new();
         match mode {
             Mode::Commands => {
+                // A board's commands are listed only while one is open, and
+                // the Markdown ones are not then (§5.1 rule 8).
+                let board = self.surface() == Surface::Board;
                 for group in GROUPS {
-                    for definition in DEFINITIONS
-                        .iter()
-                        .filter(|definition| definition.group == group)
-                    {
+                    if board && group == "Markdown" {
+                        continue;
+                    }
+                    for definition in definitions().filter(|definition| {
+                        definition.group == group
+                            && (self.preferences.boards || !definition.id.boards())
+                            && (board || definition.scope != CommandScope::Board)
+                            // On a board Find and Outline open the jump
+                            // palette, which `board.jump` names.
+                            && !(board
+                                && matches!(definition.id, CommandId::Find | CommandId::Outline))
+                    }) {
                         if fuzzy_score(&query, definition.label).is_none() {
                             continue;
                         }
@@ -445,6 +511,7 @@ impl App {
                             enabled: self.command_enabled(definition.id),
                             action: Action::Command(definition.id),
                             heading: None,
+                            tag: None,
                         });
                     }
                 }
@@ -476,6 +543,7 @@ impl App {
                                 content_match: hit.content_match,
                             }),
                             heading: None,
+                            tag: None,
                         });
                     }
                 }
@@ -559,6 +627,7 @@ impl App {
                             enabled: true,
                             action: Action::Workspace(entry.path.clone()),
                             heading: None,
+                            tag: None,
                         });
                     }
                 }
@@ -576,6 +645,7 @@ impl App {
                         enabled: self.folder_request.is_none(),
                         action: Action::Command(CommandId::AddWorkspace),
                         heading: None,
+                        tag: None,
                     });
                 }
             }
@@ -644,11 +714,12 @@ impl App {
                 }
             }
             Mode::Outline => rows = self.outline_rows(&query),
+            Mode::BoardActions => rows = self.board_action_rows(&query),
+            Mode::BoardNodes => rows = self.board_node_rows(&query),
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
                     for id in item_commands(item) {
-                        let definition = DEFINITIONS
-                            .iter()
+                        let definition = definitions()
                             .find(|entry| entry.id == *id)
                             .expect("item command definition");
                         if fuzzy_score(&query, definition.label).is_some() {
@@ -830,6 +901,7 @@ impl App {
             Action::Theme(id) => self.choose_theme(id),
             Action::Font(family) => self.choose_font(family),
             Action::Heading { revision, line } => self.choose_heading(revision, line),
+            Action::Element(element) => self.choose_element(element),
             Action::Workspace(path) => {
                 if workspace_removal {
                     self.dispatch(Command::RemoveWorkspace(path))
@@ -864,6 +936,97 @@ impl App {
             }
         }
         outcome
+    }
+
+    /// The actions palette's rows (§5.17 rule 3): what the board offers for
+    /// its selection that the app enables, and with nothing selected the
+    /// export too.
+    fn board_action_rows(&self, query: &str) -> Vec<ResultRow> {
+        let Some(view) = &self.board else {
+            return Vec::new();
+        };
+        let offers = view.offers().into_iter().map(|offer| {
+            let id = CommandId::Board(offer.command);
+            (offer.group, id, offer.current)
+        });
+        let export =
+            view.machine()
+                .selection()
+                .is_empty()
+                .then_some(("Board", CommandId::ExportSvg, false));
+        let mut rows = Vec::new();
+        for (group, id, current) in offers.chain(export) {
+            let Some(definition) = definitions().find(|definition| definition.id == id) else {
+                continue;
+            };
+            if !self.command_enabled(id) || fuzzy_score(query, definition.label).is_none() {
+                continue;
+            }
+            let mut row = action_row(
+                Key::Command(id),
+                definition.label.into(),
+                String::new(),
+                true,
+                Action::Command(id),
+            );
+            row.group = group;
+            row.shortcut = self.shortcut_label(definition.key).unwrap_or_default();
+            row.current = current;
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// The key of the palette's highlighted row.
+    fn highlighted_key(&self) -> Option<Key> {
+        let palette = self.palette.as_ref()?;
+        let row = palette.results.get(palette.active?)?;
+        Some(row.key.clone())
+    }
+
+    /// Follow the actions palette's highlighted row on the board (§5.17
+    /// rule 4): moving onto a shape, colour, fill, outline or connector
+    /// style row other than the selection's current value previews it, and
+    /// leaving the palette any way drops the preview; choosing a row runs
+    /// its command, which applies what was shown. The palette closes when
+    /// the board it opened on is no longer the open note. Runs after every
+    /// message, so it acts only on a change.
+    pub(super) fn sync_actions(&mut self) -> Task<Message> {
+        let open = self
+            .palette
+            .as_ref()
+            .is_some_and(|palette| palette.mode == Mode::BoardActions);
+        if !open {
+            self.actions_origin = None;
+            if let Some(view) = self.board.as_mut().filter(|view| view.patch().is_some()) {
+                view.set_patch(None);
+            }
+            return Task::none();
+        }
+        let note = self.actions_origin.as_ref().map(|origin| origin.note);
+        if self.board.is_none() || note != Some(self.editor_note) {
+            self.actions_origin = None;
+            self.palette = None;
+            return self.column_focus();
+        }
+        let highlighted = self.highlighted_key();
+        let origin = self.actions_origin.as_mut().expect("actions origin");
+        if highlighted == origin.highlighted {
+            return Task::none();
+        }
+        origin.highlighted.clone_from(&highlighted);
+        let current = self.palette.as_ref().and_then(|palette| {
+            let row = palette.results.get(palette.active?)?;
+            Some(row.current)
+        });
+        let command = match (highlighted, current) {
+            (Some(Key::Command(id)), Some(false)) => id.board_command(),
+            _ => None,
+        };
+        if let Some(view) = &mut self.board {
+            view.set_patch(command);
+        }
+        Task::none()
     }
 
     /// The open note's headings, with the section holding `line` current.
@@ -1045,8 +1208,14 @@ impl App {
             // Offset provenance is retained in the snapshot, but never trusted
             // after the barrier: conflicts and external edits can change bytes.
             let _queried_revision = target.index_revision;
+            // A board's match is in its labels, which the empty editor
+            // behind it does not hold.
             if target.content_match.is_some() {
-                self.editor.reveal_literal(target.query.trim());
+                if self.surface() == Surface::Board {
+                    self.reveal_on_board(&target.query);
+                } else {
+                    self.editor.reveal_literal(target.query.trim());
+                }
             }
             self.palette = None;
             self.reveal_selection();
@@ -1072,22 +1241,47 @@ impl App {
         .map(|_| Message::PaletteRevealed)
     }
 
+    /// Whether the open board's selection has its middle in the right half
+    /// of the window, so a panel at the left leaves it in view.
+    fn selection_on_the_right(&self) -> bool {
+        let Some(selected) = self
+            .board
+            .as_ref()
+            .and_then(wren_canvas::BoardView::selection_box)
+        else {
+            return false;
+        };
+        let middle = self.browser_width() + selected.x + selected.width / 2.0;
+        middle >= self.viewport.width / 2.0
+    }
+
     pub(super) fn palette_view<'a>(&'a self, base: Element<'a, Message>) -> Element<'a, Message> {
         let Some(palette) = &self.palette else {
             return base;
         };
         let colors = self.definition.colors;
         let search = palette.mode == Mode::Search;
-        let outline = palette.mode == Mode::Outline;
-        // Every mode shares one frame except the outline, which is narrow so
-        // it can sit beside the text it previews.
-        let width = if outline { 460.0 } else { PALETTE_WIDTH };
-        // The outline previews headings in the editor, so it sits beside the
-        // text: over the browser columns when they are wide enough, else at
-        // the right, away from where lines start.
-        let align = if !outline {
+        // Every mode shares one frame except the outline, the board's
+        // actions and the jump palette, which are narrow so they can sit
+        // beside what they preview.
+        let beside = matches!(
+            palette.mode,
+            Mode::Outline | Mode::BoardActions | Mode::BoardNodes
+        );
+        let width = if beside { 460.0 } else { PALETTE_WIDTH };
+        // The outline previews headings in the editor and the actions their
+        // style on the board, so they sit beside it: over the browser
+        // columns when they are wide enough, else at the right, away from
+        // where lines start, and the actions on the side of the window away
+        // from the selection they preview. The jump palette centres its
+        // element in the board, to the right of the browser columns, so at
+        // the left it covers that middle on any window it fits beside.
+        let align = if !beside {
             iced::alignment::Horizontal::Center
-        } else if self.browser_width() >= width + 32.0 {
+        } else if palette.mode == Mode::BoardNodes
+            || self.browser_width() >= width + 32.0
+            || (palette.mode == Mode::BoardActions && self.selection_on_the_right())
+        {
             iced::alignment::Horizontal::Left
         } else {
             iced::alignment::Horizontal::Right
@@ -1196,7 +1390,10 @@ impl App {
                 ));
             }
             if !search && !result.path.is_empty() {
-                let path = if matches!(palette.mode, Mode::Workspaces | Mode::Outline) {
+                let path = if matches!(
+                    palette.mode,
+                    Mode::Workspaces | Mode::Outline | Mode::BoardNodes
+                ) {
                     result.path.clone()
                 } else {
                     result.path.replace('/', " › ")
@@ -1242,6 +1439,9 @@ impl App {
                     colors.faint,
                 ));
             }
+            if let Some(tag) = &result.tag {
+                contents = contents.push(chrome::label(tag.as_str(), 11, colors.faint));
+            }
             if !result.shortcut.is_empty() {
                 contents = contents.push(chrome::keycap(&result.shortcut, self.definition));
             }
@@ -1266,6 +1466,8 @@ impl App {
                         "Search titles and text across this workspace."
                     } else if palette.mode == Mode::Outline && palette.query.trim().is_empty() {
                         "No headings in this note."
+                    } else if palette.mode == Mode::BoardNodes && palette.query.trim().is_empty() {
+                        "No labelled nodes or connectors on this board."
                     } else {
                         "No matches."
                     })
@@ -1316,7 +1518,7 @@ impl App {
                     "↵",
                     match palette.mode {
                         Mode::Search => "open at match",
-                        Mode::Outline => "jump",
+                        Mode::Outline | Mode::BoardNodes => "jump",
                         _ => "run",
                     },
                 ))
@@ -1334,11 +1536,20 @@ impl App {
             .max_width((self.viewport.width - 32.0).max(120.0))
             .clip(true)
             .style(move |_| chrome::dialog(self.definition));
+        // The board's actions preview on the board, so they leave it
+        // undimmed; a click outside still closes them.
+        let dims = palette.mode != Mode::BoardActions;
         let scrim = mouse_area(
             container(iced::widget::space())
                 .width(Fill)
                 .height(Fill)
-                .style(move |_| chrome::scrim(self.definition)),
+                .style(move |_| {
+                    if dims {
+                        chrome::scrim(self.definition)
+                    } else {
+                        container::Style::default()
+                    }
+                }),
         )
         .on_press(Message::PaletteClose);
         stack![
@@ -1414,6 +1625,10 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
         Key::Theme(id) => format!("theme-{}", id.unwrap_or("system")),
         Key::Font(family) => format!("font-{family}"),
         Key::Heading { revision, line } => format!("heading-{revision}-{line}"),
+        Key::Element(element) => match element {
+            wren_board::scene::Source::Node(id) => format!("node-{}", id.as_str()),
+            wren_board::scene::Source::Edge(id) => format!("edge-{}", id.as_str()),
+        },
     };
     iced::advanced::widget::Id::from(format!("palette-row-{generation}-{key}"))
 }
@@ -1447,7 +1662,13 @@ fn same_heading(old: &[ResultRow], selected: &ResultRow, results: &[ResultRow]) 
         .or_else(|| nearest(&mut (0..results.len())))
 }
 
-fn action_row(key: Key, title: String, path: String, enabled: bool, action: Action) -> ResultRow {
+pub(super) fn action_row(
+    key: Key,
+    title: String,
+    path: String,
+    enabled: bool,
+    action: Action,
+) -> ResultRow {
     ResultRow {
         key,
         title,
@@ -1461,6 +1682,7 @@ fn action_row(key: Key, title: String, path: String, enabled: bool, action: Acti
         enabled,
         action,
         heading: None,
+        tag: None,
     }
 }
 
@@ -1478,6 +1700,7 @@ fn destination_row(parent: Parent, title: String, path: String) -> ResultRow {
         enabled: true,
         action: Action::Destination(parent),
         heading: None,
+        tag: None,
     }
 }
 
@@ -1592,6 +1815,7 @@ mod tests {
             enabled: true,
             action: Action::Command(CommandId::Jump),
             heading: None,
+            tag: None,
         }
     }
 

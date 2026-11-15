@@ -1,0 +1,1401 @@
+schema = 1
+ext."com.example.sim".seed = 7
+
+[node.0]
+text = "id \"0\""
+kind = "shape"
+at = [820, 450]
+size = [70, 40]
+z = "c062"
+
+[node.1]
+text = "id \"1\""
+kind = "shape"
+at = [960, 510]
+size = [70, 40]
+z = "c063"
+
+[node.an-1]
+text = "[0.1,0.2]"
+kind = "shape"
+at = [430, 920]
+size = [50, 26]
+z = "c123"
+
+[node.an-2]
+text = "[0.9,0.8]"
+kind = "shape"
+at = [700, 1040]
+size = [50, 26]
+z = "c124"
+
+[node.an-3]
+text = "right"
+kind = "shape"
+at = [700, 920]
+size = [50, 26]
+z = "c125"
+
+[node.c-a]
+kind = "shape"
+at = [460, 1130]
+size = [40, 240]
+z = "c154"
+
+[node.c-b]
+kind = "shape"
+at = [760, 1130]
+size = [40, 240]
+z = "c155"
+
+[node.col-0a7f6f-0]
+text = "#0a7f6f 0"
+kind = "shape"
+at = [992, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "#0a7f6f"
+style.fill = "none"
+z = "c033"
+
+[node.col-0a7f6f-1]
+text = "#0a7f6f 1"
+kind = "shape"
+at = [992, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "#0a7f6f"
+z = "c034"
+
+[node.col-0a7f6f-2]
+text = "#0a7f6f 2"
+kind = "shape"
+at = [992, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "#0a7f6f"
+style.fill = "solid"
+z = "c035"
+
+[node.col-blue-0]
+text = "blue 0"
+kind = "shape"
+at = [868, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "blue"
+style.fill = "none"
+z = "c030"
+
+[node.col-blue-1]
+text = "blue 1"
+kind = "shape"
+at = [868, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "blue"
+z = "c031"
+
+[node.col-blue-2]
+text = "blue 2"
+kind = "shape"
+at = [868, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "blue"
+style.fill = "solid"
+z = "c032"
+
+[node.col-cyan-0]
+text = "cyan 0"
+kind = "shape"
+at = [620, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "cyan"
+style.fill = "none"
+z = "c024"
+
+[node.col-cyan-1]
+text = "cyan 1"
+kind = "shape"
+at = [620, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "cyan"
+z = "c025"
+
+[node.col-cyan-2]
+text = "cyan 2"
+kind = "shape"
+at = [620, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "cyan"
+style.fill = "solid"
+z = "c026"
+
+[node.col-green-0]
+text = "green 0"
+kind = "shape"
+at = [496, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "green"
+style.fill = "none"
+z = "c021"
+
+[node.col-green-1]
+text = "green 1"
+kind = "shape"
+at = [496, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "green"
+z = "c022"
+
+[node.col-green-2]
+text = "green 2"
+kind = "shape"
+at = [496, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "green"
+style.fill = "solid"
+z = "c023"
+
+[node.col-neutral-0]
+text = "neutral 0"
+kind = "shape"
+at = [0, 100]
+shape = "rounded"
+size = [112, 36]
+style.fill = "none"
+z = "c009"
+
+[node.col-neutral-1]
+text = "neutral 1"
+kind = "shape"
+at = [0, 146]
+shape = "rounded"
+size = [112, 36]
+z = "c010"
+
+[node.col-neutral-2]
+text = "neutral 2"
+kind = "shape"
+at = [0, 192]
+shape = "rounded"
+size = [112, 36]
+style.fill = "solid"
+z = "c011"
+
+[node.col-orange-0]
+text = "orange 0"
+kind = "shape"
+at = [248, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "orange"
+style.fill = "none"
+z = "c015"
+
+[node.col-orange-1]
+text = "orange 1"
+kind = "shape"
+at = [248, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "orange"
+z = "c016"
+
+[node.col-orange-2]
+text = "orange 2"
+kind = "shape"
+at = [248, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "orange"
+style.fill = "solid"
+z = "c017"
+
+[node.col-purple-0]
+text = "purple 0"
+kind = "shape"
+at = [744, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "purple"
+style.fill = "none"
+z = "c027"
+
+[node.col-purple-1]
+text = "purple 1"
+kind = "shape"
+at = [744, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "purple"
+z = "c028"
+
+[node.col-purple-2]
+text = "purple 2"
+kind = "shape"
+at = [744, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "purple"
+style.fill = "solid"
+z = "c029"
+
+[node.col-red-0]
+text = "red 0"
+kind = "shape"
+at = [124, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "red"
+style.fill = "none"
+z = "c012"
+
+[node.col-red-1]
+text = "red 1"
+kind = "shape"
+at = [124, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "red"
+z = "c013"
+
+[node.col-red-2]
+text = "red 2"
+kind = "shape"
+at = [124, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "red"
+style.fill = "solid"
+z = "c014"
+
+[node.col-yellow-0]
+text = "yellow 0"
+kind = "shape"
+at = [372, 100]
+shape = "rounded"
+size = [112, 36]
+style.color = "yellow"
+style.fill = "none"
+z = "c018"
+
+[node.col-yellow-1]
+text = "yellow 1"
+kind = "shape"
+at = [372, 146]
+shape = "rounded"
+size = [112, 36]
+style.color = "yellow"
+z = "c019"
+
+[node.col-yellow-2]
+text = "yellow 2"
+kind = "shape"
+at = [372, 192]
+shape = "rounded"
+size = [112, 36]
+style.color = "yellow"
+style.fill = "solid"
+z = "c020"
+
+[node.cyc-a]
+text = "cycle a"
+kind = "shape"
+at = [1010, 1220]
+parent = "cyc-b"
+size = [110, 40]
+z = "c169"
+
+[node.cyc-b]
+text = "cycle b"
+kind = "shape"
+at = [1010, 1270]
+parent = "cyc-a"
+size = [110, 40]
+z = "c170"
+
+[node.cyc-self]
+text = "own parent"
+kind = "shape"
+at = [880, 1270]
+parent = "cyc-self"
+size = [110, 40]
+z = "c171"
+
+[node.ext-node]
+text = "has ext"
+kind = "shape"
+at = [890, 320]
+ext."com.example.sim".cost = 1.5
+ext."com.example.sim".note = "a;b=c%d"
+size = [110, 40]
+z = "c043"
+
+[node.fa]
+text = "A in outer"
+kind = "shape"
+at = [20, 50]
+parent = "frame-outer"
+size = [120, 50]
+z = "a1"
+
+[node.fb]
+text = "B in inner"
+kind = "shape"
+at = [20, 40]
+parent = "frame-inner"
+size = [100, 44]
+z = "a1"
+
+[node.fc]
+text = "C at [-60,140]"
+kind = "shape"
+at = [-60, 140]
+parent = "frame-inner"
+shape = "ellipse"
+size = [110, 44]
+style.color = "green"
+z = "a2"
+
+[node.fd]
+text = "D in outer"
+kind = "shape"
+at = [20, 150]
+parent = "frame-outer"
+size = [120, 50]
+z = "a0"
+
+[node.frame-inner]
+text = "Inner frame"
+kind = "frame"
+at = [200, 40]
+parent = "frame-outer"
+size = [220, 200]
+style.color = "blue"
+z = "a2"
+
+[node.frame-outer]
+text = "Outer frame"
+kind = "frame"
+at = [0, 440]
+size = [440, 260]
+z = "c051"
+
+[node.h0-a]
+kind = "shape"
+at = [1160, 330]
+size = [20, 20]
+z = "c083"
+
+[node.h0-b]
+kind = "shape"
+at = [1330, 330]
+size = [20, 20]
+z = "c084"
+
+[node.h1-a]
+kind = "shape"
+at = [1160, 364]
+size = [20, 20]
+z = "c086"
+
+[node.h1-b]
+kind = "shape"
+at = [1330, 364]
+size = [20, 20]
+z = "c087"
+
+[node.h2-a]
+kind = "shape"
+at = [1160, 398]
+size = [20, 20]
+z = "c089"
+
+[node.h2-b]
+kind = "shape"
+at = [1330, 398]
+size = [20, 20]
+z = "c090"
+
+[node.h3-a]
+kind = "shape"
+at = [1160, 432]
+size = [20, 20]
+z = "c092"
+
+[node.h3-b]
+kind = "shape"
+at = [1330, 432]
+size = [20, 20]
+z = "c093"
+
+[node.h4-a]
+kind = "shape"
+at = [1160, 466]
+size = [20, 20]
+z = "c095"
+
+[node.h4-b]
+kind = "shape"
+at = [1330, 466]
+size = [20, 20]
+z = "c096"
+
+[node.h5-a]
+kind = "shape"
+at = [1160, 500]
+size = [20, 20]
+z = "c098"
+
+[node.h5-b]
+kind = "shape"
+at = [1330, 500]
+size = [20, 20]
+z = "c099"
+
+[node.h6-a]
+kind = "shape"
+at = [1160, 534]
+size = [20, 20]
+z = "c101"
+
+[node.h6-b]
+kind = "shape"
+at = [1330, 534]
+size = [20, 20]
+z = "c102"
+
+[node.h7-a]
+kind = "shape"
+at = [1160, 568]
+size = [20, 20]
+z = "c104"
+
+[node.h7-b]
+kind = "shape"
+at = [1330, 568]
+size = [20, 20]
+z = "c105"
+
+[node.h8-a]
+kind = "shape"
+at = [1160, 602]
+size = [20, 20]
+z = "c107"
+
+[node.h8-b]
+kind = "shape"
+at = [1330, 602]
+size = [20, 20]
+z = "c108"
+
+[node.hd-a]
+kind = "shape"
+at = [1160, 640]
+size = [20, 20]
+z = "c110"
+
+[node.hd-b]
+kind = "shape"
+at = [1330, 640]
+size = [20, 20]
+z = "c111"
+
+[node.hub]
+text = "hub"
+kind = "shape"
+at = [160, 960]
+size = [120, 70]
+z = "c113"
+
+[node.hub2]
+text = "diamond hub"
+kind = "shape"
+at = [520, 950]
+shape = "diamond"
+size = [140, 90]
+z = "c122"
+
+[node.img-missing]
+kind = "image"
+at = [1160, 100]
+size = [130, 60]
+src = "assets/not-there.png"
+z = "c049"
+
+[node.img-ok]
+kind = "image"
+at = [1160, 0]
+size = [130, 90]
+src = "assets/warehouse-map-3fa9c2d1.png"
+z = "c048"
+
+[node.img-tall]
+kind = "image"
+at = [1160, 180]
+size = [60, 120]
+src = "assets/warehouse-map-3fa9c2d1.png"
+z = "c050"
+
+[node.l0-a]
+kind = "shape"
+at = [0, 1130]
+size = [30, 24]
+z = "c133"
+
+[node.l0-b]
+kind = "shape"
+at = [330, 1130]
+size = [30, 24]
+z = "c134"
+
+[node.l1-a]
+kind = "shape"
+at = [0, 1170]
+size = [30, 24]
+z = "c136"
+
+[node.l1-b]
+kind = "shape"
+at = [330, 1170]
+size = [30, 24]
+z = "c137"
+
+[node.l2-a]
+kind = "shape"
+at = [0, 1210]
+size = [30, 24]
+z = "c139"
+
+[node.l2-b]
+kind = "shape"
+at = [330, 1210]
+size = [30, 24]
+z = "c140"
+
+[node.l3-a]
+kind = "shape"
+at = [0, 1250]
+size = [30, 24]
+z = "c142"
+
+[node.l3-b]
+kind = "shape"
+at = [330, 1250]
+size = [30, 24]
+z = "c143"
+
+[node.l4-a]
+kind = "shape"
+at = [0, 1290]
+size = [30, 24]
+z = "c145"
+
+[node.l4-b]
+kind = "shape"
+at = [330, 1290]
+size = [30, 24]
+z = "c146"
+
+[node.l5-a]
+kind = "shape"
+at = [0, 1330]
+size = [30, 24]
+z = "c148"
+
+[node.l5-b]
+kind = "shape"
+at = [330, 1330]
+size = [30, 24]
+z = "c149"
+
+[node.l6-a]
+kind = "shape"
+at = [0, 1370]
+size = [30, 24]
+z = "c151"
+
+[node.l6-b]
+kind = "shape"
+at = [330, 1370]
+size = [30, 24]
+z = "c152"
+
+[node.linked]
+text = "linked"
+kind = "shape"
+at = [1020, 250]
+link = "https://example.com/a?b=1&c=2;d"
+size = [110, 50]
+z = "c041"
+
+[node.locked]
+text = "locked"
+kind = "shape"
+at = [1020, 310]
+locked = true
+size = [110, 50]
+z = "c042"
+
+[node.long]
+text = "A very long label that keeps going. A very long label that keeps going. A very long label that keeps going. A very long label that keeps going. A very long label that keeps going. A very long label that keeps going. A very long label that keeps going. A very long label that keeps going. A very long label that keeps going."
+kind = "shape"
+at = [650, 250]
+size = [220, 110]
+z = "c039"
+
+[node.loose-n]
+text = "node"
+kind = "shape"
+at = [820, 960]
+size = [70, 36]
+z = "c129"
+
+[node.mystery]
+text = "unknown kind with text"
+kind = "mystery"
+at = [0, 340]
+payload.a = [1, 2]
+size = [110, 50]
+z = "c044"
+
+[node.note-a]
+kind = "note"
+at = [200, 330]
+file = "Projects/API migration/Cutover plan.md"
+size = [170, 70]
+subpath = "#Rollback steps"
+z = "c046"
+
+[node.note-b]
+kind = "note"
+at = [400, 340]
+file = "Inbox/Read & <review>.md"
+size = [170, 60]
+style.color = "yellow"
+z = "c047"
+
+[node.odd-shape]
+text = "shape = hexagon"
+kind = "shape"
+at = [890, 250]
+shape = "hexagon"
+size = [110, 60]
+z = "c040"
+
+[node.orphan]
+text = "parent missing"
+kind = "shape"
+at = [880, 1220]
+parent = "no-such-frame"
+size = [110, 40]
+z = "c168"
+
+[node.r0-a]
+text = "a"
+kind = "shape"
+at = [0, 760]
+size = [60, 36]
+z = "c065"
+
+[node.r0-b]
+text = "b"
+kind = "shape"
+at = [130, 870]
+size = [60, 36]
+z = "c066"
+
+[node.r1-a]
+text = "a"
+kind = "shape"
+at = [215, 760]
+size = [60, 36]
+z = "c068"
+
+[node.r1-b]
+text = "b"
+kind = "shape"
+at = [345, 870]
+size = [60, 36]
+z = "c069"
+
+[node.r2-a]
+text = "a"
+kind = "shape"
+at = [430, 760]
+size = [60, 36]
+z = "c071"
+
+[node.r2-b]
+text = "b"
+kind = "shape"
+at = [560, 870]
+size = [60, 36]
+z = "c072"
+
+[node.r3-a]
+text = "a"
+kind = "shape"
+at = [645, 760]
+size = [60, 36]
+z = "c074"
+
+[node.r3-b]
+text = "b"
+kind = "shape"
+at = [775, 870]
+size = [60, 36]
+z = "c075"
+
+[node.r4-a]
+text = "a"
+kind = "shape"
+at = [860, 760]
+size = [60, 36]
+z = "c077"
+
+[node.r4-b]
+text = "b"
+kind = "shape"
+at = [990, 870]
+size = [60, 36]
+z = "c078"
+
+[node.r5-a]
+text = "a"
+kind = "shape"
+at = [1075, 760]
+size = [60, 36]
+z = "c080"
+
+[node.r5-b]
+text = "b"
+kind = "shape"
+at = [1205, 870]
+size = [60, 36]
+z = "c081"
+
+[node.selfy]
+text = "self loop"
+kind = "shape"
+at = [860, 1140]
+size = [90, 50]
+z = "c161"
+
+[node.sh-cylinder]
+text = "cylinder"
+kind = "shape"
+at = [840, 0]
+shape = "cylinder"
+size = [120, 64]
+z = "c007"
+
+[node.sh-diamond]
+text = "diamond"
+kind = "shape"
+at = [560, 0]
+shape = "diamond"
+size = [120, 64]
+z = "c005"
+
+[node.sh-document]
+text = "document"
+kind = "shape"
+at = [980, 0]
+shape = "document"
+size = [120, 64]
+z = "c008"
+
+[node.sh-ellipse]
+text = "ellipse"
+kind = "shape"
+at = [420, 0]
+shape = "ellipse"
+size = [120, 64]
+z = "c004"
+
+[node.sh-parallelogram]
+text = "parallelogram"
+kind = "shape"
+at = [700, 0]
+shape = "parallelogram"
+size = [120, 64]
+z = "c006"
+
+[node.sh-pill]
+text = "pill"
+kind = "shape"
+at = [280, 0]
+shape = "pill"
+size = [120, 64]
+z = "c003"
+
+[node.sh-rect]
+text = "rect"
+kind = "shape"
+at = [0, 0]
+size = [120, 64]
+z = "c001"
+
+[node.sh-rounded]
+text = "rounded"
+kind = "shape"
+at = [140, 0]
+shape = "rounded"
+size = [120, 64]
+z = "c002"
+
+[node.side-bottom]
+text = "bottom"
+kind = "shape"
+at = [190, 1070]
+shape = "rounded"
+size = [60, 30]
+z = "c118"
+
+[node.side-left]
+text = "left"
+kind = "shape"
+at = [30, 980]
+shape = "rounded"
+size = [60, 30]
+z = "c120"
+
+[node.side-right]
+text = "right"
+kind = "shape"
+at = [350, 980]
+shape = "rounded"
+size = [60, 30]
+z = "c116"
+
+[node.side-top]
+text = "top"
+kind = "shape"
+at = [190, 900]
+shape = "rounded"
+size = [60, 30]
+z = "c114"
+
+[node.special]
+text = "<b>not bold</b> & \"double\" 'single' ; key=value; 100% &amp; <tag a=\"1\">\ttab"
+kind = "shape"
+at = [400, 250]
+size = [230, 70]
+style.color = "cyan"
+z = "c038"
+
+[node.sticker]
+kind = "sticker"
+at = [130, 340]
+emoji = "🚀"
+size = [48, 48]
+spin = 15
+z = "c045"
+
+[node.txt-auto]
+text = "free text, no size\nsecond line — wider than the first"
+kind = "text"
+at = [170, 260]
+size = [220, 40]
+z = "c037"
+
+[node.txt-sized]
+text = "free text with a size:\nit wraps inside one hundred and fifty px"
+kind = "text"
+at = [0, 260]
+size = [150, 60]
+z = "c036"
+
+[node.z-a]
+text = "z-a  z=3 (top)"
+kind = "shape"
+at = [480, 450]
+size = [90, 70]
+style.color = "red"
+style.fill = "solid"
+z = "3"
+
+[node.z-b]
+text = "z-b  z=1 (bottom)"
+kind = "shape"
+at = [520, 480]
+size = [90, 70]
+style.color = "blue"
+style.fill = "solid"
+z = "1"
+
+[node.z-c]
+text = "z-c  z=2"
+kind = "shape"
+at = [560, 510]
+size = [90, 70]
+style.color = "green"
+style.fill = "solid"
+z = "2"
+
+[node.z-tie1]
+text = "tie1 (below)"
+kind = "shape"
+at = [670, 450]
+size = [80, 60]
+style.color = "purple"
+style.fill = "solid"
+z = "5"
+
+[node.z-tie2]
+text = "tie2 (above)"
+kind = "shape"
+at = [700, 480]
+size = [80, 60]
+style.color = "orange"
+style.fill = "solid"
+z = "5"
+
+[edge.c-link]
+kind = "edge"
+from = { anchor = [1000, 900], node = "c-a" }
+to = { anchor = [0, 900], node = "c-b" }
+labels = [
+  { text = "linked + locked" },
+]
+link = "https://example.com/edge"
+locked = true
+route = "straight"
+z = "c160"
+
+[edge.c0]
+kind = "edge"
+from = { anchor = [1000, 100], node = "c-a" }
+to = { anchor = [0, 100], node = "c-b" }
+labels = [
+  { text = "red dashed" },
+]
+route = "straight"
+style.color = "red"
+style.stroke = "dashed"
+z = "c156"
+
+[edge.c1]
+kind = "edge"
+from = { anchor = [1000, 300], node = "c-a" }
+to = { anchor = [0, 300], node = "c-b" }
+labels = [
+  { text = "blue" },
+]
+route = "straight"
+style.color = "blue"
+z = "c157"
+
+[edge.c2]
+kind = "edge"
+from = { anchor = [1000, 500], node = "c-a" }
+to = { anchor = [0, 500], node = "c-b" }
+labels = [
+  { text = "#0a7f6f dashed" },
+]
+route = "straight"
+style.color = "#0a7f6f"
+style.stroke = "dashed"
+z = "c158"
+
+[edge.c3]
+kind = "edge"
+from = { anchor = [1000, 700], node = "c-a" }
+to = { anchor = [0, 700], node = "c-b" }
+labels = [
+  { text = "green" },
+]
+route = "straight"
+style.color = "green"
+z = "c159"
+
+[edge.e-an-1]
+kind = "edge"
+from = { node = "an-1" }
+to = { anchor = [100, 200], node = "hub2" }
+route = "straight"
+z = "c126"
+
+[edge.e-an-2]
+kind = "edge"
+from = { node = "an-2" }
+to = { anchor = [900, 800], node = "hub2" }
+route = "straight"
+z = "c127"
+
+[edge.e-an-3]
+kind = "edge"
+from = { node = "an-3" }
+to = { node = "hub2", side = "right" }
+route = "straight"
+z = "c128"
+
+[edge.e-side-bottom]
+kind = "edge"
+from = { node = "side-bottom" }
+to = { node = "hub", side = "bottom" }
+route = "straight"
+z = "c119"
+
+[edge.e-side-left]
+kind = "edge"
+from = { node = "side-left" }
+to = { node = "hub", side = "left" }
+route = "straight"
+z = "c121"
+
+[edge.e-side-right]
+kind = "edge"
+from = { node = "side-right" }
+to = { node = "hub", side = "right" }
+route = "straight"
+z = "c117"
+
+[edge.e-side-top]
+kind = "edge"
+from = { node = "side-top" }
+to = { node = "hub", side = "top" }
+route = "straight"
+z = "c115"
+
+[edge.e01]
+kind = "edge"
+from = { node = "0" }
+to = { node = "1" }
+labels = [
+  { text = "0 → 1" },
+]
+route = "straight"
+z = "c064"
+
+[edge.h0]
+kind = "edge"
+from = { node = "h0-a", side = "right" }
+to = { node = "h0-b", side = "left" }
+heads = ["none", "none"]
+labels = [
+  { text = "none/none" },
+]
+route = "straight"
+z = "c085"
+
+[edge.h1]
+kind = "edge"
+from = { node = "h1-a", side = "right" }
+to = { node = "h1-b", side = "left" }
+labels = [
+  { text = "none/arrow" },
+]
+route = "straight"
+z = "c088"
+
+[edge.h2]
+kind = "edge"
+from = { node = "h2-a", side = "right" }
+to = { node = "h2-b", side = "left" }
+heads = ["none", "triangle"]
+labels = [
+  { text = "none/triangle" },
+]
+route = "straight"
+z = "c091"
+
+[edge.h3]
+kind = "edge"
+from = { node = "h3-a", side = "right" }
+to = { node = "h3-b", side = "left" }
+heads = ["arrow", "none"]
+labels = [
+  { text = "arrow/none" },
+]
+route = "straight"
+z = "c094"
+
+[edge.h4]
+kind = "edge"
+from = { node = "h4-a", side = "right" }
+to = { node = "h4-b", side = "left" }
+heads = ["arrow", "arrow"]
+labels = [
+  { text = "arrow/arrow" },
+]
+route = "straight"
+z = "c097"
+
+[edge.h5]
+kind = "edge"
+from = { node = "h5-a", side = "right" }
+to = { node = "h5-b", side = "left" }
+heads = ["arrow", "triangle"]
+labels = [
+  { text = "arrow/triangle" },
+]
+route = "straight"
+z = "c100"
+
+[edge.h6]
+kind = "edge"
+from = { node = "h6-a", side = "right" }
+to = { node = "h6-b", side = "left" }
+heads = ["triangle", "none"]
+labels = [
+  { text = "triangle/none" },
+]
+route = "straight"
+z = "c103"
+
+[edge.h7]
+kind = "edge"
+from = { node = "h7-a", side = "right" }
+to = { node = "h7-b", side = "left" }
+heads = ["triangle", "arrow"]
+labels = [
+  { text = "triangle/arrow" },
+]
+route = "straight"
+z = "c106"
+
+[edge.h8]
+kind = "edge"
+from = { node = "h8-a", side = "right" }
+to = { node = "h8-b", side = "left" }
+heads = ["triangle", "triangle"]
+labels = [
+  { text = "triangle/triangle" },
+]
+route = "straight"
+z = "c109"
+
+[edge.hd]
+kind = "edge"
+from = { node = "hd-a" }
+to = { node = "hd-b" }
+labels = [
+  { text = "no heads field" },
+]
+route = "straight"
+z = "c112"
+
+[edge.l0]
+kind = "edge"
+from = { node = "l0-a" }
+to = { node = "l0-b" }
+route = "straight"
+z = "c135"
+
+[edge.l1]
+kind = "edge"
+from = { node = "l1-a" }
+to = { node = "l1-b" }
+labels = [
+  { text = "one" },
+]
+route = "straight"
+z = "c138"
+
+[edge.l2]
+kind = "edge"
+from = { node = "l2-a" }
+to = { node = "l2-b" }
+labels = [
+  { at = 200, text = "at 0.2" },
+]
+route = "straight"
+z = "c141"
+
+[edge.l3]
+kind = "edge"
+from = { node = "l3-a" }
+to = { node = "l3-b" }
+labels = [
+  { at = 250, text = "L 0.25" },
+  { at = 750, text = "L 0.75" },
+]
+route = "straight"
+z = "c144"
+
+[edge.l4]
+kind = "edge"
+from = { node = "l4-a" }
+to = { node = "l4-b" }
+labels = [
+  { at = 100, text = "s" },
+  { text = "m" },
+  { at = 900, text = "e" },
+]
+route = "straight"
+z = "c147"
+
+[edge.l5]
+kind = "edge"
+from = { node = "l5-a" }
+to = { node = "l5-b" }
+labels = [
+  { text = "a<b & \"c\"; d=e" },
+]
+route = "straight"
+z = "c150"
+
+[edge.l6]
+kind = "edge"
+from = { node = "l6-a" }
+to = { node = "l6-b" }
+labels = [
+  { text = "two\nlines" },
+]
+route = "straight"
+z = "c153"
+
+[edge.loose-both]
+kind = "edge"
+from = { at = [800, 1080] }
+to = { at = [980, 1060] }
+labels = [
+  { text = "both loose" },
+]
+route = "straight"
+style.color = "purple"
+style.stroke = "dashed"
+z = "c132"
+
+[edge.loose-from]
+kind = "edge"
+from = { at = [780, 1050] }
+to = { node = "loose-n" }
+labels = [
+  { text = "loose start" },
+]
+route = "straight"
+z = "c131"
+
+[edge.loose-to]
+kind = "edge"
+from = { node = "loose-n" }
+to = { at = [960, 930] }
+labels = [
+  { text = "loose end" },
+]
+route = "straight"
+z = "c130"
+
+[edge.r0]
+kind = "edge"
+from = { node = "r0-a" }
+to = { node = "r0-b" }
+labels = [
+  { text = "straight" },
+]
+route = "straight"
+z = "c067"
+
+[edge.r1]
+kind = "edge"
+from = { node = "r1-a" }
+to = { node = "r1-b" }
+labels = [
+  { text = "straight +2 pts" },
+]
+points = [[365, 778], [245, 850]]
+route = "straight"
+z = "c070"
+
+[edge.r2]
+kind = "edge"
+from = { node = "r2-a" }
+to = { node = "r2-b" }
+labels = [
+  { text = "elbow" },
+]
+z = "c073"
+
+[edge.r3]
+kind = "edge"
+from = { node = "r3-a" }
+to = { node = "r3-b" }
+labels = [
+  { text = "elbow +2 pts" },
+]
+points = [[755, 778], [755, 888]]
+z = "c076"
+
+[edge.r4]
+kind = "edge"
+from = { node = "r4-a" }
+to = { node = "r4-b" }
+labels = [
+  { text = "curved" },
+]
+route = "curved"
+z = "c079"
+
+[edge.r5]
+kind = "edge"
+from = { node = "r5-a" }
+to = { node = "r5-b" }
+labels = [
+  { text = "curved +2 pts" },
+]
+points = [[1225, 778], [1105, 850]]
+route = "curved"
+z = "c082"
+
+[edge.self]
+kind = "edge"
+from = { node = "selfy", side = "right" }
+to = { node = "selfy", side = "bottom" }
+z = "c162"
+
+[edge.x-dangling]
+kind = "edge"
+from = { node = "fa" }
+to = { node = "deleted-node" }
+labels = [
+  { text = "dangling" },
+]
+route = "straight"
+z = "c167"
+
+[edge.x-frame]
+kind = "edge"
+from = { node = "frame-inner", side = "right" }
+to = { node = "z-tie1" }
+route = "straight"
+style.stroke = "dashed"
+z = "c166"
+
+[edge.x-inside]
+kind = "edge"
+from = { node = "fb", side = "bottom" }
+to = { node = "fc", side = "right" }
+labels = [
+  { text = "inside inner" },
+]
+points = [[270, 690]]
+z = "c164"
+
+[edge.x-nested]
+kind = "edge"
+from = { node = "fb" }
+to = { node = "z-b" }
+labels = [
+  { text = "inner child → top level" },
+]
+route = "straight"
+z = "c163"
+
+[edge.x-siblings]
+kind = "edge"
+from = { node = "fa" }
+to = { node = "fd" }
+heads = ["triangle", "triangle"]
+route = "straight"
+z = "c165"

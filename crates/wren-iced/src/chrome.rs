@@ -15,6 +15,8 @@ pub enum Icon {
     Back,
     Forward,
     More,
+    /// A board note: two shapes and the connector between them.
+    Board,
 }
 
 pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Message> {
@@ -28,6 +30,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Me
         Icon::Back => "<path d='m14 6-6 6 6 6'/>",
         Icon::Forward => "<path d='m10 6 6 6-6 6'/>",
         Icon::More => "<circle cx='5' cy='12' r='1'/><circle cx='12' cy='12' r='1'/><circle cx='19' cy='12' r='1'/>",
+        Icon::Board => "<rect x='3' y='3' width='8' height='6' rx='1.5'/><rect x='13' y='15' width='8' height='6' rx='1.5'/><path d='M7 9v7.5a1.5 1.5 0 0 0 1.5 1.5H13'/>",
     };
     // Keep strokes about 1.4 px on screen: at 14 px a 1.8-unit stroke
     // rasterizes to one faint pixel on dark themes.

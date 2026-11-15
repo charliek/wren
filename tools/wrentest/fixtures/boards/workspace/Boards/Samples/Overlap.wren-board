@@ -1,0 +1,28 @@
+schema = 1
+
+[node.back]
+text = "The back shape's label is covered"
+kind = "shape"
+at = [0, 0]
+size = [240, 80]
+style.color = "blue"
+style.fill = "solid"
+z = "V01"
+
+[node.front]
+text = "The front shape is drawn last"
+kind = "shape"
+at = [160, 80]
+size = [240, 80]
+style.color = "red"
+style.fill = "solid"
+z = "V03"
+
+[node.middle]
+text = "The middle shape's label is covered"
+kind = "shape"
+at = [80, 40]
+size = [240, 80]
+style.color = "green"
+style.fill = "solid"
+z = "V02"

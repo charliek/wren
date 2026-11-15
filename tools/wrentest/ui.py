@@ -17,6 +17,7 @@ from __future__ import annotations
 import atexit
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -40,7 +41,7 @@ _FINAL_REAP_TIMEOUT: float = 5.0
 _PRESERVE_VARS = frozenset({
     "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
     "XAUTHORITY", "LIBGL_ALWAYS_SOFTWARE", "MESA_LOADER_DRIVER_OVERRIDE",
-    "WGPU_BACKEND", "ICED_BACKEND",
+    "WGPU_BACKEND", "ICED_BACKEND", "ICED_PRESENT_MODE", "WINIT_X11_SCALE_FACTOR",
     "DBUS_SESSION_BUS_ADDRESS",
     "GIO_USE_VFS", "GSETTINGS_BACKEND",
     "PATH", "LANG",
@@ -103,17 +104,38 @@ def spell_setting() -> str:
     return value
 
 
-def _names_spell_check(settings: str) -> bool:
-    return any(line.split("=", 1)[0].strip() == "spell-check"
-               for line in settings.splitlines() if "=" in line)
+def _spell_setting(settings: str | None) -> str:
+    """*settings* with the ``spell-check`` line ``WRENTEST_SPELL`` asks for.
+
+    Unlike ``WRENTEST_BOARDS``, unset still writes a line (``off``), so the
+    file exists even when the test gave no settings. Settings that already
+    name ``spell-check`` are left as they are: a spell case sets it itself.
+    """
+    return _with_setting(settings, "spell-check", spell_setting())
 
 
-def _with_spell_setting(settings: str | None) -> str:
-    """The first launch's ``config.conf``: the test's own text, plus the
-    lane's ``spell-check`` line unless the test already names it."""
-    if settings is not None and _names_spell_check(settings):
+def _boards_setting(settings: str | None) -> str | None:
+    """*settings* with the ``boards`` line ``WRENTEST_BOARDS`` asks for.
+
+    ``WRENTEST_BOARDS=off`` or ``on`` writes that setting explicitly into
+    every launch's ``config.conf``, so a run means the same thing whatever
+    the build's default is. Unset, nothing is added and the build's default
+    holds. Settings that already name ``boards`` are left as they are: a
+    board case sets it itself.
+    """
+    value = os.environ.get("WRENTEST_BOARDS", "")
+    if not value:
         return settings
-    line = f"spell-check = {spell_setting()}\n"
+    if value not in ("off", "on"):
+        raise ValueError(f"WRENTEST_BOARDS must be off or on, got {value!r}")
+    return _with_setting(settings, "boards", value)
+
+
+def _with_setting(settings: str | None, key: str, value: str) -> str:
+    """*settings* with ``key = value`` appended, unless a line names *key*."""
+    if settings is not None and re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=", settings):
+        return settings
+    line = f"{key} = {value}\n"
     if not settings:
         return line
     return settings + ("" if settings.endswith("\n") else "\n") + line
@@ -173,7 +195,13 @@ class WrenApp:
         Text for the sandbox's ``config.conf``, written before the first
         launch, with ``spell-check = <WRENTEST_SPELL>`` appended unless it
         names ``spell-check`` itself; without it the file holds only that
-        line. Restarts keep whatever the app has written there since.
+        line. ``WRENTEST_BOARDS`` adds a ``boards`` line after it unless the
+        text has one. Restarts keep whatever the app has written there
+        since.
+    lane_settings:
+        Set to ``False`` to add neither lane line: ``config.conf`` is then
+        the test's own text, and is not written at all without it, as a
+        fresh install has none.
     words:
         Text for ``words.txt`` beside ``config.conf``, written before the
         first launch.
@@ -189,6 +217,7 @@ class WrenApp:
         evaluation: bool = True,
         settings: str | None = None,
         words: str | None = None,
+        lane_settings: bool = True,
     ) -> None:
         _validate_positive_finite(readiness_timeout, "readiness_timeout")
         if type(evaluation) is not bool:
@@ -197,6 +226,8 @@ class WrenApp:
             raise ValueError("settings must be str or None")
         if words is not None and not isinstance(words, str):
             raise ValueError("words must be str or None")
+        if type(lane_settings) is not bool:
+            raise ValueError("lane_settings must be bool")
         self._binary = _find_binary()
         env_artifacts = os.environ.get("WREN_TEST_ARTIFACT_DIR")
         self._artifacts_base = (
@@ -209,7 +240,8 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
-        self._settings = _with_spell_setting(settings)
+        self._settings = (_boards_setting(_spell_setting(settings)) if lane_settings
+                          else settings)
         self._words = words
 
         self._ownroot: Path | None = None
@@ -392,7 +424,8 @@ class WrenApp:
         self._atexit_registered = True
 
         try:
-            self._write_config(self.settings_path, self._settings)
+            if self._settings is not None:
+                self._write_config(self.settings_path, self._settings)
             if self._words is not None:
                 self._write_config(self.words_path, self._words)
             self._start_process()
@@ -434,7 +467,8 @@ class WrenApp:
         if self._workspace is not None:
             cmd.extend(["--workspace", str(self._workspace)])
         elif self._evaluation and not any(
-            flag in self._extra_args for flag in ("--workspace", "--editor", "--editor-spike")
+            flag in self._extra_args
+            for flag in ("--workspace", "--editor", "--editor-spike", "--board-spike")
         ):
             cmd.append("--editor")
         cmd.extend(self._extra_args)

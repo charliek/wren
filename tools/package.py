@@ -60,14 +60,17 @@ ICON_CATALOG = Path("assets/icon/AppIcon.icon")
 # Rust's own default for aarch64-apple-darwin; actool needs some target.
 MACOS_ICON_DEPLOYMENT_TARGET = "11.0"
 # License texts shipped beside the binary: the embedded fonts' and
-# dictionary's, and iced's for the source copied into crates/wren-editor
+# dictionary's, iced's for the source copied into crates/wren-editor
 # (crates.io's iced_widget and iced_graphics packages carry none, so
-# DEPENDENCY_NOTICES.txt cannot).
+# DEPENDENCY_NOTICES.txt cannot), and lyon's for the same reason: its five
+# crates.io packages ship no license file.
 LICENSE_NOTICES = (
     Path("third_party/inter/LICENSE.txt"),
     Path("third_party/jetbrains-mono/OFL.txt"),
     Path("third_party/iced/LICENSE"),
     Path("third_party/scowl/README_en_US.txt"),
+    Path("third_party/lyon/LICENSE-MIT"),
+    Path("third_party/lyon/LICENSE-APACHE"),
 )
 # The release of crates/wren-spell/dict/, as its SOURCE.md records it.
 SCOWL_RELEASE = "2026.02.25"
@@ -101,6 +104,12 @@ NOTICES = (
     "License 2.0. Its source code is available from\n"
     f"https://crates.io/crates/spellbook/{SPELLBOOK_VERSION}, and its license text\n"
     "is in DEPENDENCY_NOTICES.txt, under spellbook.\n"
+    "\nWren links lyon 1.0.19, lyon_algorithms 1.0.22, lyon_geom 1.0.20,\n"
+    "lyon_path 1.0.19 and lyon_tessellation 1.0.23 (Copyright 2013 Nicolas\n"
+    "Silva), used under their MIT license option. Their crates.io packages\n"
+    "carry no license file, so the upstream texts accompany this bundle:\n"
+    "  third_party/lyon/LICENSE-MIT\n"
+    "  third_party/lyon/LICENSE-APACHE\n"
     "\nWren itself is released under the MIT License; see LICENSE.\n"
 )
 PROJECT_LICENSE = Path("LICENSE")

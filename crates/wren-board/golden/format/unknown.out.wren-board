@@ -1,0 +1,43 @@
+schema = 1
+layout.direction = "down"
+meta.author = "a script"
+meta.version = 2
+zz_last = true
+
+[node.a]
+text = "Unknown values"
+kind = "shape"
+at = [0, 0]
+ext.drawio.style = "rounded=1;whiteSpace=wrap;"
+extra_field = "kept"
+shape = "hexagon"
+size = [120, 60]
+style.color = "teal"
+style.fill = "hatched"
+style.glow = true
+style.stroke = "dotted"
+z = "V01"
+zz = [1, 2]
+
+[node.b]
+text = "Unknown kind"
+kind = "sticky"
+at = [200, 0]
+colour = "yellow"
+size = [120, 60]
+z = "V02"
+
+[edge.e]
+kind = "link"
+from = { node = "a", port = "p1", side = "middle" }
+to = { node = "b" }
+heads = ["diamond", "circle"]
+labels = [
+  { font = "mono", text = "styled" },
+]
+route = "curved"
+style.color = "magenta"
+style.fill = "tint"
+style.stroke = "wavy"
+weight = 3
+z = "V03"

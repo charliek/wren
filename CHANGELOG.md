@@ -13,6 +13,53 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **Boards**, a second kind of note: a canvas of shapes and connectors for
+  flowcharts and small diagrams, saved as `Name.wren-board` beside the
+  Markdown notes of a group. The file is plain text with one field per
+  line, so a change to a board is a small, readable diff in git; opening a
+  board never rewrites it. Boards save, reload, and keep conflict copies as
+  notes do, and their labels are searchable. See
+  [Boards](https://charliek.github.io/wren/reference/boards/) and the
+  [board file format](https://charliek.github.io/wren/reference/board-format/).
+- **Creating one:** the New note dialog (⌘N, Alt+N on Linux) has Markdown
+  and Board pills, switched with Tab, and the palette has **New board…**.
+- **Building with the mouse:** eight shapes (rectangle, rounded rectangle,
+  pill, ellipse, diamond, parallelogram, cylinder, document) and free text,
+  connect handles on hover, attached connectors with straight or
+  right-angled routes that avoid other shapes, arrowheads, dashes and a
+  label, a 20-unit grid, marquee selection, and resize handles.
+- **Building with the keyboard:** tool letters (V, H, R, O, D, U, Y, P, T,
+  C), Tab to add the next connected shape, ⌘+arrow (Ctrl+arrow on Linux)
+  to connect in a direction, the arrows to walk from shape to shape,
+  ⌥+arrow (Alt+arrow) to move, ⌥⇧+arrow (Alt+Shift+arrow) to resize, Enter
+  to edit a label, and C with a typed search to connect to a distant
+  shape. Duplicate (⌘D / Ctrl+D), copy, cut, and paste between boards, and
+  undo and redo.
+- **Colours and arranging:** the digits 0 to 7 set one of eight colours
+  (neutral, red, orange, yellow, green, cyan, purple, blue) that every theme
+  supplies and that stay distinguishable under common colour blindness;
+  fills none, tint, and solid; ] and [ bring to front and send to back, ⇧]
+  and ⇧[ one step; align and distribute from the palette or the macOS
+  Board menu.
+- **The actions palette:** / or Shift+F10, or a right-click (Ctrl-click on
+  macOS), lists what applies to the selection and previews each style
+  before you choose it.
+- **Jump to node:** on a board, Jump to heading (⇧⌘O, Alt+Shift+O) and Find
+  in note (⌘F, Alt+F or Ctrl+F) list its labelled shapes and connectors; a
+  workspace search hit on a board selects and centres the match.
+- **Zoom and pan:** the wheel pans and ⌘+wheel (Ctrl+wheel) zooms, the
+  text-size keys (⌘= ⌘- ⌘0, Alt on Linux) zoom in steps, and ⇧1 and ⇧2 fit
+  the board or the selection.
+- **Export** as SVG, PNG, or a draw.io file from the palette and the macOS
+  Board menu, and with **`wren export`** on the command line, with no
+  window: `wren export "Flow.wren-board" -o flow.png --theme wren-dark`.
+- **A Board menu** on macOS, between View and Window. Go's **Jump to
+  Heading…** is now **Jump in Note…**.
+- **`boards`** in `config.conf`, on by default; `boards = off` hides boards
+  and leaves their files alone.
+
 ## v0.1.1 — 2026-11-10
 
 ### Changed

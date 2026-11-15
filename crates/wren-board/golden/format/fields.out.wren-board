@@ -1,0 +1,44 @@
+schema = 1
+
+[node.base]
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V01"
+
+[node.full]
+text = "Every field"
+kind = "shape"
+at = [20, -40]
+ext.tool.note = "kept"
+parent = "base"
+shape = "diamond"
+size = [140, 80]
+style.color = "red"
+style.fill = "solid"
+style.stroke = "dashed"
+z = "V02"
+
+[node.words]
+text = "Free text"
+kind = "text"
+at = [200, 0]
+size = [120, 20]
+style.color = "#3a7bd5"
+style.fill = "none"
+z = "V03"
+
+[edge.full]
+kind = "edge"
+from = { node = "base", side = "right" }
+to = { anchor = [0, 500], node = "words" }
+ext.tool.weight = 2
+heads = ["arrow", "none"]
+labels = [
+  { at = 250, text = "first" },
+  { text = "second" },
+]
+route = "straight"
+style.color = "blue"
+style.stroke = "dashed"
+z = "V04"

@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::autosave::Autosave;
-use crate::fs_store::{DiskFile, Expected, Fault, FsStore, RelPath, WriteReceipt};
+use crate::fs_store::{DiskFile, Expected, Fault, FsStore, Leaf, RelPath, WriteReceipt};
 use crate::index::Index;
+use crate::kind::NoteKind;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
@@ -25,6 +26,7 @@ pub enum Op {
     CreateNote {
         group: GroupId,
         title: String,
+        kind: NoteKind,
     },
     Rename {
         target: ItemRef,
@@ -201,6 +203,30 @@ impl Document {
 
 const MAX_NAVIGATION_ENTRIES: usize = 100;
 
+/// How long the open board's draft rests before the index extracts its
+/// labels. A keystroke in a label sends the whole board as a draft, and
+/// extracting a large board's labels on each one cost more than the
+/// keystroke's budget (the board plan's §3.4 rule 7).
+pub const INDEX_REST: Duration = Duration::from_millis(250);
+
+/// How a Session lists a workspace, fixed for its life and inherited by a
+/// Session that `Op::OpenWorkspace` opens from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// Whether board notes are scanned, listed, indexed and opened.
+    pub boards: bool,
+}
+
+impl SessionOptions {
+    fn kinds(self) -> scan::Kinds {
+        if self.boards {
+            scan::Kinds::ALL
+        } else {
+            scan::Kinds::MARKDOWN
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Navigation {
     Visit,
@@ -224,6 +250,7 @@ pub struct Session {
     history_index: Option<usize>,
     recent: Vec<NoteId>,
     last_save_micros: u128,
+    options: SessionOptions,
     background_reconcile: bool,
     reconcile_requested: bool,
     reconcile_in_flight: Option<u64>,
@@ -234,6 +261,9 @@ pub struct Session {
     // Notes whose model metadata or index text the owner refreshed while a job
     // was in flight. Their newer owner state wins over the job's snapshot read.
     touched: HashSet<NoteId>,
+    /// When the open board last sent a draft whose labels the index has
+    /// not extracted yet.
+    index_drafted: Option<Duration>,
 }
 
 impl std::fmt::Debug for Session {
@@ -251,26 +281,45 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
+    /// Opens a Markdown-only Session, as every release before boards did.
     pub fn open(path: &Path) -> Result<Self, OpError> {
         Self::with_trash(path, Box::new(SystemTrash))
     }
 
+    pub fn open_with(path: &Path, options: SessionOptions) -> Result<Self, OpError> {
+        Self::with_options(path, Box::new(SystemTrash), options)
+    }
+
     pub fn with_trash(path: &Path, trash: Box<dyn Trash>) -> Result<Self, OpError> {
-        Self::load(path, trash, 1).map_err(|message| OpError {
+        Self::with_options(path, trash, SessionOptions::default())
+    }
+
+    pub fn with_options(
+        path: &Path,
+        trash: Box<dyn Trash>,
+        options: SessionOptions,
+    ) -> Result<Self, OpError> {
+        Self::load(path, trash, 1, options).map_err(|message| OpError {
             message,
             events: Vec::new(),
         })
     }
 
-    fn load(path: &Path, trash: Box<dyn Trash>, generation: u64) -> Result<Self, String> {
+    fn load(
+        path: &Path,
+        trash: Box<dyn Trash>,
+        generation: u64,
+        options: SessionOptions,
+    ) -> Result<Self, String> {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
         let mut index = Index::default();
-        let mut model = scan::scan_with_contents(store.reader(), None, |note, contents| {
-            index.ingest(note, contents);
-        })
-        .map_err(|error| error.to_string())?;
+        let mut model =
+            scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
+                index.ingest(note, contents);
+            })
+            .map_err(|error| error.to_string())?;
         let watcher = match watch {
             Ok(watcher) => Some(watcher),
             Err(error) => {
@@ -336,12 +385,14 @@ impl Session {
             history_index,
             recent: Vec::new(),
             last_save_micros: 0,
+            options,
             background_reconcile: false,
             reconcile_requested: false,
             reconcile_in_flight: None,
             reconcile_job: None,
             tree_revision: 0,
             touched: HashSet::new(),
+            index_drafted: None,
         };
         session.sort_model();
         let selected = session
@@ -349,10 +400,16 @@ impl Session {
             .selection()
             .and_then(|path| session.resolve_selection(&path))
             .or_else(|| {
-                session
-                    .state
-                    .last_open_note()
-                    .and_then(|path| session.resolve_selection(&path))
+                // The Markdown fallback is what released Wren reopens, which
+                // matters when the last open note is a kind this Session does
+                // not list.
+                [
+                    session.state.last_open_note(),
+                    session.state.markdown_last_open_note(),
+                ]
+                .into_iter()
+                .flatten()
+                .find_map(|path| session.resolve_selection(&path))
             });
         if let Some((parent, note)) = selected {
             session.selected_parent = Some(parent);
@@ -432,6 +489,9 @@ impl Session {
     pub fn last_save_micros(&self) -> u128 {
         self.last_save_micros
     }
+    pub fn options(&self) -> SessionOptions {
+        self.options
+    }
     pub fn pending_durability(&self) -> bool {
         self.store.pending_durability()
     }
@@ -458,12 +518,23 @@ impl Session {
         self.reconcile_job.take()
     }
 
+    /// Boards read from disk are searched by their labels once the next
+    /// background job (or, without one, the next Tick) has extracted them,
+    /// so a workspace opens without parsing its boards. A content search
+    /// that must not miss them calls this first: it extracts what still
+    /// waits, here.
+    pub fn settle_search(&mut self) {
+        self.index.extract_waiting();
+    }
+
     pub fn apply(&mut self, op: Op) -> Result<Vec<Event>, OpError> {
         self.apply_at(op, self.started.elapsed())
     }
 
     pub fn apply_at(&mut self, op: Op, now: Duration) -> Result<Vec<Event>, OpError> {
         let mut events = Vec::new();
+        let drafted = matches!(op, Op::EditDraft { .. });
+        let passive = matches!(op, Op::Tick | Op::FinishReconcile(_));
         let mut result = self.execute(op, now, &mut events);
         // A conflict copy can be published before its directory sync fails.
         // Reconcile it after the active draft has been returned to the Session.
@@ -482,8 +553,30 @@ impl Session {
         for note in added {
             self.index.read_note(&self.store, note);
         }
+        // The open board's draft waits until it has rested, and any other
+        // operation takes it at once.
+        let board_draft = drafted
+            && self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.entry.kind == NoteKind::Board);
+        let waits = passive
+            && self.index.has_pending()
+            && self
+                .index_drafted
+                .is_some_and(|at| now.saturating_sub(at) < INDEX_REST);
+        if !board_draft && !waits {
+            self.index.settle();
+        }
         if let Some(document) = &self.document {
-            self.index.set_content(document.note, &document.text, true);
+            if board_draft || waits {
+                self.index.defer_content(document.note, &document.text);
+            } else {
+                self.index.set_content(document.note, &document.text, true);
+            }
+            if board_draft {
+                self.index_drafted = Some(now);
+            }
             self.selected_parent = Some(Parent::Group(document.entry.group));
         } else if self
             .selected_parent
@@ -558,17 +651,21 @@ impl Session {
                 self.state.reorder(&path, None, &siblings)?;
                 self.finish_structure(events)
             }
-            Op::CreateNote { group, title } => {
+            Op::CreateNote { group, title, kind } => {
+                if !self.options.kinds().lists(kind) {
+                    return Err("Boards are turned off; set `boards = on` to create one".into());
+                }
                 let path = self.parent_path(Parent::Group(group))?;
                 let receipt = self
                     .store
-                    .create_file(&path, &title, b"")
+                    .create_file(&path, &title, kind, kind.template().as_bytes())
                     .map_err(|error| error.to_string())?;
                 let id = NoteId(self.model.allocate_id());
                 self.model.notes.push(Note {
                     id,
                     group,
-                    title: model::note_title(receipt.path.file_name()),
+                    title: kind.title(receipt.path.file_name()),
+                    kind,
                     path: receipt.path,
                     subtitle: None,
                     modified: receipt.file.modified,
@@ -742,6 +839,7 @@ impl Session {
                     &path,
                     Box::new(SystemTrash),
                     self.generation.wrapping_add(1),
+                    self.options,
                 )?;
                 std::mem::swap(&mut replacement.trash, &mut self.trash);
                 replacement.background_reconcile = self.background_reconcile;
@@ -929,7 +1027,13 @@ impl Session {
                     .find(|section| section.path == *path)
                     .map(|section| self.section_parent(section.id))
             })?;
-        let last = self.state.last_open_note().and_then(|path| {
+        let last = [
+            self.state.last_open_note(),
+            self.state.markdown_last_open_note(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|path| {
             self.model
                 .notes
                 .iter()
@@ -1058,12 +1162,12 @@ impl Session {
                 match self.store.write(copy, bytes, Expected::Bytes(baseline)) {
                     Ok(receipt) => receipt,
                     Err(error) if error.is_conflict() || error.is_not_found() => {
-                        self.create_conflict(path, &parent, bytes)?
+                        self.create_conflict(path, &parent, document.entry.kind, bytes)?
                     }
                     Err(error) => return Err(error.to_string()),
                 }
             }
-            _ => self.create_conflict(path, &parent, bytes)?,
+            _ => self.create_conflict(path, &parent, document.entry.kind, bytes)?,
         };
         document.recovery = Some((receipt.path.clone(), receipt.file.bytes.clone()));
         if let Some(error) = receipt.durability_error {
@@ -1139,17 +1243,18 @@ impl Session {
         &mut self,
         path: &RelPath,
         parent: &RelPath,
+        kind: NoteKind,
         bytes: &[u8],
     ) -> Result<WriteReceipt, String> {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H%M");
-        let title = model::note_title(path.file_name());
+        let title = kind.title(path.file_name());
         let mut end = title.len().min(180);
         while !title.is_char_boundary(end) {
             end -= 1;
         }
         let title = format!("{} (conflict {stamp})", &title[..end]);
         self.store
-            .create_file(parent, &title, bytes)
+            .create_file(parent, &title, kind, bytes)
             .map_err(|error| error.to_string())
     }
 
@@ -1185,6 +1290,13 @@ impl Session {
                 self.reconcile(now, events)?;
             }
         }
+        if self.index.unextracted() > 0 {
+            if self.background_reconcile {
+                self.reconcile_requested = true;
+            } else {
+                self.index.extract_waiting();
+            }
+        }
         if self.background_reconcile
             && self.reconcile_requested
             && self.reconcile_in_flight.is_none()
@@ -1202,6 +1314,7 @@ impl Session {
                 events.push(Event::Warning(format!(
                     "Background reconciliation unavailable; rescanning on the main thread: {error}"
                 )));
+                self.index.extract_waiting();
                 return self.reconcile(now, events);
             }
         };
@@ -1215,8 +1328,10 @@ impl Session {
                 tree_revision: self.tree_revision,
             },
             reader,
+            self.options.kinds(),
             self.model.scan_baseline(),
             self.index.content_snapshot(),
+            self.index.waiting(),
         ));
         Ok(())
     }
@@ -1247,7 +1362,13 @@ impl Session {
         self.reconcile_in_flight = None;
         if self.tree_revision != tags.tree_revision {
             // Own structural changes (or a conflict-copy rescan) happened after
-            // the snapshot; its IDs and paths cannot be merged safely.
+            // the snapshot; its IDs and paths cannot be merged safely. Labels
+            // name the source they came from, so they still apply.
+            if let Ok(scanned) = outcome {
+                for (note, source, text) in scanned.extracted {
+                    self.index.extracted(note, &source, text);
+                }
+            }
             self.reconcile_requested = true;
             return document_result;
         }
@@ -1270,6 +1391,7 @@ impl Session {
             mut model,
             changed,
             contents,
+            extracted,
         } = scanned;
         if changed {
             for note in &mut model.notes {
@@ -1301,6 +1423,9 @@ impl Session {
                 self.index
                     .ingest_scanned(*note, update.as_deref().map_err(String::as_str));
             }
+        }
+        for (note, source, text) in extracted {
+            self.index.extracted(note, &source, text);
         }
         self.push_limitation_warnings();
     }
@@ -1389,9 +1514,16 @@ impl Session {
             .filter(|note| note.path.as_path().starts_with(from.as_path()))
             .map(|note| note.id)
             .collect();
+        let leaf = match target {
+            ItemRef::Note(_) => Leaf::Note(
+                NoteKind::from_name(from.file_name())
+                    .ok_or("The note's file name has no note kind")?,
+            ),
+            ItemRef::Section(_) | ItemRef::Group(_) => Leaf::Directory,
+        };
         let receipt = self
             .store
-            .relocate(from, parent, name, matches!(target, ItemRef::Note(_)))
+            .relocate(from, parent, name, leaf)
             .map_err(|error| error.to_string())?;
         self.model.remap_paths(from, &receipt.path);
         let mut moved_group_section = None;
@@ -1491,11 +1623,14 @@ impl Session {
     fn refresh_tree(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
         self.tree_revision += 1;
         let active = self.document.as_ref().map(|document| {
-            self.index.set_content(document.note, &document.text, true);
+            self.index.keep_content(document.note, &document.text);
             (document.note, document.entry.path.clone())
         });
-        let scanned =
-            scan::scan_with_contents(self.store.reader(), Some(&self.model), |note, contents| {
+        let scanned = scan::scan_with_contents(
+            self.store.reader(),
+            Some(&self.model),
+            self.options.kinds(),
+            |note, contents| {
                 // A scan is not a document transition. In particular, a replacement
                 // at the active path must not insert a new ID or replace its draft.
                 if !active
@@ -1504,7 +1639,8 @@ impl Session {
                 {
                     self.index.ingest(note, contents);
                 }
-            });
+            },
+        );
         let scanned = match scanned {
             Ok(scanned) => scanned,
             Err(error) => {
@@ -1559,7 +1695,7 @@ impl Session {
         self.prune_history();
         self.index.sync_metadata(&self.model);
         if let Some(document) = &self.document {
-            self.index.set_content(document.note, &document.text, true);
+            self.index.keep_content(document.note, &document.text);
         }
         if changed {
             events.push(Event::TreeChanged);
@@ -1642,9 +1778,8 @@ impl Session {
             .iter()
             .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
             .collect::<Vec<_>>();
-        self.state.set_history(&history);
-        self.state.set_history_position(self.history_index);
-        self.state.set_recent(&recent);
+        self.state
+            .set_navigation(&history, self.history_index, &recent);
     }
 
     fn persist_metadata(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
@@ -1765,6 +1900,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::{QueryKind, Scope};
     use std::fs::{self, File, FileTimes};
 
     /// Native acceptance for the real OS trash; it moves one throwaway file
@@ -1847,7 +1983,11 @@ mod tests {
     }
 
     fn background_session(root: &std::path::Path) -> Session {
-        let mut session = Session::open(root).unwrap();
+        background_session_with(root, SessionOptions::default())
+    }
+
+    fn background_session_with(root: &std::path::Path, options: SessionOptions) -> Session {
+        let mut session = Session::open_with(root, options).unwrap();
         // Hints would only add requests; polling makes job creation deterministic.
         session.watcher = None;
         session.set_background_reconcile(true);
@@ -1875,6 +2015,198 @@ mod tests {
         seconds: u64,
     ) -> Result<Vec<Event>, OpError> {
         session.apply_at(Op::FinishReconcile(result), secs(seconds))
+    }
+
+    #[test]
+    fn the_open_boards_draft_is_extracted_once_it_rests_or_before_any_other_op() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("S/G")).unwrap();
+        let text = |label: &str| {
+            format!(
+                "schema = 1\n\n[node.a]\ntext = \"{label}\"\nkind = \"shape\"\n\
+                 at = [0, 0]\nsize = [120, 60]\n"
+            )
+        };
+        fs::write(root.path().join("S/G/Flow.wren-board"), text("Start")).unwrap();
+        fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        let board = id_at(&session, "S/G/Flow.wren-board");
+        let ms = Duration::from_millis;
+        session
+            .apply_at(Op::OpenNote { note: Some(board) }, secs(1))
+            .unwrap();
+        // The first tick polls the disk, which is no draft's doing.
+        session.apply_at(Op::Tick, secs(1)).unwrap();
+        let extracted = session.index.extractions;
+        let draft = |session: &mut Session, label: &str, at: Duration| {
+            let contents = text(label);
+            session
+                .apply_at(
+                    Op::EditDraft {
+                        note: board,
+                        contents,
+                    },
+                    at,
+                )
+                .unwrap();
+        };
+        // Typing: a keystroke every 100 ms, ticks between them.
+        for (step, label) in ["R", "Re", "Rec"].into_iter().enumerate() {
+            let at = secs(1) + ms(100 * step as u64);
+            draft(&mut session, label, at);
+            session.apply_at(Op::Tick, at + ms(50)).unwrap();
+        }
+        assert_eq!(session.index.extractions, extracted);
+        assert_eq!(session.index.content(board), Some("Start"));
+        // Rested: once.
+        session
+            .apply_at(Op::Tick, secs(1) + ms(200) + INDEX_REST)
+            .unwrap();
+        assert_eq!(session.index.extractions, extracted + 1);
+        assert_eq!(session.index.content(board), Some("Rec"));
+        session.apply_at(Op::Tick, secs(2)).unwrap();
+        assert_eq!(session.index.extractions, extracted + 1);
+
+        // Any other operation takes a waiting draft at once, before it
+        // runs: here a note switch.
+        draft(&mut session, "Recv", secs(3));
+        assert_eq!(session.index.content(board), Some("Rec"));
+        let note = id_at(&session, "S/G/Note.md");
+        session
+            .apply_at(Op::OpenNote { note: Some(note) }, secs(3) + ms(1))
+            .unwrap();
+        assert_eq!(session.index.content(board), Some("Recv"));
+        assert_eq!(session.index.extractions, extracted + 2);
+    }
+
+    fn labelled_boards(count: usize) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("S/G")).unwrap();
+        for number in 0..count {
+            fs::write(
+                root.path().join(format!("S/G/Board {number}.wren-board")),
+                format!(
+                    "schema = 1\n\n[node.n{number}]\ntext = \"Label {number}\"\n\
+                     kind = \"shape\"\nat = [0, 0]\nsize = [120, 60]\n"
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
+        root
+    }
+
+    fn found(session: &Session, query: &str) -> Vec<NoteId> {
+        session
+            .index()
+            .query(query, Scope::Workspace, QueryKind::Search, 10)
+            .into_iter()
+            .filter(|hit| hit.content_match.is_some())
+            .map(|hit| hit.note)
+            .collect()
+    }
+
+    #[test]
+    fn a_workspace_opens_without_parsing_a_board_and_the_first_job_extracts_them() {
+        let root = labelled_boards(200);
+        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        assert_eq!(session.model.notes.len(), 201);
+        let labelled = id_at(&session, "S/G/Board 123.wren-board");
+        // The open read every board and parsed none.
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.unextracted(), 200);
+        assert_eq!(session.index.content(labelled), None);
+        assert!(found(&session, "label 123").is_empty());
+
+        // The first job extracts every board on its own thread and sends no
+        // contents back, since the disk matches what the index holds.
+        let result = begin(&mut session, 1).run();
+        assert_eq!(result.sent_contents(), Some(0));
+        assert_eq!(result.sent_extractions(), Some(200));
+        finish(&mut session, result, 1).unwrap();
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.unextracted(), 0);
+        assert_eq!(session.index.content(labelled), Some("Label 123"));
+        assert_eq!(found(&session, "label 123"), [labelled]);
+        let revision = session.index.revision();
+
+        // Unchanged boards are never extracted or sent again.
+        for tick in 2..=41 {
+            let result = begin(&mut session, tick).run();
+            assert_eq!(result.sent_contents(), Some(0));
+            assert_eq!(result.sent_extractions(), Some(0));
+            finish(&mut session, result, tick).unwrap();
+        }
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.revision(), revision);
+
+        // An edit made outside Wren comes back extracted with its contents.
+        fs::write(
+            root.path().join("S/G/Board 123.wren-board"),
+            "schema = 1\n\n[node.n123]\ntext = \"Relabelled\"\nkind = \"shape\"\n\
+             at = [0, 0]\nsize = [120, 60]\n",
+        )
+        .unwrap();
+        let result = begin(&mut session, 42).run();
+        assert_eq!(result.sent_contents(), Some(1));
+        assert_eq!(result.sent_extractions(), Some(1));
+        finish(&mut session, result, 42).unwrap();
+        assert_eq!(session.index.extractions, 0);
+        assert_eq!(session.index.unextracted(), 0);
+        assert_eq!(found(&session, "relabelled"), [labelled]);
+        assert!(found(&session, "label 123").is_empty());
+    }
+
+    #[test]
+    fn labels_a_job_took_from_an_older_source_are_not_kept() {
+        let root = labelled_boards(2);
+        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        let board = id_at(&session, "S/G/Board 1.wren-board");
+        let result = begin(&mut session, 1).run();
+        // Read again before the job returns: an own rescan finds the edit.
+        fs::write(
+            root.path().join("S/G/Board 1.wren-board"),
+            "schema = 1\n\n[node.n1]\ntext = \"Newer\"\nkind = \"shape\"\n\
+             at = [0, 0]\nsize = [120, 60]\n",
+        )
+        .unwrap();
+        session.apply_at(Op::Reconcile, secs(1)).unwrap();
+        assert_eq!(session.index.unextracted(), 2);
+        finish(&mut session, result, 1).unwrap();
+        // The unchanged board's labels apply; the edited one waits for the
+        // next job rather than taking labels of its older text.
+        assert_eq!(session.index.unextracted(), 1);
+        assert_eq!(session.index.content(board), None);
+        let result = begin(&mut session, 2).run();
+        finish(&mut session, result, 2).unwrap();
+        assert_eq!(session.index.content(board), Some("Newer"));
+        assert_eq!(session.index.extractions, 0);
+    }
+
+    #[test]
+    fn without_a_job_boards_are_extracted_by_a_search_or_the_next_tick() {
+        let root = labelled_boards(200);
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        let labelled = id_at(&session, "S/G/Board 123.wren-board");
+        assert_eq!(session.index.extractions, 0);
+        // A search that must not miss a board takes what waits first.
+        session.settle_search();
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(found(&session, "label 123"), [labelled]);
+        drop(session);
+
+        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        session.watcher = None;
+        session.apply_at(Op::Tick, secs(1)).unwrap();
+        assert_eq!(session.index.extractions, 200);
+        let revision = session.index.revision();
+        for tick in 2..=41 {
+            session.apply_at(Op::Tick, secs(tick)).unwrap();
+        }
+        assert_eq!(session.index.extractions, 200);
+        assert_eq!(session.index.revision(), revision);
     }
 
     fn id_at(session: &Session, path: &str) -> NoteId {
@@ -2026,6 +2358,7 @@ mod tests {
                     Op::CreateNote {
                         group,
                         title: "created".into(),
+                        kind: NoteKind::Markdown,
                     },
                     secs(1),
                 )

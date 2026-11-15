@@ -1,0 +1,26 @@
+history = [
+    "B/K/One.md",
+    "A/G/Fresh.md",
+    "A/Hall/Second.md",
+]
+history_position = 0
+last_open_note = "B/K/One.md"
+order = [
+    "A/Hall",
+    "A/G",
+    "B",
+    "A",
+]
+recent = [
+    "A/Hall/Second.md",
+    "A/G/Fresh.md",
+    "B/K/One.md",
+]
+schema_version = 1
+selection = "B/K/One.md"
+
+[sort]
+"B/K" = "title"
+
+[widths.columns]
+notes = 300

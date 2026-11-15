@@ -3,10 +3,12 @@ use iced::widget::{
     text_input,
 };
 use iced::{Border, Element, Fill, Shrink};
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
 
+use super::board::{self, BoardFooter, Surface};
 use super::columns::Column;
 use super::commands::{Command, CommandId};
 use super::navigation::matches_name;
@@ -246,7 +248,7 @@ impl App {
             .style(move |_, status| chrome::control(self.definition, status, false, false))
     }
 
-    fn warning_slot(&self) -> Element<'_, Message> {
+    pub(super) fn warning_slot(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
         let message = self
             .banner
@@ -273,9 +275,24 @@ impl App {
             ));
         }
         contents = contents.push(self.small_button("Dismiss", Message::DismissBanner));
+        // Hidden, the slot shrinks to nothing rather than taking a fixed
+        // height of 0: iced's column leaves a child of fixed size 0 out
+        // (`Size::is_void`), so a banner appearing would move the content
+        // after it to a new place in the widget tree, whose state, the
+        // editor's focus with it, would start again (§5.15 rule 4).
+        let height = if message.is_empty() {
+            iced::Length::Shrink
+        } else {
+            iced::Length::Fixed(40.0)
+        };
         container(contents)
             .padding([6, 14])
-            .height(if message.is_empty() { 0 } else { 40 })
+            .height(height)
+            .max_height(if message.is_empty() {
+                0.0
+            } else {
+                f32::INFINITY
+            })
             .width(Fill)
             .clip(true)
             .style(move |_| chrome::surface(self.definition, colors.raised, 0.0, false))
@@ -573,14 +590,24 @@ impl App {
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
                 // The age sits at the end of the title row, so the second
                 // row is all preview.
-                let title = row![
+                let name: Element<'_, Message> =
                     ellipsis(&note.title, 13.0, theme::color(colors.text))
                         .font(fonts::MEDIUM)
-                        .width(Fill),
-                    chrome::label(modified_label(note), 11, colors.muted)
-                ]
-                .spacing(8)
-                .align_y(iced::Center);
+                        .width(Fill)
+                        .into();
+                // Only a board is marked, so a Markdown row is as it was.
+                let name = if note.kind == NoteKind::Board {
+                    row![chrome::icon(Icon::Board, 13.0, colors.muted), name]
+                        .spacing(6)
+                        .align_y(iced::Center)
+                        .width(Fill)
+                        .into()
+                } else {
+                    name
+                };
+                let title = row![name, chrome::label(modified_label(note), 11, colors.muted)]
+                    .spacing(8)
+                    .align_y(iced::Center);
                 let mut label = column![title].spacing(3).clip(true);
                 if !self.filters.notes.trim().is_empty() {
                     label = label.push(
@@ -893,11 +920,30 @@ impl App {
         .padding([6, 16])
         .height(if self.find_open { 44 } else { 0 })
         .clip(true);
-        let (style, palette) = theme::editor_colors(self.definition);
-        let editor: Element<'_, Message> = self
-            .editor
-            .view(style, palette, self.editor_measure())
-            .map(Message::Editor);
+        // A board whose text does not parse is shown as text under this.
+        let raw = self.board_error.as_ref().filter(|_| self.board.is_none());
+        let raw_banner = container(
+            text(raw.map(board::raw_banner).unwrap_or_default())
+                .size(12)
+                .color(theme::color(colors.warning)),
+        )
+        .padding(if raw.is_some() { [6, 16] } else { [0, 0] })
+        .width(Fill)
+        .height(if raw.is_some() { Shrink } else { 0.into() })
+        .clip(true)
+        .style(move |_| chrome::surface(self.definition, colors.raised, 0.0, false));
+        // Exactly one of the two widgets is mounted under `note-editor`.
+        let editor: Element<'_, Message> = match &self.board {
+            Some(view) => view
+                .view("note-editor", self.board_style())
+                .map(Message::Board),
+            None => {
+                let (style, palette) = theme::editor_colors(self.definition);
+                self.editor
+                    .view(style, palette, self.editor_measure())
+                    .map(Message::Editor)
+            }
+        };
         let mut empty = column![].spacing(14).align_x(iced::Center);
         let (prompt, action, command) = if self.selected_section.is_none() {
             (
@@ -967,6 +1013,7 @@ impl App {
         };
         column![
             header,
+            raw_banner,
             find,
             document,
             chrome::top_rule(
@@ -982,17 +1029,22 @@ impl App {
     }
 
     fn editor_footer(&self, width: f32) -> Element<'_, Message> {
+        if let Some(view) = &self.board {
+            return self.board_footer(view, width);
+        }
         let colors = self.definition.colors;
         let (status, status_color) = self.save_status();
         let cursor = self.editor.cursor();
-        let stats = if width >= 440.0 {
+        let stats = if width < 440.0 {
+            String::new()
+        } else if self.surface() == Surface::Raw {
+            format!("Board as text · {} lines", self.editor.line_count())
+        } else {
             format!(
                 "Markdown · {} lines · {} words",
                 self.editor.line_count(),
                 self.words
             )
-        } else {
-            String::new()
         };
         let mut footer = row![
             chrome::label(stats, 11, colors.muted),
@@ -1020,6 +1072,71 @@ impl App {
             footer = footer.push(self.small_button("Retry save", Message::Core(Op::Flush)));
         }
         footer.into()
+    }
+
+    /// The footer under a board: its counts, its issues and access, the
+    /// zoom, and whether it is saved.
+    fn board_footer(&self, view: &wren_canvas::BoardView, width: f32) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let (status, status_color) = self.save_status();
+        let footer = BoardFooter::of(view);
+        let mut row = row![
+            chrome::label(
+                if width >= 440.0 {
+                    footer.stats
+                } else {
+                    String::new()
+                },
+                11,
+                colors.muted
+            ),
+            iced::widget::space::horizontal(),
+        ]
+        .spacing(16)
+        .align_y(iced::Center)
+        .clip(true);
+        for flag in footer.flags {
+            row = row.push(chrome::label(flag, 11, colors.warning));
+        }
+        row = row
+            .push(chrome::label(footer.zoom, 11, colors.muted))
+            .push(chrome::label(format!("● {status}"), 11, status_color));
+        if self.session.as_ref().is_some_and(|session| {
+            session
+                .document()
+                .is_some_and(|document| document.error.is_some())
+                || session.pending_durability()
+        }) {
+            row = row.push(self.small_button("Retry save", Message::Core(Op::Flush)));
+        }
+        row.into()
+    }
+
+    /// The New note dialog's choice of kind, which Tab steps through
+    /// while the name field keeps the keyboard.
+    fn kind_pills(&self, chosen: NoteKind) -> Element<'_, Message> {
+        let definition = self.definition;
+        let mut pills = row![].spacing(6).align_y(iced::Center);
+        for (kind, label) in [(NoteKind::Markdown, "Markdown"), (NoteKind::Board, "Board")] {
+            let selected = kind == chosen;
+            pills = pills.push(
+                button(text(label).size(12))
+                    .on_press(Message::DialogNoteKind(kind))
+                    .padding([4, 12])
+                    .style(move |_, status| button::Style {
+                        border: Border {
+                            radius: 999.0.into(),
+                            ..chrome::control(definition, status, selected, false).border
+                        },
+                        ..chrome::control(definition, status, selected, false)
+                    }),
+            );
+        }
+        pills
+            .push(iced::widget::space::horizontal())
+            .push(chrome::keycap("Tab", definition))
+            .push(chrome::label("to switch", 11, definition.colors.muted))
+            .into()
     }
 
     fn small_button<'a>(&'a self, label: &'a str, message: Message) -> button::Button<'a, Message> {
@@ -1060,7 +1177,7 @@ impl App {
         let (heading, submit) = match dialog.kind {
             DialogKind::CreateSection => ("New section".into(), "Create"),
             DialogKind::CreateGroup(_) => ("New group".into(), "Create"),
-            DialogKind::CreateNote(_) => ("New note".into(), "Create"),
+            DialogKind::CreateNote(..) => ("New note".into(), "Create"),
             DialogKind::Rename(_) => ("Rename item".into(), "Rename"),
             DialogKind::Delete(target) => (
                 format!(
@@ -1091,6 +1208,11 @@ impl App {
                     .padding(9)
                     .style(move |_, status| chrome::input(self.definition, status, true)),
             );
+            if let DialogKind::CreateNote(_, chosen) = dialog.kind {
+                if self.preferences.boards {
+                    content = content.push(self.kind_pills(chosen));
+                }
+            }
         }
         if let Some(error) = &dialog.error {
             content = content.push(text(error).size(12).color(theme::color(colors.danger)));

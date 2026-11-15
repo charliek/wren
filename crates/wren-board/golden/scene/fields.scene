@@ -1,0 +1,17 @@
+bounds -0.75,-44.5 263.75x105.25
+node base path in -0.75,-0.75 121.5x61.5 fill #e4e5e5 stroke #202428 1.5: M 0,0 L 120,0 L 120,60 L 0,60 Z
+node full path in 19.25,-40.75 141.5x81.5 fill #c03030 stroke #c03030 1.5 dash 6,4: M 90,-40 L 160,0 L 90,40 L 20,0 Z
+node full text in 51.5,-10.000002 77x20 Regular 14 #ffffff
+  51.5,-10.000002 w 77 "Every field"
+node words text in 200,0 63x20 Regular 14 #3a7bd5
+  200,0 w 63 "Free text"
+edge full path in 128.95143,9.25 71.79857x19.074644 stroke #3060d0 1.5 dash 6,4: M 129.70143,27.574644 L 200,10
+edge full path in 120,23.694075 10.67157x7.761139 fill #3060d0: M 120,30 L 128.7313,23.694075 L 130.67157,31.455214 Z
+edge full path in 121,15 38x20 fill #ffffff: M 121,15 L 159,15 L 159,35 L 121,35 Z
+edge full text in 125,17 30x16 Regular 12 #3060d0
+  125,17 w 30 "first"
+edge full path in 138,10 44x20 fill #ffffff: M 138,10 L 182,10 L 182,30 L 138,30 Z
+edge full text in 142,12 36x16 Regular 12 #3060d0
+  142,12 w 36 "second"
+node full path in 15.5,-44.5 9x9 fill #d02020 stroke #ffffff 1.5: M 20,-43.75 C 22.071068,-43.75 23.75,-42.071068 23.75,-40 C 23.75,-37.928932 22.071068,-36.25 20,-36.25 C 17.928932,-36.25 16.25,-37.928932 16.25,-40 C 16.25,-42.071068 17.928932,-43.75 20,-43.75 Z
+edge full path in 124.45143,4.75 9x9 fill #d02020 stroke #ffffff 1.5: M 128.95143,5.5 C 131.02249,5.5 132.70143,7.178932 132.70143,9.25 C 132.70143,11.321068 131.02249,13 128.95143,13 C 126.88036,13 125.20143,11.321068 125.20143,9.25 C 125.20143,7.178932 126.88036,5.5 128.95143,5.5 Z

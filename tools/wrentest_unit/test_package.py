@@ -189,6 +189,8 @@ class PackageTests(unittest.TestCase):
         for holder in ("Copyright 2000-2026 by Kevin Atkinson", "Copyright 1993, Geoff Kuenning"):
             self.assertIn(holder, scowl)
         self.assertIn(f"spellbook {package.SPELLBOOK_VERSION}, unmodified, under the Mozilla Public\nLicense 2.0", text)
+        self.assertIn("Copyright (c) 2013 Nicolas Silva",
+                      (directory / "third_party/lyon/LICENSE-MIT").read_text())
         self.assertIn("MIT License", text)
         self.assertEqual((directory / "DEPENDENCY_NOTICES.txt").read_bytes(), self.dependency_text)
         self.assertIn("fixture-dependency", self.dependency_text.decode("utf-8"))
@@ -212,6 +214,17 @@ class PackageTests(unittest.TestCase):
         lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
         self.assertEqual([entry["version"] for entry in lock["package"] if entry["name"] == "spellbook"],
                          [package.SPELLBOOK_VERSION])
+
+    def test_notices_name_every_locked_lyon_package(self):
+        # Their packages ship no license file, so the bundle's own notice must
+        # follow Cargo.lock: a lyon bump has to update NOTICES too.
+        locked = tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
+        lyon = sorted(f"{entry['name']} {entry['version']}" for entry in locked
+                      if entry["name"] == "lyon" or entry["name"].startswith("lyon_"))
+        self.assertEqual(len(lyon), 5, lyon)
+        text = " ".join(package.NOTICES.split())
+        for name in lyon:
+            self.assertIn(name, text)
 
     def test_linux_layout_desktop_icon_permissions_and_notices(self):
         output = self.assemble()

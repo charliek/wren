@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="263.75" height="105.25" viewBox="-0.75 -44.5 263.75 105.25">
+<path d="M0 0L120 0L120 60L0 60Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<path d="M90 -40L160 0L90 40L20 0Z" fill="#c03030" stroke="#c03030" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="51.5" y="5.0927715" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#ffffff" xml:space="preserve">Every field</text>
+<text x="200" y="15.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#3a7bd5" xml:space="preserve">Free text</text>
+<path d="M129.70143 27.574644L200 10" fill="none" stroke="#3060d0" stroke-width="1.5" stroke-dasharray="6 4"/>
+<path d="M120 30L128.7313 23.694075L130.67157 31.455214Z" fill="#3060d0"/>
+<path d="M121 15L159 15L159 35L121 35Z" fill="#ffffff"/>
+<text x="125" y="29.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#3060d0" xml:space="preserve">first</text>
+<path d="M138 10L182 10L182 30L138 30Z" fill="#ffffff"/>
+<text x="142" y="24.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#3060d0" xml:space="preserve">second</text>
+<path d="M20 -43.75C22.071068 -43.75 23.75 -42.071068 23.75 -40C23.75 -37.928932 22.071068 -36.25 20 -36.25C17.928932 -36.25 16.25 -37.928932 16.25 -40C16.25 -42.071068 17.928932 -43.75 20 -43.75Z" fill="#d02020" stroke="#ffffff" stroke-width="1.5"/>
+<path d="M128.95143 5.5C131.02249 5.5 132.70143 7.178932 132.70143 9.25C132.70143 11.321068 131.02249 13 128.95143 13C126.88036 13 125.20143 11.321068 125.20143 9.25C125.20143 7.178932 126.88036 5.5 128.95143 5.5Z" fill="#d02020" stroke="#ffffff" stroke-width="1.5"/>
+</svg>

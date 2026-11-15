@@ -19,7 +19,7 @@ import pytest
 
 from tools.wrentest import png
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, spell_setting, wait_for
+from tools.wrentest.ui import WrenApp, wait_for
 
 ENGINES = ("classic", "advanced")
 
@@ -356,9 +356,13 @@ def test_native_engine_switch_on_focus_keeps_keyboard_focus(engine, editor_app) 
         call("editor.set", {"text": "café"})
         window = focus_native(app)
 
+        written = config.read_text()
+
         def switch_on_refocus(to: str) -> None:
             xdo("windowfocus", "--sync", "0")
-            config.write_text(f"editor-engine = {to}\nspell-check = {spell_setting()}\n")
+            # Only the engine changes: the lane's other lines stay.
+            config.write_text(written.replace(f"editor-engine = {engine}\n",
+                                              f"editor-engine = {to}\n"))
             xdo("windowfocus", "--sync", window)
             wait_for(lambda: call("editor.get")["engine"] == to, description=f"switch to {to}")
 
@@ -618,6 +622,7 @@ def test_theme_and_font_pickers_preview_live_and_restore(engine, editor_app) -> 
     with editor_app(artifacts_dir=artifact_directory("editor-pickers")) as app:
         call = app.client.call
         config = app.settings_path
+        written = config.read_text()
         shown = call("editor.get")["theme"]
 
         modal = call("palette.open", {"mode": "themes"})["navigation"]["modal"]
@@ -627,7 +632,8 @@ def test_theme_and_font_pickers_preview_live_and_restore(engine, editor_app) -> 
         call("palette.close")
         assert call("editor.get")["theme"] == shown
         # Previews never write the settings file.
-        assert config.read_text() == f"editor-engine = {engine}\nspell-check = {spell_setting()}\n"
+        assert config.read_text() == written
+        assert written.startswith(f"editor-engine = {engine}\n")
 
         modal = call("palette.open", {"mode": "fonts"})["navigation"]["modal"]
         assert modal["active_key"] == {"font": "JetBrains Mono"}

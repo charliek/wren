@@ -26,6 +26,11 @@ only a `.wren/` directory).
   Tab nests list items, and commands toggle tasks, bold, italic, and code
   and move lines. **Jump to heading** (⇧⌘O, Alt+Shift+O on Linux) lists
   the note's outline.
+- **Boards**: a second kind of note, `Name.wren-board`, a canvas of
+  shapes and connectors for flowcharts and small diagrams, built with the
+  mouse or entirely from the keyboard. The file is plain text with one
+  field per line, so a board in git has readable diffs. Boards export to
+  SVG, PNG, and draw.io, in the app or with `wren export` and no window.
 - Autosave 750 ms after you stop typing, and on every switch, move, focus
   loss, and quit. External edits reload cleanly, and conflicts keep both
   versions.
@@ -80,6 +85,8 @@ The documentation site is at <https://charliek.github.io/wren/>, built from
   custom bindings
 - [Configuration](docs/reference/configuration.md): `config.conf`, themes,
   and editor settings
+- [Boards](docs/reference/boards.md) and the
+  [board file format](docs/reference/board-format.md)
 - [Architecture](docs/development/architecture.md) and
   [Testing](docs/development/testing.md): for contributors
 

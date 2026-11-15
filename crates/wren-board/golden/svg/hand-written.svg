@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="321.5" height="120.75" viewBox="-0.75 -0.75 321.5 120.75">
+<path d="M0 0L120 0L120 60L0 60Z" fill="#e6f2e8" stroke="#309040" stroke-width="1.5"/>
+<text x="25" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">First step</text>
+<path d="M208 0L312 0C316.41827 0 320 3.5817218 320 8L320 52C320 56.418278 316.41827 60 312 60L208 60C203.58173 60 200 56.418278 200 52L200 8C200 3.5817218 203.58173 0 208 0Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="221.5" y="35.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Second step</text>
+<path d="M120 30L190 30" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M200 30L190 34L190 26Z" fill="#202428"/>
+<path d="M144 20L176 20L176 40L144 40Z" fill="#ffffff"/>
+<text x="148" y="34.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">then</text>
+<text x="0" y="115.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Comments and spacing are not kept.</text>
+</svg>

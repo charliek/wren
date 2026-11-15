@@ -1,0 +1,41 @@
+schema = 1
+
+[node.a]
+text = "A"
+kind = "shape"
+at = [0, 0]
+size = [120, 60]
+z = "V01"
+style = { color = "blue" }
+
+[node.a.ext.tool]
+k = "v"
+
+[node.b]
+text = "B"
+kind = "shape"
+at = [0, 120]
+size = [120, 60]
+z = "V02"
+
+[node.b.style]
+color = "green"
+fill = "none"
+
+[edge.e]
+kind = "edge"
+z = "V03"
+
+[edge.e.from]
+node = "a"
+side = "bottom"
+
+[edge.e.to]
+node = "b"
+
+[[edge.e.labels]]
+text = "first"
+at = 250
+
+[[edge.e.labels]]
+text = "second"

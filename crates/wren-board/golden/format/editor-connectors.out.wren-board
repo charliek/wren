@@ -1,0 +1,68 @@
+schema = 1
+
+[node.order]
+text = "Order"
+kind = "shape"
+at = [0, 0]
+shape = "pill"
+size = [120, 60]
+z = "V"
+
+[node.pack]
+text = "Pack"
+kind = "shape"
+at = [0, 200]
+size = [120, 60]
+z = "V01"
+
+[node.refund]
+text = "Refund"
+kind = "shape"
+at = [280, 0]
+size = [120, 60]
+z = "V03"
+
+[node.ship]
+text = "Ship"
+kind = "shape"
+at = [280, 200]
+size = [120, 60]
+z = "V02"
+
+[edge.back]
+kind = "edge"
+from = { node = "order" }
+to = { node = "ship" }
+z = "V08"
+
+[edge.both]
+kind = "edge"
+from = { node = "order" }
+to = { node = "refund" }
+heads = ["arrow", "arrow"]
+z = "V06"
+
+[edge.packed]
+kind = "edge"
+from = { node = "pack" }
+to = { node = "ship" }
+style.stroke = "dashed"
+z = "V05"
+
+[edge.paid]
+kind = "edge"
+from = { node = "order" }
+to = { node = "pack" }
+labels = [
+  { text = "paid" },
+]
+z = "V04"
+
+[edge.plain]
+kind = "edge"
+from = { node = "refund" }
+to = { node = "ship" }
+heads = ["none", "none"]
+route = "straight"
+style.stroke = "dashed"
+z = "V07"

@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 use wren_core::fs_store::{Fault, RelPath};
 use wren_core::index::{QueryKind, Scope};
+use wren_core::kind::NoteKind;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent, SectionId};
 use wren_core::ops::{Event, Op, Session, Trash};
 
@@ -487,6 +488,7 @@ fn partial_note_creation_and_relocation_publications_are_indexed_on_error() {
             Op::CreateNote {
                 group: g,
                 title: "Published".into(),
+                kind: NoteKind::Markdown,
             },
             Duration::ZERO,
         )
