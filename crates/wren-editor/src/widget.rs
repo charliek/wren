@@ -58,7 +58,9 @@ use iced::{
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::keys::{KeyPolicy, Routed};
-use crate::proof::{self, publish, MenuOverlay, OpenMenu, Proofreader, SpellEvent, SpellMenu};
+use crate::proof::{
+    self, publish, MenuOverlay, MenuPress, OpenMenu, Proofreader, SpellEvent, SpellMenu,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::proof::{DrawnMark, SpellFrame};
 use crate::{Message, Style};
@@ -661,6 +663,29 @@ impl<'a> TextEditor<'a> {
                     // A press in the editor closes the menu and does
                     // nothing more, so the caret stays (rule 4.4.5).
                     publish(shell, &self.menu_now, Message::Spell(SpellEvent::Close));
+                    shell.capture_event();
+                }
+                Update::Press(press) => {
+                    // Only the host knows whether a menu opened. The press
+                    // is taken as it would be with none, and the host only
+                    // closes the menu if one did.
+                    let event = match press {
+                        Pressed::Left(click) => {
+                            state.focus = Some(Focus::now());
+                            state.last_click = Some(click);
+                            state.drag_click = Some(click.kind());
+                            MenuPress::Left(click.position(), click.kind())
+                        }
+                        Pressed::Right(position) => {
+                            state.drag_click = None;
+                            MenuPress::Right(position)
+                        }
+                    };
+                    publish(
+                        shell,
+                        &self.menu_now,
+                        Message::Spell(SpellEvent::Press(event)),
+                    );
                     shell.capture_event();
                 }
                 Update::Drag(position) => {
@@ -1463,11 +1488,20 @@ enum Update {
     RightClick(Point),
     /// A press in the editor while the menu is open.
     Dismiss,
+    /// A left or right press in the editor after an opening earlier in the
+    /// batch, which may not have opened a menu.
+    Press(Pressed),
     Drag(Point),
     Release,
     Scroll(f32),
     InputMethod(Ime),
     Key(Routed),
+}
+
+enum Pressed {
+    Left(mouse::Click),
+    /// Relative to the text origin.
+    Right(Point),
 }
 
 enum Ime {
@@ -1491,8 +1525,25 @@ impl Update {
     ) -> Option<Self> {
         match event {
             Event::Mouse(event) => match event {
-                mouse::Event::ButtonPressed(_) if menu.is_some() && cursor.is_over(bounds) => {
-                    Some(Update::Dismiss)
+                mouse::Event::ButtonPressed(button) if menu.is_some() && cursor.is_over(bounds) => {
+                    let position = cursor
+                        .position_in(bounds)
+                        .map(|position| position - Vector::new(padding.left, padding.top));
+                    Some(
+                        match (menu.is_some_and(|menu| menu.opening), button, position) {
+                            (true, mouse::Button::Left, Some(position)) => {
+                                Update::Press(Pressed::Left(mouse::Click::new(
+                                    position,
+                                    mouse::Button::Left,
+                                    state.last_click,
+                                )))
+                            }
+                            (true, mouse::Button::Right, Some(position)) => {
+                                Update::Press(Pressed::Right(position))
+                            }
+                            _ => Update::Dismiss,
+                        },
+                    )
                 }
                 mouse::Event::ButtonPressed(mouse::Button::Left) => {
                     if let Some(cursor_position) = cursor.position_in(bounds) {
@@ -3877,6 +3928,14 @@ mod tests {
     /// Send `events` to one focused widget over `ev`, as iced hands over a
     /// frame's events, then carry out what it published as the host does.
     fn one_batch(ev: &mut crate::EditorView, events: Vec<Event>) -> Vec<Message> {
+        one_batch_at(ev, events.into_iter().map(|event| (event, None)).collect())
+    }
+
+    /// [`one_batch`] with the pointer where each event names it.
+    fn one_batch_at(
+        ev: &mut crate::EditorView,
+        events: Vec<(Event, Option<Point>)>,
+    ) -> Vec<Message> {
         let policy = suggest_policy();
         ev.set_key_policy(policy.clone());
         let messages: Vec<Message> = {
@@ -3888,7 +3947,7 @@ mod tests {
             state.focus = Some(Focus::now());
             events
                 .into_iter()
-                .flat_map(|event| send(&mut editor, &mut state, event, None).0)
+                .flat_map(|(event, pointer)| send(&mut editor, &mut state, event, pointer).0)
                 .collect()
         };
         for message in messages.clone() {
@@ -3940,6 +3999,67 @@ mod tests {
             ]
         );
         assert_eq!(ev.text(), "cat the");
+    }
+
+    #[test]
+    fn a_press_after_an_opening_in_one_batch_clicks_unless_a_menu_opened() {
+        let left = || press(mouse::Button::Left);
+        // The caret is on `cat`, which is spelled right, so the opening
+        // finds nothing and the click moves the caret as it does alone.
+        let mut alone = host("cat teh", 1);
+        one_batch_at(&mut alone, vec![(left(), Some(over(5.0, 0.0)))]);
+        let mut ev = host("cat teh", 1);
+        let messages = one_batch_at(
+            &mut ev,
+            vec![(suggest_key(), None), (left(), Some(over(5.0, 0.0)))],
+        );
+        assert!(
+            matches!(
+                spell_events(&messages).as_slice(),
+                [
+                    SpellEvent::OpenAtCaret,
+                    SpellEvent::Press(MenuPress::Left(_, mouse::click::Kind::Single))
+                ]
+            ),
+            "{messages:?}"
+        );
+        assert_ne!(alone.cursor().position.column, 1);
+        assert_eq!(ev.cursor(), alone.cursor());
+        assert!(ev.spell_menu().is_none());
+
+        // At the end of `teh` a menu opens, and the press only closes it:
+        // neither it nor the drag it starts moves the caret (rule 4.4.5).
+        let mut ev = host("cat teh", 7);
+        one_batch_at(
+            &mut ev,
+            vec![
+                (suggest_key(), None),
+                (left(), Some(over(1.0, 0.0))),
+                (moved_to(over(3.0, 0.0)), Some(over(3.0, 0.0))),
+            ],
+        );
+        assert_eq!(ev.text(), "cat teh");
+        assert_eq!(
+            ev.cursor(),
+            Cursor {
+                position: Position { line: 0, column: 7 },
+                selection: None
+            }
+        );
+        assert!(ev.spell_menu().is_none());
+
+        // A right press on `teh` after an opening that found nothing opens
+        // the menu there.
+        let mut ev = host("cat teh", 1);
+        one_batch_at(
+            &mut ev,
+            vec![
+                (suggest_key(), None),
+                (press(mouse::Button::Right), Some(over(5.0, 0.0))),
+            ],
+        );
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        assert_eq!(ev.cursor().position.column, 1);
     }
 
     #[test]

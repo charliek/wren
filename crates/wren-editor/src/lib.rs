@@ -39,7 +39,7 @@ pub use edit::Replace;
 pub use keys::{KeyPolicy, KeyRoute};
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
-pub use proof::{MenuKey, Proofreader, SpellEvent, SpellMenu};
+pub use proof::{MenuKey, MenuPress, Proofreader, SpellEvent, SpellMenu};
 pub use widget::Measure;
 pub use wren_markdown::Intent;
 
@@ -188,6 +188,9 @@ pub struct EditorView {
     proofreader: Option<Arc<dyn Proofreader>>,
     /// The open suggestions menu.
     menu: Option<SpellMenu>,
+    /// The left press being held only closed the menu, so its drag selects
+    /// nothing either (rule 4.4.5).
+    press_closed_menu: bool,
     /// The marks the widget last drew.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: std::cell::RefCell<SpellFrame>,
@@ -222,6 +225,7 @@ impl EditorView {
             key_policy: None,
             proofreader: None,
             menu: None,
+            press_closed_menu: false,
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: Default::default(),
         };
@@ -346,6 +350,13 @@ impl EditorView {
     /// coalescing without discarding history; no-op edits also preserve redo.
     pub fn perform(&mut self, action: Action) -> bool {
         self.menu = None;
+        if matches!(action, Action::Drag(_)) {
+            if self.press_closed_menu {
+                return false;
+            }
+        } else {
+            self.press_closed_menu = false;
+        }
         if action.is_edit() {
             let kind = edit_kind(&action);
             let now = Instant::now();
@@ -803,11 +814,13 @@ impl EditorView {
     /// one undo step. A menu key ([`SpellEvent::Key`]) acts on the open menu,
     /// or with none open is handled as the editor handles that press, which
     /// may edit the text too; these two are the events that can return
-    /// true.
+    /// true. A pointer press ([`SpellEvent::Press`]) closes the open menu,
+    /// or with none open clicks or opens one as that press would.
     pub fn spell(&mut self, event: SpellEvent) -> bool {
         match event {
             SpellEvent::Key(key) if self.menu.is_some() => return self.spell(key.event()),
             SpellEvent::Key(key) => return self.press_without_menu(key),
+            SpellEvent::Press(press) => return self.press(press),
             SpellEvent::OpenAtCaret => {
                 let caret = self.content.cursor().position;
                 let mark = proof::mark_at_caret(self.marks_at(caret.line), caret.column);
@@ -958,6 +971,24 @@ impl EditorView {
             }
         }
         out
+    }
+
+    /// Close the open menu for a pointer press in the editor, which does
+    /// nothing more (rule 4.4.5), or with none open carry the press out as
+    /// the widget does with no menu. Returns whether the text changed.
+    fn press(&mut self, press: MenuPress) -> bool {
+        if self.menu.take().is_some() {
+            self.press_closed_menu = matches!(press, MenuPress::Left(..));
+            return false;
+        }
+        match press {
+            MenuPress::Left(point, kind) => self.perform(match kind {
+                iced::advanced::mouse::click::Kind::Single => Action::Click(point),
+                iced::advanced::mouse::click::Kind::Double => Action::SelectWord,
+                iced::advanced::mouse::click::Kind::Triple => Action::SelectLine,
+            }),
+            MenuPress::Right(point) => self.spell(SpellEvent::OpenAt(point)),
+        }
     }
 
     /// Handle a press of `key` as the focused editor does with no menu

@@ -46,7 +46,22 @@ pub enum SpellEvent {
     /// [`MenuKey::event`]; with none open the editor handles the press as it
     /// would any other.
     Key(MenuKey),
+    /// A press of the left or right button inside the editor, made after an
+    /// opening earlier in the same batch, for the same reason as
+    /// [`SpellEvent::Key`]. An open menu only closes (rule 4.4.5); with none
+    /// open the editor handles the press as it would any other.
+    Press(MenuPress),
     Close,
+}
+
+/// A pointer press the host resolves against its menu; see
+/// [`SpellEvent::Press`]. Positions are relative to the text origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MenuPress {
+    /// A left press, with the kind of click it makes.
+    Left(Point, iced::advanced::mouse::click::Kind),
+    /// A right press, which opens the menu on a misspelled word.
+    Right(Point),
 }
 
 /// A key the open menu takes for itself (rule 4.4.4).
@@ -193,16 +208,19 @@ impl OpenMenu {
     }
 
     /// The menu `message` leaves `menu` as, once the host applies it. An
-    /// opening may or may not open a menu ([`Self::opening`]). A move or a
-    /// hover moves the selection, and a menu key acts as it does on an open
-    /// menu. Every other message closes the menu: the host closes it on any
-    /// action, intent, undo or redo (rule 4.4.8), and with no menu open a
-    /// menu key leaves none.
+    /// opening may or may not open a menu ([`Self::opening`]), and so may a
+    /// right press the host resolves: with no menu open, it opens one on a
+    /// misspelled word. A move or a hover moves the selection, and a menu
+    /// key acts as it does on an open menu. Every other message closes the
+    /// menu: the host closes it on any action, intent, undo or redo (rule
+    /// 4.4.8), and with no menu open a menu key leaves none.
     pub(crate) fn after(menu: Option<Self>, message: &crate::Message) -> Option<Self> {
         match message {
-            crate::Message::Spell(SpellEvent::OpenAtCaret | SpellEvent::OpenAt(_)) => {
-                Some(Self::OPENING)
-            }
+            crate::Message::Spell(
+                SpellEvent::OpenAtCaret
+                | SpellEvent::OpenAt(_)
+                | SpellEvent::Press(MenuPress::Right(_)),
+            ) => Some(Self::OPENING),
             crate::Message::Spell(SpellEvent::Key(key)) => {
                 Self::after(menu, &crate::Message::Spell(key.event()))
             }
@@ -460,6 +478,20 @@ mod tests {
         assert_eq!(after(opening, SpellEvent::Key(MenuKey::Up)), opening);
         assert_eq!(after(opening, SpellEvent::Key(MenuKey::Enter)), None);
         assert_eq!(after(None, SpellEvent::Key(MenuKey::Down)), None);
+        // A left press leaves no menu whatever the host had; a right press
+        // may open one.
+        let single = iced::advanced::mouse::click::Kind::Single;
+        assert_eq!(
+            after(
+                opening,
+                SpellEvent::Press(MenuPress::Left(Point::ORIGIN, single))
+            ),
+            None
+        );
+        assert_eq!(
+            after(opening, SpellEvent::Press(MenuPress::Right(Point::ORIGIN))),
+            opening
+        );
         // Every other message closes it, as the host closes its menu.
         for message in [
             Message::Undo,

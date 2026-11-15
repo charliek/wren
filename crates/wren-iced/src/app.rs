@@ -622,6 +622,7 @@ impl App {
                         | SpellEvent::Accept(_)
                         | SpellEvent::AcceptSelected
                         | SpellEvent::Key(_)
+                        | SpellEvent::Press(_)
                 ) {
                     self.column = columns::Column::Editor;
                 }
