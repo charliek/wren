@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import difflib
 import math
+import os
 import re
 import shutil
 from pathlib import Path
@@ -34,6 +35,17 @@ def copy_samples(destination: Path) -> Path:
     """A copy of the sample workspace at ``destination``."""
     shutil.copytree(SAMPLES, destination)
     return destination
+
+
+def write_outside(path: Path, text: str | bytes) -> None:
+    """Replace a file the way another program's atomic save does. The app
+    scans the disk on its own timer, so a file rewritten in place can be
+    read while it is empty, which a case that checks what a reload keeps
+    would see as a board with nothing on it."""
+    data = text.encode("utf-8") if isinstance(text, str) else text
+    temporary = path.with_name(f".{path.name}.outside-tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
 
 
 def conflict_board() -> str:

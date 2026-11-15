@@ -19,6 +19,7 @@ import pytest
 from tools.wrentest.boards import (
     FLOW, HAND_WRITTEN, GROUP, blocks, board, board_app, bounds, canvas_point, click, copy_samples,
     drag, edge, fitted, flushed, hover, key, line_diff, open_note, pointer, press, stamp, type_text,
+    write_outside,
 )
 from tools.wrentest.test_board_view import wait_focus
 from tools.wrentest.ui import WrenApp, wait_for
@@ -388,7 +389,7 @@ def test_a_change_on_disk_reloads_keeps_the_view_and_ends_what_was_in_flight(sam
         flushed(app)
         assert board(app)["can_undo"]
         viewport = board(app)["viewport"]
-        flow.write_bytes(flow.read_bytes() + added.encode())
+        write_outside(flow, flow.read_bytes() + added.encode())
         reconciled(app, lambda: board(app)["counts"]["nodes"] == 16)
         state = board(app)
         assert state["selection"] == [RECEIVE] and state["viewport"] == viewport, state
@@ -401,7 +402,7 @@ def test_a_change_on_disk_reloads_keeps_the_view_and_ends_what_was_in_flight(sam
         assert dirty(app)
         mine = app.client.call("session.get")["document"]["text"]
         theirs = flow.read_text(encoding="utf-8").replace('"Extra"', '"Theirs"')
-        flow.write_text(theirs, encoding="utf-8")
+        write_outside(flow, theirs)
         reconciled(app, lambda: not dirty(app))
         app.client.call("test.timer.hold", {"held": False})
         copies = sorted((samples / GROUP).glob("Checkout flow (conflict*).wren-board"))
@@ -416,7 +417,7 @@ def test_a_change_on_disk_reloads_keeps_the_view_and_ends_what_was_in_flight(sam
         x, y = canvas_point(app, {"node": PACK})
         assert pointer(app, "move", {"canvas": [x + 60, y]})["state"] == "moving"
         rewritten = theirs.replace('"Theirs"', '"Again"')
-        flow.write_text(rewritten, encoding="utf-8")
+        write_outside(flow, rewritten)
         reconciled(app, lambda: board(app)["state"] == "idle")
         state = pointer(app, "release")
         assert state["state"] == "idle" and node(app, PACK)["at"] == [0, 840], state
@@ -666,7 +667,7 @@ def test_reloading_saved_bytes_and_a_no_op_writes_nothing(samples: Path) -> None
         saved = flow.read_text(encoding="utf-8")
         # The same board, reformatted by another program.
         reformatted = "# reformatted elsewhere\n" + saved.replace(" = ", "=")
-        flow.write_text(reformatted, encoding="utf-8")
+        write_outside(flow, reformatted)
         reconciled(app, lambda: board(app)["revision"] >= 2 and not dirty(app))
         before = stamp(flow)
         click(app, {"node": PACK})
