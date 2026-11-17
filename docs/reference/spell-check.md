@@ -92,9 +92,9 @@ changes nothing else in the line, line endings included. When the word was
 written with a curly apostrophe, the corrections use one too.
 
 The menu also closes when the palette or a dialog opens, the note,
-workspace, or engine changes, the text changes, the editor scrolls or loses
-the keyboard, the window loses focus, a setting or the theme changes, or an
-input method starts composing.
+workspace, or engine changes, the text changes, the editor scrolls by a line
+or more or loses the keyboard, the window loses focus, a setting or the theme
+changes, or an input method starts composing.
 
 The menu offers corrections only. To stop a word being marked, add it to
 your word list.

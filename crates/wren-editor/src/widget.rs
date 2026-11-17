@@ -678,6 +678,10 @@ impl<'a> TextEditor<'a> {
                     if self.misspelling_under(state, position).is_some() {
                         state.focus = Some(Focus::now());
                         state.drag_click = None;
+                        // So a slight drift of the fingers during the click
+                        // cannot add up with an earlier scroll's remainder
+                        // to a whole line, which would close the menu.
+                        state.partial_scroll = 0.0;
                         publish(
                             shell,
                             &self.menu_now,
@@ -717,6 +721,7 @@ impl<'a> TextEditor<'a> {
                         }
                         Pressed::Right(position) => {
                             state.drag_click = None;
+                            state.partial_scroll = 0.0;
                             MenuPress::Right(position)
                         }
                     };
@@ -744,13 +749,18 @@ impl<'a> TextEditor<'a> {
                     }
                     let lines = lines + state.partial_scroll;
                     state.partial_scroll = lines.fract();
-                    publish(
-                        shell,
-                        &self.menu_now,
-                        Message::Action(Action::Scroll {
-                            lines: lines as i32,
-                        }),
-                    );
+                    // A trackpad sends wheel events that move no whole line
+                    // as fingers touch and lift, which a two-finger click
+                    // does; as an action they would close the menu that
+                    // click opened (rule 4.4.8).
+                    let lines = lines as i32;
+                    if lines != 0 {
+                        publish(
+                            shell,
+                            &self.menu_now,
+                            Message::Action(Action::Scroll { lines }),
+                        );
+                    }
                     shell.capture_event();
                 }
                 Update::InputMethod(update) => match update {
@@ -1524,7 +1534,13 @@ fn apply_binding(
                 apply_binding(binding, content, state, clipboard, shell, menu);
             }
         }
-        Binding::Custom(message) => publish(shell, menu, message),
+        Binding::Custom(message) => {
+            // As a right-click that opens the menu does.
+            if matches!(message, Message::Spell(SpellEvent::OpenAtCaret)) {
+                state.partial_scroll = 0.0;
+            }
+            publish(shell, menu, message);
+        }
     }
 }
 
@@ -4418,5 +4434,176 @@ mod tests {
         );
         assert_eq!(ev.text(), "cat zzz");
         assert!(ev.spell_menu().is_none());
+    }
+
+    fn wheel(delta: mouse::ScrollDelta) -> Event {
+        Event::Mouse(mouse::Event::WheelScrolled { delta })
+    }
+
+    fn pixels(y: f32) -> mouse::ScrollDelta {
+        mouse::ScrollDelta::Pixels { x: 0.0, y }
+    }
+
+    /// The wheel events a trackpad sends around a two-finger click: fingers
+    /// touching or lifting (no delta, from macOS as pixels or as lines), a
+    /// sideways touch, and a slight drift of under one line.
+    fn no_whole_line() -> [mouse::ScrollDelta; 5] {
+        [
+            pixels(0.0),
+            mouse::ScrollDelta::Lines { x: 0.0, y: 0.0 },
+            mouse::ScrollDelta::Pixels { x: 6.0, y: 0.0 },
+            pixels(-3.0),
+            pixels(3.0),
+        ]
+    }
+
+    /// `delta` the other way, as a drift back.
+    fn opposite(delta: mouse::ScrollDelta) -> mouse::ScrollDelta {
+        match delta {
+            mouse::ScrollDelta::Lines { x, y } => mouse::ScrollDelta::Lines { x: -x, y: -y },
+            mouse::ScrollDelta::Pixels { x, y } => mouse::ScrollDelta::Pixels { x: -x, y: -y },
+        }
+    }
+
+    #[test]
+    fn wheel_events_of_no_whole_line_keep_a_menu_opened_by_a_right_click() {
+        let on_word = Some(over(5.0, 0.0));
+        let right = || (press(mouse::Button::Right), on_word);
+        for delta in no_whole_line() {
+            // In the batch after the click.
+            let mut ev = host("cat teh", 1);
+            let mut state = None;
+            batch_in(&mut ev, &mut state, vec![right()]);
+            assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+            let messages = batch_in(&mut ev, &mut state, vec![(wheel(delta), on_word)]);
+            assert!(messages.is_empty(), "{delta:?}: {messages:?}");
+            assert!(ev.spell_menu().is_some(), "{delta:?}");
+            // Another, as when fingers touch and then lift.
+            batch_in(&mut ev, &mut state, vec![(wheel(opposite(delta)), on_word)]);
+            assert!(ev.spell_menu().is_some(), "{delta:?}");
+
+            // In the click's own batch, before the menu is first drawn.
+            let mut ev = host("cat teh", 1);
+            let messages = one_batch_at(
+                &mut ev,
+                vec![
+                    right(),
+                    (wheel(delta), on_word),
+                    (wheel(opposite(delta)), on_word),
+                ],
+            );
+            assert!(
+                matches!(messages.as_slice(), [Message::Spell(SpellEvent::OpenAt(_))]),
+                "{delta:?}: {messages:?}"
+            );
+            assert!(ev.spell_menu().is_some(), "{delta:?}");
+            assert_eq!(ev.cursor().position, Position { line: 0, column: 1 });
+        }
+    }
+
+    #[test]
+    fn a_scroll_left_over_from_before_the_right_click_does_not_close_its_menu() {
+        let on_word = Some(over(5.0, 0.0));
+        let mut ev = host("cat teh", 1);
+        let mut state = None;
+        // Three quarters of a line, kept for the next wheel event.
+        let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-3.0)), on_word)]);
+        assert!(messages.is_empty(), "{messages:?}");
+        batch_in(
+            &mut ev,
+            &mut state,
+            vec![(press(mouse::Button::Right), on_word)],
+        );
+        assert!(ev.spell_menu().is_some());
+        // Half a line more would have made a whole one.
+        let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-2.0)), on_word)]);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(ev.spell_menu().is_some());
+    }
+
+    #[test]
+    fn a_scroll_left_over_from_before_the_suggest_key_does_not_close_its_menu() {
+        let on_word = Some(over(5.0, 0.0));
+        let mut ev = host("cat teh", 5);
+        let mut state = None;
+        let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-3.0)), on_word)]);
+        assert!(messages.is_empty(), "{messages:?}");
+        batch_in(&mut ev, &mut state, vec![(suggest_key(), on_word)]);
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-1.0)), on_word)]);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(ev.spell_menu().is_some());
+    }
+
+    #[test]
+    fn a_scroll_of_a_whole_line_still_closes_the_menu() {
+        let text = format!("cat teh\n{}", "line\n".repeat(60));
+        let on_word = Some(over(5.0, 0.0));
+        for (delta, lines) in [
+            (pixels(-4.0), 1),
+            (pixels(8.0), -2),
+            (mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 }, 4),
+        ] {
+            let mut ev = host(&text, 1);
+            let mut state = None;
+            batch_in(
+                &mut ev,
+                &mut state,
+                vec![(press(mouse::Button::Right), on_word)],
+            );
+            assert!(ev.spell_menu().is_some());
+            let messages = batch_in(&mut ev, &mut state, vec![(wheel(delta), on_word)]);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Action(Action::Scroll { lines: l })] if *l == lines
+                ),
+                "{delta:?}: {messages:?}"
+            );
+            assert!(ev.spell_menu().is_none(), "{delta:?}");
+        }
+        // Small steps that add up to a line close it on the step that does.
+        let mut ev = host(&text, 1);
+        let mut state = None;
+        batch_in(
+            &mut ev,
+            &mut state,
+            vec![(press(mouse::Button::Right), on_word)],
+        );
+        batch_in(&mut ev, &mut state, vec![(wheel(pixels(-2.0)), on_word)]);
+        assert!(ev.spell_menu().is_some());
+        batch_in(&mut ev, &mut state, vec![(wheel(pixels(-2.0)), on_word)]);
+        assert!(ev.spell_menu().is_none());
+    }
+
+    #[test]
+    fn wheel_events_add_up_to_whole_lines_and_are_always_taken() {
+        for kind in [BackendKind::Iced, BackendKind::Owned] {
+            let content = Content::new(kind, &"line\n".repeat(60));
+            let mut editor = editor_with(&content, true, Measure::default());
+            let mut state = laid_out_state(&editor);
+            let mut scrolled = Vec::new();
+            for delta in [
+                pixels(0.0),
+                pixels(-3.0),
+                pixels(-3.0),
+                pixels(-1.0),
+                pixels(-1.0),
+                mouse::ScrollDelta::Lines { x: 0.0, y: -0.1 },
+                pixels(2.0),
+                mouse::ScrollDelta::Lines { x: 0.0, y: 0.0 },
+            ] {
+                let (messages, captured) =
+                    send(&mut editor, &mut state, wheel(delta), Some(over(1.0, 0.0)));
+                assert!(captured, "{kind:?} {delta:?}");
+                scrolled.extend(messages.into_iter().map(|message| match message {
+                    Message::Action(Action::Scroll { lines }) => lines,
+                    message => panic!("{kind:?}: {message:?}"),
+                }));
+            }
+            // 0.75, then 1.5 (a line), 0.75, 1 (a line), a line delta,
+            // which always moves at least one line, and -0.5 twice.
+            assert_eq!(scrolled, [1, 1, 1], "{kind:?}");
+        }
     }
 }
