@@ -194,11 +194,98 @@ pub(crate) fn with_breaks(text: &str, ending: LineEnding) -> Cow<'_, str> {
     Cow::Owned(written)
 }
 
+/// What ⌘C or ⌘X with no selection puts on the clipboard: `line`'s text and
+/// a line break, as VS Code does, so a paste of it reads as a whole line.
+pub(crate) fn line_clip(lines: Lines<'_>, line: usize) -> String {
+    let mut clip = lines
+        .get(line)
+        .map_or_else(String::new, |line| line.text.into_owned());
+    clip.push('\n');
+    clip
+}
+
+/// The edit that removes `line` with one of its breaks, and where the caret
+/// that was at `column` lands after it: the same column on the line that
+/// moves up into its place, or on the line above when it was the last. The
+/// only line is emptied instead. The caret column may be past the end of
+/// its new line, or inside a character; selecting it clamps it.
+pub(crate) fn cut_line(lines: Lines<'_>, line: usize, column: usize) -> (Replace, Position) {
+    let width = |line: usize| lines.get(line).map_or(0, |line| line.text.len());
+    let (start, end, caret) = if line + 1 < lines.len() {
+        (
+            Position { line, column: 0 },
+            Position {
+                line: line + 1,
+                column: 0,
+            },
+            line,
+        )
+    } else if let Some(above) = line.checked_sub(1) {
+        let start = Position {
+            line: above,
+            column: width(above),
+        };
+        (
+            start,
+            Position {
+                line,
+                column: width(line),
+            },
+            above,
+        )
+    } else {
+        (
+            Position { line, column: 0 },
+            Position {
+                line,
+                column: width(line),
+            },
+            line,
+        )
+    };
+    let replace = Replace {
+        start,
+        end,
+        text: String::new(),
+    };
+    (
+        replace,
+        Position {
+            line: caret,
+            column,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::widget::Content;
     use crate::BackendKind;
+
+    #[test]
+    fn a_line_cut_takes_one_break_and_keeps_the_caret_column() {
+        for kind in BackendKind::ALL {
+            Content::new(kind, "one\r\ntwo\r\nthree").with_lines(|lines| {
+                assert_eq!(line_clip(lines, 1), "two\n");
+                let (replace, caret) = cut_line(lines, 1, 2);
+                assert_eq!((replace.start, replace.end), (at(1, 0), at(2, 0)));
+                assert_eq!(caret, at(1, 2));
+                // The last line takes the break above it.
+                let (replace, caret) = cut_line(lines, 2, 4);
+                assert_eq!((replace.start, replace.end), (at(1, 3), at(2, 5)));
+                assert_eq!(caret, at(1, 4));
+            });
+            Content::new(kind, "only").with_lines(|lines| {
+                let (replace, caret) = cut_line(lines, 0, 2);
+                assert_eq!((replace.start, replace.end), (at(0, 0), at(0, 4)));
+                assert_eq!(caret, at(0, 2));
+            });
+            Content::new(kind, "").with_lines(|lines| {
+                assert_eq!(line_clip(lines, 0), "\n");
+            });
+        }
+    }
 
     fn at(line: usize, column: usize) -> Position {
         Position { line, column }

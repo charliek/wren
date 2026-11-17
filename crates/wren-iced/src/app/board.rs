@@ -2161,7 +2161,7 @@ z = "c"
             (true, NoteKind::Board),
             (true, NoteKind::Markdown),
         ] {
-            let _ = app.update(Message::DialogTab(reverse));
+            let _ = app.update(Message::Tab(reverse));
             assert_eq!(dialog_kind(&app), create(kind));
         }
         // A click picks a pill and hands the keyboard back to the name.
@@ -2224,7 +2224,7 @@ z = "c"
         let _ = app.dispatch(Command::Run(CommandId::RenameNote));
         let rename = dialog_kind(&app);
         assert!(matches!(rename, Some(DialogKind::Rename(_))));
-        let _ = app.update(Message::DialogTab(false));
+        let _ = app.update(Message::Tab(false));
         let _ = app.update(Message::DialogNoteKind(NoteKind::Board));
         assert_eq!(dialog_kind(&app), rename);
     }
@@ -2244,7 +2244,7 @@ z = "c"
             .iter()
             .all(|(_, id, _)| *id != CommandId::NewBoard));
         let _ = app.dispatch(Command::Run(CommandId::NewNote));
-        let _ = app.update(Message::DialogTab(false));
+        let _ = app.update(Message::Tab(false));
         let _ = app.update(Message::DialogNoteKind(NoteKind::Board));
         assert_eq!(
             dialog_kind(&app),

@@ -103,6 +103,9 @@ pub const MENUS: [Menu; 5] = {
                 C("font.reset", "Reset Text Size"),
                 S,
                 C("font.choose", "Change Editor Font…"),
+                S,
+                C("view.focus", "Toggle Focus Mode"),
+                C("view.collapse_columns", "Toggle Collapsed Columns"),
             ],
         },
         Menu {

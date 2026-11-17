@@ -228,6 +228,48 @@ impl App {
         self.finish_action(Disposition::Completed, None, task)
     }
 
+    /// Tab or Shift+Tab that no widget took. A dialog steps its kind pills;
+    /// in a browser column Tab moves right as → does and Shift+Tab left as ←
+    /// does, so Tab walks from a section to the editor.
+    pub(super) fn tab(&mut self, reverse: bool) -> Task<Message> {
+        if self.dialog.is_some() {
+            self.step_note_kind(reverse);
+            return Task::none();
+        }
+        if self.palette.is_some() || !self.column.is_browser() {
+            return Task::none();
+        }
+        if reverse {
+            self.column_left().task
+        } else {
+            self.column_right().task
+        }
+    }
+
+    /// ⌘⇧Y: fold Sections and Groups away as a double-click on a note does,
+    /// but leave the editor, its caret and the active column as they are;
+    /// pressed again while collapsed, unfold them. Leaves focus mode, since
+    /// collapsed shows the Notes column.
+    pub(super) fn toggle_collapsed(&mut self) -> Gateway {
+        if self.session.is_none() {
+            return self.blocked("No workspace is open");
+        }
+        self.cancel_gestures();
+        let collapsed = Column::Notes.fold();
+        if !self.focus && self.fold >= collapsed {
+            self.fold = 0;
+        } else {
+            self.focus = false;
+            self.fold = collapsed;
+            // A folded column cannot keep the keyboard.
+            if self.column.fold() < collapsed {
+                self.column = Column::Notes;
+            }
+        }
+        let task = self.column_focus();
+        self.finish_action(Disposition::Completed, None, task)
+    }
+
     /// A shortcut acts on the active column: ⌘P jumps among its items, ⌘N
     /// creates one, ⌘F filters it, ⌘R renames its selection. Palette rows
     /// never come through here, so they always do what their label says.

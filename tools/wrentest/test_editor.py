@@ -334,6 +334,47 @@ def test_native_typing_shortcuts_selection_and_clipboard(editor_app) -> None:
 
 
 @pytest.mark.native_x11
+def test_native_line_cut_copy_and_paste_with_nothing_selected(editor_app) -> None:
+    """With nothing selected, Ctrl+X and Ctrl+C take the caret's whole line,
+    and Ctrl+V puts that line back above the caret's, as VS Code does."""
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    with editor_app(artifacts_dir=artifact_directory("editor-native-line-clip")) as app:
+        call = app.client.call
+
+        def key(*names: str) -> None:
+            xdo("key", "--window", window, "--clearmodifiers", *names)
+
+        call("editor.set", {"text": "one\ntwo\nthree"})
+        window = focus_native(app)
+        call("editor.cursor", {"line": 1, "column": 1})
+        key("ctrl+x")
+        wait_for(lambda: call("editor.get")["text"] == "one\nthree", description="native line cut")
+        assert call("clipboard.read") == "two\n"
+        assert call("editor.get")["cursor"] == {"line": 1, "column": 1}
+
+        call("editor.cursor", {"line": 0, "column": 2})
+        key("ctrl+v")
+        wait_for(lambda: call("editor.get")["text"] == "two\none\nthree",
+                 description="native line paste goes above the caret's line")
+        assert call("editor.get")["cursor"] == {"line": 1, "column": 2}
+        key("ctrl+z", "ctrl+z")
+        wait_for(lambda: call("editor.get")["text"] == "one\ntwo\nthree",
+                 description="each is one undo step")
+
+        call("editor.cursor", {"line": 2, "column": 0})
+        key("ctrl+c")
+        wait_for(lambda: call("clipboard.read") == "three\n", description="native line copy")
+        assert call("editor.get")["text"] == "one\ntwo\nthree"
+
+        # Text from elsewhere pastes where the caret is.
+        call("clipboard.write", {"text": "X\n"})
+        call("editor.cursor", {"line": 0, "column": 1})
+        key("ctrl+v")
+        wait_for(lambda: call("editor.get")["text"] == "oX\nne\ntwo\nthree",
+                 description="an ordinary paste")
+
+
+@pytest.mark.native_x11
 def test_native_return_keeps_a_crlf_note_crlf(editor_app) -> None:
     with editor_app(artifacts_dir=artifact_directory("editor-native-crlf")) as app:
         call = app.client.call

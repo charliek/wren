@@ -140,6 +140,21 @@ pub enum Message {
     Intent(Intent),
     /// The suggestions menu. See [`EditorView::spell`].
     Spell(SpellEvent),
+    /// A copy, cut, or paste from the keyboard. See [`EditorView::clip`].
+    Clip(Clip),
+}
+
+/// What the clipboard keys did. With no selection, ⌘C and ⌘X take the
+/// caret's whole line, and ⌘V puts such a line back above the caret's, as
+/// VS Code does. The widget has already written the text to the clipboard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Clip {
+    /// The caret's line went to the clipboard as this text.
+    CopyLine(Arc<String>),
+    /// As [`Clip::CopyLine`], and the line goes from the text.
+    CutLine(Arc<String>),
+    /// A keyboard paste of this text from the clipboard.
+    Paste(Arc<String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +214,10 @@ pub struct EditorView {
     /// widget's guess at it was wrong: the widget counts the presses after
     /// it in the same batch from that guess, so they are counted again.
     press_chain: Option<Option<iced::advanced::mouse::click::Kind>>,
+    /// The text of the last whole-line copy or cut. A paste of exactly this
+    /// text goes in as a line, the way VS Code tells a line it copied from
+    /// text that only looks like one.
+    line_clip: Option<Arc<String>>,
     /// The marks the widget last drew.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: std::cell::RefCell<SpellFrame>,
@@ -236,6 +255,7 @@ impl EditorView {
             drop_drags: false,
             resolved_press: proof::ResolvedPress::default(),
             press_chain: None,
+            line_clip: None,
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: Default::default(),
         };
@@ -499,6 +519,65 @@ impl EditorView {
         }
         let edits: Vec<Replace> = plan.edits.into_iter().map(Replace::from).collect();
         self.apply(&edits, iced_cursor(plan.selection))
+    }
+
+    /// Carry out a clipboard key; see [`Clip`]. A line cut is one undoable
+    /// change, and the caret keeps its column on the line that takes the cut
+    /// line's place. A paste of the last line copied or cut, with no
+    /// selection, goes in above the caret's line and the caret stays where it
+    /// was in its own; any other paste is an ordinary one.
+    ///
+    /// Returns whether the text changed.
+    pub fn clip(&mut self, clip: Clip) -> bool {
+        self.menu = None;
+        match clip {
+            Clip::CopyLine(text) => {
+                self.line_clip = Some(text);
+                false
+            }
+            Clip::CutLine(text) => {
+                self.line_clip = Some(text);
+                let caret = self.content.cursor().position;
+                let (replace, landing) = self
+                    .content
+                    .with_lines(|lines| edit::cut_line(lines, caret.line, caret.column));
+                let landing = Cursor {
+                    position: landing,
+                    selection: None,
+                };
+                self.apply(&[replace], landing)
+            }
+            Clip::Paste(text) => {
+                let whole_line = !self.has_selection() && self.line_clip.as_ref() == Some(&text);
+                if !whole_line {
+                    return self.perform(Action::Edit(Edit::Paste(text)));
+                }
+                let caret = self.content.cursor().position;
+                let breaks = wren_markdown::line_ranges(&text).count() - 1;
+                let at = Position {
+                    line: caret.line,
+                    column: 0,
+                };
+                let landing = Cursor {
+                    position: Position {
+                        line: caret.line + breaks,
+                        column: caret.column,
+                    },
+                    selection: None,
+                };
+                self.apply(&[Replace::insert(at, text.as_str())], landing)
+            }
+        }
+    }
+
+    /// The whole-line clip of the caret's line, for a copy or cut with
+    /// nothing selected; `None` with a selection.
+    fn caret_clip(&self) -> Option<String> {
+        (!self.has_selection()).then(|| {
+            let line = self.content.cursor().position.line;
+            self.content
+                .with_lines(|lines| edit::line_clip(lines, line))
+        })
     }
 
     /// Undo the last edit unit.
@@ -966,8 +1045,9 @@ impl EditorView {
     /// it had not been open gives two (rule 4.4.4); Escape with the menu
     /// open gives none. The key is its own physical key, and a character
     /// types unless Ctrl or the logo key is held (or Alt, off macOS). The
-    /// clipboard is not there, so Copy and Paste give nothing and Cut only
-    /// its delete; dropping focus is no message.
+    /// clipboard is not there, so Paste and a Copy of a selection give
+    /// nothing and a Cut of one only its delete; with nothing selected, Copy
+    /// and Cut give their line's [`Clip`]. Dropping focus is no message.
     #[cfg(feature = "test-support")]
     pub fn key_message(
         &self,
@@ -975,15 +1055,17 @@ impl EditorView {
         modifiers: iced::keyboard::Modifiers,
     ) -> Vec<Message> {
         let menu = self.menu.as_ref().map(proof::OpenMenu::of);
-        let selection = self.has_selection();
+        let line = self.caret_clip();
         let mut out = Vec::new();
         match keys::route(key_press(key, modifiers), self.key_context(), menu) {
             None => {}
-            Some(keys::Routed::Binding(binding)) => keys::messages(binding, selection, &mut out),
+            Some(keys::Routed::Binding(binding)) => {
+                keys::messages(binding, line.as_deref(), &mut out)
+            }
             Some(keys::Routed::Close(binding)) => {
                 out.push(Message::Spell(SpellEvent::Close));
                 if let Some(binding) = binding {
-                    keys::messages(binding, selection, &mut out);
+                    keys::messages(binding, line.as_deref(), &mut out);
                 }
             }
         }
@@ -1050,13 +1132,14 @@ impl EditorView {
             return false;
         };
         let mut messages = Vec::new();
-        keys::messages(binding, self.has_selection(), &mut messages);
+        keys::messages(binding, self.caret_clip().as_deref(), &mut messages);
         let mut changed = false;
         for message in messages {
             changed |= match message {
                 Message::Action(action) => self.perform(action),
                 Message::Intent(intent) => self.intent(intent),
                 Message::Spell(event) => self.spell(event),
+                Message::Clip(clip) => self.clip(clip),
                 Message::Undo => self.undo(),
                 Message::Redo => self.redo(),
                 // Only Ctrl or Cmd+F routes to Find, never a plain key.
@@ -1813,6 +1896,7 @@ mod tests {
                 Message::Action(action) => ev.perform(action),
                 Message::Intent(intent) => ev.intent(intent),
                 Message::Spell(event) => ev.spell(event),
+                Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
                 Message::Find => false,
@@ -2347,6 +2431,129 @@ mod tests {
         Cursor {
             position: Position { line, column },
             selection: None,
+        }
+    }
+
+    // ── Clipboard keys ──────────────────────────────────────────────────────
+
+    fn clip_text(text: &str) -> Arc<String> {
+        Arc::new(text.to_owned())
+    }
+
+    #[test]
+    fn a_line_cut_and_its_paste_move_whole_lines_on_both_engines() {
+        for kind in BackendKind::ALL {
+            let mut ev = EditorView::with_backend(kind, "one\ntwo\nthree");
+            ev.move_cursor(at(1, 2));
+            let line = ev.caret_clip().unwrap();
+            assert_eq!(line, "two\n", "{kind:?}");
+            assert!(ev.clip(Clip::CutLine(clip_text(&line))));
+            assert_eq!(ev.text(), "one\nthree", "{kind:?}");
+            assert_eq!(ev.cursor(), at(1, 2), "{kind:?}: same column, next line");
+
+            // Pasted mid-line, it goes in above the caret's line, and the
+            // caret keeps its place in its own.
+            ev.move_cursor(at(0, 1));
+            assert!(ev.clip(Clip::Paste(clip_text("two\n"))));
+            assert_eq!(ev.text(), "two\none\nthree", "{kind:?}");
+            assert_eq!(ev.cursor(), at(1, 1), "{kind:?}");
+
+            // Each is one undo step.
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "one\nthree", "{kind:?}");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "one\ntwo\nthree", "{kind:?}");
+
+            // Other text, or a paste over a selection, is an ordinary paste.
+            ev.move_cursor(at(0, 1));
+            assert!(ev.clip(Clip::Paste(clip_text("X\n"))));
+            assert_eq!(ev.text(), "oX\nne\ntwo\nthree", "{kind:?}");
+            assert!(ev.undo());
+            ev.move_cursor(Cursor {
+                position: Position { line: 0, column: 3 },
+                selection: Some(Position { line: 0, column: 0 }),
+            });
+            assert!(ev.clip(Clip::Paste(clip_text("two\n"))));
+            assert_eq!(ev.text(), "two\n\ntwo\nthree", "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_cut_at_the_end_or_alone_and_a_line_copy() {
+        for kind in BackendKind::ALL {
+            // The last line takes the break above it, and the caret its column.
+            let mut ev = EditorView::with_backend(kind, "first\nsecond");
+            ev.move_cursor(at(1, 5));
+            assert!(ev.clip(Clip::CutLine(clip_text("second\n"))));
+            assert_eq!(ev.text(), "first", "{kind:?}");
+            assert_eq!(ev.cursor(), at(0, 5), "{kind:?}");
+            // The only line empties; cut again, there is nothing to change.
+            ev.move_cursor(at(0, 2));
+            assert!(ev.clip(Clip::CutLine(clip_text("first\n"))));
+            assert_eq!(ev.text(), "", "{kind:?}");
+            assert_eq!(ev.caret_clip().as_deref(), Some("\n"));
+            assert!(!ev.clip(Clip::CutLine(clip_text("\n"))));
+
+            // A copy changes nothing, yet its paste is a line paste.
+            let mut ev = EditorView::with_backend(kind, "alpha\nbeta");
+            ev.move_cursor(at(1, 2));
+            assert!(!ev.clip(Clip::CopyLine(clip_text("beta\n"))));
+            assert_eq!(ev.text(), "alpha\nbeta");
+            assert!(ev.clip(Clip::Paste(clip_text("beta\n"))));
+            assert_eq!(ev.text(), "alpha\nbeta\nbeta", "{kind:?}");
+            assert_eq!(ev.cursor(), at(2, 2), "{kind:?}");
+
+            // A shorter line below clamps the caret to its end.
+            let mut ev = EditorView::with_backend(kind, "a long line\nab");
+            ev.move_cursor(at(0, 9));
+            assert!(ev.clip(Clip::CutLine(clip_text("a long line\n"))));
+            assert_eq!(ev.cursor(), at(0, 2), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_cut_and_paste_keep_a_crlf_note_crlf() {
+        for kind in BackendKind::ALL {
+            let mut ev = EditorView::with_backend(kind, "one\r\ntwo\r\nthree");
+            ev.move_cursor(at(0, 0));
+            assert!(ev.clip(Clip::CutLine(clip_text("one\n"))));
+            assert_eq!(ev.text(), "two\r\nthree", "{kind:?}");
+            ev.move_cursor(at(1, 3));
+            assert!(ev.clip(Clip::Paste(clip_text("one\n"))));
+            assert_eq!(ev.text(), "two\r\none\r\nthree", "{kind:?}");
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_clipboard_keys_take_the_line_only_with_nothing_selected() {
+        use iced::keyboard::{Key, Modifiers};
+        let command = if cfg!(target_os = "macos") {
+            Modifiers::LOGO
+        } else {
+            Modifiers::CTRL
+        };
+        for kind in BackendKind::ALL {
+            let mut ev = EditorView::with_backend(kind, "one\ntwo");
+            ev.move_cursor(at(1, 1));
+            let key = |c: &str| Key::Character(c.into());
+            assert!(matches!(
+                ev.key_message(key("x"), command).as_slice(),
+                [Message::Clip(Clip::CutLine(text))] if text.as_str() == "two\n"
+            ));
+            assert!(matches!(
+                ev.key_message(key("c"), command).as_slice(),
+                [Message::Clip(Clip::CopyLine(text))] if text.as_str() == "two\n"
+            ));
+            ev.move_cursor(Cursor {
+                position: Position { line: 1, column: 2 },
+                selection: Some(Position { line: 1, column: 0 }),
+            });
+            assert!(matches!(
+                ev.key_message(key("x"), command).as_slice(),
+                [Message::Action(Action::Edit(Edit::Delete))]
+            ));
+            assert!(ev.key_message(key("c"), command).is_empty());
         }
     }
 

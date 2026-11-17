@@ -206,8 +206,9 @@ pub enum Message {
     /// A kind pill of the New note dialog was clicked.
     DialogNoteKind(wren_core::kind::NoteKind),
     /// Tab (`false`) or Shift+Tab (`true`) that no widget took: the New
-    /// note dialog steps its kind pills.
-    DialogTab(bool),
+    /// note dialog steps its kind pills, and a browser column moves one
+    /// column right or left.
+    Tab(bool),
     SubmitDialog,
     ConfirmTrash,
     CancelDialog,
@@ -604,7 +605,7 @@ impl App {
                 }
             }
             Message::DialogNoteKind(kind) => return self.choose_note_kind(kind),
-            Message::DialogTab(reverse) => self.step_note_kind(reverse),
+            Message::Tab(reverse) => return self.tab(reverse),
             Message::SubmitDialog => return self.submit_dialog(false),
             Message::ConfirmTrash => return self.submit_dialog(true),
             Message::CancelDialog => {
@@ -781,6 +782,10 @@ impl App {
                     task = focus_editor();
                 }
                 self.editor.spell(event)
+            }
+            wren_editor::Message::Clip(clip) => {
+                self.column = columns::Column::Editor;
+                self.editor.clip(clip)
             }
             wren_editor::Message::Undo => self.editor.undo(),
             wren_editor::Message::Redo => self.editor.redo(),
@@ -1007,7 +1012,7 @@ impl App {
                         (status == iced::event::Status::Ignored)
                             .then(|| workspace::tab(&event))
                             .flatten()
-                            .map(Message::DialogTab)
+                            .map(Message::Tab)
                     }),
                 _ => None,
             }),

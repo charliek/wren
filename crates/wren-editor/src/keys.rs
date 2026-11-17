@@ -121,15 +121,16 @@ fn is_modifier(named: Named) -> bool {
 /// The messages a binding publishes, for key routing run without the
 /// widget: what [`crate::widget`] publishes for it, except that the
 /// clipboard is not there to copy to or paste from, and dropping focus is
-/// no message. `selection` is whether text is selected, which Cut needs.
-pub(crate) fn messages(binding: Binding<Message>, selection: bool, out: &mut Vec<Message>) {
+/// no message. `line` is the caret line's [`crate::Clip`] text when nothing
+/// is selected, which Copy and Cut take instead of a selection.
+pub(crate) fn messages(binding: Binding<Message>, line: Option<&str>, out: &mut Vec<Message>) {
     use iced::widget::text_editor::{Action, Edit};
 
     let action = match binding {
         Binding::Custom(message) => return out.push(message),
         Binding::Sequence(sequence) => {
             for binding in sequence {
-                messages(binding, selection, out);
+                messages(binding, line, out);
             }
             return;
         }
@@ -142,8 +143,16 @@ pub(crate) fn messages(binding: Binding<Message>, selection: bool, out: &mut Vec
         Binding::Enter => Action::Edit(Edit::Enter),
         Binding::Backspace => Action::Edit(Edit::Backspace),
         Binding::Delete => Action::Edit(Edit::Delete),
-        Binding::Cut if selection => Action::Edit(Edit::Delete),
-        Binding::Cut | Binding::Copy | Binding::Paste | Binding::Unfocus => return,
+        Binding::Cut | Binding::Copy if line.is_some() => {
+            let text = std::sync::Arc::new(line.unwrap_or_default().to_owned());
+            return out.push(Message::Clip(if matches!(binding, Binding::Cut) {
+                crate::Clip::CutLine(text)
+            } else {
+                crate::Clip::CopyLine(text)
+            }));
+        }
+        Binding::Cut => Action::Edit(Edit::Delete),
+        Binding::Copy | Binding::Paste | Binding::Unfocus => return,
     };
     out.push(Message::Action(action));
 }
