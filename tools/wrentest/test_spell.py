@@ -509,6 +509,31 @@ def test_native_right_click_takes_the_keyboard_from_the_find_field(tmp_path: Pat
 
 
 @pytest.mark.native_x11
+def test_native_wheel_that_moves_no_line_keeps_the_menu_and_a_scroll_closes_it(
+        tmp_path: Path) -> None:
+    """Rule 4.4.8: only a wheel event that scrolls the view closes the menu.
+    A trackpad on macOS sends wheel events of no delta as two fingers touch
+    and lift for a secondary click; X11 cannot send those, so sideways wheel
+    clicks, which move no line down or up either, stand in for them."""
+    with native_spell_app(tmp_path, "spell-native-wheel") as (app, _root, window):
+        gestures.move(window, word_point(app, 5, "apear"))
+        # In the right-click's own batch of events or the next.
+        xdo("click", "3", "click", "6", "click", "7")
+        assert drawn_menu(app)["word"] == "apear"
+        for button in ("6", "7", "6", "7"):
+            xdo("click", button)
+        time.sleep(0.3)
+        drawn_frame(app, "spell-native-wheel")
+        state = menu(app)
+        assert state is not None and state["word"] == "apear" and state["bounds"], state
+        assert editor(app)["text"] == original()
+        # A wheel click down scrolls, which closes it.
+        xdo("click", "5")
+        wait_for(lambda: menu(app) is None, description="a scroll closes the menu")
+        assert editor(app)["text"] == original()
+
+
+@pytest.mark.native_x11
 def test_native_suggest_key_arrows_escape_and_return(tmp_path: Path) -> None:
     with native_spell_app(tmp_path, "spell-native-keys") as (app, _root, window):
         def keys(*names: str) -> None:
