@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.2.0 — 2026-11-17
+
 ### Added
 
 - **Boards**, a second kind of note: a canvas of shapes and connectors for
@@ -59,6 +61,31 @@ version's section as its notes, and publishes to the apt repo. See
   Heading…** is now **Jump in Note…**.
 - **`boards`** in `config.conf`, on by default; `boards = off` hides boards
   and leaves their files alone.
+- **Spell check** on the `advanced` editor engine: misspelled words get a
+  red zigzag, and a right-click or **Suggest spelling** (⌘., Alt+. on
+  Linux) opens a menu of up to five corrections. It works offline and the
+  same on both platforms, with a bundled US English dictionary (SCOWL
+  `en_US`) plus your own `words.txt` beside `config.conf`, which **Open
+  spelling word list** creates and opens. Code, URLs, link destinations,
+  front matter and HTML are never checked. `spell-check` in `config.conf`
+  is on by default, and **Toggle spell check** in the palette flips it. See
+  [Spell check](https://charliek.github.io/wren/reference/spell-check/).
+- **Toggle collapsed columns** (⇧⌘Y, Alt+Shift+Y on Linux) folds Sections
+  and Groups down to the Notes column, as a double-click on a note does,
+  without moving the open note, the caret or the keyboard; press it again
+  to bring them back. It is in the palette and the macOS View menu, beside
+  a new **Toggle Focus Mode** row.
+- **Line cut, copy and paste:** with nothing selected, ⌘X and ⌘C (Ctrl on
+  Linux) take the caret's whole line, as in VS Code. Cut is one undo step,
+  and pasting a line copied that way puts it above the caret's line.
+
+### Changed
+
+- **Tab and Shift+Tab move between the columns:** Sections, Groups, Notes,
+  then the editor. In the editor, on a board, in the New note dialog and in
+  a filter box, Tab keeps its own job.
+- **A new section is selected,** as new groups and notes already were, and
+  a new section or group opens its column and takes the keyboard.
 
 ## v0.1.1 — 2026-11-10
 
