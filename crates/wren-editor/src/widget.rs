@@ -1504,20 +1504,36 @@ fn apply_binding(
             operation::Focusable::unfocus(state);
             state.drag_click = None;
         }
-        Binding::Copy => {
-            if let Some(selection) = content.selection() {
-                clipboard.write(clipboard::Kind::Standard, selection);
-            }
-        }
-        Binding::Cut => {
-            if let Some(selection) = content.selection() {
-                clipboard.write(clipboard::Kind::Standard, selection);
-                act(Action::Edit(Edit::Delete));
+        Binding::Copy | Binding::Cut => {
+            let line = match content
+                .selection()
+                .filter(|selection| !selection.is_empty())
+            {
+                Some(selection) => {
+                    clipboard.write(clipboard::Kind::Standard, selection);
+                    None
+                }
+                // Nothing selected: the caret's whole line, as VS Code does.
+                None => {
+                    let line = content.cursor().position.line;
+                    let text = content.with_lines(|lines| crate::edit::line_clip(lines, line));
+                    clipboard.write(clipboard::Kind::Standard, text.clone());
+                    Some(Arc::new(text))
+                }
+            };
+            let mut messages = Vec::new();
+            crate::keys::clip_messages(matches!(binding, Binding::Cut), line, &mut messages);
+            for message in messages {
+                publish(shell, menu, message);
             }
         }
         Binding::Paste => {
             if let Some(contents) = clipboard.read(clipboard::Kind::Standard) {
-                act(Action::Edit(Edit::Paste(Arc::new(contents))));
+                publish(
+                    shell,
+                    menu,
+                    Message::Clip(crate::Clip::Paste(Arc::new(contents))),
+                );
             }
         }
         Binding::Move(motion) => act(Action::Move(motion)),
@@ -4130,6 +4146,7 @@ mod tests {
                 Message::Action(action) => ev.perform(action),
                 Message::Intent(intent) => ev.intent(intent),
                 Message::Spell(event) => ev.spell(event),
+                Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
                 Message::Find => false,

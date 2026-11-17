@@ -228,6 +228,73 @@ impl App {
         self.finish_action(Disposition::Completed, None, task)
     }
 
+    /// Make `column` active and unfold it, so its selection shows.
+    pub(super) fn reach_column(&mut self, column: Column) {
+        self.fold = self.fold.min(column.fold());
+        self.column = column;
+        if column.is_browser() {
+            self.focus = false;
+        }
+    }
+
+    /// Tab or Shift+Tab that no widget took. A dialog steps its kind pills;
+    /// in a browser column Tab moves right as → does and Shift+Tab left as ←
+    /// does, so Tab walks from a section to the editor. A filter box leaves
+    /// Tab unhandled too, so while one has the keyboard Tab stays put rather
+    /// than leave the text being typed.
+    pub(super) fn tab(&mut self, reverse: bool) -> Task<Message> {
+        if self.dialog.is_some() {
+            self.step_note_kind(reverse);
+            return Task::none();
+        }
+        if self.palette.is_some() || !self.column.is_browser() {
+            return Task::none();
+        }
+        iced::advanced::widget::operate(FilterTyping(false)).then(move |typing| {
+            if typing {
+                Task::none()
+            } else {
+                Task::done(Message::ColumnTab(reverse))
+            }
+        })
+    }
+
+    /// Tab's column move, once no filter box has the keyboard.
+    pub(super) fn column_tab(&mut self, reverse: bool) -> Task<Message> {
+        if self.dialog.is_some() || self.palette.is_some() || !self.column.is_browser() {
+            return Task::none();
+        }
+        if reverse {
+            self.column_left().task
+        } else {
+            self.column_right().task
+        }
+    }
+
+    /// ⌘⇧Y: fold Sections and Groups away as a double-click on a note does,
+    /// but leave the editor, its caret and the active column as they are;
+    /// pressed again while collapsed, unfold them. Leaves focus mode, since
+    /// collapsed shows the Notes column.
+    pub(super) fn toggle_collapsed(&mut self) -> Gateway {
+        if self.session.is_none() {
+            return self.blocked("No workspace is open");
+        }
+        self.cancel_gestures();
+        let collapsed = Column::Notes.fold();
+        if !self.focus && self.fold >= collapsed {
+            self.fold = 0;
+        } else {
+            self.focus = false;
+            self.fold = collapsed;
+            // A folded column cannot keep the keyboard.
+            if self.column.fold() < collapsed {
+                self.column = Column::Notes;
+            }
+        }
+        let task = self.column_focus();
+        self.finish_action(Disposition::Completed, None, task)
+    }
+
     /// A shortcut acts on the active column: ⌘P jumps among its items, ⌘N
     /// creates one, ⌘F filters it, ⌘R renames its selection. Palette rows
     /// never come through here, so they always do what their label says.
@@ -274,6 +341,42 @@ impl App {
         }
         self.column = Column::Editor;
         self.column_focus()
+    }
+}
+
+/// Whether a column's filter box has the keyboard. iced's `is_focused`
+/// answers nothing for a box that is not in the tree, as a folded column's
+/// is not, which would end the task; this always answers.
+struct FilterTyping(bool);
+
+impl iced::advanced::widget::Operation<bool> for FilterTyping {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<bool>),
+    ) {
+        if !self.0 {
+            operate(self);
+        }
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+    ) {
+        const FILTERS: [iced::advanced::widget::Id; 3] = [
+            iced::advanced::widget::Id::new("filter-sections"),
+            iced::advanced::widget::Id::new("filter-groups"),
+            iced::advanced::widget::Id::new("filter-notes"),
+        ];
+        if state.is_focused() && id.is_some_and(|id| FILTERS.contains(id)) {
+            self.0 = true;
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<bool> {
+        iced::advanced::widget::operation::Outcome::Some(self.0)
     }
 }
 

@@ -143,10 +143,10 @@ impl App {
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }
-            "dialog.tab" => {
+            "dialog.tab" | "key.tab" => {
                 // A Tab no widget took, as the keyboard subscription sends it.
                 let reverse = params.get("reverse").and_then(Value::as_bool).unwrap_or(false);
-                let task = self.update(Message::DialogTab(reverse));
+                let task = self.update(Message::Tab(reverse));
                 request.respond(Ok(self.navigation_snapshot()));
                 return Ok(task);
             }

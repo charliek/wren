@@ -1736,4 +1736,121 @@ mod columns {
         press(&mut app, CommandId::Find);
         assert!(app.find_open, "Find in the editor is find-in-note");
     }
+
+    /// Tab's column move, as `Message::Tab` sends it once no filter box has
+    /// the keyboard (a check that needs a window).
+    fn tab(app: &mut App, reverse: bool) {
+        let _ = app.update(Message::ColumnTab(reverse));
+    }
+
+    #[test]
+    fn tab_walks_right_from_a_section_to_the_editor_and_shift_tab_walks_back() {
+        let (_directory, mut app) = fixture();
+        walk_to(&mut app, Column::Sections);
+        for expected in [(Column::Groups, 1), (Column::Notes, 2), (Column::Editor, 2)] {
+            tab(&mut app, false);
+            assert_eq!(state(&app), expected);
+        }
+        // In the editor Tab is the editor's: a Tab no widget took does nothing.
+        tab(&mut app, false);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        tab(&mut app, true);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        for expected in [(Column::Groups, 1), (Column::Sections, 0)] {
+            tab(&mut app, true);
+            assert_eq!(state(&app), expected);
+        }
+        tab(&mut app, true);
+        assert_eq!(state(&app), (Column::Sections, 0), "leftmost");
+
+        // An open palette keeps Tab from the columns.
+        let _ = app.open_palette(Mode::Commands);
+        tab(&mut app, false);
+        assert_eq!(state(&app), (Column::Sections, 0));
+        let _ = app.close_palette();
+        // Once it closes, Tab moves on again.
+        tab(&mut app, false);
+        tab(&mut app, false);
+        assert_eq!(app.column, Column::Notes);
+    }
+
+    #[test]
+    fn collapse_toggles_to_the_notes_column_and_leaves_the_editor_alone() {
+        let (_directory, mut app) = fixture();
+        append(&mut app, " edited");
+        let cursor = app.editor.cursor();
+        let selected = app.selected_note;
+        press(&mut app, CommandId::CollapseColumns);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        assert_eq!(app.visible_panes(), &[Pane::Notes]);
+        assert_eq!(app.editor.cursor(), cursor);
+        assert_eq!(app.selected_note, selected);
+        assert_eq!(app.editor.text(), "first body edited");
+        press(&mut app, CommandId::CollapseColumns);
+        assert_eq!(state(&app), (Column::Editor, 0), "again unfolds");
+        assert_eq!(app.editor.cursor(), cursor);
+
+        // From focus mode it collapses rather than unfolds, even when folded.
+        let _ = run(&mut app, CommandId::ColumnLeft);
+        key(&mut app, Nav::Escape);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        let _ = app.dispatch(Command::Focus(Some(true)));
+        press(&mut app, CommandId::CollapseColumns);
+        assert!(!app.focus);
+        assert_eq!(state(&app), (Column::Editor, 2));
+
+        // A column it folds away hands the keyboard to Notes.
+        walk_to(&mut app, Column::Sections);
+        assert_eq!(state(&app), (Column::Sections, 0));
+        press(&mut app, CommandId::CollapseColumns);
+        assert_eq!(state(&app), (Column::Notes, 2));
+        press(&mut app, CommandId::CollapseColumns);
+        assert_eq!(state(&app), (Column::Notes, 0));
+    }
+
+    #[test]
+    fn a_new_section_is_selected_from_the_shortcut_and_the_header_button() {
+        let (_directory, mut app) = fixture();
+        walk_to(&mut app, Column::Sections);
+        press(&mut app, CommandId::NewNote);
+        assert_eq!(app.dialog.as_ref().unwrap().kind, DialogKind::CreateSection);
+        app.dialog.as_mut().unwrap().name = "Gamma".into();
+        let _ = app.submit_dialog(false);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.selected_section, Some(section(&app, "Gamma")));
+        assert_eq!(app.selected_group, None);
+        assert_eq!(app.selected_note, None);
+        assert_eq!(app.column, Column::Sections);
+
+        // The Sections header's + runs the command itself, from any column.
+        let _ = app.dispatch(Command::Run(CommandId::NewSection));
+        app.dialog.as_mut().unwrap().name = "Delta".into();
+        let _ = app.submit_dialog(false);
+        assert_eq!(app.selected_section, Some(section(&app, "Delta")));
+
+        // From the editor, folded, the new section's column opens and takes
+        // the keyboard, since nothing is open in it yet.
+        let _ = app.dispatch(Command::OpenNote(app.note_target(note(&app, "First"))));
+        app.column = Column::Notes;
+        key(&mut app, Nav::Escape);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        let _ = app.dispatch(Command::Run(CommandId::NewSection));
+        app.dialog.as_mut().unwrap().name = "Epsilon".into();
+        let _ = app.submit_dialog(false);
+        assert_eq!(app.selected_section, Some(section(&app, "Epsilon")));
+        assert_eq!(state(&app), (Column::Sections, 0));
+
+        // A new group and a new note are selected too.
+        let _ = app.dispatch(Command::Run(CommandId::NewGroup));
+        app.dialog.as_mut().unwrap().name = "Ideas".into();
+        let _ = app.submit_dialog(false);
+        let ideas = group(&app, "Ideas");
+        assert_eq!(app.selected_group, Some(ideas));
+        assert_eq!(state(&app), (Column::Groups, 0));
+        let _ = app.dispatch(Command::Run(CommandId::NewNote));
+        app.dialog.as_mut().unwrap().name = "Plan".into();
+        let _ = app.submit_dialog(false);
+        assert_eq!(app.selected_note, Some(note(&app, "Plan")));
+    }
 }

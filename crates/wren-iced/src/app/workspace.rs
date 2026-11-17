@@ -420,10 +420,11 @@ impl App {
         }
         let follow_up = match created {
             Some(ItemRef::Note(note)) => Some(Op::OpenNote { note: Some(note) }),
-            // A new group is where the next note goes, so select it.
+            // A new group or section is where the next item goes, so select it.
             Some(ItemRef::Group(group)) => Some(Op::SelectParent {
                 parent: Parent::Group(group),
             }),
+            Some(ItemRef::Section(section)) => Some(Op::SelectSection { section }),
             _ => None,
         };
         if let Some(op) = follow_up {
@@ -486,8 +487,13 @@ impl App {
         } else {
             false
         };
-        if matches!(created, Some(ItemRef::Note(_))) {
-            self.column = super::columns::Column::Editor;
+        // A new note takes the keyboard. A new section or group is selected
+        // with nothing open in it yet, so its own column does, unfolded.
+        match created {
+            Some(ItemRef::Note(_)) => self.column = super::columns::Column::Editor,
+            Some(ItemRef::Section(_)) => self.reach_column(super::columns::Column::Sections),
+            Some(ItemRef::Group(_)) => self.reach_column(super::columns::Column::Groups),
+            None => {}
         }
         let focus = if created.is_some()
             || (committed
@@ -802,7 +808,7 @@ impl App {
         let mut created = None;
         for event in events {
             match event {
-                Event::Created(item @ (ItemRef::Note(_) | ItemRef::Group(_))) => {
+                Event::Created(item) => {
                     created = Some(*item);
                 }
                 Event::Warning(message) => self.banner = Some(message.clone()),
@@ -1342,6 +1348,9 @@ mod tests {
             })
             .unwrap();
         assert!(directory.path().join("Still writable").is_dir());
+        // The new, empty section is selected, which closes the note.
+        assert_eq!(app.selected_note, None);
+        let _ = app.apply_core(Op::OpenNote { note: Some(note) }).unwrap();
         append(&mut app, " retained draft");
         app.session.as_mut().unwrap().fail_next(Fault::Write);
         assert!(app.apply_core(Op::Flush).is_err());

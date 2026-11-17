@@ -11,6 +11,7 @@ with that widget.
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
@@ -148,6 +149,90 @@ def test_moving_right_needs_a_selection(vault: Path) -> None:
         command(app, "navigation.column_right", disposition="blocked")
         assert nav(app, "enter")["column"] == "notes"
         assert nav(app, "down")["selected_note"] is None
+
+
+def tab(app: WrenApp, *, reverse: bool = False) -> None:
+    app.client.call("key.tab", {"reverse": reverse})
+
+
+def wait_state(app: WrenApp, expected: tuple[str, int], description: str) -> None:
+    # Tab moves only once a check that no filter box has the keyboard comes
+    # back, after the request has answered.
+    wait_for(lambda: (navigation(app)["column"], navigation(app)["fold"]) == expected,
+             timeout=3, interval=0.025, description=description)
+
+
+def test_tab_walks_right_to_the_editor_and_shift_tab_walks_back(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("columns-tab")) as app:
+        note = jump(app, FIRST)
+        for _ in range(3):
+            command(app, "navigation.column_left")
+        assert column(app) == "sections"
+        for expected in (("groups", 1), ("notes", 2), ("editor", 2)):
+            tab(app)
+            wait_state(app, expected, f"Tab moves to {expected[0]}")
+        assert navigation(app)["selected_note"] == note
+        wait_focus(app, ["note-editor"])
+        command(app, "navigation.column_left")
+        for expected in (("groups", 1), ("sections", 0)):
+            tab(app, reverse=True)
+            wait_state(app, expected, f"Shift+Tab moves to {expected[0]}")
+        # An empty group stays put, as with →.
+        click(app, {"group": item(app, "groups", "Atlas/Empty group")["id"]})
+        tab(app)
+        wait_state(app, ("notes", 2), "Tab moves to Notes")
+        tab(app)
+        time.sleep(0.3)
+        assert column(app) == "notes"
+
+        # Tab while typing in a filter box stays in the box.
+        app.client.call("column.open", {"column": "groups"})
+        shortcut(app, "navigation.find")
+        wait_focus(app, ["filter-groups"])
+        tab(app)
+        time.sleep(0.3)
+        assert column(app) == "groups"
+        assert focused(app) == ["filter-groups"]
+
+
+def test_collapse_toggles_to_the_notes_column_and_keeps_the_editor(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("columns-collapse")) as app:
+        jump(app, FIRST)
+        app.client.call("editor.cursor", {"line": 0, "column": 3})
+        before = app.client.call("editor.get")
+        state = shortcut(app, "view.collapse_columns")
+        assert (state["column"], state["fold"], state["focus"]) == ("editor", 2, False)
+        wait_for(lambda: rendered_kinds(app) == {"note"}, timeout=5, description="only Notes remains")
+        wait_focus(app, ["note-editor"])
+        after = app.client.call("editor.get")
+        assert (after["text"], after["cursor"]) == (before["text"], before["cursor"])
+        state = shortcut(app, "view.collapse_columns")
+        assert (state["column"], state["fold"]) == ("editor", 0)
+        wait_for(lambda: rendered_kinds(app) == {"section", "group", "note"}, timeout=5,
+                 description="every column is back")
+        # From focus mode it collapses, showing Notes again.
+        app.client.call("view.focus", {"enabled": True})
+        state = shortcut(app, "view.collapse_columns")
+        assert (state["focus"], state["fold"]) == (False, 2)
+
+
+def test_a_new_section_is_selected(vault: Path) -> None:
+    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("columns-new-section")) as app:
+        jump(app, FIRST)
+        for _ in range(3):
+            command(app, "navigation.column_left")
+        assert shortcut(app, "note.new")["dialog"]["kind"] == "CreateSection"
+        app.client.call("dialog.name", {"name": "Gamma"})
+        state = app.client.call("dialog.submit")
+        assert state["dialog"] is None
+        assert state["selected_section"] == item(app, "sections", "Gamma")["id"]
+        assert (state["selected_group"], state["selected_note"]) == (None, None)
+        assert state["column"] == "sections"
+        # The Sections header's + runs the command itself.
+        command(app, "section.new")
+        app.client.call("dialog.name", {"name": "Delta"})
+        state = app.client.call("dialog.submit")
+        assert state["selected_section"] == item(app, "sections", "Delta")["id"]
 
 
 def test_jump_and_new_note_land_in_the_editor(vault: Path) -> None:
@@ -399,3 +484,35 @@ def test_native_alt_p_and_alt_f_follow_the_active_column(native_workspace) -> No
     wait_for(lambda: (column(app), navigation(app)["fold"]) == ("groups", 1),
              description="a section pick moves right")
     assert native.files(root) == original_files
+
+
+@pytest.mark.native_x11
+def test_native_tab_walks_columns_and_alt_shift_y_collapses(native_workspace) -> None:
+    app, root, window = native_workspace
+    origin = native.item(app, "notes", native.ORIGIN)["id"]
+    wait_focus(app, ["note-editor"])
+    native.keys(window, "alt+shift+bracketleft", "alt+shift+bracketleft", "alt+shift+bracketleft")
+    wait_for(lambda: column(app) == "sections", description="Alt+Shift+[ reaches Sections")
+    wait_focus(app, [])
+    for expected in ("groups", "notes", "editor"):
+        native.keys(window, "Tab")
+        wait_for(lambda: column(app) == expected, description=f"native Tab moves to {expected}")
+    wait_focus(app, ["note-editor"])
+    assert navigation(app)["selected_note"] == origin
+    native.keys(window, "alt+shift+bracketleft")
+    wait_for(lambda: column(app) == "notes", description="back to Notes")
+    native.keys(window, "shift+Tab")
+    wait_for(lambda: column(app) == "groups", description="native Shift+Tab moves left")
+
+    native.keys(window, "Escape")
+    wait_for(lambda: column(app) == "editor", description="Escape returns to the editor")
+    native.keys(window, "alt+shift+bracketleft", "Escape")
+    native.keys(window, "alt+shift+y")
+    wait_for(lambda: navigation(app)["fold"] == 0, description="Alt+Shift+Y unfolds when collapsed")
+    native.keys(window, "alt+shift+y")
+    wait_for(lambda: navigation(app)["fold"] == 2, description="Alt+Shift+Y collapses")
+    assert column(app) == "editor"
+    wait_focus(app, ["note-editor"])
+    native.type_text(window, "typed after collapse")
+    wait_for(lambda: "typed after collapse" in app.client.call("editor.get")["text"],
+             description="typing still reaches the editor")

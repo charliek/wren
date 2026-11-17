@@ -48,6 +48,7 @@ pub enum CommandId {
     ColumnLeft,
     ColumnRight,
     Focus,
+    CollapseColumns,
     ResetWidths,
     SortModified,
     SortTitle,
@@ -296,6 +297,13 @@ definitions![
         App
     ),
     (Focus, "view.focus", "Toggle focus mode", "View", App),
+    (
+        CollapseColumns,
+        "view.collapse_columns",
+        "Toggle collapsed columns",
+        "View",
+        App
+    ),
     (
         ResetWidths,
         "view.reset_widths",
@@ -976,9 +984,8 @@ impl App {
                 .config
                 .as_ref()
                 .is_some_and(|config| config.writable() && !config.workspaces().is_empty()),
-            NewSection | Focus | ResetWidths | Jump | Search | ColumnLeft | ColumnRight => {
-                self.session.is_some()
-            }
+            NewSection | Focus | CollapseColumns | ResetWidths | Jump | Search | ColumnLeft
+            | ColumnRight => self.session.is_some(),
             NewGroup | RenameSection | DeleteSection | RevealSection | ReorderSection => {
                 self.selected_section.is_some() && self.session.is_some()
             }
@@ -1261,6 +1268,10 @@ impl App {
             Focus => {
                 self.palette = None;
                 self.dispatch(Command::Focus(None))
+            }
+            CollapseColumns => {
+                self.palette = None;
+                self.toggle_collapsed()
             }
             ResetWidths => {
                 self.cancel_gestures();
@@ -1684,6 +1695,7 @@ mod tests {
             "navigation.column_left",
             "navigation.column_right",
             "view.focus",
+            "view.collapse_columns",
             "view.reset_widths",
             "notes.sort_modified",
             "notes.sort_title",

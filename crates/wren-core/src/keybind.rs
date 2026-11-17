@@ -239,6 +239,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
         (format!("{p}+shift+bracketright"), "navigation.column_right"),
         (format!("{p}+r"), "note.rename"),
         (format!("{p}+y"), "view.focus"),
+        (format!("{p}+shift+y"), "view.collapse_columns"),
         // `+` is Shift+`=` on US layouts, and most people press it unshifted.
         // Toolkits report the shifted press as either key, so bind both.
         (format!("{p}+plus"), "font.increase"),
@@ -561,9 +562,9 @@ mod tests {
         defaults
     }
 
-    /// `default_bindings` as Wren 0.1.1 shipped it, plus spell check's
-    /// suggest key, its one addition. Boards add a layer and must not change
-    /// this one.
+    /// `default_bindings` as Wren 0.1.1 shipped it, plus its two additions:
+    /// spell check's suggest key and collapsing the columns to Notes. Boards
+    /// add a layer and must not change this one.
     fn frozen_base(platform: Platform) -> Vec<(&'static str, &'static str)> {
         let mut bindings = match platform {
             Platform::Mac => vec![
@@ -581,6 +582,7 @@ mod tests {
                 ("super+shift+bracketright", "navigation.column_right"),
                 ("super+r", "note.rename"),
                 ("super+y", "view.focus"),
+                ("super+shift+y", "view.collapse_columns"),
                 ("super+plus", "font.increase"),
                 ("super+equal", "font.increase"),
                 ("super+shift+equal", "font.increase"),
@@ -607,6 +609,7 @@ mod tests {
                 ("alt+shift+bracketright", "navigation.column_right"),
                 ("alt+r", "note.rename"),
                 ("alt+y", "view.focus"),
+                ("alt+shift+y", "view.collapse_columns"),
                 ("alt+plus", "font.increase"),
                 ("alt+equal", "font.increase"),
                 ("alt+shift+equal", "font.increase"),
