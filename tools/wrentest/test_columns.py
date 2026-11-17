@@ -11,6 +11,7 @@ with that widget.
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
@@ -150,8 +151,15 @@ def test_moving_right_needs_a_selection(vault: Path) -> None:
         assert nav(app, "down")["selected_note"] is None
 
 
-def tab(app: WrenApp, *, reverse: bool = False) -> dict:
-    return app.client.call("key.tab", {"reverse": reverse})
+def tab(app: WrenApp, *, reverse: bool = False) -> None:
+    app.client.call("key.tab", {"reverse": reverse})
+
+
+def wait_state(app: WrenApp, expected: tuple[str, int], description: str) -> None:
+    # Tab moves only once a check that no filter box has the keyboard comes
+    # back, after the request has answered.
+    wait_for(lambda: (navigation(app)["column"], navigation(app)["fold"]) == expected,
+             timeout=3, interval=0.025, description=description)
 
 
 def test_tab_walks_right_to_the_editor_and_shift_tab_walks_back(vault: Path) -> None:
@@ -161,18 +169,30 @@ def test_tab_walks_right_to_the_editor_and_shift_tab_walks_back(vault: Path) -> 
             command(app, "navigation.column_left")
         assert column(app) == "sections"
         for expected in (("groups", 1), ("notes", 2), ("editor", 2)):
-            state = tab(app)
-            assert (state["column"], state["fold"]) == expected
-        assert state["selected_note"] == note
+            tab(app)
+            wait_state(app, expected, f"Tab moves to {expected[0]}")
+        assert navigation(app)["selected_note"] == note
         wait_focus(app, ["note-editor"])
         command(app, "navigation.column_left")
-        for expected in (("groups", 1), ("sections", 0), ("sections", 0)):
-            state = tab(app, reverse=True)
-            assert (state["column"], state["fold"]) == expected
+        for expected in (("groups", 1), ("sections", 0)):
+            tab(app, reverse=True)
+            wait_state(app, expected, f"Shift+Tab moves to {expected[0]}")
         # An empty group stays put, as with →.
         click(app, {"group": item(app, "groups", "Atlas/Empty group")["id"]})
-        assert tab(app)["column"] == "notes"
-        assert tab(app)["column"] == "notes"
+        tab(app)
+        wait_state(app, ("notes", 2), "Tab moves to Notes")
+        tab(app)
+        time.sleep(0.3)
+        assert column(app) == "notes"
+
+        # Tab while typing in a filter box stays in the box.
+        app.client.call("column.open", {"column": "groups"})
+        shortcut(app, "navigation.find")
+        wait_focus(app, ["filter-groups"])
+        tab(app)
+        time.sleep(0.3)
+        assert column(app) == "groups"
+        assert focused(app) == ["filter-groups"]
 
 
 def test_collapse_toggles_to_the_notes_column_and_keeps_the_editor(vault: Path) -> None:

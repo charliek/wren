@@ -1505,30 +1505,26 @@ fn apply_binding(
             state.drag_click = None;
         }
         Binding::Copy | Binding::Cut => {
-            let cut = matches!(binding, Binding::Cut);
-            match content
+            let line = match content
                 .selection()
                 .filter(|selection| !selection.is_empty())
             {
                 Some(selection) => {
                     clipboard.write(clipboard::Kind::Standard, selection);
-                    if cut {
-                        act(Action::Edit(Edit::Delete));
-                    }
+                    None
                 }
                 // Nothing selected: the caret's whole line, as VS Code does.
                 None => {
                     let line = content.cursor().position.line;
                     let text = content.with_lines(|lines| crate::edit::line_clip(lines, line));
                     clipboard.write(clipboard::Kind::Standard, text.clone());
-                    let text = Arc::new(text);
-                    let clip = if cut {
-                        crate::Clip::CutLine(text)
-                    } else {
-                        crate::Clip::CopyLine(text)
-                    };
-                    publish(shell, menu, Message::Clip(clip));
+                    Some(Arc::new(text))
                 }
+            };
+            let mut messages = Vec::new();
+            crate::keys::clip_messages(matches!(binding, Binding::Cut), line, &mut messages);
+            for message in messages {
+                publish(shell, menu, message);
             }
         }
         Binding::Paste => {

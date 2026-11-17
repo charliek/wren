@@ -1737,8 +1737,10 @@ mod columns {
         assert!(app.find_open, "Find in the editor is find-in-note");
     }
 
+    /// Tab's column move, as `Message::Tab` sends it once no filter box has
+    /// the keyboard (a check that needs a window).
     fn tab(app: &mut App, reverse: bool) {
-        let _ = app.update(Message::Tab(reverse));
+        let _ = app.update(Message::ColumnTab(reverse));
     }
 
     #[test]
@@ -1827,12 +1829,25 @@ mod columns {
         let _ = app.submit_dialog(false);
         assert_eq!(app.selected_section, Some(section(&app, "Delta")));
 
+        // From the editor, folded, the new section's column opens and takes
+        // the keyboard, since nothing is open in it yet.
+        let _ = app.dispatch(Command::OpenNote(app.note_target(note(&app, "First"))));
+        app.column = Column::Notes;
+        key(&mut app, Nav::Escape);
+        assert_eq!(state(&app), (Column::Editor, 2));
+        let _ = app.dispatch(Command::Run(CommandId::NewSection));
+        app.dialog.as_mut().unwrap().name = "Epsilon".into();
+        let _ = app.submit_dialog(false);
+        assert_eq!(app.selected_section, Some(section(&app, "Epsilon")));
+        assert_eq!(state(&app), (Column::Sections, 0));
+
         // A new group and a new note are selected too.
         let _ = app.dispatch(Command::Run(CommandId::NewGroup));
         app.dialog.as_mut().unwrap().name = "Ideas".into();
         let _ = app.submit_dialog(false);
         let ideas = group(&app, "Ideas");
         assert_eq!(app.selected_group, Some(ideas));
+        assert_eq!(state(&app), (Column::Groups, 0));
         let _ = app.dispatch(Command::Run(CommandId::NewNote));
         app.dialog.as_mut().unwrap().name = "Plan".into();
         let _ = app.submit_dialog(false);

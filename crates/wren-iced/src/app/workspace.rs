@@ -487,8 +487,13 @@ impl App {
         } else {
             false
         };
-        if matches!(created, Some(ItemRef::Note(_))) {
-            self.column = super::columns::Column::Editor;
+        // A new note takes the keyboard. A new section or group is selected
+        // with nothing open in it yet, so its own column does, unfolded.
+        match created {
+            Some(ItemRef::Note(_)) => self.column = super::columns::Column::Editor,
+            Some(ItemRef::Section(_)) => self.reach_column(super::columns::Column::Sections),
+            Some(ItemRef::Group(_)) => self.reach_column(super::columns::Column::Groups),
+            None => {}
         }
         let focus = if created.is_some()
             || (committed

@@ -209,6 +209,8 @@ pub enum Message {
     /// note dialog steps its kind pills, and a browser column moves one
     /// column right or left.
     Tab(bool),
+    /// Tab's column move, after [`Message::Tab`] found no filter box typing.
+    ColumnTab(bool),
     SubmitDialog,
     ConfirmTrash,
     CancelDialog,
@@ -606,6 +608,7 @@ impl App {
             }
             Message::DialogNoteKind(kind) => return self.choose_note_kind(kind),
             Message::Tab(reverse) => return self.tab(reverse),
+            Message::ColumnTab(reverse) => return self.column_tab(reverse),
             Message::SubmitDialog => return self.submit_dialog(false),
             Message::ConfirmTrash => return self.submit_dialog(true),
             Message::CancelDialog => {

@@ -168,7 +168,7 @@ visible.
 | Key | In Sections, Groups, or Notes |
 |---|---|
 | ↑ / ↓ | Select the previous or next row. Selection is live: the next column, and the note, follow right away. |
-| ↵, →, or Tab | Move one column right. From Notes, this moves into the editor. Needs a selected row. |
+| ↵, →, or Tab | Move one column right. From Notes, this moves into the editor. Needs a selected row. Tab in a filter box stays there. |
 | ← or Shift+Tab | Move one column left. |
 | Esc | Return to the editor without changing the selection. |
 
@@ -180,9 +180,10 @@ one column right.
 Moving right (↵, →, Tab, ⇧⌘], or a double-click) folds the columns to the
 left of the active one, so the editor gets their width. Groups folds
 Sections; Notes and the editor fold Sections and Groups. Notes never folds;
-focus mode (⌘Y) hides it. ⇧⌘Y (Alt+Shift+Y) folds Sections and Groups
-without moving the keyboard, so the editor keeps it and its cursor, and
-leaves focus mode; press it again to unfold them. Folded columns show as a path at the top of the
+focus mode (⌘Y) hides it. ⇧⌘Y (Alt+Shift+Y) folds Sections and Groups and
+leaves focus mode; press it again to unfold them. From the editor or Notes
+the keyboard stays where it is, and the editor keeps its cursor; from
+Sections or Groups, Notes takes the keyboard. Folded columns show as a path at the top of the
 leftmost open column, `‹ Section › Group`: click a name, or `‹`, to open
 that column again. Moving left only ever unfolds, and a single click never
 changes what is folded. Every column is open again after a restart.
@@ -196,8 +197,9 @@ A few shortcuts act on the active column:
 | ⌘R / Alt+R | Rename section | Rename group | Rename note | Rename note |
 | ⌘F / Alt+F | Filter sections | Filter groups | Search titles and text | Find in note |
 
-Picking a section or group from its jump list selects it and moves one
-column right, like ↵. Pressing ⌘P again in that list widens it to every
+A new section or group is selected, and its column opens and takes the
+keyboard; a new note opens in the editor. Picking a section or group from
+its jump list selects it and moves one column right, like ↵. Pressing ⌘P again in that list widens it to every
 note. Esc in a filter box leaves the filter and keeps the column. Commands
 chosen from the palette always do what their label says, whichever column
 is active.
