@@ -1534,7 +1534,13 @@ fn apply_binding(
                 apply_binding(binding, content, state, clipboard, shell, menu);
             }
         }
-        Binding::Custom(message) => publish(shell, menu, message),
+        Binding::Custom(message) => {
+            // As a right-click that opens the menu does.
+            if matches!(message, Message::Spell(SpellEvent::OpenAtCaret)) {
+                state.partial_scroll = 0.0;
+            }
+            publish(shell, menu, message);
+        }
     }
 }
 
@@ -4511,6 +4517,20 @@ mod tests {
         assert!(ev.spell_menu().is_some());
         // Half a line more would have made a whole one.
         let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-2.0)), on_word)]);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(ev.spell_menu().is_some());
+    }
+
+    #[test]
+    fn a_scroll_left_over_from_before_the_suggest_key_does_not_close_its_menu() {
+        let on_word = Some(over(5.0, 0.0));
+        let mut ev = host("cat teh", 5);
+        let mut state = None;
+        let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-3.0)), on_word)]);
+        assert!(messages.is_empty(), "{messages:?}");
+        batch_in(&mut ev, &mut state, vec![(suggest_key(), on_word)]);
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        let messages = batch_in(&mut ev, &mut state, vec![(wheel(pixels(-1.0)), on_word)]);
         assert!(messages.is_empty(), "{messages:?}");
         assert!(ev.spell_menu().is_some());
     }
