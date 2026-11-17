@@ -31,7 +31,7 @@ COMMANDS = {
     "navigation.jump", "navigation.search", "navigation.find", "navigation.outline",
     "navigation.back",
     "navigation.forward", "navigation.column_left", "navigation.column_right", "view.focus",
-    "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
+    "view.collapse_columns", "view.reset_widths", "notes.sort_modified", "notes.sort_title", "theme.choose",
     "font.choose", "font.increase", "font.decrease", "font.reset",
     "workspace.switch", "workspace.add", "workspace.remove",
     "section.reorder", "group.reorder", "note.open_conflict",

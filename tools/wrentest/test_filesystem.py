@@ -292,9 +292,14 @@ def test_native_committed_creation_is_not_replayed_after_metadata_error(tmp_path
                      description="committed native creation")
             assert (root / "Created").is_dir()
             assert "workspace.toml" in state(app)["banner"]
-            xdo("key", "--window", window, "--clearmodifiers", "Return", "ctrl+f")
-            wait_for(lambda: app.client.call("editor.get")["find_open"],
+            created = next(entry["id"] for entry in state(app)["sections"]
+                           if entry["path"] == "Created")
+            assert app.client.call("navigation.get")["selected_section"] == created
+            # The palette opens only once the naming dialog has gone.
+            xdo("key", "--window", window, "--clearmodifiers", "Return", "alt+shift+p")
+            wait_for(lambda: app.client.call("navigation.get")["modal"] is not None,
                      description="creation modal dismissed despite metadata error")
+            xdo("key", "--window", window, "--clearmodifiers", "Escape")
             assert not (root / "Created 2").exists()
             assert len(state(app)["sections"]) == 3
             assert "workspace.toml" in state(app)["banner"]
