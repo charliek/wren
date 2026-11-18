@@ -1873,7 +1873,7 @@ z = "c"
         let rows = command_rows(&mut app);
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
-        assert_eq!(listed.len(), 89);
+        assert_eq!(listed.len(), 90);
         for (_, id, enabled) in &listed {
             let more =
                 id.key().starts_with("board.align.") || id.key().starts_with("board.distribute.");
@@ -2093,6 +2093,7 @@ z = "c"
                 "board.zoom.selection",
                 "board.actions",
                 "board.jump",
+                "board.keys",
             ]
         );
     }
@@ -2132,7 +2133,7 @@ z = "c"
             let _ = app.update(Message::Key(Input::Accel(accel.clone())));
             assert_eq!(app.action_serial, serial, "{} ran an action", id.key());
         }
-        assert_eq!(pressed, 54 + 13);
+        assert_eq!(pressed, 54 + 13 + 1);
         assert!(app.palette.is_none() && app.dialog.is_none() && !app.focus);
         assert_eq!(session_text(&app), text);
         assert_in_step(&app, Surface::Board);

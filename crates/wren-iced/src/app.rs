@@ -15,6 +15,7 @@ use crate::{fonts, theme};
 
 mod board;
 mod board_find;
+mod board_keys;
 mod board_spike;
 mod columns;
 mod workspace;

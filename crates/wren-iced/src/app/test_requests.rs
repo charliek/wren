@@ -475,6 +475,7 @@ impl App {
                     "outline" => Mode::Outline,
                     "board_nodes" => Mode::BoardNodes,
                     "board_actions" => Mode::BoardActions,
+                    "board_keys" => Mode::BoardKeys,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -1051,6 +1052,7 @@ fn key_json(key: &Key) -> Value {
         Key::Heading { revision, line } => json!({"heading":{"revision":revision,"line":line}}),
         Key::Element(Source::Node(id)) => json!({"element":{"node":id.as_str()}}),
         Key::Element(Source::Edge(id)) => json!({"element":{"edge":id.as_str()}}),
+        Key::SheetRow(index) => json!({"sheet_row":index}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }

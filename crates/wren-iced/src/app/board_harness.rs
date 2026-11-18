@@ -183,6 +183,8 @@ impl App {
             "revision": null,
             "counts": null,
             "patch": null,
+            "hint": [],
+            "keys_sheet": null,
             "export": self.export_state(),
             "banner": self.banner,
         });
@@ -226,6 +228,18 @@ impl App {
             "revision": self.board_revision,
             "counts": {"nodes": board.nodes.len(), "edges": board.edges.len()},
             "patch": view.patch().map(wren_canvas::Command::key),
+            "hint": self.board_hint().into_iter().map(|segment| json!({
+                "keys": segment.keys, "words": segment.words,
+            })).collect::<Vec<_>>(),
+            "keys_sheet": self.palette.as_ref()
+                .filter(|palette| palette.mode == super::palette::Mode::BoardKeys)
+                .map(|palette| json!({
+                    "query": palette.query,
+                    "rows": self.board_sheet(&palette.query).into_iter().map(|row| json!({
+                        "group": row.group, "keys": row.keys, "words": row.words,
+                        "dimmed": row.dimmed,
+                    })).collect::<Vec<_>>(),
+                })),
         });
         merge(&mut snapshot, fields);
         if elements {

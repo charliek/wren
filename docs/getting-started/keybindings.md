@@ -238,6 +238,7 @@ app's shortcuts in the first table above keep working on a board.
 | Colour: neutral, red, orange, yellow, green, cyan, purple, blue | 0 to 7 | 0 to 7 | `board.color.neutral`, `.red`, `.orange`, `.yellow`, `.green`, `.cyan`, `.purple`, `.blue` |
 | Board actions | / or ⇧F10 | / or Shift+F10 | `board.actions` |
 | Jump to node | ⇧⌘O or ⌘F | Alt+Shift+O, Alt+F, or Ctrl+F | `board.jump` (reached through `navigation.outline` and `navigation.find`) |
+| Board keys (the keys sheet) | ? | ? | `board.keys` (bound as `shift+/`; a `?` typed with another key, as on AZERTY, works too) |
 
 These have no default key; run them from the command palette or the
 [actions palette](../reference/boards.md#the-actions-palette), or bind

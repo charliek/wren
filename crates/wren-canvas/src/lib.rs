@@ -1067,22 +1067,25 @@ impl BoardView {
         let fill = shared(shapes.iter().map(|node| node.style.fill.known()));
         let mut offers = Vec::new();
         for command in Command::all() {
-            let (group, applies, current) = match command {
-                Command::Shape(each) => ("Shape", !shapes.is_empty(), shape == Some(Some(each))),
+            let Some(group) = command.offer_group() else {
+                continue;
+            };
+            let (applies, current) = match command {
+                Command::Shape(each) => (!shapes.is_empty(), shape == Some(Some(each))),
                 Command::Color(token) => (
-                    "Colour",
                     !colours.is_empty(),
                     colour == Some(&wren_board::Color::Token(token)),
                 ),
-                Command::Fill(each) => ("Fill", !shapes.is_empty(), fill == Some(Some(each))),
-                Command::StrokeDashed => ("Stroke", strokes > 0, false),
+                Command::Fill(each) => (!shapes.is_empty(), fill == Some(Some(each))),
+                Command::StrokeDashed => (strokes > 0, false),
                 Command::EdgeRouting
                 | Command::EdgeStart
                 | Command::EdgeEnd
-                | Command::EdgeReverse => ("Connector", !edges.is_empty(), false),
-                Command::Arrange(_) => ("Arrange", true, false),
-                Command::Align(_) => ("Align", arranged >= 2, false),
-                Command::Distribute(_) => ("Distribute", arranged >= 3, false),
+                | Command::EdgeReverse => (!edges.is_empty(), false),
+                Command::Arrange(_) => (true, false),
+                Command::Align(_) => (arranged >= 2, false),
+                Command::Distribute(_) => (arranged >= 3, false),
+                // The edits come last, in an order of their own.
                 _ => continue,
             };
             if writable && applies {
@@ -6870,6 +6873,11 @@ z = "c"
     fn offered(view: &BoardView) -> Vec<(&'static str, &'static str, bool)> {
         let offers = view.offers().into_iter();
         offers
+            .inspect(|offer| {
+                // With nothing selected the rows are the board's own.
+                let group = (offer.group != "Board").then_some(offer.group);
+                assert_eq!(offer.command.offer_group(), group, "{:?}", offer.command);
+            })
             .map(|offer| (offer.group, offer.command.key(), offer.current))
             .collect()
     }

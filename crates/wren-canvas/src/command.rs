@@ -6,8 +6,8 @@
 use wren_board::edit::{Alignment, Axis, Stack};
 use wren_board::{Dir, Fill, Shape, Token};
 
-/// One board command. [`Command::all`] lists the 64 of Phase 2, then the
-/// 25 of Phase 3.
+/// One board command. [`Command::all`] lists the 64 of Phase 2, the 25 of
+/// Phase 3, then the keys sheet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     /// `board.tool.*`: arm a tool.
@@ -80,6 +80,8 @@ pub enum Command {
     Actions,
     /// `board.jump`: the jump-to-node palette.
     Jump,
+    /// `board.keys`: the sheet of every board key.
+    Keys,
 }
 
 /// What the pointer does on a board.
@@ -103,7 +105,7 @@ pub enum Grow {
 }
 
 /// Every command and its key, in the order of the plan's table.
-const TABLE: [(Command, &str); 89] = {
+const TABLE: [(Command, &str); 90] = {
     use Command as C;
     use Dir::{Down, Left, Right, Up};
     [
@@ -202,6 +204,7 @@ const TABLE: [(Command, &str); 89] = {
         (C::Fill(Fill::Solid), "board.fill.solid"),
         (C::Actions, "board.actions"),
         (C::Jump, "board.jump"),
+        (C::Keys, "board.keys"),
     ]
 };
 
@@ -217,6 +220,25 @@ impl Command {
             .iter()
             .find(|(command, _)| *command == self)
             .map_or("", |(_, key)| *key)
+    }
+
+    /// The group the actions palette lists the command under when it
+    /// offers it for a selection (§5.17 rule 3), or `None` for a command
+    /// it never offers for one. [`crate::BoardView::offers`] says which of
+    /// these apply to the selection there is.
+    pub fn offer_group(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Shape(_) => "Shape",
+            Self::Color(_) => "Colour",
+            Self::Fill(_) => "Fill",
+            Self::StrokeDashed => "Stroke",
+            Self::EdgeRouting | Self::EdgeStart | Self::EdgeEnd | Self::EdgeReverse => "Connector",
+            Self::Arrange(_) => "Arrange",
+            Self::Align(_) => "Align",
+            Self::Distribute(_) => "Distribute",
+            Self::EditLabel | Self::Duplicate | Self::Copy | Self::Cut | Self::Delete => "Edit",
+            _ => return None,
+        })
     }
 
     /// The command a key names.
@@ -238,7 +260,7 @@ mod tests {
     fn every_command_has_one_board_key_and_parses_back() {
         let commands: HashSet<Command> = Command::all().collect();
         let keys: HashSet<&str> = Command::all().map(Command::key).collect();
-        assert_eq!((commands.len(), keys.len()), (89, 89));
+        assert_eq!((commands.len(), keys.len()), (90, 90));
         for command in Command::all() {
             assert!(command.key().starts_with("board."), "{command:?}");
             assert_eq!(Command::parse(command.key()), Some(command));

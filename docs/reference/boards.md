@@ -209,6 +209,40 @@ distribute leaves that row as it is. A shape selected with one of the
 shapes it is nested in moves with its container, not on its own, and
 connectors follow the shapes they join.
 
+## Hints and the keys sheet
+
+While a board has the keyboard, its footer names the keys that fit what
+is selected or armed, between the counts and the zoom:
+
+| State | Hint |
+|---|---|
+| Nothing selected | Tab add a shape · R O D U Y P pick a shape · ? all keys |
+| One shape | Tab next shape · Mod+Arrow connect · ↵ label · 0–7 colour · Shift+D reshape · / actions |
+| Several shapes | 0–7 colour · Alt+Arrow move · / align and distribute · ⌫ delete |
+| Connectors only | 0–7 colour · ↵ label · / route, heads, reverse · ⌫ delete |
+| A shape or text tool armed | click to place · drag to size · Tab add it after the selection · esc cancel |
+| Connector tool | drag from one shape to another · esc cancel |
+| Hand tool, or Space held | drag to pan |
+| A label open | Mod+↵ done · Tab done and add the next shape · esc done |
+| Connecting by keyboard | type to find · ←→↑↓ move · ↵ connect · esc give up |
+
+The keys are the ones bound now: a key you rebind shows as rebound, and a
+command with no key drops out. A part that does nothing as the board
+stands drops out too, so a read-only board's hint names only what it
+takes. Where the footer is too narrow, the parts at the end drop out
+whole before anything else; below 440 pixels the hint goes with the
+counts. `board-hints = off` in [`config.conf`](configuration.md) turns the
+hint off.
+
+**?** (Shift+/, or wherever your layout types `?`) opens the keys sheet:
+every board key in the groups of this page, Tools, Build, Select, Edit,
+Colour, Arrange, View, and Menus, with the gestures that have no key.
+Rows that do nothing for the selection as it stands are dimmed, as are
+the editing keys on a read-only board. Typing filters the sheet; ↑ and ↓
+scroll it. **?**, Esc, ↵, or a click outside closes it and gives the
+board the keyboard back. It is also **Board keys** in the command palette
+and, on macOS, the Board menu.
+
 ## The actions palette
 
 / or Shift+F10, or a right-click (Ctrl-click on macOS), opens the actions

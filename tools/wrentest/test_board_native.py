@@ -191,6 +191,33 @@ def test_native_keys_and_buttons_change_the_boards_pointer(samples) -> None:
         assert app.client.call("session.get")["document"]["dirty"] is False
 
 
+@pytest.mark.native_x11
+def test_native_question_mark_opens_and_closes_the_keys_sheet(samples) -> None:
+    """discovery/board-controls.md §3.5: `?` (Shift with /) on the focused
+    board opens the keys sheet, `?` again closes it, and so does Escape;
+    the board has the keyboard after each."""
+    def sheet(app) -> bool:
+        return board(app)["keys_sheet"] is not None
+
+    with board_app(samples, "board-native-keys") as app:
+        window, placed = native_board(app)
+        move(window, point_in(placed["root"]))
+        xdo("click", "2")
+        wait_focus(app, ["note-editor"])
+        for close in ("question", "Escape"):
+            xdo("key", "shift+slash")
+            wait_for(lambda: sheet(app), timeout=3, interval=0.025,
+                     description="the sheet opened")
+            assert app.client.call("navigation.get")["modal"]["mode"] == "board_keys"
+            assert board(app)["keys_sheet"]["query"] == ""
+            xdo("key", "shift+slash" if close == "question" else close)
+            wait_for(lambda: not sheet(app), timeout=3, interval=0.025,
+                     description=f"{close} closed the sheet")
+            wait_focus(app, ["note-editor"])
+            assert app.client.call("navigation.get")["modal"] is None
+        assert app.client.call("session.get")["document"]["dirty"] is False
+
+
 # Phase 2: real buttons and keys on the board (§6.1, §6.8 Phase 2 items 6
 # and 7). Each case proves the translation; what the board then does is
 # covered without a display.

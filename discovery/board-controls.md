@@ -105,7 +105,10 @@ and the zoom. It extends the hint an empty board shows today.
 | Hand tool or Space held | Drag to pan |
 
 The keys shown come from the live keymap, so a rebound key shows as
-rebound and an unbound command drops out of the line.
+rebound and an unbound command drops out of the line. "Space show keys"
+and "its key again to lock" wait for step 4, which builds what they name.
+The decision is `app/board_keys.rs`'s `hint`; `board.get` reports it as
+`hint`.
 
 ### 3.5 Keys sheet
 
@@ -174,7 +177,7 @@ Wren themes; the gates are those of `CLAUDE.md`.
 
 1. Cursors (§3.7). Landed.
 2. The draw.io line layout for Lucidchart (§6). Landed.
-3. Hint line and keys sheet (§3.4, §3.5), with `board-hints`.
+3. Hint line and keys sheet (§3.4, §3.5), with `board-hints`. Landed.
 4. Tool dock (§3.1), tool lock, the hand tool staying armed, key badges
    (§3.3), `board-toolbar`.
 5. Style bar (§3.2) and the sticky colour.

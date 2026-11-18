@@ -107,7 +107,20 @@ pub(crate) fn route(
     }
     let edits = || label(key, physical, modifiers, text);
     let route = match context.policy {
-        Some(policy) => policy(key, physical, modifiers, repeat),
+        // A keymap spells `?` as Shift+/, the key that types it on a US
+        // layout; another layout types it elsewhere (Shift with `,` on
+        // AZERTY, with `ß` on German), so a `?` the keymap does not know
+        // as pressed is asked as Shift+/, as the digit row's symbols are
+        // asked as digits (§5.1 rule 7).
+        Some(policy) => match policy(key, physical, modifiers, repeat) {
+            KeyRoute::Pass if text == Some("?") && !shortcut => policy(
+                &Key::Character("/".into()),
+                key::Physical::Code(key::Code::Slash),
+                Modifiers::SHIFT,
+                repeat,
+            ),
+            route => route,
+        },
         // With no keymap to ask, a chord the label reads is the label's.
         None if shortcut && context.editing && edits().is_some() => KeyRoute::Pass,
         None if shortcut => KeyRoute::Host,
@@ -349,6 +362,65 @@ mod tests {
                 _ => KeyRoute::Pass,
             }
         })
+    }
+
+    /// A `?` typed by another key than Shift+/, as on AZERTY (Shift with
+    /// the `,` key), is asked as Shift+/; in a label it stays text.
+    #[test]
+    fn a_question_mark_from_any_key_is_asked_as_shift_slash() {
+        let policy: KeyPolicy = Arc::new(|key, physical, modifiers, _| {
+            let slash = physical == Physical::Code(Code::Slash);
+            match key.as_ref() {
+                Key::Character("/") if slash && modifiers == Modifiers::SHIFT => {
+                    KeyRoute::Command(Command::Keys)
+                }
+                _ => KeyRoute::Pass,
+            }
+        });
+        let ruled = Context {
+            policy: Some(&policy),
+            ..IDLE
+        };
+        let keys = Keyed::Take(vec![Out::Command(Command::Keys)]);
+        let azerty = |text, modifiers, context| {
+            route(
+                &character(","),
+                Physical::Code(Code::KeyM),
+                modifiers,
+                text,
+                false,
+                context,
+            )
+        };
+        assert_eq!(azerty(Some("?"), Modifiers::SHIFT, ruled), keys);
+        assert_eq!(
+            route(
+                &character("/"),
+                Physical::Code(Code::Slash),
+                Modifiers::SHIFT,
+                Some("?"),
+                false,
+                ruled
+            ),
+            keys
+        );
+        // The `,` key without Shift, and `?` with a shortcut modifier.
+        assert_eq!(
+            azerty(Some(","), Modifiers::default(), ruled),
+            press(character(","), Modifiers::default(), Some(","), IDLE)
+        );
+        assert_ne!(
+            azerty(Some("?"), Modifiers::SHIFT | Modifiers::CTRL, ruled),
+            keys
+        );
+        let editing = Context {
+            editing: true,
+            ..ruled
+        };
+        assert_eq!(
+            azerty(Some("?"), Modifiers::SHIFT, editing),
+            edits(&[insert("?")])
+        );
     }
 
     #[test]

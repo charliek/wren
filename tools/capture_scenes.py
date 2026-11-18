@@ -399,6 +399,7 @@ def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
     client.call("dialog.name", {"name": "Release plan"})
     shot_here("board-new-dialog")
     client.call("dialog.close")
+    board_hint_scenes(client, shot_here, open_board)
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
@@ -458,6 +459,57 @@ def board_limits_scene(client, shot_here, workspace: Path) -> None:
              description="the limits board shown")
     client.call("command.run", {"id": "board.zoom.fit"})
     shot_here("board-limits")
+
+
+def board_hint_scenes(client, shot_here, open_board) -> None:
+    """discovery/board-controls.md §3.4 and §3.5: the footer's hint line
+    with nothing selected, one shape and a tool armed, and in a narrow
+    editor column; the keys sheet with one shape selected. Nothing here
+    changes the board."""
+    pack = "3qrg4kv1"
+
+    def key(name: str, *mods: str) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods)})
+
+    def hinted(first: str) -> None:
+        wait_for(lambda: [part["words"] for part in client.call("board.get")["hint"]][:1]
+                 == [first], timeout=5, description=f"the hint starting {first!r}")
+
+    open_board("Checkout flow", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    hinted("add a shape")
+    shot_here("board-hint-idle")
+    # The sheet with nothing selected dims what needs a selection.
+    client.call("command.run", {"id": "board.keys"})
+    wait_for(lambda: client.call("board.get")["keys_sheet"] is not None, timeout=5,
+             description="the keys sheet open")
+    shot_here("board-keys-sheet")
+    client.call("palette.query", {"query": "colour"})
+    shot_here("board-keys-sheet-filtered")
+    client.call("palette.close")
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused again")
+    client.call("board.pointer", {"kind": "click", "at": {"node": pack}, "button": "left",
+                                  "mods": []})
+    hinted("next shape")
+    shot_here("board-hint-shape")
+    key("escape")
+    key("r")
+    hinted("click to place")
+    shot_here("board-hint-armed")
+    key("escape")
+    # A narrow editor column: the hint keeps the parts that fit whole and
+    # never pushes the zoom or the save status out.
+    client.call("view.width", {"pane": "notes", "width": 720})
+    client.call("editor.focus")
+    client.call("board.pointer", {"kind": "click", "at": {"node": pack}, "button": "left",
+                                  "mods": []})
+    hinted("next shape")
+    shot_here("board-hint-narrow")
+    client.call("command.run", {"id": "view.reset_widths"})
+    key("escape")
 
 
 def board_edit_scenes(client, shot_here, open_board) -> None:

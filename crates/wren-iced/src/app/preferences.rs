@@ -16,6 +16,7 @@ use super::palette::{Key, Mode};
 use super::{workspace, App, Message};
 use crate::fonts;
 use crate::keys::{Input, Nav};
+use wren_canvas::Command as BoardCommand;
 
 /// The theme or editor font picker row being previewed. `theme` is
 /// `Some(None)` while previewing "System".
@@ -250,7 +251,7 @@ impl Preferences {
         preferences
     }
 
-    fn rebuild_keymap(&mut self) {
+    pub(super) fn rebuild_keymap(&mut self) {
         let platform = Platform::current();
         let (mut keymap, mut warnings) = Keymap::build(
             keybind::default_bindings(platform)
@@ -917,6 +918,27 @@ impl App {
                     self.column_focus()
                 };
             }
+            // The keys sheet runs nothing: the arrows scroll it and Enter
+            // closes it.
+            Input::Nav(nav)
+                if self
+                    .palette
+                    .as_ref()
+                    .is_some_and(|palette| palette.mode == Mode::BoardKeys) =>
+            {
+                let step = |y| {
+                    iced::widget::operation::scroll_by(
+                        "palette-results",
+                        iced::widget::operation::AbsoluteOffset { x: 0.0, y },
+                    )
+                };
+                return match nav {
+                    Nav::Up => step(-48.0),
+                    Nav::Down => step(48.0),
+                    Nav::Enter => self.close_palette().task,
+                    _ => Task::none(),
+                };
+            }
             Input::Nav(nav) => {
                 if self.palette.is_some() {
                     return match nav {
@@ -939,6 +961,15 @@ impl App {
             }
             Input::Accel(accel) => accel,
         };
+        // The sheet's own key closes it, as `?` typed in its filter does.
+        if self
+            .palette
+            .as_ref()
+            .is_some_and(|palette| palette.mode == Mode::BoardKeys)
+            && self.preferences.keymap.board_action(&accel) == Some(BoardCommand::Keys.key())
+        {
+            return self.close_palette().task;
+        }
         let Some(id) = self
             .preferences
             .keymap
@@ -1183,6 +1214,23 @@ mod tests {
         assert_eq!(
             character("!", Code::Digit1, Modifiers::SHIFT),
             BoardRoute::Command(C::ZoomFit)
+        );
+        // `?` is Shift+/ on US layouts, and `/` alone the actions palette.
+        // Where `?` is another key, AZERTY's `,` with Shift, the key is
+        // nothing to the keymap and the board asks again as Shift+/.
+        for typed in ["?", "/"] {
+            assert_eq!(
+                character(typed, Code::Slash, Modifiers::SHIFT),
+                BoardRoute::Command(C::Keys)
+            );
+        }
+        assert_eq!(
+            character("/", Code::Slash, Modifiers::empty()),
+            BoardRoute::Command(C::Actions)
+        );
+        assert_eq!(
+            character(",", Code::KeyM, Modifiers::SHIFT),
+            BoardRoute::Pass
         );
         assert_eq!(
             named(Named::Tab, Code::Tab, Modifiers::empty()),
