@@ -168,6 +168,47 @@ impl View<'_> {
     }
 }
 
+/// What the pointer looks like over the board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pointer {
+    Arrow,
+    /// The hand tool is armed or Space is held: a drag would pan.
+    Grab,
+    /// A pan is under way.
+    Grabbing,
+    /// A click or drag would make or connect something.
+    Crosshair,
+    /// A drag is selecting text in the open label.
+    Text,
+    /// A drag is moving copies.
+    Copy,
+    /// On a resize handle, or dragging one.
+    Resize(Handle),
+}
+
+impl Pointer {
+    /// The name the test harness reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Arrow => "arrow",
+            Self::Grab => "grab",
+            Self::Grabbing => "grabbing",
+            Self::Crosshair => "crosshair",
+            Self::Text => "text",
+            Self::Copy => "copy",
+            Self::Resize(_) => "resize",
+        }
+    }
+}
+
+/// The handle a passing pointer is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grip {
+    Resize(Handle),
+    /// A connect handle, or an endpoint handle of the selected connector.
+    Connect,
+}
+
 /// What the machine asks of the view that owns the board, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
@@ -402,6 +443,8 @@ pub struct Machine {
     /// The run the last command continued, and when.
     run: Option<(Run, Instant)>,
     hover: Option<Hover>,
+    /// The handle the passing pointer was last on, for [`Machine::pointer`].
+    grip: Option<Grip>,
     seek: Option<Seek>,
 }
 
@@ -431,7 +474,7 @@ impl Machine {
                 scale_factor,
             } => {
                 // The board moves under the pointer.
-                self.hover = None;
+                self.unhover();
                 let to = self.wheel(delta, at, zoom, sideways, scale_factor, view);
                 acts.extend(to.filter(|to| *to != view.viewport).map(Act::Look));
             }
@@ -448,9 +491,9 @@ impl Machine {
             Input::Cancel => {
                 self.cancel(&mut acts);
                 self.space = false;
-                self.hover = None;
+                self.unhover();
             }
-            Input::Leave => self.hover = None,
+            Input::Leave => self.unhover(),
             Input::Tick => self.rest(view.now),
             Input::Modifiers(mods) => self.mods = mods,
             Input::Key {
@@ -466,7 +509,7 @@ impl Machine {
                 self.tool = Tool::Select;
                 self.space = false;
                 self.focused = false;
-                self.hover = None;
+                self.unhover();
             }
             Input::Key { key, repeat } => self.seek_key(key, repeat, view, &mut acts),
             Input::Char(c) => self.seek_char(c, view.board),
@@ -485,7 +528,7 @@ impl Machine {
         }
         let run = self.run.take();
         // A command may change the board or the view under the pointer.
-        self.hover = None;
+        self.unhover();
         // Keyboard Connecting reads its own keys, so a command reaching it
         // came from elsewhere and ends it, as Escape does.
         self.seek = None;
@@ -578,7 +621,7 @@ impl Machine {
     pub fn applied(&mut self, plan: &Plan, board: &Board) -> Vec<Act> {
         let mut acts = Vec::new();
         if !plan.is_empty() {
-            self.hover = None;
+            self.unhover();
         }
         if let Some(select) = &plan.select {
             self.run = None;
@@ -630,7 +673,7 @@ impl Machine {
         self.space = false;
         self.click = None;
         self.run = None;
-        self.hover = None;
+        self.unhover();
         self.seek = None;
     }
 
@@ -665,7 +708,7 @@ impl Machine {
     /// 1).
     pub fn select(&mut self, selection: BTreeSet<Source>, cursor: Option<Source>) {
         self.run = None;
-        self.hover = None;
+        self.unhover();
         self.selection = selection;
         self.cursor = cursor;
     }
@@ -754,6 +797,38 @@ impl Machine {
             || !self.selection.is_empty()
     }
 
+    /// What the pointer shows over the board: the gesture under way, else
+    /// what is held or armed, else the handle the pointer is on. An open
+    /// label's I-beam is the widget's, which knows where the label is.
+    pub fn pointer(&self) -> Pointer {
+        match &self.gesture {
+            Gesture::Panning { .. } => return Pointer::Grabbing,
+            Gesture::Resizing { handle, .. }
+            | Gesture::Pressed {
+                on: Target::Resize(_, handle),
+                ..
+            } => return Pointer::Resize(*handle),
+            Gesture::Moving { copy: true, .. } => return Pointer::Copy,
+            Gesture::Connecting { .. }
+            | Gesture::Creating { .. }
+            | Gesture::Pressed {
+                on: Target::Connect(..) | Target::End(..),
+                ..
+            } => return Pointer::Crosshair,
+            Gesture::Selecting => return Pointer::Text,
+            _ => {}
+        }
+        if self.space || self.tool == Tool::Hand {
+            return Pointer::Grab;
+        }
+        match (self.tool, self.grip) {
+            (Tool::Shape(_) | Tool::Text | Tool::Connector, _) => Pointer::Crosshair,
+            (_, Some(Grip::Resize(handle))) => Pointer::Resize(handle),
+            (_, Some(Grip::Connect)) => Pointer::Crosshair,
+            (_, None) => Pointer::Arrow,
+        }
+    }
+
     /// When the machine next has something to do with no input, which is
     /// when the node the pointer rests on shows its connect handles (§5.5
     /// rule 8). Whoever feeds the machine sends [`Input::Tick`] then.
@@ -786,6 +861,7 @@ impl Machine {
     /// pointer, which rests on nothing until it next moves (§5.5 rule 8).
     pub(crate) fn unhover(&mut self) {
         self.hover = None;
+        self.grip = None;
     }
 
     /// The connector end being dragged.
@@ -869,7 +945,7 @@ impl Machine {
         });
         self.focused = true;
         if pans {
-            self.hover = None;
+            self.unhover();
             self.gesture = Gesture::Panning { button, from: at };
             return;
         }
@@ -1056,7 +1132,7 @@ impl Machine {
     /// show, the pointer may cross the gap to them without losing them.
     fn hover(&mut self, at: (f32, f32), view: &View<'_>) {
         if !self.hovers(view.writable) {
-            self.hover = None;
+            self.unhover();
             return;
         }
         let hit = hit::hit(
@@ -1066,6 +1142,11 @@ impl Machine {
             at,
             self.handles(view),
         );
+        self.grip = match &hit {
+            Hit::Resize(_, handle) => Some(Grip::Resize(*handle)),
+            Hit::Connect(..) | Hit::End(..) => Some(Grip::Connect),
+            Hit::Node(_) | Hit::Edge(_) | Hit::Canvas => None,
+        };
         let over = match hit {
             Hit::Node(id) | Hit::Resize(id, _) | Hit::Connect(id, _) => Some(id),
             Hit::Edge(_) | Hit::End(..) | Hit::Canvas => None,
@@ -1105,7 +1186,7 @@ impl Machine {
     /// The gesture a press on `on` becomes once the pointer has moved
     /// [`THRESHOLD`].
     fn drag(&mut self, on: Target, anchor: (f32, f32), view: &View<'_>) -> Gesture {
-        self.hover = None;
+        self.unhover();
         let connecting = |link| Gesture::Connecting {
             link,
             to: anchor,
@@ -1244,7 +1325,7 @@ impl Machine {
             // A connect handle clicked is `board.connect.<side>` from its
             // node (§5.5 rule 8).
             Target::Connect(id, Some(side)) => {
-                self.hover = None;
+                self.unhover();
                 self.select_only(Source::Node(id));
                 let dir = match side {
                     Side::Top => Dir::Up,
@@ -5562,6 +5643,132 @@ to = { node = "gone" }
             assert!(rig.selected().is_empty());
             assert_eq!(rig.machine.tool(), tool);
         }
+    }
+
+    #[test]
+    fn the_pointer_is_a_hand_while_a_drag_would_pan_or_does() {
+        let mut rig = Rig::new();
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+        rig.step(Input::Space { held: true });
+        assert_eq!(rig.machine.pointer(), Pointer::Grab);
+        rig.press(A);
+        rig.by(20.0, 0.0);
+        assert_eq!(rig.machine.pointer(), Pointer::Grabbing);
+        // Space let go mid-drag: the drag is still a pan until its release.
+        rig.step(Input::Space { held: false });
+        assert_eq!(rig.machine.pointer(), Pointer::Grabbing);
+        rig.release();
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+
+        rig.run(Command::Tool(Tool::Hand));
+        assert_eq!(rig.machine.pointer(), Pointer::Grab);
+        rig.press_with(Button::Middle, A);
+        assert_eq!(rig.machine.pointer(), Pointer::Grabbing);
+        rig.step(Input::Release {
+            button: Button::Middle,
+        });
+        assert_eq!(rig.machine.pointer(), Pointer::Grab);
+
+        // Space in an open label is a space, and no hand.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::EditLabel);
+        rig.step(Input::Space { held: true });
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+    }
+
+    #[test]
+    fn the_pointer_is_a_crosshair_with_a_making_tool_armed() {
+        for tool in [DIAMOND, Tool::Text, Tool::Connector] {
+            let mut rig = Rig::new();
+            rig.run(Command::Tool(tool));
+            assert_eq!(rig.machine.pointer(), Pointer::Crosshair, "{tool:?}");
+            // Space wins while it is held, as it wins the drag.
+            rig.step(Input::Space { held: true });
+            assert_eq!(rig.machine.pointer(), Pointer::Grab, "{tool:?}");
+        }
+        let mut rig = Rig::new();
+        rig.run(Command::Tool(DIAMOND));
+        rig.press(FREE);
+        rig.by(60.0, 40.0);
+        assert_eq!(rig.machine.pointer(), Pointer::Crosshair);
+        rig.release();
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+    }
+
+    #[test]
+    fn the_pointer_follows_the_handle_it_is_on() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        // The corner and side handles of the one selected node.
+        for (at, handle) in [
+            (A_CORNER, Handle::SouthEast),
+            ((0.0, 0.0), Handle::NorthWest),
+            ((120.0, 0.0), Handle::NorthEast),
+            ((60.0, 60.0), Handle::South),
+            ((0.0, 30.0), Handle::West),
+        ] {
+            rig.to(at);
+            assert_eq!(rig.machine.pointer(), Pointer::Resize(handle), "{at:?}");
+        }
+        rig.to(A);
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+
+        // From the press to the release of a resize, wherever it goes.
+        rig.to(A_CORNER);
+        rig.wait(400);
+        rig.press(A_CORNER);
+        assert_eq!(rig.machine.pointer(), Pointer::Resize(Handle::SouthEast));
+        rig.by(40.0, 40.0);
+        assert_eq!(rig.machine.pointer(), Pointer::Resize(Handle::SouthEast));
+        rig.release();
+
+        // A connect handle, once the node shows them.
+        let mut rig = Rig::new();
+        rig.hover(A);
+        rig.to(A_RIGHT);
+        assert_eq!(rig.machine.pointer(), Pointer::Crosshair);
+        rig.press(A_RIGHT);
+        assert_eq!(rig.machine.pointer(), Pointer::Crosshair);
+        rig.by(30.0, 0.0);
+        assert_eq!(rig.machine.pointer(), Pointer::Crosshair);
+        rig.release();
+
+        // A handle that is gone leaves no cursor behind: the selection
+        // cleared with the pointer still where the handle was.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.to(A_CORNER);
+        assert_eq!(rig.machine.pointer(), Pointer::Resize(Handle::SouthEast));
+        rig.run(Command::SelectNone);
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+
+        // A board that shows no handles has none to point at.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.writable = false;
+        rig.to(A_CORNER);
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+    }
+
+    #[test]
+    fn the_pointer_says_a_drag_moves_copies() {
+        let mut rig = Rig::new();
+        rig.step(Input::Modifiers(Mods {
+            shift: false,
+            duplicate: true,
+        }));
+        rig.press(A);
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+        rig.by(40.0, 20.0);
+        assert_eq!(rig.machine.pointer(), Pointer::Copy);
+        rig.release();
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+        // A plain move keeps the arrow.
+        rig.step(plain());
+        rig.press(B);
+        rig.by(40.0, 20.0);
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
     }
 
     #[test]

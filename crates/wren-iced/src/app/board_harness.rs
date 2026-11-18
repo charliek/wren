@@ -170,6 +170,7 @@ impl App {
             "issues": [],
             "state": null,
             "tool": null,
+            "pointer": null,
             "selection": [],
             "cursor": null,
             "editing": null,
@@ -202,6 +203,7 @@ impl App {
             })).collect::<Vec<_>>(),
             "state": state_name(machine, focused),
             "tool": tool_name(machine.tool()),
+            "pointer": machine.pointer().name(),
             "selection": machine.selection().iter().map(|element| element.id().as_str()).collect::<Vec<_>>(),
             "cursor": machine.cursor().map(|cursor| cursor.id().as_str()),
             "editing": view.label().map(|label| json!({

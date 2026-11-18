@@ -136,6 +136,61 @@ def test_native_middle_drag_pans_by_the_pointers_motion(samples) -> None:
         assert column(app) == "editor"
 
 
+@pytest.mark.native_x11
+def test_native_keys_and_buttons_change_the_boards_pointer(samples) -> None:
+    """discovery/board-controls.md §3.7: Space held is the open hand, a pan
+    the closed one, an armed shape tool the crosshair, a resize handle of
+    the selected shape its resize cursor."""
+    def shows(app, want: str) -> None:
+        wait_for(lambda: board(app)["pointer"] == want, timeout=3, interval=0.025,
+                 description=f"the pointer became {want}")
+
+    with board_app(samples, "board-native-pointer") as app:
+        window, placed = native_board(app)
+        start = point_in(placed["root"])
+        move(window, start)
+        xdo("click", "2")
+        wait_focus(app, ["note-editor"])
+        shows(app, "arrow")
+
+        xdo("keydown", "space")
+        try:
+            shows(app, "grab")
+            xdo("mousedown", "1")
+            try:
+                move(window, (start[0] + 40, start[1] + 20))
+                shows(app, "grabbing")
+            finally:
+                xdo("mouseup", "1")
+            shows(app, "grab")
+        finally:
+            xdo("keyup", "space")
+        shows(app, "arrow")
+
+        xdo("key", "d")
+        shows(app, "crosshair")
+        xdo("key", "Escape")
+        shows(app, "arrow")
+
+        xdo("key", "h")
+        shows(app, "grab")
+        xdo("key", "v")
+        shows(app, "arrow")
+
+        # One selected shape shows its handles; its corner is a resize.
+        placed = bounds(app)
+        rect = next(n["bounds"] for n in placed["nodes"] if n["id"] == START)
+        move(window, point_in(rect))
+        xdo("click", "1")
+        wait_for(lambda: board(app)["selection"] == [START], timeout=3, interval=0.025,
+                 description="the click selected the shape")
+        move(window, (round(rect["x"] + rect["width"]), round(rect["y"] + rect["height"])))
+        shows(app, "resize")
+        move(window, point_in(rect))
+        shows(app, "arrow")
+        assert app.client.call("session.get")["document"]["dirty"] is False
+
+
 # Phase 2: real buttons and keys on the board (§6.1, §6.8 Phase 2 items 6
 # and 7). Each case proves the translation; what the board then does is
 # covered without a display.

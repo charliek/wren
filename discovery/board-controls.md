@@ -136,7 +136,11 @@ state:
 | Side resize handles | horizontal or vertical resize |
 | Inside an open label | I-beam |
 | Dragging with the copy modifier | copy |
-| An editing tool over a read-only board | not allowed |
+
+A read-only board arms no editing tool and shows no handles, so it has the
+arrow and the two hands only. The rule is `Machine::pointer`, with the
+I-beam added by the widget, which knows where the open label is; the
+harness reports it as `board.get`'s `pointer`.
 
 ### 3.8 Pinch to zoom (macOS)
 
@@ -168,8 +172,8 @@ Each step lands alone with Rust unit tests, harness cases (with real X11
 clicks for the chrome), and a scene screenshot of each new state in both
 Wren themes; the gates are those of `CLAUDE.md`.
 
-1. Cursors (§3.7).
-2. The draw.io line layout for Lucidchart (§6). Landed first, being ready.
+1. Cursors (§3.7). Landed.
+2. The draw.io line layout for Lucidchart (§6). Landed.
 3. Hint line and keys sheet (§3.4, §3.5), with `board-hints`.
 4. Tool dock (§3.1), tool lock, the hand tool staying armed, key badges
    (§3.3), `board-toolbar`.

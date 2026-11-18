@@ -48,6 +48,12 @@ and every new shape opens its label for typing. Shift with a shape's letter
 (⇧R, ⇧O, ⇧D, ⇧U, ⇧Y, ⇧P) changes the shape of every selected shape and
 keeps its size and label.
 
+The pointer shows what a press would do: a crosshair while a shape, text,
+or connector tool is armed and over a connect handle, an open hand while
+the hand tool is armed or Space is held, a closed hand during a pan, a
+resize arrow over a handle of the selected shape, an I-beam over an open
+label, and the copy pointer while a drag leaves copies.
+
 Everything snaps to a 20-unit grid when it is created, moved, or resized;
 there is no key to turn snapping off. A unit is one pixel at 100 %.
 
