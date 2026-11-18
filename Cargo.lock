@@ -4947,6 +4947,7 @@ name = "wren-iced"
 version = "0.2.0"
 dependencies = [
  "iced",
+ "iced_winit",
  "muda",
  "png 0.18.1",
  "resvg",

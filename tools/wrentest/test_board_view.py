@@ -546,6 +546,53 @@ def test_the_wheel_pans_and_mod_wheel_zooms_about_the_pointer(samples: Path) -> 
     assert stamp(flow) == before_bytes
 
 
+def pinch(app: WrenApp, at: dict, delta: float) -> dict:
+    return app.client.call("board.pointer", {"kind": "pinch", "at": at, "delta": delta})
+
+
+def test_a_pinch_zooms_about_the_pointer_within_the_limits_and_writes_nothing(
+        samples: Path) -> None:
+    """discovery/board-controls.md §3.8, through `board.pointer`: the input
+    the widget sends for a macOS pinch. The native X11 case records a pinch
+    as the vendored iced_winit records winit's."""
+    flow = samples / FLOW
+    before_bytes = stamp(flow)
+    with board_app(samples, "board-pinch") as app:
+        open_note(app, FLOW)
+        start = fitted(app)
+        root = start["root"]
+        pointer = [root["x"] + root["width"] * 0.3, root["y"] + root["height"] * 0.6]
+        app.client.call("column.open", {"column": "notes"})
+
+        # Each pinch multiplies the zoom by 1 + delta about the pointer.
+        view = start["viewport"]
+        for delta in (0.5, -0.2, 0.05):
+            under = (view["x"] + (pointer[0] - root["x"]) / view["zoom"],
+                     view["y"] + (pointer[1] - root["y"]) / view["zoom"])
+            after = pinch(app, {"screen": pointer}, delta)["viewport"]
+            assert after["zoom"] == pytest.approx(view["zoom"] * (1 + delta), rel=1e-4)
+            back = (root["x"] + (under[0] - after["x"]) * after["zoom"],
+                    root["y"] + (under[1] - after["y"]) * after["zoom"])
+            assert abs(back[0] - pointer[0]) <= 1 and abs(back[1] - pointer[1]) <= 1, (back, pointer)
+            view = after
+
+        # Within 10 % and 400 %.
+        for _ in range(4):
+            view = pinch(app, {"screen": pointer}, 3.0)["viewport"]
+        assert view["zoom"] == pytest.approx(4.0)
+        for _ in range(4):
+            view = pinch(app, {"screen": pointer}, -0.9)["viewport"]
+        assert view["zoom"] == pytest.approx(0.1)
+
+        # A view, not an edit: the board keeps the keyboard where it was,
+        # stays pristine with nothing to undo, and nothing is written.
+        state = board(app)
+        assert state["pristine"] and not state["can_undo"] and state["revision"] == 0, state
+        assert column(app) == "notes"
+        assert app.client.call("session.get")["document"]["dirty"] is False
+    assert stamp(flow) == before_bytes
+
+
 def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> None:
     with board_app(samples, "board-requests") as app:
         open_note(app, NOTES)
@@ -553,6 +600,7 @@ def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> N
         for op, params in [
             ("board.bounds", {}),
             ("board.pointer", {"kind": "wheel", "at": {"canvas": [0, 0]}, "delta": {"y": 1}}),
+            ("board.pinch", {"delta": 0.1}),
             ("board.key", {"key": "r"}),
             ("board.type", {"text": "x"}),
             ("board.apply", {"edits": []}),
@@ -565,6 +613,7 @@ def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> N
             {"kind": "click", "button": "left", "at": {"node": "n1"}},
             {"kind": "press", "button": "fourth", "at": {"canvas": [0, 0]}},
             {"kind": "wheel", "at": {"edge": "e1"}, "delta": {"y": 1}},
+            {"kind": "pinch", "at": {"canvas": [0, 0]}},
         ]:
             with pytest.raises(RemoteError):
                 app.client.call("board.pointer", params)

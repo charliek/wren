@@ -28,6 +28,8 @@ pub use winit;
 
 pub mod clipboard;
 pub mod conversion;
+// Wren: the side channel for trackpad pinches (WREN.md).
+pub mod pinch;
 
 mod error;
 mod proxy;
@@ -278,6 +280,7 @@ where
                 let poll = self.instance.as_mut().poll(&mut self.context);
 
                 match poll {
+                    // Wren: `try_recv`, as futures deprecates `try_next`.
                     task::Poll::Pending => match self.receiver.try_recv() {
                         Ok(control) => match control {
                             Control::ChangeFlow(flow) => {
@@ -559,6 +562,7 @@ async fn run_instance<P>(
 
     'next_event: loop {
         // Empty the queue if possible
+        // Wren: `try_recv`, as futures deprecates `try_next`.
         let event = if let Ok(event) = event_receiver.try_recv() {
             Some(event)
         } else {
@@ -784,6 +788,10 @@ async fn run_instance<P>(
 
                         if physical_size.width == 0 || physical_size.height == 0
                         {
+                            // Wren: a frame that is not drawn takes its
+                            // pinches with it, so none waits for a later
+                            // frame and another place of the pointer.
+                            pinch::forget(id);
                             continue;
                         }
 
@@ -824,6 +832,10 @@ async fn run_instance<P>(
 
                         let interact_span = debug::interact(id);
                         let mut redraw_count = 0;
+
+                        // Wren: the pinches recorded for this window are
+                        // its widgets' to take until the loop below ends.
+                        let pinches = pinch::Frame::begin(id);
 
                         let state = loop {
                             let message_count = messages.len();
@@ -945,6 +957,7 @@ async fn run_instance<P>(
                                     user_interfaces.get_mut(&id).unwrap();
                             }
                         };
+                        drop(pinches);
                         interact_span.finish();
 
                         let draw_span = debug::draw(id);
@@ -1135,6 +1148,17 @@ async fn run_instance<P>(
                                 &window.raw,
                                 &window_event,
                             );
+
+                            // Wren: iced's `Event` has no pinch, so it is
+                            // recorded for this window's next frame.
+                            if let winit::event::WindowEvent::PinchGesture {
+                                delta,
+                                ..
+                            } = window_event
+                            {
+                                pinch::record(id, delta);
+                                window.raw.request_redraw();
+                            }
 
                             if let Some(event) = conversion::window_event(
                                 window_event,
@@ -1425,6 +1449,8 @@ fn run_action<'a, P, C>(
             window::Action::Close(id) => {
                 let _ = ui_caches.remove(&id);
                 let _ = interfaces.remove(&id);
+                // Wren: a closed window has no next frame.
+                pinch::forget(id);
 
                 if let Some(window) = window_manager.remove(id) {
                     if clipboard.window_id() == Some(window.raw.id()) {
@@ -1661,6 +1687,7 @@ fn run_action<'a, P, C>(
                 }
             }
             window::Action::Screenshot(id, channel) => {
+                // Wren: taken after the next frame is presented (WREN.md).
                 if let Some(window) = window_manager.get_mut(id) {
                     window
                         .pending_screenshots

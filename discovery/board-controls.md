@@ -193,7 +193,12 @@ iced 0.14's `conversion.rs` drops it and iced's `Event` has no pinch. The
 vendored `iced_winit` records the gesture and the board reads it as one
 more zoom input, about the pointer, within 10 % to 400 %. No harness can
 synthesise a pinch, so the check is by hand on a trackpad. Linux waits for
-a toolkit upgrade.
+a toolkit upgrade. As built: `iced_winit::pinch` holds each pinch for its
+window's next frame, the app hands the board `pinch::take`, and the
+widget reads it at that redraw (`vendor/iced_winit/WREN.md`, the side
+channel and the alternatives rejected; `discovery/boards.md` §5.13 rule
+7, the interplay). The harness's `board.pinch` records one as winit's is
+recorded, from which point the path is the real one.
 
 ### 3.9 Text size
 
@@ -257,7 +262,7 @@ Wren themes; the gates are those of `CLAUDE.md`.
    (§3.3), `board-toolbar`. Landed.
 5. Style bar (§3.2) and the sticky colour. Landed.
 6. Footer controls (§3.6). Landed.
-7. Pinch on macOS (§3.8).
+7. Pinch on macOS (§3.8). Landed, and tried on a trackpad.
 8. Text size (§3.9), after the style bar, which holds its control. Landed.
 
 ## 6. Lucidchart and the draw.io export

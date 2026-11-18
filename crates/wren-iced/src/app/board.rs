@@ -53,6 +53,9 @@ pub(super) fn open(
     fonts::load();
     let mut view = BoardView::open(text, palette, fonts::UI)?;
     view.set_covered(covered.0, covered.1);
+    // A trackpad pinch (macOS) is recorded by the vendored iced_winit for
+    // the window's next frame, which the widget reads it in.
+    view.set_pinches(iced_winit::pinch::take);
     match viewports.get(&note) {
         Some(saved) => view.return_to(*saved),
         None => view.fit(),
@@ -102,9 +105,9 @@ impl App {
     /// (§3.4 rule 1). A key the board layer binds goes on to `dispatch`, as
     /// a palette row or a menu item does.
     ///
-    /// Input other than the wheel means the board has the keyboard, as an
-    /// edit means the editor has it; the wheel reaches a board that does
-    /// not, a cancel or a focus change only says the window or the widget
+    /// Input other than the wheel or a pinch means the board has the
+    /// keyboard, as an edit means the editor has it; the wheel and a pinch
+    /// reach a board that does not, a cancel or a focus change only says the window or the widget
     /// gained or lost it, and the pointer passing over with no button
     /// down, leaving, or resting until a tick, is nobody acting on the
     /// board. Under a dialog or a palette, and while a workspace loads,
@@ -172,6 +175,7 @@ impl App {
                 let passive = matches!(
                     input,
                     Input::Wheel { .. }
+                        | Input::Pinch { .. }
                         | Input::Cancel
                         | Input::Focus(_)
                         | Input::Leave
@@ -1903,6 +1907,95 @@ z = "c"
         let _ = app.update(Message::Board(wren_canvas::Message::Input(0, press)));
         assert_eq!(app.column, Column::Notes);
         assert_in_step(&app, Surface::Text);
+    }
+
+    /// A pinch is looked at as the wheel is: it zooms a board without the
+    /// keyboard, under a palette too, takes no column and writes nothing.
+    #[test]
+    fn a_pinch_zooms_the_board_and_takes_nothing() {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        let _ = app.update(Message::Board(wren_canvas::Message::Resized {
+            width: 800.0,
+            height: 600.0,
+        }));
+        let text = session_text(&app);
+        let pinch = |delta| Input::Pinch {
+            delta,
+            at: (100.0, 100.0),
+        };
+        app.column = Column::Notes;
+        let before = app.board.as_ref().unwrap().viewport();
+        let _ = app.update(input(&app, pinch(0.25)));
+        let after = app.board.as_ref().unwrap().viewport();
+        assert!((after.zoom - before.zoom * 1.25).abs() < 1e-5, "{after:?}");
+        assert_eq!(app.column, Column::Notes);
+        assert!(!app.board.as_ref().unwrap().machine().focused());
+
+        let _ = app.open_palette(super::super::palette::Mode::Commands);
+        let _ = app.update(input(&app, pinch(-0.2)));
+        let under = app.board.as_ref().unwrap().viewport();
+        assert!((under.zoom - after.zoom * 0.8).abs() < 1e-5, "{under:?}");
+        assert_eq!(app.column, Column::Notes);
+
+        let view = app.board.as_ref().unwrap();
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!((app.board_revision, session_text(&app)), (0, text));
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+    }
+
+    /// The app hands the board the vendored iced_winit's record of pinches,
+    /// which gives them out only in the frame of the window they were
+    /// recorded for, once each.
+    #[test]
+    fn the_pinch_record_is_one_windows_for_one_frame() {
+        use iced_winit::pinch::{self, Frame};
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        let view = app.board.as_ref().unwrap();
+        let (ours, other) = (iced::window::Id::unique(), iced::window::Id::unique());
+        pinch::record(ours, 0.25);
+        pinch::record(other, 0.5);
+        pinch::record(ours, -0.1);
+        // Outside a frame there is nothing to take.
+        assert!(view.take_pinches().is_empty());
+        {
+            let _frame = Frame::begin(ours);
+            assert_eq!(view.take_pinches(), [0.25, -0.1]);
+            // Taken once.
+            assert!(view.take_pinches().is_empty());
+        }
+        assert!(view.take_pinches().is_empty());
+        // What no widget took in its frame is gone with the frame, and a
+        // pinch recorded during a frame waits for the next.
+        pinch::record(ours, 0.3);
+        {
+            let _frame = Frame::begin(ours);
+            pinch::record(ours, 0.4);
+        }
+        {
+            let _frame = Frame::begin(ours);
+            assert_eq!(view.take_pinches(), [0.4]);
+        }
+        {
+            let _frame = Frame::begin(other);
+            assert_eq!(view.take_pinches(), [0.5]);
+        }
+        // A window that closed takes its record with it.
+        pinch::record(other, 0.5);
+        pinch::forget(other);
+        {
+            let _frame = Frame::begin(other);
+            assert!(view.take_pinches().is_empty());
+        }
+        // With no frame coming, only the newest wait.
+        for n in 0..pinch::WAITING + 3 {
+            pinch::record(ours, n as f64);
+        }
+        let _frame = Frame::begin(ours);
+        let waited = view.take_pinches();
+        assert_eq!(waited.len(), pinch::WAITING);
+        assert_eq!(waited[0], 3.0);
     }
 
     /// The groups and keys of the Commands palette's rows.

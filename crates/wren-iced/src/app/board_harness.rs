@@ -185,6 +185,10 @@ impl App {
                 Ok((task, footer)) => (task, Ok(footer)),
                 Err(error) => (Task::none(), Err(error)),
             },
+            "board.pinch" => match self.board_pinch(params) {
+                Ok(delta) => (Task::none(), Ok(json!({"recorded": delta}))),
+                Err(error) => (Task::none(), Err(error)),
+            },
             "board.apply" => match self.board_apply(params) {
                 Ok(task) => (task, Ok(self.board_snapshot(false, placement.focused))),
                 Err(error) => (Task::none(), Err(error)),
@@ -685,6 +689,17 @@ impl App {
         }))
     }
 
+    /// `board.pinch`: a trackpad pinch recorded for the window as the
+    /// vendored iced_winit records winit's `PinchGesture` on macOS. The
+    /// window's next frame gives it to the board if the pointer is over
+    /// the board then, and drops it if not. Answers the delta recorded.
+    fn board_pinch(&self, params: &Value) -> Result<f64, String> {
+        let window = self.window.ok_or("window is not open")?;
+        let delta = pinch_delta(params)?;
+        iced_winit::pinch::record(window, delta);
+        Ok(delta)
+    }
+
     /// `board.pointer`: the input the widget would send for a wheel step
     /// or a button pressed, moved, released, clicked or double-clicked at a
     /// node's middle, one of its handles, a connector's middle or one of
@@ -717,7 +732,15 @@ impl App {
             .map_or(&[][..], Vec::as_slice);
         let epoch = view.epoch();
         let mut inputs = Vec::new();
-        if kind == "wheel" {
+        if kind == "pinch" {
+            if !mods.is_empty() {
+                return Err("a pinch takes no mods".into());
+            }
+            inputs.push(Input::Pinch {
+                delta: pinch_delta(params)? as f32,
+                at: at()?,
+            });
+        } else if kind == "wheel" {
             let mut zoom = false;
             let mut sideways = false;
             for modifier in mods {
@@ -763,36 +786,36 @@ impl App {
             if held != view.machine().mods() {
                 inputs.push(Input::Modifiers(held));
             }
-            let clicks = match kind {
-                "press" => {
-                    inputs.push(Input::Press {
-                        button: button()?,
-                        at: at()?,
-                    });
-                    0
-                }
-                "move" => {
-                    // The widget's first event after it got the keyboard
-                    // says so, and only then is a pointer passing over
-                    // the board's (§5.5 rule 8).
-                    if placement.focused && !view.machine().focused() {
-                        inputs.push(Input::Focus(true));
+            let clicks =
+                match kind {
+                    "press" => {
+                        inputs.push(Input::Press {
+                            button: button()?,
+                            at: at()?,
+                        });
+                        0
                     }
-                    inputs.push(Input::Move { at: at()? });
-                    0
-                }
-                "release" => {
-                    inputs.push(Input::Release { button: button()? });
-                    0
-                }
-                "click" => 1,
-                "double_click" => 2,
-                _ => {
-                    return Err(
-                        "kind must be wheel, press, move, release, click or double_click".into(),
-                    )
-                }
-            };
+                    "move" => {
+                        // The widget's first event after it got the keyboard
+                        // says so, and only then is a pointer passing over
+                        // the board's (§5.5 rule 8).
+                        if placement.focused && !view.machine().focused() {
+                            inputs.push(Input::Focus(true));
+                        }
+                        inputs.push(Input::Move { at: at()? });
+                        0
+                    }
+                    "release" => {
+                        inputs.push(Input::Release { button: button()? });
+                        0
+                    }
+                    "click" => 1,
+                    "double_click" => 2,
+                    _ => return Err(
+                        "kind must be wheel, pinch, press, move, release, click or double_click"
+                            .into(),
+                    ),
+                };
             let (button, at) = if clicks > 0 {
                 (Some(button()?), Some(at()?))
             } else {
@@ -1481,6 +1504,14 @@ fn tool_name(tool: Tool) -> &'static str {
     key.strip_prefix("board.tool.").unwrap_or(key)
 }
 
+/// A pinch's `delta`: the change in scale, as AppKit reports it.
+fn pinch_delta(params: &Value) -> Result<f64, String> {
+    params
+        .get("delta")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "delta must be a number".to_owned())
+}
+
 fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
     params
         .get(name)
@@ -1886,6 +1917,56 @@ mod tests {
                 .unwrap(),
             boards::FLOW
         );
+    }
+
+    #[test]
+    fn a_pinch_is_sent_as_the_widget_sends_it_or_recorded_as_winit_is() {
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        app.column = Column::Notes;
+        let viewport = |app: &App| app.board.as_ref().unwrap().viewport();
+        let start = viewport(&app);
+        let local = (400.0, 300.0);
+        let under = start.to_board(local);
+        let reply = ask(
+            &mut app,
+            "board.pointer",
+            json!({"kind": "pinch", "at": {"screen": [700, 340]}, "delta": 0.5}),
+            PLACED,
+        )
+        .unwrap();
+        let zoomed = viewport(&app);
+        assert!((zoomed.zoom - start.zoom * 1.5).abs() < 1e-5, "{zoomed:?}");
+        let (x, y) = zoomed.to_board(local);
+        assert!((x - under.0).abs() < 1e-2 && (y - under.1).abs() < 1e-2);
+        assert_eq!(
+            reply["viewport"]["zoom"].as_f64().unwrap() as f32,
+            zoomed.zoom
+        );
+        assert_eq!(app.column, Column::Notes);
+        for params in [
+            json!({"kind": "pinch", "at": {"canvas": [0, 0]}}),
+            json!({"kind": "pinch", "at": {"canvas": [0, 0]}, "delta": "in"}),
+            json!({"kind": "pinch", "at": {"canvas": [0, 0]}, "delta": 0.1, "mods": ["mod"]}),
+            json!({"kind": "pinch", "delta": 0.1}),
+        ] {
+            assert!(
+                ask(&mut app, "board.pointer", params.clone(), PLACED).is_err(),
+                "{params}"
+            );
+        }
+
+        // `board.pinch` records it for the window's next frame, as the
+        // vendored iced_winit records winit's.
+        let window = iced::window::Id::unique();
+        app.window = Some(window);
+        let recorded = ask(&mut app, "board.pinch", json!({"delta": 0.25}), PLACED).unwrap();
+        assert_eq!(recorded, json!({"recorded": 0.25}));
+        assert!(ask(&mut app, "board.pinch", json!({}), PLACED).is_err());
+        assert_eq!(viewport(&app), zoomed, "nothing until the frame");
+        let _frame = iced_winit::pinch::Frame::begin(window);
+        assert_eq!(app.board.as_ref().unwrap().take_pinches(), [0.25]);
     }
 
     #[test]

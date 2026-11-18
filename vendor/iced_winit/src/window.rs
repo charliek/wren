@@ -175,6 +175,7 @@ where
     pub surface_version: u64,
     pub renderer: P::Renderer,
     pub redraw_at: Option<Instant>,
+    // Wren: screenshots wait for the next presented frame (WREN.md).
     pub pending_screenshots: Vec<oneshot::Sender<Screenshot>>,
     preedit: Option<Preedit<P::Renderer>>,
     ime_state: Option<(Rectangle, input_method::Purpose)>,
