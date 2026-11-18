@@ -16,8 +16,10 @@ use crate::{fonts, theme};
 mod board;
 mod board_dock;
 mod board_find;
+mod board_footer;
 mod board_keys;
 mod board_spike;
+mod board_style_bar;
 mod columns;
 mod workspace;
 mod workspace_view;
@@ -65,6 +67,11 @@ pub struct App {
     /// The shape last armed, which the dock's folded shapes button shows
     /// while none is.
     dock_shape: wren_board::Shape,
+    /// The style bar's open menu, if any.
+    style_menu: Option<board_style_bar::Menu>,
+    /// The style bar's control the pointer is over, whose command the
+    /// board previews; see `App::style_bar_patch`.
+    style_hover: Option<wren_canvas::Command>,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
     /// What the Board menu's items were last enabled from; `None` until the
@@ -183,6 +190,10 @@ pub enum Message {
     Command(Command),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
+    /// The board's style bar opens one of its menus, or closes it.
+    StyleMenu(Option<board_style_bar::Menu>),
+    /// The pointer comes onto a style bar control that previews, or leaves.
+    StyleHover(board_style_bar::Hover),
     PaletteOpen(palette::Mode),
     PaletteQuery(String),
     PaletteChoose(u64, palette::Key),
@@ -360,6 +371,8 @@ impl App {
             board_revision: 0,
             dock_menu: None,
             dock_shape: wren_board::Shape::Rect,
+            style_menu: None,
+            style_hover: None,
             board_spike: None,
             #[cfg(any(target_os = "macos", test))]
             menu_inputs: None,
@@ -554,7 +567,22 @@ impl App {
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
-            Message::DockMenu(menu) => self.dock_menu = menu,
+            Message::DockMenu(menu) => {
+                self.dock_menu = menu;
+                self.style_menu = None;
+            }
+            Message::StyleMenu(menu) => {
+                self.style_menu = menu;
+                self.dock_menu = None;
+            }
+            Message::StyleHover(hover) => match hover {
+                board_style_bar::Hover::Enter(command) => self.style_hover = Some(command),
+                board_style_bar::Hover::Leave(command) => {
+                    if self.style_hover == Some(command) {
+                        self.style_hover = None;
+                    }
+                }
+            },
             Message::PaletteOpen(mode) => return self.open_palette(mode).task,
             Message::PaletteQuery(query) => return self.palette_query(query).task,
             Message::PaletteChoose(generation, key) => {
@@ -660,8 +688,8 @@ impl App {
                 if self.editor.close_spell_menu() {
                     return Task::none();
                 }
-                // So is the board dock's menu, and the board keeps it.
-                if self.dock_menu.take().is_some() {
+                // So is a menu of the board's bars, and the board keeps it.
+                if self.close_board_menus() {
                     return Task::none();
                 }
                 self.cancel_gestures();

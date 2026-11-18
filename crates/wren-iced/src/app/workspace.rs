@@ -901,7 +901,8 @@ impl App {
                     let covered = self.board_covered();
                     match board::open(text, note, palette, &self.board_viewports, covered) {
                         Ok(mut view) => {
-                            self.dock_menu = None;
+                            (self.dock_menu, self.style_menu, self.style_hover) =
+                                (None, None, None);
                             view.set_key_policy(super::preferences::board_policy(
                                 &self.preferences.keymap,
                             ));

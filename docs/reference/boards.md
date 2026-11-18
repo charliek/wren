@@ -28,8 +28,9 @@ Back/Forward like any note. The notes list marks them with a board icon,
 and its second line shows a board's first label.
 
 The footer reads `Board · 15 nodes · 17 connectors`, then, when there are
-any, the number of issues and why the board is read-only, then the zoom
-and the save status.
+any, the number of issues and why the board is read-only, then undo and
+redo, the zoom, and the save status (see [The footer's
+controls](#the-footers-controls)).
 
 ## Shapes and text
 
@@ -160,7 +161,8 @@ short stub ending in a cross, in the theme's error colour.
 ## Colour
 
 Every shape, text element, and connector has one of eight colours, set
-with the digit keys on the selection:
+with the digit keys on the selection, or with the
+[style bar](#the-style-bar)'s swatches:
 
 | Key | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|---|
@@ -184,6 +186,18 @@ protanopia, deuteranopia, and tritanopia.
 
 A colour written by hand as `#rrggbb` is drawn as written in every theme;
 a colour key replaces it with the colour you pick.
+
+**The colour new shapes take.** The colour you pick last is the one new
+shapes take, until you pick another: a shape or free text placed with a
+tool, a double-click, Tab, Mod+Arrow, or a connector dropped on empty
+canvas is made in it. Picking a colour with nothing selected changes
+nothing on the board and only sets it; picking one with a shape or free
+text in the selection sets it too, and picking one for connectors alone
+does not. New connectors stay neutral, a paste or a duplicate keeps the
+colours it carries, and the fill does not stick: a new shape has the
+tint fill. The colour belongs to the open board for the rest of the run,
+like its zoom; it is never written to the file and undo does not touch
+it. It starts as neutral, which writes nothing more into the file.
 
 On layouts that type a symbol on the digit row, such as AZERTY (which types
 `&` for 1), a digit key that types something nothing is bound to acts as its
@@ -246,6 +260,58 @@ canvas ends above the dock, so the dock covers none of it.
 With the dock showing, the canvas no longer names the armed tool in a
 chip at its top left. `board-toolbar = off` turns the dock off, and the
 chip comes back.
+
+## The style bar
+
+While something is selected, a bar at the top centre of the board holds
+the controls that style it, the same ones the
+[actions palette](#the-actions-palette) lists for that selection:
+
+- With shapes selected: a shape menu, whose button draws the selection's
+  shape (or a square and a circle when the shapes differ) and whose menu
+  lists all eight with the current one marked; the eight colour
+  swatches; Fill: none, tint and solid; and Solid or dashed.
+- With connectors selected: the swatches; Elbow or straight; Start
+  arrowhead and End arrowhead; Reverse; and Solid or dashed.
+- Last, a menu of Duplicate, Bring to front, Send to back, Delete, and
+  **All actions…**, which opens the actions palette.
+
+A selection with both shows both, in that order. The swatch of the
+colour the whole selection has is ringed in the accent colour, and the
+fill it has is lit. The swatches are each colour as the current theme
+draws it. A click does what the control's key or palette row does,
+through the same command, as one undo step. Resting the pointer on a
+swatch, a fill, Elbow or straight, or a row of the shape menu shows the
+change on the board without making it, as the actions palette's
+highlighted row does; moving off drops it and nothing is written.
+
+With nothing selected the bar is hidden, except while a shape or text
+tool is armed: then it shows the swatches alone, labelled **New
+shapes**, with the colour new shapes take ringed (see
+[Colour](#colour)). A click there picks it.
+
+Like the dock, a click on the bar leaves the keyboard with the board,
+finishes an open label first, and never reaches the canvas beneath it.
+Hovering a control names it and its key. While Space is held, or always
+with `board-key-badges = on`, each swatch shows its digit under it.
+
+Where the canvas is too narrow for the whole bar, the fills, Solid or
+dashed, and the connector's controls move to the top of the last menu.
+A canvas too narrow for even the swatches shows no bar. A board fitted
+to its canvas starts below the bar, so a shape at the top of a fitted
+board is never under it. A read-only board has no style bar.
+`board-toolbar = off` turns it off with the dock.
+
+## The footer's controls
+
+Under a board, the zoom figure is three controls: − zooms out, the figure
+zooms to fit, and + zooms in, as ⌘- / Alt+-, ⇧1, and ⌘= / Alt+= do. Undo
+and redo sit before them, greyed and doing nothing when there is nothing
+to undo or redo. A click there leaves the keyboard with the board, and an
+armed tool stays armed. Where the footer is narrow, the counts and the
+hint line go first and these stay. A read-only board has the zoom
+controls and no undo or redo. With `board-toolbar = off` the footer
+shows the zoom figure alone, as text.
 
 ## Hints and the keys sheet
 
@@ -330,7 +396,8 @@ searched as text; the file's own syntax (`kind`, `schema`) is not.
 | Zoom to fit / to selection | ⇧1 / ⇧2 | the same |
 
 The text-size keys step through 10, 25, 50, 75, 100, 150, 200, 300, and 400
-% on a board and save nothing. A board opens fitted to its content, never
+% on a board and save nothing; so do the footer's − and + buttons, and a
+click on its zoom figure fits the board. A board opens fitted to its content, never
 above 100 %, and returns to where you left it when you come back to it in
 the same run. The view is never written to the file. Pinch-to-zoom is not
 supported. With the software renderer (`ICED_BACKEND=tiny-skia`), labels

@@ -1034,8 +1034,20 @@ impl App {
             .is_some_and(|palette| palette.mode == Mode::BoardActions);
         if !open {
             self.actions_origin = None;
-            if let Some(view) = self.board.as_mut().filter(|view| view.patch().is_some()) {
-                view.set_patch(None);
+            // The style bar's control under the pointer previews the same
+            // way, and leaving it drops what it showed.
+            // A control that is gone (the bar folded, the selection
+            // changed) cannot say the pointer left it, and must not
+            // preview again when it comes back.
+            if let Some(hovered) = self.style_hover {
+                let bar = self.board_style_bar();
+                if bar.and_then(|bar| bar.shows(hovered)).is_none() {
+                    self.style_hover = None;
+                }
+            }
+            let hovered = self.style_bar_patch();
+            if let Some(view) = self.board.as_mut().filter(|view| view.patch() != hovered) {
+                view.set_patch(hovered);
             }
             return Task::none();
         }

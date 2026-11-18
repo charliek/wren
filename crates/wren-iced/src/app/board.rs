@@ -40,19 +40,19 @@ pub(super) type Viewports = HashMap<NoteId, SavedView>;
 
 /// A view of the board `text` holds, looked at from where `note` was left,
 /// or fitted the first time it opens in this run, leaving `covered` pixels
-/// along its bottom to the host's chrome.
+/// along its top and its bottom to the host's chrome.
 pub(super) fn open(
     text: &str,
     note: NoteId,
     palette: Palette,
     viewports: &Viewports,
-    covered: f32,
+    covered: (f32, f32),
 ) -> Result<BoardView, ParseError> {
     // Labels are measured when the view opens, which can be before iced
     // has loaded the bundled faces for a window.
     fonts::load();
     let mut view = BoardView::open(text, palette, fonts::UI)?;
-    view.set_covered(covered);
+    view.set_covered(covered.0, covered.1);
     match viewports.get(&note) {
         Some(saved) => view.return_to(*saved),
         None => view.fit(),
@@ -122,7 +122,7 @@ impl App {
                 if held || *epoch != view.epoch() {
                     return Task::none();
                 }
-                self.dock_menu = None;
+                self.close_board_menus();
                 let id = super::commands::CommandId::Board(*command);
                 return self.dispatch(super::commands::Command::Run(id)).task;
             }
@@ -132,7 +132,7 @@ impl App {
                 if held || *epoch != view.epoch() {
                     return Task::none();
                 }
-                self.dock_menu = None;
+                (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
                 let read = view.press(press).unwrap_or_default();
                 let tasks: Vec<Task<Message>> = read
                     .into_iter()
@@ -165,13 +165,13 @@ impl App {
                 if !held && !passive && !hovers {
                     self.column = Column::Editor;
                 }
-                // A press on the canvas closes the dock's menu, as a key
+                // A press on the canvas closes the bars' menus, as a key
                 // the board reads does.
                 if matches!(
                     input,
                     Input::Press { .. } | Input::Key { .. } | Input::Char(_)
                 ) {
-                    self.dock_menu = None;
+                    (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
                 }
             }
             Sent::Label(..) | Sent::Pasted(..) => {
@@ -185,13 +185,23 @@ impl App {
         self.board_did(update).task
     }
 
+    /// Close the dock's and the style bar's menus and forget the control
+    /// the pointer was over, as a press or a key on the board does, or a
+    /// command. Returns whether a menu was open.
+    pub(super) fn close_board_menus(&mut self) -> bool {
+        self.style_hover = None;
+        let dock = self.dock_menu.take().is_some();
+        let style = self.style_menu.take().is_some();
+        dock || style
+    }
+
     /// Run a board command on the open board, as its key would. Only
     /// `run_command` calls it, so every command comes through `dispatch`.
     pub(super) fn board_command(&mut self, command: wren_canvas::Command) -> BoardDid {
         let Some(view) = &mut self.board else {
             return BoardDid::default();
         };
-        self.dock_menu = None;
+        (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
         let update = view.command(command, Instant::now());
         self.board_did(update)
     }
@@ -302,7 +312,7 @@ impl App {
     /// the window loses its focus (§5.15 rule 4). The board settles and
     /// its armed tool is put away.
     pub(super) fn put_board_away(&mut self) -> Result<(), String> {
-        self.dock_menu = None;
+        self.close_board_menus();
         self.settle_board()?;
         let Some(view) = &mut self.board else {
             return Ok(());
@@ -1194,12 +1204,19 @@ z = "c"
         let view = app.board.as_ref().unwrap();
         assert!(!view.fit_pending());
         let fitted = view.viewport();
-        // Above the tool dock, which the fit leaves room for.
-        let covered = crate::app::board_dock::covered(true);
-        assert!(covered > 0.0);
+        // Between the style bar and the tool dock, which the fit leaves
+        // room for.
+        let (top, bottom) = app.board_covered();
+        assert_eq!(top, crate::app::board_style_bar::covered(true));
+        assert_eq!(bottom, crate::app::board_dock::covered(true));
+        assert!(top > 0.0 && bottom > 0.0);
+        let room = Viewport::fitting(view.scene().bounds, (800.0, 600.0 - top - bottom));
         assert_eq!(
             fitted,
-            Viewport::fitting(view.scene().bounds, (800.0, 600.0 - covered))
+            Viewport {
+                y: room.y - top / room.zoom,
+                ..room
+            }
         );
         let moved = Viewport {
             x: 37.0,

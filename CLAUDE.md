@@ -71,6 +71,8 @@ when one lands, move what users need into `docs/` and trim the note.
     the single writer and the export commands), `board_find.rs` (the jump
     palette and search reveal), `board_keys.rs` (the footer's hint line
     and the keys sheet), `board_dock.rs` (the tool dock over the canvas),
+    `board_style_bar.rs` (the style bar over the canvas),
+    `board_footer.rs` (the footer's undo, redo and zoom buttons),
     `board_harness.rs` (the `board.*` test
     requests), `board_edit_tests.rs`, and `board_spike.rs`
     (`--board-spike N`).
@@ -80,7 +82,8 @@ when one lands, move what users need into `docs/` and trim the note.
   - `theme.rs` maps a `wren_core` theme to iced's and to the editor's
     `Style` and `Palette`.
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
-    `ellipsis.rs`, and `keys.rs`.
+    `ellipsis.rs`, `keys.rs`, and `layers.rs` (a stack whose layers all
+    hear a press something before them took).
   - `macos_menu.rs` is the native menu bar, built from the table in
     `menu.rs`, which is compiled on macOS, in tests and with `smoke-test`
     so its rules are checked on Linux.

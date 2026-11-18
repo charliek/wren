@@ -482,7 +482,7 @@ impl App {
         let covered = self.board_covered();
         if let Some(view) = &mut self.board {
             view.set_key_policy(board_policy(&self.preferences.keymap));
-            view.set_covered(covered);
+            view.set_covered(covered.0, covered.1);
         }
         self.apply_editor_engine();
         self.sync_proofreader();

@@ -28,26 +28,26 @@ use crate::{fonts, theme};
 /// Below this canvas width the six shape buttons fold into one.
 pub const FOLD_WIDTH: f32 = 560.0;
 /// A button's size, and the folded shapes button's width.
-const BUTTON: (f32, f32) = (34.0, 32.0);
-const WIDE: f32 = 44.0;
+pub(super) const BUTTON: (f32, f32) = (34.0, 32.0);
+pub(super) const WIDE: f32 = 44.0;
 /// Between the bar's edge and its buttons, and between two buttons.
-const PAD: f32 = 4.0;
-const GAP: f32 = 2.0;
+pub(super) const PAD: f32 = 4.0;
+pub(super) const GAP: f32 = 2.0;
 /// A rule between groups of buttons: one pixel with room either side.
-const RULE: f32 = 7.0;
-const BORDER: f32 = 1.0;
+pub(super) const RULE: f32 = 7.0;
+pub(super) const BORDER: f32 = 1.0;
 /// From the bottom of the canvas to the bar, and the least room left
 /// beside it.
 pub const BOTTOM: f32 = 12.0;
-const SIDE: f32 = 8.0;
+pub(super) const SIDE: f32 = 8.0;
 /// How tall the bar is.
 pub const HEIGHT: f32 = BUTTON.1 + 2.0 * (PAD + BORDER);
 /// How far above the bar a fitted board ends: the canvas's fit margin
 /// covers the rest.
-const CLEAR: f32 = 16.0;
+pub(super) const CLEAR: f32 = 16.0;
 /// A menu's width, and the height of one of its rows.
-const MENU_WIDTH: f32 = 196.0;
-const MENU_ROW: f32 = 30.0;
+pub(super) const MENU_WIDTH: f32 = 196.0;
+pub(super) const MENU_ROW: f32 = 30.0;
 
 /// The shapes the "more shapes" menu holds: the two with no key.
 const MORE: [Shape; 2] = [Shape::Rounded, Shape::Document];
@@ -196,7 +196,7 @@ pub const IDS: [&str; 25] = [
     "board-dock-menu-document",
 ];
 
-fn shape_name(shape: Shape) -> &'static str {
+pub(super) fn shape_name(shape: Shape) -> &'static str {
     match shape {
         Shape::Rect => "Rectangle",
         Shape::Rounded => "Rounded rectangle",
@@ -460,11 +460,7 @@ impl App {
         }
         let (width, _) = view.size()?;
         let machine = view.machine();
-        let badges = match settings.board_key_badges {
-            KeyBadges::Hold => machine.space(),
-            KeyBadges::On => true,
-            KeyBadges::Off => false,
-        };
+        let badges = self.board_badges();
         let keys = Keys::new(&self.preferences.keymap, Platform::current());
         let sheet = self
             .palette
@@ -485,10 +481,25 @@ impl App {
         )
     }
 
-    /// What the canvas's fit leaves for the dock: room while the setting
-    /// shows it.
-    pub(super) fn board_covered(&self) -> f32 {
-        covered(self.preferences.settings.board_toolbar)
+    /// Whether the board's bars show their keys now: while Space is held,
+    /// or always or never as `board-key-badges` says.
+    pub(super) fn board_badges(&self) -> bool {
+        let held = self
+            .board
+            .as_ref()
+            .is_some_and(|view| view.machine().space());
+        match self.preferences.settings.board_key_badges {
+            KeyBadges::Hold => held,
+            KeyBadges::On => true,
+            KeyBadges::Off => false,
+        }
+    }
+
+    /// What the canvas's fit leaves for the style bar along its top and
+    /// for the dock along its bottom: room while the setting shows them.
+    pub(super) fn board_covered(&self) -> (f32, f32) {
+        let shown = self.preferences.settings.board_toolbar;
+        (super::board_style_bar::covered(shown), covered(shown))
     }
 
     /// The dock over the board, laid over the canvas's bottom centre.
@@ -698,7 +709,7 @@ impl App {
 }
 
 /// The bar's and a menu's frame: raised, with the dialog's border.
-fn panel(definition: wren_core::theme::Theme) -> container::Style {
+pub(super) fn panel(definition: wren_core::theme::Theme) -> container::Style {
     container::Style {
         border: Border {
             color: theme::color(definition.colors.dialog_border),
@@ -723,7 +734,7 @@ fn dot(color: Rgb) -> container::Style {
 
 /// A dock button: clear until the pointer is on it, and lit in the
 /// selection's colours while its tool is armed.
-fn tool_button(
+pub(super) fn tool_button(
     definition: wren_core::theme::Theme,
     status: button::Status,
     lit: bool,
@@ -1157,6 +1168,6 @@ mod tests {
         app.preferences.settings.board_toolbar = false;
         assert!(app.board_dock().is_none());
         assert!(app.board_style().tool_chip);
-        assert_eq!(app.board_covered(), 0.0);
+        assert_eq!(app.board_covered(), (0.0, 0.0));
     }
 }

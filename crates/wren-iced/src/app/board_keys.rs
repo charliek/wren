@@ -585,11 +585,22 @@ pub fn sheet(keys: &Keys, applies: impl Fn(Command) -> bool) -> Vec<SheetRow> {
 impl App {
     /// Whether `command` does something on the open board as it stands:
     /// the app enables it, and a command the actions palette offers for a
-    /// selection is offered for this one. The hint line drops what does
-    /// not apply and the keys sheet dims it.
+    /// selection is offered for this one. A colour with nothing selected
+    /// picks the colour new shapes take (discovery/board-controls.md D4).
+    /// The hint line drops what does not apply and the keys sheet dims it.
     fn board_applies(&self, offers: &[wren_canvas::Offer], command: Command) -> bool {
+        let picks_next = matches!(command, Command::Color(_))
+            && self.board.as_ref().is_some_and(|view| {
+                let board = view.board();
+                !view
+                    .machine()
+                    .selection()
+                    .iter()
+                    .any(|element| element.exists(board))
+            });
         self.command_enabled(CommandId::Board(command))
             && (command.offer_group().is_none()
+                || picks_next
                 || offers.iter().any(|offer| offer.command == command))
     }
 
@@ -1333,7 +1344,9 @@ pub(super) mod tests {
         assert_eq!(run(&mut app, Command::Keys), Disposition::Completed);
         assert!(sheet_open(&app));
         assert_eq!(dimmed(&app, "Delete selection"), Some(true));
-        assert_eq!(dimmed(&app, "Colour: red"), Some(true));
+        // With nothing selected a colour picks the one new shapes take.
+        assert_eq!(dimmed(&app, "Colour: red"), Some(false));
+        assert_eq!(dimmed(&app, "Change shape to rectangle"), Some(true));
         assert_eq!(dimmed(&app, "Select all"), Some(false));
         assert_eq!(dimmed(&app, "Rectangle tool"), Some(false));
 

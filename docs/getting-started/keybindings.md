@@ -276,7 +276,8 @@ command appears anywhere.
 **The digit row.** The colour keys are the digits as typed. On a layout
 that types a symbol there without Shift, such as AZERTY (`&` on the 1 key),
 a digit-row key whose character nothing is bound to acts as its digit, so
-0 to 7 still colour the selection.
+0 to 7 still colour the selection. With nothing selected, 0 to 7 pick the
+colour new shapes take and change nothing on the board.
 
 **Alt+Shift on Linux.** Some Linux desktops use Alt+Shift to switch
 keyboard layout, which can take the resize keys (Alt+Shift + arrow) and the

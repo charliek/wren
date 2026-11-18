@@ -404,6 +404,7 @@ def board_scenes(client, shot_here, out: Path, workspace: Path,
     client.call("dialog.close")
     board_hint_scenes(client, shot_here, open_board)
     board_dock_scenes(client, shot_here, open_board, settings)
+    board_style_bar_scenes(client, shot_here, open_board)
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
@@ -596,6 +597,116 @@ def board_dock_scenes(client, shot_here, open_board,
         path.write_text(text, encoding="utf-8")
         client.call("command.run", {"id": "settings.reload"})
         wait_for(lambda: dock()["shown"], timeout=5, description="the dock back")
+
+
+def board_style_bar_scenes(client, shot_here, open_board) -> None:
+    """discovery/board-controls.md §3.2, §3.3 and §3.6: the style bar for
+    one shape, for shapes of two colours, for a connector and for a shape
+    with a connector; its shape menu and its last menu open; a swatch's
+    preview under the pointer; its keys shown; the New shapes row with a
+    colour picked; folded on a narrow canvas; and the footer's controls
+    with something to undo and with nothing. The colours it sets are
+    undone, so the board ends as it began."""
+
+    start, pack, ship, edge = "ahj860xh", "3qrg4kv1", "1wg3aw6z", "zpsr8rp7"
+
+    def key(name: str, *mods: str, release: bool = False) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods), "release": release})
+
+    def bar(**params) -> dict:
+        return client.call("board.style_bar", params)
+
+    def laid_out(check=lambda state: True) -> None:
+        # The places are the last frame's, so wait for the one that shows it.
+        def ready() -> bool:
+            state = bar()
+            return bool(state["shown"] and state["rect"]
+                        and all(control["rect"] for control in state["controls"])
+                        and (state["menu"] is None or state["menu"]["rect"])
+                        and check(state))
+
+        wait_for(ready, timeout=5, description="the style bar laid out")
+
+    def pick(*ids: str) -> None:
+        for index, id_ in enumerate(ids):
+            at = {"edge": id_} if id_ == edge else {"node": id_}
+            client.call("board.pointer", {"kind": "click", "at": at, "button": "left",
+                                          "mods": [] if index == 0 else ["shift"]})
+
+    def menu(kind: str):
+        return lambda state: state["menu"] is not None and state["menu"]["kind"] == kind
+
+    open_board("Checkout flow", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    shot_here("board-footer")
+    pick(start)
+    laid_out()
+    shot_here("board-style-shape")
+    bar(click="board-style-shape")
+    laid_out(menu("shapes"))
+    shot_here("board-style-shape-menu")
+    bar(click="board-style-shape")
+    bar(click="board-style-more")
+    laid_out(menu("more"))
+    shot_here("board-style-more")
+    bar(click="board-style-more")
+    # Close enough to see the colour the pointer previews.
+    client.call("command.run", {"id": "board.zoom.selection"})
+    bar(hover="board-style-purple")
+    wait_for(lambda: client.call("board.get")["patch"] == "board.color.purple", timeout=5,
+             description="the preview shown")
+    shot_here("board-style-hover")
+    bar(hover=None)
+    client.call("command.run", {"id": "board.zoom.fit"})
+    key("space")
+    laid_out(lambda state: any(control["badge"] for control in state["controls"]))
+    shot_here("board-style-badges")
+    key("space", release=True)
+
+    # Two shapes of two colours: nothing ringed. Then the footer with
+    # something to undo.
+    pick(pack)
+    key("1")
+    pick(ship)
+    key("5")
+    pick(pack, ship)
+    laid_out()
+    shot_here("board-style-colours")
+    shot_here("board-footer-undo")
+    pick(edge)
+    laid_out()
+    shot_here("board-style-connector")
+    pick(pack, edge)
+    laid_out()
+    shot_here("board-style-mixed")
+    key("z", "mod")
+    key("z", "mod")
+
+    # Nothing selected and a shape tool armed: the colour new shapes take.
+    key("escape")
+    key("4")
+    key("r")
+    laid_out(lambda state: state["new_shapes"])
+    shot_here("board-style-new-shapes")
+    key("escape")
+    key("0")
+
+    # A narrow canvas folds the fills, the outline and the connector's
+    # controls into the last menu.
+    client.call("view.width", {"pane": "notes", "width": 480})
+    client.call("column.open", {"column": "sections"})
+    client.call("editor.focus")
+    pick(pack, edge)
+    laid_out(lambda state: state["folded"])
+    shot_here("board-style-fold")
+    bar(click="board-style-more")
+    laid_out(menu("more"))
+    shot_here("board-style-fold-menu")
+    bar(click="board-style-more")
+    client.call("command.run", {"id": "view.reset_widths"})
+    client.call("command.run", {"id": "board.select.none"})
 
 
 def board_edit_scenes(client, shot_here, open_board) -> None:

@@ -49,7 +49,7 @@ use wren_board::ids::Random;
 use wren_board::scene::{self, Draw, Rect, Scene, Source};
 use wren_board::{
     style, walk, Access, Board, Dir, Extra, Fill, Id, Issue, IssueKind, Limit, Named, Node,
-    NodeKind, NodeStyle, Palette, ParseError, Rgba, Shape, GRID,
+    NodeKind, NodeStyle, Palette, ParseError, Rgba, Shape, Token, GRID,
 };
 
 #[cfg(test)]
@@ -217,6 +217,8 @@ pub struct SavedView {
     /// Whether the view was the board's fit, untouched since: it comes
     /// back as a fit for the widget's size then.
     pub fitted: bool,
+    /// The colour new shapes took ([`BoardView::next_color`]).
+    pub next_color: Token,
 }
 
 /// Which labels a frame holds. Shapes are cheap on both renderers; glyphs
@@ -449,9 +451,13 @@ pub struct BoardView {
     epoch: u64,
     /// The widget's size, once it has said.
     size: Option<(f32, f32)>,
-    /// Logical pixels along the widget's bottom that the host's chrome
-    /// covers, which a fit leaves out ([`BoardView::set_covered`]).
-    covered: f32,
+    /// Logical pixels along the widget's top and bottom that the host's
+    /// chrome covers, which a fit leaves out ([`BoardView::set_covered`]).
+    covered: (f32, f32),
+    /// The colour each new shape and free text takes
+    /// (discovery/board-controls.md D4): view state, like the viewport,
+    /// never the board's and never an undo step.
+    next_color: Token,
     /// A fit asked for before the widget's size was known.
     fit_pending: bool,
     /// The view is the board's fit, with no pan, zoom or centring since:
@@ -555,7 +561,8 @@ impl BoardView {
             machine: Machine::default(),
             epoch: epoch(),
             size: None,
-            covered: 0.0,
+            covered: (0.0, 0.0),
+            next_color: Token::Neutral,
             fit_pending: false,
             fitted: false,
             anchor: None,
@@ -708,6 +715,7 @@ impl BoardView {
             viewport: self.viewport,
             size: self.size.or(self.anchor),
             fitted: self.fitted,
+            next_color: self.next_color,
         }
     }
 
@@ -715,6 +723,7 @@ impl BoardView {
     /// else from its viewport, kept centred when the widget's size differs
     /// from the one it was set for.
     pub fn return_to(&mut self, saved: SavedView) {
+        self.next_color = saved.next_color;
         if saved.fitted {
             self.fit();
             return;
@@ -759,29 +768,45 @@ impl BoardView {
         self.jump(self.viewport.zoomed_to(1.0, self.centre()));
     }
 
-    /// Say how many logical pixels along the widget's bottom the host's
-    /// chrome covers (a tool bar floating over the board). A fit then
+    /// Say how many logical pixels along the widget's top and bottom the
+    /// host's chrome covers (bars floating over the board). A fit then
     /// shows the board in the rest, so the chrome hides none of it; a
     /// view already fitted is fitted again.
-    pub fn set_covered(&mut self, bottom: f32) {
-        let bottom = if bottom.is_finite() {
-            bottom.max(0.0)
-        } else {
-            0.0
+    pub fn set_covered(&mut self, top: f32, bottom: f32) {
+        let clean = |pixels: f32| {
+            if pixels.is_finite() {
+                pixels.max(0.0)
+            } else {
+                0.0
+            }
         };
-        if bottom == self.covered {
+        let covered = (clean(top), clean(bottom));
+        if covered == self.covered {
             return;
         }
-        self.covered = bottom;
+        self.covered = covered;
         if self.fitted && self.size.is_some() {
             self.fit();
         }
     }
 
-    /// The part of a widget of `size` a fit shows the board in: all of
-    /// it but what the host's chrome covers, and never under half of it.
-    fn room(&self, (width, height): (f32, f32)) -> (f32, f32) {
-        (width, (height - self.covered).max(height / 2.0))
+    /// The view that fits `content` into the part of a widget of `size`
+    /// the host's chrome leaves, which is never under half of it: the
+    /// chrome's share of what it takes is kept in proportion.
+    fn fitting(&self, content: Rect, (width, height): (f32, f32)) -> Viewport {
+        let (top, bottom) = self.covered;
+        let covered = top + bottom;
+        let cut = covered.min(height / 2.0);
+        let above = if covered > 0.0 {
+            top * cut / covered
+        } else {
+            0.0
+        };
+        let fitted = Viewport::fitting(content, (width, height - cut));
+        Viewport {
+            y: fitted.y - above / fitted.zoom,
+            ..fitted
+        }
     }
 
     /// Show all of the board with [`FIT_MARGIN`] around it, never above
@@ -791,8 +816,7 @@ impl BoardView {
     pub fn fit(&mut self) {
         match self.size {
             Some(size) => {
-                let room = self.room(size);
-                self.jump(Viewport::fitting(self.scenes.scene().bounds, room));
+                self.jump(self.fitting(self.scenes.scene().bounds, size));
                 self.fit_pending = false;
             }
             None => self.fit_pending = true,
@@ -861,7 +885,7 @@ impl BoardView {
         };
         let zoom = self.viewport.zoom;
         let viewport = if bounds.height * zoom < SHOW_LEAST {
-            Viewport::fitting(bounds, self.room(size))
+            self.fitting(bounds, size)
         } else {
             let centre = bounds.center();
             Viewport {
@@ -1031,6 +1055,14 @@ impl BoardView {
     /// The command the board shows previewed, if any.
     pub fn patch(&self) -> Option<Command> {
         self.patch
+    }
+
+    /// The colour each new shape and free text takes: neutral when the
+    /// view opens, then the last one a colour command picked with
+    /// nothing, or a shape or free text, selected (discovery/
+    /// board-controls.md D4). It is never written to the board.
+    pub fn next_color(&self) -> Token {
+        self.next_color
     }
 
     /// What the actions palette lists for the selection (§5.17 rule 3):
@@ -1464,7 +1496,7 @@ impl BoardView {
     fn edit(&mut self, intent: &Intent, unit: Unit, now: Instant, update: &mut Update) -> bool {
         #[cfg(test)]
         self.intents.push(intent.clone());
-        let plan = edit::plan(&self.board, intent, &mut self.ids);
+        let plan = planned(&self.board, intent, self.next_color, &mut self.ids);
         self.carry_out(&plan, unit, now, update)
     }
 
@@ -1868,7 +1900,8 @@ impl BoardView {
     /// of their source, so a release makes the very board its preview
     /// showed: a connector's route depends on where its id sorts (§3.7).
     fn show(&mut self, intent: Option<&Intent>) {
-        let plan = intent.map(|intent| edit::plan(&self.board, intent, &mut self.ids.clone()));
+        let color = self.next_color;
+        let plan = intent.map(|intent| planned(&self.board, intent, color, &mut self.ids.clone()));
         let Some(plan) = plan.filter(|plan| !plan.is_empty()) else {
             self.preview = None;
             return;
@@ -2019,6 +2052,18 @@ impl BoardView {
                 let ids = picked.iter().filter_map(Source::node).cloned().collect();
                 self.edit(&Intent::Distribute { ids, axis }, Unit::One, now, update);
             }
+            // A colour picked with nothing selected, or with a shape or free
+            // text among the selection, is the one new shapes take; one
+            // picked for connectors alone is theirs only (D4).
+            Command::Color(token) if self.writable() => {
+                let board = &self.board;
+                if picked.is_empty() || picked.iter().any(|element| shape_or_text(board, element)) {
+                    self.next_color = token;
+                }
+                if let Some(intent) = style(&self.board, picked, command) {
+                    self.edit(&intent, Unit::One, now, update);
+                }
+            }
             Command::Color(_) | Command::Fill(_) | Command::StrokeDashed if editable => {
                 if let Some(intent) = style(&self.board, picked, command) {
                     self.edit(&intent, Unit::One, now, update);
@@ -2035,7 +2080,7 @@ impl BoardView {
                     .filter_map(|element| bounds(&self.board, self.scenes.scene(), element))
                     .reduce(union);
                 if let (Some(bounds), Some(size)) = (bounds, self.size) {
-                    self.jump(Viewport::fitting(bounds, self.room(size)));
+                    self.jump(self.fitting(bounds, size));
                 }
             }
             _ => {}
@@ -2324,6 +2369,42 @@ fn edge_style(board: &Board, ids: &[Id], command: Command) -> Option<Intent> {
         _ => return None,
     };
     Some(Intent::SetEdge { ids, field })
+}
+
+/// What `intent` plans on `board`, as [`edit::plan`] does, with each shape
+/// and free text it makes in `color` (discovery/board-controls.md D4): a
+/// node placed with a tool, by a double-click or at the end of a connector
+/// dropped on empty canvas, and one Tab or Mod+Arrow adds. A connector it
+/// makes stays neutral, and a paste or a duplicate keeps the colours it
+/// carries. A neutral colour changes nothing, so it writes nothing more.
+fn planned(
+    board: &Board,
+    intent: &Intent,
+    color: Token,
+    ids: &mut dyn wren_board::ids::Ids,
+) -> Plan {
+    let mut plan = edit::plan(board, intent, ids);
+    let makes = matches!(intent, Intent::AddNode { .. } | Intent::Extend { .. });
+    if makes && color != Token::Neutral {
+        for change in &mut plan.changes {
+            if let Change::PutNode(id, node) = change {
+                let kind = node.kind.as_ref().and_then(Named::known);
+                if !board.nodes.contains_key(id) && kind.is_some() {
+                    node.style.color = wren_board::Color::Token(color);
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// Whether `element` is a shape or free text on `board`: what a colour
+/// command's pick is remembered for.
+fn shape_or_text(board: &Board, element: &Source) -> bool {
+    element
+        .node()
+        .and_then(|id| board.nodes.get(id))
+        .is_some_and(|node| node.kind.as_ref().and_then(Named::known).is_some())
 }
 
 /// What a colour, fill or outline command does to the selection `picked`
@@ -2827,7 +2908,7 @@ mod tests {
         view.fit();
         let before = view.viewport();
         // Said after the fit, it fits again in the room left.
-        view.set_covered(COVERED);
+        view.set_covered(0.0, COVERED);
         let (viewport, bounds) = (view.viewport(), view.scene().bounds);
         assert_ne!(viewport, before);
         assert_eq!(
@@ -2854,10 +2935,10 @@ mod tests {
             y: 9.0,
             zoom: 1.0,
         });
-        view.set_covered(0.0);
+        view.set_covered(0.0, 0.0);
         assert_eq!((view.viewport().x, view.viewport().y), (7.0, 9.0));
         // However much is covered, a fit keeps half the widget.
-        view.set_covered(1000.0);
+        view.set_covered(0.0, 1000.0);
         view.fit();
         assert_eq!(view.viewport(), Viewport::fitting(bounds, (400.0, 150.0)));
     }
@@ -3935,6 +4016,7 @@ mod tests {
                 viewport: at,
                 size: None,
                 fitted: false,
+                next_color: Token::Neutral,
             },
         );
         waiting.update(
@@ -7252,5 +7334,216 @@ z = "c"
             view.command(Command::Actions, now).effects,
             [Effect::OpenActions]
         );
+    }
+
+    /// The colours of the nodes `view`'s board holds that `before` did
+    /// not, and of the connectors.
+    fn made_colours(
+        view: &BoardView,
+        before: &Board,
+    ) -> (Vec<wren_board::Color>, Vec<wren_board::Color>) {
+        let nodes = view.board().nodes.iter();
+        let nodes = nodes.filter(|(id, _)| !before.nodes.contains_key(*id));
+        let edges = view.board().edges.iter();
+        let edges = edges.filter(|(id, _)| !before.edges.contains_key(*id));
+        (
+            nodes.map(|(_, node)| node.style.color.clone()).collect(),
+            edges.map(|(_, edge)| edge.style.color.clone()).collect(),
+        )
+    }
+
+    /// discovery/board-controls.md D4: a colour picked with nothing
+    /// selected is remembered and changes nothing on the board; every
+    /// way of making a shape or free text then makes it in that colour,
+    /// and every connector made with it stays neutral.
+    #[test]
+    fn every_new_shape_and_free_text_takes_the_colour_picked_last() {
+        let now = Instant::now();
+        let green = wren_board::Color::Token(Token::Green);
+        let neutral = wren_board::Color::Token(Token::Neutral);
+        let mut view = sized(TWO);
+        assert_eq!(view.next_color(), Token::Neutral);
+        input(&mut view, Input::Focus(true), now);
+        assert_eq!(
+            view.command(Command::Color(Token::Green), now),
+            Update::default()
+        );
+        assert_eq!(view.next_color(), Token::Green);
+        assert!(view.pristine() && !view.can_undo());
+        assert_eq!(view.draft(), TWO);
+
+        // Placed with a tool, its label left empty.
+        let before = view.board().clone();
+        view.command(Command::Tool(Tool::Shape(Shape::Diamond)), now);
+        click(&mut view, (100.0, 300.0), now);
+        key(&mut view, Key::Escape, now);
+        assert_eq!(made_colours(&view, &before), (vec![green.clone()], vec![]));
+        // Free text, which needs its text to stay.
+        let before = view.board().clone();
+        view.command(Command::Tool(Tool::Text), now);
+        click(&mut view, (400.0, 300.0), now);
+        typed(&mut view, "Note", now);
+        key(&mut view, Key::Escape, now);
+        assert_eq!(made_colours(&view, &before), (vec![green.clone()], vec![]));
+        // A double-click on empty canvas.
+        let before = view.board().clone();
+        let later = now + Duration::from_secs(1);
+        click(&mut view, (700.0, 400.0), later);
+        click(
+            &mut view,
+            (700.0, 400.0),
+            later + Duration::from_millis(100),
+        );
+        assert_eq!(view.machine().state(), machine::State::Editing);
+        key(&mut view, Key::Escape, later);
+        assert_eq!(made_colours(&view, &before), (vec![green.clone()], vec![]));
+        // Tab and Mod+Arrow: the shape and its connector.
+        for command in [Command::ConnectNext, Command::Connect(Dir::Down)] {
+            select(&mut view, &["b"]);
+            let before = view.board().clone();
+            view.command(command, later);
+            key(&mut view, Key::Escape, later);
+            let made = made_colours(&view, &before);
+            assert_eq!(
+                made,
+                (vec![green.clone()], vec![neutral.clone()]),
+                "{command:?}"
+            );
+        }
+        // A connector dropped on empty canvas makes a shape there.
+        let before = view.board().clone();
+        let at = hover(&mut view, "a", later + Duration::from_secs(1));
+        let from = connect_handle(&view, "a", Side::Left);
+        input(&mut view, press(from), at);
+        input(&mut view, Input::Move { at: (40.0, 520.0) }, at);
+        input(&mut view, RELEASE, at);
+        key(&mut view, Key::Escape, at);
+        assert_eq!(
+            made_colours(&view, &before),
+            (vec![green.clone()], vec![neutral.clone()])
+        );
+        assert_eq!(view.next_color(), Token::Green);
+    }
+
+    #[test]
+    fn a_colour_picked_for_shapes_sticks_and_one_for_connectors_does_not() {
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        input(&mut view, Input::Focus(true), now);
+        // Connectors alone: theirs only.
+        select(&mut view, &["e"]);
+        assert_eq!(view.command(Command::Color(Token::Red), now), CHANGED);
+        assert_eq!(view.next_color(), Token::Neutral);
+        // A shape among the selection: the shapes', and the next shape's.
+        select(&mut view, &["a", "e"]);
+        assert_eq!(view.command(Command::Color(Token::Blue), now), CHANGED);
+        assert_eq!(view.next_color(), Token::Blue);
+        // Undo takes back the recolouring, never the colour picked.
+        travel(&mut view, Command::Undo, now);
+        assert_eq!(
+            view.board().nodes[&id("a")].style.color,
+            wren_board::Color::Token(Token::Neutral)
+        );
+        assert_eq!(view.next_color(), Token::Blue);
+        travel(&mut view, Command::Undo, now);
+        assert!(view.pristine());
+        assert_eq!(view.next_color(), Token::Blue);
+        travel(&mut view, Command::Redo, now);
+        assert_eq!(view.next_color(), Token::Blue);
+
+        // A duplicate and a paste keep the colours they carry.
+        select(&mut view, &["a"]);
+        let before = view.board().clone();
+        view.command(Command::Duplicate, now);
+        let neutral = wren_board::Color::Token(Token::Neutral);
+        assert_eq!(
+            made_colours(&view, &before).0,
+            std::slice::from_ref(&neutral)
+        );
+        select(&mut view, &["a"]);
+        let copied = view.command(Command::Copy, now);
+        let [Effect::ClipboardWrite(text)] = copied.effects.as_slice() else {
+            panic!("{copied:?}");
+        };
+        let before = view.board().clone();
+        pasted(&mut view, text, now);
+        assert_eq!(made_colours(&view, &before).0, [neutral]);
+        // Text pasted from outside is free text, and keeps the neutral too.
+        let before = view.board().clone();
+        pasted(&mut view, "From elsewhere", now + Duration::from_secs(1));
+        let made = made_colours(&view, &before).0;
+        assert_eq!(made, [wren_board::Color::Token(Token::Neutral)]);
+    }
+
+    #[test]
+    fn a_neutral_colour_writes_nothing_and_a_read_only_board_keeps_it() {
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        input(&mut view, Input::Focus(true), now);
+        view.command(Command::Color(Token::Purple), now);
+        view.command(Command::Color(Token::Neutral), now);
+        assert_eq!(view.next_color(), Token::Neutral);
+        view.command(Command::Tool(Tool::Shape(Shape::Rect)), now);
+        click(&mut view, (100.0, 300.0), now);
+        key(&mut view, Key::Escape, now);
+        let (added, _) = line_diff(TWO, &view.draft());
+        assert!(
+            added.iter().all(|line| !line.contains("color")),
+            "{added:?}"
+        );
+
+        let future = TWO.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1);
+        let mut view = sized(&future);
+        input(&mut view, Input::Focus(true), now);
+        assert_eq!(
+            view.command(Command::Color(Token::Red), now),
+            Update::default()
+        );
+        assert_eq!(view.next_color(), Token::Neutral);
+    }
+
+    /// The colour is the view's, kept with where the board was looked at
+    /// from, so a board returned to in the same run keeps it.
+    #[test]
+    fn a_saved_view_keeps_the_colour_new_shapes_take() {
+        let now = Instant::now();
+        let mut view = sized(TWO);
+        input(&mut view, Input::Focus(true), now);
+        view.command(Command::Color(Token::Orange), now);
+        let saved = view.saved_view();
+        assert_eq!(saved.next_color, Token::Orange);
+        let mut again = sized(TWO);
+        again.return_to(saved);
+        assert_eq!(again.next_color(), Token::Orange);
+        // A reload keeps it as it keeps the viewport.
+        view.reload(fixtures::CHECKOUT_FLOW).expect("a board");
+        assert_eq!(view.next_color(), Token::Orange);
+    }
+
+    /// A bar along the top is left out of a fit as one along the bottom
+    /// is, and the board is fitted in the room between them.
+    #[test]
+    fn a_fit_leaves_out_chrome_along_the_top_and_the_bottom() {
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        view.fit();
+        view.set_covered(50.0, 30.0);
+        let (viewport, bounds) = (view.viewport(), view.scene().bounds);
+        let room = Viewport::fitting(bounds, (SIZE.0, SIZE.1 - 80.0));
+        assert_eq!(viewport.zoom, room.zoom);
+        let near = viewport.to_screen((bounds.x, bounds.y));
+        let far = viewport.to_screen((bounds.right(), bounds.bottom()));
+        assert!(near.1 >= 50.0 + FIT_MARGIN - 0.01, "{near:?}");
+        assert!(SIZE.1 - far.1 >= 30.0 + FIT_MARGIN - 0.01, "{far:?}");
+        // Centred in that room.
+        let above = near.1 - 50.0;
+        let below = SIZE.1 - 30.0 - far.1;
+        assert!((above - below).abs() < 0.01, "{above} {below}");
+        // However much is covered, a fit keeps half the widget, the two
+        // bars' shares in proportion.
+        view.set_covered(600.0, 200.0);
+        let viewport = view.viewport();
+        let half = Viewport::fitting(bounds, (SIZE.0, SIZE.1 / 2.0));
+        assert_eq!(viewport.zoom, half.zoom);
+        assert!((viewport.y - (half.y - 225.0 / half.zoom)).abs() < 0.01);
     }
 }

@@ -96,6 +96,22 @@ Shown at the top centre when something is selected, built from
   with the sticky colour ringed.
 - With nothing selected, `0` to `7` set the sticky colour.
 
+As built: the bar is `app/board_style_bar.rs`, whose `bar` is a pure
+function of `BoardView::offers()` (which controls show and which are
+current), the armed tool, `BoardView::next_color` and the settings. The
+connector toggles (route, heads, dashed) are never shown lit, since
+`offers` marks no toggle current. Hover previews go through
+`App::style_bar_patch` into `set_patch` from `sync_actions`, so a palette, a
+dialog, an open label or a command drops them. Where the whole bar does not
+fit, the fills, dashed and the connector controls fold into the top of the
+last menu; the New shapes row drops its label, then itself. A fit leaves
+room along the top as along the bottom (`BoardView::set_covered(top,
+bottom)`). The sticky colour is `BoardView::next_color`, kept in
+`SavedView` with the viewport; the canvas recolours the new nodes of an
+`AddNode` or `Extend` plan, so `wren-board` is unchanged. The keys sheet no
+longer dims the colour rows with nothing selected. `board.style_bar`
+reports the bar and `board.get` reports `next_color`.
+
 ### 3.3 Key badges
 
 Each dock button shows its key in a corner and each swatch its digit, only
@@ -139,6 +155,15 @@ actions palette. New command: `board.keys`.
 The zoom figure becomes three controls: zoom out, the figure (zoom to
 fit), zoom in. Undo and redo buttons sit beside them, greyed when there is
 nothing to undo or redo.
+
+As built: `app/board_footer.rs`. The footer is laid as a layer over the
+editor column, which keeps its room, so a press on one of its buttons is
+taken before the canvas hears it and the board keeps the keyboard and its
+armed tool. The layers are `layers.rs`, not iced's `Stack`, which stops at
+a capture made before it: a press a browser column's filter took never
+reached the canvas under the dock, which kept the keyboard beside the
+filter. Zoom out and in run `font.decrease` and `font.increase`, as
+their keys do on a board. `board.footer` reports the controls.
 
 ### 3.7 Cursors
 
@@ -215,8 +240,8 @@ Wren themes; the gates are those of `CLAUDE.md`.
 3. Hint line and keys sheet (§3.4, §3.5), with `board-hints`. Landed.
 4. Tool dock (§3.1), tool lock, the hand tool staying armed, key badges
    (§3.3), `board-toolbar`. Landed.
-5. Style bar (§3.2) and the sticky colour.
-6. Footer controls (§3.6).
+5. Style bar (§3.2) and the sticky colour. Landed.
+6. Footer controls (§3.6). Landed.
 7. Pinch on macOS (§3.8).
 8. Text size (§3.9), after the style bar, which holds its control.
 
