@@ -328,8 +328,11 @@ def build_board_workspace(root: Path) -> None:
         os.utime(root / BOARD_GROUP / name, (mtime, mtime))
 
 
-def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
-    """discovery/boards.md §6.3, Phase 1."""
+def board_scenes(client, shot_here, out: Path, workspace: Path,
+                 settings: tuple[Path, str] | None = None) -> None:
+    """discovery/boards.md §6.3, Phase 1. `settings` is the app's
+    `config.conf` and the text it was started with, for the scenes that
+    change a setting and put it back."""
 
     def open_board(name: str, fit: bool = False) -> None:
         open_note(client, f"{name}.wren-board")
@@ -400,6 +403,7 @@ def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
     shot_here("board-new-dialog")
     client.call("dialog.close")
     board_hint_scenes(client, shot_here, open_board)
+    board_dock_scenes(client, shot_here, open_board, settings)
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
@@ -510,6 +514,88 @@ def board_hint_scenes(client, shot_here, open_board) -> None:
     shot_here("board-hint-narrow")
     client.call("command.run", {"id": "view.reset_widths"})
     key("escape")
+
+
+def board_dock_scenes(client, shot_here, open_board,
+                      settings: tuple[Path, str] | None) -> None:
+    """discovery/board-controls.md §3.1 and §3.3: the tool dock idle, with
+    a shape armed and locked, with its keys shown while Space is held,
+    with the "more shapes" menu open, folded on a narrow canvas with its
+    menu, on a read-only board, and with `board-toolbar = off`. Nothing
+    here changes the board."""
+
+    def key(name: str, *mods: str, release: bool = False) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods), "release": release})
+
+    def dock() -> dict:
+        return client.call("board.dock")
+
+    def laid_out(check) -> None:
+        # The places are the last frame's, so wait for the one that shows it.
+        wait_for(lambda: check(dock()), timeout=5, description="the dock laid out")
+
+    def lit(button_id: str):
+        return lambda state: any(button["id"] == button_id and button["lit"]
+                                 and button["rect"] for button in state["buttons"])
+
+    open_board("Checkout flow", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    laid_out(lambda state: state["shown"] and not state["folded"] and state["rect"])
+    shot_here("board-dock-idle")
+    key("d")
+    laid_out(lit("board-dock-diamond"))
+    shot_here("board-dock-armed")
+    key("d")
+    laid_out(lambda state: any(button["locked"] for button in state["buttons"]))
+    shot_here("board-dock-locked")
+    key("escape")
+    key("space")
+    laid_out(lambda state: any(button["badge"] for button in state["buttons"]))
+    shot_here("board-dock-badges")
+    key("space", release=True)
+    client.call("board.dock", {"click": "board-dock-more"})
+    laid_out(lambda state: state["menu"] and state["menu"]["rect"])
+    shot_here("board-dock-more")
+    client.call("board.dock", {"click": "board-dock-menu-document"})
+    laid_out(lit("board-dock-more"))
+    shot_here("board-dock-more-armed")
+    key("escape")
+
+    # A narrow canvas folds the six shapes into one button: every browser
+    # column open, the notes at their widest. The board, left fitted,
+    # fits again at the narrower width.
+    key("r")
+    key("escape")
+    client.call("view.width", {"pane": "notes", "width": 480})
+    client.call("column.open", {"column": "sections"})
+    laid_out(lambda state: state["folded"] and state["rect"])
+    shot_here("board-dock-fold")
+    client.call("board.dock", {"click": "board-dock-shapes"})
+    laid_out(lambda state: state["menu"] and state["menu"]["rect"])
+    shot_here("board-dock-fold-menu")
+    client.call("board.dock", {"click": "board-dock-shapes"})
+    client.call("command.run", {"id": "view.reset_widths"})
+    # A board command from a browser column folds the browser as it was.
+    client.call("command.run", {"id": "board.tool.select"})
+
+    open_board("Future", fit=True)
+    laid_out(lambda state: state["shown"] and state["rect"])
+    shot_here("board-dock-read-only")
+
+    if settings is not None:
+        path, text = settings
+        path.write_text(text + "board-toolbar = off\n", encoding="utf-8")
+        client.call("command.run", {"id": "settings.reload"})
+        open_board("Checkout flow", fit=True)
+        wait_for(lambda: not dock()["shown"], timeout=5, description="the dock off")
+        key("d")
+        shot_here("board-dock-off")
+        key("escape")
+        path.write_text(text, encoding="utf-8")
+        client.call("command.run", {"id": "settings.reload"})
+        wait_for(lambda: dock()["shown"], timeout=5, description="the dock back")
 
 
 def board_edit_scenes(client, shot_here, open_board) -> None:
@@ -801,7 +887,8 @@ def main() -> int:
                 def shot_board(name: str) -> None:
                     shot(app.client, name)
 
-                board_scenes(app.client, shot_board, out, workspace)
+                board_scenes(app.client, shot_board, out, workspace,
+                             (app.settings_path, settings + "boards = on\n"))
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

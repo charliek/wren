@@ -429,6 +429,9 @@ enum Run {
 pub struct Machine {
     focused: bool,
     tool: Tool,
+    /// The armed tool stays armed after it makes something
+    /// (discovery/board-controls.md D3).
+    locked: bool,
     selection: BTreeSet<Source>,
     cursor: Option<Source>,
     /// The element whose label is open.
@@ -506,7 +509,7 @@ impl Machine {
             // rule 4).
             Input::Focus(false) => {
                 acts = self.settle();
-                self.tool = Tool::Select;
+                self.put_away();
                 self.space = false;
                 self.focused = false;
                 self.unhover();
@@ -535,11 +538,18 @@ impl Machine {
         self.commit(&mut acts);
         match command {
             Command::CommitLabel => {}
+            // The armed tool armed again is locked, or unlocked
+            // (discovery/board-controls.md D3); Select and Hand have no lock.
+            Command::Tool(tool @ (Tool::Shape(_) | Tool::Text | Tool::Connector))
+                if view.writable && tool == self.tool =>
+            {
+                self.locked = !self.locked;
+            }
             // With one node selected the connector tool connects it by
             // keyboard (§5.12 rule 3); otherwise it is armed for the pointer.
             Command::Tool(Tool::Connector) if view.writable => match self.only_node(view.board) {
                 Some(source) => {
-                    self.tool = Tool::Select;
+                    self.put_away();
                     self.seek = Some(Seek {
                         source,
                         target: None,
@@ -547,11 +557,11 @@ impl Machine {
                         walked: None,
                     });
                 }
-                None => self.tool = Tool::Connector,
+                None => self.arm(Tool::Connector),
             },
             Command::Tool(tool) => {
                 if view.writable || matches!(tool, Tool::Select | Tool::Hand) {
-                    self.tool = tool;
+                    self.arm(tool);
                 }
             }
             Command::EditLabel => {
@@ -669,7 +679,7 @@ impl Machine {
     pub fn reset(&mut self) {
         self.gesture = Gesture::None;
         self.editing = None;
-        self.tool = Tool::Select;
+        self.put_away();
         self.space = false;
         self.click = None;
         self.run = None;
@@ -734,6 +744,28 @@ impl Machine {
     /// The armed tool; Select when none is.
     pub fn tool(&self) -> Tool {
         self.tool
+    }
+
+    /// Whether the armed tool is locked: it stays armed after it makes
+    /// something, until Escape, Select or another tool.
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    fn arm(&mut self, tool: Tool) {
+        self.tool = tool;
+        self.locked = false;
+    }
+
+    fn put_away(&mut self) {
+        self.arm(Tool::Select);
+    }
+
+    /// What the armed tool made: an unlocked tool is spent.
+    fn spend(&mut self) {
+        if !self.locked {
+            self.put_away();
+        }
     }
 
     /// The selected elements (§5.3 rule 1).
@@ -1259,11 +1291,8 @@ impl Machine {
             return;
         }
         match std::mem::take(&mut self.gesture) {
-            // The hand tool is one-shot, as every tool is (§5.2).
-            Gesture::Panning {
-                button: Button::Left,
-                ..
-            } if self.tool == Tool::Hand => self.tool = Tool::Select,
+            // The hand tool stays armed for the next drag until another
+            // tool is picked (discovery/board-controls.md D3).
             Gesture::None | Gesture::Panning { .. } | Gesture::Selecting => {}
             Gesture::Pressed {
                 anchor, on, double, ..
@@ -1282,7 +1311,7 @@ impl Machine {
             Gesture::Creating { anchor, area } => {
                 let area = area.unwrap_or_else(|| dragged(anchor, anchor));
                 acts.push(Act::Edit(creating(self.tool, area)));
-                self.tool = Tool::Select;
+                self.spend();
             }
             // Released where it changes nothing, on the node a new
             // connector came from or where an end may not go, the gesture
@@ -1290,7 +1319,7 @@ impl Machine {
             Gesture::Connecting { plan, .. } => {
                 if let Some(intent) = plan {
                     acts.push(Act::Edit(intent));
-                    self.tool = Tool::Select;
+                    self.spend();
                 }
             }
         }
@@ -1356,7 +1385,7 @@ impl Machine {
                     size,
                 };
                 acts.push(Act::Edit(creating(self.tool, area)));
-                self.tool = Tool::Select;
+                self.spend();
             }
         }
     }
@@ -1372,7 +1401,7 @@ impl Machine {
         } else if self.seek.is_some() {
             self.seek = None;
         } else if self.tool != Tool::Select {
-            self.tool = Tool::Select;
+            self.put_away();
         } else {
             self.selection.clear();
         }
@@ -1407,10 +1436,11 @@ impl Machine {
         }
     }
 
-    /// Open the label of `id`. A label is edited with no tool armed, and
+    /// Open the label of `id`. A label is edited with no tool armed but a
+    /// locked one, whose next press commits the label and makes another;
     /// Space is text in it.
     fn open(&mut self, element: Source, acts: &mut Vec<Act>) {
-        self.tool = Tool::Select;
+        self.spend();
         self.space = false;
         self.seek = None;
         self.editing = Some(element.clone());
@@ -1518,7 +1548,8 @@ impl Machine {
     /// `board.connect.next` and `board.connect.<dir>` from the one selected
     /// node, or for the former from the node the one selected connector
     /// points at, or with nothing selected from no node at all (§5.6 rules
-    /// 5 to 7). The armed shape is the new node's, and the tool is spent.
+    /// 5 to 7). The armed shape is the new node's, and the tool is spent
+    /// unless it is locked.
     fn extend(&mut self, dir: Option<Dir>, view: &View<'_>, acts: &mut Vec<Act>) {
         if !view.writable {
             return;
@@ -1550,7 +1581,7 @@ impl Machine {
             Tool::Shape(shape) => Some(shape),
             _ => None,
         };
-        self.tool = Tool::Select;
+        self.spend();
         acts.push(Act::Edit(Intent::Extend { from, dir, shape }));
     }
 
@@ -1562,7 +1593,7 @@ impl Machine {
             Tool::Shape(shape) => shape,
             _ => Shape::Rect,
         };
-        self.tool = Tool::Select;
+        self.spend();
         let (x, y) = view.centre();
         if let Some(at) = place::start(view.board, [x, y], NODE_SIZE) {
             acts.push(Act::Edit(Intent::AddNode {
@@ -2769,6 +2800,11 @@ z = "F"
         Armed(Tool),
         /// Armed with `a` selected.
         ArmedSelected(Tool),
+        /// Armed twice, so locked.
+        Locked(Tool),
+        /// The diamond tool locked, and the label of the diamond it made
+        /// open.
+        LockedEditing,
         PressedNode,
         PressedCanvas,
         /// On a resize handle of the selected `a`.
@@ -2861,6 +2897,19 @@ z = "F"
                 rig.click(A);
                 rig.run(Command::Tool(tool));
                 State::Armed
+            }
+            From::Locked(tool) => {
+                rig.run(Command::Tool(tool));
+                rig.run(Command::Tool(tool));
+                assert!(rig.machine.locked(), "{tool:?}");
+                State::Armed
+            }
+            From::LockedEditing => {
+                rig.run(Command::Tool(DIAMOND));
+                rig.run(Command::Tool(DIAMOND));
+                let acts = rig.click(CANVAS);
+                rig.play(&acts);
+                State::Editing
             }
             From::PressedNode => {
                 rig.press(A);
@@ -3125,6 +3174,46 @@ z = "F"
                 State::Editing,
             ),
             (From::Armed(Tool::Hand), T::Press(Left), State::Panning),
+            // Armed again, a making tool is locked: what it makes leaves it
+            // armed, and Escape, Select, another tool or losing the
+            // keyboard put it away (discovery/board-controls.md D3).
+            (From::Armed(Tool::Hand), hand, State::Armed),
+            (
+                From::Locked(DIAMOND),
+                T::Command(C::Tool(DIAMOND)),
+                State::Armed,
+            ),
+            (From::Locked(DIAMOND), T::Press(Left), State::Pressed),
+            (From::Locked(DIAMOND), escape, State::Idle),
+            (
+                From::Locked(DIAMOND),
+                T::Command(C::Tool(Tool::Select)),
+                State::Idle,
+            ),
+            (
+                From::Locked(DIAMOND),
+                T::Command(C::Tool(Tool::Text)),
+                State::Armed,
+            ),
+            (From::Locked(DIAMOND), focus(false), State::Unfocused),
+            (
+                From::Locked(DIAMOND),
+                T::Made(C::ConnectNext),
+                State::Editing,
+            ),
+            (From::Locked(Tool::Text), T::Press(Left), State::Pressed),
+            (From::Locked(Tool::Connector), T::PressNode, State::Pressed),
+            // A press off the label commits it and makes another.
+            (From::LockedEditing, T::PressOther, State::Pressed),
+            (From::LockedEditing, T::Press(Left), State::Editing),
+            (From::LockedEditing, escape, State::Armed),
+            (
+                From::LockedEditing,
+                T::Command(C::CommitLabel),
+                State::Armed,
+            ),
+            (From::LockedEditing, T::Settle, State::Armed),
+            (From::LockedEditing, focus(false), State::Unfocused),
             // The connector tool with one node selected connects it by
             // keyboard.
             (
@@ -3282,7 +3371,8 @@ z = "F"
             (From::PanningEditing, T::Release(Middle), State::Editing),
             (From::PanningEditing, escape, State::Editing),
             (From::PanningEditing, T::Settle, State::Idle),
-            (From::PanningHand, T::Release(Left), State::Idle),
+            // The hand tool stays armed after its drag.
+            (From::PanningHand, T::Release(Left), State::Armed),
             (From::PanningHand, T::Release(Middle), State::Panning),
         ];
         // Moving, Resizing and Marquee: release ends them, anything that
@@ -5599,28 +5689,33 @@ to = { node = "gone" }
     }
 
     #[test]
-    fn the_hand_tool_pans_once() {
+    fn the_hand_tool_pans_until_another_tool_is_picked() {
         let mut rig = Rig::new();
         rig.run(Command::Tool(Tool::Hand));
-        rig.press(A);
-        let before = rig.viewport;
-        assert!(matches!(rig.by(-30.0, 10.0)[..], [Act::Look(_)]));
-        assert_eq!(
-            (rig.viewport.x, rig.viewport.y),
-            (before.x + 30.0, before.y - 10.0)
-        );
-        assert!(rig.release().is_empty());
-        // Nothing was selected or made, and the tool is spent (§5.2: no
-        // tool lock), so the next press selects.
-        assert!(rig.selected().is_empty());
-        assert_eq!(
-            (rig.state(), rig.machine.tool()),
-            (State::Idle, Tool::Select)
-        );
-        rig.click(A);
-        assert_eq!(rig.selected(), ["a"]);
-        // A middle drag with the hand armed leaves it armed.
+        for _ in 0..2 {
+            rig.press(A);
+            let before = rig.viewport;
+            assert!(matches!(rig.by(-30.0, 10.0)[..], [Act::Look(_)]));
+            assert_eq!(
+                (rig.viewport.x, rig.viewport.y),
+                (before.x + 30.0, before.y - 10.0)
+            );
+            assert!(rig.release().is_empty());
+            // Nothing was selected or made, and the hand stays for the
+            // next drag (discovery/board-controls.md D3).
+            assert!(rig.selected().is_empty());
+            assert_eq!(
+                (rig.state(), rig.machine.tool()),
+                (State::Armed, Tool::Hand)
+            );
+        }
+        // It has no lock: armed again it is still the hand, unlocked.
         rig.run(Command::Tool(Tool::Hand));
+        assert_eq!(
+            (rig.machine.tool(), rig.machine.locked()),
+            (Tool::Hand, false)
+        );
+        // A middle drag with the hand armed leaves it armed too.
         rig.press_with(Button::Middle, A);
         rig.step(Input::Release {
             button: Button::Middle,
@@ -5629,21 +5724,149 @@ to = { node = "gone" }
             (rig.state(), rig.machine.tool()),
             (State::Armed, Tool::Hand)
         );
+        // Select puts it away, and the next press selects.
+        rig.run(Command::Tool(Tool::Select));
+        rig.click(A);
+        assert_eq!(rig.selected(), ["a"]);
+        for away in [ESCAPE, Input::Focus(false)] {
+            let mut rig = Rig::new();
+            rig.run(Command::Tool(Tool::Hand));
+            rig.step(away);
+            assert_eq!(rig.machine.tool(), Tool::Select, "{away:?}");
+        }
     }
 
     #[test]
-    fn space_pans_with_any_tool_and_selects_nothing() {
-        for tool in [Tool::Select, DIAMOND, Tool::Text, Tool::Connector] {
+    fn a_tool_armed_again_is_locked_and_stays_after_what_it_makes() {
+        // Each making tool, armed twice, makes two in a row.
+        for tool in [DIAMOND, Tool::Text] {
             let mut rig = Rig::new();
             rig.run(Command::Tool(tool));
-            rig.step(Input::Space { held: true });
-            rig.press(A);
-            assert_eq!(rig.state(), State::Panning, "{tool:?}");
-            assert!(matches!(rig.by(20.0, 0.0)[..], [Act::Look(_)]));
-            assert!(rig.release().is_empty());
-            assert!(rig.selected().is_empty());
-            assert_eq!(rig.machine.tool(), tool);
+            assert!(!rig.machine.locked());
+            rig.run(Command::Tool(tool));
+            assert!(rig.machine.locked(), "{tool:?}");
+            let acts = rig.click(CANVAS);
+            assert!(matches!(acts[..], [Act::Edit(Intent::AddNode { .. })]));
+            assert_eq!(rig.play(&acts), [Act::OpenLabel(element("new1"))]);
+            // The label opens with the tool still armed and locked.
+            assert_eq!(rig.state(), State::Editing);
+            assert_eq!((rig.machine.tool(), rig.machine.locked()), (tool, true));
+            // A press off the label commits it and makes the next.
+            rig.press(FREE);
+            let acts = rig.release();
+            assert!(
+                matches!(acts[..], [Act::Edit(Intent::AddNode { .. })]),
+                "{tool:?}: {acts:?}"
+            );
+            // A drag makes one too.
+            rig.play(&acts);
+            rig.press((300.0, 140.0));
+            rig.by(60.0, 40.0);
+            assert!(matches!(
+                rig.release()[..],
+                [Act::Edit(Intent::AddNode { .. })]
+            ));
+            assert_eq!((rig.machine.tool(), rig.machine.locked()), (tool, true));
         }
+        // Armed a third time it is unlocked, and spent by what it makes.
+        let mut rig = Rig::new();
+        for _ in 0..3 {
+            rig.run(Command::Tool(DIAMOND));
+        }
+        assert_eq!((rig.machine.tool(), rig.machine.locked()), (DIAMOND, false));
+        rig.click(CANVAS);
+        assert_eq!(rig.machine.tool(), Tool::Select);
+
+        // Tab adds the locked shape after the selection and keeps it.
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::Tool(DIAMOND));
+        rig.run(Command::Tool(DIAMOND));
+        let acts = rig.run(Command::ConnectNext);
+        assert!(matches!(
+            acts[..],
+            [Act::Edit(Intent::Extend {
+                shape: Some(Shape::Diamond),
+                ..
+            })]
+        ));
+        assert_eq!((rig.machine.tool(), rig.machine.locked()), (DIAMOND, true));
+
+        // A locked connector tool draws one connector after another.
+        let mut rig = Rig::new();
+        rig.run(Command::Tool(Tool::Connector));
+        rig.run(Command::Tool(Tool::Connector));
+        rig.press(A);
+        rig.to(B);
+        let acts = rig.release();
+        assert_eq!(acts, [Act::Edit(joined("a", floating("b")))]);
+        rig.play(&acts);
+        assert_eq!(rig.state(), State::Armed);
+        assert_eq!(
+            (rig.machine.tool(), rig.machine.locked()),
+            (Tool::Connector, true)
+        );
+    }
+
+    #[test]
+    fn a_lock_ends_with_escape_select_another_tool_or_the_keyboard() {
+        let locked = || {
+            let mut rig = Rig::new();
+            rig.run(Command::Tool(DIAMOND));
+            rig.run(Command::Tool(DIAMOND));
+            assert!(rig.machine.locked());
+            rig
+        };
+        let mut rig = locked();
+        rig.step(ESCAPE);
+        assert_eq!(
+            (rig.machine.tool(), rig.machine.locked()),
+            (Tool::Select, false)
+        );
+        let mut rig = locked();
+        rig.run(Command::Tool(Tool::Select));
+        assert_eq!(
+            (rig.machine.tool(), rig.machine.locked()),
+            (Tool::Select, false)
+        );
+        // Another tool is armed unlocked, the hand included.
+        for other in [Tool::Text, Tool::Hand, Tool::Shape(Shape::Rect)] {
+            let mut rig = locked();
+            rig.run(Command::Tool(other));
+            assert_eq!((rig.machine.tool(), rig.machine.locked()), (other, false));
+        }
+        let mut rig = locked();
+        rig.step(Input::Focus(false));
+        assert_eq!(
+            (rig.machine.tool(), rig.machine.locked()),
+            (Tool::Select, false)
+        );
+        let mut rig = locked();
+        rig.machine.reset();
+        assert!(!rig.machine.locked());
+        // With a label open, Escape closes it first and the next one puts
+        // the tool away.
+        let mut rig = locked();
+        let acts = rig.click(CANVAS);
+        rig.play(&acts);
+        assert_eq!(rig.step(ESCAPE), [Act::CommitLabel]);
+        assert_eq!((rig.state(), rig.machine.locked()), (State::Armed, true));
+        rig.step(ESCAPE);
+        assert_eq!((rig.state(), rig.machine.locked()), (State::Idle, false));
+        // Select and Hand have no lock, and a read-only board arms no
+        // making tool to lock.
+        let mut rig = Rig::new();
+        rig.run(Command::Tool(Tool::Select));
+        rig.run(Command::Tool(Tool::Select));
+        assert!(!rig.machine.locked());
+        let mut rig = Rig::new();
+        rig.writable = false;
+        rig.run(Command::Tool(DIAMOND));
+        rig.run(Command::Tool(DIAMOND));
+        assert_eq!(
+            (rig.machine.tool(), rig.machine.locked()),
+            (Tool::Select, false)
+        );
     }
 
     #[test]

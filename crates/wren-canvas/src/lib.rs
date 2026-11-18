@@ -263,6 +263,10 @@ pub struct Style {
     /// The window's scale factor, which iced does not give a widget:
     /// precise wheel deltas arrive in physical pixels.
     pub scale_factor: f32,
+    /// Whether the widget names the armed tool in a chip at its top left;
+    /// a host that shows the armed tool itself turns it off. Keyboard
+    /// Connecting's chip is drawn either way.
+    pub tool_chip: bool,
 }
 
 impl Default for Style {
@@ -270,6 +274,7 @@ impl Default for Style {
         Self {
             labels: None,
             scale_factor: 1.0,
+            tool_chip: true,
         }
     }
 }
@@ -444,6 +449,9 @@ pub struct BoardView {
     epoch: u64,
     /// The widget's size, once it has said.
     size: Option<(f32, f32)>,
+    /// Logical pixels along the widget's bottom that the host's chrome
+    /// covers, which a fit leaves out ([`BoardView::set_covered`]).
+    covered: f32,
     /// A fit asked for before the widget's size was known.
     fit_pending: bool,
     /// The view is the board's fit, with no pan, zoom or centring since:
@@ -547,6 +555,7 @@ impl BoardView {
             machine: Machine::default(),
             epoch: epoch(),
             size: None,
+            covered: 0.0,
             fit_pending: false,
             fitted: false,
             anchor: None,
@@ -750,6 +759,31 @@ impl BoardView {
         self.jump(self.viewport.zoomed_to(1.0, self.centre()));
     }
 
+    /// Say how many logical pixels along the widget's bottom the host's
+    /// chrome covers (a tool bar floating over the board). A fit then
+    /// shows the board in the rest, so the chrome hides none of it; a
+    /// view already fitted is fitted again.
+    pub fn set_covered(&mut self, bottom: f32) {
+        let bottom = if bottom.is_finite() {
+            bottom.max(0.0)
+        } else {
+            0.0
+        };
+        if bottom == self.covered {
+            return;
+        }
+        self.covered = bottom;
+        if self.fitted && self.size.is_some() {
+            self.fit();
+        }
+    }
+
+    /// The part of a widget of `size` a fit shows the board in: all of
+    /// it but what the host's chrome covers, and never under half of it.
+    fn room(&self, (width, height): (f32, f32)) -> (f32, f32) {
+        (width, (height - self.covered).max(height / 2.0))
+    }
+
     /// Show all of the board with [`FIT_MARGIN`] around it, never above
     /// 100 %; an empty board at 100 % with its origin in the middle. Before
     /// the widget has said its size the fit waits for it, and the widget
@@ -757,7 +791,8 @@ impl BoardView {
     pub fn fit(&mut self) {
         match self.size {
             Some(size) => {
-                self.jump(Viewport::fitting(self.scenes.scene().bounds, size));
+                let room = self.room(size);
+                self.jump(Viewport::fitting(self.scenes.scene().bounds, room));
                 self.fit_pending = false;
             }
             None => self.fit_pending = true,
@@ -826,7 +861,7 @@ impl BoardView {
         };
         let zoom = self.viewport.zoom;
         let viewport = if bounds.height * zoom < SHOW_LEAST {
-            Viewport::fitting(bounds, size)
+            Viewport::fitting(bounds, self.room(size))
         } else {
             let centre = bounds.center();
             Viewport {
@@ -2000,7 +2035,7 @@ impl BoardView {
                     .filter_map(|element| bounds(&self.board, self.scenes.scene(), element))
                     .reduce(union);
                 if let (Some(bounds), Some(size)) = (bounds, self.size) {
-                    self.jump(Viewport::fitting(bounds, size));
+                    self.jump(Viewport::fitting(bounds, self.room(size)));
                 }
             }
             _ => {}
@@ -2783,6 +2818,48 @@ mod tests {
         assert!(margins
             .iter()
             .any(|margin| (margin - FIT_MARGIN).abs() < 0.01));
+    }
+
+    #[test]
+    fn a_fit_leaves_out_what_the_hosts_chrome_covers() {
+        const COVERED: f32 = 30.0;
+        let mut view = sized(fixtures::CHECKOUT_FLOW);
+        view.fit();
+        let before = view.viewport();
+        // Said after the fit, it fits again in the room left.
+        view.set_covered(COVERED);
+        let (viewport, bounds) = (view.viewport(), view.scene().bounds);
+        assert_ne!(viewport, before);
+        assert_eq!(
+            viewport,
+            Viewport::fitting(bounds, (SIZE.0, SIZE.1 - COVERED))
+        );
+        let far = viewport.to_screen((bounds.right(), bounds.bottom()));
+        assert!(SIZE.1 - far.1 >= FIT_MARGIN + COVERED - 0.01, "{far:?}");
+        // The selection's fit and an element's are in that room too.
+        view.update(
+            Message::Resized {
+                width: 400.0,
+                height: 300.0,
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            view.viewport(),
+            Viewport::fitting(bounds, (400.0, 300.0 - COVERED))
+        );
+        // A view the user moved is left where it is.
+        view.set_viewport(Viewport {
+            x: 7.0,
+            y: 9.0,
+            zoom: 1.0,
+        });
+        view.set_covered(0.0);
+        assert_eq!((view.viewport().x, view.viewport().y), (7.0, 9.0));
+        // However much is covered, a fit keeps half the widget.
+        view.set_covered(1000.0);
+        view.fit();
+        assert_eq!(view.viewport(), Viewport::fitting(bounds, (400.0, 150.0)));
     }
 
     #[test]

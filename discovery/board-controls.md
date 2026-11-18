@@ -65,6 +65,18 @@ and Document, Text, Connector, and a button for the keys sheet.
 - The armed-tool chip the canvas shows today at the top left goes away when
   the dock is on, since the dock says the same thing.
 
+As built: the dock is `app/board_dock.rs`, whose `dock` decides the
+buttons, what is lit and locked, the badges and the fold as a pure
+function of the machine and the settings. On a read-only board it holds
+Select, Hand and the keys button only. A click with a label open commits
+the label, as the command it runs does, then arms the tool. A canvas too
+narrow for even the folded dock shows none. A fit leaves room for the dock
+(`BoardView::set_covered`), so a fitted board ends above it. The canvas
+drops the tool chip through `Style::tool_chip`. The machine's lock is
+`Machine::locked`; a locked tool keeps its tool while the label of what it
+made is open, and a press off the label commits it and makes the next.
+`board.dock` reports the dock with each button's place.
+
 ### 3.2 Style bar
 
 Shown at the top centre when something is selected, built from
@@ -108,9 +120,11 @@ and the zoom. It extends the hint an empty board shows today.
 
 The keys shown come from the live keymap, so a rebound key shows as
 rebound and an unbound command drops out of the line. "Space show keys"
-and "its key again to lock" wait for step 4, which builds what they name.
-The decision is `app/board_keys.rs`'s `hint`; `board.get` reports it as
-`hint`.
+shows only while Space shows the dock's keys (`board-toolbar = on` and
+`board-key-badges = hold`); "its key again to lock" names the armed
+tool's key (`D again to lock`), reads "again to unlock" while it is
+locked, and drops out for the two shapes with no key. The decision is
+`app/board_keys.rs`'s `hint`; `board.get` reports it as `hint`.
 
 ### 3.5 Keys sheet
 
@@ -200,7 +214,7 @@ Wren themes; the gates are those of `CLAUDE.md`.
 2. The draw.io line layout for Lucidchart (§6). Landed.
 3. Hint line and keys sheet (§3.4, §3.5), with `board-hints`. Landed.
 4. Tool dock (§3.1), tool lock, the hand tool staying armed, key badges
-   (§3.3), `board-toolbar`.
+   (§3.3), `board-toolbar`. Landed.
 5. Style bar (§3.2) and the sticky colour.
 6. Footer controls (§3.6).
 7. Pinch on macOS (§3.8).

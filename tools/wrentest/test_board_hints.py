@@ -48,7 +48,8 @@ def sheet(app: WrenApp) -> dict | None:
 def test_the_hint_follows_the_selection_the_tool_and_the_label(samples: Path) -> None:
     with board_app(samples, "board-hints") as app:
         focused_board(app)
-        assert line(board(app)) == "Tab add a shape · R O D U Y P pick a shape · ? all keys"
+        assert line(board(app)) == ("Tab add a shape · R O D U Y P pick a shape · Space show keys"
+                                    " · ? all keys")
 
         click(app, {"node": PACK})
         assert line(board(app)) == (f"Tab next shape · {MOD}Arrow connect · ↵ label · "
@@ -57,7 +58,11 @@ def test_the_hint_follows_the_selection_the_tool_and_the_label(samples: Path) ->
         state = key(app, "d")
         assert state["tool"] == "diamond"
         assert line(state) == ("click to place · drag to size · Tab add it after the selection"
-                               " · esc cancel")
+                               " · D again to lock · esc cancel")
+        # Its key again locks it, and the hint says how to undo that.
+        state = key(app, "d")
+        assert state["locked"] is True
+        assert "D again to unlock" in line(state)
         key(app, "escape")
         state = key(app, "enter")
         assert state["state"] == "editing"
@@ -76,7 +81,7 @@ def test_a_read_only_board_hints_only_what_it_takes(samples: Path) -> None:
         focused_board(app, FUTURE)
         state = board(app)
         assert state["read_only"] is True
-        assert line(state) == "? all keys"
+        assert line(state) == "Space show keys · ? all keys"
 
 
 def test_the_setting_off_leaves_the_footer_as_it_was(samples: Path) -> None:

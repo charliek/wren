@@ -70,7 +70,8 @@ when one lands, move what users need into `docs/` and trim the note.
     `workspace_view.rs`, `navigation.rs`, `board.rs` (the board surface,
     the single writer and the export commands), `board_find.rs` (the jump
     palette and search reveal), `board_keys.rs` (the footer's hint line
-    and the keys sheet), `board_harness.rs` (the `board.*` test
+    and the keys sheet), `board_dock.rs` (the tool dock over the canvas),
+    `board_harness.rs` (the `board.*` test
     requests), `board_edit_tests.rs`, and `board_spike.rs`
     (`--board-spike N`).
   - `board_export.rs` writes a board as SVG, PNG (through resvg) or

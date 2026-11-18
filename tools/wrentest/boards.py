@@ -240,10 +240,12 @@ def midpoint(points: list[list[float]]) -> tuple[float, float]:
     return tuple(points[-1])  # type: ignore[return-value]
 
 
-def key(app: WrenApp, name: str, *mods: str, repeat: bool = False) -> dict:
+def key(app: WrenApp, name: str, *mods: str, repeat: bool = False,
+        release: bool = False) -> dict:
     """A key pressed on the focused board (§6.2 ``board.key``): ``mod`` is
-    ⌘ on macOS and Ctrl elsewhere."""
-    return app.client.call("board.key", {"key": name, "mods": list(mods), "repeat": repeat})
+    ⌘ on macOS and Ctrl elsewhere. ``release`` lets go of a held Space."""
+    return app.client.call("board.key", {"key": name, "mods": list(mods), "repeat": repeat,
+                                         "release": release})
 
 
 def type_text(app: WrenApp, text: str) -> dict:

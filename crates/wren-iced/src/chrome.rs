@@ -17,6 +17,14 @@ pub enum Icon {
     More,
     /// A board note: two shapes and the connector between them.
     Board,
+    /// The board's select tool: a pointer.
+    Select,
+    /// The board's hand tool: an open hand.
+    Hand,
+    /// The board's text tool: a capital T.
+    Text,
+    /// The board's connector tool: a line ending in an arrow.
+    Connector,
 }
 
 pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Message> {
@@ -31,7 +39,17 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Me
         Icon::Forward => "<path d='m10 6 6 6-6 6'/>",
         Icon::More => "<circle cx='5' cy='12' r='1'/><circle cx='12' cy='12' r='1'/><circle cx='19' cy='12' r='1'/>",
         Icon::Board => "<rect x='3' y='3' width='8' height='6' rx='1.5'/><rect x='13' y='15' width='8' height='6' rx='1.5'/><path d='M7 9v7.5a1.5 1.5 0 0 0 1.5 1.5H13'/>",
+        Icon::Select => "<path d='M6.5 3.5v14.5l3.7-3.6 2.6 5.9 2.4-1.1-2.6-5.8 5.2-.3z'/>",
+        Icon::Hand => "<path d='M8 12.5V6a1.5 1.5 0 0 1 3 0v5.5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v6M17 12V8.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1.6a5 5 0 0 1-3.9-1.9l-3.8-4.8a1.5 1.5 0 0 1 2.2-2L8 14.5'/>",
+        Icon::Text => "<path d='M5.5 7V5h13v2M12 5v14M9.5 19h5'/>",
+        Icon::Connector => "<path d='M5 19 18 6M11 6h7v7'/>",
     };
+    paths_icon(paths, size, tint)
+}
+
+/// An icon drawn from SVG path elements in a 24-unit square, stroked in
+/// `tint` as [`icon`] strokes its own.
+pub fn paths_icon<'a, Message: 'a>(paths: &str, size: f32, tint: Rgb) -> Element<'a, Message> {
     // Keep strokes about 1.4 px on screen: at 14 px a 1.8-unit stroke
     // rasterizes to one faint pixel on dark themes.
     let stroke = (24.0 * 1.4 / size).max(1.8);

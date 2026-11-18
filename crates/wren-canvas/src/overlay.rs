@@ -96,7 +96,13 @@ pub(crate) struct Overlay {
 
 /// What is drawn over the view's board as it is shown now: a gesture's
 /// preview moves the outlines and handles with it.
+#[cfg(test)]
 pub(crate) fn marks(view: &BoardView) -> Overlay {
+    marks_with(view, true)
+}
+
+/// [`marks`], with the armed tool's chip only if `tool_chip`.
+pub(crate) fn marks_with(view: &BoardView, tool_chip: bool) -> Overlay {
     let machine = view.machine();
     let picture = view.picture();
     let viewport = view.viewport();
@@ -256,7 +262,7 @@ pub(crate) fn marks(view: &BoardView) -> Overlay {
             "" => CONNECT_TO.to_owned(),
             query => format!("{CONNECT_TO}: {query}"),
         }));
-    } else if let Some(name) = tool_name(machine.tool()) {
+    } else if let Some(name) = tool_name(machine.tool()).filter(|_| tool_chip) {
         marks.push(Mark::Chip(name.to_owned()));
     }
     let empty = picture.board.nodes.is_empty() && picture.board.edges.is_empty();
@@ -819,6 +825,9 @@ mod tests {
         view.command(Command::Tool(Tool::Select), now);
         assert_eq!(marks(&view).marks, []);
         assert_eq!(tool_name(Tool::Connector), Some("Connector"));
+        // A host that shows the armed tool itself turns the chip off.
+        view.command(Command::Tool(Tool::Text), now);
+        assert_eq!(marks_with(&view, false).marks, []);
     }
 
     #[test]
@@ -852,6 +861,10 @@ mod tests {
         );
         // An armed tool is named no more.
         assert_eq!(count(&overlay, |mark| matches!(mark, Mark::Chip(_))), 1);
+        // Keyboard Connecting keeps its chip with the tool chip off.
+        assert!(marks_with(&view, false)
+            .marks
+            .contains(&chip("Connect to: b")));
         input(
             &mut view,
             Input::Key {

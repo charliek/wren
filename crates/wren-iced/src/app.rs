@@ -14,6 +14,7 @@ pub use crate::cli::Options;
 use crate::{fonts, theme};
 
 mod board;
+mod board_dock;
 mod board_find;
 mod board_keys;
 mod board_spike;
@@ -59,6 +60,11 @@ pub struct App {
     board_viewports: board::Viewports,
     /// How many drafts the open board has sent, plus its reloads.
     board_revision: u64,
+    /// The tool dock's open menu, if any.
+    dock_menu: Option<board_dock::Menu>,
+    /// The shape last armed, which the dock's folded shapes button shows
+    /// while none is.
+    dock_shape: wren_board::Shape,
     /// The generated board of `--board-spike`, shown in place of the editor.
     board_spike: Option<wren_canvas::BoardView>,
     /// What the Board menu's items were last enabled from; `None` until the
@@ -175,6 +181,8 @@ pub enum Message {
     BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
+    /// The board's tool dock opens one of its menus, or closes it.
+    DockMenu(Option<board_dock::Menu>),
     PaletteOpen(palette::Mode),
     PaletteQuery(String),
     PaletteChoose(u64, palette::Key),
@@ -251,7 +259,7 @@ pub enum Message {
     #[cfg(feature = "smoke-test")]
     BoardProbed(
         std::sync::Arc<crate::test_ipc::Request>,
-        board_harness::Placement,
+        Box<board_harness::Placement>,
     ),
     /// An editor command's shortcut, routed as the editor widget routes
     /// it: `Some` only while the editor has the keyboard.
@@ -350,6 +358,8 @@ impl App {
             board_error: None,
             board_viewports: board::Viewports::new(),
             board_revision: 0,
+            dock_menu: None,
+            dock_shape: wren_board::Shape::Rect,
             board_spike: None,
             #[cfg(any(target_os = "macos", test))]
             menu_inputs: None,
@@ -500,7 +510,7 @@ impl App {
             Message::Reply(request, result) => request.respond(result),
             #[cfg(feature = "smoke-test")]
             Message::BoardProbed(request, placement) => {
-                return self.board_probed(&request, placement)
+                return self.board_probed(&request, *placement)
             }
             #[cfg(feature = "smoke-test")]
             Message::EditorShortcut(request, route) => {
@@ -544,6 +554,7 @@ impl App {
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
+            Message::DockMenu(menu) => self.dock_menu = menu,
             Message::PaletteOpen(mode) => return self.open_palette(mode).task,
             Message::PaletteQuery(query) => return self.palette_query(query).task,
             Message::PaletteChoose(generation, key) => {
@@ -647,6 +658,10 @@ impl App {
                 // An open suggestions menu is the topmost thing Escape
                 // closes; the editor keeps the keyboard and the find bar stays.
                 if self.editor.close_spell_menu() {
+                    return Task::none();
+                }
+                // So is the board dock's menu, and the board keeps it.
+                if self.dock_menu.take().is_some() {
                     return Task::none();
                 }
                 self.cancel_gestures();

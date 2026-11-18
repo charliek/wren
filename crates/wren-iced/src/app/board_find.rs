@@ -915,7 +915,8 @@ to = { node = "bare" }
         assert_eq!(selection(&app), [edge("go")]);
         lay_out(&mut app);
         assert_shown(&app, &edge("go"));
-        let fitted = Viewport::fitting(view(&app).scene().bounds, SIZE);
+        let room = (SIZE.0, SIZE.1 - crate::app::board_dock::covered(true));
+        let fitted = Viewport::fitting(view(&app).scene().bounds, room);
         assert_eq!(view(&app).viewport().zoom, fitted.zoom);
 
         // Opened again it keeps the zoom it was left at.

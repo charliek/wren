@@ -1006,8 +1006,13 @@ impl App {
             .center_x(Fill)
             .center_y(Fill)
             .style(move |_| chrome::surface(self.definition, colors.editor, 0.0, false));
+        // The board's tool dock floats over the canvas, the editor kept as
+        // the stack's first layer so its state survives the dock coming and
+        // going.
         let document: Element<'_, Message> = if self.selected_note.is_none() {
             stack![editor, opaque(empty)].into()
+        } else if let Some(dock) = self.board_dock_view() {
+            stack![editor, dock].into()
         } else {
             stack![editor].into()
         };

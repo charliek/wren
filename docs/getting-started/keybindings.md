@@ -253,6 +253,11 @@ them:
 | Solid or dashed | `board.stroke.dashed` |
 | New board, Export board as SVG, PNG, draw.io | `note.new_board`, `note.export_svg`, `note.export_png`, `note.export_drawio` |
 
+A tool's key pressed while that tool is armed locks it, so it stays armed
+after each shape it makes; Esc, V, or another tool's key unlocks it. The
+hand tool stays armed until another tool is picked. Holding Space shows
+each key on the board's [tool dock](../reference/boards.md#the-tool-dock).
+
 Esc steps back one thing at a time: it finishes an open label, ends a
 connect, puts away an armed tool, then clears the selection. It never
 leaves the board.

@@ -36,15 +36,21 @@ and the save status.
 | Tool | Key | |
 |---|---|---|
 | Select | V | Click to select, drag to move, drag on empty canvas for a marquee. |
-| Hand | H | Drag to pan. |
+| Hand | H | Drag to pan; it stays armed for the next drag until you pick another tool. |
 | Rectangle, ellipse, diamond, pill, cylinder, parallelogram | R, O, D, U, Y, P | Click for a 120 by 60 shape centred there, or drag from corner to corner. |
-| Rounded rectangle, document | — | The same, from the command palette. |
+| Rounded rectangle, document | — | The same, from the dock's "more shapes" menu or the command palette. |
 | Text | T | Free text: no outline and no fill, left- and top-aligned. |
 | Connector | C or A | See [Connectors](#connectors). |
 
 Tools are one-shot: after one shape the select tool is back, and Esc or V
-puts an armed tool away. A double-click on empty canvas makes a rectangle,
-and every new shape opens its label for typing. Shift with a shape's letter
+puts an armed tool away. Arming the tool that is already armed (its key,
+or its dock button, again) locks it: a locked shape, text, or connector
+tool stays armed after what it makes, so you can place one shape after
+another; a click away from the open label finishes it and places the
+next. Esc, V, or another tool unlocks it, and so does the board losing
+the keyboard. Select and the hand tool have no lock. A double-click on
+empty canvas makes a rectangle, and every new shape opens its label for
+typing. Shift with a shape's letter
 (⇧R, ⇧O, ⇧D, ⇧U, ⇧Y, ⇧P) changes the shape of every selected shape and
 keeps its size and label.
 
@@ -209,6 +215,38 @@ distribute leaves that row as it is. A shape selected with one of the
 shapes it is nested in moves with its container, not on its own, and
 connectors follow the shapes they join.
 
+## The tool dock
+
+A bar of tools floats at the bottom centre of a board: Select and Hand;
+the six shapes that have keys (rectangle, ellipse, diamond, pill,
+cylinder, parallelogram) and a "more shapes" menu holding Rounded
+rectangle and Document; Text and Connector; and **?**, which opens the
+keys sheet. A click on a button does what its key does, through the same
+command, so the armed tool's button is lit whether you clicked it or
+pressed its key, and a locked tool's button shows a dot. The shape
+buttons draw each shape's outline in the theme's text colour. Hovering a
+button names it and its key.
+
+A click on the dock leaves the keyboard with the board. With a label
+open, a click on a tool finishes the label first, as a click elsewhere
+on the board does, then arms the tool. A press on the dock never reaches
+the canvas beneath it, and the pointer there is the dock's.
+
+Holding Space (which also pans with a drag) shows each button's key in
+its corner; letting go hides them. A tool with no key shows none.
+`board-key-badges` in [`config.conf`](configuration.md) shows them
+always (`on`) or never (`off`); the default is `hold`.
+
+Where the canvas is under 560 pixels wide, the six shapes fold into one
+button that shows the shape last armed and opens a menu of all eight. A
+canvas too narrow for even the folded dock shows none. On a read-only
+board the dock holds Select, Hand, and **?** only. A board fitted to its
+canvas ends above the dock, so the dock covers none of it.
+
+With the dock showing, the canvas no longer names the armed tool in a
+chip at its top left. `board-toolbar = off` turns the dock off, and the
+chip comes back.
+
 ## Hints and the keys sheet
 
 While a board has the keyboard, its footer names the keys that fit what
@@ -216,11 +254,11 @@ is selected or armed, between the counts and the zoom:
 
 | State | Hint |
 |---|---|
-| Nothing selected | Tab add a shape · R O D U Y P pick a shape · ? all keys |
+| Nothing selected | Tab add a shape · R O D U Y P pick a shape · Space show keys · ? all keys |
 | One shape | Tab next shape · Mod+Arrow connect · ↵ label · 0–7 colour · Shift+D reshape · / actions |
 | Several shapes | 0–7 colour · Alt+Arrow move · / align and distribute · ⌫ delete |
 | Connectors only | 0–7 colour · ↵ label · / route, heads, reverse · ⌫ delete |
-| A shape or text tool armed | click to place · drag to size · Tab add it after the selection · esc cancel |
+| A shape or text tool armed | click to place · drag to size · Tab add it after the selection · R again to lock (or to unlock) · esc cancel |
 | Connector tool | drag from one shape to another · esc cancel |
 | Hand tool, or Space held | drag to pan |
 | A label open | Mod+↵ done · Tab done and add the next shape · esc done |
@@ -229,8 +267,11 @@ is selected or armed, between the counts and the zoom:
 The keys are the ones bound now: a key you rebind shows as rebound, and a
 command with no key drops out. A part that does nothing as the board
 stands drops out too, so a read-only board's hint names only what it
-takes. Where the footer is too narrow, the parts at the end drop out
-whole before anything else; below 440 pixels the hint goes with the
+takes. "Space show keys" appears only while Space shows the dock's keys
+(the dock on, and `board-key-badges = hold`), and "again to lock" names
+the armed tool's own key, so the two shapes with no key have none. Where
+the footer is too narrow, the parts at the end drop out whole before
+anything else; below 440 pixels the hint goes with the
 counts. `board-hints = off` in [`config.conf`](configuration.md) turns the
 hint off.
 
@@ -240,8 +281,8 @@ Colour, Arrange, View, and Menus, with the gestures that have no key.
 Rows that do nothing for the selection as it stands are dimmed, as are
 the editing keys on a read-only board. Typing filters the sheet; ↑ and ↓
 scroll it. **?**, Esc, ↵, or a click outside closes it and gives the
-board the keyboard back. It is also **Board keys** in the command palette
-and, on macOS, the Board menu.
+board the keyboard back. It is also the dock's last button, **Board keys**
+in the command palette and, on macOS, the Board menu.
 
 ## The actions palette
 
@@ -283,7 +324,7 @@ searched as text; the file's own syntax (`kind`, `schema`) is not.
 
 | Action | macOS | Linux |
 |---|---|---|
-| Pan | Scroll, Shift+scroll sideways, middle-drag, Space+drag, or the hand tool | the same |
+| Pan | Scroll, Shift+scroll sideways, middle-drag, Space+drag, or the hand tool (which stays armed) | the same |
 | Zoom at the pointer | ⌘+scroll | Ctrl+scroll |
 | Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Alt+= / Alt+- / Alt+0 |
 | Zoom to fit / to selection | ⇧1 / ⇧2 | the same |

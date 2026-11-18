@@ -1,6 +1,6 @@
 //! The board requests of the test harness (discovery/boards.md §6.2):
-//! `board.get`, `board.bounds`, `board.pointer`, `board.key`, `board.type`
-//! and `board.apply`. Each first asks the widget tree where the widget
+//! `board.get`, `board.bounds`, `board.pointer`, `board.key`, `board.type`,
+//! `board.apply` and `board.dock`. Each first asks the widget tree where the widget
 //! under `note-editor` sits and whether it has the keyboard, then answers
 //! in [`App::board_probed`]. Input goes in where the widget's own goes:
 //! `App::board_edit`, and for a key the app's keyboard path after it.
@@ -18,20 +18,29 @@ use wren_canvas::machine::{self, State};
 use wren_canvas::{handles, hit, BoardView, Button, Input, Mods, Scroll, Tool};
 
 use super::board::Surface;
+use super::board_dock;
 use super::test_requests::Focused;
 use super::{focus_editor, App, Message};
 use crate::test_ipc::Request;
 
 /// Where the widget under `note-editor` sits in the window, in logical
-/// pixels, and whether it has the keyboard.
+/// pixels, and whether it has the keyboard; and where each widget of the
+/// board's tool dock is, in the order of `board_dock::IDS`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Placement {
     pub root: Option<Rectangle>,
     pub focused: bool,
+    pub dock: [Option<Rectangle>; board_dock::IDS.len()],
 }
 
 impl Placement {
     fn of(focused: &Focused) -> Self {
+        let mut dock = [None; board_dock::IDS.len()];
+        for (name, bounds) in &focused.dock {
+            if let Some(index) = board_dock::IDS.iter().position(|id| id == name) {
+                dock[index] = Some(*bounds);
+            }
+        }
         Self {
             root: focused
                 .bounds
@@ -39,7 +48,16 @@ impl Placement {
                 .find(|(name, _)| *name == "note-editor")
                 .map(|(_, bounds)| *bounds),
             focused: focused.named.contains(&"note-editor"),
+            dock,
         }
+    }
+
+    /// Where the dock's widget `id` is, as a JSON rectangle or `null`.
+    fn dock_rect(&self, id: &str) -> Value {
+        let index = board_dock::IDS.iter().position(|each| *each == id);
+        index.and_then(|index| self.dock[index]).map_or(Value::Null, |bounds| {
+            json!({"x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height})
+        })
     }
 }
 
@@ -56,7 +74,7 @@ impl App {
         let request = Arc::clone(request);
         Ok(
             iced::advanced::widget::operate(Focused::default()).map(move |focused| {
-                Message::BoardProbed(Arc::clone(&request), Placement::of(&focused))
+                Message::BoardProbed(Arc::clone(&request), Box::new(Placement::of(&focused)))
             }),
         )
     }
@@ -100,7 +118,7 @@ impl App {
                 };
                 return focus_editor().chain(Task::done(Message::BoardProbed(
                     Arc::clone(request),
-                    focused,
+                    Box::new(focused),
                 )));
             }
             "board.pointer" => match self.board_pointer(params, placement) {
@@ -121,6 +139,10 @@ impl App {
                     merge(&mut snapshot, json!({"handled": handled}));
                     (task, Ok(snapshot))
                 }
+                Err(error) => (Task::none(), Err(error)),
+            },
+            "board.dock" => match self.board_dock_request(params, &placement) {
+                Ok((task, dock)) => (task, Ok(dock)),
                 Err(error) => (Task::none(), Err(error)),
             },
             "board.apply" => match self.board_apply(params) {
@@ -170,6 +192,7 @@ impl App {
             "issues": [],
             "state": null,
             "tool": null,
+            "locked": false,
             "pointer": null,
             "selection": [],
             "cursor": null,
@@ -205,6 +228,7 @@ impl App {
             })).collect::<Vec<_>>(),
             "state": state_name(machine, focused),
             "tool": tool_name(machine.tool()),
+            "locked": machine.locked(),
             "pointer": machine.pointer().name(),
             "selection": machine.selection().iter().map(|element| element.id().as_str()).collect::<Vec<_>>(),
             "cursor": machine.cursor().map(|cursor| cursor.id().as_str()),
@@ -252,6 +276,87 @@ impl App {
             );
         }
         snapshot
+    }
+
+    /// `board.dock`: the tool dock as it shows, each button with the
+    /// command it runs and where it is; with `click`, a button's or a menu
+    /// row's id, what a click on it sends goes first, through `update` as
+    /// the click's message does. The places are those laid out before the
+    /// click.
+    fn board_dock_request(
+        &mut self,
+        params: &Value,
+        placement: &Placement,
+    ) -> Result<(Task<Message>, Value), String> {
+        let mut task = Task::none();
+        if let Some(id) = params.get("click") {
+            let id = id.as_str().ok_or("click must be a string")?;
+            let dock = self.board_dock().ok_or("The board shows no dock")?;
+            let open = dock.menu.as_ref().map(|(menu, _)| *menu);
+            let button = dock.buttons().find(|button| button.item.id() == id);
+            let row = dock
+                .menu
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .find(|row| board_dock::row_id(row.shape) == id);
+            let message = match (button, row) {
+                (Some(button), _) => board_dock::message(button.item, open),
+                (None, Some(row)) => {
+                    board_dock::message(board_dock::Item::Tool(Tool::Shape(row.shape)), open)
+                }
+                (None, None) => return Err(format!("The dock shows no {id}")),
+            };
+            task = self.update(message);
+        }
+        let Some(dock) = self.board_dock() else {
+            return Ok((
+                task,
+                json!({"shown": false, "folded": false, "rect": null, "buttons": [], "menu": null}),
+            ));
+        };
+        let command = |item: board_dock::Item| item.command().map(wren_canvas::Command::key);
+        let buttons: Vec<Value> = dock
+            .buttons()
+            .map(|button| {
+                json!({
+                    "id": button.item.id(),
+                    "command": command(button.item),
+                    "lit": button.lit,
+                    "locked": button.locked,
+                    "key": button.key,
+                    "badge": button.key.as_ref().filter(|_| button.badge),
+                    "tip": button.tip(),
+                    "rect": placement.dock_rect(button.item.id()),
+                })
+            })
+            .collect();
+        let menu = dock.menu.as_ref().map(|(menu, rows)| {
+            json!({
+                "kind": menu.name(),
+                "rect": placement.dock_rect(board_dock::MENU_ID),
+                "rows": rows.iter().map(|row| {
+                    let id = board_dock::row_id(row.shape);
+                    json!({
+                        "id": id,
+                        "command": wren_canvas::Command::Tool(Tool::Shape(row.shape)).key(),
+                        "lit": row.lit,
+                        "locked": row.locked,
+                        "key": row.key,
+                        "rect": placement.dock_rect(id),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        });
+        Ok((
+            task,
+            json!({
+                "shown": true,
+                "folded": dock.folded,
+                "rect": placement.dock_rect(board_dock::BAR_ID),
+                "buttons": buttons,
+                "menu": menu,
+            }),
+        ))
     }
 
     /// `board.bounds`: where each element of the open board is drawn in
@@ -526,6 +631,17 @@ impl App {
             return Ok((Task::none(), false));
         }
         let epoch = view.epoch();
+        // A held Space let go, as the widget hears its release.
+        if params.get("release").and_then(Value::as_bool) == Some(true) {
+            if pressed.key != iced::keyboard::Key::Named(iced::keyboard::key::Named::Space) {
+                return Err("only space is released".into());
+            }
+            if !view.machine().space() {
+                return Ok((Task::none(), false));
+            }
+            let up = wren_canvas::Message::Input(epoch, Input::Space { held: false });
+            return Ok((self.board_edit(up), true));
+        }
         let taken = view.key(
             &pressed.key,
             pressed.physical,
@@ -1311,6 +1427,7 @@ mod tests {
             height: 600.0,
         }),
         focused: true,
+        dock: [None; board_dock::IDS.len()],
     };
 
     fn ask(app: &mut App, op: &str, params: Value, placement: Placement) -> Result<Value, String> {
@@ -1565,10 +1682,13 @@ mod tests {
                 ("filter-notes", Rectangle::default()),
                 ("note-editor", bounds),
             ],
+            dock: vec![("board-dock-keys", bounds)],
         };
         let placement = Placement::of(&focused);
         assert_eq!(placement.root, Some(bounds));
         assert!(placement.focused);
+        assert_eq!(placement.dock_rect("board-dock-keys")["width"], 3.0);
+        assert_eq!(placement.dock_rect("board-dock-select"), Value::Null);
         assert!(!Placement::of(&Focused::default()).focused);
     }
 

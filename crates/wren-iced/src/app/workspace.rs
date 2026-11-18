@@ -898,8 +898,10 @@ impl App {
                         .opening
                         .unwrap_or_else(std::time::Instant::now);
                     let palette = crate::theme::board_palette(self.definition);
-                    match board::open(text, note, palette, &self.board_viewports) {
+                    let covered = self.board_covered();
+                    match board::open(text, note, palette, &self.board_viewports, covered) {
                         Ok(mut view) => {
+                            self.dock_menu = None;
                             view.set_key_policy(super::preferences::board_policy(
                                 &self.preferences.keymap,
                             ));

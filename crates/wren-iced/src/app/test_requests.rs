@@ -334,7 +334,7 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
             }
             "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
-            | "board.apply" | "board.seed" => return self.board_request(request),
+            | "board.apply" | "board.seed" | "board.dock" => return self.board_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -1257,6 +1257,8 @@ pub(super) struct Focused {
     pub(super) named: Vec<&'static str>,
     pub(super) unnamed: usize,
     pub(super) bounds: Vec<(&'static str, iced::Rectangle)>,
+    /// Where each widget of the board's tool dock is.
+    pub(super) dock: Vec<(&'static str, iced::Rectangle)>,
 }
 
 impl iced::advanced::widget::Operation<Focused> for Focused {
@@ -1265,6 +1267,18 @@ impl iced::advanced::widget::Operation<Focused> for Focused {
         operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<Focused>),
     ) {
         operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
+        let name = id.and_then(|id| {
+            super::board_dock::IDS
+                .iter()
+                .copied()
+                .find(|name| *id == iced::advanced::widget::Id::new(name))
+        });
+        if let Some(name) = name {
+            self.dock.push((name, bounds));
+        }
     }
 
     fn focusable(

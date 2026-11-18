@@ -354,7 +354,7 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
 
         // Over every layer of the scene, and rebuilt with each frame: a
         // handful of paths.
-        let overlay = overlay::marks(view);
+        let overlay = overlay::marks_with(view, self.style.tool_chip);
         if !overlay.marks.is_empty() {
             let mut frame = canvas::Frame::new(renderer, bounds.size());
             overlay::paint(&mut frame, &overlay, view, &cull);
@@ -683,12 +683,13 @@ fn shows(
     };
     let shown = machine.pointer();
     // Over the open label the pointer is the text's, unless a drag or a
-    // held Space has already claimed it.
+    // held Space has already claimed it; a locked tool's press there is
+    // the label's too.
     let over_label = view.label_box().is_some_and(|label| {
         let (x, y) = view.viewport().to_board((at.x - bounds.x, at.y - bounds.y));
         (label.x..=label.right()).contains(&x) && (label.y..=label.bottom()).contains(&y)
     });
-    if over_label && shown == Pointer::Arrow {
+    if over_label && !machine.dragging() && !machine.space() {
         return mouse::Interaction::Text;
     }
     interaction(shown)

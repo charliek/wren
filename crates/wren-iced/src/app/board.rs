@@ -39,17 +39,20 @@ pub(super) enum Surface {
 pub(super) type Viewports = HashMap<NoteId, SavedView>;
 
 /// A view of the board `text` holds, looked at from where `note` was left,
-/// or fitted the first time it opens in this run.
+/// or fitted the first time it opens in this run, leaving `covered` pixels
+/// along its bottom to the host's chrome.
 pub(super) fn open(
     text: &str,
     note: NoteId,
     palette: Palette,
     viewports: &Viewports,
+    covered: f32,
 ) -> Result<BoardView, ParseError> {
     // Labels are measured when the view opens, which can be before iced
     // has loaded the bundled faces for a window.
     fonts::load();
     let mut view = BoardView::open(text, palette, fonts::UI)?;
+    view.set_covered(covered);
     match viewports.get(&note) {
         Some(saved) => view.return_to(*saved),
         None => view.fit(),
@@ -89,6 +92,8 @@ impl App {
             #[cfg(not(feature = "smoke-test"))]
             labels: None,
             scale_factor: self.scale_factor,
+            // The dock lights the armed tool's button instead.
+            tool_chip: self.board_dock().is_none(),
         }
     }
 
@@ -117,6 +122,7 @@ impl App {
                 if held || *epoch != view.epoch() {
                     return Task::none();
                 }
+                self.dock_menu = None;
                 let id = super::commands::CommandId::Board(*command);
                 return self.dispatch(super::commands::Command::Run(id)).task;
             }
@@ -126,6 +132,7 @@ impl App {
                 if held || *epoch != view.epoch() {
                     return Task::none();
                 }
+                self.dock_menu = None;
                 let read = view.press(press).unwrap_or_default();
                 let tasks: Vec<Task<Message>> = read
                     .into_iter()
@@ -158,6 +165,14 @@ impl App {
                 if !held && !passive && !hovers {
                     self.column = Column::Editor;
                 }
+                // A press on the canvas closes the dock's menu, as a key
+                // the board reads does.
+                if matches!(
+                    input,
+                    Input::Press { .. } | Input::Key { .. } | Input::Char(_)
+                ) {
+                    self.dock_menu = None;
+                }
             }
             Sent::Label(..) | Sent::Pasted(..) => {
                 if held || !view.writable() {
@@ -176,6 +191,7 @@ impl App {
         let Some(view) = &mut self.board else {
             return BoardDid::default();
         };
+        self.dock_menu = None;
         let update = view.command(command, Instant::now());
         self.board_did(update)
     }
@@ -184,6 +200,12 @@ impl App {
     /// changed, then what it asks of the app.
     pub(super) fn board_did(&mut self, update: wren_canvas::Update) -> BoardDid {
         let mut did = BoardDid::default();
+        // The dock's folded shapes button shows the shape last armed.
+        if let Some(wren_canvas::Tool::Shape(shape)) =
+            self.board.as_ref().map(|view| view.machine().tool())
+        {
+            self.dock_shape = shape;
+        }
         if update.changed {
             did.failed = self.board_changed().err();
         }
@@ -280,6 +302,7 @@ impl App {
     /// the window loses its focus (§5.15 rule 4). The board settles and
     /// its armed tool is put away.
     pub(super) fn put_board_away(&mut self) -> Result<(), String> {
+        self.dock_menu = None;
         self.settle_board()?;
         let Some(view) = &mut self.board else {
             return Ok(());
@@ -1171,9 +1194,12 @@ z = "c"
         let view = app.board.as_ref().unwrap();
         assert!(!view.fit_pending());
         let fitted = view.viewport();
+        // Above the tool dock, which the fit leaves room for.
+        let covered = crate::app::board_dock::covered(true);
+        assert!(covered > 0.0);
         assert_eq!(
             fitted,
-            Viewport::fitting(view.scene().bounds, (800.0, 600.0))
+            Viewport::fitting(view.scene().bounds, (800.0, 600.0 - covered))
         );
         let moved = Viewport {
             x: 37.0,

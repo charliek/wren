@@ -80,8 +80,13 @@ pub struct Situation {
     /// Keyboard Connecting.
     pub seeking: bool,
     pub tool: Tool,
+    /// The armed tool is locked (D3).
+    pub locked: bool,
     /// Space is held, so a drag pans.
     pub space: bool,
+    /// Holding Space shows the dock's keys: the dock is on and its badges
+    /// are `hold` (§3.3).
+    pub space_shows_keys: bool,
     pub selected: Selected,
 }
 
@@ -97,7 +102,7 @@ impl<'a> Keys<'a> {
     }
 
     /// The key the keymap shows first for `command`.
-    fn first(&self, command: Command) -> Option<String> {
+    pub(super) fn first(&self, command: Command) -> Option<String> {
         self.keymap.label(command.key(), self.platform)
     }
 
@@ -202,7 +207,7 @@ fn directions(command: fn(Dir) -> Command) -> [Command; 4] {
 }
 
 /// The six shape tools that have letters by default.
-const LETTERED: [Shape; 6] = [
+pub(super) const LETTERED: [Shape; 6] = [
     Shape::Rect,
     Shape::Ellipse,
     Shape::Diamond,
@@ -277,6 +282,14 @@ pub fn hint(situation: Situation, keys: &Keys, applies: impl Fn(Command) -> bool
                     Selected::Shapes | Selected::Connectors => {}
                 }
             }
+            // The tool's own key locks it (D3); a tool with no key has
+            // no part.
+            let words = if situation.locked {
+                "again to unlock"
+            } else {
+                "again to lock"
+            };
+            line.extend(part(&[Command::Tool(situation.tool)], &first, words));
             line.push(fixed("esc", "cancel"));
         }
         Tool::Connector => {
@@ -290,6 +303,9 @@ pub fn hint(situation: Situation, keys: &Keys, applies: impl Fn(Command) -> bool
                 line.extend(part(&[Command::ConnectNext], &first, "add a shape"));
                 let tools = LETTERED.map(|shape| Command::Tool(Tool::Shape(shape)));
                 line.extend(part(&tools, &first, "pick a shape"));
+                if situation.space_shows_keys {
+                    line.push(fixed("Space", "show keys"));
+                }
                 line.extend(part(&[Command::Keys], &first, "all keys"));
             }
             Selected::OneShape => {
@@ -587,12 +603,16 @@ impl App {
             return Vec::new();
         };
         let machine = view.machine();
+        let settings = &self.preferences.settings;
         let situation = Situation {
             focused: machine.focused(),
             editing: machine.editing().is_some(),
             seeking: machine.seeking().is_some(),
             tool: machine.tool(),
+            locked: machine.locked(),
             space: machine.space(),
+            space_shows_keys: settings.board_toolbar
+                && settings.board_key_badges == wren_core::settings::KeyBadges::Hold,
             selected: Selected::of(view.board(), machine.selection()),
         };
         let offers = view.offers();
@@ -824,7 +844,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::HashSet;
 
     use wren_core::keybind::{self, Layer};
@@ -832,7 +852,8 @@ mod tests {
     use super::*;
     use crate::app::commands::Scope;
 
-    fn keymap(platform: Platform, user: &[(&str, &str)]) -> Keymap {
+    /// The default keymap on `platform`, with the user's `keybind` lines.
+    pub(in crate::app) fn keymap(platform: Platform, user: &[(&str, &str)]) -> Keymap {
         let user: Vec<(String, String)> = user
             .iter()
             .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
@@ -858,7 +879,9 @@ mod tests {
         editing: false,
         seeking: false,
         tool: Tool::Select,
+        locked: false,
         space: false,
+        space_shows_keys: true,
         selected: Selected::Nothing,
     };
 
@@ -912,7 +935,7 @@ mod tests {
         let linux = |situation| shown(situation, Platform::Linux, &[]);
         assert_eq!(
             linux(IDLE),
-            "Tab add a shape · R O D U Y P pick a shape · ? all keys"
+            "Tab add a shape · R O D U Y P pick a shape · Space show keys · ? all keys"
         );
         assert_eq!(
             linux(with(Selected::OneShape)),
@@ -934,19 +957,20 @@ mod tests {
         let rect = Tool::Shape(Shape::Rect);
         assert_eq!(
             linux(armed(rect, Selected::Nothing)),
-            "click to place · drag to size · Tab add one · esc cancel"
+            "click to place · drag to size · Tab add one · R again to lock · esc cancel"
         );
         assert_eq!(
             linux(armed(rect, Selected::OneShape)),
-            "click to place · drag to size · Tab add it after the selection · esc cancel"
+            "click to place · drag to size · Tab add it after the selection · R again to lock · \
+             esc cancel"
         );
         assert_eq!(
             linux(armed(rect, Selected::Shapes)),
-            "click to place · drag to size · esc cancel"
+            "click to place · drag to size · R again to lock · esc cancel"
         );
         assert_eq!(
             linux(armed(Tool::Text, Selected::OneShape)),
-            "click to place · drag to size · esc cancel"
+            "click to place · drag to size · T again to lock · esc cancel"
         );
         assert_eq!(
             linux(armed(Tool::Connector, Selected::Nothing)),
@@ -958,6 +982,44 @@ mod tests {
             ..with(Selected::Shapes)
         };
         assert_eq!(linux(space), "drag to pan");
+    }
+
+    #[test]
+    fn the_lock_and_the_space_badges_are_named_only_where_they_hold() {
+        let linux = |situation| shown(situation, Platform::Linux, &[]);
+        let armed = |tool, locked| Situation {
+            tool,
+            locked,
+            ..IDLE
+        };
+        let diamond = Tool::Shape(Shape::Diamond);
+        assert_eq!(
+            linux(armed(diamond, true)),
+            "click to place · drag to size · Tab add one · D again to unlock · esc cancel"
+        );
+        // The two shapes with no key have no key to lock them by.
+        assert_eq!(
+            linux(armed(Tool::Shape(Shape::Rounded), false)),
+            "click to place · drag to size · Tab add one · esc cancel"
+        );
+        // A rebound tool key is the one named.
+        assert_eq!(
+            shown(
+                armed(diamond, false),
+                Platform::Linux,
+                &[("k", "board.tool.diamond")]
+            ),
+            "click to place · drag to size · Tab add one · K again to lock · esc cancel"
+        );
+        // With no dock, or badges on or off, Space shows no keys.
+        let quiet = Situation {
+            space_shows_keys: false,
+            ..IDLE
+        };
+        assert_eq!(
+            linux(quiet),
+            "Tab add a shape · R O D U Y P pick a shape · ? all keys"
+        );
     }
 
     #[test]
@@ -1015,7 +1077,7 @@ mod tests {
         let keymap = keymap(Platform::Linux, &[]);
         let keys = Keys::new(&keymap, Platform::Linux);
         let read_only = |situation| line(&hint(situation, &keys, reads_only));
-        assert_eq!(read_only(IDLE), "? all keys");
+        assert_eq!(read_only(IDLE), "Space show keys · ? all keys");
         assert_eq!(read_only(with(Selected::OneShape)), "/ actions");
         assert_eq!(read_only(with(Selected::Shapes)), "/ actions");
         assert_eq!(read_only(with(Selected::Connectors)), "/ actions");
@@ -1034,7 +1096,10 @@ mod tests {
             ("9", "board.color.blue"),
         ];
         let linux = |situation| shown(situation, Platform::Linux, &user);
-        assert_eq!(linux(IDLE), "R D U Y P pick a shape · F1 all keys");
+        assert_eq!(
+            linux(IDLE),
+            "R D U Y P pick a shape · Space show keys · F1 all keys"
+        );
         // The four connect keys are no longer the arrows with one
         // modifier, so each is shown, and the colours are no longer 0–7.
         assert_eq!(
@@ -1188,7 +1253,7 @@ mod tests {
     use crate::keys::{Input, Nav};
 
     /// Give the open board its widget's size and the keyboard.
-    fn focus(app: &mut App) {
+    pub(in crate::app) fn focus(app: &mut App) {
         for message in [
             wren_canvas::Message::Resized {
                 width: 800.0,
