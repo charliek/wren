@@ -29,6 +29,7 @@ Nothing existing is removed. Every key and gesture in
 | D6 | Settings `board-toolbar` and `board-hints`, both on by default. | Owner, 2026-11-18 |
 | D7 | Pinch to zoom on macOS only, as the last step; Linux stays on Ctrl+scroll. | Owner, 2026-11-18 |
 | D9 | Key badges on the buttons are hidden by default and show while Space is held. | Owner, 2026-11-18 (comment) |
+| D10 | Text size for a shape's label and for free text (§3.9). Stored as a number, not a name; bold, italic and Markdown labels are future scope. | Owner, 2026-11-18; the particulars of §3.9 proposed, not yet confirmed |
 
 Assumed by the design and open to the owner (stated back, not contradicted):
 
@@ -56,8 +57,9 @@ and Document, Text, Connector, and a button for the keys sheet.
   A locked tool stays armed after it places a shape. Esc or V unlocks and
   returns to Select. Select and Hand have no lock.
 - The hand tool no longer drops back to Select after one drag.
-- The shape icons are drawn in the sticky colour (§3.2) when it is not
-  neutral, so the colour for the next shape is always on screen.
+- The icons stay in the theme's text colour whatever the sticky colour
+  (§3.2) is; the owner turned down tinting them. The "New shapes" row is
+  where that colour shows.
 - Below about 560 px of canvas width the six shapes fold into one button
   showing the last shape used, with a menu of all eight.
 - The armed-tool chip the canvas shows today at the top left goes away when
@@ -154,6 +156,25 @@ more zoom input, about the pointer, within 10 % to 400 %. No harness can
 synthesise a pinch, so the check is by hand on a trackpad. Linux waits for
 a toolkit upgrade.
 
+### 3.9 Text size
+
+Every label is 14 units today and a connector's labels 12. A node gains an
+optional `style.text-size`: a whole number of board units, 8 to 96, written
+only when it is not 14, so no existing board changes by a byte. A value out
+of range is drawn clamped and listed as an issue. It applies to a shape's
+label and to free text; a connector's labels stay 12. A shape grows to fit
+a larger label as it grows for a longer one.
+
+- A number and not a name, unlike colour: every theme supplies its own
+  hues, and a size is the same in all of them. The exports already write a
+  number (`fontSize` in draw.io, `font-size` in SVG).
+- The key is `text-size` because `size` is a node's width and height.
+- No change of schema: a new optional key is "allowed without a change of
+  schema" (`docs/reference/board-format.md`), and Wren 0.2 keeps the key
+  as unknown content and draws the label at 14.
+- The interface offers presets (12, 14, 20, 28) in the style bar's menu
+  and the actions palette; any size in range can be written by hand.
+
 ## 4. How it fits the code
 
 - The dock, the style bar, the sheet and the footer controls are app
@@ -183,6 +204,7 @@ Wren themes; the gates are those of `CLAUDE.md`.
 5. Style bar (§3.2) and the sticky colour.
 6. Footer controls (§3.6).
 7. Pinch on macOS (§3.8).
+8. Text size (§3.9), after the style bar, which holds its control.
 
 ## 6. Lucidchart and the draw.io export
 

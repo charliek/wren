@@ -387,8 +387,10 @@ Wren. What does not survive:
   which becomes a free end.
 - A tab in a label is four spaces, and arrowheads are slightly larger.
 
-Only draw.io itself has been tested. Lucidchart's draw.io import is
-untested, and Visio and Miro need formats Wren does not write.
+draw.io and Lucidchart's draw.io import have been tested by hand. Each
+element of the file starts a line of its own, as draw.io writes it:
+Lucidchart refuses the same file with an element's lines joined. Visio and
+Miro need formats Wren does not write.
 
 ## Problems in a file
 
