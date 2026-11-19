@@ -1635,13 +1635,13 @@ z = "c"
                 .to_board((400.0, 300.0));
             assert!((now.0 - centre.0).abs() < 0.01 && (now.1 - centre.1).abs() < 0.01);
         }
-        assert_eq!(seen, [1.5, 2.0, 1.0, 0.75, 0.5, 0.25, 1.0]);
+        assert_eq!(seen, [1.25, 1.5, 1.0, 0.85, 0.75, 0.6, 1.0]);
         // The limits hold.
-        for _ in 0..12 {
+        for _ in 0..wren_canvas::ZOOM_STOPS.len() {
             run(&mut app, CommandId::TextBigger);
         }
         assert_eq!(zoom(&app), 4.0);
-        for _ in 0..12 {
+        for _ in 0..wren_canvas::ZOOM_STOPS.len() {
             run(&mut app, CommandId::TextSmaller);
         }
         assert_eq!(zoom(&app), 0.1);

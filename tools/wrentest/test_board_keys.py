@@ -179,7 +179,7 @@ def test_each_app_shortcut_on_a_focused_board_acts_once(samples: Path) -> None:
         app.client.call("command.run", {"id": "font.reset"})
         # The zoom steps one stop, not two.
         state = key(app, "=", APP)
-        assert not state["handled"] and state["viewport"]["zoom"] == 1.5, state
+        assert not state["handled"] and state["viewport"]["zoom"] == 1.25, state
         state = key(app, "-", APP)
         assert state["viewport"]["zoom"] == 1.0, state
         # The New note dialog opens once, over the board, which settles.

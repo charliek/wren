@@ -263,7 +263,7 @@ def run_view(spike: Spike, args) -> dict:
     middle = (size["width"] / 2, size["height"] / 2)
     spike.set(viewport={"x": 0.0, "y": 0.0, "zoom": 1.0})
     stops = []
-    for by in (1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1):
+    for by in (2, 2, 2, 2, 2, -2, -2, -2, -2, -2, -2, -2, -2, -2):
         before = spike.set()["viewport"]
         under = (before["x"] + middle[0] / before["zoom"], before["y"] + middle[1] / before["zoom"])
         after = spike.set(zoom_step=by)["viewport"]

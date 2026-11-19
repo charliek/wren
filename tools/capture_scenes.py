@@ -369,11 +369,11 @@ def board_scenes(client, shot_here, out: Path, workspace: Path,
     client.call("column.open", {"column": "editor"})
     client.call("editor.focus")
     client.call("command.run", {"id": "font.reset"})
-    for _ in range(2):
+    for _ in range(4):
         client.call("command.run", {"id": "font.increase"})
     shot_here("board-zoom-in")
     client.call("command.run", {"id": "font.reset"})
-    for _ in range(3):
+    for _ in range(6):
         client.call("command.run", {"id": "font.decrease"})
     shot_here("board-zoom-out")
     open_board("Shapes")
@@ -394,8 +394,8 @@ def board_scenes(client, shot_here, out: Path, workspace: Path,
     for _ in range(3):
         client.call("command.run", {"id": "navigation.column_right"})
     client.call("command.run", {"id": "font.reset"})
-    client.call("command.run", {"id": "font.decrease"})
-    client.call("command.run", {"id": "font.decrease"})
+    for _ in range(4):
+        client.call("command.run", {"id": "font.decrease"})
     shot_here("board-wide")
     # The New note dialog with its kind pills, opened on Board.
     client.call("command.run", {"id": "note.new_board"})
