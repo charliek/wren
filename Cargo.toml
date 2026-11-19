@@ -41,6 +41,9 @@ iced = { version = "=0.14.0", default-features = false, features = [
     "wgpu",
     "x11",
 ] }
+# Already in the tree under iced; Wren reads trackpad pinches from its
+# vendored copy (vendor/iced_winit/WREN.md). No features of its own: iced's.
+iced_winit = { version = "=0.14.1", default-features = false }
 png = "=0.18.1"
 serde_json = "=1.0.154"
 tokio = { version = "=1.54.1", default-features = false, features = ["net", "io-util", "sync", "time", "rt", "macros"] }
@@ -65,6 +68,8 @@ swash = { version = "=0.2.10", default-features = false, features = ["std"] }
 cosmic-text = { path = "vendor/cosmic-text" }
 # Repaints a frame in fewer damage groups; see vendor/iced_tiny_skia/WREN.md.
 iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
+# Screenshots of a presented frame, and trackpad pinches; see
+# vendor/iced_winit/WREN.md.
 iced_winit = { path = "vendor/iced_winit" }
 # Safety fixes for fonts with malformed tables; see vendor/swash/WREN.md.
 swash = { path = "vendor/swash" }

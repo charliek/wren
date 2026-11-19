@@ -117,6 +117,60 @@ def test_native_ctrl_wheel_zooms_about_the_pointer(samples) -> None:
 
 
 @pytest.mark.native_x11
+def test_native_a_recorded_pinch_zooms_about_the_real_pointer(samples) -> None:
+    """discovery/board-controls.md §3.8. No tool makes a real trackpad
+    pinch, so `board.pinch` records one as the vendored iced_winit records
+    winit's `PinchGesture` on macOS; from there the path is the real one:
+    the window's next frame, the widget, the real pointer."""
+    frames = iter(range(100))
+
+    def frame() -> None:
+        # A screenshot is taken after a frame the request asked for, so
+        # what was recorded before it has had its frame.
+        path = samples.parent / f"pinch-frame-{next(frames)}.png"
+        app.client.call("app.screenshot", {"path": str(path)})
+
+    with board_app(samples, "board-native-pinch") as app:
+        window, _ = native_board(app)
+        app.client.call("column.open", {"column": "notes"})
+        placed = bounds(app)
+        root = placed["root"]
+        pointer = (round(root["x"] + root["width"] * 0.3), round(root["y"] + root["height"] * 0.6))
+        move(window, pointer)
+        view = placed["viewport"]
+        under = (view["x"] + (pointer[0] - root["x"]) / view["zoom"],
+                 view["y"] + (pointer[1] - root["y"]) / view["zoom"])
+        app.client.call("board.pinch", {"delta": 0.25})
+        after = wait_for(lambda: (lambda v: v if v["zoom"] != view["zoom"] else None)(
+            bounds(app)["viewport"]), timeout=3, interval=0.025, description="the pinch zoomed")
+        assert after["zoom"] == pytest.approx(view["zoom"] * 1.25, rel=1e-4)
+        back = (root["x"] + (under[0] - after["x"]) * after["zoom"],
+                root["y"] + (under[1] - after["y"]) * after["zoom"])
+        assert abs(back[0] - pointer[0]) <= 1 and abs(back[1] - pointer[1]) <= 1, (back, pointer)
+
+        # Off the board, a pinch is dropped at its frame and not kept for
+        # when the pointer comes back.
+        assert root["x"] >= 40, "the browser columns are left of the board"
+        move(window, (round(root["x"]) - 20, round(root["y"] + 40)))
+        app.client.call("board.pinch", {"delta": 0.5})
+        frame()
+        assert bounds(app)["viewport"] == after
+        move(window, pointer)
+        frame()
+        assert bounds(app)["viewport"] == after
+        app.client.call("board.pinch", {"delta": 0.1})
+        last = wait_for(lambda: (lambda v: v if v["zoom"] != after["zoom"] else None)(
+            bounds(app)["viewport"]), timeout=3, interval=0.025, description="the pinch zoomed")
+        assert last["zoom"] == pytest.approx(after["zoom"] * 1.1, rel=1e-4)
+
+        # A pinch is looked at, as the wheel is: no column, no edit.
+        assert column(app) == "notes"
+        state = board(app)
+        assert state["pristine"] and not state["can_undo"], state
+        assert app.client.call("session.get")["document"]["dirty"] is False
+
+
+@pytest.mark.native_x11
 def test_native_middle_drag_pans_by_the_pointers_motion(samples) -> None:
     with board_app(samples, "board-native-drag") as app:
         window, placed = native_board(app)

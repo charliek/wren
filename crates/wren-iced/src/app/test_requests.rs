@@ -334,7 +334,8 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
             }
             "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
-            | "board.apply" | "board.seed" | "board.dock" | "board.style_bar" | "board.footer" => {
+            | "board.apply" | "board.seed" | "board.dock" | "board.style_bar" | "board.footer"
+            | "board.pinch" => {
                 return self.board_request(request)
             }
             "board.export" => {

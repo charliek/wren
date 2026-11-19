@@ -186,7 +186,7 @@ def test_a_board_fitted_narrow_stays_in_view_once_the_canvas_widens(samples: Pat
         placed = bounds(app)
         box, root = content_box(placed), placed["root"]
         assert abs(box["x"] + box["width"] / 2 - (root["x"] + root["width"] / 2)) < 40, (box, root)
-        for step in ("font.reset", "font.decrease", "font.decrease"):
+        for step in ("font.reset",) + ("font.decrease",) * 4:
             command(app, step)
             placed = bounds(app)
             box, root = content_box(placed), placed["root"]
@@ -195,6 +195,7 @@ def test_a_board_fitted_narrow_stays_in_view_once_the_canvas_widens(samples: Pat
             # of the canvas.
             middle = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
             assert inside(middle, root), (step, middle, root)
+        assert placed["viewport"]["zoom"] == pytest.approx(0.5)
 
 
 def fill_point(node: dict, placed: dict) -> tuple[int, int] | None:
@@ -286,8 +287,8 @@ def test_the_board_is_drawn_in_its_colours(samples: Path, theme: str) -> None:
         # A connector is 1.5 board units wide: at 200 % its middle pixel is
         # covered whole.
         app.client.call("command.run", {"id": "font.reset"})
-        app.client.call("command.run", {"id": "font.increase"})
-        app.client.call("command.run", {"id": "font.increase"})
+        for _ in range(4):
+            app.client.call("command.run", {"id": "font.increase"})
         placed = bounds(app)
         assert placed["viewport"]["zoom"] == pytest.approx(2.0)
         time.sleep(REST)
@@ -380,8 +381,10 @@ def test_right_to_left_labels_are_drawn(samples: Path) -> None:
     with board_app(samples, "board-right-to-left") as app:
         open_note(app, path)
         fitted(app)
-        for step in ("fitted", "font.reset", "font.increase", "font.increase"):
-            if step != "fitted":
+        # Fitted, then 100 %, 150 % and 200 %.
+        for step, times in (("fitted", 0), ("font.reset", 1), ("font.increase", 2),
+                            ("font.increase", 2)):
+            for _ in range(times):
                 command(app, step)
             time.sleep(REST)
             placed = bounds(app)
@@ -458,7 +461,7 @@ def test_a_connector_millions_of_units_long_is_drawn_at_every_zoom(samples: Path
         near_node = next(node for node in bounds(app)["nodes"] if node["id"] == "a")
         assert inside(centre, near_node["visible"]), near_node
         zooms = []
-        for index, step in enumerate(["font.increase"] * 4 + ["font.decrease"] * 8):
+        for index, step in enumerate(["font.increase"] * 8 + ["font.decrease"] * 16):
             command(app, step)
             time.sleep(0.2)
             zoom = board(app)["viewport"]["zoom"]
@@ -467,7 +470,9 @@ def test_a_connector_millions_of_units_long_is_drawn_at_every_zoom(samples: Path
             placed = bounds(app)
             near_node = next(node for node in placed["nodes"] if node["id"] == "a")
             assert near_node["visible"], (zoom, near_node)
-        assert zooms == [1.5, 2.0, 3.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25, 0.1]
+        assert zooms == [1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+                         3.5, 3.0, 2.5, 2.0, 1.75, 1.5, 1.25, 1.0,
+                         0.85, 0.75, 0.6, 0.5, 0.35, 0.25, 0.15, 0.1]
         assert app.client.call("session.get")["document"]["dirty"] is False
 
 
@@ -522,7 +527,7 @@ def test_the_wheel_pans_and_mod_wheel_zooms_about_the_pointer(samples: Path) -> 
         command(app, "font.reset")
         assert board(app)["viewport"]["zoom"] == pytest.approx(1.0)
         command(app, "font.increase")
-        assert board(app)["viewport"]["zoom"] == pytest.approx(1.5)
+        assert board(app)["viewport"]["zoom"] == pytest.approx(1.25)
         command(app, "font.decrease")
         assert board(app)["viewport"]["zoom"] == pytest.approx(1.0)
         assert config.read_text(encoding="utf-8") == settings
@@ -546,6 +551,53 @@ def test_the_wheel_pans_and_mod_wheel_zooms_about_the_pointer(samples: Path) -> 
     assert stamp(flow) == before_bytes
 
 
+def pinch(app: WrenApp, at: dict, delta: float) -> dict:
+    return app.client.call("board.pointer", {"kind": "pinch", "at": at, "delta": delta})
+
+
+def test_a_pinch_zooms_about_the_pointer_within_the_limits_and_writes_nothing(
+        samples: Path) -> None:
+    """discovery/board-controls.md §3.8, through `board.pointer`: the input
+    the widget sends for a macOS pinch. The native X11 case records a pinch
+    as the vendored iced_winit records winit's."""
+    flow = samples / FLOW
+    before_bytes = stamp(flow)
+    with board_app(samples, "board-pinch") as app:
+        open_note(app, FLOW)
+        start = fitted(app)
+        root = start["root"]
+        pointer = [root["x"] + root["width"] * 0.3, root["y"] + root["height"] * 0.6]
+        app.client.call("column.open", {"column": "notes"})
+
+        # Each pinch multiplies the zoom by 1 + delta about the pointer.
+        view = start["viewport"]
+        for delta in (0.5, -0.2, 0.05):
+            under = (view["x"] + (pointer[0] - root["x"]) / view["zoom"],
+                     view["y"] + (pointer[1] - root["y"]) / view["zoom"])
+            after = pinch(app, {"screen": pointer}, delta)["viewport"]
+            assert after["zoom"] == pytest.approx(view["zoom"] * (1 + delta), rel=1e-4)
+            back = (root["x"] + (under[0] - after["x"]) * after["zoom"],
+                    root["y"] + (under[1] - after["y"]) * after["zoom"])
+            assert abs(back[0] - pointer[0]) <= 1 and abs(back[1] - pointer[1]) <= 1, (back, pointer)
+            view = after
+
+        # Within 10 % and 400 %.
+        for _ in range(4):
+            view = pinch(app, {"screen": pointer}, 3.0)["viewport"]
+        assert view["zoom"] == pytest.approx(4.0)
+        for _ in range(4):
+            view = pinch(app, {"screen": pointer}, -0.9)["viewport"]
+        assert view["zoom"] == pytest.approx(0.1)
+
+        # A view, not an edit: the board keeps the keyboard where it was,
+        # stays pristine with nothing to undo, and nothing is written.
+        state = board(app)
+        assert state["pristine"] and not state["can_undo"] and state["revision"] == 0, state
+        assert column(app) == "notes"
+        assert app.client.call("session.get")["document"]["dirty"] is False
+    assert stamp(flow) == before_bytes
+
+
 def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> None:
     with board_app(samples, "board-requests") as app:
         open_note(app, NOTES)
@@ -553,6 +605,7 @@ def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> N
         for op, params in [
             ("board.bounds", {}),
             ("board.pointer", {"kind": "wheel", "at": {"canvas": [0, 0]}, "delta": {"y": 1}}),
+            ("board.pinch", {"delta": 0.1}),
             ("board.key", {"key": "r"}),
             ("board.type", {"text": "x"}),
             ("board.apply", {"edits": []}),
@@ -565,6 +618,7 @@ def test_board_requests_refuse_a_surface_that_is_not_a_board(samples: Path) -> N
             {"kind": "click", "button": "left", "at": {"node": "n1"}},
             {"kind": "press", "button": "fourth", "at": {"canvas": [0, 0]}},
             {"kind": "wheel", "at": {"edge": "e1"}, "delta": {"y": 1}},
+            {"kind": "pinch", "at": {"canvas": [0, 0]}},
         ]:
             with pytest.raises(RemoteError):
                 app.client.call("board.pointer", params)

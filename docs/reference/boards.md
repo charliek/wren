@@ -419,16 +419,20 @@ searched as text; the file's own syntax (`kind`, `schema`) is not.
 | Action | macOS | Linux |
 |---|---|---|
 | Pan | Scroll, Shift+scroll sideways, middle-drag, Space+drag, or the hand tool (which stays armed) | the same |
-| Zoom at the pointer | ⌘+scroll | Ctrl+scroll |
+| Zoom at the pointer | ⌘+scroll, or pinch on the trackpad | Ctrl+scroll |
 | Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Alt+= / Alt+- / Alt+0 |
 | Zoom to fit / to selection | ⇧1 / ⇧2 | the same |
 
-The text-size keys step through 10, 25, 50, 75, 100, 150, 200, 300, and 400
-% on a board and save nothing; so do the footer's − and + buttons, and a
-click on its zoom figure fits the board. A board opens fitted to its content, never
+The text-size keys step through 10, 15, 25, 35, 50, 60, 75, 85, 100, 125,
+150, 175, 200, 250, 300, 350, and 400 % on a board and save nothing; so do
+the footer's − and + buttons, and a click on its zoom figure fits the
+board. A board opens fitted to its content, never
 above 100 %, and returns to where you left it when you come back to it in
-the same run. The view is never written to the file. Pinch-to-zoom is not
-supported. With the software renderer (`ICED_BACKEND=tiny-skia`), labels
+the same run. The view is never written to the file. On macOS a trackpad
+pinch zooms about the pointer, between 10 and 400 %, on any board under
+the pointer, as ⌘+scroll does. Linux has no pinch: the windowing library
+Wren is built on reports one only on macOS, so there Ctrl+scroll zooms at
+the pointer. With the software renderer (`ICED_BACKEND=tiny-skia`), labels
 are left out while the view moves and when they would be smaller than 4
 pixels.
 

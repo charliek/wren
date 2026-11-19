@@ -444,6 +444,19 @@ fn translate(
             if machine.deadline().is_some_and(|due| due <= *now) {
                 sent.messages.push(input(Input::Tick));
             }
+            // The frame's pinches reach a board under the pointer, focused
+            // or not, as the wheel does; any other board leaves them, for
+            // another to take or the frame to drop. The pointer is where
+            // this frame's cursor says: the last move the widget saw may
+            // be an older one, with the moves since still on their way.
+            if let Some(at) = cursor.position_over(bounds) {
+                for delta in view.take_pinches() {
+                    sent.messages.push(input(Input::Pinch {
+                        delta: delta as f32,
+                        at: local(at),
+                    }));
+                }
+            }
         }
         Event::Window(window::Event::Focused) => state.window_focused = true,
         Event::Window(window::Event::Unfocused) => {
@@ -1037,6 +1050,8 @@ mod tests {
     /// `a` of the two-node board, in the window.
     const ON_A: Point = Point::new(160.0, 80.0);
     const AWAY: Point = Point::new(20.0, 20.0);
+    /// On the board, away from `ON_A`.
+    const AWAY_ON_BOARD: Point = Point::new(700.0, 550.0);
 
     #[test]
     fn the_cursor_is_the_boards_over_it_and_through_its_drags() {
@@ -2131,5 +2146,139 @@ mod tests {
         assert_eq!(view.board().nodes.len(), 3);
         assert_eq!(view.label(), None);
         assert_eq!(view.machine().state(), Surface::Idle);
+    }
+
+    thread_local! {
+        /// The pinches of the frame the tests below draw, as a host's
+        /// toolkit would record them.
+        static FRAME_PINCHES: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn take_frame_pinches() -> Vec<f64> {
+        FRAME_PINCHES.with(|frame| std::mem::take(&mut *frame.borrow_mut()))
+    }
+
+    fn pinched(deltas: &[f64]) {
+        FRAME_PINCHES.with(|frame| frame.borrow_mut().extend_from_slice(deltas));
+    }
+
+    fn pinches(sent: &Sent) -> Vec<(f32, (f32, f32))> {
+        inputs(sent)
+            .into_iter()
+            .filter_map(|input| match input {
+                Input::Pinch { delta, at } => Some((delta, at)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The frame's pinches reach the board at its redraw, about the
+    /// pointer, with or without the keyboard, and are taken once.
+    #[test]
+    fn a_frames_pinches_zoom_the_board_under_the_pointer() {
+        let mut view = open(fixtures::TWO);
+        view.set_pinches(take_frame_pinches);
+        let mut state = State::new();
+        let before = view.viewport();
+        let under = before.to_board((ON_A.x - BOUNDS.x, ON_A.y - BOUNDS.y));
+        pinched(&[0.25, -0.2]);
+        let redraw = Event::Window(window::Event::RedrawRequested(Instant::now()));
+        let sent = send(&mut view, &mut state, redraw.clone(), ON_A);
+        let local = (ON_A.x - BOUNDS.x, ON_A.y - BOUNDS.y);
+        assert_eq!(pinches(&sent), [(0.25, local), (-0.2, local)]);
+        assert!(!sent.captured);
+        assert!(!view.machine().focused());
+        let after = view.viewport();
+        assert!(
+            (after.zoom - before.zoom * 1.25 * 0.8).abs() < 1e-5,
+            "{after:?}"
+        );
+        let kept = after.to_screen(under);
+        assert!((kept.0 - local.0).abs() < 0.01 && (kept.1 - local.1).abs() < 0.01);
+        // Taken: the next redraw has none.
+        let again = send(&mut view, &mut state, redraw.clone(), ON_A);
+        assert!(pinches(&again).is_empty());
+        assert_eq!(view.viewport(), after);
+        // About where the frame's cursor is, not where the last move the
+        // widget saw left the pointer.
+        state.pointer = Some(AWAY_ON_BOARD);
+        pinched(&[0.1]);
+        let sent = send(&mut view, &mut state, redraw, ON_A);
+        assert_eq!(pinches(&sent), [(0.1, local)]);
+        // Only a redraw reads them.
+        pinched(&[0.5]);
+        let moved = mouse(mouse::Event::CursorMoved { position: ON_A });
+        assert!(pinches(&send(&mut view, &mut state, moved, ON_A)).is_empty());
+        assert_eq!(take_frame_pinches(), [0.5]);
+    }
+
+    /// A pinch while the pointer is off the board, or on it under an
+    /// overlay, is dropped, not kept for when it comes back.
+    #[test]
+    fn a_pinch_off_the_board_is_dropped() {
+        let mut view = open(fixtures::TWO);
+        view.set_pinches(take_frame_pinches);
+        let mut state = State::new();
+        let before = view.viewport();
+        let now = Instant::now();
+        let redraw = Event::Window(window::Event::RedrawRequested(now));
+        // A board the pointer is not over takes none: they are another
+        // board's to take, or the frame's to drop when it ends.
+        pinched(&[0.5]);
+        assert!(pinches(&send(&mut view, &mut state, redraw.clone(), AWAY)).is_empty());
+        assert_eq!(take_frame_pinches(), [0.5]);
+        pinched(&[0.5]);
+        let under = mouse::Cursor::Levitating(ON_A);
+        let sent = translate(&mut state, &redraw, BOUNDS, under, &view, Style::default());
+        assert!(pinches(&sent).is_empty());
+        assert_eq!(take_frame_pinches(), [0.5]);
+        pinched(&[0.5]);
+        let sent = translate(
+            &mut state,
+            &redraw,
+            BOUNDS,
+            mouse::Cursor::Unavailable,
+            &view,
+            Style::default(),
+        );
+        assert!(pinches(&sent).is_empty());
+        assert_eq!(take_frame_pinches(), [0.5]);
+        // Back over the board, nothing from before is applied.
+        assert!(pinches(&send(&mut view, &mut state, redraw, ON_A)).is_empty());
+        assert_eq!(view.viewport(), before);
+        // A host that hands the board no record gives it no pinch.
+        let mut view = open(fixtures::TWO);
+        pinched(&[0.5]);
+        let redraw = Event::Window(window::Event::RedrawRequested(now));
+        assert!(pinches(&send(&mut view, &mut state, redraw, ON_A)).is_empty());
+        assert_eq!(take_frame_pinches(), [0.5]);
+    }
+
+    /// On the software renderer a pinch leaves labels out while the view
+    /// moves, as a wheel zoom does; a zoom step is drawn in full at once.
+    #[test]
+    fn a_pinch_is_a_move_of_the_view_and_a_zoom_step_is_not() {
+        let mut view = open(fixtures::TWO);
+        view.set_pinches(take_frame_pinches);
+        let mut state = State::new();
+        let start = Instant::now();
+        let seen = |view: &BoardView, state: &mut State, now| {
+            let revision = view.picture().revision;
+            state
+                .motion
+                .redraw(revision, view.jumps(), view.viewport(), now);
+        };
+        seen(&view, &mut state, start);
+        pinched(&[0.1]);
+        let redraw = Event::Window(window::Event::RedrawRequested(start));
+        send(&mut view, &mut state, redraw, ON_A);
+        seen(&view, &mut state, start);
+        assert!(state.motion.moving(start));
+        assert_eq!(state.motion.rests_at(), Some(start + REST));
+        let later = start + REST * 2;
+        assert!(!state.motion.moving(later));
+        view.zoom_step(1);
+        seen(&view, &mut state, later);
+        assert!(!state.motion.moving(later));
     }
 }

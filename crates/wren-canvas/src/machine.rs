@@ -106,6 +106,12 @@ pub enum Input {
         /// pixels.
         scale_factor: f32,
     },
+    /// A trackpad pinch (macOS): the zoom is multiplied by `1 + delta`
+    /// about `at`, as AppKit's magnification says.
+    Pinch {
+        delta: f32,
+        at: (f32, f32),
+    },
     Press {
         button: Button,
         at: (f32, f32),
@@ -461,6 +467,7 @@ impl Machine {
             && matches!(
                 input,
                 Input::Wheel { .. }
+                    | Input::Pinch { .. }
                     | Input::Press { .. }
                     | Input::Move { .. }
                     | Input::Release { .. }
@@ -480,6 +487,21 @@ impl Machine {
                 self.unhover();
                 let to = self.wheel(delta, at, zoom, sideways, scale_factor, view);
                 acts.extend(to.filter(|to| *to != view.viewport).map(Act::Look));
+            }
+            // One more zoom about the pointer, as Mod+wheel is, but outside
+            // the wheel's burst: a pinch neither ends a pan burst's choice
+            // nor makes one.
+            Input::Pinch { delta, at } => {
+                self.unhover();
+                let factor = 1.0 + delta;
+                let valid =
+                    factor.is_finite() && factor > 0.0 && at.0.is_finite() && at.1.is_finite();
+                if valid {
+                    let to = view.viewport.zoomed(factor, at);
+                    if to != view.viewport {
+                        acts.push(Act::Look(to));
+                    }
+                }
             }
             // A pointer that is nowhere would snap to the origin.
             Input::Press { at, .. } | Input::Move { at }
@@ -1933,6 +1955,10 @@ mod tests {
         Scroll::Lines { x: 0.0, y }
     }
 
+    fn pinch(delta: f32) -> Input {
+        Input::Pinch { delta, at: AT }
+    }
+
     /// One step over an empty board.
     fn step(machine: &mut Machine, input: Input, viewport: Viewport, now: Instant) -> Vec<Act> {
         let board = Board::default();
@@ -2419,6 +2445,154 @@ mod tests {
         step(&mut machine, press, viewport, now);
         let same = Input::Move { at: (5.0, 5.0) };
         assert!(step(&mut machine, same, viewport, now).is_empty());
+    }
+
+    #[test]
+    fn each_pinch_multiplies_the_zoom_about_the_pointer() {
+        let now = Instant::now();
+        let mut viewport = Viewport {
+            x: -40.0,
+            y: 125.5,
+            zoom: 1.0,
+        };
+        let mut machine = Machine::default();
+        let mut expected = 1.0_f32;
+        for delta in [0.25, 0.02, -0.1, 0.5, -0.4, 0.003] {
+            let under = viewport.to_board(AT);
+            viewport = look(&mut machine, viewport, pinch(delta), now);
+            expected *= 1.0 + delta;
+            assert!(
+                (viewport.zoom - expected).abs() < 1e-5,
+                "{delta}: {viewport:?}"
+            );
+            let after = viewport.to_screen(under);
+            assert!(
+                (after.0 - AT.0).abs() < 0.01 && (after.1 - AT.1).abs() < 0.01,
+                "{delta}: {after:?}"
+            );
+        }
+        // No change in scale is no look.
+        assert!(step(&mut machine, pinch(0.0), viewport, now).is_empty());
+    }
+
+    #[test]
+    fn pinch_zoom_is_clamped_to_ten_and_four_hundred_percent() {
+        let now = Instant::now();
+        let mut viewport = Viewport::default();
+        let mut machine = Machine::default();
+        run(
+            &mut machine,
+            &mut viewport,
+            now,
+            Duration::ZERO,
+            &[pinch(1.0); 3],
+        );
+        assert_eq!(viewport.zoom, Viewport::MAX_ZOOM);
+        // At the clamp a further pinch out neither zooms nor pans.
+        assert!(step(&mut machine, pinch(0.5), viewport, now).is_empty());
+        // Clamped per event: the way back starts from 400 %.
+        viewport = look(&mut machine, viewport, pinch(-0.5), now);
+        assert!((viewport.zoom - 2.0).abs() < 1e-6);
+        run(
+            &mut machine,
+            &mut viewport,
+            now,
+            Duration::ZERO,
+            &[pinch(-0.9); 3],
+        );
+        assert_eq!(viewport.zoom, Viewport::MIN_ZOOM);
+        assert!(step(&mut machine, pinch(-0.5), viewport, now).is_empty());
+    }
+
+    #[test]
+    fn a_pinch_that_is_not_a_number_or_no_scale_does_nothing() {
+        let now = Instant::now();
+        let viewport = Viewport::default();
+        // AppKit's magnification can be NaN; a delta of -1 or less would
+        // be a zoom of nothing or less.
+        for delta in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, -2.5] {
+            let acts = step(&mut Machine::default(), pinch(delta), viewport, now);
+            assert!(acts.is_empty(), "{delta}: {acts:?}");
+        }
+        // A huge one is a number, and stops at the clamp.
+        let to = look(&mut Machine::default(), viewport, pinch(f32::MAX), now);
+        assert_eq!(to.zoom, Viewport::MAX_ZOOM);
+        for at in [(f32::NAN, 0.0), (0.0, f32::INFINITY)] {
+            let acts = step(
+                &mut Machine::default(),
+                Input::Pinch { delta: 0.5, at },
+                viewport,
+                now,
+            );
+            assert!(acts.is_empty(), "{at:?}: {acts:?}");
+        }
+    }
+
+    #[test]
+    fn a_pinch_neither_starts_nor_inherits_a_wheel_burst() {
+        let start = Instant::now();
+        let gap = Duration::from_millis(20);
+        let mut machine = Machine::default();
+        // Mid-way through a pan burst a pinch still zooms, and the burst
+        // goes on panning after it.
+        let mut viewport = Viewport::default();
+        run(
+            &mut machine,
+            &mut viewport,
+            start,
+            gap,
+            &[
+                wheel(lines(-1.0), false),
+                pinch(0.5),
+                wheel(lines(-1.0), true),
+            ],
+        );
+        assert!((viewport.zoom - 1.5).abs() < 1e-6, "{viewport:?}");
+        let panned = Viewport::default()
+            .panned(0.0, LINE)
+            .zoomed(1.5, AT)
+            .panned(0.0, LINE);
+        assert!(
+            (viewport.y - panned.y).abs() < 1e-3,
+            "{viewport:?} {panned:?}"
+        );
+        // A pinch begins no burst: a wheel step just after it reads its
+        // own modifier...
+        let later = start + BURST * 10;
+        let mut machine = Machine::default();
+        let mut viewport = Viewport::default();
+        run(
+            &mut machine,
+            &mut viewport,
+            later,
+            gap,
+            &[pinch(0.5), wheel(lines(-1.0), false)],
+        );
+        assert!(
+            (viewport.zoom - 1.5).abs() < 1e-6,
+            "the wheel panned: {viewport:?}"
+        );
+        // ...nor keeps one going: a wheel step a burst after the last
+        // wheel step is a new burst, pinches between them or not.
+        let mut machine = Machine::default();
+        let mut viewport = Viewport::default();
+        let half = BURST / 2 + Duration::from_millis(5);
+        run(
+            &mut machine,
+            &mut viewport,
+            later,
+            half,
+            &[
+                wheel(lines(1.0), true),
+                pinch(0.1),
+                wheel(lines(-1.0), false),
+            ],
+        );
+        let zoomed = ZOOM_PER_LINE * 1.1;
+        assert!(
+            (viewport.zoom - zoomed).abs() < 1e-5,
+            "the last step zoomed: {viewport:?}"
+        );
     }
 
     /// Five nodes and two connectors. `kid` is drawn inside `box`, at
@@ -3778,6 +3952,62 @@ z = "F"
         );
     }
 
+    /// As a wheel zoom does, a pinch mid-drag only moves the view: the
+    /// drag goes on, and since the zoom is about the pointer the board
+    /// point under it, and so the preview, stays where it was.
+    #[test]
+    fn a_pinch_in_mid_drag_zooms_and_carries_the_drag() {
+        let mut rig = Rig::new();
+        rig.press(A);
+        let at = rig.viewport.to_screen((A.0 + 40.0, A.1));
+        assert_eq!(
+            rig.step(Input::Move { at }),
+            [Act::Preview(Some(moved(&["a"], [40, 0])))]
+        );
+        let acts = rig.step(Input::Pinch { delta: 0.5, at });
+        assert!(matches!(acts[..], [Act::Look(_)]), "{acts:?}");
+        assert!((rig.viewport.zoom - 1.5).abs() < 1e-6);
+        assert_eq!(rig.state(), State::Moving);
+        // Twenty units further at the new zoom is twenty units further.
+        assert_eq!(
+            rig.by(60.0, 0.0),
+            [Act::Preview(Some(moved(&["a"], [60, 0])))]
+        );
+        assert_eq!(rig.release(), [Act::Edit(moved(&["a"], [60, 0]))]);
+
+        // A middle-drag pan goes on from the zoomed view too.
+        let mut rig = Rig::new();
+        rig.press_with(Button::Middle, CANVAS);
+        rig.by(-30.0, 0.0);
+        let at = rig.viewport.to_screen(CANVAS);
+        rig.step(Input::Pinch { delta: 1.0, at });
+        assert!(rig.machine.panning());
+        assert!((rig.viewport.zoom - 2.0).abs() < 1e-6);
+    }
+
+    /// A pinch looks at the board in every state the wheel does: with a
+    /// label open, which stays open; without the keyboard, which it does
+    /// not take; and on a board that cannot be edited.
+    #[test]
+    fn a_pinch_zooms_with_a_label_open_unfocused_and_read_only() {
+        let mut rig = Rig::new();
+        rig.click(A);
+        rig.run(Command::EditLabel);
+        assert!(matches!(rig.step(pinch(0.2))[..], [Act::Look(_)]));
+        assert_eq!((rig.state(), rig.editing()), (State::Editing, Some("a")));
+
+        let mut rig = Rig::new();
+        rig.step(Input::Focus(false));
+        assert!(matches!(rig.step(pinch(0.2))[..], [Act::Look(_)]));
+        assert_eq!(rig.state(), State::Unfocused);
+        assert!(!rig.machine.focused());
+
+        let mut rig = Rig::new();
+        rig.writable = false;
+        assert!(matches!(rig.step(pinch(-0.2))[..], [Act::Look(_)]));
+        assert!((rig.viewport.zoom - 0.8).abs() < 1e-6);
+    }
+
     #[test]
     fn a_drag_with_the_duplicate_key_moves_copies() {
         let copies = |by| Intent::Duplicate {
@@ -3985,6 +4215,10 @@ z = "F"
         rig.hover(A);
         rig.step(wheel(lines(-1.0), false));
         assert_eq!(rig.connect_handles(), None);
+        rig.hover(A);
+        rig.step(pinch(0.1));
+        assert_eq!(rig.connect_handles(), None);
+        assert!(!rig.machine.hovering());
         rig.hover(A);
         assert_eq!(rig.connect_handles(), Some("a"));
         rig.run(Command::SelectNone);
@@ -4699,8 +4933,9 @@ z = "F"
         let right = moved(&["a"], [20, 0]);
         let go = Command::Move(Dir::Right);
         // A press is in the table above.
-        let pointer: [(&str, Input); 2] = [
+        let pointer: [(&str, Input); 3] = [
             ("a wheel step", wheel(lines(-1.0), false)),
+            ("a pinch", pinch(0.1)),
             (
                 "a release",
                 Input::Release {

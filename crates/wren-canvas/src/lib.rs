@@ -25,8 +25,9 @@
 //!
 //! Input reaches the view as [`Message`]s, which [`BoardView::update`]
 //! runs through the pure [`Machine`]: the wheel pans, or zooms with ⌘ or
-//! Ctrl held, and a middle-button or Space drag pans. Zoom and pan are view
-//! state, never the board's. The machine also keeps the selection, the
+//! Ctrl held, a trackpad pinch zooms (from the host's record of them,
+//! [`BoardView::set_pinches`]), and a middle-button or Space drag pans.
+//! Zoom and pan are view state, never the board's. The machine also keeps the selection, the
 //! armed tool and the pointer gesture in flight, finds what a press lands
 //! on with [`hit`] and [`handles`], and answers with [`machine::Act`]s for
 //! the view to carry out: it plans and applies each edit the machine asks
@@ -76,6 +77,10 @@ pub use label::{Label, LabelAction, Motion, Preedit};
 pub use machine::{Button, Input, Key, Machine, Mods, Scroll};
 pub use measure::Measurer;
 
+/// Takes the trackpad pinches of the frame being drawn: each is the
+/// change in scale, positive to zoom in ([`BoardView::set_pinches`]).
+pub type Pinches = fn() -> Vec<f64>;
+
 /// How long after its last pan or zoom step a view counts as at rest.
 pub const REST: Duration = Duration::from_millis(150);
 
@@ -83,8 +88,11 @@ pub const REST: Duration = Duration::from_millis(150);
 /// in screen pixels.
 pub const FIT_MARGIN: f32 = 40.0;
 
-/// The zooms the keyboard steps through.
-pub const ZOOM_STOPS: [f32; 9] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+/// The zooms the keyboard steps through: close enough that a step is a
+/// nudge beside a pinch or the wheel, which zoom continuously.
+pub const ZOOM_STOPS: [f32; 17] = [
+    0.1, 0.15, 0.25, 0.35, 0.5, 0.6, 0.75, 0.85, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+];
 
 /// Room kept around the cursor element when a keyboard selection change
 /// brings it into view, in screen pixels (§5.7 rule 5).
@@ -473,6 +481,9 @@ pub struct BoardView {
     /// fit), which the widget draws in full at once instead of as a move.
     jumps: u64,
     key_policy: Option<KeyPolicy>,
+    /// Where the widget reads the trackpad pinches of the frame it is
+    /// drawing ([`BoardView::set_pinches`]).
+    pinches: Option<Pinches>,
     /// The key whose first press was read last, and whether a label was
     /// open then: the repeats of a key held since before a label opened
     /// are not its text.
@@ -569,6 +580,7 @@ impl BoardView {
             showing: None,
             jumps: 0,
             key_policy: None,
+            pinches: None,
             pressed: None,
             label: None,
             making: None,
@@ -1244,6 +1256,22 @@ impl BoardView {
     /// every other key the board's.
     pub fn set_key_policy(&mut self, policy: KeyPolicy) {
         self.key_policy = Some(policy);
+    }
+
+    /// Where the widget reads the trackpad pinches of the window's frame
+    /// it is drawing, each taken once: iced's events carry no pinch, so
+    /// the host hands the board its toolkit's record of them. The widget
+    /// turns each into an [`Input::Pinch`] at the pointer while the pointer
+    /// is over it, and drops it otherwise. Without one the board sees no
+    /// pinch.
+    pub fn set_pinches(&mut self, pinches: Pinches) {
+        self.pinches = Some(pinches);
+    }
+
+    /// The pinches of the frame being drawn, taken from the host's record,
+    /// as the widget reads them at each redraw.
+    pub fn take_pinches(&self) -> Vec<f64> {
+        self.pinches.map(|take| take()).unwrap_or_default()
     }
 
     /// Draw the ids of new elements from `seed` from now on, so a test or
@@ -3316,22 +3344,31 @@ mod tests {
         let middle = (SIZE.0 / 2.0, SIZE.1 / 2.0);
         let under = view.viewport().to_board(middle);
         let mut seen = vec![view.viewport().zoom];
-        for _ in 0..6 {
+        for _ in 0..10 {
             view.zoom_step(1);
             seen.push(view.viewport().zoom);
         }
-        assert_eq!(seen, [1.0, 1.5, 2.0, 3.0, 4.0, 4.0, 4.0]);
+        assert_eq!(
+            seen,
+            [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.0, 4.0]
+        );
         let mut seen = Vec::new();
-        for _ in 0..10 {
+        for _ in 0..18 {
             view.zoom_step(-1);
             seen.push(view.viewport().zoom);
         }
-        assert_eq!(seen, [3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25, 0.1, 0.1, 0.1]);
+        assert_eq!(
+            seen,
+            [
+                3.5, 3.0, 2.5, 2.0, 1.75, 1.5, 1.25, 1.0, 0.85, 0.75, 0.6, 0.5, 0.35, 0.25, 0.15,
+                0.1, 0.1, 0.1
+            ]
+        );
         let back = view.viewport().to_screen(under);
         assert!((back.0 - middle.0).abs() < 0.01 && (back.1 - middle.1).abs() < 0.01);
         // Several stops at once, and past either end.
         view.zoom_step(3);
-        assert_eq!(view.viewport().zoom, 0.75);
+        assert_eq!(view.viewport().zoom, 0.35);
         view.zoom_step(100);
         assert_eq!(view.viewport().zoom, 4.0);
         view.zoom_step(-128);
@@ -3345,13 +3382,13 @@ mod tests {
     fn a_zoom_between_stops_steps_to_the_next_one_each_way() {
         let mut view = sized(fixtures::OVERLAP);
         for (zoom, up, down) in [
-            (1.1, 1.5, 1.0),
-            (0.3, 0.5, 0.25),
-            (0.12, 0.25, 0.1),
-            (3.9, 4.0, 3.0),
+            (1.1, 1.25, 1.0),
+            (0.3, 0.35, 0.25),
+            (0.12, 0.15, 0.1),
+            (3.9, 4.0, 3.5),
             // A hair off a stop is that stop.
-            (1.000_01, 1.5, 0.75),
-            (0.749_99, 1.0, 0.5),
+            (1.000_01, 1.25, 0.85),
+            (0.749_99, 0.85, 0.6),
         ] {
             let at = Viewport {
                 x: 0.0,

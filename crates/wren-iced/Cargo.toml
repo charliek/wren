@@ -24,6 +24,7 @@ wren-editor.workspace = true
 wren-markdown.workspace = true
 wren-spell.workspace = true
 iced.workspace = true
+iced_winit.workspace = true
 rfd.workspace = true
 # Decodes the embedded window icon; its dependencies already ship via tiny-skia.
 png.workspace = true

@@ -104,10 +104,11 @@ when one lands, move what users need into `docs/` and trim the note.
 - `vendor/`: patched copies of crates.io crates (`cosmic-text`,
   `iced_tiny_skia`, `iced_winit`, `swash`), wired in by the root
   `[patch.crates-io]`; `make check-patches` asserts they are the ones built.
-  `cosmic-text`, `iced_tiny_skia` and `swash` each have a `WREN.md`
-  describing the change; `wren-editor`'s hanging indent needs the
-  cosmic-text one, and the spelling zigzag's cost on tiny-skia the
-  iced_tiny_skia one.
+  Each has a `WREN.md` describing its changes; `wren-editor`'s hanging
+  indent needs the cosmic-text one, the spelling zigzag's cost on
+  tiny-skia the iced_tiny_skia one, and the harness's screenshots and a
+  board's trackpad pinch (macOS) the iced_winit one, which records each
+  pinch for its window's next frame (`iced_winit::pinch`).
 - `docs/`: the documentation site (`zensical.toml` at the root). Keep it
   in step with behavior changes: keybindings, settings, and on-disk rules.
 - `discovery/`: working design notes, deliberately outside `docs/` because

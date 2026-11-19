@@ -43,6 +43,8 @@ version's section as its notes, and publishes to the apt repo. See
 - **The pointer shows what a press would do** on a board: a crosshair
   with a shape or connector tool, an open hand with the hand tool or
   Space held, a closed hand during a pan, and resize arrows over a handle.
+- **Pinch to zoom a board** on a macOS trackpad, about the pointer. Linux
+  has no pinch yet: the windowing library reports none there.
 - `board-toolbar` and `board-key-badges` in `config.conf`:
   `board-toolbar = off` removes the dock, the style bar, and the footer's
   buttons; `board-key-badges` is `hold` (the default), `on`, or `off`.
@@ -51,6 +53,9 @@ version's section as its notes, and publishes to the apt repo. See
 
 - **The hand tool stays armed** after a pan, until you pick another tool.
   It used to go back to Select after one drag.
+- **Keyboard zoom steps are half as large** on a board: ⌘= and ⌘- (Alt on
+  Linux) and the footer's − and + now also stop at 15, 35, 60, 85, 125,
+  175, 250, and 350 %.
 
 ### Fixed
 
