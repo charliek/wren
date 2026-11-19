@@ -9,7 +9,9 @@ use crate::scene::{
     MAX_LABEL_BYTES, MAX_LABEL_LINES, MAX_Z,
 };
 use crate::style::tests::LIGHT;
-use crate::{parse, write, Board, IssueKind, Limit, MAX_BOARD_BYTES, MAX_DEPTH, MAX_ELEMENTS};
+use crate::{
+    parse, write, Board, IssueKind, Limit, NodeStyle, MAX_BOARD_BYTES, MAX_DEPTH, MAX_ELEMENTS,
+};
 
 /// A limit a board file can pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,12 +26,13 @@ pub(crate) enum Cap {
     LabelBytes,
     Labels,
     ZLength,
+    TextSize,
     LabelLines,
     BoardLines,
 }
 
 impl Cap {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::FileBytes,
         Self::Elements,
         Self::Depth,
@@ -40,6 +43,7 @@ impl Cap {
         Self::LabelBytes,
         Self::Labels,
         Self::ZLength,
+        Self::TextSize,
         Self::LabelLines,
         Self::BoardLines,
     ];
@@ -213,6 +217,27 @@ pub(crate) fn fixture(cap: Cap, past: bool) -> String {
                 &format!("z = \"{z}\"\n"),
             );
         }
+        Cap::TextSize => {
+            // The smallest and the largest size, or one past each; a
+            // connector's `text-size` is unknown content, never a limit.
+            let sizes = NodeStyle::TEXT_SIZES;
+            let (low, high) = (
+                sizes.start() - i64::from(past),
+                sizes.end() + i64::from(past),
+            );
+            for (id, size) in [("a", low), ("b", high)] {
+                let fields = format!(
+                    "at = [0, 0]\nsize = [400, 200]\nstyle.text-size = {size}\nz = \"V\"\n"
+                );
+                out += &node(id, "Aa", &fields);
+            }
+            out += &edge(
+                "e",
+                "{ at = [0, 300] }",
+                "{ at = [300, 300] }",
+                &format!("style.text-size = {}\nz = \"W\"\n", high + 1),
+            );
+        }
         Cap::LabelLines => {
             // Under the fixed measurer a grapheme is 7 wide, wider than the
             // label box of a shape 10 wide, so each is a line of its own.
@@ -265,6 +290,7 @@ fn flagged(cap: Cap) -> Vec<(&'static str, IssueKind)> {
         Cap::LabelBytes => vec![("a", out(Limit::LabelBytes)), ("e", out(Limit::LabelBytes))],
         Cap::Labels => vec![("e", out(Limit::Labels))],
         Cap::ZLength => vec![("a", out(Limit::ZLength)), ("e", out(Limit::ZLength))],
+        Cap::TextSize => vec![("a", out(Limit::TextSize)), ("b", out(Limit::TextSize))],
         Cap::LabelLines => vec![("a", out(Limit::LabelLines)), ("e", out(Limit::LabelLines))],
         Cap::BoardLines => vec![("e", out(Limit::LabelLines))],
     }
@@ -281,6 +307,19 @@ fn texts(scene: &Scene, id: &str) -> Vec<Vec<String>> {
             Draw::Path { .. } => None,
         })
         .collect()
+}
+
+/// The font size of `id`'s element's one text.
+fn text_size(scene: &Scene, id: &str) -> f32 {
+    let sizes: Vec<f32> = (scene.items.iter())
+        .filter(|item| item.source.id().as_str() == id)
+        .filter_map(|item| match &item.draw {
+            Draw::Text { size, .. } => Some(*size),
+            Draw::Path { .. } => None,
+        })
+        .collect();
+    assert_eq!(sizes.len(), 1, "{id}");
+    sizes[0]
 }
 
 /// How many of `id`'s element's texts `scene` cut.
@@ -332,6 +371,14 @@ fn assert_drawn(cap: Cap, past: bool, board: &Board, scene: &Scene) {
             assert_eq!((b.width - pad, b.height - pad), (1.0, 1.0), "{cap:?}");
         }
         Cap::Anchor | Cap::LabelAt | Cap::ZLength => {}
+        Cap::TextSize => {
+            // Drawn at the end of the range it is at or past.
+            let sizes: Vec<f32> = ["a", "b"]
+                .into_iter()
+                .map(|id| text_size(scene, id))
+                .collect();
+            assert_eq!(sizes, [8.0, 96.0], "past {past}");
+        }
         Cap::LabelBytes => {
             for id in ["a", "e"] {
                 let drawn: usize = texts(scene, id).iter().flatten().map(String::len).sum();

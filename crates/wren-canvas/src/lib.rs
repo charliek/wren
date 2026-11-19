@@ -69,7 +69,7 @@ mod overlay;
 mod paint;
 mod widget;
 
-pub use command::{Command, Grow, Tool};
+pub use command::{Command, Grow, Tool, TEXT_SIZES};
 pub use keys::{KeyPolicy, KeyRoute};
 use label::Before;
 pub use label::{Label, LabelAction, Motion, Preedit};
@@ -1031,9 +1031,9 @@ impl BoardView {
 
     /// Show the board as `command` would leave it, for the actions
     /// palette's highlighted row (§5.17 rule 4), or as it is for `None`.
-    /// Only a shape, colour, fill, outline or connector style command
-    /// previews, and only on a board that may be edited; any other shows
-    /// the board as it is. The preview is drawn from a copy of the board:
+    /// Only a shape, colour, fill, label size, outline or connector style
+    /// command previews, and only on a board that may be edited; any other
+    /// shows the board as it is. The preview is drawn from a copy of the board:
     /// running the command applies it, and a settle, an edit, undo and
     /// redo drop it. A gesture in flight keeps the board to itself.
     pub fn set_patch(&mut self, command: Option<Command>) {
@@ -1067,9 +1067,9 @@ impl BoardView {
 
     /// What the actions palette lists for the selection (§5.17 rule 3):
     /// the board commands that apply to it and that the board takes, in
-    /// the groups shape, colour, fill, stroke, connector, arrange, align,
-    /// distribute and edit; with nothing selected, paste, select all and
-    /// zoom to fit. A command offered is one that can change something
+    /// the groups shape, colour, fill, text size, stroke, connector,
+    /// arrange, align, distribute and edit; with nothing selected, paste,
+    /// select all and zoom to fit. A command offered is one that can change something
     /// here: a fill for a selection with a shape in it, a connector style
     /// for one with a connector. Where every element that takes a value
     /// holds the same one, that row is current.
@@ -1132,6 +1132,8 @@ impl BoardView {
         let shape = shared(shapes.iter().map(|node| node.shape.known()));
         let colour = shared(colours.iter().copied());
         let fill = shared(shapes.iter().map(|node| node.style.fill.known()));
+        // Every node's label takes a size, a placeholder's included.
+        let text_size = shared(nodes.iter().map(|node| node.style.text_size));
         let mut offers = Vec::new();
         for command in Command::all() {
             let Some(group) = command.offer_group() else {
@@ -1144,6 +1146,7 @@ impl BoardView {
                     colour == Some(&wren_board::Color::Token(token)),
                 ),
                 Command::Fill(each) => (!shapes.is_empty(), fill == Some(Some(each))),
+                Command::TextSize(each) => (!nodes.is_empty(), text_size == Some(i64::from(each))),
                 Command::StrokeDashed => (strokes > 0, false),
                 Command::EdgeRouting
                 | Command::EdgeStart
@@ -1173,10 +1176,11 @@ impl BoardView {
         ];
         // The stable order of the groups (§5.17 rule 3), whatever the
         // command table's order is.
-        const GROUPS: [&str; 8] = [
+        const GROUPS: [&str; 9] = [
             "Shape",
             "Colour",
             "Fill",
+            "Text size",
             "Stroke",
             "Connector",
             "Arrange",
@@ -1941,12 +1945,35 @@ impl BoardView {
             Command::Color(_) | Command::Fill(_) | Command::StrokeDashed => {
                 style(&self.board, picked, command)
             }
+            Command::TextSize(size) => self.text_size(&picked, size),
             Command::EdgeRouting | Command::EdgeStart | Command::EdgeEnd | Command::EdgeReverse => {
                 let edges: Vec<Id> = picked.iter().filter_map(Source::edge).cloned().collect();
                 edge_style(&self.board, &edges, command)
             }
             _ => None,
         }
+    }
+
+    /// What a label size command does to the selection `picked`: sets it
+    /// on every selected node, each grown in whole cells to hold its label
+    /// at that size as a longer label grows it (§5.9 rule 7), never made
+    /// smaller. `None` with no node selected.
+    fn text_size(&self, picked: &[Source], size: u8) -> Option<Intent> {
+        let nodes: Vec<(Id, [i32; 2])> = picked
+            .iter()
+            .filter_map(Source::node)
+            .filter_map(|id| {
+                let node = self.board.nodes.get(id)?;
+                let mut sized = node.clone();
+                sized.style.text_size = i64::from(size);
+                let grown = label::grown(&sized, node.size, &node.text, &self.measurer);
+                Some((id.clone(), grown))
+            })
+            .collect();
+        (!nodes.is_empty()).then(|| Intent::SetTextSize {
+            nodes,
+            size: i64::from(size),
+        })
     }
 
     /// A preview of `board`, its scene built in the spare cache.
@@ -2066,6 +2093,11 @@ impl BoardView {
             }
             Command::Color(_) | Command::Fill(_) | Command::StrokeDashed if editable => {
                 if let Some(intent) = style(&self.board, picked, command) {
+                    self.edit(&intent, Unit::One, now, update);
+                }
+            }
+            Command::TextSize(size) if editable => {
+                if let Some(intent) = self.text_size(&picked, size) {
                     self.edit(&intent, Unit::One, now, update);
                 }
             }
@@ -7091,10 +7123,27 @@ z = "c"
         select(&mut view, &["a"]);
         assert_eq!(
             offered_groups(&view),
-            ["Shape", "Colour", "Fill", "Stroke", "Arrange", "Edit"]
+            [
+                "Shape",
+                "Colour",
+                "Fill",
+                "Text size",
+                "Stroke",
+                "Arrange",
+                "Edit"
+            ]
         );
         assert_eq!(offered_in(&view, "Shape").len(), 8);
         assert_eq!(offered_in(&view, "Colour").len(), 8);
+        assert_eq!(
+            offered_in(&view, "Text size"),
+            [
+                "board.text_size.12",
+                "board.text_size.14",
+                "board.text_size.20",
+                "board.text_size.28"
+            ]
+        );
         assert_eq!(
             offered_in(&view, "Fill"),
             ["board.fill.none", "board.fill.tint", "board.fill.solid"]
@@ -7123,7 +7172,8 @@ z = "c"
             [
                 "board.shape.rectangle",
                 "board.color.neutral",
-                "board.fill.tint"
+                "board.fill.tint",
+                "board.text_size.14"
             ]
         );
 
@@ -7159,6 +7209,7 @@ z = "c"
                 "Shape",
                 "Colour",
                 "Fill",
+                "Text size",
                 "Stroke",
                 "Connector",
                 "Arrange",
@@ -7173,8 +7224,23 @@ z = "c"
         );
         assert_eq!(
             offered_current(&view),
-            ["board.shape.rectangle", "board.fill.tint"]
+            [
+                "board.shape.rectangle",
+                "board.fill.tint",
+                "board.text_size.14"
+            ]
         );
+        // A size the two do not share is not current; one they do is.
+        select(&mut view, &["a"]);
+        assert_eq!(view.command(Command::TextSize(20), now), CHANGED);
+        select(&mut view, &["a", "b", "e"]);
+        assert!(!offered_current(&view)
+            .iter()
+            .any(|key| key.starts_with("board.text_size")));
+        select(&mut view, &["b"]);
+        assert_eq!(view.command(Command::TextSize(20), now), CHANGED);
+        select(&mut view, &["a", "b", "e"]);
+        assert!(offered_current(&view).contains(&"board.text_size.20"));
         // Three nodes distribute.
         let three = format!(
             "{TWO}\n[node.c]\ntext = \"C\"\nkind = \"shape\"\nat = [600, 0]\nsize = [120, 60]\nz = \"d\"\n"
@@ -7213,6 +7279,70 @@ z = "c"
         assert_eq!(offered(&view), [("Edit", "board.copy", false)]);
         select(&mut view, &["e"]);
         assert!(offered(&view).is_empty());
+    }
+
+    /// The font sizes `scene` draws `name`'s texts at.
+    fn text_sizes(scene: &Scene, name: &str) -> Vec<f32> {
+        (scene.items.iter())
+            .filter(|item| item.source.id().as_str() == name)
+            .filter_map(|item| match &item.draw {
+                scene::Draw::Text { size, .. } => Some(*size),
+                scene::Draw::Path { .. } => None,
+            })
+            .collect()
+    }
+
+    /// discovery/board-controls.md §3.9: a label size previews from a copy,
+    /// applies as one undo step that grows each node in whole cells to hold
+    /// its label at that size, and undo puts the board back. A connector's
+    /// labels stay 12, and a connector alone takes no size.
+    #[test]
+    fn a_text_size_previews_then_applies_as_one_step_that_grows_the_node() {
+        let now = Instant::now();
+        let long = format!(
+            "{}labels = [\n  {{ text = \"next\" }},\n]\nz = \"c\"\n",
+            TWO.replace("text = \"A\"", "text = \"Receive the order\"")
+                .trim_end_matches("z = \"c\"\n")
+        );
+        let mut view = sized(&long);
+        assert_eq!(view.draft(), long);
+        select(&mut view, &["a", "e"]);
+        view.set_patch(Some(Command::TextSize(28)));
+        assert_eq!(view.patch(), Some(Command::TextSize(28)));
+        assert_eq!(text_sizes(view.shown(), "a"), [28.0]);
+        assert_eq!(text_sizes(view.shown(), "e"), [12.0]);
+        assert_eq!(text_sizes(view.scene(), "a"), [14.0]);
+        assert!(view.pristine() && !view.can_undo());
+        let shown = view.shown().clone();
+        assert_eq!(view.command(Command::TextSize(28), now), CHANGED);
+        assert_eq!(view.scene(), &shown);
+        let a = &view.board().nodes[&id("a")];
+        assert_eq!(a.style.text_size, 28);
+        let [width, height] = a.size;
+        assert!(width >= 120 && height > 60, "{:?}", a.size);
+        assert_eq!((width % GRID, height % GRID), (0, 0));
+        let (added, removed) = line_diff(&long, &view.draft());
+        assert!(
+            added.contains(&"style.text-size = 28".to_owned()),
+            "{added:?}"
+        );
+        assert_eq!(removed, ["size = [120, 60]"]);
+        // Smaller again, the node keeps the room it grew to.
+        assert_eq!(view.command(Command::TextSize(12), now), CHANGED);
+        assert_eq!(view.board().nodes[&id("a")].size, [width, height]);
+        travel(&mut view, Command::Undo, now);
+        travel(&mut view, Command::Undo, now);
+        assert_eq!(view.draft(), long);
+        // A connector alone takes no size, and a read-only board none.
+        select(&mut view, &["e"]);
+        view.set_patch(Some(Command::TextSize(28)));
+        assert_eq!(view.patch(), None);
+        assert_eq!(view.command(Command::TextSize(28), now), Update::default());
+        let future = TWO.replacen("schema = 1\n", "schema = 1\nrequires = [\"frames\"]\n", 1);
+        let mut view = sized(&future);
+        select(&mut view, &["a"]);
+        assert_eq!(view.command(Command::TextSize(28), now), Update::default());
+        assert_eq!(view.draft(), future);
     }
 
     /// §5.17 rule 4: a previewed row draws the board as its command would

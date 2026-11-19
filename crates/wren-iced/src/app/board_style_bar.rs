@@ -49,6 +49,8 @@ pub enum Item {
     Shapes,
     Swatch(Token),
     Fill(Fill),
+    /// The label size menu's button, "Aa".
+    TextSizes,
     Dashed,
     Route,
     StartHead,
@@ -63,6 +65,8 @@ pub enum Item {
 pub enum Menu {
     /// The eight shapes, from the shape button.
     Shapes,
+    /// The label sizes, from the "Aa" button.
+    TextSizes,
     /// The edits and "All actions…", and on a narrow canvas the controls
     /// the bar folds away.
     More,
@@ -74,6 +78,7 @@ impl Menu {
     pub fn name(self) -> &'static str {
         match self {
             Self::Shapes => "shapes",
+            Self::TextSizes => "text_size",
             Self::More => "more",
         }
     }
@@ -81,6 +86,7 @@ impl Menu {
     fn anchor(self) -> Item {
         match self {
             Self::Shapes => Item::Shapes,
+            Self::TextSizes => Item::TextSizes,
             Self::More => Item::More,
         }
     }
@@ -97,13 +103,23 @@ impl Item {
             Self::StartHead => Command::EdgeStart,
             Self::EndHead => Command::EdgeEnd,
             Self::Reverse => Command::EdgeReverse,
-            Self::Shapes | Self::More => return None,
+            Self::Shapes | Self::TextSizes | Self::More => return None,
         })
+    }
+
+    /// The commands a control stands for in the last menu when it folds
+    /// away: its own, or for the "Aa" button the sizes its menu holds.
+    fn folded(self) -> Vec<Command> {
+        match self {
+            Self::TextSizes => wren_canvas::TEXT_SIZES.map(Command::TextSize).to_vec(),
+            _ => self.command().into_iter().collect(),
+        }
     }
 
     fn menu(self) -> Option<Menu> {
         match self {
             Self::Shapes => Some(Menu::Shapes),
+            Self::TextSizes => Some(Menu::TextSizes),
             Self::More => Some(Menu::More),
             _ => None,
         }
@@ -113,6 +129,7 @@ impl Item {
     pub fn name(self) -> &'static str {
         match self {
             Self::Shapes => "Change shape",
+            Self::TextSizes => "Text size",
             Self::More => "More",
             Self::Swatch(token) => colour_name(token),
             Self::Fill(_)
@@ -128,6 +145,7 @@ impl Item {
     pub fn id(self) -> &'static str {
         match self {
             Self::Shapes => "board-style-shape",
+            Self::TextSizes => "board-style-text-size",
             Self::More => "board-style-more",
             Self::Swatch(token) => match token {
                 Token::Neutral => "board-style-neutral",
@@ -152,7 +170,7 @@ impl Item {
 
     fn width(self) -> f32 {
         match self {
-            Self::Shapes => WIDE,
+            Self::Shapes | Self::TextSizes => WIDE,
             Self::Swatch(_) => SWATCH.0,
             _ => BUTTON.0,
         }
@@ -160,11 +178,15 @@ impl Item {
 }
 
 /// Whether the pointer over a control or a row running `command` shows it
-/// on the board first: a colour, a fill, a route or a shape.
+/// on the board first: a colour, a fill, a route, a shape or a label size.
 pub fn previews(command: Command) -> bool {
     matches!(
         command,
-        Command::Color(_) | Command::Fill(_) | Command::EdgeRouting | Command::Shape(_)
+        Command::Color(_)
+            | Command::Fill(_)
+            | Command::EdgeRouting
+            | Command::Shape(_)
+            | Command::TextSize(_)
     )
 }
 
@@ -189,6 +211,10 @@ fn command_name(command: Command) -> &'static str {
         Command::Fill(Fill::None) => "Fill: none",
         Command::Fill(Fill::Tint) => "Fill: tint",
         Command::Fill(Fill::Solid) => "Fill: solid",
+        Command::TextSize(12) => "Text size 12",
+        Command::TextSize(14) => "Text size 14",
+        Command::TextSize(20) => "Text size 20",
+        Command::TextSize(28) => "Text size 28",
         Command::StrokeDashed => "Solid or dashed",
         Command::EdgeRouting => "Elbow or straight",
         Command::EdgeStart => "Start arrowhead",
@@ -217,6 +243,10 @@ pub fn row_id(command: Command) -> &'static str {
         Command::Fill(Fill::None) => "board-style-menu-fill-none",
         Command::Fill(Fill::Tint) => "board-style-menu-fill-tint",
         Command::Fill(Fill::Solid) => "board-style-menu-fill-solid",
+        Command::TextSize(12) => "board-style-menu-text-size-12",
+        Command::TextSize(14) => "board-style-menu-text-size-14",
+        Command::TextSize(20) => "board-style-menu-text-size-20",
+        Command::TextSize(28) => "board-style-menu-text-size-28",
         Command::StrokeDashed => "board-style-menu-dashed",
         Command::EdgeRouting => "board-style-menu-route",
         Command::EdgeStart => "board-style-menu-start",
@@ -236,7 +266,7 @@ pub const MENU_ID: &str = "board-style-menu";
 
 /// Every id the bar gives a widget, for the harness to look for.
 #[cfg(any(test, feature = "smoke-test"))]
-pub const IDS: [&str; 41] = [
+pub const IDS: [&str; 46] = [
     BAR_ID,
     MENU_ID,
     "board-style-shape",
@@ -252,6 +282,7 @@ pub const IDS: [&str; 41] = [
     "board-style-fill-none",
     "board-style-fill-tint",
     "board-style-fill-solid",
+    "board-style-text-size",
     "board-style-dashed",
     "board-style-route",
     "board-style-start",
@@ -268,6 +299,10 @@ pub const IDS: [&str; 41] = [
     "board-style-menu-fill-none",
     "board-style-menu-fill-tint",
     "board-style-menu-fill-solid",
+    "board-style-menu-text-size-12",
+    "board-style-menu-text-size-14",
+    "board-style-menu-text-size-20",
+    "board-style-menu-text-size-28",
     "board-style-menu-dashed",
     "board-style-menu-route",
     "board-style-menu-start",
@@ -492,6 +527,13 @@ pub fn bar(situation: Situation, offers: &[Offer], keys: &Keys) -> Option<Bar> {
     if !fills.is_empty() {
         groups.push((true, fills));
     }
+    // The "Aa" menu, after the fills, folds with them.
+    let sized = wren_canvas::TEXT_SIZES
+        .into_iter()
+        .any(|size| offered(Command::TextSize(size)).is_some());
+    if sized {
+        groups.push((true, vec![control(Item::TextSizes, false, None)]));
+    }
     let connector: Vec<Part> = [Item::Route, Item::StartHead, Item::EndHead, Item::Reverse]
         .into_iter()
         .filter(|item| item.command().and_then(offered).is_some())
@@ -539,14 +581,20 @@ pub fn bar(situation: Situation, offers: &[Offer], keys: &Keys) -> Option<Bar> {
                 .iter()
                 .map(|shape| row(Command::Shape(*shape)))
                 .collect(),
+            Menu::TextSizes => wren_canvas::TEXT_SIZES
+                .into_iter()
+                .map(Command::TextSize)
+                .filter(|command| offered(*command).is_some())
+                .map(row)
+                .collect(),
             Menu::More => {
                 let folded = groups
                     .iter()
                     .filter(|(folds, _)| bar.folded && *folds)
                     .flat_map(|(_, group)| group)
-                    .filter_map(|part| match part {
-                        Part::Control(control) => control.item.command(),
-                        _ => None,
+                    .flat_map(|part| match part {
+                        Part::Control(control) => control.item.folded(),
+                        _ => Vec::new(),
                     });
                 let edits = [
                     Command::Duplicate,
@@ -774,6 +822,17 @@ impl App {
                 .into()
             }
             Item::More => chrome::icon(Icon::More, 20.0, ink),
+            Item::TextSizes => row![
+                text("Aa")
+                    .size(15)
+                    .font(fonts::UI)
+                    .color(theme::color(ink))
+                    .wrapping(text::Wrapping::None),
+                chrome::icon(Icon::Chevron, 10.0, ink)
+            ]
+            .spacing(2)
+            .align_y(iced::Center)
+            .into(),
             Item::Fill(fill) => glyph(&fill_paths(fill, ink)),
             Item::Dashed => glyph(DASHED),
             Item::Route => glyph(ROUTE),
@@ -931,6 +990,20 @@ impl App {
         if let Some(paths) = glyph {
             line = line.push(chrome::paths_icon(&paths, 18.0, ink));
         }
+        // A size row shows "Aa" larger as the size grows.
+        if let Command::TextSize(size) = each.command {
+            line = line.push(
+                container(
+                    text("Aa")
+                        .size(sample(size))
+                        .font(fonts::UI)
+                        .color(theme::color(ink))
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(SAMPLE)
+                .align_x(iced::Center),
+            );
+        }
         line = line.push(
             text(each.name())
                 .size(13)
@@ -970,12 +1043,27 @@ impl App {
     }
 }
 
+/// The room a size row's "Aa" takes, an icon's, so the names line up in
+/// a menu that holds both; and the size it is drawn at for a label size:
+/// larger as the size is, within that room.
+const SAMPLE: f32 = 18.0;
+
+fn sample(size: u8) -> f32 {
+    match size {
+        ..=12 => 9.0,
+        13..=14 => 11.0,
+        15..=20 => 13.0,
+        _ => 15.0,
+    }
+}
+
 /// Whether a menu row draws its style beside its name.
 fn has_glyph(command: Command) -> bool {
     matches!(
         command,
         Command::Shape(_)
             | Command::Fill(_)
+            | Command::TextSize(_)
             | Command::StrokeDashed
             | Command::EdgeRouting
             | Command::EdgeStart
@@ -1135,6 +1223,24 @@ mod tests {
         all.push((Command::StrokeDashed, false));
         all.extend(connectors());
         all.extend(edits(false));
+        offers(all)
+    }
+
+    fn sizes(current: Option<u8>) -> Vec<(Command, bool)> {
+        wren_canvas::TEXT_SIZES
+            .map(|size| (Command::TextSize(size), Some(size) == current))
+            .to_vec()
+    }
+
+    /// One shape at a label size, as the canvas offers it.
+    fn sized_shape(current: Option<u8>) -> Vec<Offer> {
+        let mut all = shapes(Some(Shape::Rect));
+        all.extend(colours(Some(Token::Neutral)));
+        all.extend(fills(Some(Fill::Tint)));
+        all.extend(sizes(current));
+        all.push((Command::StrokeDashed, false));
+        all.extend(connectors());
+        all.extend(edits(true));
         offers(all)
     }
 
@@ -1324,6 +1430,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(none.menu, None);
+    }
+
+    /// discovery/board-controls.md §3.9: the "Aa" button after the fills
+    /// opens the four sizes, the current one marked, each previewing; a
+    /// size no preset names marks none; on a narrow canvas the sizes fold
+    /// into the last menu with the fills.
+    #[test]
+    fn the_text_size_menu_holds_the_four_sizes_and_folds_with_the_fills() {
+        let bar = styled(SELECTED, &sized_shape(Some(20))).unwrap();
+        let ids = ids(&bar);
+        let fill = ids
+            .iter()
+            .position(|id| *id == "board-style-fill-solid")
+            .unwrap();
+        assert_eq!(ids[fill + 1], "board-style-text-size");
+        let aa = find(&bar, Item::TextSizes);
+        assert_eq!(
+            (aa.item.command(), aa.tip()),
+            (None, "Text size".to_owned())
+        );
+        assert!(IDS.contains(&aa.item.id()));
+        assert!(matches!(
+            message(Item::TextSizes, None),
+            Message::StyleMenu(Some(Menu::TextSizes))
+        ));
+        let open = Situation {
+            menu: Some(Menu::TextSizes),
+            ..SELECTED
+        };
+        let (menu, rows) = styled(open, &sized_shape(Some(20))).unwrap().menu.unwrap();
+        assert_eq!(menu, Menu::TextSizes);
+        let listed: Vec<(Command, bool)> =
+            rows.iter().map(|row| (row.command, row.current)).collect();
+        assert_eq!(listed, sizes(Some(20)));
+        assert_eq!(rows[0].name(), "Text size 12");
+        for row in &rows {
+            assert!(previews(row.command), "{:?}", row.command);
+            assert!(IDS.contains(&row_id(row.command)), "{:?}", row.command);
+            assert_eq!(row.key, None);
+        }
+        // A size the file holds that is no preset marks none.
+        let (_, rows) = styled(open, &sized_shape(None)).unwrap().menu.unwrap();
+        assert!(rows.iter().all(|row| !row.current));
+        // Connectors alone take no size.
+        assert!(
+            !self::ids(&styled(SELECTED, &connector()).unwrap()).contains(&"board-style-text-size")
+        );
+        // Folded, the sizes are in the last menu after the fills.
+        let wide = styled(SELECTED, &sized_shape(Some(14))).unwrap();
+        let narrow = Situation {
+            width: wide.width() + 2.0 * SIDE - 1.0,
+            menu: Some(Menu::More),
+            ..SELECTED
+        };
+        let folded = styled(narrow, &sized_shape(Some(14))).unwrap();
+        assert!(folded.folded);
+        assert!(!self::ids(&folded).contains(&"board-style-text-size"));
+        let rows = folded.menu.unwrap().1;
+        let commands: Vec<Command> = rows.iter().map(|row| row.command).collect();
+        assert_eq!(
+            commands[3..7],
+            wren_canvas::TEXT_SIZES.map(Command::TextSize)
+        );
+        assert!(rows[4].current && !rows[5].current);
+        // The Aa menu cannot open while its button is folded away.
+        let gone = styled(
+            Situation {
+                menu: Some(Menu::TextSizes),
+                ..narrow
+            },
+            &sized_shape(Some(14)),
+        )
+        .unwrap();
+        assert_eq!(gone.menu, None);
     }
 
     #[test]
@@ -1676,6 +1856,52 @@ mod tests {
         assert_eq!(view.next_color(), Token::Green);
         assert_eq!((view.board(), app.board_revision), (&before, revision));
         assert_eq!(view.machine().tool(), Tool::Shape(Shape::Rect));
+
+        // The Aa menu: a row previews its size, a click sets it as one
+        // undo step and grows the shape to hold its label, and the menu
+        // closes.
+        select(&mut app, &["pack"]);
+        let written = |app: &App| wren_board::write(app.board.as_ref().unwrap().board());
+        let before = written(&app);
+        let _ = app.update(message(Item::TextSizes, None));
+        assert_eq!(app.style_menu, Some(Menu::TextSizes));
+        let rows = app.board_style_bar().unwrap().menu.unwrap().1;
+        assert_eq!(rows.iter().filter(|row| row.current).count(), 1);
+        assert!(rows[1].current, "14 is current");
+        let _ = app.update(Message::StyleHover(Hover::Enter(Command::TextSize(28))));
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(view.patch(), Some(Command::TextSize(28)));
+        assert_eq!(written(&app), before);
+        let _ = app.update(run(Command::TextSize(28)));
+        assert!(app.style_menu.is_none());
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(
+            (view.patch(), view.board().nodes[&pack].style.text_size),
+            (None, 28)
+        );
+        assert!(written(&app).contains("style.text-size = 28\n"));
+        assert!(view.machine().focused());
+        let _ = app.update(run(Command::Undo));
+        assert_eq!(written(&app), before);
+
+        // Opened while the label is edited, a menu finishes the label
+        // first, so its rows preview as they do at any other time.
+        let _ = app.update(run(Command::EditLabel));
+        let view = app.board.as_ref().unwrap();
+        let epoch = view.epoch();
+        assert!(view.label().is_some());
+        let typed = wren_canvas::LabelAction::Insert("Packed".into());
+        let _ = app.update(Message::Board(wren_canvas::Message::Label(epoch, typed)));
+        let _ = app.update(message(Item::TextSizes, None));
+        assert_eq!(app.style_menu, Some(Menu::TextSizes));
+        let view = app.board.as_ref().unwrap();
+        assert!(view.label().is_none());
+        assert_eq!(view.board().nodes[&pack].text, "Packed");
+        let _ = app.update(Message::StyleHover(Hover::Enter(Command::TextSize(20))));
+        let view = app.board.as_ref().unwrap();
+        assert_eq!(view.patch(), Some(Command::TextSize(20)));
+        let _ = app.update(Message::StyleHover(Hover::Leave(Command::TextSize(20))));
+        let _ = app.update(Message::StyleMenu(None));
 
         // The setting off: no bar.
         app.preferences.settings.board_toolbar = false;

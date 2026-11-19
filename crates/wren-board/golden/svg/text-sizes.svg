@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="841.5" height="500.75" viewBox="-0.75 -0.75 841.5 500.75">
+<path d="M0 0L160 0L160 80L0 80Z" fill="#e4e5e5" stroke="#202428" stroke-width="1.5"/>
+<text x="62" y="44.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">Twelve</text>
+<path d="M200 0L360 0L360 80L200 80Z" fill="#e6ecf9" stroke="#3060d0" stroke-width="1.5"/>
+<text x="252" y="45.092773" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Fourteen</text>
+<path d="M400 0L560 0L560 80L400 80Z" fill="#e6f2e8" stroke="#309040" stroke-width="1.5"/>
+<text x="450" y="47.27539" font-family="Inter, system-ui, sans-serif" font-size="20" fill="#202428" xml:space="preserve">Twenty</text>
+<path d="M608 0L832 0C836.4183 0 840 3.5817218 840 8L840 72C840 76.41828 836.4183 80 832 80L608 80C603.5817 80 600 76.41828 600 72L600 8C600 3.5817218 603.5817 0 608 0Z" fill="#8040b0" stroke="#8040b0" stroke-width="1.5"/>
+<text x="636" y="50.185547" font-family="Inter, system-ui, sans-serif" font-size="28" fill="#ffffff" xml:space="preserve">Twenty-eight</text>
+<path d="M80 120C124.182785 120 160 142.38576 160 170C160 197.61424 124.182785 220 80 220C35.81722 220 0 197.61424 0 170C0 142.38576 35.81722 120 80 120Z" fill="#f9eee2" stroke="#d07010" stroke-width="1.5"/>
+<text x="30" y="148.70396" font-family="Inter, system-ui, sans-serif" font-size="20" fill="#202428" xml:space="preserve">A label at</text>
+<text x="25" y="177.27539" font-family="Inter, system-ui, sans-serif" font-size="20" fill="#202428" xml:space="preserve">twenty that</text>
+<text x="55" y="205.84682" font-family="Inter, system-ui, sans-serif" font-size="20" fill="#202428" xml:space="preserve">wraps</text>
+<path d="M200 120L600 120L600 280L200 280Z" fill="#f7e6e6" stroke="#c03030" stroke-width="1.5"/>
+<text x="232" y="234.92188" font-family="Inter, system-ui, sans-serif" font-size="96" fill="#202428" xml:space="preserve">Past 96</text>
+<text x="0" y="332.36523" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">Free text at 12</text>
+<text x="0" y="375.09277" font-family="Inter, system-ui, sans-serif" font-size="14" fill="#202428" xml:space="preserve">Free text at 14</text>
+<text x="0" y="421.5611" font-family="Inter, system-ui, sans-serif" font-size="20" fill="#202428" xml:space="preserve">Free text at 20</text>
+<text x="0" y="490.18555" font-family="Inter, system-ui, sans-serif" font-size="28" fill="#202428" xml:space="preserve">Free text at 28</text>
+<path d="M160 40L190 40" fill="none" stroke="#202428" stroke-width="1.5"/>
+<path d="M200 40L190 44L190 36Z" fill="#202428"/>
+<path d="M152 30L208 30L208 50L152 50Z" fill="#ffffff"/>
+<text x="156" y="44.365234" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#202428" xml:space="preserve">stays 12</text>
+<path d="M200 116.25C202.07108 116.25 203.75 117.92893 203.75 120C203.75 122.07107 202.07108 123.75 200 123.75C197.92892 123.75 196.25 122.07107 196.25 120C196.25 117.92893 197.92892 116.25 200 116.25Z" fill="#d02020" stroke="#ffffff" stroke-width="1.5"/>
+</svg>

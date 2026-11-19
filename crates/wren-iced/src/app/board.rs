@@ -1916,7 +1916,7 @@ z = "c"
         let rows = command_rows(&mut app);
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
-        assert_eq!(listed.len(), 90);
+        assert_eq!(listed.len(), 94);
         for (_, id, enabled) in &listed {
             let more =
                 id.key().starts_with("board.align.") || id.key().starts_with("board.distribute.");

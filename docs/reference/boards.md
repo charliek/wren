@@ -204,6 +204,30 @@ On layouts that type a symbol on the digit row, such as AZERTY (which types
 digit, so the colour keys work without Shift. Layouts with non-Latin
 letters already use the physical key.
 
+## Text size
+
+A shape's label and free text have a size: 12, 14 (the default), 20 or 28,
+from the [style bar](#the-style-bar)'s **Aa** menu, or **Text size: 12**
+to **Text size: 28** in the actions palette and the command palette
+(`board.text_size.12` to `board.text_size.28`, with no key unless you bind
+one). It applies to every selected shape and text element; a connector's
+labels are always 12. Resting the pointer on a row of the **Aa** menu shows
+the size on the board without setting it.
+
+A larger label makes its shape grow to hold it, in whole grid cells, as a
+longer label does; a smaller one shrinks nothing, so a shape keeps the room
+it grew to until you resize it. New shapes start at 14: the size you pick
+is not remembered the way the colour is. The label editor types, wraps and
+puts its caret at the label's size.
+
+The file stores the size as a whole number of board units
+(`style.text-size`), written only when it is not 14, so a board that
+uses none is unchanged. A size written by hand need not be a preset: any
+from 8 to 96 is drawn as written, and the **Aa** menu then marks no preset.
+One outside that range is drawn at 8 or 96 and listed as an issue. Wren 0.2
+keeps the size in the file but draws the label at 14, in a box that may
+have grown for a larger one.
+
 ## Arranging
 
 **Stacking.** ] brings the selection to the front and [ sends it to the
@@ -270,7 +294,9 @@ the controls that style it, the same ones the
 - With shapes selected: a shape menu, whose button draws the selection's
   shape (or a square and a circle when the shapes differ) and whose menu
   lists all eight with the current one marked; the eight colour
-  swatches; Fill: none, tint and solid; and Solid or dashed.
+  swatches; Fill: none, tint and solid; the **Aa** menu of the four
+  [text sizes](#text-size), with the selection's own marked; and Solid
+  or dashed.
 - With connectors selected: the swatches; Elbow or straight; Start
   arrowhead and End arrowhead; Reverse; and Solid or dashed.
 - Last, a menu of Duplicate, Bring to front, Send to back, Delete, and
@@ -281,7 +307,8 @@ colour the whole selection has is ringed in the accent colour, and the
 fill it has is lit. The swatches are each colour as the current theme
 draws it. A click does what the control's key or palette row does,
 through the same command, as one undo step. Resting the pointer on a
-swatch, a fill, Elbow or straight, or a row of the shape menu shows the
+swatch, a fill, Elbow or straight, or a row of the shape or **Aa** menu
+shows the
 change on the board without making it, as the actions palette's
 highlighted row does; moving off drops it and nothing is written.
 
@@ -295,8 +322,9 @@ finishes an open label first, and never reaches the canvas beneath it.
 Hovering a control names it and its key. While Space is held, or always
 with `board-key-badges = on`, each swatch shows its digit under it.
 
-Where the canvas is too narrow for the whole bar, the fills, Solid or
-dashed, and the connector's controls move to the top of the last menu.
+Where the canvas is too narrow for the whole bar, the fills, the text
+sizes, Solid or dashed, and the connector's controls move to the top of
+the last menu.
 A canvas too narrow for even the swatches shows no bar. A board fitted
 to its canvas starts below the bar, so a shape at the top of a fitted
 board is never under it. A read-only board has no style bar.
@@ -485,7 +513,8 @@ Wren. What does not survive:
   (Wren Light from the app, `--theme` from the command line), and draw.io's
   dark mode works out its own.
 - Wren's font and wrapping: draw.io wraps labels in its own font, so a
-  label may break differently or overflow its shape.
+  label may break differently or overflow its shape. Each label keeps its
+  size (`fontSize`), as SVG and PNG exports do.
 - Routes: draw.io bends elbow connectors itself and avoids no shapes, so a
   connector can cross a shape, two can share a line, and a floating end on
   a pill, cylinder, or document stops at its box.
@@ -531,6 +560,7 @@ the banner.
 | Nesting | 32 levels | Deeper shapes are drawn at the top level, listed as an issue. |
 | One label | 16 KiB and 1,024 lines | The rest is not drawn, listed as an issue; typing past 16 KiB is refused. |
 | Labels on one connector | 16 | The rest are not drawn, listed as an issue. |
+| Text size | 8 to 96 units | Drawn at 8 or 96, listed as an issue. |
 | Label lines on a board | 262,144 | Later labels are cut, listed as an issue. |
 | PNG image | 64 megapixels | The export is refused. |
 

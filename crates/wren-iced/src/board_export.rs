@@ -485,6 +485,14 @@ fn past(limit: Limit) -> String {
             "its z is over {0} characters; stacked by the first {0}",
             scene::MAX_Z
         ),
+        Limit::TextSize => {
+            let sizes = wren_board::NodeStyle::TEXT_SIZES;
+            format!(
+                "its text size is outside {} to {}; drawn at the nearer",
+                sizes.start(),
+                sizes.end()
+            )
+        }
         Limit::LabelLines => format!(
             "a label has more lines than are drawn ({} a label, {} a board); \
              only those are drawn",

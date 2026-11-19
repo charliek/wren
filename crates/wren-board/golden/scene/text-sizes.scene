@@ -1,0 +1,35 @@
+bounds -0.75,-0.75 841.5x500.75
+node s12 path in -0.75,-0.75 161.5x81.5 fill #e4e5e5 stroke #202428 1.5: M 0,0 L 160,0 L 160,80 L 0,80 Z
+node s12 text in 62,32 36x16 Regular 12 #202428
+  62,32 w 36 "Twelve"
+node s14 path in 199.25,-0.75 161.5x81.5 fill #e6ecf9 stroke #3060d0 1.5: M 200,0 L 360,0 L 360,80 L 200,80 Z
+node s14 text in 252,30 56x20 Regular 14 #202428
+  252,30 w 56 "Fourteen"
+node s20 path in 399.25,-0.75 161.5x81.5 fill #e6f2e8 stroke #309040 1.5: M 400,0 L 560,0 L 560,80 L 400,80 Z
+node s20 text in 450,25.714287 60x28.571428 Regular 20 #202428
+  450,25.714287 w 60 "Twenty"
+node s28 path in 599.25,-0.75 241.5x81.5 fill #8040b0 stroke #8040b0 1.5: M 608,0 L 832,0 C 836.4183,0 840,3.5817218 840,8 L 840,72 C 840,76.41828 836.4183,80 832,80 L 608,80 C 603.5817,80 600,76.41828 600,72 L 600,8 C 600,3.5817218 603.5817,0 608,0 Z
+node s28 text in 636,20 168x40 Regular 28 #ffffff
+  636,20 w 168 "Twenty-eight"
+node wraps path in -0.75,119.25 161.5x101.5 fill #f9eee2 stroke #d07010 1.5: M 80,120 C 124.182785,120 160,142.38576 160,170 C 160,197.61424 124.182785,220 80,220 C 35.81722,220 0,197.61424 0,170 C 0,142.38576 35.81722,120 80,120 Z
+node wraps text in 25,127.14285 110x85.71428 Regular 20 #202428
+  30,127.14285 w 100 "A label at"
+  25,155.71428 w 110 "twenty that"
+  55,184.2857 w 50 "wraps"
+node huge path in 199.25,119.25 401.5x161.5 fill #f7e6e6 stroke #c03030 1.5: M 200,120 L 600,120 L 600,280 L 200,280 Z
+node huge text in 232,131.42857 336x137.14285 Regular 96 #202428
+  232,131.42857 w 336 "Past 96"
+node t12 text in 0,320 90x16 Regular 12 #202428
+  0,320 w 90 "Free text at 12"
+node t14 text in 0,360 105x20 Regular 14 #202428
+  0,360 w 105 "Free text at 14"
+node t20 text in 0,400 150x28.571428 Regular 20 #202428
+  0,400 w 150 "Free text at 20"
+node t28 text in 0,460 210x40 Regular 28 #202428
+  0,460 w 210 "Free text at 28"
+edge s12-s14 path in 159.25,39.25 31.5x1.5 stroke #202428 1.5: M 160,40 L 190,40
+edge s12-s14 path in 190,36 10x8 fill #202428: M 200,40 L 190,44 L 190,36 Z
+edge s12-s14 path in 152,30 56x20 fill #ffffff: M 152,30 L 208,30 L 208,50 L 152,50 Z
+edge s12-s14 text in 156,32 48x16 Regular 12 #202428
+  156,32 w 48 "stays 12"
+node huge path in 195.5,115.5 9x9 fill #d02020 stroke #ffffff 1.5: M 200,116.25 C 202.07108,116.25 203.75,117.92893 203.75,120 C 203.75,122.07107 202.07108,123.75 200,123.75 C 197.92892,123.75 196.25,122.07107 196.25,120 C 196.25,117.92893 197.92892,116.25 200,116.25 Z

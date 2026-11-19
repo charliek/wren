@@ -96,7 +96,8 @@ def test_the_bar_shows_what_applies_to_the_selection(samples: Path) -> None:
         ids = [each["id"] for each in state["controls"]]
         assert ids == (["board-style-shape"] + SWATCHES
                        + ["board-style-fill-none", "board-style-fill-tint",
-                          "board-style-fill-solid", "board-style-dashed", "board-style-more"])
+                          "board-style-fill-solid", "board-style-text-size",
+                          "board-style-dashed", "board-style-more"])
         assert state["new_shapes"] is False and state["folded"] is False
         assert [each["id"] for each in state["controls"] if each["current"]] == [
             "board-style-shape", "board-style-neutral", "board-style-fill-tint"]
@@ -124,12 +125,18 @@ def test_the_bar_shows_what_applies_to_the_selection(samples: Path) -> None:
         ids = [each["id"] for each in state["controls"]]
         assert ids == SWATCHES + ["board-style-route", "board-style-start", "board-style-end",
                                   "board-style-reverse", "board-style-dashed", "board-style-more"]
-        # A shape and a connector: both.
+        # A shape and a connector: both. With every control of both the bar
+        # is wider than this canvas, so the styles are in the last menu.
         select(app, PACK, EDGE)
         state = laid_out(app, lambda state: "board-style-shape" in
                          [each["id"] for each in state["controls"]])
-        ids = [each["id"] for each in state["controls"]]
-        assert "board-style-route" in ids and "board-style-fill-solid" in ids
+        assert state["folded"] is True
+        style_bar(app, click="board-style-more")
+        state = laid_out(app, lambda state: state["menu"] is not None)
+        commands = [row["command"] for row in state["menu"]["rows"]]
+        assert {"board.edge.routing", "board.fill.solid", "board.text_size.20"} <= set(commands)
+        style_bar(app, click="board-style-more")
+        laid_out(app, lambda state: state["menu"] is None)
         # Nothing selected: no bar.
         key(app, "escape")
         assert style_bar(app)["shown"] is False

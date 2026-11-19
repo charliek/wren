@@ -434,7 +434,7 @@ const fn board_go(command: BoardCommand, key: &'static str, label: &'static str)
 /// The board's rows, in the order of the plan's command table (§5.19). Each
 /// key is the one `wren_canvas::Command::key` gives; a test holds them
 /// together.
-pub const BOARD_DEFINITIONS: [Definition; 90] = {
+pub const BOARD_DEFINITIONS: [Definition; 94] = {
     use BoardCommand as C;
     use Dir::{Down, Left, Right, Up};
     [
@@ -708,6 +708,10 @@ pub const BOARD_DEFINITIONS: [Definition; 90] = {
         board(C::Actions, "board.actions", "Board actions…"),
         board_go(C::Jump, "board.jump", "Jump to node…"),
         board(C::Keys, "board.keys", "Board keys"),
+        board(C::TextSize(12), "board.text_size.12", "Text size: 12"),
+        board(C::TextSize(14), "board.text_size.14", "Text size: 14"),
+        board(C::TextSize(20), "board.text_size.20", "Text size: 20"),
+        board(C::TextSize(28), "board.text_size.28", "Text size: 28"),
     ]
 };
 

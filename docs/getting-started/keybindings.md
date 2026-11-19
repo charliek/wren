@@ -249,6 +249,7 @@ them:
 | Align left, centre, right, top, middle, bottom | `board.align.left`, `.center`, `.right`, `.top`, `.middle`, `.bottom` |
 | Distribute horizontally, vertically | `board.distribute.horizontal`, `board.distribute.vertical` |
 | Fill: none, tint, solid | `board.fill.none`, `board.fill.tint`, `board.fill.solid` |
+| Text size: 12, 14, 20, 28 | `board.text_size.12`, `.14`, `.20`, `.28` |
 | Connector: straight or elbow / start head / end head / reverse | `board.edge.routing`, `board.edge.start`, `board.edge.end`, `board.edge.reverse` |
 | Solid or dashed | `board.stroke.dashed` |
 | New board, Export board as SVG, PNG, draw.io | `note.new_board`, `note.export_svg`, `note.export_png`, `note.export_drawio` |

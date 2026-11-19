@@ -1763,6 +1763,47 @@ mod tests {
         assert_eq!(input_method(&view, true, BOUNDS), InputMethod::Disabled);
     }
 
+    /// A label drawn at 28 is edited at 28: the input method's caret is a
+    /// line of 28 tall, and a composition is shown at 28, on screen.
+    #[test]
+    fn the_input_method_is_asked_at_the_label_s_size() {
+        let big = fixtures::TWO.replace(
+            "size = [120, 60]\nz = \"a\"",
+            "size = [120, 60]\nstyle.text-size = 28\nz = \"a\"",
+        );
+        let mut view = open(&big);
+        let mut state = State::new();
+        for _ in 0..2 {
+            let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+            send(&mut view, &mut state, press, ON_A);
+            let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+            send(&mut view, &mut state, release, ON_A);
+        }
+        assert_eq!(view.label().map(crate::Label::text), Some("A"));
+        for zoom in [0.5, 2.0] {
+            view.set_viewport(Viewport {
+                x: 0.0,
+                y: 0.0,
+                zoom,
+            });
+            let composing = LabelAction::Preedit {
+                text: "にほんご".to_owned(),
+                selection: None,
+            };
+            view.update(Message::Label(view.epoch(), composing), Instant::now());
+            let InputMethod::Enabled {
+                cursor,
+                preedit: Some(preedit),
+                ..
+            } = input_method(&view, true, BOUNDS)
+            else {
+                panic!("no input method at {zoom}");
+            };
+            assert_eq!(cursor.height, 40.0 * zoom, "{zoom}");
+            assert_eq!(preedit.text_size, Some(Pixels(28.0 * zoom)), "{zoom}");
+        }
+    }
+
     #[test]
     fn the_window_s_focus_is_followed_for_the_input_method() {
         let (mut view, mut state) = labelling();

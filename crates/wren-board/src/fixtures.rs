@@ -60,6 +60,7 @@ pub const CANONICAL: &[(&str, &str)] = &[
     sample!("Shapes"),
     sample!("Overlap"),
     sample!("Future"),
+    sample!("Text sizes"),
     golden!("editor-flowchart.out"),
     golden!("editor-paste.out"),
     golden!("editor-connectors.out"),

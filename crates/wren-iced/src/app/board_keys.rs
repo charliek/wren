@@ -468,6 +468,14 @@ fn entries() -> Vec<(&'static str, Vec<Entry>)> {
             ],
         ),
         ("Colour", colour),
+        // No key by default, so the group shows only once one is bound.
+        (
+            "Text size",
+            wren_canvas::TEXT_SIZES
+                .into_iter()
+                .map(|size| One(Command::TextSize(size)))
+                .collect(),
+        ),
         (
             "Arrange",
             vec![
@@ -1181,6 +1189,29 @@ pub(super) mod tests {
         }
         let all: HashSet<Command> = Command::all().collect();
         assert_eq!(placed, all);
+    }
+
+    /// The label sizes have no key, so they are not on the sheet until
+    /// one is bound; then they have a group of their own after Colour.
+    #[test]
+    fn a_text_size_shows_on_the_sheet_once_it_has_a_key() {
+        let plain = rows(Platform::Linux, &[], |_| true);
+        assert!(plain.iter().all(|row| row.group != "Text size"));
+        let bound = rows(
+            Platform::Linux,
+            &[("Alt+Shift+9", "board.text_size.28")],
+            |_| true,
+        );
+        let sized: Vec<&SheetRow> = bound
+            .iter()
+            .filter(|row| row.group == "Text size")
+            .collect();
+        assert_eq!(sized.len(), 1);
+        assert_eq!(sized[0].words, "Text size: 28");
+        let mut groups: Vec<&str> = bound.iter().map(|row| row.group).collect();
+        groups.dedup();
+        let colour = groups.iter().position(|group| *group == "Colour").unwrap();
+        assert_eq!(groups[colour + 1], "Text size");
     }
 
     #[test]

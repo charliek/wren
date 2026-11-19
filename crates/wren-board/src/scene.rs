@@ -1133,6 +1133,7 @@ impl<'b> Painter<'_, 'b> {
 
     fn node(&mut self, id: &Id, node: &Node, bounds: Rect) {
         let source = Source::Node(id.clone());
+        let size = node.style.drawn_text_size();
         let outlined = grow(bounds, STROKE_WIDTH / 2.0);
         match node.kind.as_ref().and_then(Named::known) {
             Some(NodeKind::Shape) => {
@@ -1160,11 +1161,11 @@ impl<'b> Painter<'_, 'b> {
                     self.path(&source, detail, None, Some(stroke), outlined);
                 }
                 let area = shape::label_box(shape, bounds);
-                self.text(&source, &node.text, area, Layout::Shape, LABEL_SIZE, label);
+                self.text(&source, &node.text, area, Layout::Shape, size, label);
             }
             Some(NodeKind::Text) => {
                 let color = style::resolve(&node.style.color, Fill::None, self.palette).stroke;
-                self.text(&source, &node.text, bounds, Layout::Free, LABEL_SIZE, color);
+                self.text(&source, &node.text, bounds, Layout::Free, size, color);
             }
             None => {
                 // A kind this build does not know, or none: a placeholder.
@@ -1198,7 +1199,7 @@ impl<'b> Painter<'_, 'b> {
                     &node.text,
                     area,
                     Layout::Shape,
-                    LABEL_SIZE,
+                    size,
                     self.palette.ink,
                 );
             }
@@ -1478,6 +1479,7 @@ pub(crate) mod tests {
             scene_golden!("fields", fixture("fields.out")),
             scene_golden!("unknown", fixture("unknown.out")),
             scene_golden!("escapes", fixture("escapes.out")),
+            scene_golden!("text-sizes", fixture("Text sizes")),
         ]
     }
 

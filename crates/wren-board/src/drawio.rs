@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::route::{self, Attach, Terminal};
-use crate::scene::{self, Point, Rect, LABEL_SIZE, MAX_LABELS, SMALL_SIZE, STUB_LENGTH};
+use crate::scene::{self, Point, Rect, MAX_LABELS, SMALL_SIZE, STUB_LENGTH};
 use crate::style::{self, Resolved};
 use crate::svg::num;
 use crate::{
@@ -224,7 +224,7 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        let _ = write!(style, "fontSize={};", num(LABEL_SIZE));
+        let _ = write!(style, "fontSize={};", num(node.style.drawn_text_size()));
         let geometry = format!(
             "<mxGeometry{}{} width=\"{}\" height=\"{}\" as=\"geometry\"/>",
             coordinate("x", bounds.x - origin.0),
@@ -889,6 +889,35 @@ pub(crate) mod tests {
                 ("as".to_owned(), "geometry".to_owned())
             ]
         );
+    }
+
+    /// A node's label size is its `fontSize`, clamped as the canvas draws
+    /// it; a connector's labels stay small, whatever its style says.
+    #[test]
+    fn a_label_s_size_is_its_font_size() {
+        let mut text = String::from("schema = 1\n");
+        for (id, kind, size) in [
+            ("a", "shape", "20"),
+            ("b", "text", "28"),
+            ("c", "sticker", "12"),
+            ("d", "shape", "200"),
+            ("e", "shape", "\"big\""),
+        ] {
+            text += &format!(
+                "\n[node.{id}]\ntext = \"{id}\"\nkind = \"{kind}\"\nat = [0, 0]\nsize = [120, 60]\n\
+                 style.text-size = {size}\nz = \"V\"\n"
+            );
+        }
+        text += "\n[edge.f]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\n\
+                 labels = [\n  { text = \"f\" },\n]\nstyle.text-size = 28\nz = \"W\"\n";
+        let found = parsed(&export(&text));
+        let sizes: Vec<String> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|id| keys(style(&found, id))["fontSize"].to_owned())
+            .collect();
+        assert_eq!(sizes, ["20", "28", "12", "96", "14"]);
+        // The connector's first label is the edge cell's own.
+        assert_eq!(keys(style(&found, "f"))["fontSize"], "12");
     }
 
     #[test]

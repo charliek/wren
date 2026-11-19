@@ -572,6 +572,13 @@ impl App {
                 self.style_menu = None;
             }
             Message::StyleMenu(menu) => {
+                // A menu's rows preview on the board, and nothing previews
+                // over an open label: opening one finishes the label, as a
+                // click on a control does. A draft that did not reach the
+                // Session is on the banner, and the menu stays shut.
+                if menu.is_some() && self.settle_board().is_err() {
+                    return Task::none();
+                }
                 self.style_menu = menu;
                 self.dock_menu = None;
             }

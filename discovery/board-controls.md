@@ -29,7 +29,7 @@ Nothing existing is removed. Every key and gesture in
 | D6 | Settings `board-toolbar` and `board-hints`, both on by default. | Owner, 2026-11-18 |
 | D7 | Pinch to zoom on macOS only, as the last step; Linux stays on Ctrl+scroll. | Owner, 2026-11-18 |
 | D9 | Key badges on the buttons are hidden by default and show while Space is held. | Owner, 2026-11-18 (comment) |
-| D10 | Text size for a shape's label and for free text (§3.9). Stored as a number, not a name; bold, italic and Markdown labels are future scope. | Owner, 2026-11-18; the particulars of §3.9 proposed, not yet confirmed |
+| D10 | Text size for a shape's label and for free text (§3.9). Stored as a number, not a name; bold, italic and Markdown labels are future scope. | Owner, 2026-11-18; the particulars of §3.9 accepted the same day |
 
 Assumed by the design and open to the owner (stated back, not contradicted):
 
@@ -214,6 +214,21 @@ a larger label as it grows for a longer one.
 - The interface offers presets (12, 14, 20, 28) in the style bar's menu
   and the actions palette; any size in range can be written by hand.
 
+As built: `NodeStyle::text_size` in `wren-board`, read only from an
+integer (Wren 0.2 kept the key as unknown content of any type, so another
+type stays unknown content, kept and drawn at 14, never an error) and
+written only when it is not 14. `Limit::TextSize` flags a size outside 8
+to 96, drawn at the nearer end. `Intent::SetTextSize` carries each node's
+box as the canvas grew it with `label::grown`, the rule a longer label
+grows by, now at the node's size. The commands are
+`board.text_size.{12,14,20,28}` (`Command::TextSize`), offered in a group
+"Text size" for any selection with a node, and unbound; the keys sheet
+lists them under their own group once one is bound, and the macOS Board
+menu, which holds no style command, does not. The style bar's "Aa" button
+follows the fills and folds with them; its menu's rows each draw "Aa"
+larger as the size is. `board.get` reports `style.text_size` and the
+label's input method caret (`editing.ime`).
+
 ## 4. How it fits the code
 
 - The dock, the style bar, the sheet and the footer controls are app
@@ -243,7 +258,7 @@ Wren themes; the gates are those of `CLAUDE.md`.
 5. Style bar (§3.2) and the sticky colour. Landed.
 6. Footer controls (§3.6). Landed.
 7. Pinch on macOS (§3.8).
-8. Text size (§3.9), after the style bar, which holds its control.
+8. Text size (§3.9), after the style bar, which holds its control. Landed.
 
 ## 6. Lucidchart and the draw.io export
 

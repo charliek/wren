@@ -467,11 +467,21 @@ fn node_style(value: Value) -> Result<NodeStyle, Fault> {
     let color = take(&mut fields, "color", string)?.map_or(defaults.color, Color::read);
     let fill = take(&mut fields, "fill", string)?.map_or(defaults.fill, Named::read);
     let stroke = take(&mut fields, "stroke", string)?.map_or(defaults.stroke, Named::read);
+    // Wren 0.2 kept `text-size` as unknown content, so a value that is not
+    // an integer is still that, never an error.
+    let text_size = match fields.get("text-size") {
+        Some(&Value::Integer(size)) => {
+            fields.remove("text-size");
+            size
+        }
+        _ => defaults.text_size,
+    };
     fields_fit(&fields, 2)?;
     Ok(NodeStyle {
         color,
         fill,
         stroke,
+        text_size,
         extra: fields,
     })
 }
@@ -801,6 +811,54 @@ mod tests {
         assert_eq!(edge.style.stroke, Named::Known(Dash::Dashed));
         assert_eq!(edge.z.as_deref(), Some("V04"));
         assert_eq!(keys(&edge.extra), ["ext"]);
+    }
+
+    /// `style.text-size` was unknown content in Wren 0.2, of any type. An
+    /// integer is now the node's label size, whatever its value; any other
+    /// type is still unknown content. Neither is ever an error, and on a
+    /// connector the key is unknown content as before.
+    #[test]
+    fn a_text_size_is_an_integer_and_anything_else_stays_unknown() {
+        let node = |value: &str| {
+            let text = format!(
+                "schema = 1\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\n\
+                 style.text-size = {value}\n"
+            );
+            ok(&text).nodes["a"].style.clone()
+        };
+        for (value, size) in [
+            ("20", 20),
+            ("14", 14),
+            ("8", 8),
+            ("7", 7),
+            ("-1", -1),
+            ("9223372036854775807", i64::MAX),
+            ("+20", 20),
+            ("0x14", 20),
+        ] {
+            let style = node(value);
+            assert_eq!(style.text_size, size, "{value}");
+            assert!(style.extra.is_empty(), "{value}");
+        }
+        for value in [
+            "\"big\"",
+            "20.5",
+            "20.0",
+            "inf",
+            "true",
+            "[20]",
+            "{ px = 20 }",
+            "1979-05-27",
+        ] {
+            let style = node(value);
+            assert_eq!(style.text_size, NodeStyle::TEXT_SIZE, "{value}");
+            assert_eq!(keys(&style.extra), ["text-size"], "{value}");
+        }
+        let edge = ok(
+            "schema = 1\n[edge.e]\nfrom = { at = [0, 0] }\nto = { at = [1, 1] }\n\
+                       style.text-size = 20\n",
+        );
+        assert_eq!(keys(&edge.edges["e"].style.extra), ["text-size"]);
     }
 
     #[test]

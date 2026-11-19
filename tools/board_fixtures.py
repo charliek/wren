@@ -181,6 +181,40 @@ def future():
     }, requires=["frames"], layout={"direction": "right"})
 
 
+def text_sizes():
+    """The four label sizes the editor offers, on shapes and on free text, a label that wraps
+    at 20, a size out of range, and a connector whose labels stay small."""
+    keys = []
+
+    def shape(text, size, x, y, w=160, h=80, **kw):
+        return dict(text=text, kind="shape", at=[x, y], size=[w, h],
+                    style={"text-size": size, **kw.pop("style", {})}, z=stack(keys), **kw)
+
+    def free(text, size, y, h):
+        return dict(text=text, kind="text", at=[0, y], size=[480, h],
+                    style={"text-size": size}, z=stack(keys))
+
+    nodes = {
+        "s12": shape("Twelve", 12, 0, 0),
+        "s14": shape("Fourteen", 14, 200, 0, style={"color": "blue"}),
+        "s20": shape("Twenty", 20, 400, 0, style={"color": "green"}),
+        "s28": shape("Twenty-eight", 28, 600, 0, 240, 80, shape="rounded",
+                     style={"color": "purple", "fill": "solid"}),
+        "wraps": shape("A label at twenty that wraps", 20, 0, 120, 160, 100, shape="ellipse",
+                       style={"color": "orange"}),
+        "huge": shape("Past 96", 120, 200, 120, 400, 160, style={"color": "red"}),
+        "t12": free("Free text at 12", 12, 320, 20),
+        "t14": free("Free text at 14", 14, 360, 20),
+        "t20": free("Free text at 20", 20, 400, 40),
+        "t28": free("Free text at 28", 28, 460, 40),
+    }
+    edges = {
+        "s12-s14": {"kind": "edge", "from": {"node": "s12"}, "to": {"node": "s14"},
+                    "labels": [{"text": "stays 12"}], "z": stack(keys)},
+    }
+    return board(nodes, edges)
+
+
 HAND_WRITTEN = '''\
 # A board written by hand, the way a person or a script might write one.
 # Wren keeps these bytes until the first edit, which rewrites the file in
@@ -235,6 +269,7 @@ def samples():
         "Shapes.wren-board": shapes(),
         "Overlap.wren-board": overlap(),
         "Future.wren-board": future(),
+        "Text sizes.wren-board": text_sizes(),
         "Hand written.wren-board": HAND_WRITTEN,
         "Notes.md": NOTES,
     }

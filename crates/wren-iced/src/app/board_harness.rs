@@ -276,6 +276,11 @@ impl App {
             "cursor": machine.cursor().map(|cursor| cursor.id().as_str()),
             "editing": view.label().map(|label| json!({
                 "id": label.id().as_str(), "text": label.text(), "caret": label.caret(),
+                // The caret the input method is given, in the canvas, and
+                // the size its composition is shown at.
+                "ime": view.label_caret().map(|(caret, size)| json!({
+                    "x": caret.x, "y": caret.y, "height": caret.height, "size": size,
+                })),
             })),
             "connecting": machine.connecting().map(|connecting| json!({
                 "target": connecting.target.map(|(id, _)| id.as_str()),
@@ -1584,6 +1589,7 @@ fn node_json(id: &Id, node: &Node) -> Value {
             "color": color_json(&node.style.color),
             "fill": node.style.fill.as_str(),
             "stroke": node.style.stroke.as_str(),
+            "text_size": node.style.text_size,
         },
         "z": node.z,
     })

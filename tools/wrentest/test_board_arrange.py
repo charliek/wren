@@ -234,8 +234,10 @@ def test_the_actions_palette_lists_the_commands_the_selection_takes(samples: Pat
 
         click(app, {"node": START})
         shown = open_actions(app)
-        assert groups(shown) == ["Shape", "Colour", "Fill", "Stroke", "Arrange", "Edit"]
-        assert current(shown) == ["board.shape.pill", "board.color.neutral", "board.fill.tint"]
+        assert groups(shown) == ["Shape", "Colour", "Fill", "Text size", "Stroke", "Arrange",
+                                 "Edit"]
+        assert current(shown) == ["board.shape.pill", "board.color.neutral", "board.fill.tint",
+                                  "board.text_size.14"]
         assert shown["active_key"] == {"command": "board.shape.pill"}
         rows = {row["key"]["command"]: row for row in shown["results"]}
         assert rows["board.color.red"]["shortcut"] == "1"
@@ -254,11 +256,11 @@ def test_the_actions_palette_lists_the_commands_the_selection_takes(samples: Pat
             click(app, {"node": node}, mods=("shift",))
         shown = open_actions(app)
         assert groups(shown) == [
-            "Shape", "Colour", "Fill", "Stroke", "Connector", "Arrange", "Align", "Distribute",
-            "Edit",
+            "Shape", "Colour", "Fill", "Text size", "Stroke", "Connector", "Arrange", "Align",
+            "Distribute", "Edit",
         ]
         # Start is a pill and the others rectangles: no shape is current.
-        assert current(shown) == ["board.color.neutral", "board.fill.tint"]
+        assert current(shown) == ["board.color.neutral", "board.fill.tint", "board.text_size.14"]
         assert shown["active_key"] == {"command": "board.color.neutral"}
         # `/` and `]` typed into the palette are its query.
         typed = app.client.call("palette.query", {"query": "/]"})["navigation"]["modal"]

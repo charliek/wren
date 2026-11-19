@@ -405,6 +405,7 @@ def board_scenes(client, shot_here, out: Path, workspace: Path,
     board_hint_scenes(client, shot_here, open_board)
     board_dock_scenes(client, shot_here, open_board, settings)
     board_style_bar_scenes(client, shot_here, open_board)
+    board_text_size_scenes(client, shot_here, open_board)
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
@@ -707,6 +708,68 @@ def board_style_bar_scenes(client, shot_here, open_board) -> None:
     bar(click="board-style-more")
     client.call("command.run", {"id": "view.reset_widths"})
     client.call("command.run", {"id": "board.select.none"})
+
+
+def board_text_size_scenes(client, shot_here, open_board) -> None:
+    """discovery/board-controls.md §3.9: the four sizes on shapes and on
+    free text, with one past the range drawn at 96 and flagged; the same
+    board far out, where tiny-skia leaves out labels under 4 pixels; the
+    "Aa" menu open on a shape; a size previewed under the pointer; and a
+    label edited at 28. The board ends as it began."""
+
+    def key(name: str, *mods: str) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods)})
+
+    def bar(**params) -> dict:
+        return client.call("board.style_bar", params)
+
+    def laid_out(check=lambda state: True) -> None:
+        def ready() -> bool:
+            state = bar()
+            return bool(state["shown"] and state["rect"]
+                        and all(control["rect"] for control in state["controls"])
+                        and (state["menu"] is None or state["menu"]["rect"])
+                        and check(state))
+
+        wait_for(ready, timeout=5, description="the style bar laid out")
+
+    def pick(node: str) -> None:
+        client.call("board.pointer", {"kind": "click", "at": {"node": node}, "button": "left",
+                                      "mods": []})
+
+    open_board("Text sizes", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    shot_here("board-text-sizes")
+    # Further out, a label under 4 pixels on screen is left out: at 25 %
+    # the sizes 12 and 14, and at 10 % all but the one drawn at 96.
+    for name in ("board-text-sizes-quarter", "board-text-sizes-far"):
+        for _ in range(2):
+            client.call("command.run", {"id": "font.decrease"})
+        shot_here(name)
+    client.call("command.run", {"id": "board.zoom.fit"})
+    pick("s20")
+    laid_out()
+    bar(click="board-style-text-size")
+    laid_out(lambda state: state["menu"] is not None)
+    shot_here("board-text-size-menu")
+    bar(hover="board-style-menu-text-size-28")
+    wait_for(lambda: client.call("board.get")["patch"] == "board.text_size.28", timeout=5,
+             description="the preview shown")
+    shot_here("board-text-size-hover")
+    bar(hover=None)
+    bar(click="board-style-text-size")
+    # A label edited at 28, its caret at the end.
+    pick("s28")
+    key("enter")
+    wait_for(lambda: client.call("board.get")["editing"] is not None, timeout=5,
+             description="the label open")
+    key("end")
+    shot_here("board-text-size-editing")
+    key("escape")
+    key("escape")
+    assert client.call("board.get")["pristine"], "the text size scenes changed the board"
 
 
 def board_edit_scenes(client, shot_here, open_board) -> None:
