@@ -334,7 +334,9 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
             }
             "board.get" | "board.bounds" | "board.pointer" | "board.key" | "board.type"
-            | "board.apply" | "board.seed" => return self.board_request(request),
+            | "board.apply" | "board.seed" | "board.dock" | "board.style_bar" | "board.footer" => {
+                return self.board_request(request)
+            }
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -475,6 +477,7 @@ impl App {
                     "outline" => Mode::Outline,
                     "board_nodes" => Mode::BoardNodes,
                     "board_actions" => Mode::BoardActions,
+                    "board_keys" => Mode::BoardKeys,
                     "item_actions" => Mode::ItemActions(target(
                         params.get("target").ok_or("target is required")?,
                     )?),
@@ -981,6 +984,11 @@ fn result_key(value: &Value) -> Result<Key, String> {
     if object.contains_key("workspace") {
         return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
     }
+    if object.contains_key("sheet_row") {
+        let row =
+            usize::try_from(id(value, "sheet_row")?).map_err(|_| "sheet_row must be usize")?;
+        return Ok(Key::SheetRow(row));
+    }
     if let Some(heading) = object.get("heading") {
         if heading.as_object().is_none_or(|object| object.len() != 2) {
             return Err("heading requires revision and line".into());
@@ -1051,6 +1059,7 @@ fn key_json(key: &Key) -> Value {
         Key::Heading { revision, line } => json!({"heading":{"revision":revision,"line":line}}),
         Key::Element(Source::Node(id)) => json!({"element":{"node":id.as_str()}}),
         Key::Element(Source::Edge(id)) => json!({"element":{"edge":id.as_str()}}),
+        Key::SheetRow(index) => json!({"sheet_row":index}),
         Key::ItemAction { target, id } => {
             json!({"item_action":{"target":item_target_json(*target),"command":id.key()}})
         }
@@ -1255,6 +1264,9 @@ pub(super) struct Focused {
     pub(super) named: Vec<&'static str>,
     pub(super) unnamed: usize,
     pub(super) bounds: Vec<(&'static str, iced::Rectangle)>,
+    /// Where each widget of the board's chrome is: its tool dock, its
+    /// style bar and the footer's controls.
+    pub(super) chrome: Vec<(&'static str, iced::Rectangle)>,
 }
 
 impl iced::advanced::widget::Operation<Focused> for Focused {
@@ -1263,6 +1275,18 @@ impl iced::advanced::widget::Operation<Focused> for Focused {
         operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<Focused>),
     ) {
         operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
+        let name = id.and_then(|id| {
+            super::board_harness::CHROME_IDS
+                .iter()
+                .copied()
+                .find(|name| *id == iced::advanced::widget::Id::new(name))
+        });
+        if let Some(name) = name {
+            self.chrome.push((name, bounds));
+        }
     }
 
     fn focusable(

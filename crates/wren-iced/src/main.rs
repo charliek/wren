@@ -7,6 +7,7 @@ mod drag_view;
 mod ellipsis;
 mod fonts;
 mod keys;
+mod layers;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(any(target_os = "macos", test, feature = "smoke-test"))]

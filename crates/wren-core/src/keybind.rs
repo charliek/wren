@@ -152,6 +152,15 @@ impl Accel {
     /// Human-readable label in the platform's convention: `⌘⇧P` on macOS,
     /// `Alt+Shift+P` elsewhere.
     pub fn label(&self, platform: Platform) -> String {
+        // What Shift+/ types on a US layout, and what a board reads as it
+        // on any layout.
+        let question = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        if self.mods == question && self.key == "/" {
+            return "?".into();
+        }
         let key = match self.key.as_str() {
             "enter" => "↵".into(),
             "escape" => "Esc".into(),
@@ -328,6 +337,7 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
         ("7", "board.color.blue"),
         ("/", "board.actions"),
         ("shift+f10", "board.actions"),
+        ("shift+/", "board.keys"),
     ]
     .into_iter()
     .map(|(trigger, action)| (trigger.to_string(), action))
@@ -673,6 +683,17 @@ mod tests {
     }
 
     #[test]
+    fn shift_slash_is_shown_as_the_question_mark_it_types() {
+        for platform in [Platform::Mac, Platform::Linux] {
+            assert_eq!(accel("shift+/").label(platform), "?");
+            assert_eq!(accel("shift+slash").label(platform), "?");
+        }
+        assert_eq!(accel("/").label(Platform::Linux), "/");
+        assert_eq!(accel("ctrl+shift+/").label(Platform::Linux), "Ctrl+Shift+/");
+        assert_eq!(accel("super+shift+/").label(Platform::Mac), "⇧⌘/");
+    }
+
+    #[test]
     fn palette_defaults_are_command_shift_p_on_mac_and_alt_shift_p_on_linux() {
         for (platform, trigger) in [
             (Platform::Mac, "super+shift+p"),
@@ -801,10 +822,11 @@ mod tests {
             // Ten of the 64 Phase 2 commands have no default key: the two
             // unlettered tools and reshapes, `board.select.none`, and the
             // five connector style commands. Twelve of the 25 of Phase 3
-            // have none: align, distribute, fill and `board.jump`.
+            // have none: align, distribute, fill and `board.jump`. The
+            // keys sheet has `?`.
             let actions: std::collections::HashSet<&str> =
                 board.iter().map(|(_, action)| *action).collect();
-            assert_eq!(actions.len(), 54 + 13, "{platform:?}");
+            assert_eq!(actions.len(), 54 + 13 + 1, "{platform:?}");
         }
     }
 
@@ -869,6 +891,7 @@ mod tests {
                 ("7".to_string(), "board.color.blue"),
                 ("/".to_string(), "board.actions"),
                 ("shift+f10".to_string(), "board.actions"),
+                ("shift+/".to_string(), "board.keys"),
             ] {
                 assert_eq!(
                     keymap.board_action(&accel(&trigger)),

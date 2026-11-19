@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use toml::value::Datetime;
 use toml::{Table, Value};
 
-use crate::{Board, Color, Edge, End, Label, Node, Token, Vocabulary};
+use crate::{Board, Color, Edge, End, Label, Node, NodeStyle, Token, Vocabulary};
 
 /// The keys a typed field of the model owns. An unknown-content key of the
 /// same name can only come from a model built in code, never from a file;
@@ -25,6 +25,10 @@ const NODE: &[&str] = &[
     "text", "kind", "at", "parent", "shape", "size", "style", "z",
 ];
 const NODE_STYLE: &[&str] = &["color", "fill", "stroke"];
+/// [`NODE_STYLE`] when the typed `text-size` owns its key: when it is not
+/// the default, or when unknown content holds an integer there, which only
+/// a model built in code can, since the reader types every integer.
+const NODE_STYLE_SIZED: &[&str] = &["color", "fill", "stroke", "text-size"];
 const EDGE: &[&str] = &[
     "kind", "from", "to", "heads", "labels", "route", "style", "z",
 ];
@@ -69,7 +73,7 @@ pub fn write(board: &Board) -> String {
 enum Field<'a> {
     Raw(&'a Value),
     Str(Cow<'a, str>),
-    Int(i32),
+    Int(i64),
     Ints([i32; 2]),
     Strs([&'a str; 2]),
     /// Keys in bytewise order. Written as dotted keys, one leaf per line;
@@ -125,9 +129,15 @@ fn node_fields(out: &mut String, node: &Node) {
     if style.stroke.as_str() != "solid" {
         style_known.push(("stroke", Field::Str(Cow::Borrowed(style.stroke.as_str()))));
     }
+    if style.text_size != NodeStyle::TEXT_SIZE {
+        style_known.push(("text-size", Field::Int(style.text_size)));
+    }
+    let sized = style.text_size != NodeStyle::TEXT_SIZE
+        || matches!(style.extra.get("text-size"), Some(Value::Integer(_)));
+    let reserved = if sized { NODE_STYLE_SIZED } else { NODE_STYLE };
     known.push((
         "style",
-        Field::Table(merged(style_known, &style.extra, NODE_STYLE)),
+        Field::Table(merged(style_known, &style.extra, reserved)),
     ));
     if let Some(z) = &node.z {
         known.push(("z", Field::Str(Cow::Borrowed(z))));
@@ -206,7 +216,7 @@ fn end(end: &End) -> Field<'_> {
 fn label(label: &Label) -> Field<'_> {
     let mut known = vec![("text", Field::Str(label_text(&label.text)))];
     if label.at != Label::DEFAULT_AT {
-        known.push(("at", Field::Int(label.at)));
+        known.push(("at", Field::Int(label.at.into())));
     }
     Field::Inline(merged(known, &label.extra, LABEL))
 }
@@ -551,6 +561,71 @@ mod tests {
         }
         board.extra.insert("node".into(), Value::Integer(1));
         assert_eq!(write(&board), fixtures::CANONICAL[0].1);
+        // An integer under `text-size` is the typed field's, whatever it
+        // holds; another type there is unknown content and is kept.
+        let node = board.nodes.values_mut().next().unwrap();
+        node.style
+            .extra
+            .insert("text-size".into(), Value::Integer(20));
+        assert_eq!(write(&board), fixtures::CANONICAL[0].1);
+    }
+
+    /// A node block with this `style` line, as the canonical writer writes
+    /// it, or with no style line.
+    fn sized(style: &str) -> String {
+        format!(
+            "schema = 1\n\n[node.a]\ntext = \"Big\"\nkind = \"shape\"\nat = [0, 0]\n\
+             size = [120, 60]\n{style}z = \"V\"\n"
+        )
+    }
+
+    /// `style.text-size` is written only when it is not 14, after the
+    /// other style keys and before a sibling such as `style.x` in byte
+    /// order, and a board without it writes as it always has.
+    #[test]
+    fn a_text_size_is_one_line_written_only_when_not_the_default() {
+        let plain = sized("");
+        let mut board = read(&plain);
+        assert_eq!(board.nodes["a"].style.text_size, 14);
+        assert_eq!(write(&board), plain);
+        board.nodes.get_mut("a").unwrap().style.text_size = 28;
+        let big = sized("style.text-size = 28\n");
+        assert_eq!(write(&board), big);
+        assert_eq!(write(&read(&big)), big);
+        board.nodes.get_mut("a").unwrap().style.text_size = 14;
+        assert_eq!(write(&board), plain);
+        // Its place among the other style keys and unknown ones.
+        let full = sized(
+            "style.color = \"red\"\nstyle.fill = \"solid\"\nstyle.stroke = \"dashed\"\n\
+             style.text-size = 20\nstyle.text_x = 1\nstyle.x = 1\n",
+        );
+        assert_eq!(write(&read(&full)), full);
+        // A hand-written 14 is the default, so it is dropped on a save.
+        assert_eq!(write(&read(&sized("style.text-size = 14\n"))), plain);
+        // Out of range, it is kept as written.
+        for size in ["7", "97", "0", "-3", "9223372036854775807"] {
+            let text = sized(&format!("style.text-size = {size}\n"));
+            assert_eq!(write(&read(&text)), text, "{size}");
+        }
+    }
+
+    /// Wren 0.2 kept `text-size` as unknown content of any type; a value
+    /// that is not an integer still is, and writes back as it was read.
+    #[test]
+    fn a_text_size_that_is_not_an_integer_is_kept_as_written() {
+        for value in ["\"big\"", "20.5", "20.0", "true", "[20]", "nan"] {
+            let text = sized(&format!("style.text-size = {value}\n"));
+            let board = read(&text);
+            let style = &board.nodes["a"].style;
+            assert_eq!(style.text_size, 14, "{value}");
+            assert!(style.extra.contains_key("text-size"), "{value}");
+            assert_eq!(write(&board), text, "{value}");
+        }
+        let edge = "schema = 1\n\n[edge.e]\nkind = \"edge\"\nfrom = { at = [0, 0] }\n\
+                    to = { at = [100, 0] }\nstyle.text-size = 20\nz = \"V\"\n";
+        let board = read(edge);
+        assert!(board.edges["e"].style.extra.contains_key("text-size"));
+        assert_eq!(write(&board), edge);
     }
 
     /// The lines of a file that hold a field: not headers, empty lines, or
@@ -855,7 +930,17 @@ mod tests {
             random_string(rng, true)
         } else {
             (*rng.pick(&[
-                "ext", "a", "zz", "style", "at", "kind", "x-y", "k_9", "Z", "from",
+                "ext",
+                "a",
+                "zz",
+                "style",
+                "at",
+                "kind",
+                "x-y",
+                "k_9",
+                "Z",
+                "from",
+                "text-size",
             ]))
             .to_owned()
         }
@@ -994,6 +1079,11 @@ mod tests {
                     color: color(rng),
                     fill: named::<Fill>(rng),
                     stroke: named::<Dash>(rng),
+                    text_size: match rng.below(4) {
+                        0 => rng.next() as i64 >> rng.below(64),
+                        1 => *rng.pick(&[7, 8, 12, 20, 28, 96, 97]),
+                        _ => NodeStyle::TEXT_SIZE,
+                    },
                     extra: extra(rng),
                 },
                 z: (!rng.one_in(8)).then(|| random_string(rng, true)),

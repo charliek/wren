@@ -310,7 +310,26 @@ pub struct NodeStyle {
     pub color: Color,
     pub fill: Named<Fill>,
     pub stroke: Named<Dash>,
+    /// `text-size`: the label's font size in board units, as written. Only
+    /// an integer is read here; Wren 0.2 kept the key as unknown content of
+    /// any type, so a value of another type stays in `extra`, where it is
+    /// kept and the label is drawn at the default.
+    pub text_size: i64,
     pub extra: Extra,
+}
+
+impl NodeStyle {
+    /// The label size a node has when its file gives none.
+    pub const TEXT_SIZE: i64 = 14;
+    /// The sizes a label is drawn at; one outside them is drawn at the
+    /// nearer end and flagged.
+    pub const TEXT_SIZES: std::ops::RangeInclusive<i64> = 8..=96;
+
+    /// The font size the node's label is drawn at: `text_size`, clamped.
+    pub fn drawn_text_size(&self) -> f32 {
+        let (low, high) = (*Self::TEXT_SIZES.start(), *Self::TEXT_SIZES.end());
+        self.text_size.clamp(low, high) as f32
+    }
 }
 
 impl Default for NodeStyle {
@@ -319,6 +338,7 @@ impl Default for NodeStyle {
             color: Color::Token(Token::Neutral),
             fill: Named::Known(Fill::Tint),
             stroke: Named::Known(Dash::Solid),
+            text_size: Self::TEXT_SIZE,
             extra: Extra::new(),
         }
     }
@@ -847,6 +867,12 @@ mod tests {
             Intent::Distribute {
                 ids: picked.clone(),
                 axis: Axis::Vertical,
+            },
+            Intent::SetTextSize {
+                nodes: (picked.iter())
+                    .map(|id| (id.clone(), board.nodes[id].size))
+                    .collect(),
+                size: 20,
             },
         ];
         for intent in intents {

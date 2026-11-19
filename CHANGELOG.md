@@ -13,6 +13,51 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **A tool dock on boards:** a bar at the bottom of the canvas with a
+  button for each tool (Select, Hand, the shapes, Text, Connector) and
+  **?**. A click does what the tool's key does. Pressing a tool's key or
+  button again locks it, so you can place one shape after another; Esc, V,
+  or another tool unlocks it. Hold Space to see each button's key.
+- **A style bar on boards:** while something is selected, a bar at the top
+  of the canvas holds what styles it: the shape menu, the eight colour
+  swatches, the fills, the text sizes, solid or dashed, a connector's
+  route and arrowheads, and a menu with Duplicate, Bring to front, Send to
+  back, Delete, and the actions palette. Resting the pointer on a control
+  previews it on the board.
+- **Text size on boards:** a shape's label and free text can be 12, 14,
+  20, or 28, from the style bar's **Aa** menu or the palette. A shape
+  grows to hold a larger label. The size is one line in the file
+  (`style.text-size`), written only when it is not 14, and it goes into
+  the SVG, PNG, and draw.io exports. Wren 0.2 keeps the line and draws the
+  label at 14.
+- **The colour you pick stays** for the shapes you add next, until you
+  pick another. With a shape or text tool armed and nothing selected, the
+  swatches (and the digits 0 to 7) set it.
+- **A hint line** in a board's footer names the keys that fit what is
+  selected or armed, and **?** opens a sheet of every board key, with a
+  filter. `board-hints = off` hides the hint line.
+- **Undo, redo, and zoom buttons** in a board's footer; a click on the
+  zoom figure fits the board.
+- **The pointer shows what a press would do** on a board: a crosshair
+  with a shape or connector tool, an open hand with the hand tool or
+  Space held, a closed hand during a pan, and resize arrows over a handle.
+- `board-toolbar` and `board-key-badges` in `config.conf`:
+  `board-toolbar = off` removes the dock, the style bar, and the footer's
+  buttons; `board-key-badges` is `hold` (the default), `on`, or `off`.
+
+### Changed
+
+- **The hand tool stays armed** after a pan, until you pick another tool.
+  It used to go back to Select after one drag.
+
+### Fixed
+
+- **Lucidchart imports a board's draw.io export.** It refused the file
+  because each element was written on one line; draw.io itself read it
+  either way.
+
 ## v0.2.0 — 2026-11-17
 
 ### Added

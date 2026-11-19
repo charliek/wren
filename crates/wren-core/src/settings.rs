@@ -118,6 +118,36 @@ impl EditorEngine {
     }
 }
 
+/// When a board's tool dock shows each button's key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyBadges {
+    /// While Space is held on the board.
+    #[default]
+    Hold,
+    On,
+    Off,
+}
+
+impl KeyBadges {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hold" => Some(Self::Hold),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The config-file spelling.
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: ThemeChoice,
@@ -138,6 +168,13 @@ pub struct Settings {
     /// Whether board notes are listed and opened, read when a workspace
     /// opens.
     pub boards: bool,
+    /// Whether a focused board's footer names the keys that fit what it
+    /// shows.
+    pub board_hints: bool,
+    /// Whether a board shows its tool dock.
+    pub board_toolbar: bool,
+    /// When the tool dock's buttons show their keys.
+    pub board_key_badges: KeyBadges,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -156,6 +193,9 @@ impl Default for Settings {
             markdown_assist: true,
             spell_check: true,
             boards: true,
+            board_hints: true,
+            board_toolbar: true,
+            board_key_badges: KeyBadges::Hold,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -256,6 +296,18 @@ impl Settings {
                 },
                 "boards" => match parse_bool(value) {
                     Some(enabled) => settings.boards = enabled,
+                    None => invalid(),
+                },
+                "board-hints" => match parse_bool(value) {
+                    Some(enabled) => settings.board_hints = enabled,
+                    None => invalid(),
+                },
+                "board-toolbar" => match parse_bool(value) {
+                    Some(enabled) => settings.board_toolbar = enabled,
+                    None => invalid(),
+                },
+                "board-key-badges" => match KeyBadges::parse(value) {
+                    Some(badges) => settings.board_key_badges = badges,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -505,6 +557,17 @@ pub const TEMPLATE: &str = "\
 # Applies when Wren restarts.
 # boards = on
 
+# Board hints: the footer under a board names the keys that fit what is
+# selected or armed.
+# board-hints = on
+
+# Board toolbar: a dock of tools at the bottom of a board, for the mouse.
+# board-toolbar = on
+
+# Board key badges: when the dock's buttons show their keys. hold shows
+# them while Space is held on the board; on always; off never.
+# board-key-badges = hold
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -721,6 +784,90 @@ mod tests {
         let off = with_value(TEMPLATE, "boards", "off");
         assert!(!Settings::parse(&off).boards);
         assert!(off.contains("\n# boards = on\n") && off.ends_with("boards = off\n"));
+    }
+
+    #[test]
+    fn board_hints_default_on_and_parse_booleans() {
+        assert!(Settings::default().board_hints);
+        assert!(Settings::parse("").board_hints);
+        for (value, enabled) in [
+            ("on", true),
+            ("yes", true),
+            ("true", true),
+            ("ON", true),
+            ("\"on\"", true),
+            ("off", false),
+            ("no", false),
+            ("false", false),
+        ] {
+            let settings = Settings::parse(&format!("board-hints = {value}\n"));
+            assert_eq!(settings.board_hints, enabled, "{value}");
+            assert!(settings.boards, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        for bad in ["sometimes", "1", ""] {
+            let settings = Settings::parse(&format!("board-hints = off\nboard-hints = {bad}\n"));
+            assert!(!settings.board_hints, "{bad:?} keeps the earlier value");
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid board-hints value"));
+        }
+        assert!(TEMPLATE.contains("\n# board-hints = on\n"));
+        let off = with_value(TEMPLATE, "board-hints", "off");
+        assert!(!Settings::parse(&off).board_hints);
+        assert!(off.contains("\n# board-hints = on\n") && off.ends_with("board-hints = off\n"));
+    }
+
+    #[test]
+    fn board_toolbar_defaults_on_and_parses_booleans() {
+        assert!(Settings::default().board_toolbar);
+        assert!(Settings::parse("").board_toolbar);
+        for (value, enabled) in [
+            ("on", true),
+            ("yes", true),
+            ("off", false),
+            ("FALSE", false),
+        ] {
+            let settings = Settings::parse(&format!("board-toolbar = {value}\n"));
+            assert_eq!(settings.board_toolbar, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        let settings = Settings::parse("board-toolbar = off\nboard-toolbar = hold\n");
+        assert!(!settings.board_toolbar, "a bad value keeps the earlier one");
+        assert_eq!(settings.warnings.len(), 1);
+        assert!(settings.warnings[0].contains("line 2: invalid board-toolbar value"));
+        assert!(TEMPLATE.contains("\n# board-toolbar = on\n"));
+        let off = with_value(TEMPLATE, "board-toolbar", "off");
+        assert!(!Settings::parse(&off).board_toolbar);
+        assert!(off.contains("\n# board-toolbar = on\n") && off.ends_with("board-toolbar = off\n"));
+    }
+
+    #[test]
+    fn board_key_badges_default_to_hold_and_parse_three_values() {
+        assert_eq!(Settings::default().board_key_badges, KeyBadges::Hold);
+        assert_eq!(Settings::parse("").board_key_badges, KeyBadges::Hold);
+        for (value, badges) in [
+            ("hold", KeyBadges::Hold),
+            ("on", KeyBadges::On),
+            ("OFF", KeyBadges::Off),
+            ("\"on\"", KeyBadges::On),
+        ] {
+            let settings = Settings::parse(&format!("board-key-badges = {value}\n"));
+            assert_eq!(settings.board_key_badges, badges, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        for badges in [KeyBadges::Hold, KeyBadges::On, KeyBadges::Off] {
+            assert_eq!(KeyBadges::parse(badges.value()), Some(badges));
+        }
+        // `yes` and `true` are not among them: hold is neither.
+        for bad in ["yes", "true", "always", ""] {
+            let settings = Settings::parse(&format!(
+                "board-key-badges = on\nboard-key-badges = {bad}\n"
+            ));
+            assert_eq!(settings.board_key_badges, KeyBadges::On, "{bad:?}");
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid board-key-badges value"));
+        }
+        assert!(TEMPLATE.contains("\n# board-key-badges = hold\n"));
     }
 
     #[test]

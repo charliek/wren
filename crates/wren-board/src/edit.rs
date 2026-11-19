@@ -122,6 +122,14 @@ pub enum Intent {
     /// nodes and connectors, the fill of shapes, the outline of shapes.
     /// Each element is named with its kind, as for [`Intent::Move`].
     SetStyle { ids: Vec<Source>, field: StyleField },
+    /// Set the label size of each node, each with the box the canvas
+    /// measured its label needs at that size (§5.9 rule 7, as a longer
+    /// label grows it), or its box as it was. Every node takes it: a
+    /// placeholder's label is drawn at it as a rectangle's is.
+    SetTextSize {
+        nodes: Vec<(Id, [i32; 2])>,
+        size: i64,
+    },
     /// Move the elements in the stacking order of their parent's scope,
     /// keeping their relative order (§5.16 rule 2, over §4.7).
     Restack { ids: Vec<Source>, to: Stack },
@@ -288,6 +296,7 @@ pub fn plan(board: &Board, intent: &Intent, ids: &mut dyn Ids) -> Plan {
         Intent::Align { ids: chosen, to } => arrange::align(board, chosen, *to),
         Intent::Distribute { ids: chosen, axis } => arrange::distribute(board, chosen, *axis),
         Intent::SetStyle { ids: chosen, field } => style::set_style(board, chosen, *field),
+        Intent::SetTextSize { nodes, size } => style::set_text_size(board, nodes, *size),
     }
 }
 

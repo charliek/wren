@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::route::{self, Attach, Terminal};
-use crate::scene::{self, Point, Rect, LABEL_SIZE, MAX_LABELS, SMALL_SIZE, STUB_LENGTH};
+use crate::scene::{self, Point, Rect, MAX_LABELS, SMALL_SIZE, STUB_LENGTH};
 use crate::style::{self, Resolved};
 use crate::svg::num;
 use crate::{
@@ -224,7 +224,7 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        let _ = write!(style, "fontSize={};", num(LABEL_SIZE));
+        let _ = write!(style, "fontSize={};", num(node.style.drawn_text_size()));
         let geometry = format!(
             "<mxGeometry{}{} width=\"{}\" height=\"{}\" as=\"geometry\"/>",
             coordinate("x", bounds.x - origin.0),
@@ -241,7 +241,8 @@ impl<'a> Writer<'a> {
             &label,
             &extra,
             &format!(
-                "<mxCell style=\"{}\" vertex=\"1\" parent=\"{}\">{geometry}</mxCell>",
+                "          <mxCell style=\"{}\" vertex=\"1\" parent=\"{}\">\n            \
+                 {geometry}\n          </mxCell>\n",
                 attribute(&style),
                 attribute(&parent_cell)
             ),
@@ -330,9 +331,9 @@ impl<'a> Writer<'a> {
                     }
                 }
                 Drawn::Point(at, missing) => {
-                    let _ = write!(
+                    let _ = writeln!(
                         points,
-                        "<mxPoint{}{} as=\"{role}\"/>",
+                        "              <mxPoint{}{} as=\"{role}\"/>",
                         coordinate("x", at.x),
                         coordinate("y", at.y)
                     );
@@ -354,7 +355,9 @@ impl<'a> Writer<'a> {
         let geometry = if points.is_empty() {
             format!("<mxGeometry{x} relative=\"1\" as=\"geometry\"/>")
         } else {
-            format!("<mxGeometry{x} relative=\"1\" as=\"geometry\">{points}</mxGeometry>")
+            format!(
+                "<mxGeometry{x} relative=\"1\" as=\"geometry\">\n{points}            </mxGeometry>"
+            )
         };
         object(
             out,
@@ -363,7 +366,8 @@ impl<'a> Writer<'a> {
             &own,
             &extra,
             &format!(
-                "<mxCell style=\"{}\" edge=\"1\" parent=\"1\"{terminals}>{geometry}</mxCell>",
+                "          <mxCell style=\"{}\" edge=\"1\" parent=\"1\"{terminals}>\n            \
+                 {geometry}\n          </mxCell>\n",
                 attribute(&style)
             ),
         );
@@ -374,8 +378,9 @@ impl<'a> Writer<'a> {
                 out,
                 "        <mxCell id=\"{}\" value=\"{}\" style=\"edgeLabel;html=1;align=center;\
                  verticalAlign=middle;resizable=0;points=[];fontColor={};fontSize={};\
-                 labelBackgroundColor=default;\" vertex=\"1\" connectable=\"0\" parent=\"{}\">\
-                 <mxGeometry{} relative=\"1\" as=\"geometry\"><mxPoint as=\"offset\"/></mxGeometry></mxCell>",
+                 labelBackgroundColor=default;\" vertex=\"1\" connectable=\"0\" parent=\"{}\">\n          \
+                 <mxGeometry{} relative=\"1\" as=\"geometry\">\n            \
+                 <mxPoint as=\"offset\"/>\n          </mxGeometry>\n        </mxCell>",
                 attribute(&format!("{cell}.label{n}")),
                 attribute(&html(&label.text)),
                 hex(color),
@@ -599,7 +604,11 @@ fn hex(color: Rgba) -> String {
 }
 
 /// One element as an `<object>` around its cell: its label, Wren's id,
-/// and what else the cell cannot hold.
+/// and what else the cell cannot hold. `inner` is the cell's own lines.
+///
+/// Every element starts a line of its own, as draw.io writes a file.
+/// Lucidchart's draw.io import refuses a file whose `<object>`, `<mxCell>`
+/// and `<mxGeometry>` share a line, though the XML is the same.
 fn object(out: &mut String, cell: &str, id: &Id, label: &str, extra: &[(&str, &str)], inner: &str) {
     let _ = write!(
         out,
@@ -609,7 +618,11 @@ fn object(out: &mut String, cell: &str, id: &Id, label: &str, extra: &[(&str, &s
     for (key, value) in extra {
         let _ = write!(out, " {key}=\"{}\"", attribute(value));
     }
-    let _ = writeln!(out, " id=\"{}\">{inner}</object>", attribute(cell));
+    let _ = writeln!(
+        out,
+        " id=\"{}\">\n{inner}        </object>",
+        attribute(cell)
+    );
 }
 
 /// A label as the HTML of an `html=1` cell: the text drawn (its first
@@ -756,6 +769,65 @@ pub(crate) mod tests {
         assert_eq!(get(&found[1], "name"), Some("a \"b\" <c> & d\n"));
     }
 
+    /// Lucidchart imports a draw.io file only when each element starts a
+    /// line of its own. Found by hand in November 2026: it refused the same
+    /// cells written one `<object>` to a line, and took them once only the
+    /// line breaks were added.
+    #[test]
+    fn every_element_starts_a_line_of_its_own() {
+        let text = "schema = 1\n\n[node.a]\ntext = \"A\"\nkind = \"shape\"\nat = [0, 20]\nsize = [120, 60]\nz = \"V\"\n\n\
+                    [edge.e]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { at = [300, 40] }\n\
+                    labels = [\n  { text = \"one\" },\n  { text = \"two\" },\n]\nz = \"W\"\n";
+        let xml = export(text);
+        let cells = xml
+            .split_once("<mxCell id=\"1\" parent=\"0\"/>\n")
+            .and_then(|(_, rest)| rest.split_once("      </root>"))
+            .map(|(cells, _)| cells)
+            .unwrap();
+        // Each line's indent and the tag it opens or closes.
+        let outline: Vec<String> = cells
+            .lines()
+            .map(|line| {
+                let tag = line.trim_start();
+                let indent = line.len() - tag.len();
+                format!("{indent} {}", tag.split(' ').next().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            outline,
+            [
+                "8 <object",
+                "10 <mxCell",
+                "12 <mxGeometry",
+                "10 </mxCell>",
+                "8 </object>",
+                "8 <object",
+                "10 <mxCell",
+                "12 <mxGeometry",
+                "14 <mxPoint",
+                "12 </mxGeometry>",
+                "10 </mxCell>",
+                "8 </object>",
+                "8 <mxCell",
+                "10 <mxGeometry",
+                "12 <mxPoint",
+                "10 </mxGeometry>",
+                "8 </mxCell>",
+            ],
+            "{cells}"
+        );
+        for xml in [
+            xml.clone(),
+            write(&parse(COVERAGE).unwrap(), &LIGHT, "Coverage"),
+        ] {
+            assert!(!xml.contains("><"), "two elements share a line\n{xml}");
+            for line in xml.lines() {
+                let line = line.trim_start();
+                assert!(line.starts_with('<') && line.ends_with('>'), "{line}");
+            }
+        }
+    }
+
     #[test]
     fn every_shape_is_a_built_in_with_its_own_size() {
         let mut text = String::from("schema = 1\n");
@@ -817,6 +889,35 @@ pub(crate) mod tests {
                 ("as".to_owned(), "geometry".to_owned())
             ]
         );
+    }
+
+    /// A node's label size is its `fontSize`, clamped as the canvas draws
+    /// it; a connector's labels stay small, whatever its style says.
+    #[test]
+    fn a_label_s_size_is_its_font_size() {
+        let mut text = String::from("schema = 1\n");
+        for (id, kind, size) in [
+            ("a", "shape", "20"),
+            ("b", "text", "28"),
+            ("c", "sticker", "12"),
+            ("d", "shape", "200"),
+            ("e", "shape", "\"big\""),
+        ] {
+            text += &format!(
+                "\n[node.{id}]\ntext = \"{id}\"\nkind = \"{kind}\"\nat = [0, 0]\nsize = [120, 60]\n\
+                 style.text-size = {size}\nz = \"V\"\n"
+            );
+        }
+        text += "\n[edge.f]\nkind = \"edge\"\nfrom = { node = \"a\" }\nto = { node = \"b\" }\n\
+                 labels = [\n  { text = \"f\" },\n]\nstyle.text-size = 28\nz = \"W\"\n";
+        let found = parsed(&export(&text));
+        let sizes: Vec<String> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|id| keys(style(&found, id))["fontSize"].to_owned())
+            .collect();
+        assert_eq!(sizes, ["20", "28", "12", "96", "14"]);
+        // The connector's first label is the edge cell's own.
+        assert_eq!(keys(style(&found, "f"))["fontSize"], "12");
     }
 
     #[test]

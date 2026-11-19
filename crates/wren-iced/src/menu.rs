@@ -141,6 +141,8 @@ pub const MENUS: [Menu; 5] = {
                 C("note.export_svg", "Export as SVG…"),
                 C("note.export_png", "Export as PNG…"),
                 C("note.export_drawio", "Export as draw.io…"),
+                S,
+                C("board.keys", "Board Keys"),
             ],
         },
         Menu {
@@ -294,6 +296,7 @@ mod tests {
                 "note.export_svg",
                 "note.export_png",
                 "note.export_drawio",
+                "board.keys",
             ]
         );
         // These keys are the text's while a label or field is focused, so

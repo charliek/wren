@@ -43,6 +43,8 @@ pub enum Mode {
     BoardActions,
     /// The open board's labelled nodes and connectors (§5.18).
     BoardNodes,
+    /// Every key of the open board (board-controls §3.5).
+    BoardKeys,
 }
 
 impl Mode {
@@ -63,6 +65,7 @@ impl Mode {
             Self::Outline => "outline",
             Self::BoardActions => "board_actions",
             Self::BoardNodes => "board_nodes",
+            Self::BoardKeys => "board_keys",
         }
     }
 
@@ -82,6 +85,7 @@ impl Mode {
             Self::Outline => "Jump to a heading…",
             Self::BoardActions => "Choose an action for the selection…",
             Self::BoardNodes => "Jump to a node…",
+            Self::BoardKeys => "Filter the board's keys…",
         }
     }
 
@@ -100,6 +104,7 @@ impl Mode {
             Self::Outline => Some("Outline"),
             Self::BoardActions => Some("Board actions"),
             Self::BoardNodes => Some("Jump to node"),
+            Self::BoardKeys => Some("Board keys"),
             _ => None,
         }
     }
@@ -129,6 +134,8 @@ pub enum Key {
     },
     /// A labelled node or connector of the open board.
     Element(wren_board::scene::Source),
+    /// A row of the board's keys sheet, by its place there.
+    SheetRow(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +168,8 @@ pub enum Action {
         line: usize,
     },
     Element(wren_board::scene::Source),
+    /// Close the palette: a row of the keys sheet, which only shows a key.
+    Dismiss,
 }
 
 /// How an outline row draws its heading.
@@ -347,6 +356,9 @@ impl App {
         if mode == Mode::BoardNodes && self.surface() != Surface::Board {
             return self.blocked("Open a board to jump to its nodes");
         }
+        if mode == Mode::BoardKeys && self.surface() != Surface::Board {
+            return self.blocked("Open a board to see its keys");
+        }
         if matches!(mode, Mode::MoveNote(note) if self.model().and_then(|model| model.note(note)).is_none())
             || matches!(mode, Mode::MoveGroup(group) if self.model().and_then(|model| model.group(group)).is_none())
         {
@@ -436,6 +448,11 @@ impl App {
         if let Err(error) = wren_core::index::validate_query(&query) {
             palette.error = Some(error.into());
             return self.blocked(error);
+        }
+        // `?` opens the keys sheet and closes it, whatever the layout
+        // types it with; it filters nothing there.
+        if palette.mode == Mode::BoardKeys && query.contains('?') {
+            return self.close_palette();
         }
         palette.query = query;
         palette.error = None;
@@ -716,6 +733,20 @@ impl App {
             Mode::Outline => rows = self.outline_rows(&query),
             Mode::BoardActions => rows = self.board_action_rows(&query),
             Mode::BoardNodes => rows = self.board_node_rows(&query),
+            Mode::BoardKeys => {
+                for (index, sheet) in self.board_sheet(&query).into_iter().enumerate() {
+                    let mut row = action_row(
+                        Key::SheetRow(index),
+                        sheet.words,
+                        String::new(),
+                        !sheet.dimmed,
+                        Action::Dismiss,
+                    );
+                    row.group = sheet.group;
+                    row.shortcut = sheet.keys.join(" ");
+                    rows.push(row);
+                }
+            }
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
                     for id in item_commands(item) {
@@ -868,6 +899,10 @@ impl App {
         let mode = palette.mode;
         let source = palette.source;
         let workspace_removal = palette.workspace_removal;
+        // The keys sheet runs nothing: Enter closes it, as Esc does.
+        if mode == Mode::BoardKeys {
+            return self.close_palette();
+        }
         let Some(result) = index
             .or(palette.active)
             .and_then(|index| palette.results.get(index))
@@ -902,6 +937,7 @@ impl App {
             Action::Font(family) => self.choose_font(family),
             Action::Heading { revision, line } => self.choose_heading(revision, line),
             Action::Element(element) => self.choose_element(element),
+            Action::Dismiss => self.close_palette(),
             Action::Workspace(path) => {
                 if workspace_removal {
                     self.dispatch(Command::RemoveWorkspace(path))
@@ -998,8 +1034,20 @@ impl App {
             .is_some_and(|palette| palette.mode == Mode::BoardActions);
         if !open {
             self.actions_origin = None;
-            if let Some(view) = self.board.as_mut().filter(|view| view.patch().is_some()) {
-                view.set_patch(None);
+            // The style bar's control under the pointer previews the same
+            // way, and leaving it drops what it showed.
+            // A control that is gone (the bar folded, the selection
+            // changed) cannot say the pointer left it, and must not
+            // preview again when it comes back.
+            if let Some(hovered) = self.style_hover {
+                let bar = self.board_style_bar();
+                if bar.and_then(|bar| bar.shows(hovered)).is_none() {
+                    self.style_hover = None;
+                }
+            }
+            let hovered = self.style_bar_patch();
+            if let Some(view) = self.board.as_mut().filter(|view| view.patch() != hovered) {
+                view.set_patch(hovered);
             }
             return Task::none();
         }
@@ -1259,6 +1307,9 @@ impl App {
         let Some(palette) = &self.palette else {
             return base;
         };
+        if palette.mode == Mode::BoardKeys {
+            return self.keys_sheet_view(base, palette);
+        }
         let colors = self.definition.colors;
         let search = palette.mode == Mode::Search;
         // Every mode shares one frame except the outline, the board's
@@ -1286,7 +1337,7 @@ impl App {
         } else {
             iced::alignment::Horizontal::Right
         };
-        let top = PALETTE_TOP.min((self.viewport.height * 0.16).max(8.0));
+        let top = palette_top(self.viewport.height);
         let mut list_height =
             (self.viewport.height - top - 134.0).clamp(40.0, if search { 460.0 } else { 400.0 });
         if search {
@@ -1573,10 +1624,15 @@ impl App {
 /// Every palette mode shares one frame, so switching modes never jumps.
 const PALETTE_WIDTH: f32 = 680.0;
 const PALETTE_TOP: f32 = 80.0;
+
+/// Where a palette's frame starts below the window's top.
+pub(super) fn palette_top(window_height: f32) -> f32 {
+    PALETTE_TOP.min((window_height * 0.16).max(8.0))
+}
 const RESULT_SPACING: f32 = 2.0;
 const RESULT_PADDING: f32 = 6.0;
-const GROUP_HEADER_SIZE: f32 = 11.0;
-const GROUP_HEADER_PADDING: f32 = 8.0;
+pub(super) const GROUP_HEADER_SIZE: f32 = 11.0;
+pub(super) const GROUP_HEADER_PADDING: f32 = 8.0;
 /// The header label at iced's default 1.3 line height, plus its padding.
 const GROUP_HEADER_HEIGHT: f32 = GROUP_HEADER_SIZE * 1.3 + 2.0 * GROUP_HEADER_PADDING;
 
@@ -1629,6 +1685,7 @@ pub(super) fn result_id(generation: u64, key: &Key) -> iced::advanced::widget::I
             wren_board::scene::Source::Node(id) => format!("node-{}", id.as_str()),
             wren_board::scene::Source::Edge(id) => format!("edge-{}", id.as_str()),
         },
+        Key::SheetRow(index) => format!("board-key-{index}"),
     };
     iced::advanced::widget::Id::from(format!("palette-row-{generation}-{key}"))
 }

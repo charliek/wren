@@ -1347,7 +1347,8 @@ fn the_actions_palette_lists_what_the_selection_takes() {
         [
             "board.shape.rectangle",
             "board.color.neutral",
-            "board.fill.tint"
+            "board.fill.tint",
+            "board.text_size.14"
         ]
     );
     // Opening previews nothing; only a highlight move does.

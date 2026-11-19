@@ -56,6 +56,7 @@ A node is a block `[node.<id>]`.
 | `style.color` | string | optional | `neutral` | A colour token or `#rrggbb` ([Colour and fill](#colour-and-fill)). |
 | `style.fill` | string | optional | `tint` | `none`, `tint`, `solid`. Not used by `text`. |
 | `style.stroke` | string | optional | `solid` | The outline: `solid` or `dashed`. |
+| `style.text-size` | integer | optional | `14` | The label's size in units: 8 to 96 ([Limits](#limits)). For `shape`, `text`, and a placeholder's label. A value that is not an integer is unknown content. |
 | `z` | string | required | | The stacking key ([Stacking order](#stacking-order)). |
 | `ext.<tool>.*` | table | optional | | Foreign data, namespaced by tool. Any TOML value. Never interpreted. |
 
@@ -350,6 +351,7 @@ edit that element.
 | One label, or a placeholder's caption | 16 KiB | Only the first 16 KiB is drawn, cut at a character boundary. |
 | Labels on one edge | 16 | Only the first 16 are drawn. |
 | `z` | 64 characters | Stacked by its first 64. |
+| A node's `style.text-size` | 8 to 96 | Drawn at the nearer end. |
 | Lines of one label (a node label, a connector label, or a caption), after wrapping | 1,024, blank lines included | Only the first 1,024 are drawn. |
 | Label lines on a whole board | 262,144, blank lines included, in drawing order | A label reaching past them is cut to what is left; one with none left draws nothing. |
 
@@ -370,6 +372,10 @@ reader accepts, refuses, and flags.
   shapes, and other values of the existing string fields, new top-level
   keys, and anything under `ext.*`. Older versions keep all of these as
   unknown content.
+  The first such addition is a node's `style.text-size`, which
+  Wren 0.2 keeps as unknown content and draws at 14. It is read only when
+  it is an integer, so a file that held another value there before it was
+  defined reads as it did: that value stays unknown content.
 - **Needs a `requires` entry:** anything an older version would draw
   misleadingly, such as `rot`.
 - **Needs `schema = 2`:** any change to the bytes written for an existing

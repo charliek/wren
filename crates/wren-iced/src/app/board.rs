@@ -39,17 +39,20 @@ pub(super) enum Surface {
 pub(super) type Viewports = HashMap<NoteId, SavedView>;
 
 /// A view of the board `text` holds, looked at from where `note` was left,
-/// or fitted the first time it opens in this run.
+/// or fitted the first time it opens in this run, leaving `covered` pixels
+/// along its top and its bottom to the host's chrome.
 pub(super) fn open(
     text: &str,
     note: NoteId,
     palette: Palette,
     viewports: &Viewports,
+    covered: (f32, f32),
 ) -> Result<BoardView, ParseError> {
     // Labels are measured when the view opens, which can be before iced
     // has loaded the bundled faces for a window.
     fonts::load();
     let mut view = BoardView::open(text, palette, fonts::UI)?;
+    view.set_covered(covered.0, covered.1);
     match viewports.get(&note) {
         Some(saved) => view.return_to(*saved),
         None => view.fit(),
@@ -89,6 +92,8 @@ impl App {
             #[cfg(not(feature = "smoke-test"))]
             labels: None,
             scale_factor: self.scale_factor,
+            // The dock lights the armed tool's button instead.
+            tool_chip: self.board_dock().is_none(),
         }
     }
 
@@ -112,11 +117,27 @@ impl App {
             return Task::none();
         };
         match &message {
-            Sent::Resized { .. } => {}
+            // The bars are laid out again for the new size, and may no
+            // longer hold the button a menu hangs from: such a menu is
+            // forgotten, so it neither comes back with its button nor
+            // takes the next Escape. One whose button is still there
+            // stays, as a canvas settles into its size over a few frames.
+            Sent::Resized { .. } => {
+                let update = view.update(message, Instant::now());
+                let task = self.board_did(update).task;
+                if self.board_dock().is_none_or(|dock| dock.menu.is_none()) {
+                    self.dock_menu = None;
+                }
+                if self.board_style_bar().is_none_or(|bar| bar.menu.is_none()) {
+                    self.style_menu = None;
+                }
+                return task;
+            }
             Sent::Command(epoch, command) => {
                 if held || *epoch != view.epoch() {
                     return Task::none();
                 }
+                self.close_board_menus();
                 let id = super::commands::CommandId::Board(*command);
                 return self.dispatch(super::commands::Command::Run(id)).task;
             }
@@ -124,6 +145,15 @@ impl App {
             // it reads as, so a bound key still goes through `dispatch`.
             Sent::Key(epoch, press) => {
                 if held || *epoch != view.epoch() {
+                    return Task::none();
+                }
+                let menu = self.dock_menu.is_some() || self.style_menu.is_some();
+                (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
+                // Escape closes the topmost thing only: with a bar's menu
+                // open that is the menu, and the armed tool, the selection
+                // and the board are as they were.
+                let escape = iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
+                if menu && press.key == escape {
                     return Task::none();
                 }
                 let read = view.press(press).unwrap_or_default();
@@ -158,6 +188,16 @@ impl App {
                 if !held && !passive && !hovers {
                     self.column = Column::Editor;
                 }
+                // A press on the canvas closes the bars' menus, as a key
+                // the board reads does. So does the board losing the
+                // keyboard, which settles it: a control the pointer still
+                // rests on must not bring its preview back.
+                if matches!(
+                    input,
+                    Input::Press { .. } | Input::Key { .. } | Input::Char(_) | Input::Focus(false)
+                ) {
+                    (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
+                }
             }
             Sent::Label(..) | Sent::Pasted(..) => {
                 if held || !view.writable() {
@@ -170,12 +210,23 @@ impl App {
         self.board_did(update).task
     }
 
+    /// Close the dock's and the style bar's menus and forget the control
+    /// the pointer was over, as a press or a key on the board does, or a
+    /// command. Returns whether a menu was open.
+    pub(super) fn close_board_menus(&mut self) -> bool {
+        self.style_hover = None;
+        let dock = self.dock_menu.take().is_some();
+        let style = self.style_menu.take().is_some();
+        dock || style
+    }
+
     /// Run a board command on the open board, as its key would. Only
     /// `run_command` calls it, so every command comes through `dispatch`.
     pub(super) fn board_command(&mut self, command: wren_canvas::Command) -> BoardDid {
         let Some(view) = &mut self.board else {
             return BoardDid::default();
         };
+        (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
         let update = view.command(command, Instant::now());
         self.board_did(update)
     }
@@ -184,6 +235,12 @@ impl App {
     /// changed, then what it asks of the app.
     pub(super) fn board_did(&mut self, update: wren_canvas::Update) -> BoardDid {
         let mut did = BoardDid::default();
+        // The dock's folded shapes button shows the shape last armed.
+        if let Some(wren_canvas::Tool::Shape(shape)) =
+            self.board.as_ref().map(|view| view.machine().tool())
+        {
+            self.dock_shape = shape;
+        }
         if update.changed {
             did.failed = self.board_changed().err();
         }
@@ -280,6 +337,7 @@ impl App {
     /// the window loses its focus (§5.15 rule 4). The board settles and
     /// its armed tool is put away.
     pub(super) fn put_board_away(&mut self) -> Result<(), String> {
+        self.close_board_menus();
         self.settle_board()?;
         let Some(view) = &mut self.board else {
             return Ok(());
@@ -1171,9 +1229,19 @@ z = "c"
         let view = app.board.as_ref().unwrap();
         assert!(!view.fit_pending());
         let fitted = view.viewport();
+        // Between the style bar and the tool dock, which the fit leaves
+        // room for.
+        let (top, bottom) = app.board_covered();
+        assert_eq!(top, crate::app::board_style_bar::covered(true));
+        assert_eq!(bottom, crate::app::board_dock::covered(true));
+        assert!(top > 0.0 && bottom > 0.0);
+        let room = Viewport::fitting(view.scene().bounds, (800.0, 600.0 - top - bottom));
         assert_eq!(
             fitted,
-            Viewport::fitting(view.scene().bounds, (800.0, 600.0))
+            Viewport {
+                y: room.y - top / room.zoom,
+                ..room
+            }
         );
         let moved = Viewport {
             x: 37.0,
@@ -1873,7 +1941,7 @@ z = "c"
         let rows = command_rows(&mut app);
         assert!(rows.iter().all(|(group, ..)| *group != "Markdown"));
         let listed: Vec<_> = rows.iter().filter(|(_, id, _)| is_board(*id)).collect();
-        assert_eq!(listed.len(), 89);
+        assert_eq!(listed.len(), 94);
         for (_, id, enabled) in &listed {
             let more =
                 id.key().starts_with("board.align.") || id.key().starts_with("board.distribute.");
@@ -2093,6 +2161,7 @@ z = "c"
                 "board.zoom.selection",
                 "board.actions",
                 "board.jump",
+                "board.keys",
             ]
         );
     }
@@ -2132,7 +2201,7 @@ z = "c"
             let _ = app.update(Message::Key(Input::Accel(accel.clone())));
             assert_eq!(app.action_serial, serial, "{} ran an action", id.key());
         }
-        assert_eq!(pressed, 54 + 13);
+        assert_eq!(pressed, 54 + 13 + 1);
         assert!(app.palette.is_none() && app.dialog.is_none() && !app.focus);
         assert_eq!(session_text(&app), text);
         assert_in_step(&app, Surface::Board);

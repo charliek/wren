@@ -340,6 +340,7 @@ pub(crate) mod tests {
             svg_golden!("fields"),
             svg_golden!("unknown"),
             svg_golden!("escapes"),
+            svg_golden!("text-sizes"),
         ];
         let scenes = golden_scenes();
         assert_eq!(goldens.len(), scenes.len());

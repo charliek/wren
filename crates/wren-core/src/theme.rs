@@ -938,6 +938,29 @@ mod tests {
         }
     }
 
+    /// The style bar's swatches (discovery/board-controls.md §3.2) are each
+    /// colour as the board draws an outline, on the bar's raised surface:
+    /// every one stands out from it as a control must, at 3:1.
+    #[test]
+    fn board_swatches_stand_out_on_the_bar_in_every_theme() {
+        use wren_board::{style, Color, Fill, Token, Vocabulary};
+
+        for theme in BUILT_INS {
+            let palette = board_palette(&theme.colors);
+            let raised = theme.colors.raised;
+            for token in Token::ALL {
+                let swatch = style::resolve(&Color::Token(*token), Fill::None, &palette).stroke;
+                let ratio = contrast(rgb(swatch), raised);
+                assert!(
+                    ratio >= 3.0,
+                    "{}: {} swatch {ratio:.2}",
+                    theme.name,
+                    token.name()
+                );
+            }
+        }
+    }
+
     /// Two board hues must differ by at least this CIE76 ΔE…
     const APART_DELTA_E: f64 = 15.0;
     /// …or by at least this much lightness (L*), for every kind of vision.

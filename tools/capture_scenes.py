@@ -328,8 +328,11 @@ def build_board_workspace(root: Path) -> None:
         os.utime(root / BOARD_GROUP / name, (mtime, mtime))
 
 
-def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
-    """discovery/boards.md §6.3, Phase 1."""
+def board_scenes(client, shot_here, out: Path, workspace: Path,
+                 settings: tuple[Path, str] | None = None) -> None:
+    """discovery/boards.md §6.3, Phase 1. `settings` is the app's
+    `config.conf` and the text it was started with, for the scenes that
+    change a setting and put it back."""
 
     def open_board(name: str, fit: bool = False) -> None:
         open_note(client, f"{name}.wren-board")
@@ -399,6 +402,10 @@ def board_scenes(client, shot_here, out: Path, workspace: Path) -> None:
     client.call("dialog.name", {"name": "Release plan"})
     shot_here("board-new-dialog")
     client.call("dialog.close")
+    board_hint_scenes(client, shot_here, open_board)
+    board_dock_scenes(client, shot_here, open_board, settings)
+    board_style_bar_scenes(client, shot_here, open_board)
+    board_text_size_scenes(client, shot_here, open_board)
     board_edit_scenes(client, shot_here, open_board)
     board_arrange_scenes(client, shot_here, open_board)
     board_style_scenes(client, shot_here)
@@ -458,6 +465,313 @@ def board_limits_scene(client, shot_here, workspace: Path) -> None:
              description="the limits board shown")
     client.call("command.run", {"id": "board.zoom.fit"})
     shot_here("board-limits")
+
+
+def board_hint_scenes(client, shot_here, open_board) -> None:
+    """discovery/board-controls.md §3.4 and §3.5: the footer's hint line
+    with nothing selected, one shape and a tool armed, and in a narrow
+    editor column; the keys sheet with one shape selected. Nothing here
+    changes the board."""
+    pack = "3qrg4kv1"
+
+    def key(name: str, *mods: str) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods)})
+
+    def hinted(first: str) -> None:
+        wait_for(lambda: [part["words"] for part in client.call("board.get")["hint"]][:1]
+                 == [first], timeout=5, description=f"the hint starting {first!r}")
+
+    open_board("Checkout flow", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    hinted("add a shape")
+    shot_here("board-hint-idle")
+    # The sheet with nothing selected dims what needs a selection.
+    client.call("command.run", {"id": "board.keys"})
+    wait_for(lambda: client.call("board.get")["keys_sheet"] is not None, timeout=5,
+             description="the keys sheet open")
+    shot_here("board-keys-sheet")
+    client.call("palette.query", {"query": "colour"})
+    shot_here("board-keys-sheet-filtered")
+    client.call("palette.close")
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused again")
+    client.call("board.pointer", {"kind": "click", "at": {"node": pack}, "button": "left",
+                                  "mods": []})
+    hinted("next shape")
+    shot_here("board-hint-shape")
+    key("escape")
+    key("r")
+    hinted("click to place")
+    shot_here("board-hint-armed")
+    key("escape")
+    # A narrow editor column: the hint keeps the parts that fit whole and
+    # never pushes the zoom or the save status out.
+    client.call("view.width", {"pane": "notes", "width": 720})
+    client.call("editor.focus")
+    client.call("board.pointer", {"kind": "click", "at": {"node": pack}, "button": "left",
+                                  "mods": []})
+    hinted("next shape")
+    shot_here("board-hint-narrow")
+    client.call("command.run", {"id": "view.reset_widths"})
+    key("escape")
+
+
+def board_dock_scenes(client, shot_here, open_board,
+                      settings: tuple[Path, str] | None) -> None:
+    """discovery/board-controls.md §3.1 and §3.3: the tool dock idle, with
+    a shape armed and locked, with its keys shown while Space is held,
+    with the "more shapes" menu open, folded on a narrow canvas with its
+    menu, on a read-only board, and with `board-toolbar = off`. Nothing
+    here changes the board."""
+
+    def key(name: str, *mods: str, release: bool = False) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods), "release": release})
+
+    def dock() -> dict:
+        return client.call("board.dock")
+
+    def laid_out(check) -> None:
+        # The places are the last frame's, so wait for the one that shows it.
+        wait_for(lambda: check(dock()), timeout=5, description="the dock laid out")
+
+    def lit(button_id: str):
+        return lambda state: any(button["id"] == button_id and button["lit"]
+                                 and button["rect"] for button in state["buttons"])
+
+    open_board("Checkout flow", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    laid_out(lambda state: state["shown"] and not state["folded"] and state["rect"])
+    shot_here("board-dock-idle")
+    key("d")
+    laid_out(lit("board-dock-diamond"))
+    shot_here("board-dock-armed")
+    key("d")
+    laid_out(lambda state: any(button["locked"] for button in state["buttons"]))
+    shot_here("board-dock-locked")
+    key("escape")
+    key("space")
+    laid_out(lambda state: any(button["badge"] for button in state["buttons"]))
+    shot_here("board-dock-badges")
+    key("space", release=True)
+    client.call("board.dock", {"click": "board-dock-more"})
+    laid_out(lambda state: state["menu"] and state["menu"]["rect"])
+    shot_here("board-dock-more")
+    client.call("board.dock", {"click": "board-dock-menu-document"})
+    laid_out(lit("board-dock-more"))
+    shot_here("board-dock-more-armed")
+    key("escape")
+
+    # A narrow canvas folds the six shapes into one button: every browser
+    # column open, the notes at their widest. The board, left fitted,
+    # fits again at the narrower width.
+    key("r")
+    key("escape")
+    client.call("view.width", {"pane": "notes", "width": 480})
+    client.call("column.open", {"column": "sections"})
+    laid_out(lambda state: state["folded"] and state["rect"])
+    shot_here("board-dock-fold")
+    client.call("board.dock", {"click": "board-dock-shapes"})
+    laid_out(lambda state: state["menu"] and state["menu"]["rect"])
+    shot_here("board-dock-fold-menu")
+    client.call("board.dock", {"click": "board-dock-shapes"})
+    client.call("command.run", {"id": "view.reset_widths"})
+    # A board command from a browser column folds the browser as it was.
+    client.call("command.run", {"id": "board.tool.select"})
+
+    open_board("Future", fit=True)
+    laid_out(lambda state: state["shown"] and state["rect"])
+    shot_here("board-dock-read-only")
+
+    if settings is not None:
+        path, text = settings
+        path.write_text(text + "board-toolbar = off\n", encoding="utf-8")
+        client.call("command.run", {"id": "settings.reload"})
+        open_board("Checkout flow", fit=True)
+        wait_for(lambda: not dock()["shown"], timeout=5, description="the dock off")
+        key("d")
+        shot_here("board-dock-off")
+        key("escape")
+        path.write_text(text, encoding="utf-8")
+        client.call("command.run", {"id": "settings.reload"})
+        wait_for(lambda: dock()["shown"], timeout=5, description="the dock back")
+
+
+def board_style_bar_scenes(client, shot_here, open_board) -> None:
+    """discovery/board-controls.md §3.2, §3.3 and §3.6: the style bar for
+    one shape, for shapes of two colours, for a connector and for a shape
+    with a connector; its shape menu and its last menu open; a swatch's
+    preview under the pointer; its keys shown; the New shapes row with a
+    colour picked; folded on a narrow canvas; and the footer's controls
+    with something to undo and with nothing. The colours it sets are
+    undone, so the board ends as it began."""
+
+    start, pack, ship, edge = "ahj860xh", "3qrg4kv1", "1wg3aw6z", "zpsr8rp7"
+
+    def key(name: str, *mods: str, release: bool = False) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods), "release": release})
+
+    def bar(**params) -> dict:
+        return client.call("board.style_bar", params)
+
+    def laid_out(check=lambda state: True) -> None:
+        # The places are the last frame's, so wait for the one that shows it.
+        def ready() -> bool:
+            state = bar()
+            return bool(state["shown"] and state["rect"]
+                        and all(control["rect"] for control in state["controls"])
+                        and (state["menu"] is None or state["menu"]["rect"])
+                        and check(state))
+
+        wait_for(ready, timeout=5, description="the style bar laid out")
+
+    def pick(*ids: str) -> None:
+        for index, id_ in enumerate(ids):
+            at = {"edge": id_} if id_ == edge else {"node": id_}
+            client.call("board.pointer", {"kind": "click", "at": at, "button": "left",
+                                          "mods": [] if index == 0 else ["shift"]})
+
+    def menu(kind: str):
+        return lambda state: state["menu"] is not None and state["menu"]["kind"] == kind
+
+    open_board("Checkout flow", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    shot_here("board-footer")
+    pick(start)
+    laid_out()
+    shot_here("board-style-shape")
+    bar(click="board-style-shape")
+    laid_out(menu("shapes"))
+    shot_here("board-style-shape-menu")
+    bar(click="board-style-shape")
+    bar(click="board-style-more")
+    laid_out(menu("more"))
+    shot_here("board-style-more")
+    bar(click="board-style-more")
+    # Close enough to see the colour the pointer previews.
+    client.call("command.run", {"id": "board.zoom.selection"})
+    bar(hover="board-style-purple")
+    wait_for(lambda: client.call("board.get")["patch"] == "board.color.purple", timeout=5,
+             description="the preview shown")
+    shot_here("board-style-hover")
+    bar(hover=None)
+    client.call("command.run", {"id": "board.zoom.fit"})
+    key("space")
+    laid_out(lambda state: any(control["badge"] for control in state["controls"]))
+    shot_here("board-style-badges")
+    key("space", release=True)
+
+    # Two shapes of two colours: nothing ringed. Then the footer with
+    # something to undo.
+    pick(pack)
+    key("1")
+    pick(ship)
+    key("5")
+    pick(pack, ship)
+    laid_out()
+    shot_here("board-style-colours")
+    shot_here("board-footer-undo")
+    pick(edge)
+    laid_out()
+    shot_here("board-style-connector")
+    pick(pack, edge)
+    laid_out()
+    shot_here("board-style-mixed")
+    key("z", "mod")
+    key("z", "mod")
+
+    # Nothing selected and a shape tool armed: the colour new shapes take.
+    key("escape")
+    key("4")
+    key("r")
+    laid_out(lambda state: state["new_shapes"])
+    shot_here("board-style-new-shapes")
+    key("escape")
+    key("0")
+
+    # A narrow canvas folds the fills, the outline and the connector's
+    # controls into the last menu.
+    client.call("view.width", {"pane": "notes", "width": 480})
+    client.call("column.open", {"column": "sections"})
+    client.call("editor.focus")
+    pick(pack, edge)
+    laid_out(lambda state: state["folded"])
+    shot_here("board-style-fold")
+    bar(click="board-style-more")
+    laid_out(menu("more"))
+    shot_here("board-style-fold-menu")
+    bar(click="board-style-more")
+    client.call("command.run", {"id": "view.reset_widths"})
+    client.call("command.run", {"id": "board.select.none"})
+
+
+def board_text_size_scenes(client, shot_here, open_board) -> None:
+    """discovery/board-controls.md §3.9: the four sizes on shapes and on
+    free text, with one past the range drawn at 96 and flagged; the same
+    board far out, where tiny-skia leaves out labels under 4 pixels; the
+    "Aa" menu open on a shape; a size previewed under the pointer; and a
+    label edited at 28. The board ends as it began."""
+
+    def key(name: str, *mods: str) -> dict:
+        return client.call("board.key", {"key": name, "mods": list(mods)})
+
+    def bar(**params) -> dict:
+        return client.call("board.style_bar", params)
+
+    def laid_out(check=lambda state: True) -> None:
+        def ready() -> bool:
+            state = bar()
+            return bool(state["shown"] and state["rect"]
+                        and all(control["rect"] for control in state["controls"])
+                        and (state["menu"] is None or state["menu"]["rect"])
+                        and check(state))
+
+        wait_for(ready, timeout=5, description="the style bar laid out")
+
+    def pick(node: str) -> None:
+        client.call("board.pointer", {"kind": "click", "at": {"node": node}, "button": "left",
+                                      "mods": []})
+
+    open_board("Text sizes", fit=True)
+    wait_for(lambda: client.call("focus.get")["named"] == ["note-editor"], timeout=5,
+             description="the board focused")
+    key("escape")
+    shot_here("board-text-sizes")
+    # Further out, a label under 4 pixels on screen is left out: at 25 %
+    # the sizes 12 and 14, and at 10 % all but the one drawn at 96.
+    # Stepped down from 100 % to each, whatever the fit and the stops are.
+    client.call("command.run", {"id": "font.reset"})
+    for name, zoom in (("board-text-sizes-quarter", 0.25), ("board-text-sizes-far", 0.1)):
+        while client.call("board.get", {})["viewport"]["zoom"] > zoom + 0.001:
+            client.call("command.run", {"id": "font.decrease"})
+        shot_here(name)
+    client.call("command.run", {"id": "board.zoom.fit"})
+    pick("s20")
+    laid_out()
+    bar(click="board-style-text-size")
+    laid_out(lambda state: state["menu"] is not None)
+    shot_here("board-text-size-menu")
+    bar(hover="board-style-menu-text-size-28")
+    wait_for(lambda: client.call("board.get")["patch"] == "board.text_size.28", timeout=5,
+             description="the preview shown")
+    shot_here("board-text-size-hover")
+    bar(hover=None)
+    bar(click="board-style-text-size")
+    # A label edited at 28, its caret at the end.
+    pick("s28")
+    key("enter")
+    wait_for(lambda: client.call("board.get")["editing"] is not None, timeout=5,
+             description="the label open")
+    key("end")
+    shot_here("board-text-size-editing")
+    key("escape")
+    key("escape")
+    assert client.call("board.get")["pristine"], "the text size scenes changed the board"
 
 
 def board_edit_scenes(client, shot_here, open_board) -> None:
@@ -749,7 +1063,8 @@ def main() -> int:
                 def shot_board(name: str) -> None:
                     shot(app.client, name)
 
-                board_scenes(app.client, shot_board, out, workspace)
+                board_scenes(app.client, shot_board, out, workspace,
+                             (app.settings_path, settings + "boards = on\n"))
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

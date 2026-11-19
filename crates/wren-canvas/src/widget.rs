@@ -26,9 +26,10 @@ use iced::{
     window, Element, Event, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector,
 };
 
+use crate::handles::Handle;
 use crate::keys;
 use crate::label::LabelAction;
-use crate::machine::{Button, Input, Scroll};
+use crate::machine::{Button, Input, Pointer, Scroll};
 use crate::overlay;
 use crate::paint::{self, Cull};
 use crate::{BoardView, KeyPress, Labels, Message, Style, Viewport, REST};
@@ -353,7 +354,7 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
 
         // Over every layer of the scene, and rebuilt with each frame: a
         // handful of paths.
-        let overlay = overlay::marks(view);
+        let overlay = overlay::marks_with(view, self.style.tool_chip);
         if !overlay.marks.is_empty() {
             let mut frame = canvas::Frame::new(renderer, bounds.size());
             overlay::paint(&mut frame, &overlay, view, &cull);
@@ -371,6 +372,18 @@ impl Widget<Message, Theme, Renderer> for Canvas<'_> {
             view.probe.moving.set(moving);
             view.probe.drew(started);
         }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let state = tree.state.downcast_ref::<State>();
+        shows(self.view, state, cursor, layout.bounds())
     }
 
     fn operate(
@@ -648,6 +661,57 @@ fn pointer(state: &State, cursor: mouse::Cursor, bounds: Rectangle) -> Option<Po
             .filter(|pointer| bounds.contains(*pointer))
             .unwrap_or(end),
     )
+}
+
+/// The cursor over the board (the design's cursor table,
+/// `discovery/board-controls.md` §3.7). A drag keeps its cursor wherever
+/// the pointer goes, as it keeps its moves; otherwise the board has a say
+/// only while the pointer is over it and under no overlay.
+fn shows(
+    view: &BoardView,
+    state: &State,
+    cursor: mouse::Cursor,
+    bounds: Rectangle,
+) -> mouse::Interaction {
+    let machine = view.machine();
+    let Some(at) = pointer(state, cursor, bounds) else {
+        return if machine.dragging() {
+            interaction(machine.pointer())
+        } else {
+            mouse::Interaction::default()
+        };
+    };
+    let shown = machine.pointer();
+    // Over the open label the pointer is the text's, unless a drag or a
+    // held Space has already claimed it; a locked tool's press there is
+    // the label's too.
+    let over_label = view.label_box().is_some_and(|label| {
+        let (x, y) = view.viewport().to_board((at.x - bounds.x, at.y - bounds.y));
+        (label.x..=label.right()).contains(&x) && (label.y..=label.bottom()).contains(&y)
+    });
+    if over_label && !machine.dragging() && !machine.space() {
+        return mouse::Interaction::Text;
+    }
+    interaction(shown)
+}
+
+fn interaction(pointer: Pointer) -> mouse::Interaction {
+    match pointer {
+        Pointer::Arrow => mouse::Interaction::default(),
+        Pointer::Grab => mouse::Interaction::Grab,
+        Pointer::Grabbing => mouse::Interaction::Grabbing,
+        Pointer::Crosshair => mouse::Interaction::Crosshair,
+        Pointer::Text => mouse::Interaction::Text,
+        Pointer::Copy => mouse::Interaction::Copy,
+        Pointer::Resize(Handle::North | Handle::South) => mouse::Interaction::ResizingVertically,
+        Pointer::Resize(Handle::East | Handle::West) => mouse::Interaction::ResizingHorizontally,
+        Pointer::Resize(Handle::NorthWest | Handle::SouthEast) => {
+            mouse::Interaction::ResizingDiagonallyDown
+        }
+        Pointer::Resize(Handle::NorthEast | Handle::SouthWest) => {
+            mouse::Interaction::ResizingDiagonallyUp
+        }
+    }
 }
 
 /// What a release of `button` sends. The release of the button the widget
@@ -973,6 +1037,71 @@ mod tests {
     /// `a` of the two-node board, in the window.
     const ON_A: Point = Point::new(160.0, 80.0);
     const AWAY: Point = Point::new(20.0, 20.0);
+
+    #[test]
+    fn the_cursor_is_the_boards_over_it_and_through_its_drags() {
+        let at = mouse::Cursor::Available;
+        let arrow = mouse::Interaction::default();
+        let mut view = open(fixtures::TWO);
+        let mut state = State::new();
+        assert_eq!(shows(&view, &state, at(ON_A), BOUNDS), arrow);
+        focus(&mut view, &mut state);
+        // Space held: a hand over the board, and nothing to say elsewhere
+        // or under an overlay.
+        let space = key(
+            Key::Named(Named::Space),
+            keyboard::Modifiers::default(),
+            Some(" "),
+        );
+        send(&mut view, &mut state, space, ON_A);
+        assert!(view.machine().space());
+        assert_eq!(
+            shows(&view, &state, at(ON_A), BOUNDS),
+            mouse::Interaction::Grab
+        );
+        assert_eq!(shows(&view, &state, at(AWAY), BOUNDS), arrow);
+        let under = mouse::Cursor::Levitating(ON_A);
+        assert_eq!(shows(&view, &state, under, BOUNDS), arrow);
+        // The pan keeps its closed hand out past the widget's corner.
+        let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        send(&mut view, &mut state, press, ON_A);
+        let moved = mouse(mouse::Event::CursorMoved { position: AWAY });
+        send(&mut view, &mut state, moved, AWAY);
+        assert_eq!(view.machine().state(), Surface::Panning);
+        assert_eq!(
+            shows(&view, &state, at(AWAY), BOUNDS),
+            mouse::Interaction::Grabbing
+        );
+        let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        send(&mut view, &mut state, release, AWAY);
+        assert_eq!(shows(&view, &state, at(AWAY), BOUNDS), arrow);
+
+        // Over an open label the pointer is the text's; off it, the arrow.
+        let (view, state) = labelling();
+        assert_eq!(
+            shows(&view, &state, at(ON_A), BOUNDS),
+            mouse::Interaction::Text
+        );
+        let empty = Point::new(700.0, 550.0);
+        assert_eq!(shows(&view, &state, at(empty), BOUNDS), arrow);
+    }
+
+    #[test]
+    fn each_resize_handle_has_the_cursor_of_its_direction() {
+        use mouse::Interaction as I;
+        for (handle, want) in [
+            (Handle::North, I::ResizingVertically),
+            (Handle::South, I::ResizingVertically),
+            (Handle::East, I::ResizingHorizontally),
+            (Handle::West, I::ResizingHorizontally),
+            (Handle::NorthWest, I::ResizingDiagonallyDown),
+            (Handle::SouthEast, I::ResizingDiagonallyDown),
+            (Handle::NorthEast, I::ResizingDiagonallyUp),
+            (Handle::SouthWest, I::ResizingDiagonallyUp),
+        ] {
+            assert_eq!(interaction(Pointer::Resize(handle)), want, "{handle:?}");
+        }
+    }
 
     #[test]
     fn a_left_drag_is_followed_outside_the_widget_until_its_release() {
@@ -1632,6 +1761,47 @@ mod tests {
         // The label closed, it is let go.
         view.settle(Instant::now());
         assert_eq!(input_method(&view, true, BOUNDS), InputMethod::Disabled);
+    }
+
+    /// A label drawn at 28 is edited at 28: the input method's caret is a
+    /// line of 28 tall, and a composition is shown at 28, on screen.
+    #[test]
+    fn the_input_method_is_asked_at_the_label_s_size() {
+        let big = fixtures::TWO.replace(
+            "size = [120, 60]\nz = \"a\"",
+            "size = [120, 60]\nstyle.text-size = 28\nz = \"a\"",
+        );
+        let mut view = open(&big);
+        let mut state = State::new();
+        for _ in 0..2 {
+            let press = mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+            send(&mut view, &mut state, press, ON_A);
+            let release = mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+            send(&mut view, &mut state, release, ON_A);
+        }
+        assert_eq!(view.label().map(crate::Label::text), Some("A"));
+        for zoom in [0.5, 2.0] {
+            view.set_viewport(Viewport {
+                x: 0.0,
+                y: 0.0,
+                zoom,
+            });
+            let composing = LabelAction::Preedit {
+                text: "にほんご".to_owned(),
+                selection: None,
+            };
+            view.update(Message::Label(view.epoch(), composing), Instant::now());
+            let InputMethod::Enabled {
+                cursor,
+                preedit: Some(preedit),
+                ..
+            } = input_method(&view, true, BOUNDS)
+            else {
+                panic!("no input method at {zoom}");
+            };
+            assert_eq!(cursor.height, 40.0 * zoom, "{zoom}");
+            assert_eq!(preedit.text_size, Some(Pixels(28.0 * zoom)), "{zoom}");
+        }
     }
 
     #[test]

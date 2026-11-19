@@ -79,10 +79,11 @@ const MAX_SIDE: i32 = scene::COORDINATE_LIMIT as i32;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Place {
     /// A shape's label box: wrapped at its width, each line centred across
-    /// and the block centred down.
-    Shape(Rect),
-    /// Free text's box: wrapped at its width, at the top left.
-    Free(Rect),
+    /// and the block centred down; with the size the label is drawn at.
+    Shape(Rect, f32),
+    /// Free text's box: wrapped at its width, at the top left; with the
+    /// size the text is drawn at.
+    Free(Rect, f32),
     /// A connector's label: broken at line feeds only, centred on a point.
     Connector(Point),
 }
@@ -90,20 +91,21 @@ pub(crate) enum Place {
 impl Place {
     /// Where the label of `node`, drawn in `bounds`, is laid out.
     pub(crate) fn of_node(node: &Node, bounds: Rect) -> Self {
+        let size = node.style.drawn_text_size();
         match node.kind.as_ref().and_then(Named::known) {
             Some(NodeKind::Shape) => {
-                Self::Shape(shape::label_box(shape::drawn(&node.shape), bounds))
+                Self::Shape(shape::label_box(shape::drawn(&node.shape), bounds), size)
             }
-            Some(NodeKind::Text) => Self::Free(bounds),
+            Some(NodeKind::Text) => Self::Free(bounds, size),
             // A placeholder's label is drawn as a rectangle's.
-            None => Self::Shape(shape::label_box(Shape::Rect, bounds)),
+            None => Self::Shape(shape::label_box(Shape::Rect, bounds), size),
         }
     }
 
     /// The font size the label is drawn at.
     pub(crate) fn text_size(self) -> f32 {
         match self {
-            Self::Shape(_) | Self::Free(_) => scene::LABEL_SIZE,
+            Self::Shape(_, size) | Self::Free(_, size) => size,
             Self::Connector(_) => scene::SMALL_SIZE,
         }
     }
@@ -111,7 +113,7 @@ impl Place {
     /// The width its lines wrap at; a connector's label does not wrap.
     fn wrap(self) -> Option<f32> {
         match self {
-            Self::Shape(area) | Self::Free(area) => Some(area.width),
+            Self::Shape(area, _) | Self::Free(area, _) => Some(area.width),
             Self::Connector(_) => None,
         }
     }
@@ -550,8 +552,8 @@ impl Label {
             .max(1) as f32
             * height;
         let top = match self.place {
-            Place::Shape(area) => area.y + (area.height - block) / 2.0,
-            Place::Free(area) => area.y,
+            Place::Shape(area, _) => area.y + (area.height - block) / 2.0,
+            Place::Free(area, _) => area.y,
             Place::Connector(centre) => centre.y - block / 2.0,
         };
         self.rows = wrapped
@@ -559,8 +561,8 @@ impl Label {
             .enumerate()
             .map(|(index, line)| Row {
                 x: match self.place {
-                    Place::Shape(area) => area.x + (area.width - line.width) / 2.0,
-                    Place::Free(area) => area.x,
+                    Place::Shape(area, _) => area.x + (area.width - line.width) / 2.0,
+                    Place::Free(area, _) => area.x,
                     Place::Connector(centre) => centre.x - line.width / 2.0,
                 },
                 y: top + index as f32 * height,
@@ -720,8 +722,8 @@ fn word_after(text: &str, offset: usize) -> usize {
     at
 }
 
-/// The size `node` needs to hold `text` in its label box, never less than
-/// `size` (§5.9 rule 7): taller, in whole cells, while the wrapped text is
+/// The size `node` needs to hold `text` in its label box, at the node's
+/// label size, never less than `size` (§5.9 rule 7): taller, in whole cells, while the wrapped text is
 /// taller than the box, and wider only for a word wider than the box
 /// alone. A blank label draws nothing and grows nothing.
 pub(crate) fn grown(node: &Node, size: [i32; 2], text: &str, measure: &dyn Measure) -> [i32; 2] {
@@ -731,11 +733,11 @@ pub(crate) fn grown(node: &Node, size: [i32; 2], text: &str, measure: &dyn Measu
     let area = |[width, height]: [i32; 2]| {
         let bounds = Rect::new(0.0, 0.0, width.max(1) as f32, height.max(1) as f32);
         match Place::of_node(node, bounds) {
-            Place::Shape(area) | Place::Free(area) => area,
+            Place::Shape(area, _) | Place::Free(area, _) => area,
             Place::Connector(_) => Rect::default(),
         }
     };
-    let font = scene::LABEL_SIZE;
+    let font = node.style.drawn_text_size();
     let widest = scene::words(text)
         .map(|word| measure.width(word.trim_end(), Face::Regular, font))
         .fold(0.0, f32::max);
@@ -745,19 +747,30 @@ pub(crate) fn grown(node: &Node, size: [i32; 2], text: &str, measure: &dyn Measu
     for _ in 0..16 {
         let before = [width, height];
         while widest > area([width, height]).width + SLACK && width < MAX_SIDE {
-            width = width.saturating_add(GRID).min(MAX_SIDE);
+            width = cell_more(width);
         }
         let wrap = Some(area([width, height]).width);
         let lines = scene::wrap(text, wrap, Face::Regular, font, measure).len();
         let needed = lines as f32 * scene::line_height(font);
         while needed > area([width, height]).height + SLACK && height < MAX_SIDE {
-            height = height.saturating_add(GRID).min(MAX_SIDE);
+            height = cell_more(height);
         }
         if [width, height] == before {
             break;
         }
     }
     [width, height]
+}
+
+/// The next side a growing node tries: one cell more. A side under 1 is
+/// measured as 1 (a file may hold any `i32`), so it goes at once to the
+/// first side past that which whole cells reach, not there cell by cell.
+fn cell_more(side: i32) -> i32 {
+    if side >= 1 {
+        return side.saturating_add(GRID).min(MAX_SIDE);
+    }
+    let cells = (i64::from(GRID) - i64::from(side)) / i64::from(GRID);
+    (i64::from(side) + cells * i64::from(GRID)) as i32
 }
 
 #[cfg(test)]
@@ -776,7 +789,7 @@ mod tests {
 
     /// Free text in a box 70 wide at (100, 50): ten graphemes to a line.
     fn free(text: &str) -> Label {
-        let place = Place::Free(Rect::new(100.0, 50.0, 70.0, 20.0));
+        let place = Place::Free(Rect::new(100.0, 50.0, 70.0, 20.0), scene::LABEL_SIZE);
         Label::open(id(), text, place, M)
     }
 
@@ -1017,7 +1030,7 @@ mod tests {
     #[test]
     fn a_shape_s_lines_are_centred_and_trailing_blank_lines_hang_below() {
         // A label box 70 wide and 60 tall at (10, 10).
-        let place = Place::Shape(Rect::new(10.0, 10.0, 70.0, 60.0));
+        let place = Place::Shape(Rect::new(10.0, 10.0, 70.0, 60.0), scene::LABEL_SIZE);
         let mut label = Label::open(id(), "abcd\nef", place, M);
         let rows = |label: &Label| -> Vec<(f32, f32)> {
             label.rows.iter().map(|row| (row.x, row.y)).collect()
@@ -1042,6 +1055,29 @@ mod tests {
         let blank = Label::open(id(), " \n\n", place, M);
         assert_eq!(blank.stored(), "");
         assert_eq!(rows(&blank), [(45.0, 30.0), (45.0, 50.0), (45.0, 70.0)]);
+    }
+
+    /// At 28 a grapheme is 14 wide and a line 40 tall: the label lays out,
+    /// measures and puts its caret as the scene draws it at that size.
+    #[test]
+    fn a_label_lays_out_and_puts_its_caret_at_its_size() {
+        let place = Place::Shape(Rect::new(10.0, 10.0, 70.0, 100.0), 28.0);
+        let mut label = Label::open(id(), "abcd ef", place, M);
+        assert_eq!(label.text_size(), 28.0);
+        // Five graphemes to a line of 70: "abcd " wraps before "ef".
+        assert_eq!(label.lines(), [("abcd", 17.0, 20.0), ("ef", 31.0, 60.0)]);
+        moved(&mut label, Motion::End);
+        let caret = label.caret_box(M);
+        assert_eq!((caret.x, caret.y, caret.height), (59.0, 60.0, 40.0));
+        let bounds = label.bounds(M);
+        assert_eq!((bounds.y, bounds.height), (20.0, 80.0));
+        // The size a node's label is drawn at is its own.
+        let mut sized = node(NodeKind::Text, Shape::Rect, [120, 20]);
+        sized.style.text_size = 20;
+        let free = Place::of_node(&sized, Rect::new(0.0, 0.0, 120.0, 20.0));
+        assert_eq!(free, Place::Free(Rect::new(0.0, 0.0, 120.0, 20.0), 20.0));
+        sized.style.text_size = 400;
+        assert_eq!(Place::of_node(&sized, Rect::default()).text_size(), 96.0);
     }
 
     #[test]
@@ -1292,6 +1328,61 @@ mod tests {
         );
         assert!(area.width >= 91.0 && area.height >= 100.0, "{size:?}");
         assert_eq!(size, [160, 120]);
+    }
+
+    /// A larger label grows its node as a longer one does, in whole cells
+    /// and never smaller; a smaller one shrinks nothing.
+    #[test]
+    fn a_node_grows_for_a_larger_label_and_never_shrinks() {
+        let mut rect = node(NodeKind::Shape, Shape::Rect, [120, 60]);
+        // "Order" fits at 14 (35 of 104 wide, 20 of 52 tall).
+        assert_eq!(grown(&rect, [120, 60], "Order", M), [120, 60]);
+        // At 28 one line is 40 tall and five graphemes 70 wide: it fits.
+        rect.style.text_size = 28;
+        assert_eq!(grown(&rect, [120, 60], "Order", M), [120, 60]);
+        // Two lines at 28 are 80 tall, past the box's 52: two more cells.
+        assert_eq!(
+            grown(
+                &rect,
+                [120, 60],
+                "Order
+now",
+                M
+            ),
+            [120, 100]
+        );
+        // A word of nine graphemes is 126 wide at 28, past the box's 104.
+        assert_eq!(grown(&rect, [120, 60], "Shipments", M), [160, 60]);
+        // Back at 12 nothing shrinks.
+        rect.style.text_size = 12;
+        assert_eq!(grown(&rect, [160, 100], "Shipments", M), [160, 100]);
+        // Free text 20 tall holds a line at 14 but not at 20.
+        let mut text = node(NodeKind::Text, Shape::Rect, [120, 20]);
+        assert_eq!(grown(&text, [120, 20], "abc", M), [120, 20]);
+        text.style.text_size = 20;
+        assert_eq!(grown(&text, [120, 20], "abc", M), [120, 40]);
+    }
+
+    /// A side a file wrote under 1 is measured as 1, and grows at once to
+    /// where steps of a cell would bring it.
+    #[test]
+    fn a_side_under_one_grows_at_once_to_where_whole_cells_reach() {
+        for (side, next) in [
+            (1, 21),
+            (0, 20),
+            (-19, 1),
+            (-20, 20),
+            (-45, 15),
+            (i32::MIN, 12),
+            (MAX_SIDE - 5, MAX_SIDE),
+        ] {
+            assert_eq!(cell_more(side), next, "{side}");
+        }
+        let rect = node(NodeKind::Shape, Shape::Rect, [120, 60]);
+        let [width, height] = grown(&rect, [i32::MIN, i32::MIN], "Hi", M);
+        assert!((1..=GRID * 4).contains(&width), "{width}");
+        assert!((1..=GRID * 4).contains(&height), "{height}");
+        assert_eq!((width % GRID, height % GRID), (12, 12));
     }
 
     /// A measurer whose every grapheme is wider than any node.

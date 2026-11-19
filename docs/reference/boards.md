@@ -28,25 +28,38 @@ Back/Forward like any note. The notes list marks them with a board icon,
 and its second line shows a board's first label.
 
 The footer reads `Board · 15 nodes · 17 connectors`, then, when there are
-any, the number of issues and why the board is read-only, then the zoom
-and the save status.
+any, the number of issues and why the board is read-only, then undo and
+redo, the zoom, and the save status (see [The footer's
+controls](#the-footers-controls)).
 
 ## Shapes and text
 
 | Tool | Key | |
 |---|---|---|
 | Select | V | Click to select, drag to move, drag on empty canvas for a marquee. |
-| Hand | H | Drag to pan. |
+| Hand | H | Drag to pan; it stays armed for the next drag until you pick another tool. |
 | Rectangle, ellipse, diamond, pill, cylinder, parallelogram | R, O, D, U, Y, P | Click for a 120 by 60 shape centred there, or drag from corner to corner. |
-| Rounded rectangle, document | — | The same, from the command palette. |
+| Rounded rectangle, document | — | The same, from the dock's "more shapes" menu or the command palette. |
 | Text | T | Free text: no outline and no fill, left- and top-aligned. |
 | Connector | C or A | See [Connectors](#connectors). |
 
 Tools are one-shot: after one shape the select tool is back, and Esc or V
-puts an armed tool away. A double-click on empty canvas makes a rectangle,
-and every new shape opens its label for typing. Shift with a shape's letter
+puts an armed tool away. Arming the tool that is already armed (its key,
+or its dock button, again) locks it: a locked shape, text, or connector
+tool stays armed after what it makes, so you can place one shape after
+another; a click away from the open label finishes it and places the
+next. Esc, V, or another tool unlocks it, and so does the board losing
+the keyboard. Select and the hand tool have no lock. A double-click on
+empty canvas makes a rectangle, and every new shape opens its label for
+typing. Shift with a shape's letter
 (⇧R, ⇧O, ⇧D, ⇧U, ⇧Y, ⇧P) changes the shape of every selected shape and
 keeps its size and label.
+
+The pointer shows what a press would do: a crosshair while a shape, text,
+or connector tool is armed and over a connect handle, an open hand while
+the hand tool is armed or Space is held, a closed hand during a pan, a
+resize arrow over a handle of the selected shape, an I-beam over an open
+label, and the copy pointer while a drag leaves copies.
 
 Everything snaps to a 20-unit grid when it is created, moved, or resized;
 there is no key to turn snapping off. A unit is one pixel at 100 %.
@@ -148,7 +161,8 @@ short stub ending in a cross, in the theme's error colour.
 ## Colour
 
 Every shape, text element, and connector has one of eight colours, set
-with the digit keys on the selection:
+with the digit keys on the selection, or with the
+[style bar](#the-style-bar)'s swatches:
 
 | Key | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|---|
@@ -173,10 +187,46 @@ protanopia, deuteranopia, and tritanopia.
 A colour written by hand as `#rrggbb` is drawn as written in every theme;
 a colour key replaces it with the colour you pick.
 
+**The colour new shapes take.** The colour you pick last is the one new
+shapes take, until you pick another: a shape or free text placed with a
+tool, a double-click, Tab, Mod+Arrow, or a connector dropped on empty
+canvas is made in it. Picking a colour with nothing selected changes
+nothing on the board and only sets it; picking one with a shape or free
+text in the selection sets it too, and picking one for connectors alone
+does not. New connectors stay neutral, a paste or a duplicate keeps the
+colours it carries, and the fill does not stick: a new shape has the
+tint fill. The colour belongs to the open board for the rest of the run,
+like its zoom; it is never written to the file and undo does not touch
+it. It starts as neutral, which writes nothing more into the file.
+
 On layouts that type a symbol on the digit row, such as AZERTY (which types
 `&` for 1), a digit key that types something nothing is bound to acts as its
 digit, so the colour keys work without Shift. Layouts with non-Latin
 letters already use the physical key.
+
+## Text size
+
+A shape's label and free text have a size: 12, 14 (the default), 20 or 28,
+from the [style bar](#the-style-bar)'s **Aa** menu, or **Text size: 12**
+to **Text size: 28** in the actions palette and the command palette
+(`board.text_size.12` to `board.text_size.28`, with no key unless you bind
+one). It applies to every selected shape and text element; a connector's
+labels are always 12. Resting the pointer on a row of the **Aa** menu shows
+the size on the board without setting it.
+
+A larger label makes its shape grow to hold it, in whole grid cells, as a
+longer label does; a smaller one shrinks nothing, so a shape keeps the room
+it grew to until you resize it. New shapes start at 14: the size you pick
+is not remembered the way the colour is. The label editor types, wraps and
+puts its caret at the label's size.
+
+The file stores the size as a whole number of board units
+(`style.text-size`), written only when it is not 14, so a board that
+uses none is unchanged. A size written by hand need not be a preset: any
+from 8 to 96 is drawn as written, and the **Aa** menu then marks no preset.
+One outside that range is drawn at 8 or 96 and listed as an issue. Wren 0.2
+keeps the size in the file but draws the label at 14, in a box that may
+have grown for a larger one.
 
 ## Arranging
 
@@ -202,6 +252,131 @@ When shapes overlap so far that equal spacing would change their order,
 distribute leaves that row as it is. A shape selected with one of the
 shapes it is nested in moves with its container, not on its own, and
 connectors follow the shapes they join.
+
+## The tool dock
+
+A bar of tools floats at the bottom centre of a board: Select and Hand;
+the six shapes that have keys (rectangle, ellipse, diamond, pill,
+cylinder, parallelogram) and a "more shapes" menu holding Rounded
+rectangle and Document; Text and Connector; and **?**, which opens the
+keys sheet. A click on a button does what its key does, through the same
+command, so the armed tool's button is lit whether you clicked it or
+pressed its key, and a locked tool's button shows a dot. The shape
+buttons draw each shape's outline in the theme's text colour. Hovering a
+button names it and its key.
+
+A click on the dock leaves the keyboard with the board. With a label
+open, a click on a tool finishes the label first, as a click elsewhere
+on the board does, then arms the tool. A press on the dock never reaches
+the canvas beneath it, and the pointer there is the dock's.
+
+Holding Space (which also pans with a drag) shows each button's key in
+its corner; letting go hides them. A tool with no key shows none.
+`board-key-badges` in [`config.conf`](configuration.md) shows them
+always (`on`) or never (`off`); the default is `hold`.
+
+Where the canvas is under 560 pixels wide, the six shapes fold into one
+button that shows the shape last armed and opens a menu of all eight. A
+canvas too narrow for even the folded dock shows none. On a read-only
+board the dock holds Select, Hand, and **?** only. A board fitted to its
+canvas ends above the dock, so the dock covers none of it.
+
+With the dock showing, the canvas no longer names the armed tool in a
+chip at its top left. `board-toolbar = off` turns the dock off, and the
+chip comes back.
+
+## The style bar
+
+While something is selected, a bar at the top centre of the board holds
+the controls that style it, the same ones the
+[actions palette](#the-actions-palette) lists for that selection:
+
+- With shapes selected: a shape menu, whose button draws the selection's
+  shape (or a square and a circle when the shapes differ) and whose menu
+  lists all eight with the current one marked; the eight colour
+  swatches; Fill: none, tint and solid; the **Aa** menu of the four
+  [text sizes](#text-size), with the selection's own marked; and Solid
+  or dashed.
+- With connectors selected: the swatches; Elbow or straight; Start
+  arrowhead and End arrowhead; Reverse; and Solid or dashed.
+- Last, a menu of Duplicate, Bring to front, Send to back, Delete, and
+  **All actions…**, which opens the actions palette.
+
+A selection with both shows both, in that order. The swatch of the
+colour the whole selection has is ringed in the accent colour, and the
+fill it has is lit. The swatches are each colour as the current theme
+draws it. A click does what the control's key or palette row does,
+through the same command, as one undo step. Resting the pointer on a
+swatch, a fill, Elbow or straight, or a row of the shape or **Aa** menu
+shows the
+change on the board without making it, as the actions palette's
+highlighted row does; moving off drops it and nothing is written.
+
+With nothing selected the bar is hidden, except while a shape or text
+tool is armed: then it shows the swatches alone, labelled **New
+shapes**, with the colour new shapes take ringed (see
+[Colour](#colour)). A click there picks it.
+
+Like the dock, a click on the bar leaves the keyboard with the board,
+finishes an open label first, and never reaches the canvas beneath it.
+Hovering a control names it and its key. While Space is held, or always
+with `board-key-badges = on`, each swatch shows its digit under it.
+
+Where the canvas is too narrow for the whole bar, the fills, the text
+sizes, Solid or dashed, and the connector's controls move to the top of
+the last menu.
+A canvas too narrow for even the swatches shows no bar. A board fitted
+to its canvas starts below the bar, so a shape at the top of a fitted
+board is never under it. A read-only board has no style bar.
+`board-toolbar = off` turns it off with the dock.
+
+## The footer's controls
+
+Under a board, the zoom figure is three controls: − zooms out, the figure
+zooms to fit, and + zooms in, as ⌘- / Alt+-, ⇧1, and ⌘= / Alt+= do. Undo
+and redo sit before them, greyed and doing nothing when there is nothing
+to undo or redo. A click there leaves the keyboard with the board, and an
+armed tool stays armed. Where the footer is narrow, the counts and the
+hint line go first and these stay. A read-only board has the zoom
+controls and no undo or redo. With `board-toolbar = off` the footer
+shows the zoom figure alone, as text.
+
+## Hints and the keys sheet
+
+While a board has the keyboard, its footer names the keys that fit what
+is selected or armed, between the counts and the zoom:
+
+| State | Hint |
+|---|---|
+| Nothing selected | Tab add a shape · R O D U Y P pick a shape · Space show keys · ? all keys |
+| One shape | Tab next shape · Mod+Arrow connect · ↵ label · 0–7 colour · Shift+D reshape · / actions |
+| Several shapes | 0–7 colour · Alt+Arrow move · / align and distribute (align alone with two) · ⌫ delete |
+| Connectors only | 0–7 colour · ↵ label · / route, heads, reverse · ⌫ delete |
+| A shape or text tool armed | click to place · drag to size · Tab add it after the selection · R again to lock (or to unlock) · esc cancel |
+| Connector tool | drag from one shape to another · esc cancel |
+| Hand tool, or Space held | drag to pan |
+| A label open | Mod+↵ done · Tab done and add the next shape · esc done |
+| Connecting by keyboard | type to find · ←→↑↓ move · ↵ connect · esc give up |
+
+The keys are the ones bound now: a key you rebind shows as rebound, and a
+command with no key drops out. A part that does nothing as the board
+stands drops out too, so a read-only board's hint names only what it
+takes. "Space show keys" appears only while Space shows the dock's keys
+(the dock on, and `board-key-badges = hold`), and "again to lock" names
+the armed tool's own key, so the two shapes with no key have none. Where
+the footer is too narrow, the parts at the end drop out whole before
+anything else; below 440 pixels the hint goes with the
+counts. `board-hints = off` in [`config.conf`](configuration.md) turns the
+hint off.
+
+**?** (Shift+/, or wherever your layout types `?`) opens the keys sheet:
+every board key in the groups of this page, Tools, Build, Select, Edit,
+Colour, Arrange, View, and Menus, with the gestures that have no key.
+Rows that do nothing for the selection as it stands are dimmed, as are
+the editing keys on a read-only board. Typing filters the sheet; ↑ and ↓
+scroll it. **?**, Esc, ↵, or a click outside closes it and gives the
+board the keyboard back. It is also the dock's last button, **Board keys**
+in the command palette and, on macOS, the Board menu.
 
 ## The actions palette
 
@@ -243,13 +418,14 @@ searched as text; the file's own syntax (`kind`, `schema`) is not.
 
 | Action | macOS | Linux |
 |---|---|---|
-| Pan | Scroll, Shift+scroll sideways, middle-drag, Space+drag, or the hand tool | the same |
+| Pan | Scroll, Shift+scroll sideways, middle-drag, Space+drag, or the hand tool (which stays armed) | the same |
 | Zoom at the pointer | ⌘+scroll | Ctrl+scroll |
 | Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Alt+= / Alt+- / Alt+0 |
 | Zoom to fit / to selection | ⇧1 / ⇧2 | the same |
 
 The text-size keys step through 10, 25, 50, 75, 100, 150, 200, 300, and 400
-% on a board and save nothing. A board opens fitted to its content, never
+% on a board and save nothing; so do the footer's − and + buttons, and a
+click on its zoom figure fits the board. A board opens fitted to its content, never
 above 100 %, and returns to where you left it when you come back to it in
 the same run. The view is never written to the file. Pinch-to-zoom is not
 supported. With the software renderer (`ICED_BACKEND=tiny-skia`), labels
@@ -337,7 +513,8 @@ Wren. What does not survive:
   (Wren Light from the app, `--theme` from the command line), and draw.io's
   dark mode works out its own.
 - Wren's font and wrapping: draw.io wraps labels in its own font, so a
-  label may break differently or overflow its shape.
+  label may break differently or overflow its shape. Each label keeps its
+  size (`fontSize`), as SVG and PNG exports do.
 - Routes: draw.io bends elbow connectors itself and avoids no shapes, so a
   connector can cross a shape, two can share a line, and a floating end on
   a pill, cylinder, or document stops at its box.
@@ -347,8 +524,10 @@ Wren. What does not survive:
   which becomes a free end.
 - A tab in a label is four spaces, and arrowheads are slightly larger.
 
-Only draw.io itself has been tested. Lucidchart's draw.io import is
-untested, and Visio and Miro need formats Wren does not write.
+draw.io and Lucidchart's draw.io import have been tested by hand. Each
+element of the file starts a line of its own, as draw.io writes it:
+Lucidchart refuses the same file with an element's lines joined. Visio and
+Miro need formats Wren does not write.
 
 ## Problems in a file
 
@@ -381,6 +560,7 @@ the banner.
 | Nesting | 32 levels | Deeper shapes are drawn at the top level, listed as an issue. |
 | One label | 16 KiB and 1,024 lines | The rest is not drawn, listed as an issue; typing past 16 KiB is refused. |
 | Labels on one connector | 16 | The rest are not drawn, listed as an issue. |
+| Text size | 8 to 96 units | Drawn at 8 or 96, listed as an issue. |
 | Label lines on a board | 262,144 | Later labels are cut, listed as an issue. |
 | PNG image | 64 megapixels | The export is refused. |
 

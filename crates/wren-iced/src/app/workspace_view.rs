@@ -18,8 +18,12 @@ use crate::chrome::{self, Icon};
 use crate::drag::RowKind;
 use crate::drag_view::Registry;
 use crate::ellipsis::ellipsis;
+use crate::layers::layers;
 use crate::panes::{self, Pane};
 use crate::{fonts, theme};
+
+/// The footer's height under the editor or a board, its rule included.
+const FOOTER: f32 = 30.0;
 
 impl App {
     /// The width of the browser columns left of the editor; 0 when hidden.
@@ -1006,25 +1010,50 @@ impl App {
             .center_x(Fill)
             .center_y(Fill)
             .style(move |_| chrome::surface(self.definition, colors.editor, 0.0, false));
+        // The board's tool dock and style bar float over the canvas, the
+        // editor kept as the first layer so its state survives the bars
+        // coming and going, and each bar keeping its layer when the other is
+        // hidden. A press a browser column took still reaches the editor
+        // beneath, which lets the keyboard go.
         let document: Element<'_, Message> = if self.selected_note.is_none() {
-            stack![editor, opaque(empty)].into()
+            layers([editor, opaque(empty)]).into()
+        } else if self.board.is_some() && self.preferences.settings.board_toolbar {
+            let dock = self
+                .board_dock_view()
+                .unwrap_or_else(|| iced::widget::Space::new().into());
+            let bar = self
+                .board_style_bar_view()
+                .unwrap_or_else(|| iced::widget::Space::new().into());
+            layers([editor, dock, bar]).into()
         } else {
-            stack![editor].into()
+            layers([editor]).into()
         };
-        column![
-            header,
-            raw_banner,
-            find,
-            document,
-            chrome::top_rule(
-                container(responsive(move |size| self.editor_footer(size.width)))
-                    .height(29)
-                    .padding([6, 16]),
-                self.definition
-            )
-        ]
-        .width(Fill)
-        .height(Fill)
+        let footer = chrome::top_rule(
+            container(responsive(move |size| self.editor_footer(size.width)))
+                .height(FOOTER - 1.0)
+                .padding([6, 16]),
+            self.definition,
+        );
+        // The footer is a layer over the column, which keeps its room: a
+        // press on one of its buttons is taken there before the canvas
+        // hears it, so a click on the board's zoom or undo leaves the board
+        // the keyboard.
+        layers([
+            column![
+                header,
+                raw_banner,
+                find,
+                document,
+                iced::widget::Space::new().height(FOOTER)
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into(),
+            column![iced::widget::Space::new().height(Fill), footer]
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        ])
         .into()
     }
 
@@ -1080,27 +1109,59 @@ impl App {
         let colors = self.definition.colors;
         let (status, status_color) = self.save_status();
         let footer = BoardFooter::of(view);
-        let mut row = row![
-            chrome::label(
-                if width >= 440.0 {
-                    footer.stats
-                } else {
-                    String::new()
-                },
-                11,
-                colors.muted
-            ),
-            iced::widget::space::horizontal(),
-        ]
+        // The hint takes the room the rest leaves, so it never pushes the
+        // zoom or the save status out; a part that does not fit wraps onto
+        // a line the footer's height clips, so it drops out whole. Below
+        // the width that drops the counts it goes too: what room is left
+        // there holds a part at most, cut short.
+        let hint = if width >= 440.0 {
+            self.board_hint()
+        } else {
+            Vec::new()
+        };
+        let mut row = row![chrome::label(
+            if width >= 440.0 {
+                footer.stats
+            } else {
+                String::new()
+            },
+            11,
+            colors.muted
+        )]
         .spacing(16)
         .align_y(iced::Center)
         .clip(true);
+        row = if hint.is_empty() {
+            row.push(iced::widget::space::horizontal())
+        } else {
+            let mut parts = row![].spacing(14).align_y(iced::Center);
+            for segment in hint {
+                let mut part = row![].spacing(4).align_y(iced::Center);
+                for key in segment.keys {
+                    part = part.push(chrome::keycap_owned(key, self.definition));
+                }
+                if !segment.words.is_empty() {
+                    part = part.push(chrome::label(segment.words, 11, colors.muted));
+                }
+                parts = parts.push(part);
+            }
+            row.push(
+                container(parts.wrap().vertical_spacing(8))
+                    .id("board-hint")
+                    .width(Fill)
+                    .height(17)
+                    .clip(true),
+            )
+        };
         for flag in footer.flags {
             row = row.push(chrome::label(flag, 11, colors.warning));
         }
-        row = row
-            .push(chrome::label(footer.zoom, 11, colors.muted))
-            .push(chrome::label(format!("● {status}"), 11, status_color));
+        row = if self.preferences.settings.board_toolbar {
+            row.push(self.board_footer_controls_view(footer.zoom))
+        } else {
+            row.push(chrome::label(footer.zoom, 11, colors.muted))
+        };
+        row = row.push(chrome::label(format!("● {status}"), 11, status_color));
         if self.session.as_ref().is_some_and(|session| {
             session
                 .document()

@@ -34,7 +34,8 @@ Z_MAX = 64
 # Known optional fields omitted when equal to their default (section 4.11 rule 9).
 NODE_DEFAULTS = {"text": "", "shape": "rect"}
 EDGE_DEFAULTS = {"heads": ["none", "arrow"], "labels": [], "route": "elbow"}
-NODE_STYLE_DEFAULTS = {"color": "neutral", "fill": "tint", "stroke": "solid"}
+# `text-size` is an integer; a value of another type is unknown content, kept as written.
+NODE_STYLE_DEFAULTS = {"color": "neutral", "fill": "tint", "stroke": "solid", "text-size": 14}
 EDGE_STYLE_DEFAULTS = {"color": "neutral", "stroke": "solid"}   # a connector has no fill
 LABEL_AT = 500
 

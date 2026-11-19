@@ -72,6 +72,21 @@ class BoardFixtureTests(unittest.TestCase):
                 self.assertEqual(back["nodes"]["a"]["z"], typed)
                 self.assertEqual(back["edges"]["e"]["text"], typed)
 
+    def test_a_text_size_of_14_is_dropped_and_any_other_value_kept(self):
+        """As the Rust writer: an integer 14 is the default and is left out; any other
+        integer, and a value of another type (unknown content in Wren 0.2), is kept."""
+        def written(size):
+            text = ("schema = 1\n\n[node.a]\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\n"
+                    "style.text-size = %s\nz = \"V\"\n" % size)
+            return board_format.dump(board_format.load(text))
+        self.assertNotIn("text-size", written("14"))
+        for size in ("12", "20", "7", "120", '"big"', "20.5", "14.0"):
+            with self.subTest(size=size):
+                self.assertIn("style.text-size = %s\n" % size, written(size))
+        edge = ("schema = 1\n\n[edge.e]\nkind = \"edge\"\nfrom = { at = [0, 0] }\n"
+                "to = { at = [1, 1] }\nstyle.text-size = 14\nz = \"V\"\n")
+        self.assertEqual(board_format.dump(board_format.load(edge)), edge)
+
     def test_hand_written_loads_and_is_not_canonical(self):
         text = (board_fixtures.SAMPLES / "Hand written.wren-board").read_text(encoding="utf-8")
         self.assertNotIn("\r", text)

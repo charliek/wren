@@ -107,7 +107,30 @@ pub(crate) fn route(
     }
     let edits = || label(key, physical, modifiers, text);
     let route = match context.policy {
-        Some(policy) => policy(key, physical, modifiers, repeat),
+        // A keymap spells `?` as Shift+/, the key that types it on a US
+        // layout; another layout types it elsewhere (Shift with `,` on
+        // AZERTY, with `ß` on German), so a typed `?` is asked as Shift+/
+        // first, as the digit row's symbols are asked as digits (§5.1
+        // rule 7). First, because the key that types it may be another
+        // board command's by its place: on Dvorak it is Shift with the
+        // key a keymap calls `[`. A key the app has bound stays the
+        // app's, as it is ahead of every board key.
+        Some(policy) => {
+            let asked = (text == Some("?") && !shortcut).then(|| {
+                policy(
+                    &Key::Character("/".into()),
+                    key::Physical::Code(key::Code::Slash),
+                    Modifiers::SHIFT,
+                    repeat,
+                )
+            });
+            match (asked, policy(key, physical, modifiers, repeat)) {
+                (Some(KeyRoute::Command(_)), KeyRoute::Host) => KeyRoute::Host,
+                (Some(bound @ KeyRoute::Command(_)), _) => bound,
+                (Some(asked), KeyRoute::Pass) => asked,
+                (_, route) => route,
+            }
+        }
         // With no keymap to ask, a chord the label reads is the label's.
         None if shortcut && context.editing && edits().is_some() => KeyRoute::Pass,
         None if shortcut => KeyRoute::Host,
@@ -349,6 +372,109 @@ mod tests {
                 _ => KeyRoute::Pass,
             }
         })
+    }
+
+    /// A `?` typed by another key than Shift+/, as on AZERTY (Shift with
+    /// the `,` key), is asked as Shift+/; in a label it stays text.
+    #[test]
+    fn a_question_mark_from_any_key_is_asked_as_shift_slash() {
+        let policy: KeyPolicy = Arc::new(|key, physical, modifiers, _| {
+            let slash = physical == Physical::Code(Code::Slash);
+            match key.as_ref() {
+                Key::Character("/") if slash && modifiers == Modifiers::SHIFT => {
+                    KeyRoute::Command(Command::Keys)
+                }
+                _ => KeyRoute::Pass,
+            }
+        });
+        let ruled = Context {
+            policy: Some(&policy),
+            ..IDLE
+        };
+        let keys = Keyed::Take(vec![Out::Command(Command::Keys)]);
+        let azerty = |text, modifiers, context| {
+            route(
+                &character(","),
+                Physical::Code(Code::KeyM),
+                modifiers,
+                text,
+                false,
+                context,
+            )
+        };
+        assert_eq!(azerty(Some("?"), Modifiers::SHIFT, ruled), keys);
+        assert_eq!(
+            route(
+                &character("/"),
+                Physical::Code(Code::Slash),
+                Modifiers::SHIFT,
+                Some("?"),
+                false,
+                ruled
+            ),
+            keys
+        );
+        // The `,` key without Shift, and `?` with a shortcut modifier.
+        assert_eq!(
+            azerty(Some(","), Modifiers::default(), ruled),
+            press(character(","), Modifiers::default(), Some(","), IDLE)
+        );
+        assert_ne!(
+            azerty(Some("?"), Modifiers::SHIFT | Modifiers::CTRL, ruled),
+            keys
+        );
+        let editing = Context {
+            editing: true,
+            ..ruled
+        };
+        assert_eq!(
+            azerty(Some("?"), Modifiers::SHIFT, editing),
+            edits(&[insert("?")])
+        );
+    }
+
+    /// On Dvorak `?` is Shift with the key a keymap calls `[`, which has a
+    /// command of its own: the `?` typed wins, and the same key without
+    /// one, or with the sheet unbound, keeps its command.
+    #[test]
+    fn a_question_mark_typed_by_another_command_s_key_is_still_asked_as_shift_slash() {
+        let back = Command::Arrange(wren_board::edit::Stack::Backward);
+        let bound = |sheet: bool| -> KeyPolicy {
+            Arc::new(move |_, physical, modifiers, _| {
+                let shifted = modifiers == Modifiers::SHIFT;
+                match physical {
+                    Physical::Code(Code::Slash) if shifted && sheet => {
+                        KeyRoute::Command(Command::Keys)
+                    }
+                    Physical::Code(Code::BracketLeft) if shifted => KeyRoute::Command(back),
+                    _ => KeyRoute::Pass,
+                }
+            })
+        };
+        let dvorak = |text, policy: &KeyPolicy| {
+            let context = Context {
+                policy: Some(policy),
+                ..IDLE
+            };
+            route(
+                &character("?"),
+                Physical::Code(Code::BracketLeft),
+                Modifiers::SHIFT,
+                text,
+                false,
+                context,
+            )
+        };
+        let took = |command| Keyed::Take(vec![Out::Command(command)]);
+        assert_eq!(dvorak(Some("?"), &bound(true)), took(Command::Keys));
+        assert_eq!(dvorak(Some("{"), &bound(true)), took(back));
+        assert_eq!(dvorak(Some("?"), &bound(false)), took(back));
+        // A key the app has bound is the app's, `?` or not.
+        let host: KeyPolicy = Arc::new(|_, physical, _, _| match physical {
+            Physical::Code(Code::Slash) => KeyRoute::Command(Command::Keys),
+            _ => KeyRoute::Host,
+        });
+        assert_eq!(dvorak(Some("?"), &host), Keyed::Leave);
     }
 
     #[test]

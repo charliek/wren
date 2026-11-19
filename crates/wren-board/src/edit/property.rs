@@ -127,6 +127,11 @@ fn random_node(rng: &mut Rng, parent: Option<String>) -> Node {
         size: [length(rng), length(rng)],
         style: NodeStyle {
             color: Color::Token(*rng.pick(Token::ALL)),
+            text_size: if rng.one_in(4) {
+                *rng.pick(&[7, 8, 20, 97])
+            } else {
+                NodeStyle::TEXT_SIZE
+            },
             ..NodeStyle::default()
         },
         z: key(rng),
@@ -336,6 +341,13 @@ fn random_intent(board: &Board, rng: &mut Rng) -> Intent {
             id: edge_id(board, rng),
             end: *rng.pick(&ends),
             to: endpoint(board, rng),
+        },
+        10 if rng.one_in(3) => Intent::SetTextSize {
+            nodes: chosen(board, rng)
+                .into_iter()
+                .map(|id| (id, [length(rng), length(rng)]))
+                .collect(),
+            size: *rng.pick(&[8, 12, 14, 20, 28, 96, 200]),
         },
         10 if rng.one_in(2) => Intent::SetStyle {
             ids: picked(board, rng),

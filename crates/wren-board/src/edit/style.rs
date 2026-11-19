@@ -1,6 +1,6 @@
 //! The colour, fill and outline of the selected elements (§5.16 rule 1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Change, Plan, StyleField};
 use crate::scene::Source;
@@ -30,6 +30,33 @@ pub(super) fn set_style(board: &Board, ids: &[Source], field: StyleField) -> Pla
         };
         if let Some(edge) = styled_edge(edge, field) {
             changes.push(Change::PutEdge(id.clone(), Box::new(edge)));
+        }
+    }
+    Plan {
+        changes,
+        ..Plan::default()
+    }
+}
+
+/// Sets the label size of each node among `nodes` to `size`, and its box
+/// to the one given beside it, which the canvas measured. The size's key
+/// is the typed field's from then on, so a value of another type that a
+/// file held there goes. A node already at both is not rewritten.
+pub(super) fn set_text_size(board: &Board, nodes: &[(Id, [i32; 2])], size: i64) -> Plan {
+    let chosen: BTreeMap<&Id, [i32; 2]> = nodes.iter().map(|(id, size)| (id, *size)).collect();
+    let mut changes = Vec::new();
+    for (id, boxed) in chosen {
+        let Some(node) = board.nodes.get(id) else {
+            continue;
+        };
+        let mut node = node.clone();
+        let changed = [
+            replace(&mut node.style.text_size, size),
+            replace(&mut node.size, boxed),
+            node.style.extra.remove("text-size").is_some(),
+        ];
+        if changed.contains(&true) {
+            changes.push(Change::PutNode(id.clone(), Box::new(node)));
         }
     }
     Plan {
@@ -259,5 +286,93 @@ z = "Z"
         for name in ["b", "c", "gone"] {
             assert_eq!(stroke_of(&board, &Source::Node(id(name))), None, "{name}");
         }
+    }
+
+    fn sized(names: &[(&str, [i32; 2])], size: i64) -> Intent {
+        Intent::SetTextSize {
+            nodes: (names.iter())
+                .map(|&(name, boxed)| (Id::new(name).unwrap(), boxed))
+                .collect(),
+            size,
+        }
+    }
+
+    /// A size is one line on each node, with a line for the box the canvas
+    /// grew; a placeholder takes it too, since its label is drawn at it.
+    #[test]
+    fn a_text_size_is_one_line_on_each_node_and_the_grown_box_another() {
+        assert_eq!(
+            lines(&sized(
+                &[("a", [120, 60]), ("b", [120, 20]), ("c", [120, 60])],
+                20
+            )),
+            [
+                "+style.text-size = 20",
+                "+style.text-size = 20",
+                "+style.text-size = 20",
+            ]
+        );
+        assert_eq!(
+            lines(&sized(&[("a", [140, 80])], 28)),
+            [
+                "-size = [120, 60]",
+                "+size = [140, 80]",
+                "+style.text-size = 28",
+            ]
+        );
+        // The default is written by having no line.
+        let mut board = parse(STYLED).unwrap();
+        board.apply(
+            &plan(
+                &board,
+                &sized(&[("a", [120, 60])], 28),
+                &mut Listed(Vec::new()),
+            )
+            .changes,
+        );
+        let before = write(&board);
+        board.apply(
+            &plan(
+                &board,
+                &sized(&[("a", [120, 60])], 14),
+                &mut Listed(Vec::new()),
+            )
+            .changes,
+        );
+        assert_eq!(
+            line_diff(&before, &write(&board)),
+            ["-style.text-size = 28"]
+        );
+        assert_eq!(write(&board), write(&parse(STYLED).unwrap()));
+    }
+
+    /// A size another type held, which Wren 0.2 kept as unknown content,
+    /// gives way to the one set; a size already held plans nothing.
+    #[test]
+    fn a_text_size_replaces_one_of_another_type_and_a_held_one_plans_nothing() {
+        let text = STYLED.replace(
+            "style.color = \"teal\"\n",
+            "style.color = \"teal\"\nstyle.text-size = \"big\"\n",
+        );
+        let mut board = parse(&text).unwrap();
+        let written = write(&board);
+        assert!(written.contains("style.text-size = \"big\"\n"));
+        let set = plan(
+            &board,
+            &sized(&[("d", [120, 60])], 14),
+            &mut Listed(Vec::new()),
+        );
+        board.apply(&set.changes);
+        assert_eq!(
+            line_diff(&written, &write(&board)),
+            ["-style.text-size = \"big\""]
+        );
+        let board = parse(STYLED).unwrap();
+        let empty = |intent: Intent| {
+            let plan = plan(&board, &intent, &mut Listed(Vec::new()));
+            assert!(plan.is_empty(), "{intent:?}: {plan:?}");
+        };
+        empty(sized(&[], 20));
+        empty(sized(&[("a", [120, 60]), ("gone", [10, 10])], 14));
     }
 }

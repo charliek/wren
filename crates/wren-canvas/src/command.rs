@@ -6,8 +6,8 @@
 use wren_board::edit::{Alignment, Axis, Stack};
 use wren_board::{Dir, Fill, Shape, Token};
 
-/// One board command. [`Command::all`] lists the 64 of Phase 2, then the
-/// 25 of Phase 3.
+/// One board command. [`Command::all`] lists the 64 of Phase 2, the 25 of
+/// Phase 3, the keys sheet, then the four label sizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     /// `board.tool.*`: arm a tool.
@@ -76,11 +76,20 @@ pub enum Command {
     Color(Token),
     /// `board.fill.*`: the fill of the selected shapes.
     Fill(Fill),
+    /// `board.text_size.*`: the label size of the selected nodes, one of
+    /// [`TEXT_SIZES`] (discovery/board-controls.md §3.9).
+    TextSize(u8),
     /// `board.actions`: the actions palette for the selection.
     Actions,
     /// `board.jump`: the jump-to-node palette.
     Jump,
+    /// `board.keys`: the sheet of every board key.
+    Keys,
 }
+
+/// The label sizes the commands set, in board units: what the style bar's
+/// menu and the actions palette offer. A file may hold any other size.
+pub const TEXT_SIZES: [u8; 4] = [12, 14, 20, 28];
 
 /// What the pointer does on a board.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -103,7 +112,7 @@ pub enum Grow {
 }
 
 /// Every command and its key, in the order of the plan's table.
-const TABLE: [(Command, &str); 89] = {
+const TABLE: [(Command, &str); 94] = {
     use Command as C;
     use Dir::{Down, Left, Right, Up};
     [
@@ -202,6 +211,11 @@ const TABLE: [(Command, &str); 89] = {
         (C::Fill(Fill::Solid), "board.fill.solid"),
         (C::Actions, "board.actions"),
         (C::Jump, "board.jump"),
+        (C::Keys, "board.keys"),
+        (C::TextSize(12), "board.text_size.12"),
+        (C::TextSize(14), "board.text_size.14"),
+        (C::TextSize(20), "board.text_size.20"),
+        (C::TextSize(28), "board.text_size.28"),
     ]
 };
 
@@ -217,6 +231,26 @@ impl Command {
             .iter()
             .find(|(command, _)| *command == self)
             .map_or("", |(_, key)| *key)
+    }
+
+    /// The group the actions palette lists the command under when it
+    /// offers it for a selection (§5.17 rule 3), or `None` for a command
+    /// it never offers for one. [`crate::BoardView::offers`] says which of
+    /// these apply to the selection there is.
+    pub fn offer_group(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Shape(_) => "Shape",
+            Self::Color(_) => "Colour",
+            Self::Fill(_) => "Fill",
+            Self::TextSize(_) => "Text size",
+            Self::StrokeDashed => "Stroke",
+            Self::EdgeRouting | Self::EdgeStart | Self::EdgeEnd | Self::EdgeReverse => "Connector",
+            Self::Arrange(_) => "Arrange",
+            Self::Align(_) => "Align",
+            Self::Distribute(_) => "Distribute",
+            Self::EditLabel | Self::Duplicate | Self::Copy | Self::Cut | Self::Delete => "Edit",
+            _ => return None,
+        })
     }
 
     /// The command a key names.
@@ -238,7 +272,7 @@ mod tests {
     fn every_command_has_one_board_key_and_parses_back() {
         let commands: HashSet<Command> = Command::all().collect();
         let keys: HashSet<&str> = Command::all().map(Command::key).collect();
-        assert_eq!((commands.len(), keys.len()), (89, 89));
+        assert_eq!((commands.len(), keys.len()), (94, 94));
         for command in Command::all() {
             assert!(command.key().starts_with("board."), "{command:?}");
             assert_eq!(Command::parse(command.key()), Some(command));
@@ -256,6 +290,22 @@ mod tests {
         for &fill in Fill::ALL {
             let command = Command::Fill(fill);
             assert_eq!(command.key(), format!("board.fill.{}", fill.name()));
+        }
+    }
+
+    #[test]
+    fn every_text_size_has_a_command() {
+        let sizes: Vec<u8> = Command::all()
+            .filter_map(|command| match command {
+                Command::TextSize(size) => Some(size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, TEXT_SIZES);
+        for size in TEXT_SIZES {
+            let command = Command::TextSize(size);
+            assert_eq!(command.key(), format!("board.text_size.{size}"));
+            assert_eq!(command.offer_group(), Some("Text size"));
         }
     }
 

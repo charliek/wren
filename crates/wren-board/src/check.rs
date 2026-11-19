@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::scene::{Source, COORDINATE_LIMIT, MAX_LABELS, MAX_LABEL_BYTES, MAX_Z};
-use crate::{Board, End, Id, Named, Node};
+use crate::{Board, End, Id, Named, Node, NodeStyle};
 
 /// The deepest nesting drawn inside parents: a node more levels down than
 /// this, counting a root as level 1, is laid out as a root.
@@ -148,6 +148,11 @@ pub enum Limit {
     Labels,
     /// A `z` over [`MAX_Z`] bytes, which stacks by its first [`MAX_Z`].
     ZLength,
+    /// A node's `style.text-size` outside [`NodeStyle::TEXT_SIZES`]; its
+    /// label is drawn at the nearer end.
+    ///
+    /// [`NodeStyle::TEXT_SIZES`]: crate::NodeStyle::TEXT_SIZES
+    TextSize,
     /// A label, or a placeholder's caption, that wraps to more than
     /// [`MAX_LABEL_LINES`] lines, or past the [`MAX_BOARD_LINES`] drawn on
     /// a board; only the lines within both are drawn. Only a scene,
@@ -160,7 +165,7 @@ pub enum Limit {
 
 impl Limit {
     /// Every limit, in the order an element's issues list them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Coordinates,
         Self::Size,
         Self::Anchor,
@@ -168,6 +173,7 @@ impl Limit {
         Self::LabelBytes,
         Self::Labels,
         Self::ZLength,
+        Self::TextSize,
         Self::LabelLines,
     ];
 
@@ -181,6 +187,7 @@ impl Limit {
             Self::LabelBytes => "label_bytes",
             Self::Labels => "labels",
             Self::ZLength => "z_length",
+            Self::TextSize => "text_size",
             Self::LabelLines => "label_lines",
         }
     }
@@ -229,6 +236,7 @@ pub(crate) fn check_with(board: &Board, cut: impl Fn(&Source) -> bool) -> Vec<Is
                 node.text.len().max(caption) > MAX_LABEL_BYTES
             }
             Limit::ZLength => long_z(node.z.as_deref()),
+            Limit::TextSize => !NodeStyle::TEXT_SIZES.contains(&node.style.text_size),
             Limit::LabelLines => cut(&source),
             Limit::Anchor | Limit::LabelAt | Limit::Labels => false,
         };
@@ -285,7 +293,7 @@ pub(crate) fn check_with(board: &Board, cut: impl Fn(&Source) -> bool) -> Vec<Is
             Limit::Labels => edge.labels.len() > MAX_LABELS,
             Limit::ZLength => long_z(edge.z.as_deref()),
             Limit::LabelLines => cut(&source),
-            Limit::Size => false,
+            Limit::Size | Limit::TextSize => false,
         };
         for limit in Limit::ALL.into_iter().filter(|&limit| past(limit)) {
             flag(IssueKind::OutOfRange(limit));
@@ -543,6 +551,7 @@ mod tests {
                 // with every field.
                 "fields.out" => &[("full", "shared_id"), ("full", "shared_id")],
                 "Shapes" => &[("dangling", "dangling_edge")],
+                "Text sizes" => &[("huge", "out_of_range")],
                 _ => &[],
             };
             assert_eq!(named(&check(&board)), pairs(expected), "{name}");
@@ -822,13 +831,13 @@ mod tests {
             concat!(
                 "schema = 1\n\n",
                 "[node.a]\nkind = \"sticky\"\nat = [2147483647, 0]\nsize = [-1, 0]\nz = \"V\"\n\n",
-                "[node.b]\ntext = \"{long_label}\"\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\nz = \"{long_z}\"\n\n",
-                "[node.c]\nkind = \"shape\"\nat = [-16777217, 0]\nsize = [1, 1]\nz = \"V\"\n\n",
+                "[node.b]\ntext = \"{long_label}\"\nkind = \"shape\"\nat = [0, 0]\nsize = [1, 1]\nstyle.text-size = 97\nz = \"{long_z}\"\n\n",
+                "[node.c]\nkind = \"shape\"\nat = [-16777217, 0]\nsize = [1, 1]\nstyle.text-size = 7\nz = \"V\"\n\n",
                 "[node.d]\nkind = \"{long_label}\"\nat = [0, 0]\nsize = [1, 1]\nz = \"V\"\n\n",
                 "[edge.e]\nkind = \"pipe\"\nfrom = {{ anchor = [-5, 500], node = \"b\" }}\n",
                 "to = {{ at = [16777217, 0] }}\nlabels = [\n  {{ at = 2000, text = \"far\" }},\n]\nz = \"W\"\n\n",
                 "[edge.f]\nkind = \"edge\"\nfrom = {{ node = \"c\" }}\nto = {{ node = \"b\" }}\nlabels = [\n{labels}]\nz = \"{long_z}\"\n\n",
-                "[edge.g]\nkind = \"edge\"\nfrom = {{ node = \"c\" }}\nto = {{ node = \"b\" }}\nlabels = [\n  {{ text = \"{long_label}\" }},\n]\nz = \"W\"\n",
+                "[edge.g]\nkind = \"edge\"\nfrom = {{ node = \"c\" }}\nto = {{ node = \"b\" }}\nlabels = [\n  {{ text = \"{long_label}\" }},\n]\nstyle.text-size = 200\nz = \"W\"\n",
             ),
             long_label = long_label,
             long_z = long_z,
@@ -846,7 +855,9 @@ mod tests {
             ("a", Limit::Size),
             ("b", Limit::LabelBytes),
             ("b", Limit::ZLength),
+            ("b", Limit::TextSize),
             ("c", Limit::Coordinates),
+            ("c", Limit::TextSize),
             ("d", Limit::LabelBytes),
             ("e", Limit::Coordinates),
             ("e", Limit::Anchor),

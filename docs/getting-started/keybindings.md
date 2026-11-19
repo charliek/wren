@@ -238,6 +238,7 @@ app's shortcuts in the first table above keep working on a board.
 | Colour: neutral, red, orange, yellow, green, cyan, purple, blue | 0 to 7 | 0 to 7 | `board.color.neutral`, `.red`, `.orange`, `.yellow`, `.green`, `.cyan`, `.purple`, `.blue` |
 | Board actions | / or ⇧F10 | / or Shift+F10 | `board.actions` |
 | Jump to node | ⇧⌘O or ⌘F | Alt+Shift+O, Alt+F, or Ctrl+F | `board.jump` (reached through `navigation.outline` and `navigation.find`) |
+| Board keys (the keys sheet) | ? | ? | `board.keys` (bound as `shift+/`; a `?` typed with another key, as on AZERTY, works too) |
 
 These have no default key; run them from the command palette or the
 [actions palette](../reference/boards.md#the-actions-palette), or bind
@@ -248,9 +249,15 @@ them:
 | Align left, centre, right, top, middle, bottom | `board.align.left`, `.center`, `.right`, `.top`, `.middle`, `.bottom` |
 | Distribute horizontally, vertically | `board.distribute.horizontal`, `board.distribute.vertical` |
 | Fill: none, tint, solid | `board.fill.none`, `board.fill.tint`, `board.fill.solid` |
+| Text size: 12, 14, 20, 28 | `board.text_size.12`, `.14`, `.20`, `.28` |
 | Connector: straight or elbow / start head / end head / reverse | `board.edge.routing`, `board.edge.start`, `board.edge.end`, `board.edge.reverse` |
 | Solid or dashed | `board.stroke.dashed` |
 | New board, Export board as SVG, PNG, draw.io | `note.new_board`, `note.export_svg`, `note.export_png`, `note.export_drawio` |
+
+A tool's key pressed while that tool is armed locks it, so it stays armed
+after each shape it makes; Esc, V, or another tool's key unlocks it. The
+hand tool stays armed until another tool is picked. Holding Space shows
+each key on the board's [tool dock](../reference/boards.md#the-tool-dock).
 
 Esc steps back one thing at a time: it finishes an open label, ends a
 connect, puts away an armed tool, then clears the selection. It never
@@ -270,7 +277,8 @@ command appears anywhere.
 **The digit row.** The colour keys are the digits as typed. On a layout
 that types a symbol there without Shift, such as AZERTY (`&` on the 1 key),
 a digit-row key whose character nothing is bound to acts as its digit, so
-0 to 7 still colour the selection.
+0 to 7 still colour the selection. With nothing selected, 0 to 7 pick the
+colour new shapes take and change nothing on the board.
 
 **Alt+Shift on Linux.** Some Linux desktops use Alt+Shift to switch
 keyboard layout, which can take the resize keys (Alt+Shift + arrow) and the

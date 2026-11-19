@@ -1,0 +1,96 @@
+schema = 1
+
+[node.huge]
+text = "Past 96"
+kind = "shape"
+at = [200, 120]
+size = [400, 160]
+style.color = "red"
+style.text-size = 120
+z = "V05"
+
+[node.s12]
+text = "Twelve"
+kind = "shape"
+at = [0, 0]
+size = [160, 80]
+style.text-size = 12
+z = "V"
+
+[node.s14]
+text = "Fourteen"
+kind = "shape"
+at = [200, 0]
+size = [160, 80]
+style.color = "blue"
+z = "V01"
+
+[node.s20]
+text = "Twenty"
+kind = "shape"
+at = [400, 0]
+size = [160, 80]
+style.color = "green"
+style.text-size = 20
+z = "V02"
+
+[node.s28]
+text = "Twenty-eight"
+kind = "shape"
+at = [600, 0]
+shape = "rounded"
+size = [240, 80]
+style.color = "purple"
+style.fill = "solid"
+style.text-size = 28
+z = "V03"
+
+[node.t12]
+text = "Free text at 12"
+kind = "text"
+at = [0, 320]
+size = [480, 20]
+style.text-size = 12
+z = "V06"
+
+[node.t14]
+text = "Free text at 14"
+kind = "text"
+at = [0, 360]
+size = [480, 20]
+z = "V07"
+
+[node.t20]
+text = "Free text at 20"
+kind = "text"
+at = [0, 400]
+size = [480, 40]
+style.text-size = 20
+z = "V08"
+
+[node.t28]
+text = "Free text at 28"
+kind = "text"
+at = [0, 460]
+size = [480, 40]
+style.text-size = 28
+z = "V09"
+
+[node.wraps]
+text = "A label at twenty that wraps"
+kind = "shape"
+at = [0, 120]
+shape = "ellipse"
+size = [160, 100]
+style.color = "orange"
+style.text-size = 20
+z = "V04"
+
+[edge.s12-s14]
+kind = "edge"
+from = { node = "s12" }
+to = { node = "s14" }
+labels = [
+  { text = "stays 12" },
+]
+z = "V0A"

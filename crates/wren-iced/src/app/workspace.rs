@@ -884,6 +884,11 @@ impl App {
                             false
                         }
                     });
+            if reloaded {
+                // The text under the bars changed: a menu or a preview is
+                // of the board as it was, as on a board newly opened.
+                (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
+            }
             if !reloaded {
                 if let (Some(view), Some(previous)) = (self.board.take(), self.editor_note) {
                     board::close(&view, previous, &mut self.board_viewports);
@@ -898,8 +903,11 @@ impl App {
                         .opening
                         .unwrap_or_else(std::time::Instant::now);
                     let palette = crate::theme::board_palette(self.definition);
-                    match board::open(text, note, palette, &self.board_viewports) {
+                    let covered = self.board_covered();
+                    match board::open(text, note, palette, &self.board_viewports, covered) {
                         Ok(mut view) => {
+                            (self.dock_menu, self.style_menu, self.style_hover) =
+                                (None, None, None);
                             view.set_key_policy(super::preferences::board_policy(
                                 &self.preferences.keymap,
                             ));

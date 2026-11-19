@@ -1,7 +1,8 @@
 //! The board requests of the test harness (discovery/boards.md §6.2):
-//! `board.get`, `board.bounds`, `board.pointer`, `board.key`, `board.type`
-//! and `board.apply`. Each first asks the widget tree where the widget
-//! under `note-editor` sits and whether it has the keyboard, then answers
+//! `board.get`, `board.bounds`, `board.pointer`, `board.key`, `board.type`,
+//! `board.apply`, `board.dock`, `board.style_bar` and `board.footer`. Each
+//! first asks the widget tree where the widget under `note-editor` sits,
+//! where the board's bars are, and whether it has the keyboard, then answers
 //! in [`App::board_probed`]. Input goes in where the widget's own goes:
 //! `App::board_edit`, and for a key the app's keyboard path after it.
 
@@ -19,19 +20,59 @@ use wren_canvas::{handles, hit, BoardView, Button, Input, Mods, Scroll, Tool};
 
 use super::board::Surface;
 use super::test_requests::Focused;
+use super::{board_dock, board_footer, board_style_bar};
 use super::{focus_editor, App, Message};
 use crate::test_ipc::Request;
 
+const CHROME: usize = board_dock::IDS.len() + board_style_bar::IDS.len() + board_footer::IDS.len();
+
+/// Every id the board's chrome gives a widget: the tool dock's, the style
+/// bar's and the footer controls'.
+pub const CHROME_IDS: [&str; CHROME] = {
+    let mut ids = [""; CHROME];
+    let mut at = 0;
+    let lists: [&[&str]; 3] = [&board_dock::IDS, &board_style_bar::IDS, &board_footer::IDS];
+    let mut list = 0;
+    while list < lists.len() {
+        let mut index = 0;
+        while index < lists[list].len() {
+            ids[at] = lists[list][index];
+            at += 1;
+            index += 1;
+        }
+        list += 1;
+    }
+    ids
+};
+
 /// Where the widget under `note-editor` sits in the window, in logical
-/// pixels, and whether it has the keyboard.
-#[derive(Debug, Clone, Copy, Default)]
+/// pixels, and whether it has the keyboard; and where each widget of the
+/// board's chrome is, in the order of [`CHROME_IDS`].
+#[derive(Debug, Clone, Copy)]
 pub struct Placement {
     pub root: Option<Rectangle>,
     pub focused: bool,
+    pub chrome: [Option<Rectangle>; CHROME],
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            root: None,
+            focused: false,
+            chrome: [None; CHROME],
+        }
+    }
 }
 
 impl Placement {
     fn of(focused: &Focused) -> Self {
+        let mut chrome = [None; CHROME];
+        for (name, bounds) in &focused.chrome {
+            if let Some(index) = CHROME_IDS.iter().position(|id| id == name) {
+                chrome[index] = Some(*bounds);
+            }
+        }
         Self {
             root: focused
                 .bounds
@@ -39,7 +80,16 @@ impl Placement {
                 .find(|(name, _)| *name == "note-editor")
                 .map(|(_, bounds)| *bounds),
             focused: focused.named.contains(&"note-editor"),
+            chrome,
         }
+    }
+
+    /// Where the chrome's widget `id` is, as a JSON rectangle or `null`.
+    fn rect(&self, id: &str) -> Value {
+        let index = CHROME_IDS.iter().position(|each| *each == id);
+        index.and_then(|index| self.chrome[index]).map_or(Value::Null, |bounds| {
+            json!({"x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height})
+        })
     }
 }
 
@@ -56,7 +106,7 @@ impl App {
         let request = Arc::clone(request);
         Ok(
             iced::advanced::widget::operate(Focused::default()).map(move |focused| {
-                Message::BoardProbed(Arc::clone(&request), Placement::of(&focused))
+                Message::BoardProbed(Arc::clone(&request), Box::new(Placement::of(&focused)))
             }),
         )
     }
@@ -100,7 +150,7 @@ impl App {
                 };
                 return focus_editor().chain(Task::done(Message::BoardProbed(
                     Arc::clone(request),
-                    focused,
+                    Box::new(focused),
                 )));
             }
             "board.pointer" => match self.board_pointer(params, placement) {
@@ -121,6 +171,18 @@ impl App {
                     merge(&mut snapshot, json!({"handled": handled}));
                     (task, Ok(snapshot))
                 }
+                Err(error) => (Task::none(), Err(error)),
+            },
+            "board.dock" => match self.board_dock_request(params, &placement) {
+                Ok((task, dock)) => (task, Ok(dock)),
+                Err(error) => (Task::none(), Err(error)),
+            },
+            "board.style_bar" => match self.board_style_bar_request(params, &placement) {
+                Ok((task, bar)) => (task, Ok(bar)),
+                Err(error) => (Task::none(), Err(error)),
+            },
+            "board.footer" => match self.board_footer_request(params, &placement) {
+                Ok((task, footer)) => (task, Ok(footer)),
                 Err(error) => (Task::none(), Err(error)),
             },
             "board.apply" => match self.board_apply(params) {
@@ -170,6 +232,9 @@ impl App {
             "issues": [],
             "state": null,
             "tool": null,
+            "locked": false,
+            "next_color": null,
+            "pointer": null,
             "selection": [],
             "cursor": null,
             "editing": null,
@@ -182,6 +247,8 @@ impl App {
             "revision": null,
             "counts": null,
             "patch": null,
+            "hint": [],
+            "keys_sheet": null,
             "export": self.export_state(),
             "banner": self.banner,
         });
@@ -202,10 +269,18 @@ impl App {
             })).collect::<Vec<_>>(),
             "state": state_name(machine, focused),
             "tool": tool_name(machine.tool()),
+            "locked": machine.locked(),
+            "next_color": view.next_color().name(),
+            "pointer": machine.pointer().name(),
             "selection": machine.selection().iter().map(|element| element.id().as_str()).collect::<Vec<_>>(),
             "cursor": machine.cursor().map(|cursor| cursor.id().as_str()),
             "editing": view.label().map(|label| json!({
                 "id": label.id().as_str(), "text": label.text(), "caret": label.caret(),
+                // The caret the input method is given, in the canvas, and
+                // the size its composition is shown at.
+                "ime": view.label_caret().map(|(caret, size)| json!({
+                    "x": caret.x, "y": caret.y, "height": caret.height, "size": size,
+                })),
             })),
             "connecting": machine.connecting().map(|connecting| json!({
                 "target": connecting.target.map(|(id, _)| id.as_str()),
@@ -224,6 +299,18 @@ impl App {
             "revision": self.board_revision,
             "counts": {"nodes": board.nodes.len(), "edges": board.edges.len()},
             "patch": view.patch().map(wren_canvas::Command::key),
+            "hint": self.board_hint().into_iter().map(|segment| json!({
+                "keys": segment.keys, "words": segment.words,
+            })).collect::<Vec<_>>(),
+            "keys_sheet": self.palette.as_ref()
+                .filter(|palette| palette.mode == super::palette::Mode::BoardKeys)
+                .map(|palette| json!({
+                    "query": palette.query,
+                    "rows": self.board_sheet(&palette.query).into_iter().map(|row| json!({
+                        "group": row.group, "keys": row.keys, "words": row.words,
+                        "dimmed": row.dimmed,
+                    })).collect::<Vec<_>>(),
+                })),
         });
         merge(&mut snapshot, fields);
         if elements {
@@ -236,6 +323,255 @@ impl App {
             );
         }
         snapshot
+    }
+
+    /// `board.dock`: the tool dock as it shows, each button with the
+    /// command it runs and where it is; with `click`, a button's or a menu
+    /// row's id, what a click on it sends goes first, through `update` as
+    /// the click's message does. The places are those laid out before the
+    /// click.
+    fn board_dock_request(
+        &mut self,
+        params: &Value,
+        placement: &Placement,
+    ) -> Result<(Task<Message>, Value), String> {
+        let mut task = Task::none();
+        if let Some(id) = params.get("click") {
+            let id = id.as_str().ok_or("click must be a string")?;
+            let dock = self.board_dock().ok_or("The board shows no dock")?;
+            let open = dock.menu.as_ref().map(|(menu, _)| *menu);
+            let button = dock.buttons().find(|button| button.item.id() == id);
+            let row = dock
+                .menu
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .find(|row| board_dock::row_id(row.shape) == id);
+            let message = match (button, row) {
+                (Some(button), _) => board_dock::message(button.item, open),
+                (None, Some(row)) => {
+                    board_dock::message(board_dock::Item::Tool(Tool::Shape(row.shape)), open)
+                }
+                (None, None) => return Err(format!("The dock shows no {id}")),
+            };
+            task = self.update(message);
+        }
+        let Some(dock) = self.board_dock() else {
+            return Ok((
+                task,
+                json!({"shown": false, "folded": false, "rect": null, "buttons": [], "menu": null}),
+            ));
+        };
+        let command = |item: board_dock::Item| item.command().map(wren_canvas::Command::key);
+        let buttons: Vec<Value> = dock
+            .buttons()
+            .map(|button| {
+                json!({
+                    "id": button.item.id(),
+                    "command": command(button.item),
+                    "lit": button.lit,
+                    "locked": button.locked,
+                    "key": button.key,
+                    "badge": button.key.as_ref().filter(|_| button.badge),
+                    "tip": button.tip(),
+                    "rect": placement.rect(button.item.id()),
+                })
+            })
+            .collect();
+        let menu = dock.menu.as_ref().map(|(menu, rows)| {
+            json!({
+                "kind": menu.name(),
+                "rect": placement.rect(board_dock::MENU_ID),
+                "rows": rows.iter().map(|row| {
+                    let id = board_dock::row_id(row.shape);
+                    json!({
+                        "id": id,
+                        "command": wren_canvas::Command::Tool(Tool::Shape(row.shape)).key(),
+                        "lit": row.lit,
+                        "locked": row.locked,
+                        "key": row.key,
+                        "rect": placement.rect(id),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        });
+        Ok((
+            task,
+            json!({
+                "shown": true,
+                "folded": dock.folded,
+                "rect": placement.rect(board_dock::BAR_ID),
+                "buttons": buttons,
+                "menu": menu,
+            }),
+        ))
+    }
+
+    /// `board.style_bar`: the style bar as it shows, each control with the
+    /// command it runs, whether it is current, its key and where it is;
+    /// with `hover`, a control's or a row's id, the pointer comes onto it
+    /// first, or with `null` leaves; with `click`, what a click on it
+    /// sends goes next, through `update` as the click's message does. The
+    /// places are those laid out before.
+    fn board_style_bar_request(
+        &mut self,
+        params: &Value,
+        placement: &Placement,
+    ) -> Result<(Task<Message>, Value), String> {
+        use board_style_bar::Hover;
+        let mut tasks = Vec::new();
+        let find = |bar: &board_style_bar::Bar, id: &str| {
+            let open = bar.menu.as_ref().map(|(menu, _)| *menu);
+            let control = bar.controls().find(|control| control.item.id() == id);
+            let row = bar
+                .menu
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .find(|row| board_style_bar::row_id(row.command) == id);
+            match (control, row) {
+                (Some(control), _) => Ok((
+                    control.item.command(),
+                    board_style_bar::message(control.item, open),
+                )),
+                (None, Some(row)) => Ok((Some(row.command), board_style_bar::run(row.command))),
+                (None, None) => Err(format!("The style bar shows no {id}")),
+            }
+        };
+        match params.get("hover") {
+            None => {}
+            Some(Value::Null) => {
+                if let Some(command) = self.style_hover {
+                    tasks.push(self.update(Message::StyleHover(Hover::Leave(command))));
+                }
+            }
+            Some(Value::String(id)) => {
+                let bar = self
+                    .board_style_bar()
+                    .ok_or("The board shows no style bar")?;
+                let command = find(&bar, id)?
+                    .0
+                    .filter(|command| board_style_bar::previews(*command))
+                    .ok_or_else(|| format!("{id} previews nothing"))?;
+                tasks.push(self.update(Message::StyleHover(Hover::Enter(command))));
+            }
+            Some(_) => return Err("hover must be an id or null".into()),
+        }
+        if let Some(id) = params.get("click") {
+            let id = id.as_str().ok_or("click must be a string")?;
+            let bar = self
+                .board_style_bar()
+                .ok_or("The board shows no style bar")?;
+            let (_, message) = find(&bar, id)?;
+            tasks.push(self.update(message));
+        }
+        let task = Task::batch(tasks);
+        let hover = self.style_hover.map(wren_canvas::Command::key);
+        let Some(bar) = self.board_style_bar() else {
+            return Ok((
+                task,
+                json!({"shown": false, "new_shapes": false, "folded": false, "rect": null,
+                       "controls": [], "menu": null, "hover": hover}),
+            ));
+        };
+        let palette = crate::theme::board_palette(self.definition);
+        let ring = self.definition.colors.accent;
+        let controls: Vec<Value> = bar
+            .controls()
+            .map(|control| {
+                let color = match control.item {
+                    board_style_bar::Item::Swatch(token) => {
+                        let drawn = wren_board::style::resolve(
+                            &Color::Token(token),
+                            wren_board::Fill::None,
+                            &palette,
+                        );
+                        rgb(drawn.stroke)
+                    }
+                    _ => Value::Null,
+                };
+                json!({
+                    "id": control.item.id(),
+                    "command": control.item.command().map(wren_canvas::Command::key),
+                    "current": control.current,
+                    "shape": control.shape.map(Shape::name),
+                    "key": control.key,
+                    "badge": control.key.as_ref().filter(|_| control.badge),
+                    "tip": control.tip(),
+                    "color": color,
+                    "rect": placement.rect(control.item.id()),
+                })
+            })
+            .collect();
+        let menu = bar.menu.as_ref().map(|(menu, rows)| {
+            json!({
+                "kind": menu.name(),
+                "rect": placement.rect(board_style_bar::MENU_ID),
+                "rows": rows.iter().map(|row| {
+                    let id = board_style_bar::row_id(row.command);
+                    json!({
+                        "id": id,
+                        "command": row.command.key(),
+                        "name": row.name(),
+                        "current": row.current,
+                        "key": row.key,
+                        "rect": placement.rect(id),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        });
+        Ok((
+            task,
+            json!({
+                "shown": true,
+                "new_shapes": bar.new_shapes(),
+                "folded": bar.folded,
+                "rect": placement.rect(board_style_bar::BAR_ID),
+                "controls": controls,
+                "menu": menu,
+                "hover": hover,
+                "ring": rgb(Rgba::rgb(ring.0, ring.1, ring.2)),
+            }),
+        ))
+    }
+
+    /// `board.footer`: the controls in the footer under the board, each
+    /// with the command it runs, whether it is enabled, its key and where
+    /// it is, and the zoom it shows; with `click`, a control's id, what a
+    /// click on it sends goes first: for a greyed control, only what
+    /// closes the bars' menus.
+    fn board_footer_request(
+        &mut self,
+        params: &Value,
+        placement: &Placement,
+    ) -> Result<(Task<Message>, Value), String> {
+        let mut task = Task::none();
+        if let Some(id) = params.get("click") {
+            let id = id.as_str().ok_or("click must be a string")?;
+            let button = self
+                .board_footer_controls()
+                .into_iter()
+                .find(|button| button.control.id() == id)
+                .ok_or_else(|| format!("The footer shows no {id}"))?;
+            task = self.update(button.message());
+        }
+        let zoom = self
+            .board
+            .as_ref()
+            .map(|view| super::board::BoardFooter::of(view).zoom);
+        let controls: Vec<Value> = self
+            .board_footer_controls()
+            .iter()
+            .map(|button| {
+                json!({
+                    "id": button.control.id(),
+                    "command": button.control.command().key(),
+                    "enabled": button.enabled,
+                    "key": button.key,
+                    "tip": button.tip(),
+                    "rect": placement.rect(button.control.id()),
+                })
+            })
+            .collect();
+        Ok((task, json!({"zoom": zoom, "controls": controls})))
     }
 
     /// `board.bounds`: where each element of the open board is drawn in
@@ -510,6 +846,17 @@ impl App {
             return Ok((Task::none(), false));
         }
         let epoch = view.epoch();
+        // A held Space let go, as the widget hears its release.
+        if params.get("release").and_then(Value::as_bool) == Some(true) {
+            if pressed.key != iced::keyboard::Key::Named(iced::keyboard::key::Named::Space) {
+                return Err("only space is released".into());
+            }
+            if !view.machine().space() {
+                return Ok((Task::none(), false));
+            }
+            let up = wren_canvas::Message::Input(epoch, Input::Space { held: false });
+            return Ok((self.board_edit(up), true));
+        }
         let taken = view.key(
             &pressed.key,
             pressed.physical,
@@ -1240,6 +1587,7 @@ fn node_json(id: &Id, node: &Node) -> Value {
             "color": color_json(&node.style.color),
             "fill": node.style.fill.as_str(),
             "stroke": node.style.stroke.as_str(),
+            "text_size": node.style.text_size,
         },
         "z": node.z,
     })
@@ -1295,6 +1643,7 @@ mod tests {
             height: 600.0,
         }),
         focused: true,
+        chrome: [None; CHROME],
     };
 
     fn ask(app: &mut App, op: &str, params: Value, placement: Placement) -> Result<Value, String> {
@@ -1549,10 +1898,22 @@ mod tests {
                 ("filter-notes", Rectangle::default()),
                 ("note-editor", bounds),
             ],
+            chrome: vec![
+                ("board-dock-keys", bounds),
+                ("board-style-red", bounds),
+                ("board-footer-undo", bounds),
+            ],
         };
         let placement = Placement::of(&focused);
         assert_eq!(placement.root, Some(bounds));
         assert!(placement.focused);
+        for id in ["board-dock-keys", "board-style-red", "board-footer-undo"] {
+            assert_eq!(placement.rect(id)["width"], 3.0, "{id}");
+        }
+        assert_eq!(placement.rect("board-dock-select"), Value::Null);
+        // No id is two widgets'.
+        let unique: std::collections::HashSet<&str> = CHROME_IDS.into_iter().collect();
+        assert_eq!(unique.len(), CHROME_IDS.len());
         assert!(!Placement::of(&Focused::default()).focused);
     }
 
