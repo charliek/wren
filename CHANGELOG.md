@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.2.1 — 2026-11-19
+
 ### Added
 
 - **A tool dock on boards:** a bar at the bottom of the canvas with a
@@ -30,7 +32,7 @@ version's section as its notes, and publishes to the apt repo. See
   20, or 28, from the style bar's **Aa** menu or the palette. A shape
   grows to hold a larger label. The size is one line in the file
   (`style.text-size`), written only when it is not 14, and it goes into
-  the SVG, PNG, and draw.io exports. Wren 0.2 keeps the line and draws the
+  the SVG, PNG, and draw.io exports. Wren 0.2.0 keeps the line and draws the
   label at 14.
 - **The colour you pick stays** for the shapes you add next, until you
   pick another. With a shape or text tool armed and nothing selected, the
