@@ -1172,6 +1172,25 @@ mod tests {
         assert!(find(&app.board_dock().unwrap(), Item::More).lit);
         assert_eq!(app.dock_shape, Shape::Document);
 
+        // A canvas that changes size keeps a menu whose button the dock
+        // still holds, and forgets one whose button went with the fold,
+        // which then does not come back with its button.
+        let resize = |app: &mut App, width: f32| {
+            let sized = wren_canvas::Message::Resized {
+                width,
+                height: 600.0,
+            };
+            let _ = app.update(Message::Board(sized));
+        };
+        let _ = app.update(message(Item::More, None));
+        resize(&mut app, 780.0);
+        assert_eq!(app.dock_menu, Some(Menu::More));
+        resize(&mut app, 500.0);
+        assert!(app.board_dock().unwrap().folded);
+        assert!(app.dock_menu.is_none());
+        resize(&mut app, 800.0);
+        assert!(app.board_dock().unwrap().menu.is_none());
+
         // The settings: badges on, then the dock off.
         app.preferences.settings.board_key_badges = KeyBadges::On;
         assert!(find(&app.board_dock().unwrap(), Item::Keys).badge);

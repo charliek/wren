@@ -1654,8 +1654,8 @@ impl BoardView {
                 let about = self.viewport.to_screen((centre.x, centre.y));
                 self.jump(self.viewport.zoomed_to(readable, about));
             }
-            Some(size) if !shows(self.viewport, size, around) => {
-                self.jump(revealing(self.viewport, size, around));
+            Some(size) if !self.exposes(size, around) => {
+                self.jump(self.revealed(size, around));
             }
             _ => {}
         }
@@ -2255,25 +2255,45 @@ impl BoardView {
     /// [`REVEAL_MARGIN`] around it, in the part of the widget the host's
     /// chrome leaves, as a fit is.
     fn reveal_element(&mut self, element: &Source) {
-        let Some((width, height)) = self.size else {
+        let Some(size) = self.size else {
             return;
         };
         if let Some(bounds) = bounds(&self.board, self.scenes.scene(), element) {
-            let (above, cut) = self.cover(height);
-            let seen = Viewport {
-                y: self.viewport.y + above / self.viewport.zoom,
-                ..self.viewport
-            };
-            let shown = revealing(seen, (width, height - cut), bounds);
-            // Already in view, the viewport is the one it has, to the bit.
-            self.jump(if shown == seen {
-                self.viewport
-            } else {
-                Viewport {
-                    y: shown.y - above / shown.zoom,
-                    ..shown
-                }
-            });
+            self.jump(self.revealed(size, bounds));
+        }
+    }
+
+    /// The part of a widget of `size` the host's chrome leaves: the
+    /// viewport whose origin is that part's top left, its size, and how
+    /// far down the widget it starts.
+    fn exposed(&self, (width, height): (f32, f32)) -> (Viewport, (f32, f32), f32) {
+        let (above, cut) = self.cover(height);
+        let seen = Viewport {
+            y: self.viewport.y + above / self.viewport.zoom,
+            ..self.viewport
+        };
+        (seen, (width, height - cut), above)
+    }
+
+    /// Whether all of `bounds` is in that part.
+    fn exposes(&self, size: (f32, f32), bounds: Rect) -> bool {
+        let (seen, room, _) = self.exposed(size);
+        shows(seen, room, bounds)
+    }
+
+    /// The viewport that brings `bounds` into that part by the least pan
+    /// ([`revealing`]): the one the view has, to the bit, when nothing
+    /// need move.
+    fn revealed(&self, size: (f32, f32), bounds: Rect) -> Viewport {
+        let (seen, room, above) = self.exposed(size);
+        let shown = revealing(seen, room, bounds);
+        if shown == seen {
+            self.viewport
+        } else {
+            Viewport {
+                y: shown.y - above / shown.zoom,
+                ..shown
+            }
         }
     }
 
@@ -4946,6 +4966,18 @@ z = "c"
         view.reveal_element(&a);
         let bottom = view.viewport().to_screen((0.0, 60.0)).1;
         assert_eq!(bottom, SIZE.1 - 60.0 - REVEAL_MARGIN);
+        // A label opened under what covers the top comes out from under
+        // it; one opened clear of it stays where it is.
+        let under = Viewport { y: -20.0, ..above };
+        view.set_viewport(under);
+        open_label(&mut view, "a", Instant::now());
+        assert_eq!(top(&view), 80.0 + REVEAL_MARGIN);
+        let mut view = sized(TWO);
+        view.set_covered(80.0, 60.0);
+        let clear = Viewport { y: -200.0, ..above };
+        view.set_viewport(clear);
+        open_label(&mut view, "a", Instant::now());
+        assert_eq!(view.viewport(), clear);
     }
 
     #[test]

@@ -118,8 +118,21 @@ impl App {
         };
         match &message {
             // The bars are laid out again for the new size, and may no
-            // longer hold the button a menu hangs from.
-            Sent::Resized { .. } => (self.dock_menu, self.style_menu) = (None, None),
+            // longer hold the button a menu hangs from: such a menu is
+            // forgotten, so it neither comes back with its button nor
+            // takes the next Escape. One whose button is still there
+            // stays, as a canvas settles into its size over a few frames.
+            Sent::Resized { .. } => {
+                let update = view.update(message, Instant::now());
+                let task = self.board_did(update).task;
+                if self.board_dock().is_none_or(|dock| dock.menu.is_none()) {
+                    self.dock_menu = None;
+                }
+                if self.board_style_bar().is_none_or(|bar| bar.menu.is_none()) {
+                    self.style_menu = None;
+                }
+                return task;
+            }
             Sent::Command(epoch, command) => {
                 if held || *epoch != view.epoch() {
                     return Task::none();
