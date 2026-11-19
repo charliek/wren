@@ -884,6 +884,11 @@ impl App {
                             false
                         }
                     });
+            if reloaded {
+                // The text under the bars changed: a menu or a preview is
+                // of the board as it was, as on a board newly opened.
+                (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
+            }
             if !reloaded {
                 if let (Some(view), Some(previous)) = (self.board.take(), self.editor_note) {
                     board::close(&view, previous, &mut self.board_viewports);

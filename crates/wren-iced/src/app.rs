@@ -567,15 +567,20 @@ impl App {
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
+            // Opening a menu of a bar finishes an open label first, as a
+            // click on one of its controls does: the keys typed next are
+            // not the label's, and a style menu's rows preview on the
+            // board, which an open label keeps to itself. A draft that did
+            // not reach the Session is on the banner, and the menu stays
+            // shut.
             Message::DockMenu(menu) => {
+                if menu.is_some() && self.settle_board().is_err() {
+                    return Task::none();
+                }
                 self.dock_menu = menu;
                 self.style_menu = None;
             }
             Message::StyleMenu(menu) => {
-                // A menu's rows preview on the board, and nothing previews
-                // over an open label: opening one finishes the label, as a
-                // click on a control does. A draft that did not reach the
-                // Session is on the banner, and the menu stays shut.
                 if menu.is_some() && self.settle_board().is_err() {
                     return Task::none();
                 }

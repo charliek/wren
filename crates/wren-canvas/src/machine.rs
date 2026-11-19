@@ -1404,6 +1404,8 @@ impl Machine {
             self.put_away();
         } else {
             self.selection.clear();
+            // Its handles go with it, and the pointer may be on one.
+            self.unhover();
         }
     }
 
@@ -5965,6 +5967,11 @@ to = { node = "gone" }
         rig.to(A_CORNER);
         assert_eq!(rig.machine.pointer(), Pointer::Resize(Handle::SouthEast));
         rig.run(Command::SelectNone);
+        assert_eq!(rig.machine.pointer(), Pointer::Arrow);
+        rig.click(A);
+        rig.to(A_CORNER);
+        assert_eq!(rig.machine.pointer(), Pointer::Resize(Handle::SouthEast));
+        rig.step(ESCAPE);
         assert_eq!(rig.machine.pointer(), Pointer::Arrow);
 
         // A board that shows no handles has none to point at.

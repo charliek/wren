@@ -132,7 +132,15 @@ impl App {
                 if held || *epoch != view.epoch() {
                     return Task::none();
                 }
+                let menu = self.dock_menu.is_some() || self.style_menu.is_some();
                 (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
+                // Escape closes the topmost thing only: with a bar's menu
+                // open that is the menu, and the armed tool, the selection
+                // and the board are as they were.
+                let escape = iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
+                if menu && press.key == escape {
+                    return Task::none();
+                }
                 let read = view.press(press).unwrap_or_default();
                 let tasks: Vec<Task<Message>> = read
                     .into_iter()
@@ -166,10 +174,12 @@ impl App {
                     self.column = Column::Editor;
                 }
                 // A press on the canvas closes the bars' menus, as a key
-                // the board reads does.
+                // the board reads does. So does the board losing the
+                // keyboard, which settles it: a control the pointer still
+                // rests on must not bring its preview back.
                 if matches!(
                     input,
-                    Input::Press { .. } | Input::Key { .. } | Input::Char(_)
+                    Input::Press { .. } | Input::Key { .. } | Input::Char(_) | Input::Focus(false)
                 ) {
                     (self.dock_menu, self.style_menu, self.style_hover) = (None, None, None);
                 }

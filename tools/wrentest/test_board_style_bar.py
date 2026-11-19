@@ -512,6 +512,42 @@ def test_native_a_click_on_a_greyed_footer_control_leaves_the_board_as_it_was(sa
 
 
 @pytest.mark.native_x11
+def test_native_a_right_or_middle_click_on_the_bars_leaves_the_board_as_it_was(samples) -> None:
+    """The bars take a press of any button. A right or a middle press that
+    fell through would reach the board as a click off it, which takes the
+    keyboard from it and puts the armed tool away."""
+    from tools.wrentest.test_board_dock import button as dock_button
+    from tools.wrentest.test_board_dock import laid_out as dock_laid_out
+
+    with board_app(samples, "board-bars-other-buttons") as app:
+        window, placed = native(app)
+        nodes = {each["id"]: each["bounds"] for each in fitted(app)["nodes"]}
+        press_on(window, nodes[PACK])
+        wait_for(lambda: board(app)["selection"] == [PACK], timeout=3, interval=0.025,
+                 description="the click selected Pack")
+        xdo("key", "d")
+        wait_for(lambda: board(app)["tool"] == "diamond", timeout=3, interval=0.025,
+                 description="D armed the diamond")
+        foot = footer_laid_out(app)
+        rects = [dock_button(dock_laid_out(app), "board-dock-ellipse")["rect"],
+                 control(laid_out(app), "board-style-green")["rect"],
+                 footer_control(foot, "board-footer-zoom-in")["rect"],
+                 footer_control(foot, "board-footer-undo")["rect"]]
+        for rect in rects:
+            for which in ("2", "3"):
+                move(window, point_in(rect))
+                xdo("click", which)
+        # Whatever the clicks did has been done once a key gets through.
+        xdo("key", "1")
+        wait_for(lambda: colour(app, PACK) == "red", timeout=3, interval=0.025,
+                 description="the key still reached the board")
+        assert board(app)["tool"] == "diamond"
+        assert board(app)["state"] == "armed"
+        assert board(app)["selection"] == [PACK]
+        wait_focus(app, ["note-editor"])
+
+
+@pytest.mark.native_x11
 def test_native_the_footer_s_zoom_and_undo_work_by_real_clicks(samples) -> None:
     with board_app(samples, "board-footer-native") as app:
         window, placed = native(app)

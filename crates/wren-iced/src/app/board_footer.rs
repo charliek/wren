@@ -90,6 +90,16 @@ impl Button {
             None => self.control.name().to_owned(),
         }
     }
+
+    /// What a click on it sends: its command, as its key does, or for a
+    /// greyed one only what closes the bars' menus.
+    pub fn message(&self) -> Message {
+        if self.enabled {
+            Message::Command(Command::Run(self.control.command()))
+        } else {
+            Message::DockMenu(None)
+        }
+    }
 }
 
 /// What the footer's controls read of the board.
@@ -179,20 +189,21 @@ impl App {
                 .height(17)
                 .padding([0, if each.control == Control::Zoom { 5 } else { 3 }])
                 .style(move |_, status| footer_button(definition.colors.control, status, enabled));
-            let pressed: Element<'_, Message> = if each.enabled {
-                pressed
-                    .on_press(Message::Command(Command::Run(each.control.command())))
-                    .into()
+            // A control takes every press on it, as the bars' own ground
+            // does, greyed or not and whatever the button: one that fell
+            // through would reach the board as a click off it, which
+            // takes the keyboard from the board and puts its tool away.
+            let taken = if each.enabled {
+                mouse_area(pressed.on_press(each.message()))
             } else {
-                // A greyed control still takes its press, as the bars'
-                // own ground does: one that fell through would reach the
-                // board as a click off it, which takes the keyboard from
-                // the board and puts its tool away.
                 mouse_area(pressed)
-                    .on_press(Message::DockMenu(None))
+                    .on_press(each.message())
                     .interaction(iced::mouse::Interaction::Idle)
-                    .into()
             };
+            let pressed: Element<'_, Message> = taken
+                .on_right_press(Message::DockMenu(None))
+                .on_middle_press(Message::DockMenu(None))
+                .into();
             controls = controls.push(tooltip(
                 container(pressed).id(each.control.id()),
                 container(

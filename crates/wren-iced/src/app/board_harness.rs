@@ -536,7 +536,8 @@ impl App {
     /// `board.footer`: the controls in the footer under the board, each
     /// with the command it runs, whether it is enabled, its key and where
     /// it is, and the zoom it shows; with `click`, a control's id, what a
-    /// click on it sends goes first. A greyed control sends nothing.
+    /// click on it sends goes first: for a greyed control, only what
+    /// closes the bars' menus.
     fn board_footer_request(
         &mut self,
         params: &Value,
@@ -550,10 +551,7 @@ impl App {
                 .into_iter()
                 .find(|button| button.control.id() == id)
                 .ok_or_else(|| format!("The footer shows no {id}"))?;
-            if button.enabled {
-                let run = super::commands::Command::Run(button.control.command());
-                task = self.update(Message::Command(run));
-            }
+            task = self.update(button.message());
         }
         let zoom = self
             .board

@@ -738,10 +738,13 @@ impl App {
             .id(BAR_ID)
             .padding(PAD + BORDER)
             .style(move |_| panel(definition));
-        // The bar's own background takes a press, so none reaches the
-        // canvas beneath it; it closes an open menu.
+        // The bar's own background takes a press of any button, as the
+        // dock's does, so none reaches the canvas beneath it; it closes
+        // an open menu.
         let strip = mouse_area(strip)
             .on_press(Message::StyleMenu(None))
+            .on_right_press(Message::StyleMenu(None))
+            .on_middle_press(Message::StyleMenu(None))
             .interaction(iced::mouse::Interaction::Idle);
 
         let mut layer = column![strip].spacing(10).align_x(iced::Center);
@@ -779,6 +782,8 @@ impl App {
                 .style(move |_| panel(definition)),
             )
             .on_press(Message::StyleMenu(Some(*menu)))
+            .on_right_press(Message::StyleMenu(Some(*menu)))
+            .on_middle_press(Message::StyleMenu(Some(*menu)))
             .interaction(iced::mouse::Interaction::Idle);
             let shift = Space::new().width(2.0 * offset.abs());
             layer = layer.push(if offset >= 0.0 {
@@ -1902,6 +1907,56 @@ mod tests {
         assert_eq!(view.patch(), Some(Command::TextSize(20)));
         let _ = app.update(Message::StyleHover(Hover::Leave(Command::TextSize(20))));
         let _ = app.update(Message::StyleMenu(None));
+
+        // The dock's menu finishes an open label too.
+        let _ = app.update(run(Command::EditLabel));
+        assert!(app.board.as_ref().unwrap().label().is_some());
+        let _ = app.update(Message::DockMenu(Some(
+            super::super::board_dock::Menu::More,
+        )));
+        assert!(app.dock_menu.is_some());
+        assert!(app.board.as_ref().unwrap().label().is_none());
+
+        // Escape with a menu open closes the menu and nothing else; the
+        // next one is the board's, and clears the selection.
+        let escape = |app: &mut App| {
+            use iced::keyboard::key::{Code, Named, Physical};
+            let press = wren_canvas::KeyPress {
+                key: iced::keyboard::Key::Named(Named::Escape),
+                physical: Physical::Code(Code::Escape),
+                modifiers: iced::keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+                held: true,
+            };
+            let epoch = app.board.as_ref().unwrap().epoch();
+            let _ = app.update(Message::Board(wren_canvas::Message::Key(epoch, press)));
+        };
+        let selected = |app: &App| app.board.as_ref().unwrap().machine().selection().len();
+        escape(&mut app);
+        assert!(app.dock_menu.is_none());
+        assert_eq!(selected(&app), 1);
+        let _ = app.update(message(Item::Shapes, None));
+        assert_eq!(app.style_menu, Some(Menu::Shapes));
+        escape(&mut app);
+        assert!(app.style_menu.is_none());
+        assert_eq!(selected(&app), 1);
+
+        // The board losing the keyboard closes a menu and ends a preview,
+        // though the pointer still rests on the control.
+        let _ = app.update(message(Item::Shapes, None));
+        let _ = app.update(Message::StyleHover(Hover::Enter(Command::Color(
+            Token::Green,
+        ))));
+        assert!(app.board.as_ref().unwrap().patch().is_some());
+        let epoch = app.board.as_ref().unwrap().epoch();
+        let blur = wren_canvas::Message::Input(epoch, wren_canvas::Input::Focus(false));
+        let _ = app.update(Message::Board(blur));
+        assert!(app.style_menu.is_none() && app.style_hover.is_none());
+        assert!(app.board.as_ref().unwrap().patch().is_none());
+        focus(&mut app);
+        escape(&mut app);
+        assert_eq!(selected(&app), 0);
 
         // The setting off: no bar.
         app.preferences.settings.board_toolbar = false;

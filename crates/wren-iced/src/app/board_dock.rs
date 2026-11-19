@@ -530,9 +530,13 @@ impl App {
             .padding(PAD + BORDER)
             .style(move |_| panel(definition));
         // The bar's own background takes a press, so none reaches the
-        // canvas beneath it; it closes an open menu.
+        // canvas beneath it; it closes an open menu. Any button's press:
+        // one the bar let through would reach the board as a click off
+        // it, which takes the keyboard from the board.
         let bar = mouse_area(bar)
             .on_press(Message::DockMenu(None))
+            .on_right_press(Message::DockMenu(None))
+            .on_middle_press(Message::DockMenu(None))
             .interaction(iced::mouse::Interaction::Idle);
 
         let mut layer = column![].spacing(10).align_x(iced::Center);
@@ -556,6 +560,8 @@ impl App {
                     .style(move |_| panel(definition)),
             )
             .on_press(Message::DockMenu(Some(*menu)))
+            .on_right_press(Message::DockMenu(Some(*menu)))
+            .on_middle_press(Message::DockMenu(Some(*menu)))
             .interaction(iced::mouse::Interaction::Idle);
             let shift = Space::new().width(2.0 * offset.abs());
             layer = layer.push(if offset >= 0.0 {
