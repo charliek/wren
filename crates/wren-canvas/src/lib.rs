@@ -790,10 +790,9 @@ impl BoardView {
         }
     }
 
-    /// The view that fits `content` into the part of a widget of `size`
-    /// the host's chrome leaves, which is never under half of it: the
-    /// chrome's share of what it takes is kept in proportion.
-    fn fitting(&self, content: Rect, (width, height): (f32, f32)) -> Viewport {
+    /// How much of a widget `height` tall the host's chrome takes from its
+    /// top, and from its top and bottom together.
+    fn cover(&self, height: f32) -> (f32, f32) {
         let (top, bottom) = self.covered;
         let covered = top + bottom;
         let cut = covered.min(height / 2.0);
@@ -802,6 +801,14 @@ impl BoardView {
         } else {
             0.0
         };
+        (above, cut)
+    }
+
+    /// The view that fits `content` into the part of a widget of `size`
+    /// the host's chrome leaves, which is never under half of it: the
+    /// chrome's share of what it takes is kept in proportion.
+    fn fitting(&self, content: Rect, (width, height): (f32, f32)) -> Viewport {
+        let (above, cut) = self.cover(height);
         let fitted = Viewport::fitting(content, (width, height - cut));
         Viewport {
             y: fitted.y - above / fitted.zoom,
@@ -1632,18 +1639,20 @@ impl BoardView {
             .and_then(|id| hit::Frames::new(&self.board).get(id));
         let around = node.map_or(lines, |node| union(node, lines));
         let small = label.text_size() * self.viewport.zoom < MIN_LABEL_PX;
+        // 100 %, or what a label smaller than the least readable needs.
+        let readable = (MIN_LABEL_PX / label.text_size()).clamp(1.0, Viewport::MAX_ZOOM);
         self.label = Some(label);
         let centre = around.center();
         match self.size {
             Some((width, height)) if small => self.jump(Viewport {
-                x: centre.x - width / 2.0,
-                y: centre.y - height / 2.0,
-                zoom: 1.0,
+                x: centre.x - width / (2.0 * readable),
+                y: centre.y - height / (2.0 * readable),
+                zoom: readable,
             }),
             // Before the widget has a size, the element stays where it is.
             None if small => {
                 let about = self.viewport.to_screen((centre.x, centre.y));
-                self.jump(self.viewport.zoomed_to(1.0, about));
+                self.jump(self.viewport.zoomed_to(readable, about));
             }
             Some(size) if !shows(self.viewport, size, around) => {
                 self.jump(revealing(self.viewport, size, around));
@@ -2243,13 +2252,28 @@ impl BoardView {
     }
 
     /// Pan by the least amount that shows the element `id` with
-    /// [`REVEAL_MARGIN`] around it.
+    /// [`REVEAL_MARGIN`] around it, in the part of the widget the host's
+    /// chrome leaves, as a fit is.
     fn reveal_element(&mut self, element: &Source) {
-        let Some(size) = self.size else {
+        let Some((width, height)) = self.size else {
             return;
         };
         if let Some(bounds) = bounds(&self.board, self.scenes.scene(), element) {
-            self.jump(revealing(self.viewport, size, bounds));
+            let (above, cut) = self.cover(height);
+            let seen = Viewport {
+                y: self.viewport.y + above / self.viewport.zoom,
+                ..self.viewport
+            };
+            let shown = revealing(seen, (width, height - cut), bounds);
+            // Already in view, the viewport is the one it has, to the bit.
+            self.jump(if shown == seen {
+                self.viewport
+            } else {
+                Viewport {
+                    y: shown.y - above / shown.zoom,
+                    ..shown
+                }
+            });
         }
     }
 
@@ -4891,6 +4915,39 @@ z = "c"
         assert_eq!(view.board().nodes[&id("first")].text, "First!");
     }
 
+    /// A reveal brings an element into the part of the widget the host's
+    /// chrome leaves, not under a bar; in view there, nothing moves.
+    #[test]
+    fn a_reveal_keeps_clear_of_what_the_host_covers() {
+        let above = Viewport {
+            x: -100.0,
+            y: 200.0,
+            zoom: 1.0,
+        };
+        let a = Source::Node(id("a"));
+        let top = |view: &BoardView| view.viewport().to_screen((0.0, 0.0)).1;
+        let mut view = sized(TWO);
+        view.set_viewport(above);
+        view.reveal_element(&a);
+        assert_eq!(top(&view), REVEAL_MARGIN);
+        let mut view = sized(TWO);
+        view.set_covered(80.0, 60.0);
+        view.set_viewport(above);
+        view.reveal_element(&a);
+        assert_eq!(top(&view), 80.0 + REVEAL_MARGIN);
+        let shown = view.viewport();
+        view.reveal_element(&a);
+        assert_eq!(view.viewport(), shown);
+        // From below, its bottom clears what covers the widget's bottom.
+        view.set_viewport(Viewport {
+            y: -1000.0,
+            ..above
+        });
+        view.reveal_element(&a);
+        let bottom = view.viewport().to_screen((0.0, 60.0)).1;
+        assert_eq!(bottom, SIZE.1 - 60.0 - REVEAL_MARGIN);
+    }
+
     #[test]
     fn a_label_too_small_to_read_opens_at_one_hundred_percent() {
         let now = Instant::now();
@@ -4934,6 +4991,15 @@ z = "c"
         assert_eq!(view.viewport().zoom, 1.0);
         let after = view.viewport().to_screen((60.0, 30.0));
         assert!((after.0 - before.0).abs() < 0.01 && (after.1 - before.1).abs() < 0.01);
+        // A label of 8 is not readable at 100 % either: it opens at 125 %,
+        // where it is 10 px, with its node in the middle as before.
+        let tiny = TWO.replacen("z = \"a\"", "style.text-size = 8\nz = \"a\"", 1);
+        let mut view = sized(&tiny);
+        view.set_viewport(at(0.5));
+        open_label(&mut view, "a", now);
+        assert_eq!(view.viewport().zoom, 1.25);
+        let middle = view.viewport().to_screen((60.0, 30.0));
+        assert!((middle.0 - SIZE.0 / 2.0).abs() < 0.01 && (middle.1 - SIZE.1 / 2.0).abs() < 0.01);
         // A node out of view is brought into it, at the zoom it has.
         let mut view = sized(TWO);
         view.set_viewport(Viewport {

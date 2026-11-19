@@ -117,7 +117,9 @@ impl App {
             return Task::none();
         };
         match &message {
-            Sent::Resized { .. } => {}
+            // The bars are laid out again for the new size, and may no
+            // longer hold the button a menu hangs from.
+            Sent::Resized { .. } => (self.dock_menu, self.style_menu) = (None, None),
             Sent::Command(epoch, command) => {
                 if held || *epoch != view.epoch() {
                     return Task::none();

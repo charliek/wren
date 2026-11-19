@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use iced::widget::{
-    button, column, container, mouse_area, row, space, stack, text, tooltip, Space,
+    button, column, container, mouse_area, row, scrollable, space, stack, text, tooltip, Space,
 };
 use iced::{Border, Element, Fill};
 use wren_board::scene::{Point, Rect, Segment};
@@ -505,7 +505,7 @@ impl App {
     /// The dock over the board, laid over the canvas's bottom centre.
     pub(super) fn board_dock_view(&self) -> Option<Element<'_, Message>> {
         let dock = self.board_dock()?;
-        let width = self.board.as_ref()?.size()?.0;
+        let (width, height) = self.board.as_ref()?.size()?;
         let definition = self.definition;
         let colors = definition.colors;
         let open = dock.menu.as_ref().map(|(menu, _)| *menu);
@@ -552,12 +552,18 @@ impl App {
             for each in rows {
                 list = list.push(self.dock_menu_row(each));
             }
+            // In a canvas too short for every row the menu scrolls.
+            let bar_height = BUTTON.1 + 2.0 * (PAD + BORDER);
+            let room = (height - BOTTOM - bar_height - 10.0 - SIDE).max(MENU_ROW);
             let list = mouse_area(
-                container(list)
-                    .id(MENU_ID)
-                    .width(MENU_WIDTH)
-                    .padding(PAD)
-                    .style(move |_| panel(definition)),
+                container(
+                    scrollable(list).style(move |_, status| chrome::scrollbar(definition, status)),
+                )
+                .id(MENU_ID)
+                .width(MENU_WIDTH)
+                .max_height(room)
+                .padding(PAD)
+                .style(move |_| panel(definition)),
             )
             .on_press(Message::DockMenu(Some(*menu)))
             .on_right_press(Message::DockMenu(Some(*menu)))

@@ -112,8 +112,9 @@ pub(crate) fn route(
         // AZERTY, with `ß` on German), so a typed `?` is asked as Shift+/
         // first, as the digit row's symbols are asked as digits (§5.1
         // rule 7). First, because the key that types it may be another
-        // command's by its place: on Dvorak it is Shift with the key a
-        // keymap calls `[`.
+        // board command's by its place: on Dvorak it is Shift with the
+        // key a keymap calls `[`. A key the app has bound stays the
+        // app's, as it is ahead of every board key.
         Some(policy) => {
             let asked = (text == Some("?") && !shortcut).then(|| {
                 policy(
@@ -124,6 +125,7 @@ pub(crate) fn route(
                 )
             });
             match (asked, policy(key, physical, modifiers, repeat)) {
+                (Some(KeyRoute::Command(_)), KeyRoute::Host) => KeyRoute::Host,
                 (Some(bound @ KeyRoute::Command(_)), _) => bound,
                 (Some(asked), KeyRoute::Pass) => asked,
                 (_, route) => route,
@@ -467,6 +469,12 @@ mod tests {
         assert_eq!(dvorak(Some("?"), &bound(true)), took(Command::Keys));
         assert_eq!(dvorak(Some("{"), &bound(true)), took(back));
         assert_eq!(dvorak(Some("?"), &bound(false)), took(back));
+        // A key the app has bound is the app's, `?` or not.
+        let host: KeyPolicy = Arc::new(|_, physical, _, _| match physical {
+            Physical::Code(Code::Slash) => KeyRoute::Command(Command::Keys),
+            _ => KeyRoute::Host,
+        });
+        assert_eq!(dvorak(Some("?"), &host), Keyed::Leave);
     }
 
     #[test]

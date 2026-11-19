@@ -744,8 +744,10 @@ def board_text_size_scenes(client, shot_here, open_board) -> None:
     shot_here("board-text-sizes")
     # Further out, a label under 4 pixels on screen is left out: at 25 %
     # the sizes 12 and 14, and at 10 % all but the one drawn at 96.
-    for name in ("board-text-sizes-quarter", "board-text-sizes-far"):
-        for _ in range(2):
+    # Stepped down from 100 % to each, whatever the fit and the stops are.
+    client.call("command.run", {"id": "font.reset"})
+    for name, zoom in (("board-text-sizes-quarter", 0.25), ("board-text-sizes-far", 0.1)):
+        while client.call("board.get", {})["viewport"]["zoom"] > zoom + 0.001:
             client.call("command.run", {"id": "font.decrease"})
         shot_here(name)
     client.call("command.run", {"id": "board.zoom.fit"})

@@ -8,6 +8,7 @@ real pointer with xdotool, at scale factor 1 (the X11 lanes' Xvfb).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -323,7 +324,8 @@ def test_the_footer_undoes_redoes_and_zooms(samples: Path) -> None:
             "board-footer-zoom", "board-footer-zoom-in"]
         assert [each["enabled"] for each in state["controls"]] == [False, False, True, True,
                                                                     True]
-        assert footer_control(state, "board-footer-undo")["tip"] == "Undo   Ctrl+Z"
+        undo_key = "⌘Z" if sys.platform == "darwin" else "Ctrl+Z"
+        assert footer_control(state, "board-footer-undo")["tip"] == f"Undo   {undo_key}"
         assert footer_control(state, "board-footer-zoom")["command"] == "board.zoom.fit"
         assert footer_control(state, "board-footer-zoom-in")["command"] == "font.increase"
         fitted_zoom = board(app)["viewport"]["zoom"]

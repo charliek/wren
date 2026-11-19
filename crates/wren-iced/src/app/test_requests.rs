@@ -984,6 +984,11 @@ fn result_key(value: &Value) -> Result<Key, String> {
     if object.contains_key("workspace") {
         return Ok(Key::Workspace(PathBuf::from(string(value, "workspace")?)));
     }
+    if object.contains_key("sheet_row") {
+        let row =
+            usize::try_from(id(value, "sheet_row")?).map_err(|_| "sheet_row must be usize")?;
+        return Ok(Key::SheetRow(row));
+    }
     if let Some(heading) = object.get("heading") {
         if heading.as_object().is_none_or(|object| object.len() != 2) {
             return Err("heading requires revision and line".into());

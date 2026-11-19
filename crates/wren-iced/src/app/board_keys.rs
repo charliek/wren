@@ -319,11 +319,13 @@ pub fn hint(situation: Situation, keys: &Keys, applies: impl Fn(Command) -> bool
             Selected::Shapes => {
                 line.extend(part(&colours(), &digits, "colour"));
                 line.extend(part(&directions(Command::Move), &arrows, "move"));
+                // Two shapes align; it takes three to distribute.
                 let align = applies(Command::Align(Alignment::Left));
-                let words = if align {
-                    "align and distribute"
-                } else {
-                    "actions"
+                let distribute = applies(Command::Distribute(Axis::Horizontal));
+                let words = match (align, distribute) {
+                    (true, true) => "align and distribute",
+                    (true, false) => "align",
+                    _ => "actions",
                 };
                 line.extend(part(&[Command::Actions], &first, words));
                 line.extend(part(&[Command::Delete], &first, "delete"));
@@ -963,6 +965,17 @@ pub(super) mod tests {
         assert_eq!(
             linux(with(Selected::Shapes)),
             "0–7 colour · Alt+Arrow move · / align and distribute · ⌫ delete"
+        );
+        // Two shapes align; it takes three to distribute.
+        let keymap = keymap(Platform::Linux, &[]);
+        let two = hint(
+            with(Selected::Shapes),
+            &Keys::new(&keymap, Platform::Linux),
+            |command| !matches!(command, Command::Distribute(_)),
+        );
+        assert_eq!(
+            line(&two),
+            "0–7 colour · Alt+Arrow move · / align · ⌫ delete"
         );
         assert_eq!(
             linux(with(Selected::Connectors)),

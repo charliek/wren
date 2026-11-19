@@ -350,7 +350,7 @@ is selected or armed, between the counts and the zoom:
 |---|---|
 | Nothing selected | Tab add a shape · R O D U Y P pick a shape · Space show keys · ? all keys |
 | One shape | Tab next shape · Mod+Arrow connect · ↵ label · 0–7 colour · Shift+D reshape · / actions |
-| Several shapes | 0–7 colour · Alt+Arrow move · / align and distribute · ⌫ delete |
+| Several shapes | 0–7 colour · Alt+Arrow move · / align and distribute (align alone with two) · ⌫ delete |
 | Connectors only | 0–7 colour · ↵ label · / route, heads, reverse · ⌫ delete |
 | A shape or text tool armed | click to place · drag to size · Tab add it after the selection · R again to lock (or to unlock) · esc cancel |
 | Connector tool | drag from one shape to another · esc cancel |
