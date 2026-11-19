@@ -373,7 +373,7 @@ reader accepts, refuses, and flags.
   keys, and anything under `ext.*`. Older versions keep all of these as
   unknown content.
   The first such addition is a node's `style.text-size`, which
-  Wren 0.2 keeps as unknown content and draws at 14. It is read only when
+  Wren 0.2.0 keeps as unknown content and draws at 14. It is read only when
   it is an integer, so a file that held another value there before it was
   defined reads as it did: that value stays unknown content.
 - **Needs a `requires` entry:** anything an older version would draw

@@ -311,7 +311,7 @@ pub struct NodeStyle {
     pub fill: Named<Fill>,
     pub stroke: Named<Dash>,
     /// `text-size`: the label's font size in board units, as written. Only
-    /// an integer is read here; Wren 0.2 kept the key as unknown content of
+    /// an integer is read here; Wren 0.2.0 kept the key as unknown content of
     /// any type, so a value of another type stays in `extra`, where it is
     /// kept and the label is drawn at the default.
     pub text_size: i64,

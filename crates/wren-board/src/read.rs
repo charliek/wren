@@ -467,7 +467,7 @@ fn node_style(value: Value) -> Result<NodeStyle, Fault> {
     let color = take(&mut fields, "color", string)?.map_or(defaults.color, Color::read);
     let fill = take(&mut fields, "fill", string)?.map_or(defaults.fill, Named::read);
     let stroke = take(&mut fields, "stroke", string)?.map_or(defaults.stroke, Named::read);
-    // Wren 0.2 kept `text-size` as unknown content, so a value that is not
+    // Wren 0.2.0 kept `text-size` as unknown content, so a value that is not
     // an integer is still that, never an error.
     let text_size = match fields.get("text-size") {
         Some(&Value::Integer(size)) => {
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(keys(&edge.extra), ["ext"]);
     }
 
-    /// `style.text-size` was unknown content in Wren 0.2, of any type. An
+    /// `style.text-size` was unknown content in Wren 0.2.0, of any type. An
     /// integer is now the node's label size, whatever its value; any other
     /// type is still unknown content. Neither is ever an error, and on a
     /// connector the key is unknown content as before.

@@ -214,13 +214,13 @@ a larger label as it grows for a longer one.
   number (`fontSize` in draw.io, `font-size` in SVG).
 - The key is `text-size` because `size` is a node's width and height.
 - No change of schema: a new optional key is "allowed without a change of
-  schema" (`docs/reference/board-format.md`), and Wren 0.2 keeps the key
+  schema" (`docs/reference/board-format.md`), and Wren 0.2.0 keeps the key
   as unknown content and draws the label at 14.
 - The interface offers presets (12, 14, 20, 28) in the style bar's menu
   and the actions palette; any size in range can be written by hand.
 
 As built: `NodeStyle::text_size` in `wren-board`, read only from an
-integer (Wren 0.2 kept the key as unknown content of any type, so another
+integer (Wren 0.2.0 kept the key as unknown content of any type, so another
 type stays unknown content, kept and drawn at 14, never an error) and
 written only when it is not 14. `Limit::TextSize` flags a size outside 8
 to 96, drawn at the nearer end. `Intent::SetTextSize` carries each node's

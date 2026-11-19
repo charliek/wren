@@ -609,7 +609,7 @@ mod tests {
         }
     }
 
-    /// Wren 0.2 kept `text-size` as unknown content of any type; a value
+    /// Wren 0.2.0 kept `text-size` as unknown content of any type; a value
     /// that is not an integer still is, and writes back as it was read.
     #[test]
     fn a_text_size_that_is_not_an_integer_is_kept_as_written() {

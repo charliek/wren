@@ -224,7 +224,7 @@ The file stores the size as a whole number of board units
 (`style.text-size`), written only when it is not 14, so a board that
 uses none is unchanged. A size written by hand need not be a preset: any
 from 8 to 96 is drawn as written, and the **Aa** menu then marks no preset.
-One outside that range is drawn at 8 or 96 and listed as an issue. Wren 0.2
+One outside that range is drawn at 8 or 96 and listed as an issue. Wren 0.2.0
 keeps the size in the file but draws the label at 14, in a box that may
 have grown for a larger one.
 

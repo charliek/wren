@@ -346,7 +346,7 @@ z = "Z"
         assert_eq!(write(&board), write(&parse(STYLED).unwrap()));
     }
 
-    /// A size another type held, which Wren 0.2 kept as unknown content,
+    /// A size another type held, which Wren 0.2.0 kept as unknown content,
     /// gives way to the one set; a size already held plans nothing.
     #[test]
     fn a_text_size_replaces_one_of_another_type_and_a_held_one_plans_nothing() {
