@@ -175,6 +175,13 @@ make smoke-wayland SMOKE_TESTS='tools/wrentest/test_board*.py'
 already, so the whole suite can run with the setting on. Unset, nothing is
 added and the build's default holds.
 
+`WRENTEST_TASKS=off` or `on` does the same for the `tasks` line. CI runs
+one lane (X11, tiny-skia) with it `on`; the others pass it empty, which adds no line, so the
+build's default (`off`) holds. `make
+smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on both engines, once with
+tasks `off` and once `on`, for `DISPLAY_BACKEND` (default `x11`) and the
+current `ICED_BACKEND`, and fails if either run ran no task test (none collected, or all skipped).
+
 `WRENTEST_PERF=release` makes `test_board_perf.py` assert the release
 budgets instead of the debug ceilings. Build the release binary in its own
 target directory so the smoke build is not replaced:
