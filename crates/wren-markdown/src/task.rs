@@ -711,6 +711,29 @@ fn owners_in(line: &str, range: Range<usize>) -> Vec<Owner> {
     owners
 }
 
+/// The `#tag`s in the description at `range` of `line`: each `#` at its
+/// start or after white space that a name follows. The name runs to white
+/// space or to one of [`TAG_STOPS`], as a tag among the tokens does.
+fn tags_in(line: &str, range: Range<usize>) -> Vec<Range<usize>> {
+    let text = line.get(range.clone()).unwrap_or_default();
+    let mut tags = Vec::new();
+    let mut apart = true;
+    for (at, c) in text.char_indices() {
+        if c == '#' && apart {
+            let name = &text[at + 1..];
+            let len = name
+                .find(|c: char| c.is_whitespace() || TAG_STOPS.contains(c))
+                .unwrap_or(name.len());
+            if len > 0 {
+                let start = range.start + at;
+                tags.push(start..start + 1 + len);
+            }
+        }
+        apart = c.is_whitespace();
+    }
+    tags
+}
+
 /// Whether `name` can be written as an `@owner` and read back whole.
 pub fn is_owner_name(name: &str) -> bool {
     !name.is_empty() && owner_len(name) == name.len()
@@ -750,6 +773,17 @@ impl<'a> TaskLine<'a> {
     /// The owners' names, without the `@`.
     pub fn owner_names(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.owners.iter().map(|owner| self.text(&owner.name))
+    }
+
+    /// Every `#tag` on the line with its `#`, in line order: those in the
+    /// description, then those among the tokens ([`Kept::Tag`]).
+    pub fn tags(&self) -> Vec<Range<usize>> {
+        let mut tags = tags_in(self.line, self.description.clone());
+        tags.extend(self.tokens.iter().filter_map(|token| match token {
+            Token::Kept(token) if token.kind == Kept::Tag => Some(token.range.clone()),
+            _ => None,
+        }));
+        tags
     }
 
     /// The tokens after the description, in line order.
@@ -1192,6 +1226,32 @@ mod tests {
                 "<a> @sam due=2026-12-01(📅) high owner=@sam tag[#x] block=^id",
             ),
         ]);
+    }
+
+    #[test]
+    fn tags_are_read_in_the_description_and_among_the_tokens() {
+        for (line, expected) in [
+            ("- [ ] Call the bank", vec![]),
+            ("- [ ] Call #home", vec!["#home"]),
+            ("- [ ] #home call #a/b-c now", vec!["#home", "#a/b-c"]),
+            (
+                "- [ ] Call #home ⏫ #work 📅 2026-12-01 #late",
+                vec!["#home", "#work", "#late"],
+            ),
+            // A tag's name ends at white space and at Obsidian Tasks' stops.
+            (
+                "- [ ] Call #home, #日本. #a\t#b:c",
+                vec!["#home", "#日本", "#a", "#b"],
+            ),
+            // A `#` after other text, or with no name, starts none.
+            ("- [ ] a#b (#c) ## # #!x c# #", vec![]),
+            // A tag in a field is part of the field.
+            ("- [ ] Call [area:: #home] #work", vec!["#work"]),
+        ] {
+            let read = read(line);
+            let tags: Vec<&str> = read.tags().iter().map(|tag| read.text(tag)).collect();
+            assert_eq!(tags, expected, "{line:?}");
+        }
     }
 
     #[test]

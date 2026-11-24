@@ -57,6 +57,7 @@ use iced::{
 
 use crate::backend::{Backend, BackendKind, Lines, Placement};
 use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
+use crate::hit::{self, Hit};
 use crate::keys::{KeyPolicy, Routed};
 use crate::proof::{
     self, publish, MenuOverlay, MenuPress, OpenMenu, Proofreader, ResolvedPress, SpellEvent,
@@ -206,15 +207,14 @@ impl Content {
         self.0.get_mut().reveal(position);
     }
 
-    /// The mark whose glyphs lie under `point`, relative to the text origin,
-    /// among the marks `marks` gives for a line and its text; see
-    /// [`mark_under`].
-    pub fn mark_under(
+    /// Where `point`, relative to the text origin, falls among the marks
+    /// `marks` gives for a line and its text; see [`place_under`].
+    pub fn place_under(
         &self,
         point: Point,
-        marks: impl FnMut(usize, &str) -> Vec<Range<usize>>,
-    ) -> Option<(usize, Range<usize>)> {
-        mark_under(&self.0.borrow(), point, marks)
+        marks: impl FnOnce(usize, &str) -> Vec<Range<usize>>,
+    ) -> Option<Place> {
+        place_under(&self.0.borrow(), point, marks)
     }
 
     /// Where the view is scrolled.
@@ -915,20 +915,33 @@ impl<'a> TextEditor<'a> {
         })
     }
 
-    /// The misspelled word under `point`, relative to the text origin, as
-    /// the last layout placed it and the widget's highlighter found its
-    /// prose. Only the owned engine has any (§3.3).
+    /// The host's proofreader, on the engine that checks spelling (§3.3).
+    fn speller(&self) -> Option<&'a dyn Proofreader> {
+        self.proofreader
+            .filter(|_| self.content.kind() == BackendKind::Owned)
+    }
+
+    /// The misspelled word under `point`, relative to the text origin; see
+    /// [`Self::hit_under`]. With no speller there is none to look for.
     fn misspelling_under(&self, state: &State, point: Point) -> Option<(usize, Range<usize>)> {
-        let proofreader = self
-            .proofreader
-            .filter(|_| self.content.kind() == BackendKind::Owned)?;
+        self.speller()?;
+        let (line, hit) = self.hit_under(state, point)?;
+        Some((line, hit.misspelling()?))
+    }
+
+    /// What lies under `point`, relative to the text origin, and its line:
+    /// a misspelled word before a span ([`crate::hit`]), as the last layout
+    /// placed them and the widget's highlighter read the line. Only the
+    /// owned engine has misspellings (§3.3); both have spans.
+    fn hit_under(&self, state: &State, point: Point) -> Option<(usize, Hit)> {
         let highlighter = state.highlighter.borrow();
-        self.content.mark_under(point, |line, text| {
-            highlighter
-                .decor(line)
-                .map(|decor| proof::line_marks(proofreader, text, &decor.prose))
+        let place = self.content.place_under(point, |line, text| {
+            (self.speller().zip(highlighter.decor(line)))
+                .map(|(proofreader, decor)| proof::line_marks(proofreader, text, &decor.prose))
                 .unwrap_or_default()
-        })
+        })?;
+        let span = || highlighter.spans(place.line)?.at(place.column?).cloned();
+        Some((place.line, hit::resolve(place.mark, span)?))
     }
 
     fn input_method<'b>(&self, state: &'b State, bounds: Rectangle) -> InputMethod<&'b str> {
@@ -2153,15 +2166,31 @@ fn word_row(editor: &Backend, menu: &SpellMenu) -> Option<(f32, f32, f32)> {
         })
 }
 
-/// The misspelled word whose glyphs lie under `point`, relative to the text
-/// origin, as its line and byte range: the visible row holding `point`, and
-/// the first of the marks `marks` gives for that row's line whose glyphs on
-/// that row span `point`'s x.
-fn mark_under(
+/// Where a point falls in the laid out text; see [`place_under`].
+pub struct Place {
+    /// The line of the row under the point.
+    pub line: usize,
+    /// The misspelled word there.
+    pub mark: Option<Range<usize>>,
+    /// The byte in the line at which the glyph under the point starts.
+    /// Not looked for under a misspelled word, which is the hit there
+    /// ([`crate::hit`]).
+    pub column: Option<usize>,
+}
+
+/// Where `point`, relative to the text origin, falls: the visible row
+/// holding it, and on that row
+///
+/// - the first of the marks `marks` gives for the row's line whose glyphs
+///   on the row span `point`'s x, and with none
+/// - the glyph that holds `point`'s x. A span is hit by its glyph and not
+///   by the extent of its glyphs: in text of two directions the glyphs of
+///   a span can lie apart, with a glyph of no span between them.
+fn place_under(
     editor: &Backend,
     point: Point,
-    mut marks: impl FnMut(usize, &str) -> Vec<Range<usize>>,
-) -> Option<(usize, Range<usize>)> {
+    marks: impl FnOnce(usize, &str) -> Vec<Range<usize>>,
+) -> Option<Place> {
     let run = editor
         .buffer()
         .layout_runs()
@@ -2171,13 +2200,21 @@ fn mark_under(
             .iter()
             .map(|glyph| (glyph.start..glyph.end, glyph.x, glyph.w))
     };
-    marks(run.line_i, run.text)
-        .into_iter()
-        .find(|mark| {
-            glyph_span(run.text, glyphs(), mark.clone())
-                .is_some_and(|(left, right)| point.x >= left && point.x < right)
-        })
-        .map(|mark| (run.line_i, mark))
+    let mark = marks(run.line_i, run.text).into_iter().find(|mark| {
+        glyph_span(run.text, glyphs(), mark.clone())
+            .is_some_and(|(left, right)| point.x >= left && point.x < right)
+    });
+    let column = match mark {
+        Some(_) => None,
+        None => glyphs()
+            .find(|(_, x, width)| point.x >= *x && point.x < x + width)
+            .map(|(bytes, _, _)| bytes.start),
+    };
+    Some(Place {
+        line: run.line_i,
+        mark,
+        column,
+    })
 }
 
 /// A wrapped continuation row starts past byte 0; an empty line has no glyphs.
@@ -3308,6 +3345,163 @@ mod tests {
         assert!(state.focus.is_some(), "the editor takes the keyboard");
         assert!(state.drag_click.is_none(), "a drag in progress ends");
         assert_eq!(content.cursor().position, Position { line: 0, column: 0 });
+    }
+
+    /// What a hit is, in a word.
+    fn hit_kind(hit: &Hit) -> &'static str {
+        use wren_markdown::span::SpanKind;
+        match hit {
+            Hit::Misspelling(_) => "misspelling",
+            Hit::Span(span) => match span.kind {
+                SpanKind::Box(_) => "box",
+                SpanKind::Owner { .. } => "owner",
+                SpanKind::Tag => "tag",
+                SpanKind::BlockId => "block id",
+                SpanKind::Link { .. } => "link",
+                SpanKind::Code => "code",
+                _ => "another span",
+            },
+        }
+    }
+
+    /// One hit test serves a misspelled word and the classifier's spans:
+    /// the word wins where it lies in a span, the owned engine alone has
+    /// misspellings, and both engines have the spans.
+    #[test]
+    fn the_hit_under_a_point_is_a_misspelling_before_a_span_on_both_engines() {
+        let proofreader = fixtures::Rejects::new(&["sam", "plna", "home", "teh"]);
+        let text = "- [/] Mail @sam the [plna](https://x.io) #home ^b1\nplain teh `code`";
+        let settings = HighlighterSettings {
+            tasks: Some(wren_markdown::TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+            }),
+            ..fixtures::SETTINGS
+        };
+        for kind in BackendKind::ALL {
+            let content = Content::new(kind, text);
+            let editor = TextEditor::new(
+                &content,
+                "e",
+                settings,
+                fixtures::STYLE,
+                true,
+                Metrics::default(),
+                true,
+            )
+            .proofreader(Some(&proofreader));
+            fixtures::load_font();
+            let mut state = State::new(settings);
+            editor.lay_out(&mut state, BOUNDS.size());
+            let spelled = kind == BackendKind::Owned;
+            // A word in a span is the word where spelling is checked, and
+            // the span where it is not.
+            let word = |range: Range<usize>, span: &'static str, whole: Range<usize>| {
+                if spelled {
+                    Some(("misspelling", range))
+                } else {
+                    Some((span, whole))
+                }
+            };
+            for (cells, row, expected) in [
+                (0.5, 0.0, None),
+                (3.5, 0.0, Some(("box", 2..5))),
+                (7.5, 0.0, None),
+                (11.5, 0.0, Some(("owner", 11..15))),
+                (13.5, 0.0, word(12..15, "owner", 11..15)),
+                (20.5, 0.0, Some(("link", 20..40))),
+                (22.5, 0.0, word(21..25, "link", 20..40)),
+                (30.5, 0.0, Some(("link", 20..40))),
+                (41.5, 0.0, Some(("tag", 41..46))),
+                (43.5, 0.0, word(42..46, "tag", 41..46)),
+                (48.5, 0.0, Some(("block id", 47..50))),
+                (55.0, 0.0, None),
+                (2.5, 1.0, None),
+                (7.5, 1.0, spelled.then_some(("misspelling", 6..9))),
+                (12.5, 1.0, Some(("code", 10..16))),
+                (2.5, 2.0, None),
+            ] {
+                let point = Point::new(cells * ADVANCE, row * LINE_HEIGHT + 12.0);
+                let found = editor.hit_under(&state, point);
+                assert_eq!(
+                    found
+                        .as_ref()
+                        .map(|(_, hit)| (hit_kind(hit), hit.range().clone())),
+                    expected,
+                    "{kind:?} cell {cells} row {row}"
+                );
+                assert!(
+                    found.as_ref().is_none_or(|(line, _)| *line == row as usize),
+                    "{kind:?} cell {cells} row {row}"
+                );
+                // The right-click's own test is this one, kept to the words.
+                assert_eq!(
+                    editor.misspelling_under(&state, point),
+                    found.and_then(|(line, hit)| Some((line, hit.misspelling()?))),
+                    "{kind:?} cell {cells} row {row}"
+                );
+            }
+        }
+    }
+
+    /// In text of two directions a span's glyphs can lie apart. `ב* ג` is
+    /// laid out right to left, so the `ג` after the emphasis stands between
+    /// its `A` and its closing `*`: a span is hit by the glyph under the
+    /// pointer, never by the stretch from its first glyph to its last.
+    #[test]
+    fn a_glyph_between_a_spans_glyphs_is_not_the_span() {
+        let text = "x *A ב* ג";
+        let after = text.find('ג').expect("the letter after the emphasis");
+        let emphasis = text.find('*').expect("an opener")..text.rfind('*').expect("a closer") + 1;
+        for kind in BackendKind::ALL {
+            let content = Content::new(kind, text);
+            let editor = editor_with(&content, true, Measure::default());
+            let state = laid_out_state(&editor);
+            // The middle of each glyph on the row, by the byte it starts at.
+            let middles: Vec<(usize, f32)> = {
+                let backend = content.0.borrow();
+                let run = backend.buffer().layout_runs().next().expect("a row");
+                run.glyphs
+                    .iter()
+                    .map(|glyph| (glyph.start, glyph.x + glyph.w / 2.0))
+                    .collect()
+            };
+            let middle = |byte: usize| {
+                let (_, x) = middles
+                    .iter()
+                    .find(|(start, _)| *start == byte)
+                    .expect("a glyph");
+                Point::new(*x, 12.0)
+            };
+            let inside: Vec<f32> = middles
+                .iter()
+                .filter(|(start, _)| emphasis.contains(start))
+                .map(|(_, x)| *x)
+                .collect();
+            let (left, right) = inside
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(left, right), x| {
+                    (left.min(*x), right.max(*x))
+                });
+            let point = middle(after);
+            assert!(
+                left < point.x && point.x < right,
+                "{kind:?}: the letter stands between the emphasis's glyphs: {middles:?}"
+            );
+            assert_eq!(editor.hit_under(&state, point), None, "{kind:?}");
+            // Every glyph of the emphasis is the emphasis, wherever it stands.
+            for (byte, _) in text
+                .char_indices()
+                .filter(|(byte, _)| emphasis.contains(byte))
+            {
+                let hit = editor.hit_under(&state, middle(byte));
+                assert_eq!(
+                    hit.map(|(line, hit)| (line, hit.range().clone())),
+                    Some((0, emphasis.clone())),
+                    "{kind:?} byte {byte}"
+                );
+            }
+            assert_eq!(editor.hit_under(&state, middle(0)), None, "{kind:?}");
+        }
     }
 
     #[test]

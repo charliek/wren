@@ -17,6 +17,7 @@ mod edit;
 mod find;
 mod highlighter;
 mod history;
+mod hit;
 mod keys;
 mod plain;
 mod proof;
@@ -40,11 +41,13 @@ pub use edit::Replace;
 pub use highlighter::HighlightedLine;
 #[cfg(feature = "test-support")]
 pub use highlighter::{highlight_lines, Highlight, LineDecor, Scale};
+pub use hit::Hit;
 pub use keys::{KeyPolicy, KeyRoute};
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
 pub use proof::{MenuKey, MenuPress, Proofreader, SpellEvent, SpellMenu};
 pub use widget::Measure;
+use wren_markdown::span::LineSpans;
 pub use wren_markdown::Intent;
 
 use backend::Lines;
@@ -978,9 +981,9 @@ impl EditorView {
                 self.open_menu(mark.map(|mark| (caret.line, mark)));
             }
             SpellEvent::OpenAt(point) => {
-                let target = self
-                    .content
-                    .mark_under(point, |line, _| self.marks_at(line));
+                let target = (self.speller())
+                    .and_then(|_| self.place_under(point))
+                    .and_then(|place| Some((place.line, place.mark?)));
                 self.open_menu(target);
             }
             SpellEvent::Move(delta) => {
@@ -1225,24 +1228,71 @@ impl EditorView {
             .is_some_and(|text| !text.is_empty())
     }
 
-    /// The misspellings of `line`, found without the widget: its prose comes
-    /// from a fresh pass over the lines down to it (§3.3), the same marks a
-    /// frame draws there. Empty on the iced engine or with no proofreader,
-    /// which is then not asked.
-    fn marks_at(&self, line: usize) -> Vec<Range<usize>> {
-        let Some(proofreader) = self
-            .proofreader
+    /// What lies at the character that starts at byte `column` of `line`: a
+    /// misspelled word before one of the line's typed spans; see [`Hit`].
+    /// `None` where neither is, and past the text.
+    pub fn hit_at(&self, line: usize, column: usize) -> Option<Hit> {
+        let (marks, spans) = self.ranges_at(line);
+        hit::at(column, &marks, &spans)
+    }
+
+    /// What lies under `point`, relative to the text origin as a click
+    /// action's position is, and its line: a misspelled word before one of
+    /// the line's typed spans, as the last layout placed their glyphs; see
+    /// [`Hit`].
+    pub fn hit_under(&self, point: iced::Point) -> Option<(usize, Hit)> {
+        let place = self.place_under(point)?;
+        let span = || self.spans_at(place.line).at(place.column?).cloned();
+        Some((place.line, hit::resolve(place.mark, span)?))
+    }
+
+    /// Where `point` falls in the laid out text, among the misspellings
+    /// found without the widget ([`Self::marks_at`]).
+    fn place_under(&self, point: iced::Point) -> Option<widget::Place> {
+        self.content
+            .place_under(point, |line, _| self.marks_at(line))
+    }
+
+    /// The typed spans of `line`, as its highlighter reads them. None past
+    /// the text.
+    pub fn spans_at(&self, line: usize) -> LineSpans {
+        self.content.with_lines(|lines| {
+            highlighter::spans_at(&lines, line, self.front_matter_end, self.tasks)
+        })
+    }
+
+    /// The host's proofreader, on the engine that checks spelling (§3.3).
+    fn speller(&self) -> Option<&dyn Proofreader> {
+        self.proofreader
             .as_deref()
             .filter(|_| self.content.kind() == BackendKind::Owned)
-        else {
+    }
+
+    /// The misspellings of `line`, found without the widget; see
+    /// [`Self::ranges_at`]. Empty on the iced engine or with no
+    /// proofreader, which is then not asked.
+    fn marks_at(&self, line: usize) -> Vec<Range<usize>> {
+        if self.speller().is_none() {
             return Vec::new();
-        };
+        }
+        self.ranges_at(line).0
+    }
+
+    /// The two lists a hit test reads for `line`, found without the widget
+    /// from a fresh scan of the lines down to it (§3.3): the misspellings,
+    /// the same marks a frame draws there, and the typed spans, whose
+    /// prose the proofreader was asked about.
+    fn ranges_at(&self, line: usize) -> (Vec<Range<usize>>, LineSpans) {
         self.content.with_lines(|lines| {
             let Some(text) = lines.get(line) else {
-                return Vec::new();
+                return Default::default();
             };
-            let prose = highlighter::prose_at(&lines, line, self.front_matter_end, self.tasks);
-            proof::line_marks(proofreader, &text.text, &prose)
+            let spans = highlighter::spans_at(&lines, line, self.front_matter_end, self.tasks);
+            let marks = self
+                .speller()
+                .map(|proofreader| proof::line_marks(proofreader, &text.text, &spans.prose()))
+                .unwrap_or_default();
+            (marks, spans)
         })
     }
 
@@ -5242,6 +5292,167 @@ mod tests {
                         assert!(ev.redo(), "{what}");
                         assert_eq!(ev.text(), want.join(ending), "{what}");
                     }
+                }
+            }
+        }
+    }
+
+    mod hits {
+        use wren_markdown::date::Date;
+        use wren_markdown::span::SpanKind;
+        use wren_markdown::task::Priority;
+        use wren_markdown::TaskOptions;
+
+        use super::*;
+
+        const TEXT: &str = "- [ ] Call @sam [plna](u) ⏫ 📅 2026-12-01 #home\nplain teh";
+
+        /// An editor on `kind` holding [`TEXT`], with the host's tasks on
+        /// or off and a proofreader that rejects four of its words.
+        fn editor(kind: BackendKind, tasks: bool) -> EditorView {
+            let mut ev = EditorView::with_backend(kind, TEXT);
+            ev.set_tasks(tasks.then(|| TaskOptions {
+                today: Date::new(2026, 11, 19).expect("a date"),
+            }));
+            ev.set_proofreader(Some(Arc::new(fixtures::Rejects::new(&[
+                "sam", "plna", "home", "teh",
+            ]))));
+            ev
+        }
+
+        /// What a hit on line `line` is, in a word, and the text it covers.
+        fn seen(line: usize, hit: Option<Hit>) -> Option<(&'static str, &'static str)> {
+            let hit = hit?;
+            let line = TEXT.split('\n').nth(line).expect("a line of the text");
+            let kind = match &hit {
+                Hit::Misspelling(_) => "misspelling",
+                Hit::Span(span) => match span.kind {
+                    SpanKind::Box(_) => "box",
+                    SpanKind::Owner { .. } => "owner",
+                    SpanKind::Link { .. } => "link",
+                    SpanKind::Priority(Priority::High) => "high priority",
+                    SpanKind::Date { .. } => "date",
+                    SpanKind::Tag => "tag",
+                    _ => "another span",
+                },
+            };
+            Some((kind, &line[hit.range().clone()]))
+        }
+
+        /// A misspelled word is the hit where it lies in an owner, a link
+        /// or a tag; with no speller, as on the classic engine, the span
+        /// is; and a task token is one on both engines.
+        #[test]
+        fn the_hit_at_a_column_is_a_misspelling_before_a_span_on_both_engines() {
+            for kind in BackendKind::ALL {
+                let ev = editor(kind, true);
+                let spelled = kind == BackendKind::Owned;
+                let word = |word: &'static str, kind: &'static str, span: &'static str| {
+                    Some(if spelled {
+                        ("misspelling", word)
+                    } else {
+                        (kind, span)
+                    })
+                };
+                for (column, expected) in [
+                    (0, None),
+                    (3, Some(("box", "[ ]"))),
+                    (6, None),
+                    (11, Some(("owner", "@sam"))),
+                    (12, word("sam", "owner", "@sam")),
+                    (15, None),
+                    (16, Some(("link", "[plna](u)"))),
+                    (17, word("plna", "link", "[plna](u)")),
+                    (26, Some(("high priority", "⏫"))),
+                    (29, None),
+                    (30, Some(("date", "📅 2026-12-01"))),
+                    (44, Some(("date", "📅 2026-12-01"))),
+                    (46, Some(("tag", "#home"))),
+                    (47, word("home", "tag", "#home")),
+                    (51, None),
+                ] {
+                    assert_eq!(seen(0, ev.hit_at(0, column)), expected, "{kind:?} {column}");
+                }
+                assert_eq!(
+                    seen(1, ev.hit_at(1, 7)),
+                    spelled.then_some(("misspelling", "teh")),
+                    "{kind:?}"
+                );
+                assert_eq!(ev.hit_at(1, 2), None, "{kind:?}");
+                assert_eq!(ev.hit_at(2, 0), None, "{kind:?}: past the text");
+            }
+        }
+
+        /// With the host's tasks off a task line has no task span, so only
+        /// its inline Markdown and its misspellings are hit.
+        #[test]
+        fn with_tasks_off_no_task_token_is_hit() {
+            for kind in BackendKind::ALL {
+                let ev = editor(kind, false);
+                let spelled = kind == BackendKind::Owned;
+                for (column, expected) in [
+                    (3, None),
+                    (11, None),
+                    (12, spelled.then_some(("misspelling", "sam"))),
+                    (16, Some(("link", "[plna](u)"))),
+                    (26, None),
+                    (30, None),
+                    (46, None),
+                ] {
+                    assert_eq!(seen(0, ev.hit_at(0, column)), expected, "{kind:?} {column}");
+                }
+                assert!(
+                    ev.spans_at(0).spans.iter().all(|span| !span.kind.is_task()),
+                    "{kind:?}"
+                );
+                assert_eq!(editor(kind, true).spans_at(0).spans.len(), 6, "{kind:?}");
+            }
+        }
+
+        /// The same hit under the pointer, by the glyphs the last layout
+        /// placed; the suggestions menu opens on the misspelling alone.
+        #[test]
+        fn the_hit_under_a_point_reads_the_laid_out_glyphs_on_both_engines() {
+            for kind in BackendKind::ALL {
+                let mut ev = editor(kind, true);
+                ev.content.lay_out(iced::Size::new(600.0, 400.0));
+                let spelled = kind == BackendKind::Owned;
+                let point =
+                    |cells: f32, row: f32| iced::Point::new(cells * CELL, row * 24.0 + 12.0);
+                for (cells, row, expected) in [
+                    (3.5, 0.0, Some(("box", "[ ]"))),
+                    (7.5, 0.0, None),
+                    (11.5, 0.0, Some(("owner", "@sam"))),
+                    (
+                        13.5,
+                        0.0,
+                        Some(if spelled {
+                            ("misspelling", "sam")
+                        } else {
+                            ("owner", "@sam")
+                        }),
+                    ),
+                    (16.5, 0.0, Some(("link", "[plna](u)"))),
+                    (7.5, 1.0, spelled.then_some(("misspelling", "teh"))),
+                    (2.5, 1.0, None),
+                    (2.5, 2.0, None),
+                ] {
+                    let at_point = point(cells, row);
+                    let found = ev.hit_under(at_point);
+                    assert!(
+                        found.as_ref().is_none_or(|(line, _)| *line == row as usize),
+                        "{kind:?} {at_point:?}"
+                    );
+                    let hit = found.map(|(_, hit)| hit);
+                    let misspelled = matches!(hit, Some(Hit::Misspelling(_)));
+                    assert_eq!(seen(row as usize, hit), expected, "{kind:?} {at_point:?}");
+                    ev.close_spell_menu();
+                    ev.spell(SpellEvent::OpenAt(at_point));
+                    assert_eq!(
+                        ev.spell_menu().is_some(),
+                        misspelled,
+                        "{kind:?} {at_point:?}"
+                    );
                 }
             }
         }

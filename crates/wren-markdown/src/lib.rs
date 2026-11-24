@@ -15,6 +15,7 @@ pub mod block;
 pub mod date;
 pub mod edit;
 pub mod outline;
+pub mod span;
 pub mod status;
 pub mod task;
 
