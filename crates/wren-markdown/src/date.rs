@@ -283,6 +283,16 @@ pub enum Parsed {
     Invalid,
 }
 
+impl Parsed {
+    /// What text in the shape `YYYY-MM-DD` (four, two and two ASCII digits
+    /// joined by hyphens) names: its date, or [`Parsed::Invalid`] when it
+    /// is no real one. `None` for text in any other shape, spaces around
+    /// it included.
+    pub fn from_iso(text: &str) -> Option<Self> {
+        iso_shaped(text).then(|| Date::parse_iso(text).map_or(Self::Invalid, Self::Date))
+    }
+}
+
 /// The date a typed word or ISO date names, relative to `today`, or `None`
 /// when the text is not a date at all. Text is trimmed and words ignore
 /// ASCII case. English only, and weeks start on Monday.
@@ -310,10 +320,7 @@ pub enum Parsed {
 /// the years 1 to 9999 is not a date either.
 pub fn parse(text: &str, today: Date) -> Option<Parsed> {
     let text = text.trim();
-    if iso_shaped(text) {
-        return Some(Date::parse_iso(text).map_or(Parsed::Invalid, Parsed::Date));
-    }
-    parse_word(text, today).map(Parsed::Date)
+    Parsed::from_iso(text).or_else(|| parse_word(text, today).map(Parsed::Date))
 }
 
 /// Four, two and two ASCII digits joined by hyphens.
@@ -668,6 +675,25 @@ mod tests {
             " 2026-02-30 ",
         ] {
             assert_eq!(parse(text, today), Some(Parsed::Invalid), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_iso_shape_alone_reads_as_a_date_or_as_invalid() {
+        for (text, expected) in [
+            ("2026-11-19", Some(Parsed::Date(date("2026-11-19")))),
+            ("2026-02-30", Some(Parsed::Invalid)),
+            ("0000-00-00", Some(Parsed::Invalid)),
+            (" 2026-11-19", None),
+            ("2026-11-19 ", None),
+            ("2026-1-19", None),
+            ("2026/11/19", None),
+            ("２０２６-11-19", None),
+            ("tomorrow", None),
+            ("today", None),
+            ("", None),
+        ] {
+            assert_eq!(Parsed::from_iso(text), expected, "{text:?}");
         }
     }
 

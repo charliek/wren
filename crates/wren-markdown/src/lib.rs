@@ -16,6 +16,7 @@ pub mod date;
 pub mod edit;
 pub mod outline;
 pub mod status;
+pub mod task;
 
 pub use edit::plan;
 
