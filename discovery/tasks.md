@@ -1,6 +1,6 @@
 # Tasks: research and proposed design
 
-Status: **discovery.** Written 2026-11-15 against `main` at `0b23f89`; references re-checked against `ec1440b`. Nothing is built. The first release is the editor alone (ring 0, §12); the rollup and kanban follow once that has been refined in use. §2 records what the owner has decided; §3 lists every question and how it was answered. Line references are to `ec1440b`; find the named function if they have moved.
+Status: **discovery, design settled.** Written 2026-11-15 against `main` at `0b23f89`; references re-checked against `ec1440b`; the design review's decisions added 2026-11-24 (§2 items 18 to 29, §3.3). Nothing is built. The first release is the editor alone (ring 0, §12), built on shared editor primitives (§6.1). The summary view (ring 1) follows straight after it, and kanban (ring 2) is a release of its own after that. §2 records what the owner has decided; §3 lists every question and how it was answered. Line references are to `ec1440b`; find the named function if they have moved.
 
 ## 1. What we are building and why
 
@@ -32,6 +32,21 @@ Wren is not meant to replace Jira. The intended use is personal organisation: ac
 15. **The due date and priority can be set or changed from the rollup and from kanban**, not only in the editor (§9, §11).
 16. **Priority ships in the first release** (Q6). **The first release is the Markdown editing and display only** (ring 0, §12): no rollup and no kanban. The task experience is refined in the editor first, and the views are then built on it.
 17. **The recommended defaults for Q7 to Q14 are accepted** (§3.1, §3.2). Q9, Q12, Q13 and Q14 are starting points that using ring 0 may revise.
+
+Decided in the design review, 2026-11-24 (questions D1 to D16, §3.3):
+
+18. **Build primitives, not only features.** Ring 0 leaves the editor with shared pieces the next feature can build on, extending what spell check started (§6.1). It targets the advanced editor engine only, as spell check does; the classic engine shows the text as written, and may be retired later.
+19. **Ring 1 follows straight after ring 0.** No read-only quick list in between. Kanban (ring 2) is a release of its own after ring 1, first without manual card order (D9; §11).
+20. **A click on the box cycles the status:** open → doing → done → open. Cancelled stays out of the cycle; a click on a cancelled task reopens it (D1). The keys stay a done toggle: ⌘↵ / Ctrl+Enter in the editor, and Space or ⌘↵ in the summary view (D15).
+21. **Default keys:** ⌘D / Ctrl+D sets the due date, ⇧⌘↵ / Ctrl+Shift+Enter opens the task form (D2), and ⇧⌘T / Alt+Shift+T is Show tasks (D12). Everything else is in the palette and the menus.
+22. **Right-click menus with single keys** on task lines and their tokens (D3). The status menu takes the box characters (Space, `/`, `x`, `-`); the priority menu takes H, M and L, with Shift for Highest and Lowest. On a misspelled word, spelling comes first.
+23. **The status bar spells out the caret's task** in ring 0, for example "Doing · due Mon 23 Nov, in 4 days · ⏫ High · @alice.chen" (D4).
+24. **Summaries open in the editor pane, from a count in each column header** (D5): the count is open and doing tasks for what the column belongs to, red when one is overdue (D8). Counts are on whenever tasks are on; `task-counts = on | off` in `config.conf` and the palette command `view.toggle_task_counts` hide them (D14). Show tasks from the Notes column or the editor opens the note's group (D6).
+25. **The summary view shows every task by default.** The status chips narrow it (none pressed means all), "Hide done after 14 days" stays on, and finished work sits below the open tasks in each group, struck through (D7). The List | Board switch appears only once the board exists.
+26. **Undo in the summary view:** a message with Undo, plus ⌘Z / Ctrl+Z while the view has the keyboard (D13; §10.2).
+27. **`tasks-me`** in `config.conf` names that count as Me (D10).
+28. **Hide tasks in this note,** on a right-click in the Notes column and in the summary view, writes `tasks: off` into the note's front matter, with Undo; hidden notes get a "tasks off" mark in the Notes column (D16; §7).
+29. **Weekday words** mean the next one after today; `next fri` is Friday of next week (D11).
 
 ## 3. Questions, and how each was answered
 
@@ -88,11 +103,36 @@ Two smaller choices sit under Q8, settled the same way:
 Each answer below is accepted (§2 item 17). Using ring 0 is what may revise Q9, Q12, Q13 and Q14.
 
 - **Q9, chips or text.** Today the editor draws every character of the source; hiding `📅 2026-12-01` behind a chip reading "Dec 1" (or "Tomorrow", or "2 days overdue") means teaching the editor fork to replace a range with a drawn element, and keeping caret movement, selection and Backspace sensible around it. That is real work in both engines. *Answer:* ship coloured text (date red when overdue, owners in an accent, a done task's line dimmed), then decide whether the raw date is noisy enough in daily use to justify chips. A middle step is possible: keep the text but show a hover or status-line hint ("due in 2 days").
-- **Q10, where tokens go.** When Wren writes a token, it goes at the end of the line, before an Obsidian `^block-id` if there is one. Wren reads tokens backwards from the end, as Obsidian does, and Obsidian is sensitive to some orders (its issue 1505). *Answer:* when Wren writes, it uses the order Obsidian Tasks' own serializer writes (read from `DefaultTaskSerializer.ts` when implementing and pinned in tests). It never moves `@owner`, which stays in the description where the user typed it. A line someone ordered differently by hand is left alone, except for the one token being changed.
+- **Q10, where tokens go.** When Wren writes a token, it goes at the end of the line, before an Obsidian `^block-id` if there is one. Wren reads tokens backwards from the end, as Obsidian does, and Obsidian is sensitive to some orders (its issue 1505). *Answer:* when Wren writes, it uses the order Obsidian Tasks' own serializer writes, pinned in tests. Confirmed in its source on 2026-11-24 (`TaskLayoutOptions.ts`, `DefaultTaskSerializer.ts`): the description, `🆔`, priority, then the created, start, scheduled, due, cancelled and done dates, then the block id. It never moves `@owner`, which stays in the description where the user typed it. A line someone ordered differently by hand is left alone, except for the one token being changed.
 - **Q11, a box checked by hand.** Typing `x` between the brackets is plain editing. Wren could notice it and add `✅ today`, but that rewrites the user's typing, and fixing a mis-typed box would gain and lose dates. *Answer:* only the toggle (⌘↵ on macOS, Ctrl+Enter on Linux, already `markdown.toggle_task`), the status menu and the views write dates.
-- **Q12, when auto-suggest appears.** Too eager and it interrupts note-taking; too shy and nobody discovers it. *Answer:* only on task lines, only after two letters at the start of a word that match an entry (`du`, `to`, `hi`), never inside the description's first word, and Escape hides it for the rest of that line. A `tasks.suggest` setting can turn it off.
+- **Q12, when auto-suggest appears.** Too eager and it interrupts note-taking; too shy and nobody discovers it. *Answer:* only on task lines, only after two letters at the start of a word that match an entry (`du`, `to`, `hi`), never inside the description's first word, and Escape hides it for the rest of that line. A `tasks-suggest` setting can turn it off.
 - **Q13, default keys.** The new commands are: set due date, the task form, set priority, raise, lower, cycle status, and set status. Each default key has to be free on both platforms: the Command layer on macOS, Ctrl for editing on Linux, and IBus's Ctrl+. emoji key (`crates/wren-core/src/keybind.rs:274`). *Answer:* bind set due date and the task form; leave the rest palette-only, and every command can still be bound with a `keybind` line until use shows which deserve a default.
 - **Q14, the calendar's conventions.** Which day starts the week, how a typed `3/4` is read, and in which language `fri` or `tomorrow` are understood. *Answer:* ISO conventions: weeks start on Monday, typed dates are `YYYY-MM-DD` or words (`today`, `tomorrow`, weekday names, `+3d`, `+2w`), and slash dates are not accepted because they are ambiguous. English words only. A setting for the week's first day can follow if wanted.
+
+### 3.3 The design review (2026-11-24)
+
+A design page with a working prototype put sixteen questions to the owner (numbered Q1 to Q16 there, D1 to D16 here). Every answer took the recommended option; the owner's notes added D15 and D16 and are folded into §2 items 18 to 29.
+
+| # | Question | Answer |
+|---|---|---|
+| D1 | Does a click on the box do something? | It cycles open → doing → done → open; cancelled stays out |
+| D2 | Default keys in ring 0? | ⌘D / Ctrl+D due date, ⇧⌘↵ / Ctrl+Shift+Enter task form |
+| D3 | Right-click task menu, single-key menus? | Both |
+| D4 | The caret's task in the status bar? | Yes, in ring 0 |
+| D5 | Where do summaries start? | A count in each column header (not a pinned row) |
+| D6 | Show tasks from Notes or the editor: which scope? | The note's group |
+| D7 | Where does finished work sit when every task shows? | Below the open tasks in each group, struck through |
+| D8 | What does the header count count? | Open and doing, red when any is overdue |
+| D9 | Kanban: when, and with what order? | Ring 2, its own release after ring 1, without manual order at first |
+| D10 | A `tasks-me` setting? | Yes |
+| D11 | What does a weekday name mean? | The next one after today; `next fri` is next week's |
+| D12 | A default key for Show tasks? | ⇧⌘T / Alt+Shift+T |
+| D13 | Undo in the summary view? | A message with Undo, plus ⌘Z / Ctrl+Z in the view |
+| D14 | Header counts on by default? | On whenever tasks are on; a setting and a palette command hide them |
+| D15 | Now that a click cycles, what do the keys do? | They stay a done toggle |
+| D16 | Where is Hide tasks in this note? | The Notes column and the summary view |
+
+Sizing for D9, from the review: once ring 1 exists, a board without manual order is roughly a third of ring 1. Ring 1 carries the hard parts (the index, writing to notes that aren't open, the shared form, menus and calendar). The board adds a layout (medium), dragging cards on the drag machinery in `crates/wren-iced/src/drag.rs` and `drag_view.rs` (medium), keyboard moves (small) and tests (medium). Manual order would add about as much again.
 
 ## 4. Research: how other tools write tasks
 
@@ -136,7 +176,8 @@ A task is a list item with a box, as `wren_markdown::block` reads it today (`tas
 
 - Statuses are a table of symbol, name, type and next symbol, as in Obsidian Tasks. Types are what filters, toggling and the rollup work on, so on hold or waiting (`[h]`, `[?]` and so on) can later be added as rows. A user-edited table is ring 3 (§12).
 - `block::Task` holds `done: bool` today (`block.rs:237-243`). It becomes the box's character plus the status type, and `task_box` accepts any single character that is not `]`. The highlighter, Backspace on a task (`edit/delete.rs`), `markdown.toggle_task` (`edit/task.rs`) and the outline tests all read `Task` and move with it. `docs/reference/spell-check.md:29` names "tasks (open and done)" and changes too.
-- **Toggling** (`markdown.toggle_task`, extended): open → done, doing → done, done → open, cancelled → open. These are the Obsidian Tasks defaults. A new `task.set_status` command opens a menu of every status, and `task.cycle_status` steps open → doing → done.
+- **Toggling** (`markdown.toggle_task`, extended): open → done, doing → done, done → open, cancelled → open. These are the Obsidian Tasks defaults. A new `task.set_status` command opens a menu of every status, and `task.cycle_status` steps open → doing → done → open, with cancelled → open.
+- **A click on the box cycles** like `task.cycle_status` (§2 item 20); the toggle key and Space in the summary view stay the done toggle above. Cancelled is reached from the status menu only.
 
 ### 5.2 Due date
 
@@ -215,11 +256,11 @@ Obsidian Tasks' indicators, appended to the line like the due date:
 | `⏬` | Lowest | 6 |
 
 ```markdown
-- [ ] Send the deck to finance @sam 📅 2026-12-01 ⏫
+- [ ] Send the deck to finance @sam ⏫ 📅 2026-12-01
 ```
 
 - **No priority sorts between Medium and Low**, as in Obsidian Tasks: Low and Lowest mean "deliberately later", so they sort below unmarked tasks, and nobody has to mark every task to use priority at all.
-- **Read with or without the variation selector.** An emoji may be followed by U+FE0F, which macOS's emoji picker (Ctrl+Cmd+Space) inserts after `⏫`. Obsidian Tasks failed to read such a `⏫` until 6.1.1 (issue 2273). Wren reads each indicator with or without U+FE0F. It writes the exact code points Obsidian Tasks writes; check those in its serializer (`DefaultTaskSerializer.ts`) when implementing, and pin them in tests.
+- **Read with or without the variation selector.** An emoji may be followed by U+FE0F, which macOS's emoji picker (Ctrl+Cmd+Space) inserts after `⏫`. Obsidian Tasks failed to read such a `⏫` until 6.1.1 (issue 2273). Wren reads each indicator with or without U+FE0F. It writes what Obsidian Tasks writes: each glyph as a single code point, with no U+FE0F (confirmed in `DefaultTaskSerializer.ts`), pinned in tests.
 - **One priority per task.** If a line has several indicators, the last one wins on read. Setting a priority replaces every indicator on the line.
 - **Why five levels.** Other tools use fewer: three in Logseq, org-mode and NotePlan (`!`, `!!`, `!!!`), four in Todoist, and todo.txt guides advise using only A to C. Wren still reads all five for compatibility. Its menus put High, Medium and Low first and Highest and Lowest after them (Q7), so the everyday choice is three.
 - **Shown as:**
@@ -250,7 +291,7 @@ Pieces the three share:
 - **Owner completion.** Typing `@` on a task line offers the owners already used in the workspace: in ring 0 from a scan of the notes the search index holds, and from ring 1 from the task index (Q8, §3.1).
 - **Highlighting.** The highlighter (`crates/wren-editor/src/highlighter.rs`) colours the date token, red when overdue, and the owner token. Collapsing `📅 2026-12-01` into a chip reading "Dec 1" would be new work in the editor fork, which cannot hide text today. Whether to do it is decided while refining ring 0.
 - **Spell check** skips `@names` and the date tokens, as it already skips `#tags` (`docs/reference/spell-check.md:44`).
-- **Commands** follow the project's rule: a `CommandId`, a `definitions!` row, handling in `run_command`, Editor scope where only the focused editor runs the key, and a keybinding default on both platforms.
+- **Commands** follow the project's rule: a `CommandId`, a `definitions!` row, handling in `run_command`, Editor scope where only the focused editor runs the key, and a keybinding default on both platforms. Defaults (§2 item 21): `task.set_due` ⌘D / Ctrl+D and `task.edit` ⇧⌘↵ / Ctrl+Shift+Enter (Editor scope), `tasks.show` ⇧⌘T / Alt+Shift+T (App scope). All three are unbound today in `keybind.rs`; the board layer's ⌘D is read only by a focused board.
 - **Linux and macOS** (§2 item 12). Every entry path is checked on both:
   - shortcuts use Command on macOS and Alt on Linux (`keys::alt_filter` keeps an Alt press from typing its letter);
   - the system emoji pickers' output, VS16 included, must parse;
@@ -259,13 +300,25 @@ Pieces the three share:
 
   §13 has the test plan.
 
+### 6.1 Foundations: the primitives ring 0 builds
+
+Ring 0 builds these first, and the task features are thin clients of them (§2 item 18). Where a primitive replaces something spell check has, spell check moves onto it first, so its existing tests prove the refactor. `wren-editor` stays free of Wren types: providers and sources come from the host through traits, as `Proofreader` does.
+
+| Primitive | Where | First users | Later users |
+|---|---|---|---|
+| Inline spans: typed ranges per line (due, stamp, priority, owner, tag, misspelling) | `wren-markdown` classifier, read by the highlighter | Highlighting, spell check skipping tokens, box clicks, right-click hit-testing, the status-bar line | Tags, links, chips |
+| An anchored popover: placement, keyboard routing, Esc, caret restore | `wren-editor`, grown from `SpellMenu` (`proof.rs`) | The spelling menu (moved first), the status and priority menus, the calendar, auto-suggest | A tag picker, link previews |
+| Context-menu providers, asked in order for the span under the pointer | `wren-editor`, providers from the host | Spelling, then tasks | Links, tags, headings |
+| Completion sources: a trigger rule and a candidate source | `wren-editor`, sources from the host | Owners, dates, priority words | Tags, note links |
+| A line edit: parse, change, write back as one `EditPlan` replacement and one undo step, carrying the text it expects | `wren-markdown` | Toggle, menus, the form, auto-suggest | Ring 1's writes to notes that aren't open, board moves |
+
 ## 7. Which tasks a rollup includes, and how to ignore them
 
 Every task counts by default. A per-task opt-in such as Obsidian's `#task` filter would be too noisy for meeting notes. Ignoring works in layers, coarsest first:
 
 1. **Scope.** A rollup covers what the user picks: the workspace, a section, a group, or a set of notes.
 2. **Folder exclusions** (Q4). A section or group can be excluded from every rollup ("Hide tasks from this group"), stored in `.wren/tasks.toml` (§10.3). Folders have no front matter, so this is the only place it can live.
-3. **A note switch** (Q4). `tasks: off` in a note's front matter excludes the note. This suits grocery lists, templates and checklists that are not work. Wren also honours Obsidian's `TP_ignore_this_file: true`. Reading front matter keys is new: `block.rs` classifies front matter lines but does not parse YAML. Two `key: value` lines need no YAML library; a full parser would.
+3. **A note switch** (Q4). `tasks: off` in a note's front matter excludes the note. **Hide tasks in this note**, on a right-click in the Notes column and in the summary view, writes the line (creating the front matter if there is none) and removes it again, with Undo (§2 item 28). This suits grocery lists, templates and checklists that are not work. Wren also honours Obsidian's `TP_ignore_this_file: true`. Reading front matter keys is new: `block.rs` classifies front matter lines but does not parse YAML. Two `key: value` lines need no YAML library; a full parser would.
 4. **View filters**, for older work. Hide done and cancelled tasks whose `✅`/`❌` date is older than N days (default 14). A filter for undated open tasks in notes untouched for M days is worth considering. Filters are per view and remembered in `.wren/tasks.toml`.
 
 Not proposed: dismissing a single task without changing its status. It needs task identity (§11), and cancelling the task covers the need.
@@ -279,9 +332,10 @@ Not proposed: dismissing a single task without changing its status. It needs tas
 
 ## 9. The rollup view (ring 1)
 
-- **Opening it.** A command `tasks.show` opens the view for the selected tree item (workspace, section, group or note); a multi-select of notes gives a note set. It is a view, not a note: no file behind it, and it never becomes the open document.
+- **Opening it.** A command `tasks.show` opens the view for the selected tree item (workspace, section, group or note); a multi-select of notes gives a note set. It is a view, not a note: no file behind it, and it never becomes the open document. Its entries in Back and Forward history are session-local and never written to `.wren/workspace.toml` (decided in planning, 2026-11-24). The note-set scope waits for multi-select in the Notes column, which does not exist yet; it is outside the first ring 1 build (`discovery/tasks-build.md` §10).
 - **Rows.** The status box, the description with its tokens shown as in the editor, the priority, the due date, the owners, and the note (with the nearest heading) it comes from.
-- **Grouping:** by note (default), by due bucket (Overdue, Today, This week, Later, No date), by priority, or by owner (Me = no owner). **Sorting** within a group: overdue first, then priority, then due date. **Filters:** status types (default: open and doing), owner, due bucket, priority, and §7's hide-older-work.
+- **Opening it** from the columns: a count in each column header (Sections → the workspace, Groups → the section, Notes → the group), on by default and hidden with `task-counts = off`; a right-click on a row; or `tasks.show`, which from the Notes column or the editor opens the note's group (§2 item 24).
+- **Grouping:** by note (default), by due bucket (Overdue, Today, This week, Later, No date), by priority, or by owner (Me = no owner, or a name in `tasks-me`). **Sorting** within a group: open before finished, overdue first, then priority, then due date. **Filters:** status types (default: none pressed, so every status shows; a chip narrows), owner, due bucket, priority, and §7's hide-older-work, on by default (§2 item 25).
 - **Changes from the view** (§2 item 15), each writing the note through §10:
   - set the status: click the box to toggle, or the menu for any status;
   - set or clear the due date, with the same calendar as §6;
@@ -309,7 +363,7 @@ Op::EditTaskLine { note, line, expect: String, replace: String }
 
 ### 10.2 Undo
 
-The editor's undo history is per open note and does not cover a closed note. The rollup keeps its own undo for the actions taken in it, each undone by the reverse `EditTaskLine` with the same check. This is open for discussion: no undo in a view, with a "done" toast that offers Undo, is the smaller choice.
+The editor's undo history is per open note and does not cover a closed note. The rollup keeps its own undo for the actions taken in it, each undone by the reverse `EditTaskLine` with the same check. Decided (§2 item 26): every write shows a message naming the note and line, with Undo, and ⌘Z / Ctrl+Z undoes the view's last change while the view has the keyboard.
 
 ### 10.3 `.wren/tasks.toml`
 
@@ -318,6 +372,7 @@ App-managed and beside `.wren/workspace.toml` (`crates/wren-core/src/workspace_s
 ## 11. Kanban (ring 2)
 
 - Columns are status types by default: Open, Doing, Done, Cancelled. Moving a card rewrites the character in its box through `EditTaskLine`.
+- **First release of the board: no manual order** (§2 item 19). Cards sort by priority, then due date, so no `🆔` is written and no view file is needed. The board is the summary view's second layout (List | Board), with the same scope, owner filter and keys; ⇧← and ⇧→ move a card. Manual order, below, comes later if it is missed.
 - Card order within a column lives in `.wren/tasks.toml`, keyed by a task id. An id that survives edits is the hard part. The Obsidian-compatible answer is `🆔 x7k2`, the token Obsidian Tasks uses for dependencies, added to a task the first time it is reordered on a board. Tasks never reordered need no id and sort by due date.
 - Later column queries: by owner (one column per person), by due bucket, or by priority, where a move rewrites the owner, the date or the priority instead of the status.
 - **Editing a card** (§2 item 15). A card shows its priority badge, its due date (red when overdue) and its owners. The same keys and menus as the rollup set its status, due date and priority, and the card opens the "Create or edit task" form (§6). Optional swimlanes by priority give a priority-by-status grid, like TaskNotes' swimlanes.
@@ -326,7 +381,7 @@ App-managed and beside `.wren/workspace.toml` (`crates/wren-core/src/workspace_s
 
 The first release is **ring 0 alone**: writing and displaying tasks in the editor (§2 item 16). The views come after the editing experience has been used and refined, and are built on it.
 
-- **Ring 0 (first release): the editor.**
+- **Ring 0 (first release): the editor**, on the advanced engine, starting with the primitives of §6.1.
   - statuses in the box, with toggle, cycle and the status menu;
   - the `📅` due date and its calendar popover;
   - priority `🔺⏫🔼🔽⏬`, with raise and lower;
@@ -337,18 +392,19 @@ The first release is **ring 0 alone**: writing and displaying tasks in the edito
   - highlighting: the date red when overdue, owners, done tasks dimmed. Whether tokens collapse into chips is decided while refining this ring;
   - spell check skipping the tokens;
   - a `tasks` setting gating all of it, off by default until the ring is done, as `boards` was.
-- **Ring 1: the rollup,** built on ring 0 as refined:
+- **Ring 1: the rollup,** straight after ring 0:
   - the task index (§8), which then also feeds owner completion;
   - the rollup for a scope, with status, due date and priority set from the view, the shared form, and opening at the line;
   - the write path to closed notes (§10) and the view's undo;
-  - folder exclusions, the note switch and hide-older-work;
+  - folder exclusions, the note switch with Hide tasks in this note, and hide-older-work;
+  - the column-header counts and `task-counts`;
   - later in the ring: inline description edit and saved views.
-- **Ring 2: kanban.** Columns by status with saved order (`🆔`), card editing, swimlanes by priority, then owner, due-bucket and priority columns. Also "copy for Jira" (the description, owner and due date as plain text, the link back to the note left out).
+- **Ring 2: kanban,** a release of its own. Columns by status, sorted by priority and due date, with card editing; then saved order (`🆔`) if missed, swimlanes by priority, and owner, due-bucket and priority columns. Also "copy for Jira" (the description, owner and due date as plain text, the link back to the note left out).
 - **Ring 3:** a user-defined status table (on hold, waiting); scheduled and start dates; recurrence as its own primitive; reminders.
 
 ## 13. Risks and spikes before building
 
-1. **Emoji in the editor, on both platforms.** The editor relies on the system's emoji font (`crates/wren-iced/src/fonts.rs` looks for Noto Color Emoji). Check `📅`, `✅`, `❌` and the five priority glyphs, with and without U+FE0F:
+1. **Emoji in the editor, on both platforms.** The editor relies on the system's emoji fonts through font fallback: `crates/wren-iced/src/fonts.rs` loads no emoji font (it bundles Inter and JetBrains Mono, and keeps emoji fonts out of the monospace picker). Check `📅`, `✅`, `❌` and the five priority glyphs, with and without U+FE0F:
    - on Linux, with and without Noto Color Emoji, on X11 and Wayland, with tiny-skia and wgpu;
    - on macOS, on Metal;
    - for each: the glyph, its width, caret movement and selection across it, and Backspace over it (one grapheme), on both editor engines.
