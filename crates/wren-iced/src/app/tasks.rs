@@ -2,13 +2,18 @@
 //! reads, and the day change that refreshes them. All of it waits on the
 //! `tasks` setting the app launched with.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use iced::Subscription;
-use wren_markdown::block::Boxes;
+use wren_markdown::block::{self, Boxes};
 use wren_markdown::date::Date;
+use wren_markdown::span::SpanKind;
+use wren_markdown::task::{self, Summary};
 use wren_markdown::TaskOptions;
 
+use super::board::Surface;
 use super::{App, Message};
 
 /// How often a running Wren looks for a new local date while tasks are on.
@@ -53,6 +58,42 @@ impl Clock {
     pub(super) fn changes(&self) -> u64 {
         self.changes
     }
+}
+
+/// The caret line's task box as [`App::caret_task`] last found it, or that
+/// the line has none, with what it was found for, and the task spelled out
+/// for the day it was spelled out on.
+#[derive(Debug, Default)]
+pub(super) struct TaskMemo {
+    kept: RefCell<Option<Memo>>,
+    /// How many times a line was read for its box.
+    #[cfg(test)]
+    reads: std::cell::Cell<usize>,
+    /// How many times a task was spelled out.
+    #[cfg(test)]
+    formats: std::cell::Cell<usize>,
+}
+
+#[derive(Debug)]
+struct Memo {
+    key: MemoKey,
+    found: Option<TaskBox>,
+    /// The day `summary` was spelled out for; `None` before it was.
+    today: Option<Date>,
+    summary: Option<Rc<Summary>>,
+}
+
+/// A line's text and its task's box.
+type TaskBox = (String, block::Task);
+
+/// What a [`TaskMemo`] holds for: the editor's text revision (which also
+/// moves on a note switch and when tasks turn on or off), the caret's line
+/// and the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoKey {
+    revision: u64,
+    line: usize,
+    engine: wren_editor::BackendKind,
 }
 
 impl App {
@@ -115,6 +156,82 @@ impl App {
     /// the settings are applied, and when the day changes.
     pub(super) fn sync_task_options(&mut self) {
         self.editor.set_tasks(self.task_options());
+    }
+
+    /// Whether the editor holds Markdown a task line can be read from: a
+    /// note's text, or the in-memory evaluation text outside a workspace.
+    pub(super) fn markdown_in_editor(&self) -> bool {
+        let open = !self.workspace_mode
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.document().is_some());
+        open && self.surface() == Surface::Text
+    }
+
+    /// The caret's task spelled out, as the status bar shows it
+    /// (discovery/tasks.md §2 item 23): `None` with tasks off, and unless
+    /// the caret's line holds a task's box. The line of the box is the
+    /// task's own: its tokens are read there, so a later line of the same
+    /// item is not. The relative dates count from [`App::today`], read on
+    /// each view, so the line follows the caret, every edit and a new day.
+    ///
+    /// Finding the box scans the note down to the caret's line, so what it
+    /// finds is kept ([`TaskMemo`]) until the text, the caret's line or the
+    /// engine changes, and the task spelled out until then or a new day: a
+    /// view with none of them changed reads and formats nothing.
+    pub(super) fn caret_task(&self) -> Option<Rc<Summary>> {
+        if !self.preferences.tasks || !self.markdown_in_editor() {
+            return None;
+        }
+        let key = MemoKey {
+            revision: self.editor.revision(),
+            line: self.editor.cursor().position.line,
+            engine: self.editor.backend(),
+        };
+        let today = self.today();
+        let mut kept = self.task_memo.kept.borrow_mut();
+        let memo = match &mut *kept {
+            Some(memo) if memo.key == key => memo,
+            _ => kept.insert(Memo {
+                key,
+                found: self.task_box(key.line),
+                today: None,
+                summary: None,
+            }),
+        };
+        if memo.today != Some(today) {
+            memo.today = Some(today);
+            memo.summary = memo.found.as_ref().and_then(|(text, box_)| {
+                #[cfg(test)]
+                self.task_memo.formats.set(self.task_memo.formats.get() + 1);
+                let line = task::parse(text, *box_)?;
+                Some(Rc::new(task::summary(&line, today)))
+            });
+        }
+        memo.summary.clone()
+    }
+
+    /// Line `number`'s text and its task's box, when it holds one.
+    fn task_box(&self, number: usize) -> Option<TaskBox> {
+        #[cfg(test)]
+        self.task_memo.reads.set(self.task_memo.reads.get() + 1);
+        let text = self.editor.line_text(number)?;
+        // Every box opens with one; the lines above are scanned only for a
+        // line that might hold one.
+        if !text.contains('[') {
+            return None;
+        }
+        let box_ = self
+            .editor
+            .spans_at(number)
+            .spans
+            .iter()
+            .find_map(|span| match span.kind {
+                SpanKind::Box(task) => Some(task),
+                _ => None,
+            })?;
+        Some((text, box_))
     }
 
     /// The timer that looks for a new day: only while tasks are on.
@@ -611,5 +728,171 @@ mod tests {
         }
         let preferences = Preferences::load(None);
         assert!(!preferences.tasks && preferences.settings.warnings.is_empty());
+    }
+
+    /// A note of task lines, read by the status bar's task line.
+    const FOOTER_NOTE: &str = "# Status bar\n\
+        \n\
+        - [/] Draft the cutover runbook @alice.chen ⏫ 📅 2026-11-23\n\
+        \x20 still the same item, on its next line\n\
+        - [ ] Send the deck @sam @priya 🔼 📅 2026-11-16\n\
+        Not a task line.\n\
+        ```\n\
+        - [ ] In a fence\n\
+        ```\n\
+        > - [x] Quoted 📅 2026-11-12 ✅ 2026-11-16";
+
+    /// The app on `engine` with `tasks`, today pinned to Thursday 19
+    /// November 2026 and [`FOOTER_NOTE`] in its editor.
+    fn footer_app(engine: &str, tasks: &str) -> (tempfile::TempDir, App) {
+        let (directory, mut app) = app(&format!("editor-engine = {engine}\ntasks = {tasks}\n"));
+        app.clock = Clock::new(Some(date("2026-11-19")));
+        app.sync_task_options();
+        app.editor.replace_text(FOOTER_NOTE, false);
+        (directory, app)
+    }
+
+    /// The caret's task line as the footer shows it, with the caret on
+    /// `line`.
+    fn footer_at(app: &mut App, line: usize) -> Option<String> {
+        app.editor.move_cursor(iced::widget::text_editor::Cursor {
+            position: iced::widget::text_editor::Position { line, column: 3 },
+            selection: None,
+        });
+        app.caret_task().map(|summary| summary.text())
+    }
+
+    #[test]
+    fn the_footer_spells_out_the_caret_lines_task_on_both_engines() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = footer_app(engine, "on");
+            assert_eq!(
+                footer_at(&mut app, 2).as_deref(),
+                Some("Doing · due Mon 23 Nov, in 4 days · ⏫ High · @alice.chen"),
+                "{engine}"
+            );
+            // The item's next line is not the task's own.
+            assert_eq!(footer_at(&mut app, 3), None, "{engine}");
+            let late = footer_at(&mut app, 4);
+            assert_eq!(
+                late.as_deref(),
+                Some("Open · due Mon 16 Nov, 3 days overdue · 🔼 Medium · @sam @priya"),
+                "{engine}"
+            );
+            assert!(app.caret_task().is_some_and(|summary| summary.overdue()));
+            for line in [0, 1, 5, 6, 7, 8] {
+                assert_eq!(footer_at(&mut app, line), None, "{engine} line {line}");
+            }
+            assert_eq!(
+                footer_at(&mut app, 9).as_deref(),
+                Some("Done · due Thu 12 Nov · yours · done Mon 16 Nov"),
+                "{engine}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_footers_relative_dates_follow_the_day_change() {
+        let (_directory, mut app) = footer_app("advanced", "on");
+        let due = |app: &mut App| {
+            footer_at(app, 2)
+                .unwrap()
+                .split(" · ")
+                .nth(1)
+                .map(str::to_owned)
+        };
+        assert_eq!(due(&mut app).as_deref(), Some("due Mon 23 Nov, in 4 days"));
+        app.pin_today(date("2026-11-22"));
+        assert_eq!(due(&mut app).as_deref(), Some("due Mon 23 Nov, tomorrow"));
+        app.pin_today(date("2026-11-25"));
+        assert_eq!(
+            due(&mut app).as_deref(),
+            Some("due Mon 23 Nov, 2 days overdue")
+        );
+    }
+
+    #[test]
+    fn with_tasks_off_the_footer_has_no_task() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = footer_app(engine, "off");
+            for line in 0..10 {
+                assert_eq!(footer_at(&mut app, line), None, "{engine} line {line}");
+            }
+        }
+    }
+
+    /// The line found for the footer is kept, and the task spelled out: a
+    /// view with nothing changed reads and formats nothing, and an edit, a
+    /// caret move, a note switch, an engine change and tasks turning off
+    /// each read afresh. A day change formats again without a read, and so
+    /// moves the relative date.
+    #[test]
+    fn the_footers_task_is_read_and_spelled_out_once_until_something_changes() {
+        use iced::widget::text_editor::{Action, Edit, Motion};
+        let (_directory, mut app) = footer_app("advanced", "on");
+        let counts = |app: &App| (app.task_memo.reads.get(), app.task_memo.formats.get());
+        let example = "Doing · due Mon 23 Nov, in 4 days · ⏫ High · @alice.chen";
+        assert_eq!(footer_at(&mut app, 2).as_deref(), Some(example));
+        assert_eq!(counts(&app), (1, 1));
+        for _ in 0..3 {
+            assert_eq!(
+                app.caret_task().map(|summary| summary.text()).as_deref(),
+                Some(example)
+            );
+        }
+        assert_eq!(counts(&app), (1, 1), "nothing changed: no read, no format");
+        // A miss is kept too.
+        assert_eq!(footer_at(&mut app, 5), None);
+        assert_eq!(app.caret_task(), None);
+        assert_eq!(counts(&app), (2, 1), "a caret move, and a miss kept");
+        // The same line again after a move away is read again.
+        assert!(footer_at(&mut app, 2).is_some());
+        assert_eq!(counts(&app), (3, 2));
+        app.pin_today(date("2026-11-22"));
+        assert_eq!(
+            app.caret_task()
+                .map(|summary| summary.pieces[1].text.clone())
+                .as_deref(),
+            Some("due Mon 23 Nov, tomorrow")
+        );
+        assert_eq!(
+            counts(&app),
+            (3, 3),
+            "a day change formats, and reads no line"
+        );
+        assert!(app.caret_task().is_some());
+        assert_eq!(counts(&app), (3, 3));
+        // An edit at the line's end: the caret stays on it, and it is read
+        // again.
+        app.editor.perform(Action::Move(Motion::End));
+        assert!(app.caret_task().is_some());
+        assert_eq!(counts(&app), (3, 3), "a move along the line keeps its task");
+        assert!(app.editor.perform(Action::Edit(Edit::Insert('z'))));
+        assert_eq!(app.editor.cursor().position.line, 2);
+        assert!(app.caret_task().is_some());
+        assert_eq!(counts(&app), (4, 4), "an edit");
+        assert!(app.caret_task().is_some());
+        assert_eq!(counts(&app), (4, 4));
+        // A note switch puts other text in at the same caret line.
+        app.editor.replace_text("one\ntwo\n- [ ] Three", true);
+        app.editor.move_cursor(iced::widget::text_editor::Cursor {
+            position: iced::widget::text_editor::Position { line: 2, column: 0 },
+            selection: None,
+        });
+        assert_eq!(
+            app.caret_task().map(|summary| summary.text()).as_deref(),
+            Some("Open · yours")
+        );
+        assert_eq!(counts(&app), (5, 5), "a note switch");
+        let text = app.editor.text();
+        assert!(app
+            .editor
+            .set_backend(wren_editor::BackendKind::Iced, &text));
+        assert!(app.caret_task().is_some());
+        assert_eq!(counts(&app), (6, 6), "an engine change");
+        // The editor reading boxes as with tasks off gives no task spans.
+        app.editor.set_tasks(None);
+        assert_eq!(app.caret_task(), None);
+        assert_eq!(counts(&app), (7, 6), "the boxes read changed");
     }
 }

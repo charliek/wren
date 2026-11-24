@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iced::theme::Mode;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, responsive, row, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
 use wren_core::model::{GroupId, NoteId, SectionId};
 use wren_core::ops::{Op, Session};
@@ -30,6 +30,7 @@ mod navigation;
 mod palette;
 mod preferences;
 mod spelling;
+mod task_footer;
 mod tasks;
 mod workspaces;
 
@@ -57,6 +58,10 @@ pub struct App {
     preferences: preferences::Preferences,
     spelling: spelling::Spelling,
     clock: tasks::Clock,
+    /// What the status bar's task line last found; see `App::caret_task`.
+    task_memo: tasks::TaskMemo,
+    /// The footers' measured label widths; see `task_footer::Widths`.
+    label_widths: task_footer::Widths,
     editor: EditorView,
     /// The open note as a board, when it is one and its text parses; see
     /// `board::Surface`. The editor is empty meanwhile.
@@ -294,6 +299,10 @@ pub enum Message {
     ),
 }
 
+/// The evaluation editor's text size: iced's default, which its footer's
+/// labels take.
+const EVALUATION_TEXT: f32 = 16.0;
+
 /// How long the footer's word count may lag the text. Counting reads the
 /// whole note, too slow in a debug build to repeat on every keystroke.
 const WORD_COUNT_DELAY: Duration = Duration::from_millis(250);
@@ -374,6 +383,8 @@ impl App {
             clock: tasks::Clock::new(options.today),
             #[cfg(not(feature = "smoke-test"))]
             clock: tasks::Clock::new(None),
+            task_memo: tasks::TaskMemo::default(),
+            label_widths: task_footer::Widths::default(),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
             board_error: None,
@@ -1014,30 +1025,65 @@ impl App {
                 .view(style, palette, self.editor_measure())
                 .map(Message::Editor),
         );
-        let cursor = self.editor.cursor();
+        // With tasks on, the footer learns its width, to fit the caret's
+        // task in; its height is then set to the one its text gives it.
         body = body.push(
-            container(
-                row![
-                    text(format!(
-                        "Markdown · {} lines · {} words",
-                        self.editor.line_count(),
-                        self.words
-                    )),
-                    iced::widget::space::horizontal(),
-                    text(format!(
-                        "Ln {}, byte col {}",
-                        cursor.position.line + 1,
-                        cursor.position.column + 1
-                    ))
-                    .font(fonts::EDITOR),
-                    text("Not saved · spike").color(theme::color(colors.warning)),
-                ]
-                .spacing(20),
-            )
+            if self.preferences.tasks {
+                container(responsive(move |size| {
+                    self.evaluation_footer(Some(size.width))
+                }))
+                .height(EVALUATION_TEXT * 1.3 + 2.0 * 8.0)
+            } else {
+                container(self.evaluation_footer(None))
+            }
             .padding([8, 16])
             .width(Fill),
         );
         self.palette_view(body.width(Fill).height(Fill).into())
+    }
+
+    /// The evaluation editor's footer row, `width` wide inside its insets
+    /// when the caret's task may show in it.
+    fn evaluation_footer(&self, width: Option<f32>) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let cursor = self.editor.cursor();
+        let position = format!(
+            "Ln {}, byte col {}",
+            cursor.position.line + 1,
+            cursor.position.column + 1
+        );
+        let saved = "Not saved · spike";
+        // The caret's task after the line count, in the room the rest
+        // leaves, as under a note.
+        let task = width.and_then(|width| {
+            let summary = self.caret_task()?;
+            let counts = format!("Markdown · {} lines", self.editor.line_count());
+            let label = |content: &str, font| self.label_widths.of(content, EVALUATION_TEXT, font);
+            let room = width
+                - label(&counts, fonts::UI)
+                - label(&position, fonts::EDITOR)
+                - label(saved, fonts::UI)
+                - 3.0 * 20.0;
+            Some((counts, self.task_line(&summary, room, EVALUATION_TEXT)?))
+        });
+        let (counts, middle) = task.unwrap_or_else(|| {
+            (
+                format!(
+                    "Markdown · {} lines · {} words",
+                    self.editor.line_count(),
+                    self.words
+                ),
+                iced::widget::space::horizontal().into(),
+            )
+        });
+        row![
+            text(counts),
+            middle,
+            text(position).font(fonts::EDITOR),
+            text(saved).color(theme::color(colors.warning)),
+        ]
+        .spacing(20)
+        .into()
     }
 
     #[cfg(feature = "smoke-test")]

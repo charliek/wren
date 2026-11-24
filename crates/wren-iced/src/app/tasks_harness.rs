@@ -1,9 +1,10 @@
 //! The task requests of the test harness (discovery/tasks-build.md §1):
-//! `tasks.get`, the caret line's task model and how the editor draws its
-//! tokens, the effective `tasks` setting and today; and `tasks.set_today`,
-//! which pins the clock. With tasks off every request but `tasks.get` is
-//! refused, and `tasks.get` says only that they are off, so a lane with the
-//! setting off can assert the gate.
+//! `tasks.get`, the caret line's task model, how the editor draws its
+//! tokens and how the status bar spells the task out (`footer`, `null` off
+//! a task line), the effective `tasks` setting and today; and
+//! `tasks.set_today`, which pins the clock. With tasks off every request
+//! but `tasks.get` is refused, and `tasks.get` says only that they are off,
+//! so a lane with the setting off can assert the gate.
 
 use std::sync::Arc;
 
@@ -13,7 +14,6 @@ use wren_markdown::date::Date;
 use wren_markdown::span::SpanKind;
 use wren_markdown::task::DateField;
 
-use super::board::Surface;
 use super::test_requests::string;
 use super::{App, Message};
 use crate::test_ipc::Request;
@@ -56,6 +56,14 @@ impl App {
             },
             "line": line,
             "tokens": tokens,
+            "footer": self.caret_task().map(|summary| json!({
+                "text": summary.text(),
+                "overdue": summary.overdue(),
+                "pieces": summary.pieces.iter().map(|piece| json!({
+                    "text": piece.text,
+                    "look": piece.look.name(),
+                })).collect::<Vec<_>>(),
+            })),
         })
     }
 
@@ -77,12 +85,7 @@ impl App {
     /// Both are `null` unless a Markdown note is in the editor, or the
     /// in-memory evaluation text outside a workspace.
     fn caret_line(&self) -> (Value, Value) {
-        let open = !self.workspace_mode
-            || self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.document().is_some());
-        if !open || self.surface() != Surface::Text {
+        if !self.markdown_in_editor() {
             return (Value::Null, Value::Null);
         }
         let number = self.editor.cursor().position.line;

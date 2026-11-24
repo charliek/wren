@@ -366,8 +366,9 @@ def tasks_out(out: Path, engine: str, fonts: str | None) -> Path:
     return out / "tasks" / f"{engine}-{renderer}-{display}-{fonts}"
 
 
-def task_scenes(client, shot_here, engine: str) -> None:
-    """The note of task lines, with the pinned date in force, on `engine`."""
+def task_scenes(client, shot_here, engine: str, resize) -> None:
+    """The note of task lines, with the pinned date in force, on `engine`.
+    `resize` sizes the window (``WIDTHxHEIGHT``); X11 only."""
     state = client.call("tasks.get")
     assert state["tasks"] is True and state["today"] == TASKS_TODAY, state
     assert state["engine"] == engine, (state["engine"], engine)
@@ -377,6 +378,53 @@ def task_scenes(client, shot_here, engine: str) -> None:
     shot_here("task-lines")
     colour_scenes(client, shot_here)
     emoji_scenes(client, shot_here)
+    footer_scenes(client, shot_here, resize)
+
+
+# The windows the tight, cutoff and narrow footer scenes size to; at these
+# widths the browser columns take 624 px, so the editor's footer is the rest.
+# In the tight one (516 px of footer) the task line has room for its first
+# pieces only; the cutoff one's footer (446 px) is just wider than the 440 px
+# below which the footer keeps only the position and the save status, as the
+# narrow one's does.
+TIGHT_WINDOW = "1140x560"
+CUTOFF_WINDOW = "1070x560"
+NARROW_WINDOW = "620x560"
+
+
+def footer_scenes(client, shot_here, resize) -> None:
+    """The status bar's task line (discovery/tasks-build.md item 2.3): the
+    design's example on a doing task, an overdue task, and then, on X11, a
+    window so narrow that the line gives way to the save status. The window
+    is resized last, so the scenes before keep the platform's size. The
+    tight window and the one just above the cutoff in between show the
+    pieces that do not fit dropping whole, from the end."""
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+
+    def footer_at(line: int) -> dict | None:
+        client.call("editor.cursor", {"line": line, "column": 0, "selection": None})
+        return client.call("tasks.get")["footer"]
+
+    client.call("editor.focus")
+    footer = footer_at(2)
+    assert footer["text"] == "Doing · due Mon 23 Nov, in 4 days · ⏫ High · @alice.chen", footer
+    shot_here("task-footer")
+    footer = footer_at(3)
+    assert footer["overdue"] and footer["text"] == \
+        "Open · due Mon 16 Nov, 3 days overdue · 🔼 Medium · @sam @priya", footer
+    shot_here("task-footer-overdue")
+    if display_server() != "x11":
+        print(f"task-footer-narrow: skipped, resizing needs X11 ({display_server()})")
+        return
+    resize(TIGHT_WINDOW)
+    footer_at(2)
+    shot_here("task-footer-tight")
+    resize(CUTOFF_WINDOW)
+    shot_here("task-footer-cutoff")
+    resize(NARROW_WINDOW)
+    shot_here("task-footer-narrow")
 
 
 def colour_scenes(client, shot_here) -> None:
@@ -1244,7 +1292,8 @@ def main() -> int:
                 def shot_tasks(name: str) -> None:
                     shot(app.client, name)
 
-                task_scenes(app.client, shot_tasks, engine)
+                task_scenes(app.client, shot_tasks, engine,
+                            lambda size: window_size(app, size))
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

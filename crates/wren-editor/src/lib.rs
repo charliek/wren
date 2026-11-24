@@ -28,6 +28,7 @@ mod fixtures;
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -239,6 +240,15 @@ pub struct EditorView {
     /// The marks the widget last drew.
     #[cfg(any(test, feature = "test-support"))]
     spell_frame: std::cell::RefCell<SpellFrame>,
+    /// See [`EditorView::revision`].
+    revision: u64,
+}
+
+/// The last revision any editor took; see [`EditorView::revision`].
+static REVISIONS: AtomicU64 = AtomicU64::new(0);
+
+fn next_revision() -> u64 {
+    REVISIONS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 impl EditorView {
@@ -271,6 +281,7 @@ impl EditorView {
             line_clip: None,
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: Default::default(),
+            revision: next_revision(),
         };
         view.refresh_front_matter();
         view
@@ -305,7 +316,20 @@ impl EditorView {
         if tasks != self.tasks {
             self.menu = None;
         }
+        if tasks.is_some() != self.tasks.is_some() {
+            // The boxes read change, and with them what a line is.
+            self.revision = next_revision();
+        }
         self.tasks = tasks;
+    }
+
+    /// A number that changes whenever the text does, or the way its lines
+    /// are read ([`set_tasks`](Self::set_tasks) turning tasks on or off),
+    /// and that no other editor in the process has had: what a host keys
+    /// what it read from the text by, such as a line's
+    /// [`spans_at`](Self::spans_at).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn tasks(&self) -> Option<wren_markdown::TaskOptions> {
@@ -1113,9 +1137,9 @@ impl EditorView {
         self.spell_frame.borrow().clone()
     }
 
-    /// The text of `line` without its ending, so a host can name the word a
-    /// mark of [`spell_frame`](Self::spell_frame) covers.
-    #[cfg(any(test, feature = "test-support"))]
+    /// The text of `line` without its ending: what a host reads a line's
+    /// [`spans_at`](Self::spans_at) against, or names the word a mark of
+    /// [`spell_frame`](Self::spell_frame) covers by.
     pub fn line_text(&self, line: usize) -> Option<String> {
         self.content
             .with_lines(|lines| lines.get(line).map(|text| text.text.to_string()))
@@ -1494,6 +1518,7 @@ impl EditorView {
 
     /// Refresh what derives from the text after it changed.
     fn text_changed(&mut self) {
+        self.revision = next_revision();
         self.menu = None;
         self.refresh_front_matter();
         self.recompute_find();
@@ -1629,6 +1654,56 @@ fn edit_kind(action: &Action) -> EditKind {
 mod tests {
     use super::*;
     use widget::Content;
+
+    // ── Revision ────────────────────────────────────────────────────────────
+
+    /// The revision moves on every change to the text and to how its lines
+    /// are read, on both engines, and on nothing else; no two editors share
+    /// one.
+    #[test]
+    fn the_revision_moves_with_the_text_and_the_boxes_read() {
+        let today = wren_markdown::date::Date::new(2026, 11, 19).unwrap();
+        for kind in BackendKind::ALL {
+            let mut ev = EditorView::with_backend(kind, "- [ ] one\ntwo");
+            assert_ne!(
+                ev.revision(),
+                EditorView::with_backend(kind, "- [ ] one\ntwo").revision()
+            );
+            let mut last = ev.revision();
+            let mut moved = |ev: &EditorView, what: &str, wanted: bool| {
+                assert_eq!(ev.revision() != last, wanted, "{kind:?}: {what}");
+                last = ev.revision();
+            };
+            ev.move_cursor(Cursor {
+                position: Position { line: 1, column: 1 },
+                selection: None,
+            });
+            ev.perform(Action::Move(Motion::Right));
+            moved(&ev, "caret moves", false);
+            assert!(ev.perform(Action::Edit(Edit::Insert('x'))));
+            moved(&ev, "typing", true);
+            assert!(ev.undo());
+            moved(&ev, "undo", true);
+            assert!(ev.redo());
+            moved(&ev, "redo", true);
+            ev.replace_text("other", false);
+            moved(&ev, "a new text", true);
+            ev.set_tasks(Some(wren_markdown::TaskOptions { today }));
+            moved(&ev, "tasks on", true);
+            ev.set_tasks(Some(wren_markdown::TaskOptions {
+                today: today.add_days(1).unwrap(),
+            }));
+            moved(&ev, "a new day", false);
+            ev.set_tasks(None);
+            moved(&ev, "tasks off", true);
+            let other = match kind {
+                BackendKind::Iced => BackendKind::Owned,
+                BackendKind::Owned => BackendKind::Iced,
+            };
+            assert!(ev.set_backend(other, "other"));
+            moved(&ev, "an engine change", true);
+        }
+    }
 
     // ── Spell check ─────────────────────────────────────────────────────────
 
