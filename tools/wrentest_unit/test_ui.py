@@ -356,10 +356,12 @@ class TestBuildEnv(unittest.TestCase):
                     "LANG": "en_US.UTF-8",
                     "GIO_USE_VFS": "local",
                     "GSETTINGS_BACKEND": "memory",
+                    "FONTCONFIG_FILE": "/tmp/fonts.conf",
                 },
                 clear=True,
             ):
                 env = ui._build_env(Path(d))
+        self.assertEqual(env["FONTCONFIG_FILE"], "/tmp/fonts.conf")
         self.assertEqual(env["DISPLAY"], ":99")
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertEqual(env["LANG"], "en_US.UTF-8")

@@ -45,6 +45,8 @@ _PRESERVE_VARS = frozenset({
     "DBUS_SESSION_BUS_ADDRESS",
     "GIO_USE_VFS", "GSETTINGS_BACKEND",
     "PATH", "LANG",
+    # A font setup to run under: the emoji spike's "no emoji font" cells.
+    "FONTCONFIG_FILE",
 })
 
 _XDG_DIRS = {

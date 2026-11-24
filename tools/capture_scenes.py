@@ -19,7 +19,8 @@ menu with no suggestions, and the menu above a word on the last visible row.
 `--only tasks` opens the task fixture workspace
 (`tools/wrentest/fixtures/tasks/`) on the advanced engine, unless `--engine` or
 `--setting editor-engine=…` says otherwise, with `tasks = on` and today pinned
-to 19 November 2026, and writes to
+to 19 November 2026, shoots its task lines and the emoji spike's note (with
+a caret and a selection on its glyphs), and writes to
 `<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
 scene depends on; `--fonts` names the font setup instead of the check for Noto
 Color Emoji.
@@ -373,6 +374,69 @@ def task_scenes(client, shot_here, engine: str) -> None:
     client.call("editor.cursor", {"line": 2, "column": 21, "selection": None})
     client.call("editor.focus")
     shot_here("task-lines")
+    emoji_scenes(client, shot_here)
+
+
+def emoji_scenes(client, shot_here) -> None:
+    """The emoji spike's note (discovery/tasks-build.md item 0.3): every task
+    glyph bare and with U+FE0F in wrapped task lines, then the caret one
+    Right past a glyph on a wrapped row, and a Shift+Right selection of one
+    glyph. Each step is checked before its shot, with `assert` or without."""
+
+    def expect(actual, wanted, what: str) -> None:
+        if actual != wanted:
+            raise RuntimeError(f"{what}: got {actual!r}, wanted {wanted!r}")
+
+    open_note(client, "Emoji spike.md")
+    lines = wait_for(lambda: (text := client.call("editor.get")["text"]).startswith("# Emoji")
+                     and text, timeout=10, description="the emoji note opens").split("\n")
+
+    def cluster_at(prefix: str, cluster: str, last: bool) -> tuple[int, int, int]:
+        """The line starting with `prefix`, and the byte range of the first
+        or last `cluster` in it."""
+        line = next(i for i, text in enumerate(lines) if text.startswith(prefix))
+        text = lines[line]
+        found = text.rfind(cluster) if last else text.find(cluster)
+        start = len(text[:found].encode("utf-8"))
+        return line, start, start + len(cluster.encode("utf-8"))
+
+    def at(line: int, column: int) -> dict:
+        return {"line": line, "column": column}
+
+    def step(key: str, mods: list[str]) -> dict:
+        return client.call("editor.key", {"key": key, "mods": mods})
+
+    client.call("editor.cursor", {"line": 0, "column": 0, "selection": None})
+    client.call("editor.focus")
+    shot_here("tasks-emoji")
+
+    # The last line's last glyph, so the view scrolls to the lines the first
+    # scene leaves below it. The window's size is the platform's, so check
+    # that the glyph is on a wrapped row: Home there stops at the row's
+    # start, past the line's first glyph, and not at the task's text.
+    lowest = "\u23ec\ufe0f"
+    line, start, end = cluster_at("- [ ] Lowest VS16", lowest, last=True)
+    _, _, first_end = cluster_at("- [ ] Lowest VS16", lowest, last=False)
+    client.call("editor.cursor", {"line": line, "column": start, "selection": None})
+    expect(step("right", [])["cursor"], at(line, end), "one Right over the last U+23EC U+FE0F")
+    row = step("home", [])["cursor"]
+    if row["line"] != line or not first_end < row["column"] <= start:
+        raise RuntimeError(f"the last U+23EC U+FE0F is not on a wrapped row: Home went "
+                           f"to {row!r}, wanted line {line}, a column in "
+                           f"{first_end + 1}..={start}")
+    expect(client.call("editor.cursor", {"line": line, "column": end, "selection": None})
+           ["cursor"], at(line, end), "the caret back after the last U+23EC U+FE0F")
+    shot_here("tasks-emoji-caret")
+
+    # The line has two; Shift+Right from the first selects the first.
+    highest = "\U0001f53a\ufe0f"
+    line, start, end = cluster_at("- [ ] Highest VS16", highest, last=False)
+    client.call("editor.cursor", {"line": line, "column": start, "selection": None})
+    selected = step("right", ["shift"])
+    expect(selected["selected_text"], highest, "Shift+Right over the first U+1F53A U+FE0F")
+    expect((selected["selection"], selected["cursor"]), (at(line, start), at(line, end)),
+           "the selection's anchor and caret")
+    shot_here("tasks-emoji-selection")
 
 
 BOARD_GROUP = "Boards/Samples"

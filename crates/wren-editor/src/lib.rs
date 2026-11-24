@@ -4464,4 +4464,237 @@ mod tests {
             assert_eq!(ev.selected_text().as_deref(), Some("İ"));
         }
     }
+
+    // ── Task emoji ──────────────────────────────────────────────────────────
+
+    /// The task glyphs (discovery/tasks.md §5.2, §5.3 and §5.7), each bare
+    /// and with U+FE0F, in task lines on both engines: the emoji spike,
+    /// discovery/tasks-build.md item 0.3. Whatever font draws a glyph, or
+    /// none, it is one grapheme, so these assert steps and byte offsets,
+    /// never pixels.
+    mod task_emoji {
+        use iced::{Point, Rectangle, Size};
+        use unicode_segmentation::UnicodeSegmentation;
+
+        use super::*;
+
+        const GLYPHS: [&str; 8] = [
+            "\u{1F4C5}", // 📅 due
+            "\u{2705}",  // ✅ done
+            "\u{274C}",  // ❌ cancelled
+            "\u{1F53A}", // 🔺 highest
+            "\u{23EB}",  // ⏫ high
+            "\u{1F53C}", // 🔼 medium
+            "\u{1F53D}", // 🔽 low
+            "\u{23EC}",  // ⏬ lowest
+        ];
+
+        /// Each glyph bare, then with the emoji variation selector.
+        fn clusters() -> impl Iterator<Item = String> {
+            GLYPHS
+                .iter()
+                .flat_map(|glyph| [glyph.to_string(), format!("{glyph}\u{FE0F}")])
+        }
+
+        /// A task line with `cluster` as its due token, and where it is.
+        fn task_line(cluster: &str) -> (String, Range<usize>) {
+            let line = format!("- [ ] Due {cluster} 2026-12-01");
+            let start = line.find(cluster).expect("the cluster");
+            (line, start..start + cluster.len())
+        }
+
+        fn without(line: &str, range: Range<usize>) -> String {
+            format!("{}{}", &line[..range.start], &line[range.end..])
+        }
+
+        fn selecting(range: Range<usize>) -> Cursor {
+            Cursor {
+                position: Position {
+                    line: 0,
+                    column: range.end,
+                },
+                selection: Some(Position {
+                    line: 0,
+                    column: range.start,
+                }),
+            }
+        }
+
+        #[test]
+        fn each_glyph_bare_or_with_its_selector_is_one_grapheme() {
+            for cluster in clusters() {
+                assert_eq!(cluster.graphemes(true).count(), 1, "{cluster:?}");
+            }
+        }
+
+        #[test]
+        fn arrows_step_over_each_glyph_once_and_shift_selects_exactly_it() {
+            let size = Size::new(600.0, 200.0);
+            for kind in BackendKind::ALL {
+                for cluster in clusters() {
+                    let case = format!("{kind:?} {cluster:?}");
+                    let (line, range) = task_line(&cluster);
+                    let mut ev = EditorView::with_backend(kind, &line);
+                    ev.content.lay_out(size);
+                    ev.move_cursor(at(0, range.start));
+                    ev.perform(Action::Move(Motion::Right));
+                    assert_eq!(ev.cursor(), at(0, range.end), "{case}: Right");
+                    ev.perform(Action::Move(Motion::Left));
+                    assert_eq!(ev.cursor(), at(0, range.start), "{case}: Left");
+                    ev.perform(Action::Select(Motion::Right));
+                    assert_eq!(ev.cursor(), selecting(range.clone()), "{case}");
+                    assert_eq!(ev.selected_text().as_deref(), Some(cluster.as_str()));
+                    // From after it, Shift+Left takes the same text.
+                    ev.move_cursor(at(0, range.end));
+                    ev.perform(Action::Select(Motion::Left));
+                    assert_eq!(ev.selected_text().as_deref(), Some(cluster.as_str()));
+                    assert_eq!(ev.text(), line, "{case}: no edit");
+                }
+            }
+        }
+
+        #[test]
+        fn one_backspace_after_or_delete_before_takes_the_whole_glyph() {
+            for kind in BackendKind::ALL {
+                for assist in [true, false] {
+                    for cluster in clusters() {
+                        let case = format!("{kind:?} assist {assist} {cluster:?}");
+                        let (line, range) = task_line(&cluster);
+                        let expected = without(&line, range.clone());
+                        let mut ev = EditorView::with_backend(kind, &line);
+                        ev.set_markdown_assist(assist);
+                        ev.move_cursor(at(0, range.end));
+                        assert!(ev.intent(Intent::Backspace), "{case}");
+                        assert_eq!(ev.text(), expected, "{case}: Backspace");
+                        assert_eq!(ev.cursor(), at(0, range.start), "{case}");
+                        assert!(ev.undo(), "{case}");
+                        assert_eq!(ev.text(), line, "{case}: one undo");
+
+                        ev.move_cursor(at(0, range.start));
+                        assert!(ev.intent(Intent::Delete), "{case}");
+                        assert_eq!(ev.text(), expected, "{case}: Delete");
+                        assert_eq!(ev.cursor(), at(0, range.start), "{case}");
+                    }
+                }
+            }
+        }
+
+        /// The keys as the focused editor routes them, not the actions.
+        #[cfg(feature = "test-support")]
+        #[test]
+        fn the_arrow_and_backspace_keys_do_the_same() {
+            use iced::keyboard::key::Named;
+            use iced::keyboard::{Key, Modifiers};
+
+            fn press(ev: &mut EditorView, key: Named, modifiers: Modifiers) {
+                for message in ev.key_message(Key::Named(key), modifiers) {
+                    match message {
+                        Message::Action(action) => {
+                            ev.perform(action);
+                        }
+                        Message::Intent(intent) => {
+                            ev.intent(intent);
+                        }
+                        other => panic!("{key:?}: {other:?}"),
+                    }
+                }
+            }
+
+            let size = Size::new(600.0, 200.0);
+            for kind in BackendKind::ALL {
+                for cluster in clusters() {
+                    let case = format!("{kind:?} {cluster:?}");
+                    let (line, range) = task_line(&cluster);
+                    let mut ev = EditorView::with_backend(kind, &line);
+                    ev.content.lay_out(size);
+                    ev.move_cursor(at(0, range.start));
+                    press(&mut ev, Named::ArrowRight, Modifiers::empty());
+                    assert_eq!(ev.cursor(), at(0, range.end), "{case}: Right");
+                    press(&mut ev, Named::ArrowLeft, Modifiers::empty());
+                    assert_eq!(ev.cursor(), at(0, range.start), "{case}: Left");
+                    press(&mut ev, Named::ArrowRight, Modifiers::SHIFT);
+                    assert_eq!(ev.cursor(), selecting(range.clone()), "{case}");
+                    ev.move_cursor(at(0, range.end));
+                    press(&mut ev, Named::Backspace, Modifiers::empty());
+                    assert_eq!(ev.text(), without(&line, range.clone()), "{case}");
+                    assert_eq!(ev.cursor(), at(0, range.start), "{case}");
+                }
+            }
+        }
+
+        /// The one rectangle a selection of `range` on line 0 draws.
+        fn drawn(ev: &mut EditorView, range: Range<usize>, size: Size) -> Rectangle {
+            ev.move_cursor(selecting(range.clone()));
+            ev.content.lay_out(size);
+            match ev.content.selection_geometry() {
+                Some(text_editor::Selection::Range(rects)) if rects.len() == 1 => rects[0],
+                other => panic!("{range:?}: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn clicks_land_beside_each_drawn_glyph_and_wrapped_rows_stay_aligned() {
+            // Narrow enough that the second glyph wraps onto a later row.
+            let size = Size::new(200.0, 400.0);
+            for kind in BackendKind::ALL {
+                for cluster in clusters() {
+                    let case = format!("{kind:?} {cluster:?}");
+                    let line = format!(
+                        "- [ ] Due {cluster} 2026-12-01, then words enough to wrap \
+                         this task line under its box {cluster} 2026-12-01"
+                    );
+                    let first = line.find(&cluster).unwrap();
+                    let last = line.rfind(&cluster).unwrap();
+                    let mut ev = EditorView::with_backend(kind, &line);
+                    for start in [first, last] {
+                        let range = start..start + cluster.len();
+                        let rect = drawn(&mut ev, range.clone(), size);
+                        assert!(rect.width > 0.0, "{case}: {rect:?}");
+                        // The left half of the glyph is before it, the right
+                        // half after it. Both engines take a click in whole
+                        // pixels, so each click is a whole pixel inside the
+                        // glyph, at least a pixel from its middle. Whatever
+                        // font draws it, a glyph too narrow for that must
+                        // still land on one of its two sides.
+                        let middle = rect.x + rect.width / 2.0;
+                        let y = rect.center_y().floor();
+                        for (x, column) in [
+                            ((rect.x + 1.0).floor(), range.start),
+                            ((rect.x + rect.width - 1.0).floor(), range.end),
+                        ] {
+                            ev.perform(Action::Click(Point::new(x, y)));
+                            ev.content.lay_out(size);
+                            let landed = ev.cursor();
+                            if (x - middle).abs() >= 1.0 && x >= rect.x && x < rect.x + rect.width {
+                                assert_eq!(landed, at(0, column), "{case}: {start} at {x}");
+                            } else {
+                                assert!(
+                                    landed == at(0, range.start) || landed == at(0, range.end),
+                                    "{case}: {start} at {x} in {rect:?}: {landed:?}"
+                                );
+                            }
+                        }
+                    }
+
+                    // The row the last glyph is on starts under the box, at
+                    // the item's content column, on the advanced engine, which
+                    // hangs wrapped rows, and at the margin on the classic one.
+                    let row = drawn(&mut ev, last..last + cluster.len(), size).y;
+                    assert!(row > 0.0, "{case}: the glyph is on a wrapped row");
+                    let row_start = line
+                        .grapheme_indices(true)
+                        .filter(|(_, grapheme)| !grapheme.trim().is_empty())
+                        .map(|(at, grapheme)| drawn(&mut ev, at..at + grapheme.len(), size))
+                        .find(|rect| rect.y == row)
+                        .expect("the row's first glyph");
+                    let column = match kind {
+                        BackendKind::Owned => "- ".len(),
+                        BackendKind::Iced => 0,
+                    };
+                    let margin = drawn(&mut ev, column..column + 1, size).x;
+                    assert_eq!(row_start.x, margin, "{case}");
+                }
+            }
+        }
+    }
 }
