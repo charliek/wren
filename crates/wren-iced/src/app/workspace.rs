@@ -1067,7 +1067,7 @@ impl App {
         self.cancel_gestures();
         self.palette = None;
         let name = match kind {
-            DialogKind::CreateNote(..) => wren_core::ops::dated_title(),
+            DialogKind::CreateNote(..) => self.today().to_string(),
             DialogKind::Rename(target) => self.item_name(target).unwrap_or_default().into(),
             _ => String::new(),
         };

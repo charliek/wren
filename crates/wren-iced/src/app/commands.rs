@@ -844,6 +844,13 @@ impl CommandId {
         )
     }
 
+    /// Whether the command exists only while the `tasks` setting is on:
+    /// with it off it is not listed anywhere, its key is unbound, and it
+    /// does not run.
+    pub fn tasks(self) -> bool {
+        false
+    }
+
     pub fn parse(key: &str) -> Option<Self> {
         definitions()
             .find(|definition| definition.key == key)
@@ -978,7 +985,7 @@ impl App {
 
     pub(super) fn command_enabled(&self, id: CommandId) -> bool {
         use CommandId::*;
-        if self.loading.is_some() {
+        if self.loading.is_some() || (id.tasks() && !self.preferences.tasks) {
             return false;
         }
         match id {
@@ -1190,7 +1197,7 @@ impl App {
             NewDatedNote => {
                 let outcome = self.process_core(Op::CreateNote {
                     group: self.selected_group.expect("enabled group"),
-                    title: wren_core::ops::dated_title(),
+                    title: self.today().to_string(),
                     kind: NoteKind::Markdown,
                 });
                 if outcome.processed.disposition.committed() {

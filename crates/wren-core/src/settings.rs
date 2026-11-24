@@ -173,6 +173,9 @@ pub struct Settings {
     pub board_hints: bool,
     /// Whether a board shows its tool dock.
     pub board_toolbar: bool,
+    /// Whether task lines get their statuses, dates and commands, read
+    /// at launch.
+    pub tasks: bool,
     /// When the tool dock's buttons show their keys.
     pub board_key_badges: KeyBadges,
     /// `(trigger, action)` in file order; later lines win.
@@ -196,6 +199,7 @@ impl Default for Settings {
             board_hints: true,
             board_toolbar: true,
             board_key_badges: KeyBadges::Hold,
+            tasks: false,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -308,6 +312,10 @@ impl Settings {
                 },
                 "board-key-badges" => match KeyBadges::parse(value) {
                     Some(badges) => settings.board_key_badges = badges,
+                    None => invalid(),
+                },
+                "tasks" => match parse_bool(value) {
+                    Some(enabled) => settings.tasks = enabled,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -568,6 +576,11 @@ pub const TEMPLATE: &str = "\
 # them while Space is held on the board; on always; off never.
 # board-key-badges = hold
 
+# Tasks: statuses, due dates, priorities and owners on task lines, with
+# their commands. Still being built; off, task lines are edited as before.
+# Applies when Wren restarts.
+# tasks = off
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -784,6 +797,37 @@ mod tests {
         let off = with_value(TEMPLATE, "boards", "off");
         assert!(!Settings::parse(&off).boards);
         assert!(off.contains("\n# boards = on\n") && off.ends_with("boards = off\n"));
+    }
+
+    #[test]
+    fn tasks_default_off_and_parse_booleans() {
+        assert!(!Settings::default().tasks);
+        assert!(!Settings::parse("").tasks);
+        for (value, enabled) in [
+            ("on", true),
+            ("yes", true),
+            ("true", true),
+            ("ON", true),
+            ("\"on\"", true),
+            ("off", false),
+            ("no", false),
+            ("false", false),
+        ] {
+            let settings = Settings::parse(&format!("tasks = {value}\n"));
+            assert_eq!(settings.tasks, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        for bad in ["sometimes", "1", ""] {
+            let settings = Settings::parse(&format!("tasks = on\ntasks = {bad}\n"));
+            assert!(settings.tasks, "{bad:?} keeps the earlier value");
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid tasks value"));
+        }
+        assert!(TEMPLATE.contains("\n# tasks = off\n"));
+        assert!(!Settings::parse(TEMPLATE).tasks);
+        let on = with_value(TEMPLATE, "tasks", "on");
+        assert!(Settings::parse(&on).tasks);
+        assert!(on.contains("\n# tasks = off\n") && on.ends_with("tasks = on\n"));
     }
 
     #[test]

@@ -16,6 +16,13 @@ wider than its column. `--only spell` (with `--engine advanced`) turns spell
 check on, seeds `words.txt` and shoots the spell-check acceptance note: its
 marks with one hidden at the caret, the suggestions menu under a word, the
 menu with no suggestions, and the menu above a word on the last visible row.
+`--only tasks` opens the task fixture workspace
+(`tools/wrentest/fixtures/tasks/`) on the advanced engine, unless `--engine` or
+`--setting editor-engine=…` says otherwise, with `tasks = on` and today pinned
+to 19 November 2026, and writes to
+`<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
+scene depends on; `--fonts` names the font setup instead of the check for Noto
+Color Emoji.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -311,6 +318,61 @@ def spell_scenes(client, shot_here) -> None:
     assert menu["bounds"]["y"] + menu["bounds"]["height"] <= word["rects"][0]["y"], (menu, word)
     shot_here("spell-menu-above")
     close_menu()
+
+
+TASKS_FIXTURE = Path(__file__).resolve().parent / "wrentest" / "fixtures" / "tasks" / "workspace"
+# Every task scene pins the design page's day, a Thursday.
+TASKS_TODAY = "2026-11-19"
+
+
+def display_server() -> str:
+    """The display server the app will open its window on. winit picks
+    Wayland whenever `WAYLAND_DISPLAY` is set and not empty, X11 otherwise
+    (Wren forces neither); `WAYLAND_SOCKET` never reaches the app, since the
+    harness passes only `WAYLAND_DISPLAY` and `DISPLAY` through."""
+    if sys.platform == "darwin":
+        return "macos"
+    return "wayland" if os.environ.get("WAYLAND_DISPLAY") else "x11"
+
+
+def last_value(settings: str, key: str) -> str | None:
+    """The value the last `key` line of `settings` gives, as Wren reads it."""
+    value = None
+    for line in settings.splitlines():
+        name, separator, rest = line.partition("=")
+        if separator and not line.lstrip().startswith("#") and name.strip() == key:
+            value = rest.strip().strip('"')
+    return value
+
+
+def tasks_out(out: Path, engine: str, fonts: str | None) -> Path:
+    """`<out>/tasks/<engine>-<renderer>-<display>-<fonts>`: a task scene
+    depends on the renderer, the display server and whether an emoji font
+    is installed, so each setup keeps its own PNGs."""
+    renderer = os.environ.get("ICED_BACKEND", "default")
+    display = display_server()
+    if fonts is None:
+        if sys.platform == "darwin":
+            fonts = "system"
+        else:
+            try:
+                families = subprocess.run(["fc-list", ":", "family"], capture_output=True,
+                                          text=True, check=True).stdout
+            except (OSError, subprocess.CalledProcessError):
+                families = ""
+            fonts = "noto-emoji" if "Noto Color Emoji" in families else "no-emoji"
+    return out / "tasks" / f"{engine}-{renderer}-{display}-{fonts}"
+
+
+def task_scenes(client, shot_here, engine: str) -> None:
+    """The note of task lines, with the pinned date in force, on `engine`."""
+    state = client.call("tasks.get")
+    assert state["tasks"] is True and state["today"] == TASKS_TODAY, state
+    assert state["engine"] == engine, (state["engine"], engine)
+    open_note(client, "Task lines.md")
+    client.call("editor.cursor", {"line": 2, "column": 21, "selection": None})
+    client.call("editor.focus")
+    shot_here("task-lines")
 
 
 BOARD_GROUP = "Boards/Samples"
@@ -1003,32 +1065,44 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
-    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic",
-                        help="the editor-engine setting")
+    parser.add_argument("--engine", choices=("classic", "advanced"),
+                        help="the editor-engine setting: classic, or advanced for --only tasks")
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown", "spell", "boards"),
+    parser.add_argument("--only", choices=("markdown", "spell", "boards", "tasks"),
                         help="shoot only these scenes")
+    parser.add_argument("--fonts", metavar="LABEL",
+                        help="with --only tasks, name the font setup in the output path "
+                             "(default: whether Noto Color Emoji is installed)")
     parser.add_argument("--window", metavar="WIDTHxHEIGHT",
                         help="with --only boards, resize the window first (X11 only); "
                              "pair it with --label")
     args = parser.parse_args()
+    if args.engine is None:
+        args.engine = "advanced" if args.only == "tasks" else "classic"
+    if args.fonts and args.only != "tasks":
+        parser.error("--fonts goes with --only tasks")
     if args.only == "spell" and args.engine != "advanced":
         parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
     if args.window and (args.only != "boards" or sys.platform == "darwin"
                         or "x" not in args.window):
         parser.error("--window takes WIDTHxHEIGHT, with --only boards, on X11")
-    out = args.out if args.engine == "classic" else args.out / args.engine
-    if args.label:
-        out = out / args.label
-    out = (out / args.theme).resolve()
     settings = f"editor-engine = {args.engine}\n"
     for setting in args.setting:
         key, separator, value = setting.partition("=")
         if not separator:
             parser.error(f"--setting {setting!r} is not KEY=VALUE")
         settings += f"{key.strip()} = {value.strip()}\n"
+    # A `--setting editor-engine=…` comes later in the file, so it wins.
+    engine = last_value(settings, "editor-engine")
+    if args.only == "tasks":
+        out = tasks_out(args.out, engine, args.fonts)
+    else:
+        out = args.out if engine == "classic" else args.out / engine
+    if args.label:
+        out = out / args.label
+    out = (out / args.theme).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     def settled(client) -> bool:
@@ -1065,6 +1139,26 @@ def main() -> int:
 
                 board_scenes(app.client, shot_board, out, workspace,
                              (app.settings_path, settings + "boards = on\n"))
+            return 0
+        if args.only == "tasks":
+            workspace = Path(temp).resolve() / "tasks"
+            shutil.copytree(TASKS_FIXTURE, workspace)
+            # Half an hour from an hour boundary, so "Edited" reads the same
+            # through the capture.
+            mtime = time.time() - 1.5 * 3600
+            for path in workspace.rglob("*.md"):
+                os.utime(path, (mtime, mtime))
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "tasks = on\n", today=TASKS_TODAY) as app:
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_tasks(name: str) -> None:
+                    shot(app.client, name)
+
+                task_scenes(app.client, shot_tasks, engine)
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

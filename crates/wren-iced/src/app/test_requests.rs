@@ -78,6 +78,9 @@ impl App {
             "shortcut" => {
                 // A key binding firing, with its active-column scoping.
                 let id = CommandId::parse(string(params, "id")?).ok_or("Unknown command ID")?;
+                if id.tasks() && !self.preferences.tasks {
+                    return Err("The command is unavailable".into());
+                }
                 if id.scope() == Scope::Editor {
                     // The editor's key policy routes the bound key, and only
                     // a focused editor sees it.
@@ -338,6 +341,7 @@ impl App {
             | "board.pinch" => {
                 return self.board_request(request)
             }
+            "tasks.get" | "tasks.set_today" => return self.tasks_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -1225,7 +1229,7 @@ fn parent_json(parent: Parent) -> Value {
     }
 }
 
-fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
+pub(super) fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
     params
         .get(name)
         .and_then(Value::as_str)
@@ -1360,9 +1364,11 @@ impl App {
             rows: &'static [Row],
             kind: Kind,
             keymap: &wren_core::keybind::Keymap,
+            tasks: bool,
             enabled: &mut dyn FnMut(&str) -> bool,
         ) -> Vec<Value> {
             rows.iter()
+                .filter(|row| menu::row_built(row, tasks))
                 .map(|row| match *row {
                     Row::Command(key, title) => json!({
                         "key": key,
@@ -1376,7 +1382,7 @@ impl App {
                     Row::Separator => json!({"separator": true}),
                     Row::Submenu(title, inner) => json!({
                         "submenu": title,
-                        "items": listed(inner, kind, keymap, enabled),
+                        "items": listed(inner, kind, keymap, tasks, enabled),
                     }),
                 })
                 .collect()
@@ -1389,7 +1395,13 @@ impl App {
                     Kind::Board => "board",
                     Kind::Window => "window",
                 };
-                let items = listed(spec.rows, spec.kind, &self.preferences.keymap, &mut enabled);
+                let items = listed(
+                    spec.rows,
+                    spec.kind,
+                    &self.preferences.keymap,
+                    self.preferences.tasks,
+                    &mut enabled,
+                );
                 json!({"title": spec.title, "kind": kind, "items": items})
             })
             .collect();

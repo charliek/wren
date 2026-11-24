@@ -312,6 +312,40 @@ impl MarkdownHighlighter {
     }
 }
 
+/// One line's spans and decoration.
+#[cfg(feature = "test-support")]
+pub type HighlightedLine = (Vec<(Range<usize>, Highlight)>, LineDecor);
+
+/// Every line of `text`, split at `\n`, as a fresh highlighter run gives it
+/// with `palette` and `font`: its spans and its decoration.
+#[cfg(feature = "test-support")]
+pub fn highlight_lines(text: &str, palette: Palette, font: Font) -> Vec<HighlightedLine> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let settings = Settings {
+        palette,
+        font,
+        front_matter_end: block::front_matter_end(&lines[..]),
+    };
+    highlight_all(&lines[..], settings)
+}
+
+/// Every line of `lines` as a fresh highlighter with `settings` gives it.
+#[cfg(feature = "test-support")]
+pub(crate) fn highlight_all<L: wren_markdown::Lines + ?Sized>(
+    lines: &L,
+    settings: Settings,
+) -> Vec<HighlightedLine> {
+    let mut highlighter = <MarkdownHighlighter as highlighter::Highlighter>::new(&settings);
+    (0..lines.line_count())
+        .map(|index| {
+            let spans =
+                highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(index))
+                    .collect();
+            (spans, highlighter.decor[index].clone())
+        })
+        .collect()
+}
+
 /// The prose ranges of line `index` of `lines`, from a fresh highlighter run
 /// over the lines down to it, for a caller that cannot see the widget's own.
 /// Prose depends on neither colour nor font, so only `front_matter_end` of

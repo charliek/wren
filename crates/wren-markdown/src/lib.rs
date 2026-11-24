@@ -12,6 +12,7 @@
 use std::ops::Range;
 
 pub mod block;
+pub mod date;
 pub mod edit;
 pub mod outline;
 

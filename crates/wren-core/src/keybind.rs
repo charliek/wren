@@ -414,6 +414,13 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
     bindings
 }
 
+/// Default `(trigger, action)` pairs of the task commands, which the keymap
+/// takes only while the `tasks` setting is on; with it off the keymap is the
+/// one without them, so their triggers do what they did before.
+pub fn default_task_bindings(_platform: Platform) -> Vec<(String, &'static str)> {
+    Vec::new()
+}
+
 /// The resolved trigger → action tables, one per [`Layer`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Keymap {
@@ -645,6 +652,13 @@ mod tests {
             Platform::Linux => [("ctrl+f", "navigation.find"), ("ctrl+q", "app.quit")],
         });
         bindings
+    }
+
+    #[test]
+    fn no_task_command_has_a_default_key_yet() {
+        for platform in [Platform::Mac, Platform::Linux] {
+            assert!(default_task_bindings(platform).is_empty(), "{platform:?}");
+        }
     }
 
     #[test]

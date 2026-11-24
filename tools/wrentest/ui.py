@@ -28,7 +28,7 @@ from typing import Any
 
 from tools.wrentest.client import Client, ProtocolError, RemoteError, TransportError
 
-__all__ = ["WrenApp", "spell_setting", "wait_for"]
+__all__ = ["WrenApp", "spell_setting", "tasks_setting", "wait_for"]
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -131,6 +131,26 @@ def _boards_setting(settings: str | None) -> str | None:
     return _with_setting(settings, "boards", value)
 
 
+def tasks_setting() -> str | None:
+    """The lane's ``tasks`` value: ``WRENTEST_TASKS``, or ``None`` unset."""
+    value = os.environ.get("WRENTEST_TASKS", "")
+    if value and value not in ("off", "on"):
+        raise ValueError(f"WRENTEST_TASKS must be off or on, got {value!r}")
+    return value or None
+
+
+def _tasks_setting(settings: str | None) -> str | None:
+    """*settings* with the ``tasks`` line ``WRENTEST_TASKS`` asks for.
+
+    Like ``WRENTEST_BOARDS``: ``off`` or ``on`` writes that setting into
+    every launch's ``config.conf``, unset adds nothing, and settings that
+    already name ``tasks`` are left as they are, since a task case sets it
+    itself.
+    """
+    value = tasks_setting()
+    return settings if value is None else _with_setting(settings, "tasks", value)
+
+
 def _with_setting(settings: str | None, key: str, value: str) -> str:
     """*settings* with ``key = value`` appended, unless a line names *key*."""
     if settings is not None and re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=", settings):
@@ -196,8 +216,8 @@ class WrenApp:
         launch, with ``spell-check = <WRENTEST_SPELL>`` appended unless it
         names ``spell-check`` itself; without it the file holds only that
         line. ``WRENTEST_BOARDS`` adds a ``boards`` line after it unless the
-        text has one. Restarts keep whatever the app has written there
-        since.
+        text has one, and ``WRENTEST_TASKS`` a ``tasks`` line after that.
+        Restarts keep whatever the app has written there since.
     lane_settings:
         Set to ``False`` to add neither lane line: ``config.conf`` is then
         the test's own text, and is not written at all without it, as a
@@ -205,6 +225,9 @@ class WrenApp:
     words:
         Text for ``words.txt`` beside ``config.conf``, written before the
         first launch.
+    today:
+        A ``YYYY-MM-DD`` date the app takes as today, through
+        ``WREN_TEST_TODAY``, on every launch.
     """
 
     def __init__(
@@ -218,6 +241,7 @@ class WrenApp:
         settings: str | None = None,
         words: str | None = None,
         lane_settings: bool = True,
+        today: str | None = None,
     ) -> None:
         _validate_positive_finite(readiness_timeout, "readiness_timeout")
         if type(evaluation) is not bool:
@@ -228,6 +252,9 @@ class WrenApp:
             raise ValueError("words must be str or None")
         if type(lane_settings) is not bool:
             raise ValueError("lane_settings must be bool")
+        if today is not None and (not isinstance(today, str)
+                                  or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", today)):
+            raise ValueError("today must be a YYYY-MM-DD string or None")
         self._binary = _find_binary()
         env_artifacts = os.environ.get("WREN_TEST_ARTIFACT_DIR")
         self._artifacts_base = (
@@ -240,9 +267,10 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
-        self._settings = (_boards_setting(_spell_setting(settings)) if lane_settings
-                          else settings)
+        self._settings = (_tasks_setting(_boards_setting(_spell_setting(settings)))
+                          if lane_settings else settings)
         self._words = words
+        self._today = today
 
         self._ownroot: Path | None = None
         self._socket_path: Path | None = None
@@ -457,6 +485,8 @@ class WrenApp:
         home_root = self._ownroot / "home_root"
         home_root.mkdir(mode=0o700, exist_ok=True)
         env = _build_env(home_root)
+        if self._today is not None:
+            env["WREN_TEST_TODAY"] = self._today
 
         self._artifacts_base.mkdir(parents=True, exist_ok=True)
         stamp = f"{time.monotonic_ns()}-{self._launch_counter}"

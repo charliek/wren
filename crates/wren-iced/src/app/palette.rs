@@ -506,6 +506,7 @@ impl App {
                     for definition in definitions().filter(|definition| {
                         definition.group == group
                             && (self.preferences.boards || !definition.id.boards())
+                            && (self.preferences.tasks || !definition.id.tasks())
                             && (board || definition.scope != CommandScope::Board)
                             // On a board Find and Outline open the jump
                             // palette, which `board.jump` names.
@@ -749,7 +750,10 @@ impl App {
             }
             Mode::ItemActions(item) => {
                 if let Some(target) = source {
-                    for id in item_commands(item) {
+                    for id in item_commands(item)
+                        .iter()
+                        .filter(|id| self.preferences.tasks || !id.tasks())
+                    {
                         let definition = definitions()
                             .find(|entry| entry.id == *id)
                             .expect("item command definition");

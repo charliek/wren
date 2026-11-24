@@ -165,6 +165,17 @@ pub fn menus(boards: bool) -> impl Iterator<Item = &'static Menu> {
         .filter(move |menu| boards || menu.kind != Kind::Board)
 }
 
+/// Whether a row is built while the `tasks` setting is `tasks`: a command
+/// that exists only with it on is left out with it off.
+pub fn row_built(row: &Row, tasks: bool) -> bool {
+    match row {
+        Row::Command(key, _) => {
+            tasks || !crate::app::commands::CommandId::parse(key).is_some_and(|id| id.tasks())
+        }
+        Row::Native(_) | Row::Separator | Row::Submenu(..) => true,
+    }
+}
+
 /// Every command row under `rows`, submenus included, in order.
 #[cfg(test)]
 pub fn commands(rows: &'static [Row]) -> Vec<(&'static str, &'static str)> {
@@ -265,6 +276,19 @@ mod tests {
         for (menu, key, _) in all_commands() {
             let id = CommandId::parse(key).unwrap();
             assert_eq!(id.boards(), menu.kind == Kind::Board, "{key}");
+        }
+    }
+
+    #[test]
+    fn with_tasks_off_no_row_reaches_a_task_command() {
+        for (menu, key, title) in all_commands() {
+            let id = CommandId::parse(key).unwrap();
+            let row = Row::Command(key, title);
+            assert!(row_built(&row, true), "{key}");
+            assert_eq!(row_built(&row, false), !id.tasks(), "{} {key}", menu.title);
+        }
+        for row in [Row::Separator, Row::Native(Native::About)] {
+            assert!(row_built(&row, false));
         }
     }
 

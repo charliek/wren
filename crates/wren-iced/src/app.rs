@@ -30,6 +30,7 @@ mod navigation;
 mod palette;
 mod preferences;
 mod spelling;
+mod tasks;
 mod workspaces;
 
 use crate::panes::Widths;
@@ -40,6 +41,8 @@ use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
 mod board_harness;
+#[cfg(feature = "smoke-test")]
+mod tasks_harness;
 #[cfg(feature = "smoke-test")]
 mod test_requests;
 
@@ -53,6 +56,7 @@ pub struct App {
     preview: preferences::Preview,
     preferences: preferences::Preferences,
     spelling: spelling::Spelling,
+    clock: tasks::Clock,
     editor: EditorView,
     /// The open note as a board, when it is one and its text parses; see
     /// `board::Surface`. The editor is empty meanwhile.
@@ -217,6 +221,8 @@ pub enum Message {
     Drag(u64, crate::drag::DragEvent),
     Resize(u64, crate::panes::ResizeEvent),
     Tick,
+    /// The tasks timer asks whether the local date has changed.
+    DayCheck,
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
     /// The dictionary and the first read of `words.txt`, loaded off the UI
     /// thread at launch.
@@ -364,6 +370,10 @@ impl App {
             preview: preferences::Preview::default(),
             preferences,
             spelling: spelling::Spelling::new(words_path.clone()),
+            #[cfg(feature = "smoke-test")]
+            clock: tasks::Clock::new(options.today),
+            #[cfg(not(feature = "smoke-test"))]
+            clock: tasks::Clock::new(None),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
             board_error: None,
@@ -637,6 +647,7 @@ impl App {
             Message::Key(input) => return self.key_input(input),
             #[cfg(target_os = "macos")]
             Message::MenuCommand(key) => return self.menu_command(&key),
+            Message::DayCheck => self.check_day(),
             Message::Tick => {
                 self.count_words(Instant::now());
                 #[cfg(feature = "smoke-test")]
@@ -1079,6 +1090,7 @@ impl App {
         if self.session.is_some() || self.words_due.is_some() {
             subscriptions.push(iced::time::every(Duration::from_millis(25)).map(|_| Message::Tick));
         }
+        subscriptions.extend(self.day_subscription());
         #[cfg(target_os = "macos")]
         subscriptions.push(crate::macos_menu::events().map(Message::MenuCommand));
         #[cfg(feature = "smoke-test")]
@@ -1103,6 +1115,9 @@ mod board_edit_tests;
 
 #[cfg(test)]
 mod navigation_tests;
+
+#[cfg(test)]
+mod tasks_baseline;
 
 #[cfg(test)]
 mod tests {

@@ -138,8 +138,28 @@ pub trait Trash: Send {
     fn trash(&mut self, path: &Path) -> Result<(), String>;
 }
 
-pub fn dated_title() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+/// Today in local time, kept to the years 1 to 9999 a date can spell: a
+/// clock outside them reads as the nearest end.
+pub fn local_today() -> wren_markdown::date::Date {
+    use chrono::Datelike;
+    let today = chrono::Local::now().date_naive();
+    civil(today.year(), today.month(), today.day())
+}
+
+/// The date chrono gives as `year`, `month` and `day`, or the nearest end
+/// of the four-digit years for one outside them.
+fn civil(year: i32, month: u32, day: u32) -> wren_markdown::date::Date {
+    use wren_markdown::date::Date;
+    if year < 1 {
+        return Date::new(1, 1, 1).expect("1 January of year 1 is a date");
+    }
+    let last = Date::new(9999, 12, 31).expect("31 December 9999 is a date");
+    u16::try_from(year)
+        .ok()
+        .zip(u8::try_from(month).ok())
+        .zip(u8::try_from(day).ok())
+        .and_then(|((year, month), day)| Date::new(year, month, day))
+        .unwrap_or(last)
 }
 
 pub struct SystemTrash;
@@ -1914,6 +1934,34 @@ mod tests {
         fs::write(&path, b"safe to delete").unwrap();
         SystemTrash.trash(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn local_today_is_the_local_calendar_date() {
+        // Read on both sides of the call, so a midnight between them still
+        // gives one of the two days.
+        let local = || chrono::Local::now().format("%Y-%m-%d").to_string();
+        let before = local();
+        let today = local_today().to_string();
+        let after = local();
+        assert!(today == before || today == after, "{today}");
+    }
+
+    #[test]
+    fn a_clock_outside_the_four_digit_years_reads_as_the_nearest_end() {
+        for (year, month, day, expected) in [
+            (2026, 11, 19, "2026-11-19"),
+            (1, 1, 1, "0001-01-01"),
+            (9999, 12, 31, "9999-12-31"),
+            (0, 6, 15, "0001-01-01"),
+            (-44, 3, 15, "0001-01-01"),
+            (i32::MIN, 1, 1, "0001-01-01"),
+            (10000, 1, 1, "9999-12-31"),
+            (262_143, 12, 31, "9999-12-31"),
+            (i32::MAX, 1, 1, "9999-12-31"),
+        ] {
+            assert_eq!(civil(year, month, day).to_string(), expected, "{year}");
+        }
     }
 
     #[test]

@@ -36,6 +36,8 @@ use iced::{Color, Element, Font};
 
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
+#[cfg(feature = "test-support")]
+pub use highlighter::{highlight_lines, Highlight, HighlightedLine, LineDecor, Scale};
 pub use keys::{KeyPolicy, KeyRoute};
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
@@ -354,11 +356,7 @@ impl EditorView {
         let editor = TextEditor::new(
             &self.content,
             "note-editor",
-            HighlighterSettings {
-                palette,
-                font: self.font,
-                front_matter_end: self.front_matter_end,
-            },
+            self.highlighter_settings(palette),
             style,
             self.line_numbers,
             self.metrics,
@@ -372,6 +370,31 @@ impl EditorView {
         #[cfg(any(test, feature = "test-support"))]
         let editor = editor.spell_frame(&self.spell_frame);
         editor.into()
+    }
+
+    /// What the widget's highlighter is set up with, for `palette`.
+    fn highlighter_settings(&self, palette: Palette) -> HighlighterSettings {
+        HighlighterSettings {
+            palette,
+            font: self.font,
+            front_matter_end: self.front_matter_end,
+        }
+    }
+
+    /// Every line as the widget's highlighter, set up as this editor sets
+    /// it up, colours and decorates it with `palette`.
+    #[cfg(feature = "test-support")]
+    pub fn highlighted(&self, palette: Palette) -> Vec<HighlightedLine> {
+        let settings = self.highlighter_settings(palette);
+        self.content
+            .with_lines(|lines| highlighter::highlight_all(&lines, settings))
+    }
+
+    /// The misspellings the editor finds on `line` with its proofreader,
+    /// the ones the suggest key reads.
+    #[cfg(feature = "test-support")]
+    pub fn marks(&self, line: usize) -> Vec<Range<usize>> {
+        self.marks_at(line)
     }
 
     // -----------------------------------------------------------------------

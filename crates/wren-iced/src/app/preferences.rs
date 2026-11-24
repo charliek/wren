@@ -61,6 +61,10 @@ pub struct Preferences {
     /// with: a Session lists boards or not for its whole life, so a later
     /// value waits for a restart.
     pub boards: bool,
+    /// The `tasks` setting as it was at launch, which is what the app runs
+    /// with: the macOS menu bar is built once, so a later value waits for a
+    /// restart.
+    pub tasks: bool,
     /// The bytes last loaded, so focus-triggered reloads skip unchanged files.
     loaded: Option<String>,
     /// The warning last shown for these settings, so a clean reload can
@@ -104,7 +108,7 @@ pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool)
 }
 
 /// The keymap layer of a command key; `None` for a key that names none.
-fn layer_of(action: &str) -> Option<Layer> {
+pub(super) fn layer_of(action: &str) -> Option<Layer> {
     CommandId::parse(action).map(|id| match id.scope() {
         Scope::Board => Layer::Board,
         Scope::App | Scope::Editor => Layer::Base,
@@ -235,6 +239,34 @@ fn read(path: Option<&Path>) -> (Option<String>, Settings) {
     }
 }
 
+/// The keymap of `platform`'s defaults and the user's `keybinds`, before
+/// the board bindings the app shadows are dropped. The task defaults join
+/// only while `tasks` is on.
+pub(super) fn build_keymap(
+    platform: Platform,
+    keybinds: &[(String, String)],
+    tasks: bool,
+) -> (Keymap, Vec<String>) {
+    let task_defaults = if tasks {
+        keybind::default_task_bindings(platform)
+    } else {
+        Vec::new()
+    };
+    Keymap::build(
+        keybind::default_bindings(platform)
+            .into_iter()
+            .chain(keybind::default_board_bindings(platform))
+            .chain(task_defaults),
+        keybinds,
+        // With tasks off a task command does not exist, so a `keybind`
+        // line naming one is an unknown action.
+        |action| {
+            layer_of(action)
+                .filter(|_| tasks || !CommandId::parse(action).is_some_and(CommandId::tasks))
+        },
+    )
+}
+
 impl Preferences {
     /// Load from `path`; `None` means defaults with nowhere to persist.
     pub fn load(path: Option<PathBuf>) -> Self {
@@ -242,6 +274,7 @@ impl Preferences {
         let mut preferences = Self {
             keymap: Keymap::default(),
             boards: settings.boards,
+            tasks: settings.tasks,
             settings,
             path,
             loaded,
@@ -252,14 +285,8 @@ impl Preferences {
     }
 
     pub(super) fn rebuild_keymap(&mut self) {
-        let platform = Platform::current();
-        let (mut keymap, mut warnings) = Keymap::build(
-            keybind::default_bindings(platform)
-                .into_iter()
-                .chain(keybind::default_board_bindings(platform)),
-            &self.settings.keybinds,
-            layer_of,
-        );
+        let (mut keymap, mut warnings) =
+            build_keymap(Platform::current(), &self.settings.keybinds, self.tasks);
         // A board binding on a trigger the base layer gives an App command
         // could never run, since the app's shortcut wins, and neither could
         // one on Escape, which `board_policy` keeps for the ladder; drop
@@ -338,10 +365,17 @@ impl Preferences {
         }
     }
 
-    /// What to say when the file asks for a `boards` value other than the
-    /// one the app launched with.
+    /// What to say when the file asks for a `boards` or `tasks` value other
+    /// than the one the app launched with.
     fn restart_notice(&self) -> Option<String> {
-        (self.settings.boards != self.boards).then(|| "Restart Wren to apply `boards`.".to_owned())
+        let waiting: Vec<&str> = [
+            ("`boards`", self.settings.boards != self.boards),
+            ("`tasks`", self.settings.tasks != self.tasks),
+        ]
+        .into_iter()
+        .filter_map(|(name, waits)| waits.then_some(name))
+        .collect();
+        (!waiting.is_empty()).then(|| format!("Restart Wren to apply {}.", waiting.join(" and ")))
     }
 
     fn warning(&self) -> Option<String> {
@@ -763,8 +797,11 @@ impl App {
     /// rebuilds the menu keeps or leaves out the Board menu as before.
     #[cfg(target_os = "macos")]
     pub(super) fn install_menu(&mut self) {
-        let installed =
-            crate::macos_menu::install(&self.preferences.keymap, self.preferences.boards);
+        let installed = crate::macos_menu::install(
+            &self.preferences.keymap,
+            self.preferences.boards,
+            self.preferences.tasks,
+        );
         // The new items start enabled, whatever the last sync set.
         self.menu_inputs = None;
         if let Err(error) = installed {
