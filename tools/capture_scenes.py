@@ -19,8 +19,9 @@ menu with no suggestions, and the menu above a word on the last visible row.
 `--only tasks` opens the task fixture workspace
 (`tools/wrentest/fixtures/tasks/`) on the advanced engine, unless `--engine` or
 `--setting editor-engine=…` says otherwise, with `tasks = on` and today pinned
-to 19 November 2026, shoots its task lines and the emoji spike's note (with
-a caret and a selection on its glyphs), and writes to
+to 19 November 2026, shoots its task lines, the task colours (with a caret,
+a selection, and two days later), and the emoji spike's note (with a caret
+and a selection on its glyphs), and writes to
 `<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
 scene depends on; `--fonts` names the font setup instead of the check for Noto
 Color Emoji.
@@ -374,7 +375,28 @@ def task_scenes(client, shot_here, engine: str) -> None:
     client.call("editor.cursor", {"line": 2, "column": 21, "selection": None})
     client.call("editor.focus")
     shot_here("task-lines")
+    colour_scenes(client, shot_here)
     emoji_scenes(client, shot_here)
+
+
+def colour_scenes(client, shot_here) -> None:
+    """Task colours (discovery/tasks-build.md item 2.2): due dates ahead,
+    today, past and on no real day, owners, every priority, and a done and a
+    cancelled task, with the caret on an overdue line; the same lines
+    selected; then two days later, when the dates passed turn overdue."""
+    open_note(client, "Due dates.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Due dates"),
+             timeout=10, description="the due dates note opens")
+    client.call("editor.cursor", {"line": 4, "column": 0, "selection": None})
+    client.call("editor.focus")
+    shot_here("task-colours")
+    client.call("editor.cursor", {"line": 13, "column": 0,
+                                  "selection": {"line": 2, "column": 0}})
+    shot_here("task-colours-selection")
+    client.call("editor.cursor", {"line": 4, "column": 0, "selection": None})
+    client.call("tasks.set_today", {"date": "2026-11-21"})
+    shot_here("task-colours-later")
+    client.call("tasks.set_today", {"date": TASKS_TODAY})
 
 
 def emoji_scenes(client, shot_here) -> None:

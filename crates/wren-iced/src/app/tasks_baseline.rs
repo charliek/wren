@@ -57,7 +57,7 @@ const WORDS: [&str; 19] = [
 
 /// A palette whose every role has a colour of its own, so a span's colour
 /// names its role.
-const ROLES: [(&str, Color); 10] = [
+const ROLES: [(&str, Color); 13] = [
     ("text", Color::from_rgb8(1, 0, 0)),
     ("muted", Color::from_rgb8(2, 0, 0)),
     ("faint", Color::from_rgb8(3, 0, 0)),
@@ -68,6 +68,9 @@ const ROLES: [(&str, Color); 10] = [
     ("code", Color::from_rgb8(8, 0, 0)),
     ("quote", Color::from_rgb8(9, 0, 0)),
     ("completed", Color::from_rgb8(10, 0, 0)),
+    ("date", Color::from_rgb8(11, 0, 0)),
+    ("overdue", Color::from_rgb8(12, 0, 0)),
+    ("owner", Color::from_rgb8(13, 0, 0)),
 ];
 
 fn palette() -> Palette {
@@ -83,6 +86,9 @@ fn palette() -> Palette {
         code: role("code"),
         quote: role("quote"),
         completed: role("completed"),
+        date: role("date"),
+        overdue: role("overdue"),
+        owner: role("owner"),
     }
 }
 

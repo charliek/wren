@@ -43,6 +43,11 @@ Inside checked text, these are skipped:
   and `![alt](url)` only `the text` and `alt` are checked.
 - Bare URLs and autolinks (`<https://…>`).
 - Emphasis and strikethrough markers, so `_word_` is checked as `word`.
+- With `tasks = on`, a task's tokens after its description: dates
+  (`📅 2026-12-01`, `✅ …`, `❌ …`, `[due:: …]` and the like), priority
+  glyphs, `🆔` ids, a closing `^block-id`, and the tokens Wren keeps as
+  written, such as `🔁 every week`. Owners (`@sam`) and tags are skipped by
+  the word rules below.
 
 A word is skipped whole when it:
 

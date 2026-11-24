@@ -24,6 +24,11 @@
 //!     apart.
 //!   - Finished tasks, done and with tasks on cancelled (`[-]`): faint
 //!     markers and `completed` text, struck through.
+//!   - With tasks on, a task's tokens: a due date in `date`, or `overdue`
+//!     once today has passed it on an unfinished task (bold) or when it is
+//!     no real day; `@owners` in `owner`; stamps and ids faint. A priority
+//!     glyph keeps the text's colour. On a finished task the strike stops at
+//!     the description and the tokens after it are faint.
 //!   - Thematic breaks, setext underlines, and HTML blocks: faint.
 //!   - Inline code spans (`` `...` ``): `code` colour on a code chip.
 //!   - Bold (`**...**`, `__...__`) and italic (`*...*`, `_..._`): the font's
@@ -56,7 +61,9 @@ use iced::advanced::text::highlighter::{self, Format};
 use iced::font::{self, Font};
 use iced::Color;
 use wren_markdown::block::{self, Boxes, Container, Kind, LineInfo, Scanner};
+use wren_markdown::date::{Date, Parsed};
 use wren_markdown::span::{self, LineSpans, Span, SpanKind};
+use wren_markdown::task::DateField;
 use wren_markdown::TaskOptions;
 
 use crate::Palette;
@@ -203,7 +210,8 @@ pub struct LineDecor {
 // Span colours
 // ---------------------------------------------------------------------------
 
-/// The palette plus the font whose bold and italic variants style emphasis.
+/// The palette plus the font whose bold and italic variants style emphasis,
+/// and the day a task's due date is read against.
 struct Ink {
     text: Color,
     muted: Color,
@@ -215,7 +223,12 @@ struct Ink {
     code: Color,
     quote: Color,
     completed: Color,
+    date: Color,
+    overdue: Color,
+    owner: Color,
     font: Font,
+    /// Today, with the host's tasks on.
+    today: Option<Date>,
 }
 
 impl Ink {
@@ -231,6 +244,9 @@ impl Ink {
             code,
             quote,
             completed,
+            date,
+            overdue,
+            owner,
         } = palette;
         Self {
             text,
@@ -243,7 +259,11 @@ impl Ink {
             code,
             quote,
             completed,
+            date,
+            overdue,
+            owner,
             font,
+            today: None,
         }
     }
 }
@@ -310,7 +330,10 @@ impl highlighter::Highlighter for MarkdownHighlighter {
         } else {
             containers
         };
-        let ink = Ink::new(self.settings.palette, self.settings.font);
+        let ink = Ink {
+            today: self.settings.tasks.map(|tasks| tasks.today),
+            ..Ink::new(self.settings.palette, self.settings.font)
+        };
         let boxes = self.settings.boxes();
         let (spans, decor, read) = line_highlights(line, index, &info, own, continued, boxes, &ink);
 
@@ -344,6 +367,10 @@ impl MarkdownHighlighter {
         self.spans.get(line)
     }
 }
+
+/// One line's spans, sorted and apart.
+#[cfg(feature = "test-support")]
+pub type Highlights = Vec<(Range<usize>, Highlight)>;
 
 /// One line's spans and decoration.
 #[cfg(any(test, feature = "test-support"))]
@@ -386,6 +413,27 @@ pub(crate) fn highlight_all<L: wren_markdown::Lines + ?Sized>(
         .collect()
 }
 
+/// Line `index` of `lines` as a fresh highlighter with `settings` gives it,
+/// highlighting only the lines down to it: its spans and the typed spans
+/// they were coloured from. None past the last line.
+#[cfg(feature = "test-support")]
+pub(crate) fn highlight_through<L: wren_markdown::Lines + ?Sized>(
+    lines: &L,
+    index: usize,
+    settings: Settings,
+) -> Option<(Highlights, LineSpans)> {
+    if index >= lines.line_count() {
+        return None;
+    }
+    let mut highlighter = <MarkdownHighlighter as highlighter::Highlighter>::new(&settings);
+    for line in 0..index {
+        let _ = highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(line));
+    }
+    let spans =
+        highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(index)).collect();
+    Some((spans, highlighter.spans.pop()?))
+}
+
 /// The typed spans of line `index` of `lines`, from a fresh scan of the
 /// lines down to it, for a caller that cannot see the widget's own. Spans
 /// depend on neither colour nor font, so only `front_matter_end` and `tasks`
@@ -405,7 +453,36 @@ pub fn spans_at(
         scanner.next_line(lines.line(line));
     }
     let line = lines.line(index);
-    span::spans(line, &scanner.next_line(line), boxes)
+    read(line, &scanner.next_line(line), boxes)
+}
+
+/// The spans of `line`, classified as `info` by a scan with `boxes`, as the
+/// editor reads them: with tasks on, a task's dates, priority, ids and the
+/// tokens Wren keeps are not prose, so spell check reads none of them. Its
+/// owners and tags stay prose, as the speller already passes over a chunk
+/// with an `@` and a `#tag`.
+fn read(line: &str, info: &LineInfo, boxes: Boxes) -> LineSpans {
+    let mut read = span::spans(line, info, boxes);
+    read.not_prose.extend(
+        (read.spans.iter())
+            .filter(|span| is_token(&span.kind))
+            .map(|span| span.range.clone()),
+    );
+    read
+}
+
+/// Whether a task span is one of the tokens after a task's description,
+/// not its box and not an owner or a tag, which may stand in the
+/// description.
+fn is_token(kind: &SpanKind) -> bool {
+    matches!(
+        kind,
+        SpanKind::Date { .. }
+            | SpanKind::Priority(_)
+            | SpanKind::Id { .. }
+            | SpanKind::BlockId
+            | SpanKind::Kept(_)
+    )
 }
 
 /// The prose ranges of line `index` of `lines`, the ones the widget's
@@ -459,7 +536,7 @@ fn line_highlights(
     boxes: Boxes,
     ink: &Ink,
 ) -> (Vec<(Range<usize>, Highlight)>, LineDecor, LineSpans) {
-    let read = span::spans(line, info, boxes);
+    let read = read(line, info, boxes);
     let mut spans = Spans::default();
     let mut decor = LineDecor {
         hang: info.prefix_end,
@@ -534,7 +611,15 @@ fn line_highlights(
         Kind::Prose if done => {
             // Done text recedes, but its links keep their colour: the links
             // it has when read alone, whatever code or comment holds them.
-            let text = info.text_start..info.text_start + line[info.text_start..].trim_end().len();
+            // With tasks on, the strike stops at the description, and the
+            // tokens after it recede unstruck.
+            let end = (read.spans.iter())
+                .filter(|span| is_token(&span.kind))
+                .map(|span| span.range.start)
+                .min()
+                .map_or(line.len(), |start| start.max(info.text_start));
+            let text =
+                info.text_start..info.text_start + line[info.text_start..end].trim_end().len();
             let completed = Highlight::colored(ink.completed);
             let links = span::links(line, text.clone());
             let mut covered = text.start;
@@ -581,14 +666,16 @@ fn line_highlights(
 // ---------------------------------------------------------------------------
 
 /// Which colour shows where inline spans overlap, the higher the stronger:
-/// emphasised text keeps the colour of a strike it is in, struck text that
-/// of a link, and nothing recolours code, a comment, a destination or the
+/// emphasised text keeps the colour of a strike it is in, a task's token
+/// recolours emphasis but not a strike, struck text keeps the colour of a
+/// link, and nothing recolours code, a comment, a destination or the
 /// characters that are syntax alone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum Layer {
     #[default]
     None,
     Emphasis,
+    Task,
     Struck,
     Link,
     Own,
@@ -605,9 +692,10 @@ struct Cell {
     fixed_face: bool,
 }
 
-/// Whether `span` is inline Markdown the highlighter colours. A link nested
-/// in another is drawn as that one's text, and a task's spans, an autolink
-/// and a reference definition have no colour of their own.
+/// Whether `span` is inline Markdown or a task's token the highlighter
+/// colours. A link nested in another is drawn as that one's text, and an
+/// autolink, a reference definition, a task's box, a priority glyph, a tag,
+/// a block id and the tokens Wren keeps have no colour of their own.
 fn paints(span: &Span) -> bool {
     matches!(
         span.kind,
@@ -617,7 +705,34 @@ fn paints(span: &Span) -> bool {
             | SpanKind::Strike { .. }
             | SpanKind::Emphasis { .. }
             | SpanKind::Link { nested: false, .. }
+            | SpanKind::Date { .. }
+            | SpanKind::Owner { .. }
+            | SpanKind::Id { .. }
     )
+}
+
+/// How an unfinished task's token looks: its colour, and whether it is
+/// bold. A due date is in `date`, and `overdue` when it is before today,
+/// bold, or when it is no real day, not bold: a problem to see, quieter
+/// than work that is late. Due today is not late. A done or cancelled stamp
+/// and an id are `faint`, an owner is `owner`.
+fn token_look(kind: &SpanKind, ink: &Ink) -> Option<(Color, bool)> {
+    Some(match kind {
+        SpanKind::Date {
+            field: DateField::Due,
+            value,
+            ..
+        } => match value {
+            Parsed::Invalid => (ink.overdue, false),
+            Parsed::Date(date) if ink.today.is_some_and(|today| *date < today) => {
+                (ink.overdue, true)
+            }
+            Parsed::Date(_) => (ink.date, false),
+        },
+        SpanKind::Date { .. } | SpanKind::Id { .. } => (ink.faint, false),
+        SpanKind::Owner { .. } => (ink.owner, false),
+        _ => return None,
+    })
 }
 
 /// The coloured pieces of a span that [`paints`], in line order:
@@ -626,8 +741,13 @@ fn paints(span: &Span) -> bool {
 ///   strikes and emphasis: `faint`.
 /// - Links: `link` text and a `completed` destination. Bare URLs: `link`.
 /// - Struck text: `completed`. Emphasised text: `text`.
+/// - A task's tokens: see [`token_look`].
 fn pieces(span: &Span, ink: &Ink, mut piece: impl FnMut(Range<usize>, Color, Layer)) {
     let range = span.range.clone();
+    if let Some((color, _)) = token_look(&span.kind, ink) {
+        piece(range, color, Layer::Task);
+        return;
+    }
     match &span.kind {
         SpanKind::Code => piece(range, ink.code, Layer::Own),
         SpanKind::Comment => piece(range, ink.faint, Layer::Own),
@@ -701,7 +821,7 @@ fn inline_highlights(
                 SpanKind::Emphasis {
                     strong, emphasis, ..
                 } => face(ink.font, strong, emphasis),
-                _ => None,
+                _ => token_look(&span.kind, ink).and_then(|(_, bold)| face(ink.font, bold, false)),
             };
             pieces(span, ink, |range, color, _| {
                 let highlight = Highlight {
@@ -720,11 +840,14 @@ fn inline_highlights(
     let mut cells = vec![Cell::default(); text.len()];
     let within = |range: Range<usize>| range.start - text.start..range.end - text.start;
     for span in painted() {
+        let bold = token_look(&span.kind, ink).is_some_and(|(_, bold)| bold);
         pieces(span, ink, |range, color, layer| {
             for cell in &mut cells[within(range)] {
                 if layer >= cell.layer {
                     cell.color = Some(color);
                     cell.layer = layer;
+                    // A bold token is bold where its colour shows.
+                    cell.bold |= bold;
                 }
             }
         });
@@ -1171,6 +1294,328 @@ mod tests {
         assert_eq!(
             after,
             highlight_tasks(fixtures::DARK, line, tasks_on())[0].0
+        );
+    }
+
+    /// The colour and boldness of the span over `token`, the first place it
+    /// appears in `line`: `None` where no span covers it, which draws it in
+    /// the body colour.
+    fn token_at(
+        line: &str,
+        spans: &[(Range<usize>, Highlight)],
+        token: &str,
+    ) -> Option<(Color, bool)> {
+        let start = line
+            .find(token)
+            .unwrap_or_else(|| panic!("{token:?} in {line:?}"));
+        let end = start + token.len();
+        let covering: Vec<_> = spans
+            .iter()
+            .filter(|(range, _)| range.start < end && start < range.end)
+            .collect();
+        let (range, highlight) = covering.first()?;
+        assert!(
+            covering.len() == 1 && range.start <= start && end <= range.end,
+            "{token:?} is one span in {line:?}: {covering:?}"
+        );
+        let bold = highlight
+            .font
+            .is_some_and(|font| font.weight == font::Weight::Bold);
+        Some((highlight.color?, bold))
+    }
+
+    /// With tasks on, an unfinished task's due date is in the date colour,
+    /// or overdue and bold when it is before today, whatever its status;
+    /// due today is not late, and a date that is no real day is overdue's
+    /// colour without the weight. Owners take theirs, stamps and ids
+    /// recede, and a priority glyph, a tag, a block id and a kept token are
+    /// drawn as the text around them.
+    #[test]
+    fn an_unfinished_tasks_tokens_take_their_colours_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            let date = Some((p.date, false));
+            let overdue = Some((p.overdue, true));
+            let invalid = Some((p.overdue, false));
+            let faint = Some((p.faint, false));
+            let owner = Some((p.owner, false));
+            for (line, token, look) in [
+                ("- [ ] Future 📅 2026-11-20", "📅 2026-11-20", date),
+                ("- [ ] Next year 📅 2027-01-01", "📅 2027-01-01", date),
+                ("- [ ] Today 📅 2026-11-19", "📅 2026-11-19", date),
+                ("- [ ] Late 📅 2026-11-18", "📅 2026-11-18", overdue),
+                ("- [/] Late doing 📅 2026-11-01", "📅 2026-11-01", overdue),
+                ("- [a] Late unknown 📅 2025-12-31", "📅 2025-12-31", overdue),
+                ("  1. [ ] Numbered 📅 2026-11-18", "📅 2026-11-18", overdue),
+                ("> - [ ] Quoted 📅 2026-11-18", "📅 2026-11-18", overdue),
+                ("- [ ] Alias 📆 2026-11-18", "📆 2026-11-18", overdue),
+                (
+                    "- [ ] Field [due:: 2026-11-18]",
+                    "[due:: 2026-11-18]",
+                    overdue,
+                ),
+                ("- [ ] Field [due:: 2026-11-20]", "[due:: 2026-11-20]", date),
+                ("- [ ] No such day 📅 2026-02-30", "📅 2026-02-30", invalid),
+                (
+                    "- [ ] Past no such day 📅 2025-13-01",
+                    "📅 2025-13-01",
+                    invalid,
+                ),
+                ("- [ ] Ask @alice.chen ⏫", "@alice.chen", owner),
+                ("- [ ] Ask @alice.chen ⏫", "⏫", None),
+                ("- [ ] Ask @sam and @priya", "@priya", owner),
+                ("- [ ] Stamped open ✅ 2026-11-18", "✅ 2026-11-18", faint),
+                ("- [ ] Stamped open ❌ 2026-11-18", "❌ 2026-11-18", faint),
+                ("- [ ] Card 🆔 a1 🔼", "🆔 a1", faint),
+                ("- [ ] Card 🆔 a1 🔼", "🔼", None),
+                ("- [ ] Low 🔽\u{fe0f} 📅 2026-11-20", "🔽\u{fe0f}", None),
+                ("- [ ] Tagged #home ^b1", "#home", None),
+                ("- [ ] Tagged #home ^b1", "^b1", None),
+                (
+                    "- [ ] Water 🔁 every week ⏳ 2026-11-01",
+                    "⏳ 2026-11-01",
+                    None,
+                ),
+                (
+                    "- [ ] Water 🔁 every week ⏳ 2026-11-01",
+                    "🔁 every week",
+                    None,
+                ),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                assert_eq!(token_at(line, &spans, token), look, "{token:?} in {line:?}");
+                assert!(decor.strikes.is_empty(), "{line:?}");
+            }
+        }
+    }
+
+    /// Each due date is read on its own, so on a line with two the one
+    /// that is past is overdue.
+    #[test]
+    fn each_due_date_on_a_line_is_read_against_today() {
+        let p = dark_palette();
+        let line = "- [ ] Twice 📅 2026-11-01 📅 2026-12-01";
+        let (spans, _) = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+        assert_eq!(
+            token_at(line, &spans, "📅 2026-11-01"),
+            Some((p.overdue, true))
+        );
+        assert_eq!(
+            token_at(line, &spans, "📅 2026-12-01"),
+            Some((p.date, false))
+        );
+    }
+
+    /// A finished task recedes whole: its description struck, its tokens
+    /// faint after the strike, a past due date never red, and its owners
+    /// dimmed with the text they stand in.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // a struck line has one strike
+    fn a_finished_tasks_tokens_recede_unstruck_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            for (line, description, tail) in [
+                (
+                    "- [x] Ship the deck @sam 📅 2026-11-01 ✅ 2026-11-18",
+                    "Ship the deck @sam",
+                    "📅 2026-11-01 ✅ 2026-11-18",
+                ),
+                (
+                    "- [-] Book the room @sam ❌ 2026-11-16",
+                    "Book the room @sam",
+                    "❌ 2026-11-16",
+                ),
+                (
+                    "- [X] Late but done ⏫ 📅 2026-11-01  ",
+                    "Late but done",
+                    "⏫ 📅 2026-11-01  ",
+                ),
+                (
+                    "> - [x] See [docs](u) 🆔 a1 ^b1",
+                    "See [docs](u)",
+                    "🆔 a1 ^b1",
+                ),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                let start = line.find(description).unwrap();
+                assert_eq!(decor.strikes, [start..start + description.len()], "{line}");
+                // Everything after the description is faint, to the end.
+                let tail = line.find(tail).unwrap()..line.len();
+                let after: Vec<_> = spans
+                    .iter()
+                    .filter(|(range, _)| range.end > start + description.len())
+                    .collect();
+                assert!(
+                    after.iter().all(|(_, look)| look.color == Some(p.faint)),
+                    "{line}: {after:?}"
+                );
+                assert!(after[0].0.start <= tail.start, "{line}: {after:?}");
+                assert_eq!(after.last().map(|(range, _)| range.end), Some(tail.end));
+                assert!(spans.iter().all(|(_, highlight)| highlight.font.is_none()));
+                for (range, highlight) in &spans {
+                    for color in [p.date, p.overdue, p.owner] {
+                        assert_ne!(highlight.color, Some(color), "{line}: {range:?}");
+                    }
+                }
+                if let Some(at) = line.find("@sam") {
+                    assert_eq!(
+                        token_at(line, &spans, "@sam"),
+                        Some((p.completed, false)),
+                        "{line}"
+                    );
+                    assert!(at < start + description.len());
+                }
+            }
+            // A finished task's link keeps its colour under the strike.
+            let line = "> - [x] See [docs](u) 🆔 a1 ^b1";
+            let (spans, _) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(token_at(line, &spans, "docs"), Some((p.link, false)));
+            // With no token, the strike runs to the end of the text, as it
+            // always has.
+            let line = "- [x] All words  ";
+            let (_, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(decor.strikes, [6..15]);
+        }
+    }
+
+    /// A token inside a code span or a comment is code or a comment, and
+    /// inside a strike or a link it is struck or linked text; emphasis
+    /// around an owner keeps its face under the owner's colour.
+    #[test]
+    fn a_token_in_inline_markdown_yields_to_it() {
+        let p = dark_palette();
+        for (line, token, look) in [
+            ("- [ ] Run ` @sam ` now", "@sam", (p.code, false)),
+            ("- [ ] Run <!-- @sam --> now", "@sam", (p.faint, false)),
+            ("- [ ] Ask ~~@sam~~ now", "@sam", (p.completed, false)),
+            ("- [ ] Ask [@sam](u) now", "@sam", (p.link, false)),
+        ] {
+            let (spans, _) = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+            assert_eq!(token_at(line, &spans, token), Some(look), "{line}");
+        }
+        let line = "- [ ] **Ask @sam** now";
+        let (spans, _) = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+        assert_eq!(token_at(line, &spans, "@sam"), Some((p.owner, true)));
+        assert_eq!(token_at(line, &spans, "Ask"), Some((p.text, true)));
+    }
+
+    /// With tasks off a task line's tokens are text: none of them takes a
+    /// colour of its own, and the line looks as it did before tasks.
+    #[test]
+    fn with_tasks_off_task_tokens_have_no_colour() {
+        let p = dark_palette();
+        for line in [
+            "- [ ] Late @sam ⏫ 📅 2026-11-18 🆔 a1",
+            "- [ ] No such day 📅 2026-02-30",
+            "- [x] Done @sam 📅 2026-11-01 ✅ 2026-11-18",
+            "- [/] Doing @sam 📅 2026-11-01",
+        ] {
+            let off = highlight_tasks(fixtures::DARK, line, None).remove(0);
+            assert_eq!(
+                off,
+                highlight_text(fixtures::DARK, line).remove(0),
+                "{line}"
+            );
+            for (range, highlight) in &off.0 {
+                for color in [p.date, p.overdue, p.owner] {
+                    assert_ne!(highlight.color, Some(color), "{line}: {range:?}");
+                }
+            }
+            assert_ne!(
+                off,
+                highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0)
+            );
+        }
+    }
+
+    /// With tasks on spell check reads a task's description and its owners
+    /// and tags, which the speller passes over itself, but none of its
+    /// other tokens. With tasks off it reads the whole text, as it did.
+    #[test]
+    fn task_tokens_leave_the_prose_with_tasks_on() {
+        let prose = |line: &str, tasks| -> Vec<String> {
+            prose_at(&[line], 0, None, tasks)
+                .into_iter()
+                .map(|range| line[range].to_owned())
+                .collect()
+        };
+        for (line, on) in [
+            (
+                "- [ ] Call @sam #home ⏫ 📅 2026-11-18",
+                vec!["Call @sam #home ", " "],
+            ),
+            (
+                "- [ ] Card 🆔 a1 🔁 every week ⛔ abc,def ^b1",
+                vec!["Card ", " ", " ", " "],
+            ),
+            (
+                "- [ ] Field [due:: 2026-11-18] [k:: v]",
+                vec!["Field ", " "],
+            ),
+            ("- [x] Shipped @sam ✅ 2026-11-18", vec!["Shipped @sam "]),
+            (
+                "- [-] Dropped ❌ 2026-11-18 📅 2026-11-01",
+                vec!["Dropped ", " "],
+            ),
+            ("- [ ] 📅 2026-11-18", vec![]),
+            ("- [ ] Plain words", vec!["Plain words"]),
+            // Text after a token makes it description, and prose.
+            (
+                "- [ ] 📅 2026-12-01 then lunch",
+                vec!["📅 2026-12-01 then lunch"],
+            ),
+        ] {
+            assert_eq!(prose(line, tasks_on()), on, "{line}");
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, tasks_on())
+                    .remove(0)
+                    .1
+                    .prose,
+                prose_at(&[line], 0, None, tasks_on()),
+                "{line}"
+            );
+            // Off, the text is one piece of prose, to the end of the line.
+            let off = prose(line, None);
+            assert!(off.len() == 1 && line.ends_with(&off[0]), "{line}: {off:?}");
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, None)
+                    .remove(0)
+                    .1
+                    .prose,
+                highlight_text(fixtures::DARK, line).remove(0).1.prose,
+                "{line}"
+            );
+        }
+    }
+
+    /// A new day is a new setting: the widget's highlighter reads every
+    /// line again, and a due date it passed is overdue.
+    #[test]
+    fn a_new_day_turns_a_due_date_it_passed_overdue() {
+        let p = dark_palette();
+        let line = "- [ ] Pay the invoice 📅 2026-11-20";
+        let day = |day| Settings {
+            tasks: Some(TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, day).expect("a date"),
+            }),
+            ..settings(fixtures::DARK, None)
+        };
+        let mut h = MarkdownHighlighter::new(&day(19));
+        let before: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(
+            token_at(line, &before, "📅 2026-11-20"),
+            Some((p.date, false))
+        );
+        h.update(&day(20));
+        assert_eq!(h.current_line(), 0);
+        let today: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(today, before, "due today is not late");
+        h.update(&day(21));
+        assert_eq!(h.current_line(), 0);
+        let after: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(
+            token_at(line, &after, "📅 2026-11-20"),
+            Some((p.overdue, true))
         );
     }
 
@@ -2536,7 +2981,8 @@ see https://x.io/a_(b)_c, (https://x.io/d). `` a`b `` ` unclosed <!-- unclosed
     /// nothing a line shows: these digests were recorded from the
     /// highlighter as it was before, over the fixture notes and 10 000
     /// generated documents. With tasks off they hold for as long as that
-    /// setting promises today's behaviour.
+    /// setting promises today's behaviour. The tasks-on digest was recorded
+    /// again when tasks gained their colours.
     #[test]
     fn highlighting_is_what_it_was_before_the_span_layer() {
         assert_eq!(
@@ -2546,7 +2992,7 @@ see https://x.io/a_(b)_c, (https://x.io/d). `` a`b `` ` unclosed <!-- unclosed
         );
         assert_eq!(
             corpus_digest(10_000, tasks_on()),
-            0x8792_7706_0f83_a62b,
+            0x5a63_ae28_5458_2dbe,
             "tasks on"
         );
     }

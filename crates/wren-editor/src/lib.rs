@@ -40,7 +40,7 @@ pub use edit::Replace;
 #[cfg(any(test, feature = "test-support"))]
 pub use highlighter::HighlightedLine;
 #[cfg(feature = "test-support")]
-pub use highlighter::{highlight_lines, Highlight, LineDecor, Scale};
+pub use highlighter::{highlight_lines, Highlight, Highlights, LineDecor, Scale};
 pub use hit::Hit;
 pub use keys::{KeyPolicy, KeyRoute};
 #[cfg(any(test, feature = "test-support"))]
@@ -125,6 +125,12 @@ pub struct Palette {
     pub quote: Color,
     /// The text of completed tasks and `~~struck~~` text.
     pub completed: Color,
+    /// A task's due date, with the host's tasks on.
+    pub date: Color,
+    /// An unfinished task's due date that is past, or that is no real day.
+    pub overdue: Color,
+    /// A task's `@owner`.
+    pub owner: Color,
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +422,24 @@ impl EditorView {
         let settings = self.highlighter_settings(palette);
         self.content
             .with_lines(|lines| highlighter::highlight_all(&lines, settings))
+    }
+
+    /// Line `line` as the widget's highlighter, set up as this editor sets
+    /// it up, colours it with `palette`, highlighting only the lines down
+    /// to it: its text, its spans and the typed spans they come from. None
+    /// past the last line.
+    #[cfg(feature = "test-support")]
+    pub fn highlighted_line(
+        &self,
+        line: usize,
+        palette: Palette,
+    ) -> Option<(String, Highlights, LineSpans)> {
+        let settings = self.highlighter_settings(palette);
+        self.content.with_lines(|lines| {
+            let text = lines.get(line)?.text.to_string();
+            let (spans, read) = highlighter::highlight_through(&lines, line, settings)?;
+            Some((text, spans, read))
+        })
     }
 
     /// The misspellings the editor finds on `line` with its proofreader,
@@ -5452,6 +5476,170 @@ mod tests {
                         ev.spell_menu().is_some(),
                         misspelled,
                         "{kind:?} {at_point:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Task colours (tasks build item 2.2) on both engines: what each token
+    /// is drawn in, with the host's tasks on and off, and what spell check
+    /// reads of a task line.
+    mod task_colours {
+        use wren_markdown::date::Date;
+        use wren_markdown::TaskOptions;
+
+        use super::*;
+
+        /// Pinned to Thursday 19 November 2026, as every task test is.
+        const NOTE: &str = "\
+- [ ] Future @alice.chen ⏫ 📅 2026-11-20
+- [ ] Today 📅 2026-11-19
+- [/] Overdue @sam 📅 2026-11-18
+- [x] Done late 📅 2026-11-01 ✅ 2026-11-18
+- [-] Dropped @sam ❌ 2026-11-16
+- [ ] No such day 📅 2026-02-30
+- [ ] Card 🆔 a1 🔽";
+
+        fn tasks(day: u8) -> Option<TaskOptions> {
+            Some(TaskOptions {
+                today: Date::new(2026, 11, day).expect("a date"),
+            })
+        }
+
+        /// The colour, if any, and boldness of `token` on line `line` of
+        /// `ev`, drawn with the dark fixture palette.
+        fn look(ev: &EditorView, line: usize, token: &str) -> (Option<Color>, bool) {
+            let text = NOTE.split('\n').nth(line).expect("a line");
+            let start = text.find(token).expect("the token on its line");
+            let end = start + token.len();
+            let highlighted = ev.highlighted(fixtures::DARK);
+            let (spans, _) = &highlighted[line];
+            let over: Vec<_> = spans
+                .iter()
+                .filter(|(range, _)| range.start < end && start < range.end)
+                .collect();
+            match over.as_slice() {
+                [] => (None, false),
+                [(range, highlight)] => {
+                    assert!(range.start <= start && end <= range.end, "{token:?}");
+                    let format = highlight.to_format();
+                    let bold = format
+                        .font
+                        .is_some_and(|font| font.weight == iced::font::Weight::Bold);
+                    (format.color, bold)
+                }
+                more => panic!("{token:?} lies in {} spans: {more:?}", more.len()),
+            }
+        }
+
+        #[test]
+        #[allow(clippy::single_range_in_vec_init)] // a struck line has one strike
+        fn each_task_token_takes_its_colour_on_both_engines() {
+            let p = fixtures::DARK;
+            for kind in BackendKind::ALL {
+                let mut ev = EditorView::with_backend(kind, NOTE);
+                ev.set_tasks(tasks(19));
+                for (line, token, expected) in [
+                    (0, "📅 2026-11-20", (Some(p.date), false)),
+                    (0, "@alice.chen", (Some(p.owner), false)),
+                    (0, "⏫", (None, false)),
+                    (1, "📅 2026-11-19", (Some(p.date), false)),
+                    (2, "📅 2026-11-18", (Some(p.overdue), true)),
+                    (2, "@sam", (Some(p.owner), false)),
+                    (3, "📅 2026-11-01 ✅ 2026-11-18", (Some(p.faint), false)),
+                    (4, "@sam", (Some(p.completed), false)),
+                    (4, "❌ 2026-11-16", (Some(p.faint), false)),
+                    (5, "📅 2026-02-30", (Some(p.overdue), false)),
+                    (6, "🆔 a1", (Some(p.faint), false)),
+                    (6, "🔽", (None, false)),
+                ] {
+                    assert_eq!(look(&ev, line, token), expected, "{kind:?} {token:?}");
+                }
+                let strikes: Vec<_> = ev
+                    .highlighted(fixtures::DARK)
+                    .into_iter()
+                    .map(|(_, decor)| decor.strikes)
+                    .collect();
+                assert_eq!(strikes[3], [6..15], "{kind:?}: the description only");
+                assert_eq!(strikes[4], [6..18], "{kind:?}");
+
+                // Off, no token has a colour of its own.
+                ev.set_tasks(None);
+                for (line, token) in [
+                    (0, "📅 2026-11-20"),
+                    (0, "@alice.chen"),
+                    (2, "📅 2026-11-18"),
+                    (5, "📅 2026-02-30"),
+                    (6, "🆔 a1"),
+                ] {
+                    assert_eq!(look(&ev, line, token), (None, false), "{kind:?} {token:?}");
+                }
+            }
+        }
+
+        /// A later day read by the same editor turns the dates it passed
+        /// overdue, and only those of unfinished tasks.
+        #[test]
+        fn a_later_today_turns_the_same_lines_overdue_on_both_engines() {
+            let p = fixtures::DARK;
+            for kind in BackendKind::ALL {
+                let mut ev = EditorView::with_backend(kind, NOTE);
+                ev.set_tasks(tasks(19));
+                assert_eq!(look(&ev, 0, "📅 2026-11-20"), (Some(p.date), false));
+                assert_eq!(look(&ev, 1, "📅 2026-11-19"), (Some(p.date), false));
+                ev.set_tasks(tasks(21));
+                assert_eq!(look(&ev, 0, "📅 2026-11-20"), (Some(p.overdue), true));
+                assert_eq!(look(&ev, 1, "📅 2026-11-19"), (Some(p.overdue), true));
+                assert_eq!(look(&ev, 3, "📅 2026-11-01"), (Some(p.faint), false));
+            }
+        }
+
+        /// Spell check reads a task's words, its owners and tags among
+        /// them, but not its dates, priority or id: the speller is asked
+        /// about none of them, on the engine that has one.
+        #[test]
+        fn spell_check_reads_no_task_token_with_tasks_on() {
+            let text = "- [ ] Mial @alice.chen ⏫ 📅 2026-11-20 🆔 qzx ^blk";
+            for kind in BackendKind::ALL {
+                let mut ev = EditorView::with_backend(kind, text);
+                ev.set_proofreader(Some(Arc::new(fixtures::Rejects::new(&[
+                    "Mial", "qzx", "blk", "2026", "11", "20",
+                ]))));
+                ev.set_tasks(tasks(19));
+                let prose: Vec<&str> = ev
+                    .spans_at(0)
+                    .prose()
+                    .into_iter()
+                    .map(|range| &text[range])
+                    .collect();
+                assert_eq!(prose, ["Mial @alice.chen ", " ", " ", " "], "{kind:?}");
+                assert_eq!(
+                    ev.highlighted(fixtures::DARK)[0].1.prose,
+                    ev.spans_at(0).prose(),
+                    "{kind:?}"
+                );
+                let marks: Vec<&str> = ev
+                    .marks_at(0)
+                    .into_iter()
+                    .map(|range| &text[range])
+                    .collect();
+                if kind == BackendKind::Owned {
+                    assert_eq!(marks, ["Mial"], "{kind:?}");
+                } else {
+                    assert!(marks.is_empty(), "{kind:?}");
+                }
+                // Off, the tokens are prose, as they were.
+                ev.set_tasks(None);
+                let marks: Vec<&str> = ev
+                    .marks_at(0)
+                    .into_iter()
+                    .map(|range| &text[range])
+                    .collect();
+                if kind == BackendKind::Owned {
+                    assert!(
+                        marks.contains(&"qzx") && marks.contains(&"blk"),
+                        "{marks:?}"
                     );
                 }
             }

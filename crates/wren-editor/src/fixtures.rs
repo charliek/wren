@@ -51,6 +51,9 @@ pub const DARK: Palette = Palette {
     code: Color::from_rgb8(0x7f, 0xd1, 0xa0),
     quote: Color::from_rgb8(0xa3, 0xaa, 0xb6),
     completed: Color::from_rgb8(0x9a, 0xa1, 0xac),
+    date: Color::from_rgb8(0x72, 0xd6, 0xe3),
+    overdue: Color::from_rgb8(0xf0, 0x88, 0x88),
+    owner: Color::from_rgb8(0x7e, 0xb1, 0xe7),
 };
 
 pub const SETTINGS: Settings = Settings {
@@ -71,6 +74,9 @@ pub const LIGHT: Palette = Palette {
     code: Color::from_rgb8(0x19, 0x73, 0x42),
     quote: Color::from_rgb8(0x58, 0x61, 0x71),
     completed: Color::from_rgb8(0x50, 0x5a, 0x68),
+    date: Color::from_rgb8(0x04, 0x77, 0x84),
+    overdue: Color::from_rgb8(0xb3, 0x2d, 0x36),
+    owner: Color::from_rgb8(0x04, 0x4e, 0xa4),
 };
 
 /// Registers every face of [`FONT`] so layout tests measure real glyphs

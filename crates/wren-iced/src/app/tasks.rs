@@ -376,6 +376,9 @@ mod tests {
             code: ink,
             quote: ink,
             completed: ink,
+            date: ink,
+            overdue: ink,
+            owner: ink,
         };
         let lines: Vec<&str> = STATUS_NOTE.split('\n').collect();
         let replaced = |line: usize, new: &[&str]| {

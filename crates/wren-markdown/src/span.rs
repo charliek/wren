@@ -243,7 +243,8 @@ pub struct LineSpans {
     /// Sorted by start, a span before the spans inside it.
     pub spans: Vec<Span>,
     /// Bytes that are no span's and still not prose: markup that only
-    /// looks like a construct, which spell check skips. In no order.
+    /// looks like a construct, which spell check skips, and what a reader
+    /// takes out of the prose itself. In no order.
     pub not_prose: Vec<Range<usize>>,
 }
 
@@ -262,20 +263,34 @@ impl LineSpans {
             }
             from = from.max(range.end);
         };
-        let excluded = (self.spans.iter().flat_map(Span::not_prose))
-            .chain(self.not_prose.iter().cloned())
-            .filter(|range| !range.is_empty());
+        let filled = |range: &Range<usize>| !range.is_empty();
+        let of_spans = (self.spans.iter().flat_map(Span::not_prose)).filter(filled);
+        let others = self
+            .not_prose
+            .iter()
+            .filter(|&range| filled(range))
+            .cloned();
         // Spans that lie apart give their exclusions in line order, which
-        // is every line but one whose markup nests.
+        // is every line but one whose markup nests; the other exclusions
+        // are in line order when a reader added them so, as a task's
+        // tokens are. Two orderly lists are merged as they come, the
+        // spans' first where two start together, as a stable sort of the
+        // spans' then the others would order them.
         let mut end = 0;
-        let apart = self.not_prose.is_empty()
-            && (self.spans.iter())
-                .filter(|span| !span.kind.is_task())
-                .all(|span| std::mem::replace(&mut end, span.range.end) <= span.range.start);
-        if apart {
-            excluded.for_each(&mut cut);
+        let apart = (self.spans.iter())
+            .filter(|span| !span.kind.is_task())
+            .all(|span| std::mem::replace(&mut end, span.range.end) <= span.range.start);
+        if apart && self.not_prose.is_sorted_by_key(|range| range.start) {
+            let mut others = others.peekable();
+            for range in of_spans {
+                while let Some(other) = others.next_if(|other| other.start < range.start) {
+                    cut(other);
+                }
+                cut(range);
+            }
+            others.for_each(&mut cut);
         } else {
-            let mut excluded: Vec<Range<usize>> = excluded.collect();
+            let mut excluded: Vec<Range<usize>> = of_spans.chain(others).collect();
             excluded.sort_by_key(|range| range.start);
             excluded.into_iter().for_each(&mut cut);
         }
@@ -1632,6 +1647,88 @@ mod tests {
             self.0 ^= self.0 << 25;
             self.0 ^= self.0 >> 27;
             (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) % n as u64) as usize
+        }
+    }
+
+    /// The prose with every exclusion sorted first, as `prose` once always
+    /// read it.
+    fn sorted_prose(read: &LineSpans) -> Vec<Range<usize>> {
+        let mut excluded: Vec<Range<usize>> = (read.spans.iter().flat_map(Span::not_prose))
+            .chain(read.not_prose.iter().cloned())
+            .filter(|range| !range.is_empty())
+            .collect();
+        excluded.sort_by_key(|range| range.start);
+        let mut prose = Vec::new();
+        let mut from = read.text.start;
+        for range in excluded {
+            let end = range.start.min(read.text.end);
+            if from < end {
+                prose.push(from..end);
+            }
+            from = from.max(range.end);
+        }
+        if from < read.text.end {
+            prose.push(from..read.text.end);
+        }
+        prose
+    }
+
+    /// `prose` merges the spans' exclusions with others a reader added in
+    /// line order, a task's tokens say, without sorting them, and gets
+    /// what sorting every exclusion gets, whatever the line.
+    #[test]
+    fn merged_exclusions_give_the_prose_sorted_ones_give() {
+        const PIECES: &[&str] = &[
+            "word ",
+            "*",
+            "**",
+            "_",
+            "~~",
+            "`",
+            "[",
+            "](",
+            ")",
+            "][",
+            "]",
+            "<",
+            ">",
+            "<!--",
+            "-->",
+            "https://x.io ",
+            "a@b ",
+            "@sam ",
+            "#tag ",
+            "- [ ] ",
+            "- [/] ",
+            "📅 2026-11-20 ",
+            "✅ 2026-11-18 ",
+            "⏫ ",
+            "🆔 a1 ",
+            "^b1",
+            "[due:: 2026-11-18] ",
+            "[k:: v] ",
+            "🔁 every week ",
+            " ",
+            "é",
+        ];
+        let mut rng = Rng(0x5eed_0000_0000_0222);
+        for _ in 0..20_000 {
+            let text: String = (0..rng.below(14))
+                .map(|_| PIECES[rng.below(PIECES.len())])
+                .collect();
+            for boxes in [Boxes::Plain, Boxes::Status] {
+                for (line, mut read) in read(&text, boxes) {
+                    assert_eq!(read.prose(), sorted_prose(&read), "{line:?}");
+                    let tokens: Vec<Range<usize>> = (read.spans.iter())
+                        .filter(|span| {
+                            span.kind.is_task() && !matches!(span.kind, SpanKind::Box(_))
+                        })
+                        .map(|span| span.range.clone())
+                        .collect();
+                    read.not_prose.extend(tokens);
+                    assert_eq!(read.prose(), sorted_prose(&read), "{line:?} {boxes:?}");
+                }
+            }
         }
     }
 

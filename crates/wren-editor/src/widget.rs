@@ -3443,6 +3443,68 @@ mod tests {
         }
     }
 
+    /// The host's tasks reach the glyphs on both engines, and a new day
+    /// restyles the lines the widget already laid out: the same due date is
+    /// drawn in the date colour, then overdue, with nothing in the text
+    /// changed.
+    #[test]
+    fn a_new_day_redraws_a_passed_due_date_overdue_on_both_engines() {
+        use iced::advanced::graphics::text::to_color;
+
+        let text = "- [ ] Pay the invoice @sam 📅 2026-11-20\nplain";
+        let date = text.find('📅').expect("a due date");
+        let owner = text.find('@').expect("an owner");
+        let day = |day| HighlighterSettings {
+            tasks: Some(wren_markdown::TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, day).expect("a date"),
+            }),
+            ..fixtures::SETTINGS
+        };
+        for kind in BackendKind::ALL {
+            let content = Content::new(kind, text);
+            let colour_at = |byte: usize| {
+                let backend = content.0.borrow();
+                let line = &backend.buffer().lines[0];
+                line.attrs_list().get_span(byte).color_opt
+            };
+            let weight_at = |byte: usize| {
+                let backend = content.0.borrow();
+                let line = &backend.buffer().lines[0];
+                line.attrs_list().get_span(byte).weight
+            };
+            fixtures::load_font();
+            let mut state = State::new(day(19));
+            let widget = |settings| {
+                TextEditor::new(
+                    &content,
+                    "e",
+                    settings,
+                    fixtures::STYLE,
+                    true,
+                    Metrics::default(),
+                    true,
+                )
+            };
+            widget(day(19)).lay_out(&mut state, BOUNDS.size());
+            let palette = fixtures::DARK;
+            assert_eq!(colour_at(date), Some(to_color(palette.date)), "{kind:?}");
+            assert_eq!(colour_at(owner), Some(to_color(palette.owner)), "{kind:?}");
+            let regular = weight_at(date);
+            // Due today is not late.
+            widget(day(20)).lay_out(&mut state, BOUNDS.size());
+            assert_eq!(colour_at(date), Some(to_color(palette.date)), "{kind:?}");
+            widget(day(21)).lay_out(&mut state, BOUNDS.size());
+            assert_eq!(colour_at(date), Some(to_color(palette.overdue)), "{kind:?}");
+            assert_eq!(weight_at(date), cosmic_text::Weight::BOLD, "{kind:?}");
+            assert_ne!(regular, cosmic_text::Weight::BOLD, "{kind:?}");
+            assert_eq!(colour_at(owner), Some(to_color(palette.owner)), "{kind:?}");
+            // With tasks off the same glyphs are body text.
+            widget(fixtures::SETTINGS).lay_out(&mut state, BOUNDS.size());
+            assert_eq!(colour_at(date), None, "{kind:?}");
+            assert_eq!(colour_at(owner), None, "{kind:?}");
+        }
+    }
+
     /// In text of two directions a span's glyphs can lie apart. `ב* ג` is
     /// laid out right to left, so the `ג` after the emphasis stands between
     /// its `A` and its closing `*`: a span is hit by the glyph under the
