@@ -387,6 +387,7 @@ mod tests {
             palette: fixtures::DARK,
             font: fixtures::FONT,
             front_matter_end: None,
+            tasks: None,
         });
         update(&mut backend, &mut highlighter, size, fixtures::FONT);
         (backend, highlighter)

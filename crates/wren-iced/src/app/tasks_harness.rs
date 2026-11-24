@@ -56,9 +56,11 @@ impl App {
     }
 
     /// The caret's line as the task model reads it so far: its number, its
-    /// text, and whether the classifier reads it as a task and a done one.
-    /// `null` unless a Markdown note is in the editor, or the in-memory
-    /// evaluation text outside a workspace.
+    /// text, and its task as the classifier reads it with the app's own
+    /// options, `null` when the line opens none. A task is its box's byte
+    /// range in the line, the symbol in the box, and its status' name and
+    /// type. The whole is `null` unless a Markdown note is in the editor,
+    /// or the in-memory evaluation text outside a workspace.
     fn caret_task_line(&self) -> Value {
         let open = !self.workspace_mode
             || self
@@ -76,15 +78,19 @@ impl App {
         let Some(line) = lines.get(number) else {
             return Value::Null;
         };
-        let task = block::scan(&lines[..])
+        let task = block::scan(&lines[..], self.task_boxes())
             .get(number)
             .and_then(|info| info.item)
             .and_then(|item| item.task);
         json!({
             "number": number,
             "text": line,
-            "task": task.is_some(),
-            "done": task.map(|task| task.done),
+            "task": task.map(|task| json!({
+                "box": [task.start, task.end],
+                "symbol": task.symbol.to_string(),
+                "status": task.row().name,
+                "type": task.status.name(),
+            })),
         })
     }
 }

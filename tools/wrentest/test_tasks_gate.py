@@ -72,16 +72,18 @@ def test_the_caret_line_reads_as_the_classifier_reads_it(engine: str) -> None:  
     with WrenApp(settings=f"editor-engine = {engine}\ntasks = on\n", today=TODAY,
                  artifacts_dir=artifact_directory("tasks-gate-line")) as app:
         app.client.call("editor.set", {"text": "- [ ] open\n- [x] done\n- [/] doing\nplain"})
-        for line, text, task, done in [
-            (0, "- [ ] open", True, False),
-            (1, "- [x] done", True, True),
-            # Today's classifier reads only a space, x or X in the box.
-            (2, "- [/] doing", False, None),
-            (3, "plain", False, None),
+
+        def box(symbol: str, status: str, kind: str) -> dict:
+            return {"box": [2, 5], "symbol": symbol, "status": status, "type": kind}
+
+        for line, text, task in [
+            (0, "- [ ] open", box(" ", "Open", "open")),
+            (1, "- [x] done", box("x", "Done", "done")),
+            (2, "- [/] doing", box("/", "Doing", "doing")),
+            (3, "plain", None),
         ]:
             app.client.call("editor.cursor", {"line": line, "column": 0, "selection": None})
-            assert tasks(app)["line"] == {"number": line, "text": text, "task": task,
-                                          "done": done}
+            assert tasks(app)["line"] == {"number": line, "text": text, "task": task}
 
 
 def test_with_no_note_open_there_is_no_caret_line(tmp_path) -> None:

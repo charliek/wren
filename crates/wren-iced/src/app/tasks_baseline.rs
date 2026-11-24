@@ -24,7 +24,8 @@ use iced::{font, Color, Font};
 use wren_core::index::{QueryKind, Scope};
 use wren_core::ops::{Op, Session};
 use wren_editor::{Highlight, LineDecor, Palette, Scale};
-use wren_markdown::block::{self, Container, Kind, LineInfo, Marker};
+use wren_markdown::block::{self, Boxes, Container, Kind, LineInfo, Marker};
+use wren_markdown::status::StatusType;
 
 use super::commands::{Command, CommandId};
 use super::spelling::{dictionary, Loaded, Spelling};
@@ -147,13 +148,13 @@ fn classified(info: &LineInfo, containers: &[Container]) -> String {
         );
         match item.task {
             Some(task) => {
-                let state = if task.done { "done" } else { "open" };
-                let _ = write!(
-                    out,
-                    "\n  task {state} box {}..{}",
-                    task.start,
-                    task.start + 3
-                );
+                // With tasks off a box is open or done, and nothing else.
+                let state = match task.status {
+                    StatusType::Done => "done",
+                    StatusType::Open => "open",
+                    other => panic!("a {other:?} box with tasks off"),
+                };
+                let _ = write!(out, "\n  task {state} box {}..{}", task.start, task.end);
             }
             None => out.push_str("\n  task none"),
         }
@@ -338,9 +339,11 @@ fn report() -> String {
     let root = crate::test_support::tempdir();
     let workspace = workspace(root.path(), "search");
     let lines = lines();
-    let infos = block::scan(&lines[..]);
-    let mut scanner = block::Scanner::with_front_matter(block::front_matter_end(&lines[..]));
-    let highlighted = wren_editor::highlight_lines(NOTE, palette(), Font::MONOSPACE);
+    // As `tasks = off` reads the lines: the plain boxes, and no task options.
+    let boxes = Boxes::with_tasks(false);
+    let infos = block::scan(&lines[..], boxes);
+    let mut scanner = block::Scanner::with_front_matter(block::front_matter_end(&lines[..]), boxes);
+    let highlighted = wren_editor::highlight_lines(NOTE, palette(), Font::MONOSPACE, None);
 
     let mut spelling = Spelling::new(None);
     spelling

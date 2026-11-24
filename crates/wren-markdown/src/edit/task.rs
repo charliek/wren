@@ -3,12 +3,18 @@
 use std::collections::HashSet;
 
 use super::*;
+use crate::status::{self, StatusType};
 
 /// What toggling does to one line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Target {
-    /// A task box whose mark is at byte `at` of line `line`.
-    Task { line: usize, at: usize, done: bool },
+    /// A task box on line `line` whose symbol is the bytes `at..end`.
+    Task {
+        line: usize,
+        at: usize,
+        end: usize,
+        status: StatusType,
+    },
     /// A list item without a box; one goes in at byte `at`.
     Item { line: usize, at: usize, space: bool },
     /// A plain line; `- [ ] ` goes in at byte `at`.
@@ -25,13 +31,15 @@ impl Target {
     }
 }
 
-/// Toggle the task boxes on the lines the selection covers. With any open
-/// task, every task is marked done; otherwise every task is marked open.
-/// Items and plain lines get a box only when no line is a task. Code is
-/// left alone, and so are blank lines inside a selection.
-pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
+/// Toggle the task boxes on the lines the selection covers. With any
+/// unfinished task (open or doing; a symbol without a status is open),
+/// every task is marked done; otherwise every task, the cancelled ones
+/// included, is marked open. Items and plain lines get a box only when no
+/// line is a task. Code is left alone, and so are blank lines inside a
+/// selection.
+pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Options) -> EditPlan {
     let sel = clamp_selection(base, sel);
-    let an = Analysis::new(base, None);
+    let an = Analysis::new(base, None, opts.boxes());
     let mut d = Draft::new(base);
     let mut marks = sel;
     let (first, last) = if sel.is_empty() {
@@ -61,8 +69,9 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
                 match item.task {
                     Some(task) => Target::Task {
                         line: k,
-                        at: task.start + 1,
-                        done: task.done,
+                        at: task.symbol_range().start,
+                        end: task.symbol_range().end,
+                        status: task.status,
                     },
                     None => Target::Item {
                         line: k,
@@ -91,17 +100,28 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
     let any_task = targets.iter().any(|t| matches!(t, Target::Task { .. }));
     let mark_done = targets
         .iter()
-        .any(|t| matches!(t, Target::Task { done: false, .. }));
+        .any(|t| matches!(t, Target::Task { status, .. } if status.is_unfinished()));
     // Later edits on a line go first, so earlier byte offsets stay valid.
     targets.sort_by_key(|t| std::cmp::Reverse(t.place()));
     for target in targets {
         match target {
-            Target::Task { line, at, done } if done != mark_done => {
+            // A done task keeps its own `x` or `X` when the rest join it.
+            Target::Task {
+                line,
+                at,
+                end,
+                status,
+            } if !(mark_done && status == StatusType::Done) => {
+                let symbol = if mark_done {
+                    status::DONE
+                } else {
+                    status::OPEN
+                };
                 edit_line(
                     &mut d,
                     line,
-                    at..at + 1,
-                    if mark_done { "x" } else { " " },
+                    at..end,
+                    symbol.encode_utf8(&mut [0; 4]),
                     &mut marks,
                 );
             }
@@ -132,7 +152,7 @@ fn setext_text(an: &Analysis) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
-    use crate::edit::tests::{apply, check};
+    use crate::edit::tests::{apply, check, check_with, tasks_on};
     use crate::{plan, Document, Intent, Lines, Options, Pos, Selection};
 
     fn items(n: usize) -> String {
@@ -209,6 +229,86 @@ mod tests {
                 ("> - [ ] a|", "> - [x] a|"),
                 ("- > a|", "- > - [ ] a|"),
                 ("\u{feff}a|", "\u{feff}- [ ] a|"),
+            ],
+        );
+    }
+
+    /// The done toggle by status: an unfinished task (open, doing, or a
+    /// symbol with no status) becomes done, a finished one (done or
+    /// cancelled) open. The whole symbol goes, whatever its width.
+    #[test]
+    fn toggle_task_reads_the_status_and_replaces_the_whole_symbol() {
+        check_with(
+            Intent::ToggleTask,
+            &tasks_on(),
+            &[
+                ("- [ ] a|", "- [x] a|"),
+                ("- [/] a|", "- [x] a|"),
+                ("- [x] a|", "- [ ] a|"),
+                ("- [X] a|", "- [ ] a|"),
+                ("- [-] a|", "- [ ] a|"),
+                ("- [a] b|", "- [x] b|"),
+                ("- [1] x|", "- [x] x|"),
+                ("- [[] a|", "- [x] a|"),
+                ("- [é] a|", "- [x] a|"),
+                ("- [界] a|", "- [x] a|"),
+                ("- [😀] a|", "- [x] a|"),
+                ("|- [界] a", "|- [x] a"),
+                ("- [界]| a", "- [x]| a"),
+                ("- [界]\ta|", "- [x]\ta|"),
+                ("- [界]|", "- [x]|"),
+                ("1. [✓] a|", "1. [x] a|"),
+                ("> - [/] a|", "> - [x] a|"),
+                ("- [界] a\n  b|", "- [x] a\n  b|"),
+                // Not boxes: the item gets one.
+                ("- [✔\u{fe0f}] a|", "- [ ] [✔\u{fe0f}] a|"),
+                ("- []] a|", "- [ ] []] a|"),
+                ("- [a]: http://u|", "- [ ] [a]: http://u|"),
+            ],
+        );
+        // Each status toggles to the symbol its row of the table names.
+        for row in crate::status::STATUSES {
+            let before = format!("- [{}] a|", row.symbol);
+            let after = format!("- [{}] a|", row.next);
+            check_with(Intent::ToggleTask, &tasks_on(), &[(&before, &after)]);
+        }
+        // Off, a box that is not one of the three is the item's text.
+        check(
+            Intent::ToggleTask,
+            &[
+                ("- [/] a|", "- [ ] [/] a|"),
+                ("- [-] a|", "- [ ] [-] a|"),
+                ("- [界] a|", "- [ ] [界] a|"),
+                ("- [1] x|", "- [ ] [1] x|"),
+            ],
+        );
+    }
+
+    /// With any unfinished task in the selection every task becomes done,
+    /// cancelled ones included; otherwise every task becomes open.
+    #[test]
+    fn toggle_task_over_a_selection_of_statuses() {
+        check_with(
+            Intent::ToggleTask,
+            &tasks_on(),
+            &[
+                ("«- [ ] a\n- [-] b»", "«- [x] a\n- [x] b»"),
+                ("«- [/] a\n- [-] b»", "«- [x] a\n- [x] b»"),
+                ("«- [界] a\n- [-] b»", "«- [x] a\n- [x] b»"),
+                ("«- [/] a\n- [x] b\n- [X] c»", "«- [x] a\n- [x] b\n- [X] c»"),
+                ("«- [x] a\n- [-] b»", "«- [ ] a\n- [ ] b»"),
+                ("«- [-] a\n- [-] b»", "«- [ ] a\n- [ ] b»"),
+                ("«- [X] a\n- [-] b\n- [x] c»", "«- [ ] a\n- [ ] b\n- [ ] c»"),
+                (
+                    "«- [ ] a\n- [/] b\n- [x] c\n- [-] d\n- [😀] e»",
+                    "«- [x] a\n- [x] b\n- [x] c\n- [x] d\n- [x] e»",
+                ),
+                // The selection's ends follow a symbol that changes width.
+                ("- [界] a«b\n- [é] c»d", "- [x] a«b\n- [x] c»d"),
+                ("- [«界] a\n- [é»] c", "- [«x] a\n- [x»] c"),
+                // A plain item among tasks gets no box.
+                ("«- [-] a\n- c»", "«- [ ] a\n- c»"),
+                ("«- [/] a\nc»", "«- [x] a\nc»"),
             ],
         );
     }

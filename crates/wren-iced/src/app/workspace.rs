@@ -591,6 +591,7 @@ impl App {
     pub(super) fn session_options(&self) -> SessionOptions {
         SessionOptions {
             boards: self.preferences.boards,
+            tasks: self.preferences.tasks,
         }
     }
 
@@ -1243,7 +1244,10 @@ mod tests {
         std::fs::create_dir_all(&group).unwrap();
         std::fs::write(group.join("Note.md"), "note").unwrap();
         std::fs::write(group.join("Flow.wren-board"), wren_board::EMPTY).unwrap();
-        let options = SessionOptions { boards: true };
+        let options = SessionOptions {
+            boards: true,
+            tasks: false,
+        };
         let mut earlier = Session::open_with(directory.path(), options).unwrap();
         let of_kind = |session: &Session, kind| {
             let notes = &session.model().notes;
@@ -1301,7 +1305,10 @@ mod tests {
         let off = load_with(
             Some(off),
             directory.path().into(),
-            SessionOptions { boards: true },
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
         )
         .session
         .unwrap();
@@ -1311,7 +1318,10 @@ mod tests {
         let on = load_with(
             None,
             directory.path().into(),
-            SessionOptions { boards: true },
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
         )
         .session
         .unwrap();
@@ -1327,10 +1337,22 @@ mod tests {
         let (mut app, _) = App::new(Options::default());
         app.preferences.boards = false;
         app.preferences.settings.boards = true;
-        assert_eq!(app.session_options(), SessionOptions { boards: false });
+        assert_eq!(
+            app.session_options(),
+            SessionOptions {
+                boards: false,
+                tasks: false,
+            }
+        );
         app.preferences.boards = true;
         app.preferences.settings.boards = false;
-        assert_eq!(app.session_options(), SessionOptions { boards: true });
+        assert_eq!(
+            app.session_options(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            }
+        );
     }
 
     #[test]

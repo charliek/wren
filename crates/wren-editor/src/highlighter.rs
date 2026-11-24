@@ -16,8 +16,12 @@
 //!     H1–H3 text is set larger and their rows are taller, on engines that
 //!     can size spans.
 //!   - Block quotes: faint markers, italic `quote` text.
-//!   - List markers and open task boxes: accent colour.
-//!   - Completed tasks: faint markers and `completed` text, struck through.
+//!   - List markers and the boxes of unfinished tasks: accent colour. With
+//!     the host's tasks on that is an open box, a doing one (`[/]`) and one
+//!     whose character has no status; the character itself tells them
+//!     apart.
+//!   - Finished tasks, done and with tasks on cancelled (`[-]`): faint
+//!     markers and `completed` text, struck through.
 //!   - Thematic breaks, setext underlines, and HTML blocks: faint.
 //!   - Inline code spans (`` `...` ``): `code` colour on a code chip.
 //!   - Bold (`**...**`, `__...__`) and italic (`*...*`, `_..._`): the font's
@@ -47,7 +51,8 @@ use std::ops::Range;
 use iced::advanced::text::highlighter::{self, Format};
 use iced::font::{self, Font};
 use iced::Color;
-use wren_markdown::block::{self, Container, Kind, LineInfo, Scanner};
+use wren_markdown::block::{self, Boxes, Container, Kind, LineInfo, Scanner};
+use wren_markdown::TaskOptions;
 
 use crate::Palette;
 
@@ -159,6 +164,16 @@ pub struct Settings {
     /// the editor recomputes this after every change; a new value restarts
     /// highlighting, since every checkpoint was scanned with the old one.
     pub front_matter_end: Option<usize>,
+    /// The host's tasks, when they are on: a box of any status is then a
+    /// task. `None` reads the lines as an editor without tasks does.
+    pub tasks: Option<TaskOptions>,
+}
+
+impl Settings {
+    /// The task boxes these settings read.
+    fn boxes(&self) -> Boxes {
+        Boxes::with_tasks(self.tasks.is_some())
+    }
 }
 
 /// What the widget draws for a line beyond its glyph colours.
@@ -250,7 +265,7 @@ impl highlighter::Highlighter for MarkdownHighlighter {
     type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Highlight)>;
 
     fn new(settings: &Settings) -> Self {
-        let scanner = Scanner::with_front_matter(settings.front_matter_end);
+        let scanner = Scanner::with_front_matter(settings.front_matter_end, settings.boxes());
         Self {
             settings: *settings,
             checkpoints: vec![scanner.clone()],
@@ -313,24 +328,31 @@ impl MarkdownHighlighter {
 }
 
 /// One line's spans and decoration.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub type HighlightedLine = (Vec<(Range<usize>, Highlight)>, LineDecor);
 
 /// Every line of `text`, split at `\n`, as a fresh highlighter run gives it
-/// with `palette` and `font`: its spans and its decoration.
+/// with `palette`, `font` and the host's `tasks`: its spans and its
+/// decoration.
 #[cfg(feature = "test-support")]
-pub fn highlight_lines(text: &str, palette: Palette, font: Font) -> Vec<HighlightedLine> {
+pub fn highlight_lines(
+    text: &str,
+    palette: Palette,
+    font: Font,
+    tasks: Option<TaskOptions>,
+) -> Vec<HighlightedLine> {
     let lines: Vec<&str> = text.split('\n').collect();
     let settings = Settings {
         palette,
         font,
         front_matter_end: block::front_matter_end(&lines[..]),
+        tasks,
     };
     highlight_all(&lines[..], settings)
 }
 
 /// Every line of `lines` as a fresh highlighter with `settings` gives it.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn highlight_all<L: wren_markdown::Lines + ?Sized>(
     lines: &L,
     settings: Settings,
@@ -348,12 +370,13 @@ pub(crate) fn highlight_all<L: wren_markdown::Lines + ?Sized>(
 
 /// The prose ranges of line `index` of `lines`, from a fresh highlighter run
 /// over the lines down to it, for a caller that cannot see the widget's own.
-/// Prose depends on neither colour nor font, so only `front_matter_end` of
-/// the widget's [`Settings`] matters. Empty past the last line.
+/// Prose depends on neither colour nor font, so only `front_matter_end` and
+/// `tasks` of the widget's [`Settings`] matter. Empty past the last line.
 pub fn prose_at(
     lines: &impl wren_markdown::Lines,
     index: usize,
     front_matter_end: Option<usize>,
+    tasks: Option<TaskOptions>,
 ) -> Vec<Range<usize>> {
     if index >= lines.line_count() {
         return Vec::new();
@@ -374,6 +397,7 @@ pub fn prose_at(
         },
         font: Font::DEFAULT,
         front_matter_end,
+        tasks,
     });
     for line in 0..=index {
         let _ = highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(line));
@@ -444,7 +468,10 @@ fn line_highlights(
     }
 
     let task = info.item.and_then(|item| item.task);
-    let done = task.is_some_and(|task| task.done);
+    // A finished task, done or cancelled, recedes: faint markers, and a
+    // dimmed, struck description. Any other box takes the accent, and its
+    // own character tells doing or an unknown status from open.
+    let done = task.is_some_and(|task| task.status.is_finished());
     for (segment, container) in block::segments(line, index, own, continued)
         .into_iter()
         .zip(own)
@@ -1098,6 +1125,7 @@ mod tests {
             palette,
             font: fixtures::FONT,
             front_matter_end,
+            tasks: None,
         }
     }
 
@@ -1274,6 +1302,216 @@ mod tests {
                 assert!(spans.iter().all(|(_, highlight)| highlight.font.is_none()));
             }
         }
+    }
+
+    /// Tasks on, on the day every task test pins.
+    fn tasks_on() -> Option<TaskOptions> {
+        Some(TaskOptions {
+            today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+        })
+    }
+
+    /// [`highlight_text`] for a host with these `tasks`.
+    fn highlight_tasks(
+        palette: Palette,
+        text: &str,
+        tasks: Option<TaskOptions>,
+    ) -> Vec<(LineSpans, LineDecor)> {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let settings = Settings {
+            tasks,
+            ..settings(palette, block::front_matter_end(&lines[..]))
+        };
+        highlight_all(&lines[..], settings)
+    }
+
+    /// With tasks on, the box of an unfinished task (open, doing, or a
+    /// character with no status) takes the accent with its marker, whatever
+    /// the character's width, and its text stays plain.
+    #[test]
+    fn unfinished_status_boxes_use_the_accent_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            for (line, marker) in [
+                ("- [ ] open", "- [ ] "),
+                ("- [/] doing", "- [/] "),
+                ("- [a] unknown", "- [a] "),
+                ("- [1] unknown", "- [1] "),
+                ("- [[] unknown", "- [[] "),
+                ("- [é] unknown", "- [é] "),
+                ("- [界] unknown", "- [界] "),
+                ("- [😀]\tunknown", "- [😀]\t"),
+                ("12. [/]  doing", "12. [/]  "),
+                ("- [/]", "- [/]"),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                assert_eq!(colored(line, &spans), [(marker, Some(p.accent))], "{line}");
+                assert!(decor.strikes.is_empty(), "{line}");
+                assert_eq!(decor.hang, line.find('[').unwrap(), "{line}");
+            }
+            // Inside a quote the box is the accent's and the quote's marker
+            // and text are the quote's.
+            let line = "> - [界] quoted";
+            let (spans, _) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(
+                colored(line, &spans),
+                [
+                    ("> ", Some(p.faint)),
+                    ("- [界] ", Some(p.accent)),
+                    ("quoted", Some(p.quote)),
+                ]
+            );
+        }
+    }
+
+    /// With tasks on, a cancelled task recedes exactly as a done one does:
+    /// faint markers, `completed` text and a strike over the description.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // a struck line has one strike
+    fn done_and_cancelled_tasks_recede_alike_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            for (line, marker, text) in [
+                ("- [x] completed", "- [x] ", "completed"),
+                ("- [X] completed", "- [X] ", "completed"),
+                ("- [-] cancelled", "- [-] ", "cancelled"),
+                ("  1. [-]  **cancelled**  ", "1. [-]  ", "**cancelled**"),
+                // The quote's faint marker runs into the item's.
+                ("> - [-] quoted", "> - [-] ", "quoted"),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                let colored = colored(line, &spans);
+                assert_eq!(colored[0], (marker, Some(p.faint)), "{line}");
+                assert_eq!(colored[1], (text, Some(p.completed)), "{line}");
+                assert!(colored[2..]
+                    .iter()
+                    .all(|(_, color)| *color == Some(p.faint)));
+                let start = line.find(text).unwrap();
+                assert_eq!(decor.strikes, [start..start + text.len()], "{line}");
+            }
+            // A cancelled task's link keeps its colour under the strike.
+            let line = "- [-] see [docs](u)";
+            let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(decor.strikes, [6..line.len()]);
+            assert!(colored(line, &spans).contains(&("docs", Some(p.link))));
+        }
+    }
+
+    /// With tasks off the same lines are what they were before tasks: only
+    /// `[ ]`, `[x]` and `[X]` are boxes, and any other bracket is the
+    /// item's text.
+    #[test]
+    fn with_tasks_off_only_the_three_plain_boxes_are_highlighted() {
+        let p = dark_palette();
+        for line in [
+            "- [/] doing",
+            "- [-] cancelled",
+            "- [a] unknown",
+            "- [界] unknown",
+            "- [/]",
+        ] {
+            let off = highlight_tasks(fixtures::DARK, line, None).remove(0);
+            assert_eq!(
+                off,
+                highlight_text(fixtures::DARK, line).remove(0),
+                "{line}"
+            );
+            let (spans, decor) = off;
+            assert_eq!(colored(line, &spans)[0], ("- ", Some(p.accent)), "{line}");
+            assert!(decor.strikes.is_empty(), "{line}");
+            assert_eq!(decor.hang, 2, "{line}");
+            let on = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+            assert_ne!(on.0, spans, "{line}");
+        }
+        // The three plain boxes look the same either way.
+        for line in ["- [ ] open", "- [x] done", "1. [X] done", "- item", "text"] {
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, None),
+                highlight_tasks(fixtures::DARK, line, tasks_on()),
+                "{line}"
+            );
+        }
+        // Not boxes with tasks on either.
+        for line in ["- [✔\u{fe0f}] a", "- []] a", "- [a]: http://u", "[/] a"] {
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, None),
+                highlight_tasks(fixtures::DARK, line, tasks_on()),
+                "{line}"
+            );
+        }
+    }
+
+    /// Spell check reads a task's description, never its box: with tasks
+    /// on the prose of a status task starts after the box, and a finished
+    /// one keeps its prose under the strike.
+    #[test]
+    fn the_prose_of_a_status_task_starts_after_its_box() {
+        let prose = |line: &str, tasks| -> Vec<String> {
+            prose_at(&[line], 0, None, tasks)
+                .into_iter()
+                .map(|range| line[range].to_owned())
+                .collect()
+        };
+        for (line, text) in [
+            ("- [/] doing task", "doing task"),
+            ("- [-] dropped task", "dropped task"),
+            ("- [a] unknown task", "unknown task"),
+            ("- [界] wide box", "wide box"),
+            ("> 1. [😀]\tquoted", "quoted"),
+            ("- [x] done task", "done task"),
+        ] {
+            assert_eq!(prose(line, tasks_on()), [text], "{line}");
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, tasks_on())
+                    .remove(0)
+                    .1
+                    .prose,
+                prose_at(&[line], 0, None, tasks_on()),
+                "{line}"
+            );
+        }
+        assert_eq!(prose("- [/]", tasks_on()), [] as [&str; 0]);
+        // Off, the bracket is part of the item's text, as it was.
+        for line in ["- [/] doing task", "- [a] unknown task", "- [界] wide box"] {
+            let off = prose(line, None);
+            assert_ne!(off, prose(line, tasks_on()), "{line}");
+            assert_eq!(
+                prose_at(&[line], 0, None, None),
+                highlight_text(fixtures::DARK, line).remove(0).1.prose,
+                "{line}"
+            );
+        }
+    }
+
+    /// A change of the host's tasks is a change of settings, so the
+    /// widget's highlighter starts again and reads every line anew.
+    #[test]
+    fn a_change_of_tasks_rehighlights_from_the_first_line() {
+        let line = "- [/] doing";
+        let off = settings(fixtures::DARK, None);
+        let on = Settings {
+            tasks: tasks_on(),
+            ..off
+        };
+        assert_ne!(off, on);
+        let later = Settings {
+            tasks: Some(TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, 20).expect("a date"),
+            }),
+            ..off
+        };
+        assert_ne!(on, later, "a new day is a new setting");
+        let mut h = MarkdownHighlighter::new(&off);
+        let before: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(h.current_line(), 1);
+        h.update(&on);
+        assert_eq!(h.current_line(), 0);
+        let after: LineSpans = h.highlight_line(line).collect();
+        assert_ne!(before, after);
+        assert_eq!(
+            after,
+            highlight_tasks(fixtures::DARK, line, tasks_on())[0].0
+        );
     }
 
     #[test]
@@ -2311,6 +2549,7 @@ mod tests {
             palette: fixtures::LIGHT,
             font: Font::with_name("Fira Code"),
             front_matter_end: None,
+            tasks: None,
         });
 
         let spans: Vec<_> = h.highlight_line("# Heading").collect();

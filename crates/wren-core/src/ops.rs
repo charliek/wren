@@ -235,6 +235,9 @@ pub const INDEX_REST: Duration = Duration::from_millis(250);
 pub struct SessionOptions {
     /// Whether board notes are scanned, listed, indexed and opened.
     pub boards: bool,
+    /// Whether the app's tasks are on: previews and search snippets then
+    /// read a task box of any status, as the editor does.
+    pub tasks: bool,
 }
 
 impl SessionOptions {
@@ -244,6 +247,10 @@ impl SessionOptions {
         } else {
             scan::Kinds::MARKDOWN
         }
+    }
+
+    fn boxes(self) -> wren_markdown::block::Boxes {
+        wren_markdown::block::Boxes::with_tasks(self.tasks)
     }
 }
 
@@ -334,7 +341,7 @@ impl Session {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
-        let mut index = Index::default();
+        let mut index = Index::with_boxes(options.boxes());
         let mut model =
             scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
                 index.ingest(note, contents);
@@ -2077,7 +2084,14 @@ mod tests {
         };
         fs::write(root.path().join("S/G/Flow.wren-board"), text("Start")).unwrap();
         fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        let mut session = Session::open_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        )
+        .unwrap();
         session.watcher = None;
         let board = id_at(&session, "S/G/Flow.wren-board");
         let ms = Duration::from_millis;
@@ -2158,7 +2172,13 @@ mod tests {
     #[test]
     fn a_workspace_opens_without_parsing_a_board_and_the_first_job_extracts_them() {
         let root = labelled_boards(200);
-        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        let mut session = background_session_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        );
         assert_eq!(session.model.notes.len(), 201);
         let labelled = id_at(&session, "S/G/Board 123.wren-board");
         // The open read every board and parsed none.
@@ -2209,7 +2229,13 @@ mod tests {
     #[test]
     fn labels_a_job_took_from_an_older_source_are_not_kept() {
         let root = labelled_boards(2);
-        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        let mut session = background_session_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        );
         let board = id_at(&session, "S/G/Board 1.wren-board");
         let result = begin(&mut session, 1).run();
         // Read again before the job returns: an own rescan finds the edit.
@@ -2235,7 +2261,14 @@ mod tests {
     #[test]
     fn without_a_job_boards_are_extracted_by_a_search_or_the_next_tick() {
         let root = labelled_boards(200);
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        let mut session = Session::open_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        )
+        .unwrap();
         session.watcher = None;
         let labelled = id_at(&session, "S/G/Board 123.wren-board");
         assert_eq!(session.index.extractions, 0);
@@ -2245,7 +2278,14 @@ mod tests {
         assert_eq!(found(&session, "label 123"), [labelled]);
         drop(session);
 
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        let mut session = Session::open_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        )
+        .unwrap();
         session.watcher = None;
         session.apply_at(Op::Tick, secs(1)).unwrap();
         assert_eq!(session.index.extractions, 200);

@@ -15,6 +15,7 @@ pub mod block;
 pub mod date;
 pub mod edit;
 pub mod outline;
+pub mod status;
 
 pub use edit::plan;
 
@@ -316,6 +317,14 @@ pub enum Intent {
     MoveLineDown,
 }
 
+/// What a host whose tasks are on reads in a task line beyond the plain
+/// box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TaskOptions {
+    /// Today where the user is, the day a task's dates are read against.
+    pub today: date::Date,
+}
+
 /// Planner settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Options {
@@ -323,6 +332,17 @@ pub struct Options {
     pub indent_width: usize,
     /// Whether edits renumber ordered lists.
     pub renumber: bool,
+    /// The host's tasks, when they are on. `None`, the default, reads and
+    /// edits a task line as an editor without tasks does: the box holds a
+    /// space, `x` or `X`, and nothing else on the line is special.
+    pub tasks: Option<TaskOptions>,
+}
+
+impl Options {
+    /// The task boxes these settings read; see [`block::Boxes`].
+    pub const fn boxes(&self) -> block::Boxes {
+        block::Boxes::with_tasks(self.tasks.is_some())
+    }
 }
 
 impl Default for Options {
@@ -330,6 +350,7 @@ impl Default for Options {
         Self {
             indent_width: block::TAB_STOP,
             renumber: true,
+            tasks: None,
         }
     }
 }

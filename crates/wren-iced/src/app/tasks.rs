@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use iced::Subscription;
+use wren_markdown::block::Boxes;
 use wren_markdown::date::Date;
+use wren_markdown::TaskOptions;
 
 use super::{App, Message};
 
@@ -87,6 +89,32 @@ impl App {
     /// relative to today refreshes from here.
     fn day_changed(&mut self) {
         self.clock.changes += 1;
+        self.sync_task_options();
+    }
+
+    /// The one value everything that reads a task line is given: `None`
+    /// with tasks off, when Wren reads and edits a task line exactly as it
+    /// did before tasks, and today's date with them on. It reaches the
+    /// editor (`sync_task_options`), which hands it to the Markdown keys,
+    /// the highlighter and so spell check's prose; the Session takes the
+    /// setting itself (`session_options`), for the index's previews; and
+    /// whatever classifies lines here takes `task_boxes`.
+    pub(super) fn task_options(&self) -> Option<TaskOptions> {
+        self.preferences.tasks.then(|| TaskOptions {
+            today: self.today(),
+        })
+    }
+
+    /// The task boxes the classifier reads in this run: the part of
+    /// [`App::task_options`] that does not change with the day.
+    pub(super) fn task_boxes(&self) -> Boxes {
+        Boxes::with_tasks(self.preferences.tasks)
+    }
+
+    /// Give the editor the task options as they are now: at launch, when
+    /// the settings are applied, and when the day changes.
+    pub(super) fn sync_task_options(&mut self) {
+        self.editor.set_tasks(self.task_options());
     }
 
     /// The timer that looks for a new day: only while tasks are on.
@@ -229,6 +257,239 @@ mod tests {
             .iter()
             .any(|note| note.title == "2031-02-03"));
         assert!(directory.path().join("Alpha/Inbox/2031-02-03.md").exists());
+    }
+
+    /// A note whose every line reads one way with tasks on and another
+    /// with them off.
+    const STATUS_NOTE: &str =
+        "# Status\n\n- [/] Doing teh draft\n- [界] Wide box\n- [-] Dropped idea\n- [/]\n  ===\n";
+
+    /// An app on `engine` with `STATUS_NOTE` open in a workspace of its
+    /// own, opened the way the app opens one, with spell check loaded and
+    /// today pinned.
+    fn status_app(engine: &str, tasks: &str) -> (tempfile::TempDir, App) {
+        use wren_core::ops::{Op, Session};
+
+        use super::super::spelling::{dictionary, Loaded};
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join("workspace/Tasks/Status");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("Lines.md"), STATUS_NOTE).unwrap();
+        let config = directory.path().join("config/config.conf");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            format!("editor-engine = {engine}\nspell-check = on\ntasks = {tasks}\n"),
+        )
+        .unwrap();
+        let options = Options {
+            editor: true,
+            ..Options::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(config));
+        app.clock = Clock::new(Some(date("2026-11-19")));
+        app.apply_preferences();
+        app.workspace_mode = true;
+        let workspace = directory.path().join("workspace");
+        app.session = Some(Session::open_with(&workspace, app.session_options()).unwrap());
+        app.sync_editor(true);
+        let note = app.model().unwrap().notes[0].id;
+        let _ = app.process_core(Op::OpenNote { note: Some(note) });
+        assert_eq!(app.editor.text(), STATUS_NOTE, "{engine}");
+        let _ = app.update(Message::SpellLoaded(Loaded::new(dictionary(), None)));
+        (directory, app)
+    }
+
+    /// The note after `edit` with the caret at `column` of `line`; one
+    /// undo then restores it.
+    fn after(app: &mut App, line: usize, column: usize, edit: &str) -> String {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+        use iced::widget::text_editor::{Cursor, Position};
+
+        use super::super::commands::Command;
+        app.editor.move_cursor(Cursor {
+            position: Position { line, column },
+            selection: None,
+        });
+        match edit {
+            "toggle" => {
+                let _ = app.dispatch(Command::Run(CommandId::ToggleTask));
+            }
+            key => {
+                let named = if key == "enter" {
+                    Named::Enter
+                } else {
+                    Named::Backspace
+                };
+                for message in app
+                    .editor
+                    .key_message(Key::Named(named), Modifiers::empty())
+                {
+                    let _ = app.update(Message::Editor(message));
+                }
+            }
+        }
+        let text = app.editor.text();
+        let draft = &app.session.as_ref().unwrap().document().unwrap().text;
+        assert_eq!(&text, draft, "the edit reaches the session");
+        let _ = app.update(Message::Editor(wren_editor::Message::Undo));
+        assert_eq!(app.editor.text(), STATUS_NOTE, "one undo restores the note");
+        text
+    }
+
+    fn outline_titles(app: &mut App) -> Vec<String> {
+        let _ = app.open_palette(Mode::Outline);
+        let titles = app
+            .palette
+            .as_ref()
+            .expect("the outline opens")
+            .results
+            .iter()
+            .map(|row| row.title.clone())
+            .collect();
+        let _ = app.close_palette();
+        titles
+    }
+
+    /// With tasks on, nothing in the app reads a task line with the
+    /// default options: the editor's keys and highlighter, the prose spell
+    /// check reads, the outline, and the Session's previews and snippets
+    /// all read a box of any status, on both engines. With tasks off the
+    /// same paths read the note as Wren did before tasks.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // a line often has one strike or prose range
+    fn every_reader_of_a_task_line_takes_the_apps_task_options() {
+        use wren_core::index::{QueryKind, Scope};
+        use wren_editor::Palette;
+        use wren_markdown::TaskOptions;
+
+        let ink = iced::Color::BLACK;
+        let palette = Palette {
+            text: ink,
+            muted: ink,
+            faint: ink,
+            accent: ink,
+            heading: ink,
+            heading2: ink,
+            link: ink,
+            code: ink,
+            quote: ink,
+            completed: ink,
+        };
+        let lines: Vec<&str> = STATUS_NOTE.split('\n').collect();
+        let replaced = |line: usize, new: &[&str]| {
+            [&lines[..line], new, &lines[line + 1..]]
+                .concat()
+                .join("\n")
+        };
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = status_app(engine, "on");
+            let today = date("2026-11-19");
+            assert_eq!(app.task_options(), Some(TaskOptions { today }), "{engine}");
+            assert_eq!(app.task_boxes(), Boxes::Status, "{engine}");
+
+            // The editor: its options, its highlighter, its keys.
+            assert_eq!(app.editor.tasks(), app.task_options(), "{engine}");
+            let highlighted = app.editor.highlighted(palette);
+            let boxes: Vec<usize> = highlighted.iter().map(|(_, decor)| decor.hang).collect();
+            assert_eq!(boxes, [0, 0, 2, 2, 2, 2, 2, 0], "{engine}");
+            assert_eq!(highlighted[2].0[0].0, 0..6, "{engine}: the box is a marker");
+            assert_eq!(highlighted[3].0[0].0, 0..8, "{engine}: a wide box too");
+            assert_eq!(highlighted[4].1.strikes, [6..18], "{engine}: cancelled");
+            assert_eq!(
+                after(&mut app, 3, lines[3].len(), "enter"),
+                replaced(3, &[lines[3], "- [ ] "]),
+                "{engine}"
+            );
+            assert_eq!(
+                after(&mut app, 3, 8, "backspace"),
+                replaced(3, &["- Wide box"]),
+                "{engine}"
+            );
+            assert_eq!(
+                after(&mut app, 2, 0, "toggle"),
+                replaced(2, &["- [x] Doing teh draft"]),
+                "{engine}"
+            );
+            assert_eq!(
+                after(&mut app, 4, 0, "toggle"),
+                replaced(4, &["- [ ] Dropped idea"]),
+                "{engine}"
+            );
+
+            // Spelling: the prose starts after the box, and the editor's
+            // proofreader marks the one misspelled word in it.
+            assert_eq!(highlighted[2].1.prose, [6..21], "{engine}");
+            assert_eq!(highlighted[3].1.prose, [8..16], "{engine}");
+            let marks = app.editor.marks(2);
+            if engine == "advanced" {
+                assert_eq!(marks, [12..15], "teh");
+            } else {
+                assert!(marks.is_empty(), "the classic engine has no proofreader");
+            }
+
+            // The outline: an empty task is no heading's text.
+            assert_eq!(outline_titles(&mut app), ["Status"], "{engine}");
+
+            // The Session and its index.
+            let session = app.session.as_ref().unwrap();
+            assert!(session.options().tasks, "{engine}");
+            let note = session.model().notes[0].id;
+            assert_eq!(session.index().preview(note), Some("Doing teh draft"));
+            let hit = &session
+                .index()
+                .query("wide", Scope::Workspace, QueryKind::Search, 10)[0];
+            assert!(
+                hit.snippet
+                    .text
+                    .contains("Doing teh draft · Wide box · Dropped idea"),
+                "{engine}: {:?}",
+                hit.snippet.text
+            );
+
+            // A new day reaches the editor through the day change.
+            app.pin_today(date("2026-11-20"));
+            assert_eq!(
+                app.editor.tasks(),
+                Some(TaskOptions {
+                    today: date("2026-11-20")
+                }),
+                "{engine}"
+            );
+
+            // Off, the same paths read the three plain boxes only.
+            let (_directory, mut app) = status_app(engine, "off");
+            assert_eq!(app.task_options(), None, "{engine}");
+            assert_eq!(app.task_boxes(), Boxes::Plain, "{engine}");
+            assert_eq!(app.editor.tasks(), None, "{engine}");
+            let highlighted = app.editor.highlighted(palette);
+            assert_eq!(highlighted[2].0[0].0, 0..2, "{engine}: only the marker");
+            assert!(highlighted[4].1.strikes.is_empty(), "{engine}");
+            assert_ne!(highlighted[2].1.prose, [6..21], "{engine}");
+            assert_eq!(
+                after(&mut app, 3, lines[3].len(), "enter"),
+                replaced(3, &[lines[3], "- "]),
+                "{engine}"
+            );
+            assert_eq!(
+                after(&mut app, 3, 8, "backspace"),
+                replaced(3, &["- [界]Wide box"]),
+                "{engine}"
+            );
+            assert_eq!(
+                after(&mut app, 4, 0, "toggle"),
+                replaced(4, &["- [ ] [-] Dropped idea"]),
+                "{engine}"
+            );
+            assert_eq!(outline_titles(&mut app), ["Status", "[/]"], "{engine}");
+            let session = app.session.as_ref().unwrap();
+            assert!(!session.options().tasks, "{engine}");
+            let note = session.model().notes[0].id;
+            assert_eq!(session.index().preview(note), Some("[/] Doing teh draft"));
+            app.pin_today(date("2026-11-20"));
+            assert_eq!(app.editor.tasks(), None, "{engine}");
+        }
     }
 
     #[test]

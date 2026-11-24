@@ -26,7 +26,14 @@ where **Suggest spelling** is unavailable too.
 
 | Checked | Not checked |
 |---|---|
-| Paragraphs, list items, quotes, tasks (open and done), table rows, and headings | Front matter, fenced and indented code, HTML blocks, thematic breaks, and link reference definitions (`[label]: url`) |
+| Paragraphs, list items, quotes, tasks of every status, table rows, and headings | Front matter, fenced and indented code, HTML blocks, thematic breaks, and link reference definitions (`[label]: url`) |
+
+A task's box is never checked, only the text after it. Without
+[`tasks = on`](configuration.md), a box is `[ ]`, `[x]` or `[X]`, and any
+other bracket after a list marker, such as `[/]`, is the item's text. With
+`tasks = on`, a box holds any one character, so a task of any status is
+read the same way: open, doing (`[/]`), done, cancelled (`[-]`), or a
+character with no status of its own.
 
 Inside checked text, these are skipped:
 

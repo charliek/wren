@@ -57,6 +57,7 @@ pub const SETTINGS: Settings = Settings {
     palette: DARK,
     font: FONT,
     front_matter_end: None,
+    tasks: None,
 };
 
 pub const LIGHT: Palette = Palette {

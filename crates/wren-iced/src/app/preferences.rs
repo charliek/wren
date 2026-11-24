@@ -513,6 +513,7 @@ impl App {
         self.editor.set_markdown_assist(assist);
         self.editor
             .set_key_policy(key_policy(&self.preferences.keymap, assist));
+        self.sync_task_options();
         let covered = self.board_covered();
         if let Some(view) = &mut self.board {
             view.set_key_policy(board_policy(&self.preferences.keymap));

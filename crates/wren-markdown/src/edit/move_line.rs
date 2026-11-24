@@ -57,7 +57,7 @@ pub(super) fn move_lines<L: Lines + ?Sized>(
             Pos::new(count - 1, d.line(count - 1).len())
         };
     }
-    let an = Analysis::new(base, None);
+    let an = Analysis::new(base, None, opts.boxes());
     let code = (lo..=hi).any(|j| an.recs[j].info.kind.is_code_like());
     if opts.renumber && !code {
         let was: Vec<Option<u32>> = (0..count)
@@ -97,12 +97,14 @@ pub(super) fn move_lines<L: Lines + ?Sized>(
             }
         }
         for (j, slot, n) in heads {
-            let ws = Analysis::new(&d, None).line_at(j, d.line(j)).ws;
+            let ws = Analysis::new(&d, None, opts.boxes())
+                .line_at(j, d.line(j))
+                .ws;
             set_number(&mut d, j, ws, n, &mut marks);
-            renumber_from(&mut d, j, slot, Some(n), false, &mut marks);
+            renumber_from(&mut d, j, slot, Some(n), false, opts.boxes(), &mut marks);
         }
         let runs: Vec<Run> = near.map(|line| Run { line, slot: None }).collect();
-        renumber_runs(&mut d, &runs, &was, &mut marks);
+        renumber_runs(&mut d, &runs, &was, opts.boxes(), &mut marks);
     }
     finish(base, &d, marks)
 }

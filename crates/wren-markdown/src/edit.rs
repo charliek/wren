@@ -11,7 +11,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::block::{self, Container, Kind, LineInfo, ListItem, Marker, Scanner, Segment};
+use crate::block::{self, Boxes, Container, Kind, LineInfo, ListItem, Marker, Scanner, Segment};
 use crate::{EditPlan, Intent, Lines, Options, Pos, Replace, Selection};
 
 mod delete;
@@ -20,6 +20,9 @@ mod move_line;
 mod tab;
 mod task;
 mod wrap;
+
+/// The box a new item's task starts with.
+const OPEN_BOX: &str = "[ ]";
 
 /// Plan `intent` at `sel`.
 ///
@@ -44,14 +47,14 @@ pub fn plan(
         Intent::Delete => delete::forward(lines, sel),
         Intent::DeleteWordBackward => delete::word_backward(lines, sel),
         Intent::DeleteWordForward => delete::word_forward(lines, sel),
-        Intent::DeleteToTextStart => delete::to_text_start(lines, sel),
-        Intent::Home { extend } => motion::home(lines, sel, extend),
+        Intent::DeleteToTextStart => delete::to_text_start(lines, sel, opts),
+        Intent::Home { extend } => motion::home(lines, sel, extend, opts),
         Intent::DocumentStart { extend } => motion::document_start(lines, sel, extend),
         Intent::DocumentEnd { extend } => motion::document_end(lines, sel, extend),
-        Intent::ToggleTask => task::toggle(lines, sel),
-        Intent::Bold => wrap::toggle(lines, sel, wrap::Style::Bold),
-        Intent::Italic => wrap::toggle(lines, sel, wrap::Style::Italic),
-        Intent::Code => wrap::toggle(lines, sel, wrap::Style::Code),
+        Intent::ToggleTask => task::toggle(lines, sel, opts),
+        Intent::Bold => wrap::toggle(lines, sel, wrap::Style::Bold, opts),
+        Intent::Italic => wrap::toggle(lines, sel, wrap::Style::Italic, opts),
+        Intent::Code => wrap::toggle(lines, sel, wrap::Style::Code, opts),
         Intent::MoveLineUp => move_line::move_lines(lines, sel, true, opts),
         Intent::MoveLineDown => move_line::move_lines(lines, sel, false, opts),
     }
@@ -62,12 +65,12 @@ fn enter<L: Lines + ?Sized>(base: &L, sel: Selection, shift: bool, opts: &Option
     let end = clamp(base, sel.end());
     let mut draft = Draft::new(base);
     draft.delete(start, end);
-    let analysis = enter_analysis(&draft, start.line);
+    let analysis = enter_analysis(&draft, start.line, opts.boxes());
     let (caret, requests) = break_line(&mut draft, &analysis, start, shift);
     let mut marks = Selection::caret(caret);
     if opts.renumber {
         for request in requests {
-            let an = Analysis::new(&draft, None);
+            let an = Analysis::new(&draft, None, opts.boxes());
             renumber(&mut draft, &an, request, &mut marks);
         }
     }
@@ -77,12 +80,12 @@ fn enter<L: Lines + ?Sized>(base: &L, sel: Selection, shift: bool, opts: &Option
 /// The analysis Enter on line `l` needs. A line outside any container
 /// breaks without reading the lines after it, so only the lines up to it are
 /// scanned; any other line may continue or renumber a list below.
-fn enter_analysis(d: &Draft, l: usize) -> Analysis {
-    let bounded = Analysis::scan(d, Some(l), l + 1);
+fn enter_analysis(d: &Draft, l: usize, boxes: Boxes) -> Analysis {
+    let bounded = Analysis::scan(d, Some(l), l + 1, boxes);
     if bounded.stack(l).is_empty() && as_empty_item(&bounded, l, d.line(l)).is_none() {
         bounded
     } else {
-        Analysis::new(d, Some(l))
+        Analysis::new(d, Some(l), boxes)
     }
 }
 
@@ -224,7 +227,7 @@ fn break_line(d: &mut Draft, an: &Analysis, pos: Pos, shift: bool) -> (Pos, Vec<
 fn as_empty_item(an: &Analysis, l: usize, line: &str) -> Option<(LineInfo, Vec<Container>, usize)> {
     let info = &an.recs[l].info;
     let paragraph_like = matches!(info.kind, Kind::Prose | Kind::SetextUnderline { .. });
-    if info.lazy || !paragraph_like || !is_empty_marker(&line[info.text_start..]) {
+    if info.lazy || !paragraph_like || !is_empty_marker(&line[info.text_start..], an.boxes) {
         return None;
     }
     let mut scanner = an.before.clone()?;
@@ -236,7 +239,7 @@ fn as_empty_item(an: &Analysis, l: usize, line: &str) -> Option<(LineInfo, Vec<C
 }
 
 /// Whether `s` is a list marker alone, with an optional task box.
-fn is_empty_marker(s: &str) -> bool {
+fn is_empty_marker(s: &str, boxes: Boxes) -> bool {
     let s = trim_ws_end(s);
     let rest = match s.strip_prefix(['-', '*', '+']) {
         Some(rest) => rest,
@@ -249,7 +252,8 @@ fn is_empty_marker(s: &str) -> bool {
         }
     };
     let task = rest.trim_start_matches([' ', '\t']);
-    rest.is_empty() || (task.len() < rest.len() && matches!(task, "[ ]" | "[x]" | "[X]"))
+    let boxed = || block::task_box(task, 0, boxes).is_some_and(|found| found.end == task.len());
+    rest.is_empty() || (task.len() < rest.len() && boxed())
 }
 
 /// The line being broken, and where.
@@ -447,10 +451,10 @@ fn insert_above(
 ) -> (Pos, Vec<Renumber>) {
     let mut above = ctx.line[..text_start].to_owned();
     if let Some(task) = item.task {
-        above.replace_range(task.start..task.start + 3, "[ ]");
+        above.replace_range(task.start..task.end, OPEN_BOX);
     }
     above.truncate(trim_ws_end(&above).len());
-    let mut probe = an.before.clone().unwrap_or_default();
+    let mut probe = an.before.clone().unwrap_or_else(|| Scanner::new(an.boxes));
     let probed = probe.next_line(&above);
     let empty_item = probed.is_empty_item() && probed.depth == slot + 1;
     if !empty_item {
@@ -696,8 +700,14 @@ struct Run {
 /// After a line move, `was` holds the original document's ordered number
 /// on each line, and a run counts from the number its first line had, so
 /// reordered items keep the run's start. Otherwise it is empty.
-fn renumber_runs(d: &mut Draft, runs: &[Run], was: &[Option<u32>], marks: &mut Selection) {
-    let an = Analysis::new(&*d, None);
+fn renumber_runs(
+    d: &mut Draft,
+    runs: &[Run],
+    was: &[Option<u32>],
+    boxes: Boxes,
+    marks: &mut Selection,
+) {
+    let an = Analysis::new(&*d, None, boxes);
     let mut found: Vec<(usize, usize)> = Vec::new();
     for run in runs {
         let Some(slot) = run.slot.or_else(|| an.item_slot(run.line)) else {
@@ -712,7 +722,7 @@ fn renumber_runs(d: &mut Draft, runs: &[Run], was: &[Option<u32>], marks: &mut S
     }
     for (first, slot) in found {
         let start = was.get(first).copied().flatten();
-        renumber_from(d, first, slot, start, true, marks);
+        renumber_from(d, first, slot, start, true, boxes, marks);
     }
 }
 
@@ -725,9 +735,10 @@ fn renumber_from(
     slot: usize,
     start: Option<u32>,
     keep_same: bool,
+    boxes: Boxes,
     marks: &mut Selection,
 ) {
-    let an = Analysis::new(&*d, None);
+    let an = Analysis::new(&*d, None, boxes);
     let Some(Container::Item(head)) = an.opened_here(first, slot) else {
         return;
     };
@@ -955,8 +966,8 @@ fn spacing(line: &str, item: &ListItem) -> String {
 fn task_text(line: &str, item: &ListItem) -> String {
     match item.task {
         Some(task) => {
-            let gap = &line[task.start + 3..item.text_start.max(task.start + 3)];
-            format!("[ ]{}", if gap.is_empty() { " " } else { gap })
+            let gap = &line[task.end..item.text_start.max(task.end)];
+            format!("{OPEN_BOX}{}", if gap.is_empty() { " " } else { gap })
         }
         None => String::new(),
     }
@@ -1033,22 +1044,29 @@ struct Analysis {
     opened: Vec<Container>,
     /// The scanner just before the line asked for in [`Analysis::new`].
     before: Option<Scanner>,
+    /// The task boxes the scan read, for whatever scans a line again.
+    boxes: Boxes,
 }
 
 impl Analysis {
-    fn new<L: Lines + ?Sized>(lines: &L, checkpoint: Option<usize>) -> Self {
-        Self::scan(lines, checkpoint, lines.line_count())
+    fn new<L: Lines + ?Sized>(lines: &L, checkpoint: Option<usize>, boxes: Boxes) -> Self {
+        Self::scan(lines, checkpoint, lines.line_count(), boxes)
     }
 
     /// The analysis of lines `0..=last` only, for a plan that reads no line
     /// after `last`. A line's record depends only on the lines up to it, so
     /// these records are the full analysis's.
-    fn through<L: Lines + ?Sized>(lines: &L, last: usize) -> Self {
-        Self::scan(lines, None, (last + 1).min(lines.line_count()))
+    fn through<L: Lines + ?Sized>(lines: &L, last: usize, boxes: Boxes) -> Self {
+        Self::scan(lines, None, (last + 1).min(lines.line_count()), boxes)
     }
 
-    fn scan<L: Lines + ?Sized>(lines: &L, checkpoint: Option<usize>, count: usize) -> Self {
-        let mut scanner = Scanner::with_front_matter(block::front_matter_end(lines));
+    fn scan<L: Lines + ?Sized>(
+        lines: &L,
+        checkpoint: Option<usize>,
+        count: usize,
+        boxes: Boxes,
+    ) -> Self {
+        let mut scanner = Scanner::with_front_matter(block::front_matter_end(lines), boxes);
         let mut recs = Vec::with_capacity(count);
         let mut opened = Vec::new();
         let mut before = None;
@@ -1074,6 +1092,7 @@ impl Analysis {
             recs,
             opened,
             before,
+            boxes,
         }
     }
 
@@ -1495,7 +1514,7 @@ fn advance(pos: Pos, text: &str) -> Pos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Document, LineEnding};
+    use crate::{Document, LineEnding, TaskOptions};
 
     /// Parse a fixture: `|` is the cursor, `«` a selection's anchor and `»`
     /// its head.
@@ -1784,7 +1803,7 @@ mod tests {
             let mut after = apply(&doc, &exited);
             let caret = Document::new(&after).offset(exited.selection.head);
             after.insert_str(caret, "foo");
-            let infos = block::scan(&Document::new(&after));
+            let infos = block::scan(&Document::new(&after), Boxes::Plain);
             let last = infos.last().expect("a document has a line");
             assert!(last.item.is_some(), "{before:?} became {after:?}");
         }
@@ -1808,6 +1827,109 @@ mod tests {
                 ("> Para\n> - |x", "> Para\n>\n> - |x"),
             ],
         );
+    }
+
+    /// Enter on a task of any status, whatever its symbol's width,
+    /// continues with an open box and the task's own spacing.
+    #[test]
+    fn enter_continues_a_status_box_with_an_open_one() {
+        check_with(
+            Intent::Enter,
+            &tasks_on(),
+            &[
+                ("- [/] doing|", "- [/] doing\n- [ ] |"),
+                ("- [-] gone|", "- [-] gone\n- [ ] |"),
+                ("- [x] done|", "- [x] done\n- [ ] |"),
+                ("- [a] unknown|", "- [a] unknown\n- [ ] |"),
+                ("- [界] wide|", "- [界] wide\n- [ ] |"),
+                ("- [界]  wide|", "- [界]  wide\n- [ ]  |"),
+                ("- [é]\tt|", "- [é]\tt\n- [ ]\t|"),
+                ("- [😀] a|b", "- [😀] a\n- [ ] |b"),
+                ("1. [✓] a|", "1. [✓] a\n2. [ ] |"),
+                ("> - [/] q|", "> - [/] q\n> - [ ] |"),
+                ("- a|\n  - [界] b", "- a\n  - [ ] |\n  - [界] b"),
+                ("- [[] a|", "- [[] a\n- [ ] |"),
+                // An empty task leaves the list, as an empty open one does.
+                ("- [/] |", "|"),
+                ("- [界]|", "|"),
+                ("- a\n- [-] |", "- a\n\n|"),
+                ("- [界] a\n  - |", "- [界] a\n- [ ] |"),
+                ("- a\n  - [界] |", "- a\n- |"),
+                // An empty task typed under a paragraph line is still one.
+                ("- a\n  - [界]|", "- a\n- |"),
+                // Not boxes, so the item continues without one.
+                ("- [✔\u{fe0f}] a|", "- [✔\u{fe0f}] a\n- |"),
+                ("- []] a|", "- []] a\n- |"),
+                ("- [a]: http://u|", "- [a]: http://u\n- |"),
+            ],
+        );
+        // Off, only the three plain boxes are tasks.
+        check(
+            Intent::Enter,
+            &[
+                ("- [/] doing|", "- [/] doing\n- |"),
+                ("- [-] gone|", "- [-] gone\n- |"),
+                ("- [界] wide|", "- [界] wide\n- |"),
+                ("- [1] x|", "- [1] x\n- |"),
+                ("- [[] a|", "- [[] a\n- |"),
+                ("- [a]: http://u|", "- [a]: http://u\n- |"),
+                ("- [/] |", "- [/] \n- |"),
+                ("- [x] done|", "- [x] done\n- [ ] |"),
+            ],
+        );
+    }
+
+    #[test]
+    fn enter_at_the_start_of_a_status_task_inserts_an_open_one_above() {
+        check_with(
+            Intent::Enter,
+            &tasks_on(),
+            &[
+                ("- [/] |doing", "- [ ]\n- [/] |doing"),
+                ("- [-] |gone", "- [ ]\n- [-] |gone"),
+                ("- [界] |wide", "- [ ]\n- [界] |wide"),
+                ("- [😀]  |b", "- [ ]\n- [😀]  |b"),
+                ("1. [é] |x\n2. y", "1. [ ]\n2. [é] |x\n3. y"),
+                ("> - [✓] |x", "> - [ ]\n> - [✓] |x"),
+                ("- [|/] x", "- [ ]\n- [/] |x"),
+                ("- [界|] x", "- [ ]\n- [界] |x"),
+                // A box is content, so the item above may follow a paragraph.
+                ("Para\n- [界] |x", "Para\n- [ ]\n- [界] |x"),
+            ],
+        );
+        check(
+            Intent::Enter,
+            &[
+                ("- [/] |doing", "- [/] \n- |doing"),
+                ("- [界] |wide", "- [界] \n- |wide"),
+                ("- |[/] doing", "-\n- |[/] doing"),
+            ],
+        );
+    }
+
+    #[test]
+    fn tab_and_line_moves_carry_a_status_box_along() {
+        check_with(
+            Intent::Tab,
+            &tasks_on(),
+            &[("- a\n- [界] b|", "- a\n  - [界] b|")],
+        );
+        check_with(
+            Intent::ShiftTab,
+            &tasks_on(),
+            &[("- a\n  - [界] b|", "- a\n- [界] b|")],
+        );
+        check_with(
+            Intent::MoveLineUp,
+            &tasks_on(),
+            &[("- [ ] a\n- [界] b|", "- [界] b|\n- [ ] a")],
+        );
+        check_with(
+            Intent::Bold,
+            &tasks_on(),
+            &[("«- [界] wide»", "- [界] **«wide»**")],
+        );
+        check(Intent::Bold, &[("«- [界] wide»", "- **«[界] wide»**")]);
     }
 
     #[test]
@@ -2290,9 +2412,45 @@ mod tests {
         "**b** *i* `c`",
     ];
 
-    /// A random small document with mixed line endings and maybe a byte
-    /// order mark.
-    fn random_text(rng: &mut Rng) -> String {
+    /// Task lines for the random documents of a host with tasks on: every
+    /// status, symbols of one to four bytes, and boxes that are not boxes.
+    const BOX_LINES: [&str; 16] = [
+        "- [/] doing",
+        "- [-] cancelled",
+        "* [a] letter",
+        "1. [1] digit",
+        "- [界] wide",
+        "  - [é] accent",
+        "> - [✓] quoted",
+        "- [😀] four bytes",
+        "- [/]",
+        "- [界]\tt",
+        "- [[] bracket",
+        "- []] not",
+        "- [✔\u{fe0f}] two scalars",
+        "- [e\u{301}] combining",
+        "- [a]: http://u",
+        "[/] bare",
+    ];
+
+    /// Tasks on, on the day every task test pins.
+    pub(super) fn tasks() -> TaskOptions {
+        TaskOptions {
+            today: crate::date::Date::new(2026, 11, 19).expect("a date"),
+        }
+    }
+
+    /// The default settings with tasks on.
+    pub(super) fn tasks_on() -> Options {
+        Options {
+            tasks: Some(tasks()),
+            ..Options::default()
+        }
+    }
+
+    /// A random small document made of `lines`, with mixed line endings
+    /// and maybe a byte order mark.
+    fn random_text(rng: &mut Rng, lines: &[&str]) -> String {
         let mut text = String::new();
         if rng.below(8) == 0 {
             text.push('\u{feff}');
@@ -2302,7 +2460,7 @@ mod tests {
             if i > 0 {
                 text.push_str(rng.pick(&ENDINGS));
             }
-            text.push_str(rng.pick(&LINES));
+            text.push_str(rng.pick(lines));
         }
         if rng.below(3) == 0 {
             text.push_str(rng.pick(&ENDINGS));
@@ -2312,6 +2470,17 @@ mod tests {
 
     #[test]
     fn random_documents_and_intents_plan_valid_edits() {
+        random_plans(0x5eed_0f3a_3d1e_5700, &LINES, None);
+    }
+
+    /// The same with tasks on, over documents that hold every kind of box.
+    #[test]
+    fn random_documents_with_status_boxes_plan_valid_edits() {
+        let lines = [&LINES[..], &BOX_LINES[..]].concat();
+        random_plans(0x5eed_0f3a_3d1e_5701, &lines, Some(tasks()));
+    }
+
+    fn random_plans(seed: u64, lines: &[&str], tasks: Option<TaskOptions>) {
         let intents = [
             Intent::Enter,
             Intent::ShiftEnter,
@@ -2333,9 +2502,9 @@ mod tests {
             Intent::MoveLineUp,
             Intent::MoveLineDown,
         ];
-        let mut rng = Rng(0x5eed_0f3a_3d1e_5700);
+        let mut rng = Rng(seed);
         for case in 0..30_000 {
-            let text = random_text(&mut rng);
+            let text = random_text(&mut rng, lines);
             let doc = Document::new(&text);
             // Positions may be off the document or inside a character; the
             // planner clamps them.
@@ -2355,6 +2524,7 @@ mod tests {
             let opts = Options {
                 indent_width: *rng.pick(&[2, 4]),
                 renumber: rng.below(5) != 0,
+                tasks,
             };
             let what = format!("case {case}: {intent:?} at {sel:?} in {text:?}");
             let plan = plan(&doc, sel, intent, &opts);
@@ -2362,8 +2532,8 @@ mod tests {
         }
     }
 
-    fn full_at(doc: &Document, l: usize) -> Analysis {
-        Analysis::new(doc, Some(l))
+    fn full_at(doc: &Document, l: usize, boxes: Boxes) -> Analysis {
+        Analysis::new(doc, Some(l), boxes)
     }
 
     /// The shortcuts that skip the block scan agree with it: a bounded scan
@@ -2373,23 +2543,38 @@ mod tests {
     /// text.
     #[test]
     fn scan_shortcuts_agree_with_the_full_scan() {
-        let mut rng = Rng(0x0b0d_5ca1_ab1e_0042);
-        let opts = Options::default();
+        scan_shortcuts(0x0b0d_5ca1_ab1e_0042, &LINES, None);
+    }
+
+    /// The same with tasks on, where a box may hold any character.
+    #[test]
+    fn scan_shortcuts_agree_with_the_full_scan_of_status_boxes() {
+        let lines = [&LINES[..], &BOX_LINES[..]].concat();
+        scan_shortcuts(0x0b0d_5ca1_ab1e_0043, &lines, Some(tasks()));
+    }
+
+    fn scan_shortcuts(seed: u64, lines: &[&str], tasks: Option<TaskOptions>) {
+        let mut rng = Rng(seed);
+        let opts = Options {
+            tasks,
+            ..Options::default()
+        };
+        let boxes = opts.boxes();
         for _ in 0..2_000 {
-            let text = random_text(&mut rng);
+            let text = random_text(&mut rng, lines);
             let doc = Document::new(&text);
-            let full = Analysis::new(&doc, None);
+            let full = Analysis::new(&doc, None, boxes);
             for l in 0..doc.line_count() {
                 let line = doc.line(l);
                 let floor = bom_len(l, line);
-                let bounded = Analysis::through(&doc, l);
+                let bounded = Analysis::through(&doc, l, boxes);
                 assert_eq!(bounded.recs.len(), l + 1, "{text:?}");
                 assert_eq!(
                     bounded.recs[l].info, full.recs[l].info,
                     "line {l} of {text:?}"
                 );
                 assert_eq!(
-                    motion::text_start(&doc, l, floor),
+                    motion::text_start(&doc, l, floor, boxes),
                     full.recs[l].info.text_start.clamp(floor, line.len()),
                     "line {l} of {text:?}"
                 );
@@ -2397,10 +2582,10 @@ mod tests {
                     let p = Pos::new(l, col);
                     for shift in [false, true] {
                         let mut bounded = Draft::new(&doc);
-                        let an = enter_analysis(&bounded, l);
+                        let an = enter_analysis(&bounded, l, boxes);
                         let got = break_line(&mut bounded, &an, p, shift);
                         let mut draft = Draft::new(&doc);
-                        let want = break_line(&mut draft, &full_at(&doc, l), p, shift);
+                        let want = break_line(&mut draft, &full_at(&doc, l, boxes), p, shift);
                         assert_eq!(got.0, want.0, "Enter at {p:?} in {text:?}");
                         assert_eq!(
                             diff(&doc, &bounded),
@@ -2409,7 +2594,7 @@ mod tests {
                         );
                         assert_eq!(got.1.len(), want.1.len(), "Enter at {p:?} in {text:?}");
                     }
-                    if !delete::may_end_markup(&line[..col]) {
+                    if !delete::may_end_markup(&line[..col], boxes) {
                         assert!(
                             delete::markup_or_indentation(&doc, p, Selection::caret(p), &opts)
                                 .is_none(),

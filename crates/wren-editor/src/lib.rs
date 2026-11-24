@@ -36,8 +36,10 @@ use iced::{Color, Element, Font};
 
 pub use backend::{BackendKind, Placement};
 pub use edit::Replace;
+#[cfg(any(test, feature = "test-support"))]
+pub use highlighter::HighlightedLine;
 #[cfg(feature = "test-support")]
-pub use highlighter::{highlight_lines, Highlight, HighlightedLine, LineDecor, Scale};
+pub use highlighter::{highlight_lines, Highlight, LineDecor, Scale};
 pub use keys::{KeyPolicy, KeyRoute};
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
@@ -203,6 +205,8 @@ pub struct EditorView {
     /// The text's `block::front_matter_end`, kept current after every
     /// change for the highlighter, which cannot look ahead.
     front_matter_end: Option<usize>,
+    /// The host's tasks, when they are on; see [`EditorView::set_tasks`].
+    tasks: Option<wren_markdown::TaskOptions>,
     markdown_assist: bool,
     key_policy: Option<KeyPolicy>,
     proofreader: Option<Arc<dyn Proofreader>>,
@@ -228,12 +232,6 @@ pub struct EditorView {
     spell_frame: std::cell::RefCell<SpellFrame>,
 }
 
-/// How the planner indents and renumbers.
-const PLAN_OPTIONS: wren_markdown::Options = wren_markdown::Options {
-    indent_width: 4,
-    renumber: true,
-};
-
 impl EditorView {
     /// Create a new editor pre-populated with `text`, on iced's engine.
     pub fn new(text: &str) -> Self {
@@ -253,6 +251,7 @@ impl EditorView {
             line_height: widget::DEFAULT_LINE_HEIGHT,
             font: Font::MONOSPACE,
             front_matter_end: None,
+            tasks: None,
             markdown_assist: true,
             key_policy: None,
             proofreader: None,
@@ -286,6 +285,31 @@ impl EditorView {
 
     pub fn markdown_assist(&self) -> bool {
         self.markdown_assist
+    }
+
+    /// Tell the editor whether the host's tasks are on, and today's date
+    /// when they are (off by default). It is the one value everything in
+    /// the editor that reads a task line takes: the Markdown keys' plans,
+    /// the highlighter, and so the prose spell check reads. On, a box of
+    /// any status is a task; off, only `[ ]`, `[x]` and `[X]` are.
+    pub fn set_tasks(&mut self, tasks: Option<wren_markdown::TaskOptions>) {
+        if tasks != self.tasks {
+            self.menu = None;
+        }
+        self.tasks = tasks;
+    }
+
+    pub fn tasks(&self) -> Option<wren_markdown::TaskOptions> {
+        self.tasks
+    }
+
+    /// How the planner indents and renumbers, and the tasks it reads.
+    fn plan_options(&self) -> wren_markdown::Options {
+        wren_markdown::Options {
+            indent_width: 4,
+            renumber: true,
+            tasks: self.tasks,
+        }
     }
 
     /// Editor text size in points; row and caret heights scale with it.
@@ -378,12 +402,13 @@ impl EditorView {
             palette,
             font: self.font,
             front_matter_end: self.front_matter_end,
+            tasks: self.tasks,
         }
     }
 
     /// Every line as the widget's highlighter, set up as this editor sets
     /// it up, colours and decorates it with `palette`.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn highlighted(&self, palette: Palette) -> Vec<HighlightedLine> {
         let settings = self.highlighter_settings(palette);
         self.content
@@ -535,7 +560,9 @@ impl EditorView {
             let plain = (!assist)
                 .then(|| plain::plan(lines, selection, intent))
                 .flatten();
-            plain.unwrap_or_else(|| wren_markdown::plan(&lines, selection, intent, &PLAN_OPTIONS))
+            plain.unwrap_or_else(|| {
+                wren_markdown::plan(&lines, selection, intent, &self.plan_options())
+            })
         });
         if plan.edits.is_empty() {
             // A motion, or a key with nothing to do: no text to snapshot.
@@ -1214,7 +1241,7 @@ impl EditorView {
             let Some(text) = lines.get(line) else {
                 return Vec::new();
             };
-            let prose = highlighter::prose_at(&lines, line, self.front_matter_end);
+            let prose = highlighter::prose_at(&lines, line, self.front_matter_end, self.tasks);
             proof::line_marks(proofreader, &text.text, &prose)
         })
     }
@@ -4695,6 +4722,354 @@ mod tests {
                     assert_eq!(row_start.x, margin, "{case}");
                 }
             }
+        }
+    }
+
+    // ── Task statuses ───────────────────────────────────────────────────────
+
+    /// A box of any status (discovery/tasks.md §5.1) on both engines, with
+    /// the host's tasks on and off: tasks build item 1.1.
+    #[allow(clippy::single_range_in_vec_init)] // a line often has one strike or prose range
+    mod task_status {
+        use wren_markdown::date::Date;
+        use wren_markdown::TaskOptions;
+
+        use super::*;
+
+        fn tasks_on() -> Option<TaskOptions> {
+            Some(TaskOptions {
+                today: Date::new(2026, 11, 19).expect("a date"),
+            })
+        }
+
+        /// An editor on `kind` holding `text`, with the caret at the end of
+        /// its first line and the host's `tasks`.
+        fn editor(kind: BackendKind, text: &str, tasks: Option<TaskOptions>) -> EditorView {
+            let mut ev = EditorView::with_backend(kind, text);
+            ev.set_tasks(tasks);
+            let end = text.split('\n').next().expect("a line").len();
+            ev.move_cursor(at(0, end));
+            ev
+        }
+
+        const NOTE: &str = "- [ ] open\n- [/] doing\n- [x] done\n- [-] dropped\n- [界] wide";
+
+        /// `(text, colour)` of each span of each line of `ev`.
+        fn colours(ev: &EditorView) -> Vec<Vec<(String, Color)>> {
+            let text = ev.text();
+            let lines: Vec<&str> = text.split('\n').collect();
+            ev.highlighted(fixtures::DARK)
+                .iter()
+                .zip(lines)
+                .map(|((spans, _), line)| {
+                    spans
+                        .iter()
+                        .map(|(range, highlight)| {
+                            let color = highlight.to_format().color.expect("a coloured span");
+                            (line[range.clone()].to_owned(), color)
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+
+        fn strikes(ev: &EditorView) -> Vec<Vec<Range<usize>>> {
+            ev.highlighted(fixtures::DARK)
+                .into_iter()
+                .map(|(_, decor)| decor.strikes)
+                .collect()
+        }
+
+        #[test]
+        fn tasks_are_off_until_the_host_turns_them_on() {
+            for kind in BackendKind::ALL {
+                let mut ev = EditorView::with_backend(kind, NOTE);
+                assert_eq!(ev.tasks(), None, "{kind:?}");
+                assert_eq!(ev.plan_options().tasks, None);
+                assert_eq!(ev.highlighter_settings(fixtures::DARK).tasks, None);
+                ev.set_tasks(tasks_on());
+                assert_eq!(ev.tasks(), tasks_on(), "{kind:?}");
+                assert_eq!(ev.plan_options().tasks, tasks_on());
+                assert_eq!(ev.highlighter_settings(fixtures::DARK).tasks, tasks_on());
+                // A new engine keeps the host's tasks.
+                let other = match kind {
+                    BackendKind::Iced => BackendKind::Owned,
+                    BackendKind::Owned => BackendKind::Iced,
+                };
+                ev.set_backend(other, NOTE);
+                assert_eq!(ev.tasks(), tasks_on(), "{kind:?}");
+                assert_eq!(colours(&ev)[1][0].0, "- [/] ");
+            }
+        }
+
+        #[test]
+        fn each_status_is_coloured_by_its_type_on_both_engines() {
+            let accent = fixtures::DARK.accent;
+            let faint = fixtures::DARK.faint;
+            let completed = fixtures::DARK.completed;
+            for kind in BackendKind::ALL {
+                let on = editor(kind, NOTE, tasks_on());
+                assert_eq!(
+                    colours(&on),
+                    [
+                        vec![("- [ ] ".to_owned(), accent)],
+                        vec![("- [/] ".to_owned(), accent)],
+                        vec![("- [x] ".to_owned(), faint), ("done".to_owned(), completed)],
+                        vec![
+                            ("- [-] ".to_owned(), faint),
+                            ("dropped".to_owned(), completed)
+                        ],
+                        vec![("- [界] ".to_owned(), accent)],
+                    ],
+                    "{kind:?}"
+                );
+                assert_eq!(
+                    strikes(&on),
+                    [vec![], vec![], vec![6..10], vec![6..13], vec![]],
+                    "{kind:?}"
+                );
+
+                // Off, the doing, cancelled and unknown boxes are text, and
+                // the other two lines are what they are with tasks on.
+                let off = editor(kind, NOTE, None);
+                let (off_colours, on_colours) = (colours(&off), colours(&on));
+                for line in [0, 2] {
+                    assert_eq!(off_colours[line], on_colours[line], "{kind:?} line {line}");
+                }
+                for line in [1, 3, 4] {
+                    assert_eq!(
+                        off_colours[line][0],
+                        ("- ".to_owned(), accent),
+                        "{kind:?} line {line}"
+                    );
+                }
+                assert_eq!(
+                    strikes(&off),
+                    [vec![], vec![], vec![6..10], vec![], vec![]],
+                    "{kind:?}"
+                );
+            }
+        }
+
+        /// `(line, caret column or the line's end, key, the text with tasks
+        /// on, the text with tasks off)`.
+        const KEYS: &[(&str, Option<usize>, Intent, &str, &str)] = &[
+            (
+                "- [/] doing",
+                None,
+                Intent::Enter,
+                "- [/] doing\n- [ ] ",
+                "- [/] doing\n- ",
+            ),
+            (
+                "- [-] dropped",
+                None,
+                Intent::Enter,
+                "- [-] dropped\n- [ ] ",
+                "- [-] dropped\n- ",
+            ),
+            (
+                "- [界] wide",
+                None,
+                Intent::Enter,
+                "- [界] wide\n- [ ] ",
+                "- [界] wide\n- ",
+            ),
+            (
+                "- [/] doing",
+                Some(6),
+                Intent::Enter,
+                "- [ ]\n- [/] doing",
+                "- [/] \n- doing",
+            ),
+            (
+                "- [界] wide",
+                Some(8),
+                Intent::Enter,
+                "- [ ]\n- [界] wide",
+                "- [界] \n- wide",
+            ),
+            (
+                "- [/] doing",
+                Some(6),
+                Intent::Backspace,
+                "- doing",
+                "- [/]doing",
+            ),
+            (
+                "- [-] dropped",
+                Some(6),
+                Intent::Backspace,
+                "- dropped",
+                "- [-]dropped",
+            ),
+            (
+                "- [界] wide",
+                Some(8),
+                Intent::Backspace,
+                "- wide",
+                "- [界]wide",
+            ),
+            ("- [界]", None, Intent::Backspace, "- ", "- [界"),
+            (
+                "- [/] doing",
+                None,
+                Intent::ToggleTask,
+                "- [x] doing",
+                "- [ ] [/] doing",
+            ),
+            (
+                "- [-] dropped",
+                None,
+                Intent::ToggleTask,
+                "- [ ] dropped",
+                "- [ ] [-] dropped",
+            ),
+            (
+                "- [界] wide",
+                None,
+                Intent::ToggleTask,
+                "- [x] wide",
+                "- [ ] [界] wide",
+            ),
+            (
+                "- [x] done",
+                None,
+                Intent::ToggleTask,
+                "- [ ] done",
+                "- [ ] done",
+            ),
+            (
+                "- [✔\u{fe0f}] two",
+                None,
+                Intent::ToggleTask,
+                "- [ ] [✔\u{fe0f}] two",
+                "- [ ] [✔\u{fe0f}] two",
+            ),
+            (
+                "- [a]: http://u",
+                None,
+                Intent::Enter,
+                "- [a]: http://u\n- ",
+                "- [a]: http://u\n- ",
+            ),
+        ];
+
+        #[test]
+        fn the_markdown_keys_read_a_status_box_only_with_tasks_on() {
+            for kind in BackendKind::ALL {
+                for (line, column, intent, on, off) in KEYS {
+                    for (tasks, expected) in [(tasks_on(), on), (None, off)] {
+                        let case = format!("{kind:?} {intent:?} on {line:?}, tasks {tasks:?}");
+                        let mut ev = editor(kind, line, tasks);
+                        if let Some(column) = column {
+                            ev.move_cursor(at(0, *column));
+                        }
+                        assert!(ev.intent(*intent), "{case}");
+                        assert_eq!(ev.text(), **expected, "{case}");
+                        assert!(ev.undo(), "{case}");
+                        assert_eq!(ev.text(), *line, "{case}: one undo step");
+                    }
+                }
+            }
+        }
+
+        /// The toggle over a selection: with an unfinished task in it every
+        /// task becomes done; otherwise every task, cancelled ones
+        /// included, becomes open. The caret keeps its place in the text
+        /// when a wide symbol before it shrinks.
+        #[test]
+        fn the_toggle_follows_the_statuses_a_selection_holds() {
+            let all = |text: &str| Cursor {
+                position: Position {
+                    line: text.split('\n').count() - 1,
+                    column: text.rsplit('\n').next().expect("a line").len(),
+                },
+                selection: Some(Position { line: 0, column: 0 }),
+            };
+            for kind in BackendKind::ALL {
+                for (before, after) in [
+                    ("- [ ] a\n- [-] b\n- [界] c", "- [x] a\n- [x] b\n- [x] c"),
+                    ("- [/] a\n- [X] b", "- [x] a\n- [X] b"),
+                    ("- [x] a\n- [-] b", "- [ ] a\n- [ ] b"),
+                    ("- [-] a\n- [-] b", "- [ ] a\n- [ ] b"),
+                ] {
+                    let mut ev = editor(kind, before, tasks_on());
+                    ev.move_cursor(all(before));
+                    assert!(ev.intent(Intent::ToggleTask), "{kind:?} {before:?}");
+                    assert_eq!(ev.text(), after, "{kind:?} {before:?}");
+                    assert_eq!(ev.cursor(), all(after), "{kind:?} {before:?}");
+                }
+                let mut ev = editor(kind, "- [界] wide", tasks_on());
+                assert!(ev.intent(Intent::ToggleTask));
+                assert_eq!(ev.cursor(), at(0, "- [x] wide".len()), "{kind:?}");
+            }
+        }
+
+        /// Spell check reads what the highlighter calls prose, so with
+        /// tasks on a box's own character is never a word.
+        #[test]
+        fn spelling_reads_a_status_tasks_description_and_never_its_box() {
+            let proofreader = Arc::new(fixtures::Rejects::new(&["wrd", "teh"]));
+            let text = "- [/] teh wrd\n- [wrd] wrd\n- [-] teh";
+            let mut ev = editor(BackendKind::Owned, text, tasks_on());
+            ev.set_proofreader(Some(proofreader));
+            let marks = |ev: &EditorView| -> Vec<(usize, Range<usize>)> {
+                (0..ev.line_count())
+                    .flat_map(|line| ev.marks_at(line).into_iter().map(move |mark| (line, mark)))
+                    .collect()
+            };
+            let on = marks(&ev);
+            assert_eq!(
+                on,
+                [(0, 6..9), (0, 10..13), (1, 3..6), (1, 8..11), (2, 6..9)]
+            );
+            // The marks are found in the prose the widget's highlighter
+            // gives with the same settings.
+            for (line, (_, decor)) in ev.highlighted(fixtures::DARK).iter().enumerate() {
+                for (_, mark) in on.iter().filter(|(at, _)| *at == line) {
+                    assert!(
+                        decor
+                            .prose
+                            .iter()
+                            .any(|prose| prose.start <= mark.start && mark.end <= prose.end),
+                        "line {line}: {mark:?} in {:?}",
+                        decor.prose
+                    );
+                }
+            }
+            assert_eq!(ev.highlighted(fixtures::DARK)[0].1.prose, [6..13]);
+            ev.set_tasks(None);
+            assert_eq!(
+                marks(&ev),
+                on,
+                "the same words are misspelled with tasks off"
+            );
+            assert_ne!(ev.highlighted(fixtures::DARK)[0].1.prose, [6..13]);
+
+            // A box's character that is no word is marked only while the
+            // box is text.
+            let proofreader = Arc::new(fixtures::Rejects::new(&["z", "teh"]));
+            let mut ev = editor(BackendKind::Owned, "- [z] teh", tasks_on());
+            ev.set_proofreader(Some(proofreader));
+            assert_eq!(marks(&ev), [(0, 6..9)]);
+            ev.set_tasks(None);
+            assert_eq!(marks(&ev), [(0, 3..4), (0, 6..9)]);
+        }
+
+        #[test]
+        fn a_change_of_tasks_closes_the_suggestions_menu() {
+            let proofreader =
+                Arc::new(fixtures::Rejects::new(&["teh"]).suggesting(&[("teh", &["the"])]));
+            let mut ev = editor(BackendKind::Owned, "- [/] teh", tasks_on());
+            ev.set_proofreader(Some(proofreader));
+            ev.move_cursor(at(0, 7));
+            ev.open_menu(Some((0, 6..9)));
+            assert!(ev.menu.is_some());
+            ev.set_tasks(tasks_on());
+            assert!(ev.menu.is_some(), "the same tasks change nothing");
+            ev.set_tasks(None);
+            assert!(ev.menu.is_none());
         }
     }
 }

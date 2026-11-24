@@ -1024,6 +1024,7 @@ mod tests {
             palette: fixtures::DARK,
             font: fixtures::FONT,
             front_matter_end: None,
+            tasks: None,
         })
     }
 

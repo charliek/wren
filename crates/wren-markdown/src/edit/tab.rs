@@ -10,7 +10,7 @@ pub(super) fn indent<L: Lines + ?Sized>(
     opts: &Options,
 ) -> EditPlan {
     let sel = clamp_selection(base, sel);
-    let an = Analysis::new(base, None);
+    let an = Analysis::new(base, None, opts.boxes());
     let mut d = Draft::new(base);
     let mut marks = sel;
     let mut runs = Vec::new();
@@ -44,7 +44,7 @@ pub(super) fn indent<L: Lines + ?Sized>(
         }
     }
     if opts.renumber {
-        renumber_runs(&mut d, &runs, &[], &mut marks);
+        renumber_runs(&mut d, &runs, &[], opts.boxes(), &mut marks);
     }
     finish(base, &d, marks)
 }

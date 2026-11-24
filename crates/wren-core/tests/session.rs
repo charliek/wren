@@ -138,7 +138,10 @@ impl Fixture {
         Session::with_options(
             self.path(),
             self.quarantine.fake(false),
-            SessionOptions { boards: true },
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
         )
         .unwrap()
     }
@@ -3185,7 +3188,13 @@ fn a_session_with_boards_lists_titles_kinds_and_warnings() {
     let fixture = Fixture::empty();
     write_mixed(&fixture);
     let mut session = fixture.board_session();
-    assert_eq!(session.options(), SessionOptions { boards: true });
+    assert_eq!(
+        session.options(),
+        SessionOptions {
+            boards: true,
+            tasks: false,
+        }
+    );
     assert_eq!(
         listed(&session),
         [
@@ -3234,7 +3243,10 @@ fn a_workspace_opened_from_a_session_inherits_its_options() {
         let mut session = Session::with_options(
             first.path(),
             first.quarantine.fake(false),
-            SessionOptions { boards },
+            SessionOptions {
+                boards,
+                tasks: false,
+            },
         )
         .unwrap();
         run(
@@ -3243,7 +3255,13 @@ fn a_workspace_opened_from_a_session_inherits_its_options() {
                 path: second.path().to_path_buf(),
             },
         );
-        assert_eq!(session.options(), SessionOptions { boards });
+        assert_eq!(
+            session.options(),
+            SessionOptions {
+                boards,
+                tasks: false,
+            }
+        );
         assert_eq!(listed(&session).len(), if boards { 3 } else { 1 });
 
         // Background reconciliation scans with the same kinds.
@@ -3261,6 +3279,64 @@ fn a_workspace_opened_from_a_session_inherits_its_options() {
         at(&mut session, Op::FinishReconcile(job.run()), time + 1);
         assert_eq!(listed(&session).len(), if boards { 4 } else { 1 });
     }
+}
+
+/// The `tasks` option decides which task boxes the index's previews and
+/// snippets drop, for the first workspace, for a draft, and for a
+/// workspace opened from the Session.
+#[test]
+fn the_tasks_option_reaches_previews_drafts_and_an_opened_workspace() {
+    for (tasks, doing, wide, draft) in [
+        (
+            false,
+            "[/] Doing the cutover",
+            "[界] Wide box",
+            "[-] Dropped",
+        ),
+        (true, "Doing the cutover", "Wide box", "Dropped"),
+    ] {
+        let first = Fixture::empty();
+        first.write(
+            "A/G/One.md",
+            "# One\n\n- [/] Doing the cutover\n".as_bytes(),
+        );
+        let second = Fixture::empty();
+        second.write("A/G/Two.md", "- [界] Wide box\n".as_bytes());
+        let options = SessionOptions {
+            boards: false,
+            tasks,
+        };
+        let mut session =
+            Session::with_options(first.path(), first.quarantine.fake(false), options).unwrap();
+        assert_eq!(session.options(), options);
+        let one = note(&session, "A/G/One.md");
+        assert_eq!(session.index().preview(one), Some(doing), "tasks {tasks}");
+        let hit = &session
+            .index()
+            .query("cutover", Scope::Workspace, QueryKind::Search, 10)[0];
+        assert!(hit.snippet.text.ends_with(doing), "{:?}", hit.snippet.text);
+
+        run(&mut session, Op::OpenNote { note: Some(one) });
+        run(
+            &mut session,
+            Op::EditDraft {
+                note: one,
+                contents: "- [-] Dropped\n".into(),
+            },
+        );
+        assert_eq!(session.index().preview(one), Some(draft), "tasks {tasks}");
+
+        run(
+            &mut session,
+            Op::OpenWorkspace {
+                path: second.path().to_path_buf(),
+            },
+        );
+        assert_eq!(session.options(), options);
+        let two = note(&session, "A/G/Two.md");
+        assert_eq!(session.index().preview(two), Some(wide), "tasks {tasks}");
+    }
+    assert!(!SessionOptions::default().tasks);
 }
 
 #[test]

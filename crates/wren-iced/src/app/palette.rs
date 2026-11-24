@@ -1085,7 +1085,7 @@ impl App {
     fn outline_headings(&self, line: usize) -> Vec<OutlineHeading> {
         let text = self.editor.text();
         let document = wren_markdown::Document::new(&text);
-        let outline = wren_markdown::outline::Outline::new(&document);
+        let outline = wren_markdown::outline::Outline::new(&document, self.task_boxes());
         let headings = outline.headings();
         let top = headings
             .iter()

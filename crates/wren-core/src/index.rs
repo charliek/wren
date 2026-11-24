@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
-use wren_markdown::block::{self, Kind, Scanner};
+use wren_markdown::block::{self, Boxes, Kind, LineInfo, Scanner};
 
 use crate::fs_store::{DiskFile, FsStore, RelPath};
 use crate::kind::NoteKind;
@@ -132,6 +132,9 @@ pub struct Index {
     /// would otherwise be parsed whole on every keystroke (the board plan's
     /// §3.4 rule 7). Until then search reads the source before it.
     pending: Option<(NoteId, Arc<str>)>,
+    /// The task boxes previews and snippets read, as the editor of the same
+    /// run reads them: fixed by the Session's `tasks` option.
+    boxes: Boxes,
     /// Board sources handed to extraction, so tests can prove that unchanged
     /// boards are never extracted again.
     #[cfg(test)]
@@ -140,11 +143,20 @@ pub struct Index {
 
 impl Default for Index {
     fn default() -> Self {
-        Self::with_budget(MAX_CONTENT_BYTES)
+        Self::with_boxes(Boxes::Plain)
     }
 }
 
 impl Index {
+    /// An empty index whose previews and snippets read the task boxes
+    /// `boxes` names.
+    pub(crate) fn with_boxes(boxes: Boxes) -> Self {
+        Self {
+            boxes,
+            ..Self::with_budget(MAX_CONTENT_BYTES)
+        }
+    }
+
     fn with_budget(budget: usize) -> Self {
         Self {
             entries: HashMap::new(),
@@ -155,6 +167,7 @@ impl Index {
             revision: 0,
             warnings: Vec::new(),
             pending: None,
+            boxes: Boxes::Plain,
             #[cfg(test)]
             extractions: 0,
         }
@@ -288,7 +301,7 @@ impl Index {
                 });
                 let snippet = match searched {
                     Some(searched) => match &content_match {
-                        Some(hit) => snippet(&searched.text, hit.clone(), entry.kind),
+                        Some(hit) => snippet(&searched.text, hit.clone(), entry.kind, self.boxes),
                         None => searched.preview.snippet(),
                     },
                     None => Snippet {
@@ -646,6 +659,7 @@ impl Index {
             return;
         }
         let kind = self.entries[&note].kind;
+        let boxes = self.boxes;
         let searched = text.map(|text| {
             let folded = if text.is_ascii() {
                 text.to_ascii_lowercase()
@@ -657,7 +671,7 @@ impl Index {
                 folded
             };
             Searched {
-                preview: Preview::new(&text, kind),
+                preview: Preview::new(&text, kind, boxes),
                 text,
                 folded: folded.into_boxed_str(),
             }
@@ -788,22 +802,27 @@ fn lowercase(text: &str) -> String {
 /// heading text, with its block markers (`>`, list markers, task boxes) and
 /// surrounding whitespace dropped. Classified by `wren_markdown::block`, so
 /// front matter, setext headings, and fences read as the editor reads them.
-fn body_line(text: &str) -> Range<usize> {
-    body_line_in(text, wren_markdown::line_ranges(text).map(|(line, _)| line))
+#[cfg(test)]
+fn body_line(text: &str, boxes: Boxes) -> Range<usize> {
+    let lines = wren_markdown::line_ranges(text).map(|(line, _)| line);
+    body_line_in(text, lines, boxes).0
 }
 
-/// [`body_line`] over `text`'s lines, read lazily: it stops at the first
-/// body line, so a long note costs only the lines before it.
-fn body_line_in(text: &str, mut lines: impl Iterator<Item = Range<usize>>) -> Range<usize> {
-    let Some(first) = lines.next() else {
-        return 0..0;
-    };
-    // Front matter is read only when line 0 opens it, and then only to the
-    // first `---` or `...` line: `front_matter_end` decides by that line.
+/// `text`'s lines with their classification, read one at a time. Front
+/// matter is read only when line 0 opens it, and then only to the first
+/// `---` or `...` line: `front_matter_end` decides by that line.
+fn classified<'a>(
+    text: &'a str,
+    mut lines: impl Iterator<Item = Range<usize>> + 'a,
+    boxes: Boxes,
+) -> impl Iterator<Item = (Range<usize>, LineInfo)> + 'a {
     let delimiter = |line: &Range<usize>| text[line.clone()].trim_end_matches([' ', '\t']);
-    let mut head = vec![first];
-    let first = delimiter(&head[0]);
-    if first.strip_prefix('\u{feff}').unwrap_or(first) == "---" {
+    let mut head: Vec<Range<usize>> = lines.next().into_iter().collect();
+    let opens = head.first().is_some_and(|first| {
+        let first = delimiter(first);
+        first.strip_prefix('\u{feff}').unwrap_or(first) == "---"
+    });
+    if opens {
         for line in lines.by_ref() {
             let closes = matches!(delimiter(&line), "---" | "...");
             head.push(line);
@@ -813,33 +832,49 @@ fn body_line_in(text: &str, mut lines: impl Iterator<Item = Range<usize>>) -> Ra
         }
     }
     let head_lines: Vec<&str> = head.iter().map(|line| &text[line.clone()]).collect();
-    let mut scanner = Scanner::with_front_matter(block::front_matter_end(&head_lines[..]));
-    let mut candidate: Option<(usize, Range<usize>)> = None;
-    for (index, range) in head.into_iter().chain(lines).enumerate() {
-        let line = &text[range.clone()];
-        let info = scanner.next_line(line);
+    let front_matter_end = (!head_lines.is_empty())
+        .then(|| block::front_matter_end(&head_lines[..]))
+        .flatten();
+    let mut scanner = Scanner::with_front_matter(front_matter_end, boxes);
+    head.into_iter().chain(lines).map(move |range| {
+        let info = scanner.next_line(&text[range.clone()]);
+        (range, info)
+    })
+}
+
+/// [`body_line`] over `text`'s lines, read lazily: it stops at the first
+/// body line, so a long note costs only the lines before it. With the line
+/// comes whether it is a task's description, the text after its box.
+fn body_line_in<'a>(
+    text: &'a str,
+    lines: impl Iterator<Item = Range<usize>> + 'a,
+    boxes: Boxes,
+) -> (Range<usize>, bool) {
+    let mut candidate: Option<(usize, (Range<usize>, bool))> = None;
+    for (index, (range, info)) in classified(text, lines, boxes).enumerate() {
         match info.kind {
             Kind::Prose => {
                 if candidate.is_none() {
                     let start = range.start + info.text_start;
-                    let words = line[info.text_start..].trim_end();
-                    candidate = Some((index, start..start + words.len()));
+                    let words = text[range][info.text_start..].trim_end();
+                    let task = info.item.is_some_and(|item| item.task.is_some());
+                    candidate = Some((index, (start..start + words.len(), task)));
                 }
             }
             // Paragraph lines from `start` on were heading text.
             Kind::SetextUnderline { start, .. } => match candidate {
                 Some((line, _)) if line >= start => candidate = None,
-                Some((_, range)) => return range,
+                Some((_, body)) => return body,
                 None => {}
             },
             _ => {
-                if let Some((_, range)) = candidate {
-                    return range;
+                if let Some((_, body)) = candidate {
+                    return body;
                 }
             }
         }
     }
-    candidate.map_or(0..0, |(_, range)| range)
+    candidate.map_or((0..0, false), |(_, body)| body)
 }
 
 /// A note's preview: the first body line, clipped to [`PREVIEW_CHARS`], as
@@ -854,17 +889,26 @@ struct Preview {
 impl Preview {
     /// A board's searched text is plain, one label per line, so its preview
     /// is the first line with words rather than a Markdown body line.
-    fn new(text: &str, kind: NoteKind) -> Self {
-        let line = match kind {
-            NoteKind::Markdown => body_line(text),
-            NoteKind::Board => first_line(text),
+    fn new(text: &str, kind: NoteKind, boxes: Boxes) -> Self {
+        let (line, task) = match kind {
+            NoteKind::Markdown => {
+                let lines = wren_markdown::line_ranges(text).map(|(line, _)| line);
+                body_line_in(text, lines, boxes)
+            }
+            NoteKind::Board => (first_line(text), false),
         };
         let end = text[line.clone()]
             .char_indices()
             .nth(PREVIEW_CHARS)
             .map_or(line.end, |(byte, _)| line.start + byte);
         let text = match kind {
-            NoteKind::Markdown => plain_markdown(&text[line.start..end], true).0,
+            // With tasks on, a task's description is past every block marker
+            // already: what looks like one in it (`- [/] - [x] words`) is its
+            // text. Any other line is read as it was before tasks.
+            NoteKind::Markdown => {
+                let at_line_start = !(task && boxes == Boxes::Status);
+                plain_markdown(&text[line.start..end], at_line_start).0
+            }
             NoteKind::Board => text[line.start..end].to_owned(),
         };
         Self {
@@ -917,7 +961,7 @@ fn first_line(text: &str) -> Range<usize> {
 
 /// A search hit's context: the hit with up to [`CONTEXT_CHARS`] on each side,
 /// started and ended on word boundaries and reduced to plain words.
-fn snippet(text: &str, hit: Range<usize>, kind: NoteKind) -> Snippet {
+fn snippet(text: &str, hit: Range<usize>, kind: NoteKind, boxes: Boxes) -> Snippet {
     let start = text[..hit.start]
         .char_indices()
         .rev()
@@ -948,7 +992,8 @@ fn snippet(text: &str, hit: Range<usize>, kind: NoteKind) -> Snippet {
     let (plain, map) = match kind {
         NoteKind::Markdown => {
             let at_line_start = start == 0 || text[..start].ends_with(['\n', '\r']);
-            plain_markdown(&text[start..end], at_line_start)
+            let tasks = task_prefixes(text, start..end, boxes);
+            plain_blocks(&text[start..end], at_line_start, &tasks)
         }
         NoteKind::Board => plain_lines(&text[start..end]),
     };
@@ -1010,6 +1055,49 @@ fn strip_block_markers(mut line: &str) -> &str {
 /// Returns the text and, for each source byte offset `0..=text.len()`, the
 /// matching offset in the result.
 fn plain_markdown(text: &str, at_line_start: bool) -> (String, Vec<usize>) {
+    plain_blocks(text, at_line_start, &[])
+}
+
+/// With [`Boxes::Status`], the block markup of each task line that shows
+/// in `window` of `text`, as byte ranges of the window: from the line's
+/// start to its text's, clipped to the window, so quote and list markers,
+/// the box and the spacing after it all go, however they are spaced. The
+/// classifier decides what a task is, on the whole line and with the lines
+/// before it, so a window that opens inside the markup, a tab after the
+/// marker, and a line that only looks like a task are read as the editor
+/// reads them. Empty with [`Boxes::Plain`], when snippets are what they
+/// were before tasks.
+///
+/// The note is classified from its first line down to the window, and only
+/// when the window's lines hold a `[`.
+fn task_prefixes(text: &str, window: Range<usize>, boxes: Boxes) -> Vec<Range<usize>> {
+    if boxes != Boxes::Status {
+        return Vec::new();
+    }
+    let first = text[..window.start]
+        .rfind(['\n', '\r'])
+        .map_or(0, |ending| ending + 1);
+    if !text[first..window.end].contains('[') {
+        return Vec::new();
+    }
+    let lines = wren_markdown::line_ranges(text).map(|(line, _)| line);
+    classified(text, lines, boxes)
+        .take_while(|(line, _)| line.start < window.end)
+        .filter(|(_, info)| info.item.is_some_and(|item| item.task.is_some()))
+        .map(|(line, info)| {
+            let markup = line.start..line.start + info.text_start;
+            markup.start.max(window.start)..markup.end.min(window.end)
+        })
+        .filter(|markup| markup.start < markup.end)
+        .map(|markup| markup.start - window.start..markup.end - window.start)
+        .collect()
+}
+
+/// [`plain_markdown`] for text whose task lines the classifier has found:
+/// `tasks` are their block markup ([`task_prefixes`]). Such a line's markup
+/// is dropped as given and nothing after it is read as a block marker; any
+/// other line is read as [`plain_markdown`] reads it.
+fn plain_blocks(text: &str, at_line_start: bool, tasks: &[Range<usize>]) -> (String, Vec<usize>) {
     let mut dropped = vec![false; text.len()];
     let mut block_break = vec![false; text.len()];
     let mut line_start = 0;
@@ -1026,7 +1114,19 @@ fn plain_markdown(text: &str, at_line_start: bool) -> (String, Vec<usize>) {
         let mut body = line_start;
         let mut heading = false;
         let mut quote = false;
-        if !first || at_line_start {
+        if let Some(task) = tasks.iter().find(|task| task.start == line_start) {
+            // A task with no description has no words to show.
+            let markup = if text[task.end..line_end].trim().is_empty() {
+                line_end
+            } else {
+                task.end
+            };
+            dropped[line_start..markup].fill(true);
+            body = markup;
+            if let Some(index) = previous_break {
+                block_break[index] = true;
+            }
+        } else if !first || at_line_start {
             let block = if only_block_markers(line) {
                 dropped[line_start..line_end].fill(true);
                 body = line_end;
@@ -1601,7 +1701,12 @@ mod tests {
         let text = "Intro words here\n- [ ] Review promo\n- [x] Share Q4 deck\n- [x]";
         for needle in ["promo\n- [x] Share", "Share", "Review"] {
             let hit = text.find(needle).unwrap();
-            let result = snippet(text, hit..hit + needle.len(), NoteKind::Markdown);
+            let result = snippet(
+                text,
+                hit..hit + needle.len(),
+                NoteKind::Markdown,
+                Boxes::Plain,
+            );
             assert_eq!(
                 result.text,
                 "Intro words here · Review promo · Share Q4 deck"
@@ -1615,7 +1720,7 @@ mod tests {
             "z".repeat(CONTEXT_CHARS)
         );
         let hit = text.find("packet").unwrap();
-        let result = snippet(&text, hit..hit + 6, NoteKind::Markdown);
+        let result = snippet(&text, hit..hit + 6, NoteKind::Markdown, Boxes::Plain);
         assert_eq!(result.text, "Review promo packet draft…");
         assert_eq!(&result.text[result.highlight.unwrap()], "packet");
     }
@@ -1624,7 +1729,12 @@ mod tests {
     fn snippet_highlights_follow_the_match_through_dropped_markup() {
         let text = "## Agenda\n- API migration: cutover and **rollback** window\n";
         let hit = text.find("rollback").unwrap();
-        let result = snippet(text, hit..hit + "rollback".len(), NoteKind::Markdown);
+        let result = snippet(
+            text,
+            hit..hit + "rollback".len(),
+            NoteKind::Markdown,
+            Boxes::Plain,
+        );
         assert_eq!(
             result.text,
             "Agenda · API migration: cutover and rollback window"
@@ -1632,7 +1742,7 @@ mod tests {
         assert_eq!(&result.text[result.highlight.unwrap()], "rollback");
         let marker = text.find("**").unwrap();
         assert_eq!(
-            snippet(text, marker..marker + 2, NoteKind::Markdown).highlight,
+            snippet(text, marker..marker + 2, NoteKind::Markdown, Boxes::Plain).highlight,
             None
         );
 
@@ -1643,7 +1753,7 @@ mod tests {
             "tail ".repeat(20)
         );
         let hit = text.find("rollback").unwrap();
-        let result = snippet(&text, hit..hit + 8, NoteKind::Markdown);
+        let result = snippet(&text, hit..hit + 8, NoteKind::Markdown, Boxes::Plain);
         assert!(
             result.text.starts_with("…Ramp") || result.text.starts_with("…diff"),
             "{}",
@@ -1668,7 +1778,7 @@ mod tests {
             "»*«",
         ] {
             plain_markdown(text, true);
-            Preview::new(text, NoteKind::Markdown);
+            Preview::new(text, NoteKind::Markdown, Boxes::Plain);
         }
         assert_eq!(
             plain_markdown("café *latte* naïve_name", true).0,
@@ -1677,7 +1787,7 @@ mod tests {
         // The leading context's first whitespace is a three-byte ideographic space.
         let text = format!("{}\u{3000}abc needle", "語".repeat(100));
         let hit = text.find("needle").unwrap();
-        let result = snippet(&text, hit..hit + 6, NoteKind::Markdown);
+        let result = snippet(&text, hit..hit + 6, NoteKind::Markdown, Boxes::Plain);
         assert_eq!(result.text, "…abc needle");
         assert_eq!(&result.text[result.highlight.unwrap()], "needle");
     }
@@ -1685,16 +1795,16 @@ mod tests {
     #[test]
     fn snippets_are_utf8_safe_near_both_ends_and_in_long_content() {
         for text in ["é日本", "", "a"] {
-            let result = Preview::new(text, NoteKind::Markdown).snippet();
+            let result = Preview::new(text, NoteKind::Markdown, Boxes::Plain).snippet();
             assert_eq!(result.text, text);
             assert!(result.highlight.is_none());
         }
         let text = format!("{}Needle{}", "界".repeat(200), "é".repeat(200));
-        let result = snippet(&text, 600..606, NoteKind::Markdown);
+        let result = snippet(&text, 600..606, NoteKind::Markdown, Boxes::Plain);
         assert!(result.text.starts_with('…') && result.text.ends_with('…'));
         assert_eq!(&result.text[result.highlight.unwrap()], "Needle");
         for hit in [0..3, text.len() - 2..text.len()] {
-            let result = snippet(&text, hit.clone(), NoteKind::Markdown);
+            let result = snippet(&text, hit.clone(), NoteKind::Markdown, Boxes::Plain);
             assert_eq!(&result.text[result.highlight.unwrap()], &text[hit]);
         }
     }
@@ -2157,12 +2267,280 @@ labels = [{ text = "when paid" }]
             ("Plain *emphasis*", "Plain *emphasis*"),
             ("2026-11-04 notes", "2026-11-04 notes"),
         ] {
-            assert_eq!(&line[body_line(line)], expected, "{line:?}");
+            assert_eq!(&line[body_line(line, Boxes::Plain)], expected, "{line:?}");
         }
         let text = "# Title\n\n- First item\n";
-        assert_eq!(&text[body_line(text)], "First item");
+        assert_eq!(&text[body_line(text, Boxes::Plain)], "First item");
         let text = "# Title\n- [ ]\n>\n- [x] Shipped\n";
-        assert_eq!(&text[body_line(text)], "Shipped");
+        assert_eq!(&text[body_line(text, Boxes::Plain)], "Shipped");
+    }
+
+    /// With tasks on, a box of any status is a marker the preview drops,
+    /// whatever its symbol's width; off, only the three plain boxes are.
+    #[test]
+    fn previews_drop_status_boxes_only_with_tasks_on() {
+        for (line, plain, status) in [
+            ("- [/] Doing", "[/] Doing", "Doing"),
+            ("- [-] Dropped", "[-] Dropped", "Dropped"),
+            ("- [界] x", "[界] x", "x"),
+            ("  1. [é]\tAccent", "[é]\tAccent", "Accent"),
+            ("> - [✓] Quoted", "[✓] Quoted", "Quoted"),
+            ("- [😀]  Wide", "[😀]  Wide", "Wide"),
+            ("- [1] x", "[1] x", "x"),
+            ("- [[] bracket", "[[] bracket", "bracket"),
+            ("- [ ] Open", "Open", "Open"),
+            ("- [X] Shipped", "Shipped", "Shipped"),
+            // Not boxes with tasks on either.
+            ("- [✔\u{fe0f}] two", "[✔\u{fe0f}] two", "[✔\u{fe0f}] two"),
+            ("- []] no", "[]] no", "[]] no"),
+            ("- [a]: http://u", "[a]: http://u", "[a]: http://u"),
+            ("[/] bare", "[/] bare", "[/] bare"),
+            ("- [/]", "[/]", ""),
+        ] {
+            assert_eq!(&line[body_line(line, Boxes::Plain)], plain, "{line:?}");
+            assert_eq!(&line[body_line(line, Boxes::Status)], status, "{line:?}");
+        }
+        // An empty task of any status has no words, so the next line has.
+        let text = "# Title\n- [/]\n- [界] \n- [-] Dropped\n";
+        assert_eq!(&text[body_line(text, Boxes::Status)], "Dropped");
+        assert_eq!(&text[body_line(text, Boxes::Plain)], "[/]");
+        for (line, plain, status) in [
+            ("- [/] Doing", "[/] Doing", "Doing"),
+            ("- [界] x", "[界] x", "x"),
+            ("- [-] **Dropped** `now`", "[-] Dropped now", "Dropped now"),
+            ("- [x] Shipped", "Shipped", "Shipped"),
+            // A task's description is its text, whatever it looks like.
+            (
+                "- [/] - [界] literal",
+                "[/] - [界] literal",
+                "- [界] literal",
+            ),
+            ("- [/] [界]", "[/] [界]", "[界]"),
+            ("- [ ] - [x] words", "words", "- [x] words"),
+            ("- [/] 1. words", "[/] 1. words", "1. words"),
+            ("-\t[界]\tneedle", "[界] needle", "needle"),
+            ("1.\t[é]\tneedle", "[é] needle", "needle"),
+            // A line that is no task is read as it was.
+            ("- - nested", "nested", "nested"),
+            ("- 1. nested", "nested", "nested"),
+        ] {
+            let text = |boxes| Preview::new(line, NoteKind::Markdown, boxes).text;
+            assert_eq!(&*text(Boxes::Plain), plain, "{line:?}");
+            assert_eq!(&*text(Boxes::Status), status, "{line:?}");
+        }
+    }
+
+    /// The snippet for the first `needle` in `text`, and what it highlights.
+    fn shown(text: &str, needle: &str, boxes: Boxes) -> (String, Option<String>) {
+        let hit = text.find(needle).expect("the needle is in the text");
+        let result = snippet(text, hit..hit + needle.len(), NoteKind::Markdown, boxes);
+        let highlight = result.highlight.map(|range| result.text[range].to_owned());
+        (result.text, highlight)
+    }
+
+    /// With tasks on, a search snippet drops the block markup of a line the
+    /// classifier reads as a task, and nothing else as a box; with tasks
+    /// off it is what it was. `(text, needle, off, on)`; the needle is
+    /// highlighted in both.
+    #[test]
+    fn snippets_drop_a_task_lines_markup_where_the_classifier_reads_a_task() {
+        for (text, needle, off, on) in [
+            (
+                "## Agenda\n- [/] Draft the rollback plan\n- [界]\n1. [-] Old **idea**\n",
+                "rollback",
+                "Agenda · [/] Draft the rollback plan · [界] · [-] Old idea",
+                "Agenda · Draft the rollback plan · Old idea",
+            ),
+            (
+                "- [1] x-ray\n- [/] yes",
+                "yes",
+                "[1] x-ray · [/] yes",
+                "x-ray · yes",
+            ),
+            // A task's description may itself look like a box, or like
+            // another task: it is the task's text.
+            ("- [/] [界]", "界", "[/] [界]", "[界]"),
+            ("- [/] [2] second", "second", "[/] [2] second", "[2] second"),
+            (
+                "- [/] - [界] literal",
+                "literal",
+                "[/] - [界] literal",
+                "- [界] literal",
+            ),
+            ("- [ ] - [x] words", "words", "words", "- [x] words"),
+            // A tab after the marker or the box, as the editor reads it.
+            ("-\t[界]\tneedle", "needle", "- [界] needle", "needle"),
+            ("1.\t[é]\tneedle", "needle", "1. [é] needle", "needle"),
+            (
+                "- [界]\tx-ray\n1. [ ]\tyes",
+                "yes",
+                "[界] x-ray · [ ] yes",
+                "x-ray · yes",
+            ),
+            (
+                "> - [✓] quoted needle",
+                "needle",
+                "[✓] quoted needle",
+                "quoted needle",
+            ),
+            // Lines that only look like tasks: `2.` cannot interrupt a
+            // paragraph, a fence holds code, and a box needs a list marker.
+            (
+                "Intro\n2. [界] needle",
+                "needle",
+                "Intro · [界] needle",
+                "Intro · [界] needle",
+            ),
+            (
+                "```\n- [/] needle\n```",
+                "needle",
+                "[/] needle",
+                "[/] needle",
+            ),
+            (
+                "[1] Smith needle",
+                "needle",
+                "[1] Smith needle",
+                "[1] Smith needle",
+            ),
+            (
+                "> [a] quoted needle",
+                "needle",
+                "[a] quoted needle",
+                "[a] quoted needle",
+            ),
+            (
+                "- [a]: http://needle",
+                "needle",
+                "[a]: http://needle",
+                "[a]: http://needle",
+            ),
+            (
+                "- [✔\u{fe0f}] two needle",
+                "needle",
+                "[✔\u{fe0f}] two needle",
+                "[✔\u{fe0f}] two needle",
+            ),
+            // The plain boxes, on a line that is no task, as before tasks.
+            ("[x] bare needle", "needle", "bare needle", "bare needle"),
+        ] {
+            let highlighted = Some(needle.to_owned());
+            assert_eq!(
+                shown(text, needle, Boxes::Plain),
+                (off.to_owned(), highlighted.clone()),
+                "{text:?} off"
+            );
+            assert_eq!(
+                shown(text, needle, Boxes::Status),
+                (on.to_owned(), highlighted),
+                "{text:?} on"
+            );
+        }
+    }
+
+    /// The context window may open or close inside a task line's markup:
+    /// the box is found on the whole line, so what the window shows of it
+    /// is dropped, and the hit keeps its place.
+    #[test]
+    fn a_snippet_window_that_cuts_a_task_lines_markup_shows_none_of_it() {
+        let long = "a".repeat(42);
+        let text = format!("- [界] {long} needle");
+        assert_eq!(
+            shown(&text, "needle", Boxes::Status),
+            (format!("…{long} needle"), Some("needle".to_owned()))
+        );
+        assert_eq!(
+            shown(&text, "needle", Boxes::Plain),
+            (format!("…[界] {long} needle"), Some("needle".to_owned()))
+        );
+        // The window ends inside the next task's markup.
+        let text = format!("- [/] needle {long}\n- [界] next");
+        let (on, highlight) = shown(&text, "needle", Boxes::Status);
+        assert!(
+            on.starts_with("needle aaaa") && !on.contains(['[', '-']),
+            "{on:?}"
+        );
+        assert_eq!(highlight.as_deref(), Some("needle"));
+        // A hit in the box itself has nothing to highlight.
+        assert_eq!(
+            shown("- [界] words", "界", Boxes::Status),
+            ("words".into(), None)
+        );
+        // Behind front matter and a byte order mark, with every line
+        // ending; the front matter's own lines are shown as they were.
+        for ending in ["\n", "\r\n", "\r", "\n\r"] {
+            let lines = [
+                "\u{feff}---",
+                "title: x",
+                "---",
+                "- [/] one",
+                "-\t[界]\ttwo needle",
+            ];
+            let (on, highlight) = shown(&lines.join(ending), "needle", Boxes::Status);
+            assert!(on.ends_with("--- · one · two needle"), "{ending:?}: {on:?}");
+            assert_eq!(highlight.as_deref(), Some("needle"), "{ending:?}");
+        }
+        // A box in front matter is no task's.
+        let text = "---\nkey: v\n- [/] needle\n---\nbody";
+        let on = shown(text, "needle", Boxes::Status);
+        assert_eq!(on, shown(text, "needle", Boxes::Plain));
+        assert!(on.0.contains("[/] needle"), "{on:?}");
+        // No `[` in the window: nothing is classified, nothing changes.
+        let text = "- plain item\n- another needle";
+        assert_eq!(
+            shown(text, "needle", Boxes::Status),
+            shown(text, "needle", Boxes::Plain)
+        );
+        assert!(task_prefixes(text, 0..text.len(), Boxes::Status).is_empty());
+        assert!(task_prefixes("- [/] x", 0..7, Boxes::Plain).is_empty());
+        assert_eq!(
+            task_prefixes("- [/] x\n- [界]", 0..15, Boxes::Status),
+            [0..6, 8..15]
+        );
+    }
+
+    /// The marker-only heuristic and the marker stripper know the three
+    /// plain boxes only, with tasks on or off.
+    #[test]
+    fn the_block_marker_heuristics_read_only_the_plain_boxes() {
+        for (line, markers) in [
+            ("- [ ]", true),
+            ("1. [x] ", true),
+            ("- [/]", false),
+            ("> - [界]", false),
+        ] {
+            assert_eq!(only_block_markers(line), markers, "{line:?}");
+        }
+        assert_eq!(strip_block_markers("- [x] words"), "words");
+        assert_eq!(strip_block_markers("- [/] words"), "[/] words");
+        assert_eq!(plain_markdown("- [ ]\tx\n- [x] y", true).0, "[ ] x · y");
+    }
+
+    /// The index reads the boxes it was built with, for the preview and
+    /// for a search hit's snippet.
+    #[test]
+    fn an_index_built_with_status_boxes_previews_and_snippets_with_them() {
+        let text = "# Tasks\n\n- [/] Doing the cutover\n- [界] Wide box\n";
+        for (boxes, preview, snippet) in [
+            (Boxes::Plain, "[/] Doing the cutover", "[界] Wide box"),
+            (Boxes::Status, "Doing the cutover", "Wide box"),
+        ] {
+            let mut index = Index::with_boxes(boxes);
+            index.sync_metadata(&workspace());
+            index.set_content(NoteId(4), text, false);
+            assert_eq!(index.preview(NoteId(4)), Some(preview), "{boxes:?}");
+            let hit = &index.query("wide", Scope::Workspace, QueryKind::Search, 10)[0];
+            assert!(
+                hit.snippet.text.ends_with(snippet),
+                "{:?}",
+                hit.snippet.text
+            );
+            assert_eq!(
+                &hit.snippet.text[hit.snippet.highlight.clone().unwrap()],
+                "Wide"
+            );
+        }
+        assert_eq!(Index::default().boxes, Boxes::Plain);
     }
 
     #[test]
@@ -2174,7 +2552,7 @@ labels = [{ text = "when paid" }]
             ("~~~\ncode\n~~~\nAfter", "After"),
             ("Para\n\n---\n", "Para"),
         ] {
-            assert_eq!(&text[body_line(text)], expected, "{text:?}");
+            assert_eq!(&text[body_line(text, Boxes::Plain)], expected, "{text:?}");
         }
     }
 
@@ -2188,7 +2566,10 @@ labels = [{ text = "when paid" }]
             touched.set(touched.get() + 1);
             line
         });
-        assert_eq!(&text[body_line_in(&text, lines)], "First words");
+        assert_eq!(
+            &text[body_line_in(&text, lines, Boxes::Plain).0],
+            "First words"
+        );
         assert!(touched.get() <= 4, "read {} lines", touched.get());
     }
 
@@ -2197,7 +2578,8 @@ labels = [{ text = "when paid" }]
         fn whole(text: &str) -> Range<usize> {
             use wren_markdown::{Document, Lines as _};
             let document = Document::new(text);
-            let mut scanner = Scanner::with_front_matter(block::front_matter_end(&document));
+            let mut scanner =
+                Scanner::with_front_matter(block::front_matter_end(&document), Boxes::Plain);
             let mut candidate: Option<(usize, Range<usize>)> = None;
             for index in 0..document.line_count() {
                 let line = document.line(index);
@@ -2240,7 +2622,7 @@ labels = [{ text = "when paid" }]
             "---\nkey: v\n--- \u{a0}\nstill front\n---\nBody",
             "Para\n---\nBody",
         ] {
-            assert_eq!(body_line(text), whole(text), "{text:?}");
+            assert_eq!(body_line(text, Boxes::Plain), whole(text), "{text:?}");
         }
     }
 
@@ -2286,7 +2668,7 @@ labels = [{ text = "when paid" }]
             index.preview(NoteId(4)).unwrap().chars().count(),
             PREVIEW_CHARS
         );
-        let snippet = Preview::new(&text, NoteKind::Markdown).snippet();
+        let snippet = Preview::new(&text, NoteKind::Markdown, Boxes::Plain).snippet();
         assert!(snippet.text.ends_with('…'));
         assert_eq!(snippet.text.chars().count(), PREVIEW_CHARS + 1);
     }

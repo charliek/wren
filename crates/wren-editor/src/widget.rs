@@ -269,6 +269,7 @@ impl Content {
             palette: crate::fixtures::DARK,
             font: crate::fixtures::FONT,
             front_matter_end: None,
+            tasks: None,
         });
         let backend = self.0.get_mut();
         backend.update(
@@ -297,6 +298,7 @@ impl Content {
             palette: crate::fixtures::DARK,
             font: crate::fixtures::FONT,
             front_matter_end,
+            tasks: None,
         });
         let backend = self.0.get_mut();
         backend.update(
@@ -2251,6 +2253,7 @@ mod tests {
             palette: fixtures::DARK,
             font: fixtures::FONT,
             front_matter_end: None,
+            tasks: None,
         });
         state.focus();
         state.preedit = Some(input_method::Preedit {
@@ -2278,6 +2281,7 @@ mod tests {
             palette: fixtures::DARK,
             font: fixtures::FONT,
             front_matter_end: None,
+            tasks: None,
         });
         // An input method opens with an empty preedit.
         assert!(!state.set_preedit(Some(input_method::Preedit::new())));
@@ -2304,6 +2308,7 @@ mod tests {
                 palette: fixtures::DARK,
                 font: fixtures::FONT,
                 front_matter_end: None,
+                tasks: None,
             });
             let lay_out = |content: &Content, highlighter: &mut MarkdownHighlighter| {
                 content.0.borrow_mut().update(
@@ -2327,6 +2332,7 @@ mod tests {
                 palette: fixtures::DARK,
                 font: fixtures::FONT,
                 front_matter_end: None,
+                tasks: None,
             });
 
             // Opening the input method moves nothing; composing does.
@@ -2361,6 +2367,7 @@ mod tests {
                 palette: fixtures::DARK,
                 font: fixtures::FONT,
                 front_matter_end: None,
+                tasks: None,
             });
             assert!(
                 take_preedit(&mut state, &content, preedit("に")),

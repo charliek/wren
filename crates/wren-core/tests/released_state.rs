@@ -74,7 +74,15 @@ impl Workspace {
             directory: TempDir::new().unwrap(),
             count: 0,
         };
-        Session::with_options(self.path(), Box::new(bin), SessionOptions { boards }).unwrap()
+        Session::with_options(
+            self.path(),
+            Box::new(bin),
+            SessionOptions {
+                boards,
+                tasks: false,
+            },
+        )
+        .unwrap()
     }
 
     fn state_bytes(&self) -> Option<Vec<u8>> {
