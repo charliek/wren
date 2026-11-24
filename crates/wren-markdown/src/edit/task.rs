@@ -138,6 +138,30 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Options
     finish(base, &d, marks)
 }
 
+/// The task line `l` belongs to: the line its box is on, and the box. A
+/// line of a task item's own text (its first line, a continuation, a lazy
+/// line) belongs to that task, as the toggle reads it. A blank line, code,
+/// a line past the end and a line in no task item belong to none.
+pub(crate) fn task_item<L: Lines + ?Sized>(
+    base: &L,
+    l: usize,
+    boxes: Boxes,
+) -> Option<(usize, block::Task)> {
+    if l >= base.line_count() {
+        return None;
+    }
+    let an = Analysis::through(base, l, boxes);
+    let info = &an.recs[l].info;
+    if info.kind.is_code_like() || (info.kind == Kind::Blank && info.item.is_none()) {
+        return None;
+    }
+    let slot = an.open_stack(l).len().checked_sub(1)?;
+    match an.opened(l, slot) {
+        (k, Container::Item(item)) => item.task.map(|task| (k, task)),
+        (_, Container::Quote { .. }) => None,
+    }
+}
+
 /// Which lines are the text of a setext heading: the lines from each
 /// underline's `start` up to the underline.
 fn setext_text(an: &Analysis) -> Vec<bool> {

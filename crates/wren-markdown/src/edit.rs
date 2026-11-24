@@ -21,6 +21,8 @@ mod tab;
 mod task;
 mod wrap;
 
+pub(crate) use task::task_item;
+
 /// The box a new item's task starts with.
 const OPEN_BOX: &str = "[ ]";
 
@@ -1512,13 +1514,13 @@ fn advance(pos: Pos, text: &str) -> Pos {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Document, LineEnding, TaskOptions};
 
     /// Parse a fixture: `|` is the cursor, `«` a selection's anchor and `»`
     /// its head.
-    pub(super) fn parse(fixture: &str) -> (String, Selection) {
+    pub(crate) fn parse(fixture: &str) -> (String, Selection) {
         let mut text = String::new();
         let (mut anchor, mut head) = (None, None);
         let mut pos = Pos::default();
@@ -1544,7 +1546,7 @@ mod tests {
     }
 
     /// Mark a selection in `text`.
-    pub(super) fn render(text: &str, sel: Selection) -> String {
+    pub(crate) fn render(text: &str, sel: Selection) -> String {
         let doc = Document::new(text);
         let at = |p: Pos| {
             assert!(
@@ -1575,7 +1577,7 @@ mod tests {
     /// Apply a plan the way an editor does (plan §4): bottom-up, with each
     /// `'\n'` written as the ending of the line being split, or on the last
     /// line the previous line's, else LF.
-    pub(super) fn apply(doc: &Document, plan: &EditPlan) -> String {
+    pub(crate) fn apply(doc: &Document, plan: &EditPlan) -> String {
         for pair in plan.edits.windows(2) {
             assert!(
                 pair[0].end <= pair[1].start,
@@ -1628,7 +1630,7 @@ mod tests {
     /// Run each `before → after` case under every line ending, mixed
     /// endings, and with and without a final line ending.
     #[track_caller]
-    pub(super) fn check_with(intent: Intent, opts: &Options, cases: &[(&str, &str)]) {
+    pub(crate) fn check_with(intent: Intent, opts: &Options, cases: &[(&str, &str)]) {
         for (before, after) in cases {
             let (text, sel) = parse(before);
             let variants = ENDINGS
@@ -2441,7 +2443,7 @@ mod tests {
     }
 
     /// The default settings with tasks on.
-    pub(super) fn tasks_on() -> Options {
+    pub(crate) fn tasks_on() -> Options {
         Options {
             tasks: Some(tasks()),
             ..Options::default()

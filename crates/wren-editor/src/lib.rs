@@ -5072,4 +5072,178 @@ mod tests {
             assert!(ev.menu.is_none());
         }
     }
+
+    // ── The task line edit ──────────────────────────────────────────────────
+
+    /// `wren_markdown::task::edit` applied through [`EditorView::apply`]:
+    /// each change is one undo step on both engines (tasks build item 1.4).
+    mod task_line_edit {
+        use wren_markdown::date::Date;
+        use wren_markdown::task::{self, Change, Stale};
+        use wren_markdown::{Document, Options, TaskOptions};
+
+        use super::*;
+
+        fn tasks_on() -> Options {
+            Options {
+                tasks: Some(TaskOptions {
+                    today: Date::new(2026, 11, 19).expect("a date"),
+                }),
+                ..Options::default()
+            }
+        }
+
+        const NOTE: &str = "# Plan\n\n- [ ] Send the deck 🔽 📅 2026-11-30 ^deck\n\
+                            - [x] Book ✅ 2026-11-18\n- [ ] Call @sam about it ⏫";
+
+        /// `(line, caret column, change, the line after it, the caret after
+        /// it)`.
+        fn cases() -> Vec<(usize, usize, Change, &'static str, usize)> {
+            let due = Date::new(2026, 12, 1);
+            vec![
+                (
+                    2,
+                    19,
+                    Change::ToggleDone,
+                    "- [x] Send the deck 🔽 📅 2026-11-30 ✅ 2026-11-19 ^deck",
+                    19,
+                ),
+                (3, 3, Change::ToggleDone, "- [ ] Book", 3),
+                (
+                    2,
+                    0,
+                    Change::Cycle,
+                    "- [/] Send the deck 🔽 📅 2026-11-30 ^deck",
+                    0,
+                ),
+                (
+                    3,
+                    10,
+                    Change::SetStatus('-'),
+                    "- [-] Book ❌ 2026-11-19",
+                    10,
+                ),
+                (
+                    2,
+                    19,
+                    Change::SetDue(due),
+                    "- [ ] Send the deck 🔽 📅 2026-12-01 ^deck",
+                    19,
+                ),
+                (
+                    2,
+                    19,
+                    Change::SetDue(None),
+                    "- [ ] Send the deck 🔽 ^deck",
+                    19,
+                ),
+                (
+                    2,
+                    19,
+                    Change::SetPriority(Some(task::Priority::High)),
+                    "- [ ] Send the deck ⏫ 📅 2026-11-30 ^deck",
+                    19,
+                ),
+                (
+                    2,
+                    19,
+                    Change::RaisePriority,
+                    "- [ ] Send the deck 📅 2026-11-30 ^deck",
+                    19,
+                ),
+                (
+                    2,
+                    19,
+                    Change::LowerPriority,
+                    "- [ ] Send the deck ⏬ 📅 2026-11-30 ^deck",
+                    19,
+                ),
+                (
+                    2,
+                    19,
+                    Change::AddOwner("sam".into()),
+                    "- [ ] Send the deck @sam 🔽 📅 2026-11-30 ^deck",
+                    19,
+                ),
+                // No `@sam` on the line: nothing to undo.
+                (
+                    3,
+                    10,
+                    Change::RemoveOwner("sam".into()),
+                    "- [x] Book ✅ 2026-11-18",
+                    10,
+                ),
+                (
+                    4,
+                    21,
+                    Change::RemoveOwner("sam".into()),
+                    "- [ ] Call about it ⏫",
+                    16,
+                ),
+                (
+                    2,
+                    8,
+                    Change::SetDescription("Mail the deck".into()),
+                    "- [ ] Mail the deck 🔽 📅 2026-11-30 ^deck",
+                    19,
+                ),
+                (
+                    2,
+                    19,
+                    Change::Compound(vec![
+                        Change::SetDescription("Mail it".into()),
+                        Change::SetStatus('/'),
+                        Change::SetDue(due),
+                        Change::SetPriority(Some(task::Priority::High)),
+                        Change::AddOwner("sam".into()),
+                    ]),
+                    "- [/] Mail it @sam ⏫ 📅 2026-12-01 ^deck",
+                    13,
+                ),
+            ]
+        }
+
+        #[test]
+        fn each_change_is_one_undo_step_on_both_engines() {
+            for kind in BackendKind::ALL {
+                for ending in ["\n", "\r\n"] {
+                    let note = NOTE.replace('\n', ending);
+                    for (line, column, change, after, caret) in cases() {
+                        let what = format!("{kind:?} {ending:?} {change:?}");
+                        let mut ev = EditorView::with_backend(kind, &note);
+                        ev.set_tasks(tasks_on().tasks);
+                        ev.move_cursor(at(line, column));
+                        let text = ev.text();
+                        let doc = Document::new(&text);
+                        let selection = markdown_selection(ev.cursor());
+                        let edit = task::edit(&doc, line, selection, &change, &tasks_on())
+                            .expect("a task line");
+                        let plan = edit.plan_for(&doc).expect("the line it read");
+                        let edits: Vec<Replace> =
+                            plan.edits.iter().cloned().map(Replace::from).collect();
+                        let changed = ev.apply(&edits, iced_cursor(plan.selection));
+                        assert_eq!(changed, !edit.is_noop(), "{what}");
+                        let mut want: Vec<&str> = NOTE.split('\n').collect();
+                        want[line] = after;
+                        assert_eq!(ev.text(), want.join(ending), "{what}");
+                        assert_eq!(ev.cursor(), at(line, caret), "{what}");
+                        if !changed {
+                            assert!(!ev.can_undo(), "{what}");
+                            continue;
+                        }
+                        // The plan is stale now: its line has changed.
+                        let now = ev.text();
+                        assert_eq!(edit.plan_for(&Document::new(&now)), Err(Stale), "{what}");
+                        // One undo restores the line and the caret.
+                        assert!(ev.undo(), "{what}");
+                        assert_eq!(ev.text(), note, "{what}");
+                        assert_eq!(ev.cursor(), at(line, column), "{what}");
+                        assert!(!ev.can_undo(), "{what}: one step");
+                        assert!(ev.redo(), "{what}");
+                        assert_eq!(ev.text(), want.join(ending), "{what}");
+                    }
+                }
+            }
+        }
+    }
 }

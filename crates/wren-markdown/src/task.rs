@@ -53,9 +53,10 @@
 //!
 //! Each `set_…` method returns the whole line with one thing changed:
 //!
-//! - A token that is there is changed in place: only the bytes of its date,
-//!   or of its priority glyph, are replaced, so a `🗓`, a `[due:: …]` field
-//!   and a U+FE0F stay as they were written.
+//! - A token that is there is changed in place: only the bytes of its
+//!   date are replaced, so a `🗓`, a `[due:: …]` field and a U+FE0F after
+//!   a date's glyph stay as they were written. A priority of another level
+//!   is a new glyph, written bare in the old one's place, U+FE0F and all.
 //! - A new token is written as Obsidian Tasks writes it (`📅`, `✅`, `❌`
 //!   and the priority glyphs with no U+FE0F, one space before the date) and
 //!   goes as late on the line as that tool's order allows: before the
@@ -77,6 +78,10 @@
 //!
 //! Nothing else on the line moves or changes: not an `@owner`, not a kept
 //! token, and not the order of tokens someone wrote by hand.
+//!
+//! Every writer of a task line in a document goes through [`edit`], which
+//! applies a [`Change`] with these writers and the stamps a status change
+//! asks for, as one replacement that knows the line it expects.
 
 use std::cell::{Cell, OnceCell};
 use std::ops::Range;
@@ -85,6 +90,10 @@ use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use crate::block::{self, Boxes};
 use crate::date::{Date, Parsed};
+
+mod change;
+
+pub use change::{edit, Change, LineEdit, Stale};
 
 /// The variation selector an emoji picker may put after a glyph.
 const VS16: char = '\u{fe0f}';
@@ -839,8 +848,10 @@ impl<'a> TaskLine<'a> {
     /// The line with its priority set to `level`, or with none.
     ///
     /// Setting a level replaces every indicator among the tokens (design
-    /// §5.7): the last becomes the new glyph in place, keeping a U+FE0F
-    /// after it, and the others are removed. So a line with two
+    /// §5.7): the last becomes the new glyph in place, written bare as a
+    /// new glyph is (a U+FE0F after the old one goes with it), unless it is
+    /// already `level`, when it stays as written, and the others are
+    /// removed. So a line with two
     /// indicators changes even when `level` is the one it is read as
     /// having; only a line whose one indicator is `level` comes back as
     /// it was. A caller that saves a form the user did not change the
@@ -911,8 +922,11 @@ impl<'a> TaskLine<'a> {
             (None, _) => self.removals(ranges),
             (Some(level), Some(last)) => {
                 let mut edits = self.removals(ranges.take_while(|range| *range != last.range));
-                let glyph = last.range.start..last.range.start + last.level.glyph().len_utf8();
-                edits.push((glyph, level.glyph().to_string()));
+                // Another level is a new glyph, written bare; the same
+                // level stays as it is written, U+FE0F and all.
+                if last.level != level {
+                    edits.push((last.range.clone(), level.glyph().to_string()));
+                }
                 edits
             }
             (Some(level), None) => {
@@ -1935,7 +1949,7 @@ mod tests {
                 ("- [ ] 📅 2026-12-01", "- [ ] ⏫ 📅 2026-12-01"),
                 ("- [ ] Pay📅 2026-12-01", "- [ ] Pay ⏫ 📅 2026-12-01"),
                 ("- [ ] a 🆔 x📅 2026-12-01", "- [ ] a 🆔 x ⏫ 📅 2026-12-01"),
-                // In place, a variation selector kept.
+                // In place.
                 ("- [ ] a 🔽", "- [ ] a ⏫"),
                 // The one indicator is already this level: nothing changes.
                 ("- [ ] a ⏫ ^b", "- [ ] a ⏫ ^b"),
@@ -1945,9 +1959,10 @@ mod tests {
                 ("- [ ] A 🔽 ⏫", "- [ ] A ⏫"),
                 ("- [ ] a 🔽 📅 2026-12-01 ⏫", "- [ ] a 📅 2026-12-01 ⏫"),
                 ("- [ ] a ⏫ ⏫\u{fe0f} ^b", "- [ ] a ⏫\u{fe0f} ^b"),
+                // Another level is a new glyph: its U+FE0F goes too.
                 (
                     "- [ ] a 🔽\u{fe0f} 📅 2026-12-01",
-                    "- [ ] a ⏫\u{fe0f} 📅 2026-12-01",
+                    "- [ ] a ⏫ 📅 2026-12-01",
                 ),
                 (
                     "- [ ] a 📅 2026-12-01 🔺 @sam [k:: v]",
@@ -2330,7 +2345,7 @@ mod tests {
     }
 
     /// SplitMix64, seeded, so a failure replays.
-    struct Rng(u64);
+    pub(super) struct Rng(pub(super) u64);
 
     impl Rng {
         fn next(&mut self) -> u64 {
@@ -2341,7 +2356,7 @@ mod tests {
             z ^ (z >> 31)
         }
 
-        fn below(&mut self, n: usize) -> usize {
+        pub(super) fn below(&mut self, n: usize) -> usize {
             (self.next() % n.max(1) as u64) as usize
         }
 
@@ -2349,7 +2364,7 @@ mod tests {
             self.below(n) == 0
         }
 
-        fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+        pub(super) fn pick<T: Copy>(&mut self, items: &[T]) -> T {
             items[self.below(items.len())]
         }
     }
@@ -2464,7 +2479,7 @@ mod tests {
     /// A task line of words then tokens, with the odd word among the
     /// tokens, every kind of spacing, and one time in four a character
     /// dropped, doubled or put in at random.
-    fn random_line(rng: &mut Rng) -> String {
+    pub(super) fn random_line(rng: &mut Rng) -> String {
         let mut line = rng
             .pick(&[
                 "- ", "- ", "- ", "* ", "+ ", "1. ", "12) ", "> - ", "  - ", "-\t", "> > 3. ",
@@ -3045,12 +3060,15 @@ mod tests {
             Change::Date(field, Some(date)) => before
                 .date(*field)
                 .map(|token| (token.date.clone(), date.to_string())),
+            // Another level replaces the whole indicator with a bare
+            // glyph; the same level leaves it as written.
             Change::Priority(Some(level)) if subject.len() == 1 => before.priority().map(|token| {
-                let glyph = token.level.glyph().len_utf8();
-                (
-                    token.range.start..token.range.start + glyph,
-                    level.glyph().to_string(),
-                )
+                let text = if token.level == *level {
+                    before.text(&token.range).to_owned()
+                } else {
+                    level.glyph().to_string()
+                };
+                (token.range.clone(), text)
             }),
             _ => None,
         };
