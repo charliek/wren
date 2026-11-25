@@ -41,8 +41,9 @@ struct Built {
 
 /// Build and install the menu bar on the main thread. Item shortcuts come
 /// from the keymap so a rebinding in `config.conf` shows in the menu; the
-/// Board menu is built only with the `boards` setting on.
-pub fn install(keymap: &Keymap, boards: bool) -> muda::Result<()> {
+/// Board menu is built only with the `boards` setting on, and a task
+/// command's item only with `tasks` on.
+pub fn install(keymap: &Keymap, boards: bool, tasks: bool) -> muda::Result<()> {
     let menu = Menu::new();
     let mut built = Built {
         updates: None,
@@ -51,7 +52,7 @@ pub fn install(keymap: &Keymap, boards: bool) -> muda::Result<()> {
     let mut window_menu = None;
     for spec in menu::menus(boards) {
         let submenu = Submenu::new(spec.title, true);
-        append(&submenu, spec.rows, spec.kind, keymap, &mut built)?;
+        append(&submenu, spec.rows, spec.kind, keymap, tasks, &mut built)?;
         menu.append(&submenu)?;
         if spec.kind == Kind::Window {
             window_menu = Some(submenu);
@@ -72,9 +73,10 @@ fn append(
     rows: &'static [Row],
     kind: Kind,
     keymap: &Keymap,
+    tasks: bool,
     built: &mut Built,
 ) -> muda::Result<()> {
-    for row in rows {
+    for row in rows.iter().filter(|row| menu::row_built(row, tasks)) {
         match *row {
             Row::Command(key, title) => {
                 // The first trigger muda can show: it has no key for `+`, so
@@ -107,7 +109,7 @@ fn append(
             Row::Separator => submenu.append(&PredefinedMenuItem::separator())?,
             Row::Submenu(title, rows) => {
                 let inner = Submenu::new(title, true);
-                append(&inner, rows, kind, keymap, built)?;
+                append(&inner, rows, kind, keymap, tasks, built)?;
                 submenu.append(&inner)?;
             }
         }

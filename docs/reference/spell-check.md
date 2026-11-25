@@ -26,7 +26,16 @@ where **Suggest spelling** is unavailable too.
 
 | Checked | Not checked |
 |---|---|
-| Paragraphs, list items, quotes, tasks (open and done), table rows, and headings | Front matter, fenced and indented code, HTML blocks, thematic breaks, and link reference definitions (`[label]: url`) |
+| Paragraphs, list items, quotes, tasks of every status, table rows, and headings | Front matter, fenced and indented code, HTML blocks, thematic breaks, and link reference definitions (`[label]: url`) |
+
+A task's box is never checked, only the text after it. Without
+[`tasks = on`](configuration.md), a box is `[ ]`, `[x]` or `[X]`, and any
+other bracket after a list marker, such as `[/]`, is the item's text. With
+`tasks = on`, a box holds any one character, so a task of any status is
+read the same way: open, doing (`[/]`), done, cancelled (`[-]`), or a
+character with no status of its own. See [Tasks](tasks.md). On a task line,
+a right-click on a misspelled word opens the corrections menu, not the task
+menu.
 
 Inside checked text, these are skipped:
 
@@ -36,6 +45,11 @@ Inside checked text, these are skipped:
   and `![alt](url)` only `the text` and `alt` are checked.
 - Bare URLs and autolinks (`<https://…>`).
 - Emphasis and strikethrough markers, so `_word_` is checked as `word`.
+- With `tasks = on`, a task's tokens after its description: dates
+  (`📅 2026-12-01`, `✅ …`, `❌ …`, `[due:: …]` and the like), priority
+  glyphs, `🆔` ids, a closing `^block-id`, and the tokens Wren keeps as
+  written, such as `🔁 every week`. Owners (`@sam`) and tags are skipped by
+  the word rules below.
 
 A word is skipped whole when it:
 

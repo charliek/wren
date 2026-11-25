@@ -3,9 +3,11 @@
 //! Implements `iced::core::text::highlighter::Highlighter`. Lines are
 //! classified by [`wren_markdown::block`], the classifier the rest of Wren
 //! uses, so nested lists, quotes, `~~~` and container-indented fences,
-//! indented code, and front matter highlight the way they edit. Inline
-//! markup is matched by hand on top, with colours from the host's
-//! [`Palette`] rather than a fixed third-party theme.
+//! indented code, and front matter highlight the way they edit. What lies
+//! inside a line comes from the same classifier as typed spans
+//! ([`wren_markdown::span`]): the highlighter decides none of it, and only
+//! gives each span its colour and face from the host's [`Palette`], rather
+//! than from a fixed third-party theme.
 //!
 //! Supported constructs:
 //!   - Front matter: muted, with faint delimiters.
@@ -16,8 +18,17 @@
 //!     H1–H3 text is set larger and their rows are taller, on engines that
 //!     can size spans.
 //!   - Block quotes: faint markers, italic `quote` text.
-//!   - List markers and open task boxes: accent colour.
-//!   - Completed tasks: faint markers and `completed` text, struck through.
+//!   - List markers and the boxes of unfinished tasks: accent colour. With
+//!     the host's tasks on that is an open box, a doing one (`[/]`) and one
+//!     whose character has no status; the character itself tells them
+//!     apart.
+//!   - Finished tasks, done and with tasks on cancelled (`[-]`): faint
+//!     markers and `completed` text, struck through.
+//!   - With tasks on, a task's tokens: a due date in `date`, or `overdue`
+//!     once today has passed it on an unfinished task (bold) or when it is
+//!     no real day; `@owners` in `owner`; stamps and ids faint. A priority
+//!     glyph keeps the text's colour. On a finished task the strike stops at
+//!     the description and the tokens after it are faint.
 //!   - Thematic breaks, setext underlines, and HTML blocks: faint.
 //!   - Inline code spans (`` `...` ``): `code` colour on a code chip.
 //!   - Bold (`**...**`, `__...__`) and italic (`*...*`, `_..._`): the font's
@@ -38,7 +49,9 @@
 //! that `change_line` can resync cheaply without replaying the document.
 //! Alongside the spans, each highlighted line leaves a [`LineDecor`] for the
 //! widget to draw: strike-throughs, the code band, and inline code chips,
-//! plus the prose ranges spell check reads.
+//! plus the prose ranges spell check reads. It also leaves the typed spans
+//! it was coloured from ([`MarkdownHighlighter::spans`]), for the hit test
+//! ([`crate::hit`]).
 //!
 //! All byte ranges returned are valid UTF-8 boundaries.
 
@@ -47,7 +60,11 @@ use std::ops::Range;
 use iced::advanced::text::highlighter::{self, Format};
 use iced::font::{self, Font};
 use iced::Color;
-use wren_markdown::block::{self, Container, Kind, LineInfo, Scanner};
+use wren_markdown::block::{self, Boxes, Container, Kind, LineInfo, Scanner};
+use wren_markdown::date::{Date, Parsed};
+use wren_markdown::span::{self, LineSpans, Span, SpanKind};
+use wren_markdown::task::DateField;
+use wren_markdown::TaskOptions;
 
 use crate::Palette;
 
@@ -159,6 +176,16 @@ pub struct Settings {
     /// the editor recomputes this after every change; a new value restarts
     /// highlighting, since every checkpoint was scanned with the old one.
     pub front_matter_end: Option<usize>,
+    /// The host's tasks, when they are on: a box of any status is then a
+    /// task. `None` reads the lines as an editor without tasks does.
+    pub tasks: Option<TaskOptions>,
+}
+
+impl Settings {
+    /// The task boxes these settings read.
+    fn boxes(&self) -> Boxes {
+        Boxes::with_tasks(self.tasks.is_some())
+    }
 }
 
 /// What the widget draws for a line beyond its glyph colours.
@@ -183,7 +210,8 @@ pub struct LineDecor {
 // Span colours
 // ---------------------------------------------------------------------------
 
-/// The palette plus the font whose bold and italic variants style emphasis.
+/// The palette plus the font whose bold and italic variants style emphasis,
+/// and the day a task's due date is read against.
 struct Ink {
     text: Color,
     muted: Color,
@@ -195,7 +223,12 @@ struct Ink {
     code: Color,
     quote: Color,
     completed: Color,
+    date: Color,
+    overdue: Color,
+    owner: Color,
     font: Font,
+    /// Today, with the host's tasks on.
+    today: Option<Date>,
 }
 
 impl Ink {
@@ -211,6 +244,9 @@ impl Ink {
             code,
             quote,
             completed,
+            date,
+            overdue,
+            owner,
         } = palette;
         Self {
             text,
@@ -223,7 +259,11 @@ impl Ink {
             code,
             quote,
             completed,
+            date,
+            overdue,
+            owner,
             font,
+            today: None,
         }
     }
 }
@@ -242,6 +282,9 @@ pub struct MarkdownHighlighter {
     scanner: Scanner,
     /// `decor[i]` for every line before the next one to highlight.
     decor: Vec<LineDecor>,
+    /// `spans[i]`, the typed spans line `i` was highlighted from, for the
+    /// same lines.
+    spans: Vec<LineSpans>,
 }
 
 impl highlighter::Highlighter for MarkdownHighlighter {
@@ -250,12 +293,13 @@ impl highlighter::Highlighter for MarkdownHighlighter {
     type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Highlight)>;
 
     fn new(settings: &Settings) -> Self {
-        let scanner = Scanner::with_front_matter(settings.front_matter_end);
+        let scanner = Scanner::with_front_matter(settings.front_matter_end, settings.boxes());
         Self {
             settings: *settings,
             checkpoints: vec![scanner.clone()],
             scanner,
             decor: Vec::new(),
+            spans: Vec::new(),
         }
     }
 
@@ -272,6 +316,7 @@ impl highlighter::Highlighter for MarkdownHighlighter {
         self.checkpoints.truncate(index + 1);
         self.scanner = self.checkpoints[index].clone();
         self.decor.truncate(self.scanner.line_index());
+        self.spans.truncate(self.scanner.line_index());
     }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
@@ -285,11 +330,17 @@ impl highlighter::Highlighter for MarkdownHighlighter {
         } else {
             containers
         };
-        let ink = Ink::new(self.settings.palette, self.settings.font);
-        let (spans, decor) = line_highlights(line, index, &info, own, continued, &ink);
+        let ink = Ink {
+            today: self.settings.tasks.map(|tasks| tasks.today),
+            ..Ink::new(self.settings.palette, self.settings.font)
+        };
+        let boxes = self.settings.boxes();
+        let (spans, decor, read) = line_highlights(line, index, &info, own, continued, boxes, &ink);
 
         self.decor.truncate(index);
         self.decor.push(decor);
+        self.spans.truncate(index);
+        self.spans.push(read);
         let next = self.scanner.line_index();
         if next.is_multiple_of(CHECKPOINT_INTERVAL) {
             self.checkpoints.truncate(next / CHECKPOINT_INTERVAL);
@@ -310,45 +361,140 @@ impl MarkdownHighlighter {
     pub fn decor(&self, line: usize) -> Option<&LineDecor> {
         self.decor.get(line)
     }
+
+    /// The typed spans of `line`, under the same condition.
+    pub fn spans(&self, line: usize) -> Option<&LineSpans> {
+        self.spans.get(line)
+    }
 }
 
-/// The prose ranges of line `index` of `lines`, from a fresh highlighter run
-/// over the lines down to it, for a caller that cannot see the widget's own.
-/// Prose depends on neither colour nor font, so only `front_matter_end` of
-/// the widget's [`Settings`] matters. Empty past the last line.
+/// One line's spans, sorted and apart.
+#[cfg(feature = "test-support")]
+pub type Highlights = Vec<(Range<usize>, Highlight)>;
+
+/// One line's spans and decoration.
+#[cfg(any(test, feature = "test-support"))]
+pub type HighlightedLine = (Vec<(Range<usize>, Highlight)>, LineDecor);
+
+/// Every line of `text`, split at `\n`, as a fresh highlighter run gives it
+/// with `palette`, `font` and the host's `tasks`: its spans and its
+/// decoration.
+#[cfg(feature = "test-support")]
+pub fn highlight_lines(
+    text: &str,
+    palette: Palette,
+    font: Font,
+    tasks: Option<TaskOptions>,
+) -> Vec<HighlightedLine> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let settings = Settings {
+        palette,
+        font,
+        front_matter_end: block::front_matter_end(&lines[..]),
+        tasks,
+    };
+    highlight_all(&lines[..], settings)
+}
+
+/// Every line of `lines` as a fresh highlighter with `settings` gives it.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn highlight_all<L: wren_markdown::Lines + ?Sized>(
+    lines: &L,
+    settings: Settings,
+) -> Vec<HighlightedLine> {
+    let mut highlighter = <MarkdownHighlighter as highlighter::Highlighter>::new(&settings);
+    (0..lines.line_count())
+        .map(|index| {
+            let spans =
+                highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(index))
+                    .collect();
+            (spans, highlighter.decor[index].clone())
+        })
+        .collect()
+}
+
+/// Line `index` of `lines` as a fresh highlighter with `settings` gives it,
+/// highlighting only the lines down to it: its spans and the typed spans
+/// they were coloured from. None past the last line.
+#[cfg(feature = "test-support")]
+pub(crate) fn highlight_through<L: wren_markdown::Lines + ?Sized>(
+    lines: &L,
+    index: usize,
+    settings: Settings,
+) -> Option<(Highlights, LineSpans)> {
+    if index >= lines.line_count() {
+        return None;
+    }
+    let mut highlighter = <MarkdownHighlighter as highlighter::Highlighter>::new(&settings);
+    for line in 0..index {
+        let _ = highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(line));
+    }
+    let spans =
+        highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(index)).collect();
+    Some((spans, highlighter.spans.pop()?))
+}
+
+/// The typed spans of line `index` of `lines`, from a fresh scan of the
+/// lines down to it, for a caller that cannot see the widget's own. Spans
+/// depend on neither colour nor font, so only `front_matter_end` and `tasks`
+/// of the widget's [`Settings`] matter. None past the last line.
+pub fn spans_at(
+    lines: &impl wren_markdown::Lines,
+    index: usize,
+    front_matter_end: Option<usize>,
+    tasks: Option<TaskOptions>,
+) -> LineSpans {
+    if index >= lines.line_count() {
+        return LineSpans::default();
+    }
+    let boxes = Boxes::with_tasks(tasks.is_some());
+    let mut scanner = Scanner::with_front_matter(front_matter_end, boxes);
+    for line in 0..index {
+        scanner.next_line(lines.line(line));
+    }
+    let line = lines.line(index);
+    read(line, &scanner.next_line(line), boxes)
+}
+
+/// The spans of `line`, classified as `info` by a scan with `boxes`, as the
+/// editor reads them: with tasks on, a task's dates, priority, ids and the
+/// tokens Wren keeps are not prose, so spell check reads none of them. Its
+/// owners and tags stay prose, as the speller already passes over a chunk
+/// with an `@` and a `#tag`.
+fn read(line: &str, info: &LineInfo, boxes: Boxes) -> LineSpans {
+    let mut read = span::spans(line, info, boxes);
+    read.not_prose.extend(
+        (read.spans.iter())
+            .filter(|span| is_token(&span.kind))
+            .map(|span| span.range.clone()),
+    );
+    read
+}
+
+/// Whether a task span is one of the tokens after a task's description,
+/// not its box and not an owner or a tag, which may stand in the
+/// description.
+fn is_token(kind: &SpanKind) -> bool {
+    matches!(
+        kind,
+        SpanKind::Date { .. }
+            | SpanKind::Priority(_)
+            | SpanKind::Id { .. }
+            | SpanKind::BlockId
+            | SpanKind::Kept(_)
+    )
+}
+
+/// The prose ranges of line `index` of `lines`, the ones the widget's
+/// highlighter leaves in its [`LineDecor`]; see [`spans_at`].
+#[cfg(test)]
 pub fn prose_at(
     lines: &impl wren_markdown::Lines,
     index: usize,
     front_matter_end: Option<usize>,
+    tasks: Option<TaskOptions>,
 ) -> Vec<Range<usize>> {
-    if index >= lines.line_count() {
-        return Vec::new();
-    }
-    let ink = Color::BLACK;
-    let mut highlighter = <MarkdownHighlighter as highlighter::Highlighter>::new(&Settings {
-        palette: Palette {
-            text: ink,
-            muted: ink,
-            faint: ink,
-            accent: ink,
-            heading: ink,
-            heading2: ink,
-            link: ink,
-            code: ink,
-            quote: ink,
-            completed: ink,
-        },
-        font: Font::DEFAULT,
-        front_matter_end,
-    });
-    for line in 0..=index {
-        let _ = highlighter::Highlighter::highlight_line(&mut highlighter, lines.line(line));
-    }
-    highlighter
-        .decor
-        .pop()
-        .map(|decor| decor.prose)
-        .unwrap_or_default()
+    spans_at(lines, index, front_matter_end, tasks).prose()
 }
 
 // ---------------------------------------------------------------------------
@@ -375,29 +521,26 @@ impl Spans {
             _ => self.0.push((range, highlight)),
         }
     }
-
-    /// Spans found in `line[offset..]`, shifted into `line`.
-    fn extend_at(&mut self, offset: usize, spans: Vec<(Range<usize>, Highlight)>) {
-        for (range, highlight) in spans {
-            self.push(range.start + offset..range.end + offset, highlight);
-        }
-    }
 }
 
-/// The spans and decoration of line `index`, classified as `info`. `own`
-/// are the containers the line belongs to, the first `continued` of which
-/// were open before it.
+/// The spans and decoration of line `index`, classified as `info` by a scan
+/// with `boxes`, and the typed spans they were read from. `own` are the
+/// containers the line belongs to, the first `continued` of which were open
+/// before it.
 fn line_highlights(
     line: &str,
     index: usize,
     info: &LineInfo,
     own: &[Container],
     continued: usize,
+    boxes: Boxes,
     ink: &Ink,
-) -> (Vec<(Range<usize>, Highlight)>, LineDecor) {
+) -> (Vec<(Range<usize>, Highlight)>, LineDecor, LineSpans) {
+    let read = read(line, info, boxes);
     let mut spans = Spans::default();
     let mut decor = LineDecor {
         hang: info.prefix_end,
+        prose: read.prose(),
         ..LineDecor::default()
     };
     let body = info.prefix_end..line.len();
@@ -406,11 +549,14 @@ fn line_highlights(
         let delimiter = matches!(line[body.clone()].trim_end(), "---" | "...");
         let color = if delimiter { ink.faint } else { ink.muted };
         spans.push(body, Highlight::colored(color));
-        return (spans.0, decor);
+        return (spans.0, decor, read);
     }
 
     let task = info.item.and_then(|item| item.task);
-    let done = task.is_some_and(|task| task.done);
+    // A finished task, done or cancelled, recedes: faint markers, and a
+    // dimmed, struck description. Any other box takes the accent, and its
+    // own character tells doing or an unknown status from open.
+    let done = task.is_some_and(|task| task.status.is_finished());
     for (segment, container) in block::segments(line, index, own, continued)
         .into_iter()
         .zip(own)
@@ -448,7 +594,6 @@ fn line_highlights(
                     Highlight::bold(color, ink.font).sized(Scale::heading(*level)),
                 );
                 spans.push(text.end..line.len(), faint);
-                decor.prose = shifted(&scan_inline(&line[text.clone()], ink).prose, text.start);
             }
         }
         Kind::SetextUnderline { .. } | Kind::ThematicBreak | Kind::Html => {
@@ -464,12 +609,21 @@ fn line_highlights(
         }
         Kind::IndentedCode => spans.push(body, Highlight::colored(ink.muted)),
         Kind::Prose if done => {
-            // Done text recedes, but its links keep their colour.
-            let text = info.text_start..info.text_start + line[info.text_start..].trim_end().len();
+            // Done text recedes, but its links keep their colour: the links
+            // it has when read alone, whatever code or comment holds them.
+            // With tasks on, the strike stops at the description, and the
+            // tokens after it recede unstruck.
+            let end = (read.spans.iter())
+                .filter(|span| is_token(&span.kind))
+                .map(|span| span.range.start)
+                .min()
+                .map_or(line.len(), |start| start.max(info.text_start));
+            let text =
+                info.text_start..info.text_start + line[info.text_start..end].trim_end().len();
             let completed = Highlight::colored(ink.completed);
+            let links = span::links(line, text.clone());
             let mut covered = text.start;
-            for (range, highlight) in scan_links(&line[text.clone()], ink) {
-                let range = range.start + text.start..range.end + text.start;
+            for (range, highlight) in inline_highlights(line, text.clone(), &links, ink) {
                 spans.push(covered..range.start, completed);
                 covered = range.end;
                 spans.push(range, highlight);
@@ -477,568 +631,258 @@ fn line_highlights(
             spans.push(covered..text.end, completed);
             spans.push(text.end..line.len(), Highlight::colored(ink.faint));
             decor.strikes.push(text);
-            // Done text keeps its one colour, but spell check still skips
-            // its code, links and markers.
-            let start = info.text_start;
-            if !is_reference_definition(&line[start..]) {
-                decor.prose = shifted(&scan_inline(&line[start..], ink).prose, start);
-            }
         }
         Kind::Prose => {
-            let start = info.text_start;
-            let inline = scan_inline(&line[start..], ink);
-            let shift = |r: &Range<usize>| r.start + start..r.end + start;
-            decor.strikes.extend(inline.strikes.iter().map(shift));
-            decor.code_spans.extend(inline.code.iter().map(shift));
-            if !is_reference_definition(&line[start..]) {
-                decor.prose = shifted(&inline.prose, start);
-            }
-            if info.quote_depth == 0 {
-                spans.extend_at(start, inline.spans);
-            } else {
-                // Quoted text between the inline spans is italic.
-                let quote = Highlight::italic(ink.quote, ink.font);
-                let mut covered = start;
-                for (range, highlight) in inline.spans {
-                    let range = range.start + start..range.end + start;
-                    spans.push(covered..range.start, quote);
-                    covered = range.end;
-                    spans.push(range, highlight);
+            let text = read.text.clone();
+            for span in &read.spans {
+                match span.kind {
+                    SpanKind::Code => decor.code_spans.push(span.range.clone()),
+                    SpanKind::Strike { .. } => decor
+                        .strikes
+                        .extend(span.inner().filter(|inner| !inner.is_empty())),
+                    _ => {}
                 }
-                spans.push(covered..line.len(), quote);
+            }
+            // Quoted text between the inline spans is italic.
+            let quote = (info.quote_depth > 0).then(|| Highlight::italic(ink.quote, ink.font));
+            let mut covered = text.start;
+            for (range, highlight) in inline_highlights(line, text.clone(), &read.spans, ink) {
+                if let Some(quote) = quote {
+                    spans.push(covered..range.start, quote);
+                }
+                covered = range.end;
+                spans.push(range, highlight);
+            }
+            if let Some(quote) = quote {
+                spans.push(covered..text.end, quote);
             }
         }
     }
-    (spans.0, decor)
-}
-
-fn shifted(ranges: &[Range<usize>], by: usize) -> Vec<Range<usize>> {
-    ranges.iter().map(|r| r.start + by..r.end + by).collect()
-}
-
-/// Whether `text`, a line's text, opens a link reference definition:
-/// `[label]:`. A footnote definition (`[^label]:`) is not one; its text is
-/// prose.
-fn is_reference_definition(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix('[') else {
-        return false;
-    };
-    if rest.starts_with('^') {
-        return false;
-    }
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    while let Some(&byte) = bytes.get(i) {
-        match byte {
-            b'\\' => i += 1,
-            b'[' => return false,
-            b']' => {
-                return bytes.get(i + 1) == Some(&b':')
-                    && rest[..i].chars().any(|ch| !ch.is_whitespace());
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
+    (spans.0, decor, read)
 }
 
 // ---------------------------------------------------------------------------
-// Inline element scanner
+// Inline spans to colours
 // ---------------------------------------------------------------------------
 
-/// The inline Markdown of a line: sorted, non-overlapping spans, and the
-/// struck ranges, all relative to the scanned text.
-struct Inline {
-    spans: Vec<(Range<usize>, Highlight)>,
-    strikes: Vec<Range<usize>>,
-    /// Inline code spans, backticks included.
-    code: Vec<Range<usize>>,
-    /// The text spell check reads: everything but code, comments, link
-    /// syntax and destinations, URLs, and emphasis and strike delimiters.
-    prose: Vec<Range<usize>>,
+/// Which colour shows where inline spans overlap, the higher the stronger:
+/// emphasised text keeps the colour of a strike it is in, a task's token
+/// recolours emphasis but not a strike, struck text keeps the colour of a
+/// link, and nothing recolours code, a comment, a destination or the
+/// characters that are syntax alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Layer {
+    #[default]
+    None,
+    Emphasis,
+    Task,
+    Struck,
+    Link,
+    Own,
 }
 
-/// Scans inline Markdown. Code spans and HTML comments come first and hold
-/// nothing else. Links and bare URLs come next, so emphasis never pairs the
-/// `_` or `*` of a URL. Strikethrough and emphasis are matched inside each
-/// link's text, and then across the line, where they can wrap whole links.
-fn scan_inline(line: &str, ink: &Ink) -> Inline {
-    let mut cells = Cells::new(line);
-    let code = cells.code_spans(ink);
-    cells.comments(ink);
-    let texts = cells.links(ink);
-    cells.bare_urls(ink);
-    cells.autolinks();
-    let mut strikes = Vec::new();
-    for text in &texts {
-        strikes.extend(cells.delimited(text.clone(), ink));
-    }
-    for text in texts {
-        cells.set(text, |cell| cell.locked = true);
-    }
-    strikes.extend(cells.delimited(0..line.len(), ink));
-    strikes.sort_by_key(|range| range.start);
-    Inline {
-        spans: cells.spans(ink.font),
-        strikes,
-        code,
-        prose: cells.prose(),
-    }
-}
-
-/// Only the links of a line, for text that is otherwise one colour.
-fn scan_links(line: &str, ink: &Ink) -> Vec<(Range<usize>, Highlight)> {
-    let mut cells = Cells::new(line);
-    cells.links(ink);
-    cells.bare_urls(ink);
-    cells.spans(ink.font)
-}
-
-/// The style of one byte of scanned text.
+/// The look of one byte of a line's text.
 #[derive(Clone, Copy, Default)]
 struct Cell {
     color: Option<Color>,
+    layer: Layer,
     bold: bool,
     italic: bool,
     /// Code and comments keep their face inside emphasis.
     fixed_face: bool,
-    /// No later delimiter may match here.
-    locked: bool,
-    /// Spell check skips this byte. Only prose reads it; no colour does.
-    excluded: bool,
 }
 
-/// A line's bytes as each kind of construct layers its style onto them. A
-/// construct found later can wrap one found earlier but never pair its
-/// delimiters inside it.
-struct Cells<'a> {
-    line: &'a str,
-    cells: Vec<Cell>,
+/// Whether `span` is inline Markdown or a task's token the highlighter
+/// colours. A link nested in another is drawn as that one's text, and an
+/// autolink, a reference definition, a task's box, a priority glyph, a tag,
+/// a block id and the tokens Wren keeps have no colour of their own.
+fn paints(span: &Span) -> bool {
+    matches!(
+        span.kind,
+        SpanKind::Code
+            | SpanKind::Comment
+            | SpanKind::Url
+            | SpanKind::Strike { .. }
+            | SpanKind::Emphasis { .. }
+            | SpanKind::Link { nested: false, .. }
+            | SpanKind::Date { .. }
+            | SpanKind::Owner { .. }
+            | SpanKind::Id { .. }
+    )
 }
 
-impl<'a> Cells<'a> {
-    fn new(line: &'a str) -> Self {
-        Self {
-            line,
-            cells: vec![Cell::default(); line.len()],
-        }
-    }
-
-    fn set(&mut self, range: Range<usize>, style: impl Fn(&mut Cell)) {
-        self.cells[range].iter_mut().for_each(style);
-    }
-
-    fn exclude(&mut self, range: Range<usize>) {
-        self.set(range, |cell| cell.excluded = true);
-    }
-
-    /// Excludes a matched emphasis or strike delimiter, unless a letter or
-    /// digit touches it on both sides: `snake_case_name` and
-    /// `un*believ*able` stay one piece of prose.
-    fn exclude_delimiter(&mut self, range: Range<usize>) {
-        let before = self.line[..range.start].chars().next_back();
-        let after = self.line[range.end..].chars().next();
-        let inside = [before, after]
-            .iter()
-            .all(|ch| ch.is_some_and(char::is_alphanumeric));
-        if !inside {
-            self.exclude(range);
-        }
-    }
-
-    /// The maximal runs of characters with no excluded byte.
-    fn prose(&self) -> Vec<Range<usize>> {
-        let mut prose: Vec<Range<usize>> = Vec::new();
-        for (start, ch) in self.line.char_indices() {
-            let end = start + ch.len_utf8();
-            if self.cells[start..end].iter().any(|cell| cell.excluded) {
-                continue;
+/// How an unfinished task's token looks: its colour, and whether it is
+/// bold. A due date is in `date`, and `overdue` when it is before today,
+/// bold, or when it is no real day, not bold: a problem to see, quieter
+/// than work that is late. Due today is not late. A done or cancelled stamp
+/// and an id are `faint`, an owner is `owner`.
+fn token_look(kind: &SpanKind, ink: &Ink) -> Option<(Color, bool)> {
+    Some(match kind {
+        SpanKind::Date {
+            field: DateField::Due,
+            value,
+            ..
+        } => match value {
+            Parsed::Invalid => (ink.overdue, false),
+            Parsed::Date(date) if ink.today.is_some_and(|today| *date < today) => {
+                (ink.overdue, true)
             }
-            match prose.last_mut() {
-                Some(last) if last.end == start => last.end = end,
-                _ => prose.push(start..end),
-            }
-        }
-        prose
-    }
+            Parsed::Date(_) => (ink.date, false),
+        },
+        SpanKind::Date { .. } | SpanKind::Id { .. } => (ink.faint, false),
+        SpanKind::Owner { .. } => (ink.owner, false),
+        _ => return None,
+    })
+}
 
-    /// Faint, locked syntax: brackets, tildes, and the like.
-    fn mark(&mut self, range: Range<usize>, ink: &Ink) {
-        self.set(range, |cell| {
-            cell.color = Some(ink.faint);
-            cell.locked = true;
-        });
+/// The coloured pieces of a span that [`paints`], in line order:
+///
+/// - Code spans: `code`. Comments, a link's brackets and the delimiters of
+///   strikes and emphasis: `faint`.
+/// - Links: `link` text and a `completed` destination. Bare URLs: `link`.
+/// - Struck text: `completed`. Emphasised text: `text`.
+/// - A task's tokens: see [`token_look`].
+fn pieces(span: &Span, ink: &Ink, mut piece: impl FnMut(Range<usize>, Color, Layer)) {
+    let range = span.range.clone();
+    if let Some((color, _)) = token_look(&span.kind, ink) {
+        piece(range, color, Layer::Task);
+        return;
     }
-
-    fn is_free(&self, range: Range<usize>) -> bool {
-        self.cells[range].iter().all(|cell| !cell.locked)
-    }
-
-    /// The first `marker` in `from..end` that lies on free bytes.
-    fn next_free(&self, marker: &str, from: usize, end: usize) -> Option<usize> {
-        let mut search = from;
-        while let Some(at) = self.line[search..end].find(marker).map(|at| search + at) {
-            if self.is_free(at..at + marker.len()) {
-                return Some(at);
-            }
-            search = at + 1;
-        }
-        None
-    }
-
-    /// Backtick code spans, closed by a run of as many backticks as opened
-    /// them. Returns their ranges, backticks included.
-    fn code_spans(&mut self, ink: &Ink) -> Vec<Range<usize>> {
-        let bytes = self.line.as_bytes();
-        let run = |from: usize| bytes[from..].iter().take_while(|&&b| b == b'`').count();
-        let mut found = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] != b'`' {
-                i += 1;
-                continue;
-            }
-            let ticks = run(i);
-            let mut k = i + ticks;
-            let mut end = None;
-            while k < bytes.len() {
-                if bytes[k] == b'`' {
-                    let length = run(k);
-                    if length == ticks {
-                        end = Some(k + length);
-                        break;
-                    }
-                    k += length;
-                } else {
-                    k += 1;
+    match &span.kind {
+        SpanKind::Code => piece(range, ink.code, Layer::Own),
+        SpanKind::Comment => piece(range, ink.faint, Layer::Own),
+        SpanKind::Url => piece(range, ink.link, Layer::Link),
+        SpanKind::Link {
+            text, destination, ..
+        } => {
+            piece(text.start - 1..text.start, ink.faint, Layer::Own);
+            piece(text.clone(), ink.link, Layer::Link);
+            match destination {
+                Some(destination) => {
+                    piece(text.end..destination.start, ink.faint, Layer::Own);
+                    piece(destination.clone(), ink.completed, Layer::Own);
+                    piece(destination.end..range.end, ink.faint, Layer::Own);
                 }
-            }
-            match end {
-                Some(end) => {
-                    self.set(i..end, |cell| {
-                        cell.color = Some(ink.code);
-                        cell.fixed_face = true;
-                        cell.locked = true;
-                        cell.excluded = true;
-                    });
-                    found.push(i..end);
-                    i = end;
-                }
-                None => i += ticks,
+                None => piece(text.end..range.end, ink.faint, Layer::Own),
             }
         }
-        found
-    }
-
-    /// `<!-- ... -->`, faint.
-    fn comments(&mut self, ink: &Ink) {
-        let mut search = 0;
-        while let Some(open) = self.line[search..].find("<!--").map(|at| search + at) {
-            let Some(end) = self.line[open + 4..]
-                .find("-->")
-                .map(|at| open + 4 + at + 3)
-            else {
-                break;
+        SpanKind::Strike { .. } | SpanKind::Emphasis { .. } => {
+            let Some([open, close]) = span.delimiters() else {
+                return;
             };
-            if self.is_free(open..end) {
-                self.set(open..end, |cell| {
-                    cell.color = Some(ink.faint);
-                    cell.fixed_face = true;
-                    cell.locked = true;
-                    cell.excluded = true;
-                });
-                search = end;
-            } else {
-                search = open + 1;
-            }
-        }
-    }
-
-    /// `[text](destination)` and `[text][ref]`: `link` text between faint
-    /// brackets, and a `completed` destination. Brackets pair by depth, and
-    /// a destination ends at the `)` that balances its parentheses, as in
-    /// CommonMark. Returns the text ranges.
-    fn links(&mut self, ink: &Ink) -> Vec<Range<usize>> {
-        let bytes = self.line.as_bytes();
-        let mut open = Vec::new();
-        let mut pairs = Vec::new();
-        for (i, &byte) in bytes.iter().enumerate() {
-            match byte {
-                _ if self.cells[i].locked => {}
-                b'[' => open.push(i),
-                b']' => pairs.extend(open.pop().map(|start| (start, i))),
-                _ => {}
-            }
-        }
-        pairs.sort_unstable();
-        let mut texts = Vec::new();
-        let mut covered = 0;
-        for (start, close) in pairs {
-            // Only a link's text is prose: an image's `!`, its brackets and
-            // its destination or label are not.
-            let bang = usize::from(start > 0 && bytes[start - 1] == b'!');
-            if start < covered {
-                // A link or image inside a link's text, such as a linked
-                // image: excluded the same way, but drawn as the outer
-                // link's text. A pair in the outer link's tail finds its
-                // own tail locked.
-                if let Some(end) = self.link_tail(close + 1) {
-                    self.exclude(start - bang..start + 1);
-                    self.exclude(close..end);
-                }
-                continue;
-            }
-            let Some(end) = self.link_tail(close + 1) else {
-                continue;
+            let (color, layer) = match span.kind {
+                SpanKind::Strike { .. } => (ink.completed, Layer::Struck),
+                _ => (ink.text, Layer::Emphasis),
             };
-            covered = end;
-            self.mark(start..start + 1, ink);
-            self.exclude(start - bang..start + 1);
-            self.exclude(close..end);
-            let text = start + 1..close;
-            self.set(text.clone(), |cell| {
-                cell.color.get_or_insert(ink.link);
-            });
-            let destination = close + 2..end - 1;
-            if bytes[close + 1] == b'(' && !destination.is_empty() {
-                self.mark(close..destination.start, ink);
-                self.set(destination.clone(), |cell| {
-                    cell.color = Some(ink.completed);
-                    cell.locked = true;
-                });
-                self.mark(destination.end..end, ink);
-            } else {
-                self.mark(close..end, ink);
-            }
-            texts.push(text);
+            piece(open.clone(), ink.faint, Layer::Own);
+            piece(open.end..close.start, color, layer);
+            piece(close, ink.faint, Layer::Own);
         }
-        texts
+        _ => {}
     }
+}
 
-    /// The end of the `(destination)` or `[ref]` that starts at `start`.
-    fn link_tail(&self, start: usize) -> Option<usize> {
-        let bytes = self.line.as_bytes();
-        let inline = match bytes.get(start)? {
-            b'(' => true,
-            b'[' => false,
-            _ => return None,
-        };
-        let mut depth = 0_usize;
-        for (i, &byte) in bytes.iter().enumerate().skip(start) {
-            if self.cells[i].locked {
-                return None;
-            }
-            match byte {
-                b'(' if inline => depth += 1,
-                b')' if inline => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i + 1);
-                    }
-                }
-                b']' if !inline => return Some(i + 1),
-                _ => {}
-            }
-        }
-        None
-    }
+/// `base` in the bold or italic face, or `None` for neither.
+fn face(base: Font, bold: bool, italic: bool) -> Option<Font> {
+    (bold || italic).then_some(Font {
+        weight: if bold {
+            font::Weight::Bold
+        } else {
+            base.weight
+        },
+        style: if italic {
+            font::Style::Italic
+        } else {
+            base.style
+        },
+        ..base
+    })
+}
 
-    /// Bare `http://` and `https://` URLs in the link colour. A URL ends at
-    /// whitespace or other markup, and keeps [`trim_url`]'s punctuation out.
-    fn bare_urls(&mut self, ink: &Ink) {
-        let line = self.line;
-        let mut search = 0;
-        while let Some((start, scheme)) = ["https://", "http://"]
-            .iter()
-            .filter_map(|scheme| Some((search + line[search..].find(scheme)?, scheme.len())))
-            .min()
-        {
-            let rest = &line[start..];
-            let length = rest
-                .char_indices()
-                .find(|&(i, ch)| ch.is_whitespace() || self.cells[start + i].locked)
-                .map_or(rest.len(), |(i, _)| i);
-            let url = trim_url(&rest[..length]);
-            if url.len() > scheme {
-                self.set(start..start + url.len(), |cell| {
-                    cell.color = Some(ink.link);
-                    cell.locked = true;
-                    cell.excluded = true;
-                });
-            }
-            search = start + length.max(1);
-        }
-    }
-
-    /// CommonMark autolinks, `<scheme:…>` and `<user@host>`, angle brackets
-    /// included. They are excluded from prose and otherwise left as they
-    /// were: the highlighter colours only the URL inside, if it is bare.
-    fn autolinks(&mut self) {
-        let line = self.line;
-        let mut search = 0;
-        while let Some(open) = line[search..].find('<').map(|at| search + at) {
-            let rest = &line[open + 1..];
-            let Some(length) = rest.find(['<', '>']) else {
-                break;
+/// The highlights of the inline Markdown `spans` find in `text` of `line`:
+/// sorted, apart, touching ones that look the same merged; see [`pieces`]
+/// for the colours. Emphasis is in the bold or italic face, which its
+/// delimiters share: cosmic-text shapes a word in the font of its first
+/// character, so a regular-weight `**` would leave `**Alice` regular.
+fn inline_highlights(
+    line: &str,
+    text: Range<usize>,
+    spans: &[Span],
+    ink: &Ink,
+) -> Vec<(Range<usize>, Highlight)> {
+    let painted = || spans.iter().filter(|span| paints(span));
+    let mut highlights = Spans::default();
+    // Most lines have no inline Markdown, and most that have any have none
+    // inside other: their spans' pieces are the highlights as they come.
+    let mut end = text.start;
+    if painted().all(|span| std::mem::replace(&mut end, span.range.end) <= span.range.start) {
+        for span in painted() {
+            let font = match span.kind {
+                SpanKind::Emphasis {
+                    strong, emphasis, ..
+                } => face(ink.font, strong, emphasis),
+                _ => token_look(&span.kind, ink).and_then(|(_, bold)| face(ink.font, bold, false)),
             };
-            let inner = &rest[..length];
-            if rest.as_bytes()[length] == b'>' && is_autolink(inner) {
-                let end = open + 1 + length + 1;
-                self.exclude(open..end);
-                search = end;
-            } else {
-                search = open + 1;
-            }
-        }
-    }
-
-    /// Strikethrough, then emphasis from the strongest marker down, inside
-    /// `range`. Returns the struck ranges.
-    fn delimited(&mut self, range: Range<usize>, ink: &Ink) -> Vec<Range<usize>> {
-        let strikes = self.strikethrough(range.clone(), ink);
-        for (marker, bold, italic) in [
-            ("***", true, true),
-            ("___", true, true),
-            ("**", true, false),
-            ("__", true, false),
-            ("*", false, true),
-            ("_", false, true),
-        ] {
-            self.emphasis(range.clone(), marker, bold, italic, ink);
-        }
-        strikes
-    }
-
-    /// `~~struck~~`: faint tildes around `completed` text, keeping the
-    /// colour of links and code inside. Returns the struck text ranges.
-    fn strikethrough(&mut self, range: Range<usize>, ink: &Ink) -> Vec<Range<usize>> {
-        let mut strikes = Vec::new();
-        let mut search = range.start;
-        while let Some(open) = self.next_free("~~", search, range.end) {
-            let Some(close) = self.next_free("~~", open + 2, range.end) else {
-                break;
-            };
-            let inner = open + 2..close;
-            self.set(inner.clone(), |cell| {
-                cell.color.get_or_insert(ink.completed);
-            });
-            self.mark(open..inner.start, ink);
-            self.mark(close..close + 2, ink);
-            self.exclude_delimiter(open..inner.start);
-            self.exclude_delimiter(close..close + 2);
-            if !inner.is_empty() {
-                strikes.push(inner);
-            }
-            search = close + 2;
-        }
-        strikes
-    }
-
-    /// Emphasis delimited by `marker`, which then holds no other emphasis.
-    fn emphasis(&mut self, range: Range<usize>, marker: &str, bold: bool, italic: bool, ink: &Ink) {
-        let mut search = range.start;
-        while let Some(open) = self.next_free(marker, search, range.end) {
-            let content = open + marker.len();
-            let Some(close) = self.next_free(marker, content, range.end) else {
-                break;
-            };
-            let end = close + marker.len();
-            let face = |cell: &mut Cell| {
-                cell.bold |= bold;
-                cell.italic |= italic;
-            };
-            self.set(content..close, |cell| {
-                if !cell.fixed_face {
-                    face(cell);
-                }
-                cell.color.get_or_insert(ink.text);
-            });
-            // cosmic-text shapes a word in the font of its first character,
-            // so a regular-weight `**` would leave `**Alice` regular. The
-            // markers carry the span's font and differ only in colour.
-            for markers in [open..content, close..end] {
-                self.set(markers.clone(), |cell| {
-                    cell.color = Some(ink.faint);
-                    face(cell);
-                });
-                self.exclude_delimiter(markers);
-            }
-            self.set(open..end, |cell| cell.locked = true);
-            search = end;
-        }
-    }
-
-    /// The styled bytes as sorted spans, touching ones that look the same
-    /// merged.
-    fn spans(&self, base: Font) -> Vec<(Range<usize>, Highlight)> {
-        let mut spans = Spans::default();
-        for (start, character) in self.line.char_indices() {
-            let cell = self.cells[start];
-            let font = (cell.bold || cell.italic).then_some(Font {
-                weight: if cell.bold {
-                    font::Weight::Bold
-                } else {
-                    base.weight
-                },
-                style: if cell.italic {
-                    font::Style::Italic
-                } else {
-                    base.style
-                },
-                ..base
-            });
-            if cell.color.is_some() || font.is_some() {
+            pieces(span, ink, |range, color, _| {
                 let highlight = Highlight {
-                    color: cell.color,
+                    color: Some(color),
                     font,
                     scale: Scale::BODY,
                 };
-                spans.push(start..start + character.len_utf8(), highlight);
+                highlights.push(range, highlight);
+            });
+        }
+        return highlights.0;
+    }
+
+    // Spans in spans: each byte takes the colour of its strongest layer
+    // and the faces of all the emphasis around it.
+    let mut cells = vec![Cell::default(); text.len()];
+    let within = |range: Range<usize>| range.start - text.start..range.end - text.start;
+    for span in painted() {
+        let bold = token_look(&span.kind, ink).is_some_and(|(_, bold)| bold);
+        pieces(span, ink, |range, color, layer| {
+            for cell in &mut cells[within(range)] {
+                if layer >= cell.layer {
+                    cell.color = Some(color);
+                    cell.layer = layer;
+                    // A bold token is bold where its colour shows.
+                    cell.bold |= bold;
+                }
             }
-        }
-        spans.0
-    }
-}
-
-/// Whether `inner`, the text between `<` and `>`, makes an autolink: a URI
-/// (a scheme of 2 to 32 letters, digits, `+`, `.` or `-` that starts with a
-/// letter, a `:`, then no space) or an email address.
-fn is_autolink(inner: &str) -> bool {
-    if inner.is_empty() || inner.contains(|ch: char| ch.is_whitespace() || ch.is_control()) {
-        return false;
-    }
-    if let Some((scheme, _)) = inner.split_once(':') {
-        let bytes = scheme.as_bytes();
-        if (2..=32).contains(&bytes.len())
-            && bytes[0].is_ascii_alphabetic()
-            && bytes
-                .iter()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
-        {
-            return true;
+        });
+        let cells = &mut cells[within(span.range.clone())];
+        match span.kind {
+            SpanKind::Code | SpanKind::Comment => {
+                cells.iter_mut().for_each(|cell| cell.fixed_face = true);
+            }
+            SpanKind::Emphasis {
+                strong, emphasis, ..
+            } => cells.iter_mut().for_each(|cell| {
+                cell.bold |= strong;
+                cell.italic |= emphasis;
+            }),
+            _ => {}
         }
     }
-    inner
-        .split_once('@')
-        .is_some_and(|(user, host)| !user.is_empty() && !host.is_empty() && !host.contains('@'))
-}
-
-/// A bare URL without its trailing sentence punctuation, as in GFM's
-/// autolinks: a final `)` stays only when it closes a `(` in the URL.
-fn trim_url(mut url: &str) -> &str {
-    while let Some(last) = url.chars().next_back() {
-        let trailing = match last {
-            ')' => url.matches(')').count() > url.matches('(').count(),
-            '.' | ',' | ';' | ':' | '!' | '?' | '*' | '_' | '~' | '>' | '"' | '\'' => true,
-            _ => false,
-        };
-        if !trailing {
-            break;
+    for (at, character) in line[text.clone()].char_indices() {
+        let cell = cells[at];
+        let font = face(
+            ink.font,
+            cell.bold && !cell.fixed_face,
+            cell.italic && !cell.fixed_face,
+        );
+        if cell.color.is_some() || font.is_some() {
+            let highlight = Highlight {
+                color: cell.color,
+                font,
+                scale: Scale::BODY,
+            };
+            let start = text.start + at;
+            highlights.push(start..start + character.len_utf8(), highlight);
         }
-        url = &url[..url.len() - 1];
     }
-    url
+    highlights.0
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +908,7 @@ mod tests {
             palette,
             font: fixtures::FONT,
             front_matter_end,
+            tasks: None,
         }
     }
 
@@ -1240,6 +1085,538 @@ mod tests {
                 assert!(spans.iter().all(|(_, highlight)| highlight.font.is_none()));
             }
         }
+    }
+
+    /// Tasks on, on the day every task test pins.
+    fn tasks_on() -> Option<TaskOptions> {
+        Some(TaskOptions {
+            today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+        })
+    }
+
+    /// [`highlight_text`] for a host with these `tasks`.
+    fn highlight_tasks(
+        palette: Palette,
+        text: &str,
+        tasks: Option<TaskOptions>,
+    ) -> Vec<(LineSpans, LineDecor)> {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let settings = Settings {
+            tasks,
+            ..settings(palette, block::front_matter_end(&lines[..]))
+        };
+        highlight_all(&lines[..], settings)
+    }
+
+    /// With tasks on, the box of an unfinished task (open, doing, or a
+    /// character with no status) takes the accent with its marker, whatever
+    /// the character's width, and its text stays plain.
+    #[test]
+    fn unfinished_status_boxes_use_the_accent_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            for (line, marker) in [
+                ("- [ ] open", "- [ ] "),
+                ("- [/] doing", "- [/] "),
+                ("- [a] unknown", "- [a] "),
+                ("- [1] unknown", "- [1] "),
+                ("- [[] unknown", "- [[] "),
+                ("- [é] unknown", "- [é] "),
+                ("- [界] unknown", "- [界] "),
+                ("- [😀]\tunknown", "- [😀]\t"),
+                ("12. [/]  doing", "12. [/]  "),
+                ("- [/]", "- [/]"),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                assert_eq!(colored(line, &spans), [(marker, Some(p.accent))], "{line}");
+                assert!(decor.strikes.is_empty(), "{line}");
+                assert_eq!(decor.hang, line.find('[').unwrap(), "{line}");
+            }
+            // Inside a quote the box is the accent's and the quote's marker
+            // and text are the quote's.
+            let line = "> - [界] quoted";
+            let (spans, _) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(
+                colored(line, &spans),
+                [
+                    ("> ", Some(p.faint)),
+                    ("- [界] ", Some(p.accent)),
+                    ("quoted", Some(p.quote)),
+                ]
+            );
+        }
+    }
+
+    /// With tasks on, a cancelled task recedes exactly as a done one does:
+    /// faint markers, `completed` text and a strike over the description.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // a struck line has one strike
+    fn done_and_cancelled_tasks_recede_alike_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            for (line, marker, text) in [
+                ("- [x] completed", "- [x] ", "completed"),
+                ("- [X] completed", "- [X] ", "completed"),
+                ("- [-] cancelled", "- [-] ", "cancelled"),
+                ("  1. [-]  **cancelled**  ", "1. [-]  ", "**cancelled**"),
+                // The quote's faint marker runs into the item's.
+                ("> - [-] quoted", "> - [-] ", "quoted"),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                let colored = colored(line, &spans);
+                assert_eq!(colored[0], (marker, Some(p.faint)), "{line}");
+                assert_eq!(colored[1], (text, Some(p.completed)), "{line}");
+                assert!(colored[2..]
+                    .iter()
+                    .all(|(_, color)| *color == Some(p.faint)));
+                let start = line.find(text).unwrap();
+                assert_eq!(decor.strikes, [start..start + text.len()], "{line}");
+            }
+            // A cancelled task's link keeps its colour under the strike.
+            let line = "- [-] see [docs](u)";
+            let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(decor.strikes, [6..line.len()]);
+            assert!(colored(line, &spans).contains(&("docs", Some(p.link))));
+        }
+    }
+
+    /// With tasks off the same lines are what they were before tasks: only
+    /// `[ ]`, `[x]` and `[X]` are boxes, and any other bracket is the
+    /// item's text.
+    #[test]
+    fn with_tasks_off_only_the_three_plain_boxes_are_highlighted() {
+        let p = dark_palette();
+        for line in [
+            "- [/] doing",
+            "- [-] cancelled",
+            "- [a] unknown",
+            "- [界] unknown",
+            "- [/]",
+        ] {
+            let off = highlight_tasks(fixtures::DARK, line, None).remove(0);
+            assert_eq!(
+                off,
+                highlight_text(fixtures::DARK, line).remove(0),
+                "{line}"
+            );
+            let (spans, decor) = off;
+            assert_eq!(colored(line, &spans)[0], ("- ", Some(p.accent)), "{line}");
+            assert!(decor.strikes.is_empty(), "{line}");
+            assert_eq!(decor.hang, 2, "{line}");
+            let on = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+            assert_ne!(on.0, spans, "{line}");
+        }
+        // The three plain boxes look the same either way.
+        for line in ["- [ ] open", "- [x] done", "1. [X] done", "- item", "text"] {
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, None),
+                highlight_tasks(fixtures::DARK, line, tasks_on()),
+                "{line}"
+            );
+        }
+        // Not boxes with tasks on either.
+        for line in ["- [✔\u{fe0f}] a", "- []] a", "- [a]: http://u", "[/] a"] {
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, None),
+                highlight_tasks(fixtures::DARK, line, tasks_on()),
+                "{line}"
+            );
+        }
+    }
+
+    /// Spell check reads a task's description, never its box: with tasks
+    /// on the prose of a status task starts after the box, and a finished
+    /// one keeps its prose under the strike.
+    #[test]
+    fn the_prose_of_a_status_task_starts_after_its_box() {
+        let prose = |line: &str, tasks| -> Vec<String> {
+            prose_at(&[line], 0, None, tasks)
+                .into_iter()
+                .map(|range| line[range].to_owned())
+                .collect()
+        };
+        for (line, text) in [
+            ("- [/] doing task", "doing task"),
+            ("- [-] dropped task", "dropped task"),
+            ("- [a] unknown task", "unknown task"),
+            ("- [界] wide box", "wide box"),
+            ("> 1. [😀]\tquoted", "quoted"),
+            ("- [x] done task", "done task"),
+        ] {
+            assert_eq!(prose(line, tasks_on()), [text], "{line}");
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, tasks_on())
+                    .remove(0)
+                    .1
+                    .prose,
+                prose_at(&[line], 0, None, tasks_on()),
+                "{line}"
+            );
+        }
+        assert_eq!(prose("- [/]", tasks_on()), [] as [&str; 0]);
+        // Off, the bracket is part of the item's text, as it was.
+        for line in ["- [/] doing task", "- [a] unknown task", "- [界] wide box"] {
+            let off = prose(line, None);
+            assert_ne!(off, prose(line, tasks_on()), "{line}");
+            assert_eq!(
+                prose_at(&[line], 0, None, None),
+                highlight_text(fixtures::DARK, line).remove(0).1.prose,
+                "{line}"
+            );
+        }
+    }
+
+    /// A change of the host's tasks is a change of settings, so the
+    /// widget's highlighter starts again and reads every line anew.
+    #[test]
+    fn a_change_of_tasks_rehighlights_from_the_first_line() {
+        let line = "- [/] doing";
+        let off = settings(fixtures::DARK, None);
+        let on = Settings {
+            tasks: tasks_on(),
+            ..off
+        };
+        assert_ne!(off, on);
+        let later = Settings {
+            tasks: Some(TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, 20).expect("a date"),
+            }),
+            ..off
+        };
+        assert_ne!(on, later, "a new day is a new setting");
+        let mut h = MarkdownHighlighter::new(&off);
+        let before: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(h.current_line(), 1);
+        h.update(&on);
+        assert_eq!(h.current_line(), 0);
+        let after: LineSpans = h.highlight_line(line).collect();
+        assert_ne!(before, after);
+        assert_eq!(
+            after,
+            highlight_tasks(fixtures::DARK, line, tasks_on())[0].0
+        );
+    }
+
+    /// The colour and boldness of the span over `token`, the first place it
+    /// appears in `line`: `None` where no span covers it, which draws it in
+    /// the body colour.
+    fn token_at(
+        line: &str,
+        spans: &[(Range<usize>, Highlight)],
+        token: &str,
+    ) -> Option<(Color, bool)> {
+        let start = line
+            .find(token)
+            .unwrap_or_else(|| panic!("{token:?} in {line:?}"));
+        let end = start + token.len();
+        let covering: Vec<_> = spans
+            .iter()
+            .filter(|(range, _)| range.start < end && start < range.end)
+            .collect();
+        let (range, highlight) = covering.first()?;
+        assert!(
+            covering.len() == 1 && range.start <= start && end <= range.end,
+            "{token:?} is one span in {line:?}: {covering:?}"
+        );
+        let bold = highlight
+            .font
+            .is_some_and(|font| font.weight == font::Weight::Bold);
+        Some((highlight.color?, bold))
+    }
+
+    /// With tasks on, an unfinished task's due date is in the date colour,
+    /// or overdue and bold when it is before today, whatever its status;
+    /// due today is not late, and a date that is no real day is overdue's
+    /// colour without the weight. Owners take theirs, stamps and ids
+    /// recede, and a priority glyph, a tag, a block id and a kept token are
+    /// drawn as the text around them.
+    #[test]
+    fn an_unfinished_tasks_tokens_take_their_colours_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            let date = Some((p.date, false));
+            let overdue = Some((p.overdue, true));
+            let invalid = Some((p.overdue, false));
+            let faint = Some((p.faint, false));
+            let owner = Some((p.owner, false));
+            for (line, token, look) in [
+                ("- [ ] Future 📅 2026-11-20", "📅 2026-11-20", date),
+                ("- [ ] Next year 📅 2027-01-01", "📅 2027-01-01", date),
+                ("- [ ] Today 📅 2026-11-19", "📅 2026-11-19", date),
+                ("- [ ] Late 📅 2026-11-18", "📅 2026-11-18", overdue),
+                ("- [/] Late doing 📅 2026-11-01", "📅 2026-11-01", overdue),
+                ("- [a] Late unknown 📅 2025-12-31", "📅 2025-12-31", overdue),
+                ("  1. [ ] Numbered 📅 2026-11-18", "📅 2026-11-18", overdue),
+                ("> - [ ] Quoted 📅 2026-11-18", "📅 2026-11-18", overdue),
+                ("- [ ] Alias 📆 2026-11-18", "📆 2026-11-18", overdue),
+                (
+                    "- [ ] Field [due:: 2026-11-18]",
+                    "[due:: 2026-11-18]",
+                    overdue,
+                ),
+                ("- [ ] Field [due:: 2026-11-20]", "[due:: 2026-11-20]", date),
+                ("- [ ] No such day 📅 2026-02-30", "📅 2026-02-30", invalid),
+                (
+                    "- [ ] Past no such day 📅 2025-13-01",
+                    "📅 2025-13-01",
+                    invalid,
+                ),
+                ("- [ ] Ask @alice.chen ⏫", "@alice.chen", owner),
+                ("- [ ] Ask @alice.chen ⏫", "⏫", None),
+                ("- [ ] Ask @sam and @priya", "@priya", owner),
+                ("- [ ] Stamped open ✅ 2026-11-18", "✅ 2026-11-18", faint),
+                ("- [ ] Stamped open ❌ 2026-11-18", "❌ 2026-11-18", faint),
+                ("- [ ] Card 🆔 a1 🔼", "🆔 a1", faint),
+                ("- [ ] Card 🆔 a1 🔼", "🔼", None),
+                ("- [ ] Low 🔽\u{fe0f} 📅 2026-11-20", "🔽\u{fe0f}", None),
+                ("- [ ] Tagged #home ^b1", "#home", None),
+                ("- [ ] Tagged #home ^b1", "^b1", None),
+                (
+                    "- [ ] Water 🔁 every week ⏳ 2026-11-01",
+                    "⏳ 2026-11-01",
+                    None,
+                ),
+                (
+                    "- [ ] Water 🔁 every week ⏳ 2026-11-01",
+                    "🔁 every week",
+                    None,
+                ),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                assert_eq!(token_at(line, &spans, token), look, "{token:?} in {line:?}");
+                assert!(decor.strikes.is_empty(), "{line:?}");
+            }
+        }
+    }
+
+    /// Each due date is read on its own, so on a line with two the one
+    /// that is past is overdue.
+    #[test]
+    fn each_due_date_on_a_line_is_read_against_today() {
+        let p = dark_palette();
+        let line = "- [ ] Twice 📅 2026-11-01 📅 2026-12-01";
+        let (spans, _) = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+        assert_eq!(
+            token_at(line, &spans, "📅 2026-11-01"),
+            Some((p.overdue, true))
+        );
+        assert_eq!(
+            token_at(line, &spans, "📅 2026-12-01"),
+            Some((p.date, false))
+        );
+    }
+
+    /// A finished task recedes whole: its description struck, its tokens
+    /// faint after the strike, a past due date never red, and its owners
+    /// dimmed with the text they stand in.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // a struck line has one strike
+    fn a_finished_tasks_tokens_recede_unstruck_with_tasks_on() {
+        for palette in [fixtures::DARK, fixtures::LIGHT] {
+            let p = Ink::new(palette, fixtures::FONT);
+            for (line, description, tail) in [
+                (
+                    "- [x] Ship the deck @sam 📅 2026-11-01 ✅ 2026-11-18",
+                    "Ship the deck @sam",
+                    "📅 2026-11-01 ✅ 2026-11-18",
+                ),
+                (
+                    "- [-] Book the room @sam ❌ 2026-11-16",
+                    "Book the room @sam",
+                    "❌ 2026-11-16",
+                ),
+                (
+                    "- [X] Late but done ⏫ 📅 2026-11-01  ",
+                    "Late but done",
+                    "⏫ 📅 2026-11-01  ",
+                ),
+                (
+                    "> - [x] See [docs](u) 🆔 a1 ^b1",
+                    "See [docs](u)",
+                    "🆔 a1 ^b1",
+                ),
+            ] {
+                let (spans, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+                let start = line.find(description).unwrap();
+                assert_eq!(decor.strikes, [start..start + description.len()], "{line}");
+                // Everything after the description is faint, to the end.
+                let tail = line.find(tail).unwrap()..line.len();
+                let after: Vec<_> = spans
+                    .iter()
+                    .filter(|(range, _)| range.end > start + description.len())
+                    .collect();
+                assert!(
+                    after.iter().all(|(_, look)| look.color == Some(p.faint)),
+                    "{line}: {after:?}"
+                );
+                assert!(after[0].0.start <= tail.start, "{line}: {after:?}");
+                assert_eq!(after.last().map(|(range, _)| range.end), Some(tail.end));
+                assert!(spans.iter().all(|(_, highlight)| highlight.font.is_none()));
+                for (range, highlight) in &spans {
+                    for color in [p.date, p.overdue, p.owner] {
+                        assert_ne!(highlight.color, Some(color), "{line}: {range:?}");
+                    }
+                }
+                if let Some(at) = line.find("@sam") {
+                    assert_eq!(
+                        token_at(line, &spans, "@sam"),
+                        Some((p.completed, false)),
+                        "{line}"
+                    );
+                    assert!(at < start + description.len());
+                }
+            }
+            // A finished task's link keeps its colour under the strike.
+            let line = "> - [x] See [docs](u) 🆔 a1 ^b1";
+            let (spans, _) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(token_at(line, &spans, "docs"), Some((p.link, false)));
+            // With no token, the strike runs to the end of the text, as it
+            // always has.
+            let line = "- [x] All words  ";
+            let (_, decor) = highlight_tasks(palette, line, tasks_on()).remove(0);
+            assert_eq!(decor.strikes, [6..15]);
+        }
+    }
+
+    /// A token inside a code span or a comment is code or a comment, and
+    /// inside a strike or a link it is struck or linked text; emphasis
+    /// around an owner keeps its face under the owner's colour.
+    #[test]
+    fn a_token_in_inline_markdown_yields_to_it() {
+        let p = dark_palette();
+        for (line, token, look) in [
+            ("- [ ] Run ` @sam ` now", "@sam", (p.code, false)),
+            ("- [ ] Run <!-- @sam --> now", "@sam", (p.faint, false)),
+            ("- [ ] Ask ~~@sam~~ now", "@sam", (p.completed, false)),
+            ("- [ ] Ask [@sam](u) now", "@sam", (p.link, false)),
+        ] {
+            let (spans, _) = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+            assert_eq!(token_at(line, &spans, token), Some(look), "{line}");
+        }
+        let line = "- [ ] **Ask @sam** now";
+        let (spans, _) = highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0);
+        assert_eq!(token_at(line, &spans, "@sam"), Some((p.owner, true)));
+        assert_eq!(token_at(line, &spans, "Ask"), Some((p.text, true)));
+    }
+
+    /// With tasks off a task line's tokens are text: none of them takes a
+    /// colour of its own, and the line looks as it did before tasks.
+    #[test]
+    fn with_tasks_off_task_tokens_have_no_colour() {
+        let p = dark_palette();
+        for line in [
+            "- [ ] Late @sam ⏫ 📅 2026-11-18 🆔 a1",
+            "- [ ] No such day 📅 2026-02-30",
+            "- [x] Done @sam 📅 2026-11-01 ✅ 2026-11-18",
+            "- [/] Doing @sam 📅 2026-11-01",
+        ] {
+            let off = highlight_tasks(fixtures::DARK, line, None).remove(0);
+            assert_eq!(
+                off,
+                highlight_text(fixtures::DARK, line).remove(0),
+                "{line}"
+            );
+            for (range, highlight) in &off.0 {
+                for color in [p.date, p.overdue, p.owner] {
+                    assert_ne!(highlight.color, Some(color), "{line}: {range:?}");
+                }
+            }
+            assert_ne!(
+                off,
+                highlight_tasks(fixtures::DARK, line, tasks_on()).remove(0)
+            );
+        }
+    }
+
+    /// With tasks on spell check reads a task's description and its owners
+    /// and tags, which the speller passes over itself, but none of its
+    /// other tokens. With tasks off it reads the whole text, as it did.
+    #[test]
+    fn task_tokens_leave_the_prose_with_tasks_on() {
+        let prose = |line: &str, tasks| -> Vec<String> {
+            prose_at(&[line], 0, None, tasks)
+                .into_iter()
+                .map(|range| line[range].to_owned())
+                .collect()
+        };
+        for (line, on) in [
+            (
+                "- [ ] Call @sam #home ⏫ 📅 2026-11-18",
+                vec!["Call @sam #home ", " "],
+            ),
+            (
+                "- [ ] Card 🆔 a1 🔁 every week ⛔ abc,def ^b1",
+                vec!["Card ", " ", " ", " "],
+            ),
+            (
+                "- [ ] Field [due:: 2026-11-18] [k:: v]",
+                vec!["Field ", " "],
+            ),
+            ("- [x] Shipped @sam ✅ 2026-11-18", vec!["Shipped @sam "]),
+            (
+                "- [-] Dropped ❌ 2026-11-18 📅 2026-11-01",
+                vec!["Dropped ", " "],
+            ),
+            ("- [ ] 📅 2026-11-18", vec![]),
+            ("- [ ] Plain words", vec!["Plain words"]),
+            // Text after a token makes it description, and prose.
+            (
+                "- [ ] 📅 2026-12-01 then lunch",
+                vec!["📅 2026-12-01 then lunch"],
+            ),
+        ] {
+            assert_eq!(prose(line, tasks_on()), on, "{line}");
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, tasks_on())
+                    .remove(0)
+                    .1
+                    .prose,
+                prose_at(&[line], 0, None, tasks_on()),
+                "{line}"
+            );
+            // Off, the text is one piece of prose, to the end of the line.
+            let off = prose(line, None);
+            assert!(off.len() == 1 && line.ends_with(&off[0]), "{line}: {off:?}");
+            assert_eq!(
+                highlight_tasks(fixtures::DARK, line, None)
+                    .remove(0)
+                    .1
+                    .prose,
+                highlight_text(fixtures::DARK, line).remove(0).1.prose,
+                "{line}"
+            );
+        }
+    }
+
+    /// A new day is a new setting: the widget's highlighter reads every
+    /// line again, and a due date it passed is overdue.
+    #[test]
+    fn a_new_day_turns_a_due_date_it_passed_overdue() {
+        let p = dark_palette();
+        let line = "- [ ] Pay the invoice 📅 2026-11-20";
+        let day = |day| Settings {
+            tasks: Some(TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, day).expect("a date"),
+            }),
+            ..settings(fixtures::DARK, None)
+        };
+        let mut h = MarkdownHighlighter::new(&day(19));
+        let before: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(
+            token_at(line, &before, "📅 2026-11-20"),
+            Some((p.date, false))
+        );
+        h.update(&day(20));
+        assert_eq!(h.current_line(), 0);
+        let today: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(today, before, "due today is not late");
+        h.update(&day(21));
+        assert_eq!(h.current_line(), 0);
+        let after: LineSpans = h.highlight_line(line).collect();
+        assert_eq!(
+            token_at(line, &after, "📅 2026-11-20"),
+            Some((p.overdue, true))
+        );
     }
 
     #[test]
@@ -2277,6 +2654,7 @@ mod tests {
             palette: fixtures::LIGHT,
             font: Font::with_name("Fira Code"),
             front_matter_end: None,
+            tasks: None,
         });
 
         let spans: Vec<_> = h.highlight_line("# Heading").collect();
@@ -2286,5 +2664,336 @@ mod tests {
         let bold = spans[1].1.font.unwrap();
         assert_eq!(bold.family, font::Family::Name("Fira Code"));
         assert_eq!(bold.weight, font::Weight::Bold);
+    }
+
+    // ── The span layer ───────────────────────────────────────────────────────
+
+    /// FNV-1a over the numbers fed to it.
+    struct Digest(u64);
+
+    impl Digest {
+        fn new() -> Self {
+            Self(0xcbf2_9ce4_8422_2325)
+        }
+
+        fn add(&mut self, value: u64) {
+            for byte in value.to_le_bytes() {
+                self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        fn ranges(&mut self, ranges: &[Range<usize>]) {
+            self.add(ranges.len() as u64);
+            for range in ranges {
+                self.add(range.start as u64);
+                self.add(range.end as u64);
+            }
+        }
+
+        /// Everything a highlighted line gives the widget: each span's
+        /// range, colour, face and scale, and the whole decoration.
+        fn lines(&mut self, lines: &[HighlightedLine]) {
+            self.add(lines.len() as u64);
+            for (spans, decor) in lines {
+                self.add(spans.len() as u64);
+                for (range, highlight) in spans {
+                    self.ranges(std::slice::from_ref(range));
+                    match highlight.color {
+                        Some(Color { r, g, b, a }) => {
+                            for channel in [r, g, b, a] {
+                                self.add(u64::from(channel.to_bits()));
+                            }
+                        }
+                        None => self.add(u64::MAX),
+                    }
+                    self.add(highlight.font.map_or(0, |font| {
+                        1 + u64::from(font.weight == font::Weight::Bold)
+                            + 2 * u64::from(font.style == font::Style::Italic)
+                    }));
+                    self.add(u64::from(highlight.scale.text.to_bits()));
+                    self.add(u64::from(highlight.scale.row.to_bits()));
+                }
+                self.add(u64::from(decor.code));
+                self.ranges(&decor.strikes);
+                self.ranges(&decor.code_spans);
+                self.add(decor.hang as u64);
+                self.ranges(&decor.prose);
+            }
+        }
+    }
+
+    /// Inline Markdown inside inline Markdown, on each kind of line.
+    const NESTED: &str = "\
+[a ~~struck~~ and **bold** `code` link](https://x.io/a_b_c) then ~~[a link](u) struck~~
+**bold [link *both*](u) and `code` and <!-- a comment --> and https://x.io/_a_**
+~~struck **bold _both_** https://x.io and `code`~~ ~~~~ **** ~~a *b~~ c*
+[![alt _text_](pic_a_b.png)](https://x.io) ![image](a.png) [text][label] [a][b](c)
+snake_case_name un*believ*able a_b_ _c_d ~~e~~f <me@x.io> <https://x.io/_a_> <kbd>
+see https://x.io/a_(b)_c, (https://x.io/d). `` a`b `` ` unclosed <!-- unclosed
+# A *heading* with `code` and [a link](u) #
+> quoted **bold** [link](u) ~~struck~~ `code` https://x.io
+> - [x] quoted done [link](u) `[code](u)` **bold** ~~struck~~
+- [x] done [link *text*](u) and `[code](u)` https://x.io <!-- [c](d) -->
+- [-] dropped **bold** [link](https://x.io) ✅ 2026-11-19 ❌ 2026-11-19
+- [/] doing *@sam* [the **plan**](u) #tag 🆔 a1 ⏫ 📅 2026-11-18 ^id
+- [ ] open ~~**@alice.chen**~~ `📅 2026-12-01` 🔺\u{fe0f} [due:: 2026-02-30]
+1. [ ] numbered `code` 📅 2026-12-01 then *more*
+[label]: https://x.io \"*Title*\"
+[^note]: a *footnote* with `code`
+- [label]: <https://x.io> **bold**
+";
+
+    /// The notes the harness and the scenes use, and [`NESTED`].
+    const NOTES: [&str; 6] = [
+        NESTED,
+        fixtures::SPELL_NOTE,
+        include_str!("../../../tools/wrentest/fixtures/spell.md"),
+        include_str!(
+            "../../../tools/wrentest/fixtures/tasks/workspace/Tasks/Baseline/Task lines.md"
+        ),
+        include_str!("../../../tools/wrentest/fixtures/tasks/workspace/Tasks/Emoji/Emoji spike.md"),
+        include_str!("../../../tools/wrentest/fixtures/boards/workspace/Boards/Samples/Notes.md"),
+    ];
+
+    /// What a line of Markdown and a task line are made of, to draw
+    /// generated lines from.
+    const PIECES: &[&str] = &[
+        "word",
+        "Wren",
+        "é",
+        "🐦",
+        "说明",
+        "\u{301}",
+        "\u{feff}",
+        " ",
+        " ",
+        "  ",
+        "\t",
+        "*",
+        "**",
+        "***",
+        "_",
+        "__",
+        "~~",
+        "~",
+        "`",
+        "``",
+        "[",
+        "]",
+        "(",
+        ")",
+        "![",
+        "](",
+        "][",
+        "<",
+        ">",
+        "<!--",
+        "-->",
+        "https://",
+        "http://x.io/",
+        "a@b",
+        "#",
+        "# ",
+        "## ",
+        "- ",
+        "> ",
+        "- [x] ",
+        "- [ ] ",
+        "- [/] ",
+        "- [-] ",
+        "- [?] ",
+        "1. ",
+        "```",
+        "~~~",
+        "    ",
+        "---",
+        "|",
+        ":",
+        "]:",
+        "\\",
+        "^",
+        "^id",
+        "a_b",
+        "x:y",
+        "@sam",
+        "@alice.chen",
+        "#tag",
+        "📅",
+        "📅 ",
+        "📆 ",
+        "✅ ",
+        "❌ ",
+        "2026-12-01",
+        "2026-02-30",
+        "[due:: 2026-11-18]",
+        "[k:: v]",
+        "⏫",
+        "🔺",
+        "🔽\u{fe0f}",
+        "\u{fe0f}",
+        "🆔 a1",
+        "🔁 every week",
+        "⛔ a,b",
+    ];
+
+    /// Delimiters and little else, for lines whose inline Markdown nests
+    /// and crosses.
+    const DENSE: &[&str] = &[
+        "*",
+        "*",
+        "**",
+        "_",
+        "__",
+        "~~",
+        "~",
+        "`",
+        "``",
+        "[",
+        "]",
+        "(",
+        ")",
+        "!",
+        "<",
+        ">",
+        " ",
+        " ",
+        "a",
+        "b",
+        "é",
+        "1",
+        "-",
+        "<!--",
+        "-->",
+        "http://x",
+        "https://y.z/",
+        ":",
+        "\\",
+        ".",
+        ",",
+        "@",
+        "#",
+    ];
+
+    /// What a dense line starts with.
+    const STARTS: &[&str] = &[
+        "", "", "", "- ", "> ", "- [x] ", "- [ ] ", "- [/] ", "- [-] ", "# ", "1. ", "  ",
+        "> - [x] ", "---", "```", "[a]: ",
+    ];
+
+    /// The next document of the generated corpus: one to ten lines, each
+    /// of [`PIECES`] or, every other document, a start and mostly
+    /// [`DENSE`] pieces.
+    fn generated(rng: &mut Rng) -> String {
+        let dense = rng.below(2) == 0;
+        (0..1 + rng.below(10))
+            .map(|_| {
+                let mut line = String::new();
+                if dense {
+                    line.push_str(rng.pick(STARTS));
+                }
+                for _ in 0..rng.below(if dense { 24 } else { 16 }) {
+                    let from = if dense && rng.below(5) != 0 {
+                        DENSE
+                    } else {
+                        PIECES
+                    };
+                    line.push_str(rng.pick(from));
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The digest of [`NOTES`] and of `generated` generated documents as a
+    /// host with these `tasks` highlights them.
+    fn corpus_digest(generated_documents: usize, tasks: Option<TaskOptions>) -> u64 {
+        let mut digest = Digest::new();
+        let mut rng = Rng(0x7a5c_5eed_0000_0021);
+        let documents = NOTES
+            .iter()
+            .map(|note| (*note).to_owned())
+            .chain((0..generated_documents).map(|_| generated(&mut rng)))
+            .collect::<Vec<_>>();
+        for document in &documents {
+            digest.lines(&highlight_tasks(fixtures::DARK, document, tasks));
+        }
+        digest.0
+    }
+
+    /// A caller without the widget reads a line's spans and prose from a
+    /// fresh scan ([`spans_at`]), and gets what the widget's highlighter
+    /// holds for that line.
+    #[test]
+    fn a_fresh_scan_reads_the_spans_and_prose_the_highlighter_holds() {
+        let mut rng = Rng(0x7a5c_5eed_0000_0022);
+        let documents = NOTES
+            .iter()
+            .map(|note| (*note).to_owned())
+            .chain((0..300).map(|_| generated(&mut rng)));
+        for document in documents {
+            let lines: Vec<&str> = document.split('\n').collect();
+            let end = block::front_matter_end(&lines[..]);
+            for tasks in [None, tasks_on()] {
+                let mut h = MarkdownHighlighter::new(&Settings {
+                    tasks,
+                    ..settings(fixtures::DARK, end)
+                });
+                for (index, line) in lines.iter().enumerate() {
+                    let _ = h.highlight_line(line);
+                    let fresh = spans_at(&&lines[..], index, end, tasks);
+                    assert_eq!(h.spans(index), Some(&fresh), "{line:?}");
+                    let decor = h.decor(index).expect("a highlighted line");
+                    assert_eq!(decor.prose, fresh.prose(), "{line:?}");
+                    assert_eq!(decor.prose, prose_at(&&lines[..], index, end, tasks));
+                }
+                assert_eq!(
+                    spans_at(&&lines[..], lines.len(), end, tasks),
+                    span::LineSpans::default()
+                );
+                // Lines the text changed under are read again, spans too.
+                h.change_line(0);
+                assert_eq!(h.spans(0), None);
+            }
+        }
+    }
+
+    /// A finished task's line is read whole for its prose, reference
+    /// definition or not, so a line built to make one pass slow must not
+    /// be: here 100 000 comment openers that all reach one `-->` across a
+    /// code span. Read opener by opener, it takes minutes.
+    #[test]
+    fn a_long_done_line_of_comment_openers_highlights_in_linear_time() {
+        let line = format!("- [x] [r]: {}`x`-->", "<!--".repeat(100_000));
+        for tasks in [None, tasks_on()] {
+            let began = std::time::Instant::now();
+            let (spans, decor) = highlight_tasks(fixtures::DARK, &line, tasks).remove(0);
+            let took = began.elapsed();
+            assert_eq!(decor.strikes, vec![(6..line.len())]);
+            assert!(decor.prose.is_empty() && decor.code_spans.is_empty());
+            assert_eq!(spans.len(), 2, "the marker with its box, and the text");
+            assert!(took.as_secs() < 20, "took {took:?}");
+        }
+    }
+
+    /// The highlighter reads the classifier's spans (`wren_markdown::span`)
+    /// where it once matched inline Markdown itself, and that changed
+    /// nothing a line shows: these digests were recorded from the
+    /// highlighter as it was before, over the fixture notes and 10 000
+    /// generated documents. With tasks off they hold for as long as that
+    /// setting promises today's behaviour. The tasks-on digest was recorded
+    /// again when tasks gained their colours.
+    #[test]
+    fn highlighting_is_what_it_was_before_the_span_layer() {
+        assert_eq!(
+            corpus_digest(10_000, None),
+            0x6c5f_4634_ac2b_f122,
+            "tasks off"
+        );
+        assert_eq!(
+            corpus_digest(10_000, tasks_on()),
+            0x5a63_ae28_5458_2dbe,
+            "tasks on"
+        );
     }
 }

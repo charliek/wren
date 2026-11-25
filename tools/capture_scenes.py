@@ -16,6 +16,17 @@ wider than its column. `--only spell` (with `--engine advanced`) turns spell
 check on, seeds `words.txt` and shoots the spell-check acceptance note: its
 marks with one hidden at the caret, the suggestions menu under a word, the
 menu with no suggestions, and the menu above a word on the last visible row.
+`--only tasks` opens the task fixture workspace
+(`tools/wrentest/fixtures/tasks/`) on the advanced engine, unless `--engine` or
+`--setting editor-engine=…` says otherwise, with `tasks = on` and today pinned
+to 19 November 2026, shoots its task lines, the task colours (with a caret,
+a selection, and two days later), the emoji spike's note (with a caret
+and a selection on its glyphs), the line commands, the status bar and, on
+the advanced engine, the task, status, priority and spelling menus, and
+writes to
+`<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
+scene depends on; `--fonts` names the font setup instead of the check for Noto
+Color Emoji.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -311,6 +322,497 @@ def spell_scenes(client, shot_here) -> None:
     assert menu["bounds"]["y"] + menu["bounds"]["height"] <= word["rects"][0]["y"], (menu, word)
     shot_here("spell-menu-above")
     close_menu()
+
+
+TASKS_FIXTURE = Path(__file__).resolve().parent / "wrentest" / "fixtures" / "tasks" / "workspace"
+# Every task scene pins the design page's day, a Thursday.
+TASKS_TODAY = "2026-11-19"
+
+
+def display_server() -> str:
+    """The display server the app will open its window on. winit picks
+    Wayland whenever `WAYLAND_DISPLAY` is set and not empty, X11 otherwise
+    (Wren forces neither); `WAYLAND_SOCKET` never reaches the app, since the
+    harness passes only `WAYLAND_DISPLAY` and `DISPLAY` through."""
+    if sys.platform == "darwin":
+        return "macos"
+    return "wayland" if os.environ.get("WAYLAND_DISPLAY") else "x11"
+
+
+def last_value(settings: str, key: str) -> str | None:
+    """The value the last `key` line of `settings` gives, as Wren reads it."""
+    value = None
+    for line in settings.splitlines():
+        name, separator, rest = line.partition("=")
+        if separator and not line.lstrip().startswith("#") and name.strip() == key:
+            value = rest.strip().strip('"')
+    return value
+
+
+def tasks_out(out: Path, engine: str, fonts: str | None) -> Path:
+    """`<out>/tasks/<engine>-<renderer>-<display>-<fonts>`: a task scene
+    depends on the renderer, the display server and whether an emoji font
+    is installed, so each setup keeps its own PNGs."""
+    renderer = os.environ.get("ICED_BACKEND", "default")
+    display = display_server()
+    if fonts is None:
+        if sys.platform == "darwin":
+            fonts = "system"
+        else:
+            try:
+                families = subprocess.run(["fc-list", ":", "family"], capture_output=True,
+                                          text=True, check=True).stdout
+            except (OSError, subprocess.CalledProcessError):
+                families = ""
+            fonts = "noto-emoji" if "Noto Color Emoji" in families else "no-emoji"
+    return out / "tasks" / f"{engine}-{renderer}-{display}-{fonts}"
+
+
+def task_scenes(client, shot_here, engine: str, resize) -> None:
+    """The note of task lines, with the pinned date in force, on `engine`.
+    `resize` sizes the window (``WIDTHxHEIGHT``); X11 only."""
+    state = client.call("tasks.get")
+    assert state["tasks"] is True and state["today"] == TASKS_TODAY, state
+    assert state["engine"] == engine, (state["engine"], engine)
+    open_note(client, "Task lines.md")
+    client.call("editor.cursor", {"line": 2, "column": 21, "selection": None})
+    client.call("editor.focus")
+    shot_here("task-lines")
+    colour_scenes(client, shot_here)
+    emoji_scenes(client, shot_here)
+    command_scenes(client, shot_here)
+    footer_scenes(client, shot_here, resize)
+    form_scenes(client, shot_here, resize)
+    if engine == "advanced":
+        menu_scenes(client, shot_here, resize)
+        calendar_scenes(client, shot_here, resize)
+        suggestion_scenes(client, shot_here)
+
+
+def suggestion_scenes(client, shot_here) -> None:
+    """Task suggestions (discovery/tasks-build.md item 5.1), typed at the
+    end of a task line: `to` offers the dates, `hi` the priorities, and `@`
+    the owners of the workspace's task lines, each drawn tentative (Enter
+    would continue the list), and the dates again once Down has picked
+    Tomorrow, which Enter would then write. Each word is taken back with
+    Backspace, which leaves the note as it was."""
+    open_note(client, "Task lines.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Task lines"),
+             timeout=10, description="the task lines note opens")
+    original = client.call("editor.get")["text"]
+    line = 2
+    text = original.split("\n")[line]
+    assert text == "- [ ] Open alpha task", text
+    client.call("editor.cursor", {"line": line, "column": len(text.encode()), "selection": None})
+    client.call("editor.focus")
+    wait_for(lambda: client.call("tasks.owners")["current"], timeout=10,
+             description="the owners are read")
+
+    def offered(word: str, labels: list[str], name: str, confirmed: str | None = None) -> None:
+        for character in f" {word}":
+            client.call("editor.key", {"key": "space" if character == " " else character})
+        popover = client.call("editor.get")["popover"]
+        assert popover is not None and popover["mode"] == "suggest", popover
+        shown = [row["label"] for row in popover["rows"]]
+        assert shown[:len(labels)] == labels, shown
+        assert popover["takes_enter"] is False and popover["footer"], popover
+        shot_here(name)
+        if confirmed:
+            client.call("editor.key", {"key": "down"})
+            popover = client.call("editor.get")["popover"]
+            assert popover["takes_enter"] is True and popover["selected"] == 1, popover
+            shot_here(confirmed)
+        for _ in f" {word}":
+            client.call("editor.key", {"key": "backspace"})
+        assert client.call("editor.get")["text"] == original
+
+    offered("to", ["Today", "Tomorrow"], "task-suggest-dates", "task-suggest-dates-confirmed")
+    offered("hi", ["High priority", "Highest priority"], "task-suggest-priority")
+    offered("@", ["@alice.chen", "@bob"], "task-suggest-owners")
+
+
+def form_scenes(client, shot_here, resize) -> None:
+    """The task form (discovery/tasks-build.md item 6.1), on either engine:
+    a new task on a blank line with its description, due date and priority
+    filled in; a full task (doing, an owner, a priority, a due date) being
+    edited, its "Writes" line showing the change; and the calendar open
+    under the form's due field. Each is cancelled with Escape, which writes
+    nothing."""
+    if display_server() == "x11":
+        resize("1280x800")
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+    original = client.call("editor.get")["text"]
+    lines = original.split("\n")
+
+    def opened(line: int, description: str) -> dict:
+        client.call("editor.cursor", {"line": line, "column": 0, "selection": None})
+        client.call("editor.focus")
+        client.call("shortcut", {"id": "task.edit"})
+        wait_for(lambda: client.call("focus.get")["named"] == ["task-form-description"],
+                 timeout=10, description=f"the form's description has the keyboard ({description})")
+        return client.call("tasks.form")
+
+    def close() -> None:
+        while client.call("tasks.form")["open"]:
+            client.call("editor.key", {"key": "escape"})
+        assert client.call("editor.get")["text"] == original
+
+    blank = lines.index("", 3)
+    state = opened(blank, "new")
+    assert (state["kind"], state["title"]) == ("new", "New task"), state
+    for field, text in [("description", "Call the bank about the card"), ("due", "fri")]:
+        client.call("tasks.form_type", {"field": field, "text": text})
+    for _ in range(3):
+        client.call("editor.key", {"key": "tab"})
+    client.call("editor.key", {"key": "h"})
+    state = client.call("tasks.form")
+    assert state["writes"] == "- [ ] Call the bank about the card ⏫ 📅 2026-11-20", state
+    assert state["focus"] == "priority", state
+    shot_here("task-form-new")
+    close()
+
+    full = 2
+    assert lines[full].startswith("- [/] Draft the cutover runbook"), lines[full]
+    state = opened(full, "edit")
+    assert (state["kind"], state["owners"]) == ("edit", ["alice.chen"]), state
+    client.call("tasks.form_click", {"status": "Done"})
+    client.call("tasks.form_type", {"field": "due", "text": "+1w"})
+    client.call("tasks.form_type", {"field": "owners", "text": "sam"})
+    client.call("tasks.form_click", {"target": "calendar"})
+    client.call("editor.key", {"key": "escape"})
+    for _ in range(2):
+        client.call("editor.key", {"key": "tab"})
+    state = client.call("tasks.form")
+    assert state["focus"] == "owners", state
+    shot_here("task-form-edit")
+    client.call("tasks.form_type", {"field": "owners", "text": ""})
+    client.call("tasks.form_click", {"target": "calendar"})
+    wait_for(lambda: client.call("focus.get")["named"] == ["calendar-field"],
+             timeout=10, description="the calendar over the form has the keyboard")
+    assert client.call("tasks.form")["calendar"]["selected"] == "2026-11-26"
+    shot_here("task-form-calendar")
+    close()
+
+
+def calendar_scenes(client, shot_here, resize) -> None:
+    """The calendar (discovery/tasks-build.md item 4.1): opened by
+    `task.set_due` on a task with no due date, so on today; with `fri`
+    typed, the selection moved to Friday; with a word that names no date;
+    opened by a right-click on a due date, which it opens on, with Clear;
+    and on X11, in macOS's default 1024×640 window, flipped above a dated
+    task near the bottom, clear of the footer. Each is closed with Escape,
+    which writes nothing."""
+    if display_server() == "x11":
+        resize("1280x800")
+    open_note(client, "Task lines.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Task lines"),
+             timeout=10, description="the task lines note opens")
+    original = client.call("editor.get")["text"]
+    lines = original.split("\n")
+
+    def opened(description: str) -> dict:
+        wait_for(lambda: client.call("focus.get")["named"] == ["calendar-field"],
+                 timeout=10, description=f"the calendar's field has the keyboard ({description})")
+        return client.call("tasks.calendar")
+
+    def close() -> None:
+        client.call("editor.key", {"key": "escape"})
+        assert client.call("tasks.calendar") == {"open": False}
+        assert client.call("editor.get")["text"] == original
+
+    line = 2
+    assert lines[line] == "- [ ] Open alpha task", lines[line]
+    client.call("editor.cursor", {"line": line, "column": len(lines[line].encode()),
+                                  "selection": None})
+    client.call("editor.focus")
+    client.call("shortcut", {"id": "task.set_due"})
+    state = opened("empty")
+    assert (state["selected"], state["typed"], state["invalid"]) == (TASKS_TODAY, "", False), state
+    shot_here("task-calendar-empty")
+    for character in "fri":
+        client.call("editor.key", {"key": character})
+    state = client.call("tasks.calendar")
+    assert (state["selected"], state["invalid"]) == ("2026-11-20", False), state
+    shot_here("task-calendar-typed")
+    client.call("tasks.calendar_type", {"text": "blorp"})
+    assert client.call("tasks.calendar")["invalid"] is True
+    shot_here("task-calendar-invalid")
+    close()
+
+    due = 14
+    assert lines[due] == "- [ ] Due mike task 📅 2026-11-20", lines[due]
+    client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
+    client.call("editor.focus")
+    client.call("editor.right_click",
+                {"line": due, "column": len(lines[due][:lines[due].index("2026")].encode())})
+    state = opened("from the date")
+    assert (state["line"], state["selected"], state["clear"]) == (due, "2026-11-20", True), state
+    shot_here("task-calendar-date")
+    close()
+
+    if display_server() == "x11":
+        resize("1024x640")
+        low = 17
+        assert lines[low].startswith("- [ ] Every papa token"), lines[low]
+        client.call("editor.cursor", {"line": low, "column": 6, "selection": None})
+        client.call("editor.focus")
+        client.call("shortcut", {"id": "task.set_due"})
+        state = opened("flipped")
+        anchor = client.call("editor.bounds", {
+            "line": low, "start": state["anchor"]["range"][0],
+            "end": state["anchor"]["range"][1]})
+        card = state["bounds"]
+        assert card["y"] + card["height"] <= anchor["y"], ("flipped above", card, anchor)
+        assert card["y"] >= 0 and card["y"] + card["height"] <= 640 - 30, card
+        shot_here("task-calendar-flipped")
+        close()
+        resize("1280x800")
+
+
+def menu_scenes(client, shot_here, resize) -> None:
+    """The task menus (discovery/tasks-build.md item 3.4), each with the
+    task's status or priority marked: the task menu for a right-click on a
+    doing task's description, the status menu on its box, and the priority
+    menu on its glyph; then a misspelled word on a task line, whose
+    right-click opens spelling's menu first. The window is first put back
+    to its own size, which the footer scenes changed on X11, and spell
+    check is turned on for the last scene alone."""
+    if display_server() == "x11":
+        resize("1280x800")
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+    line = 2
+    text = client.call("editor.get")["text"].split("\n")[line]
+    assert text == "- [/] Draft the cutover runbook @alice.chen ⏫ 📅 2026-11-23", text
+    client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
+    client.call("editor.focus")
+    # Spelling may be on already (`--setting spell-check=on`): off for the
+    # task menus, which a misspelled `runbook` would open spelling's menu
+    # over, and as it was once the scenes are done.
+    spelling_was_on = client.call("editor.spell")["enabled"]
+    if spelling_was_on:
+        client.call("command.run", {"id": "editor.toggle_spell_check"})
+
+    def menu_at(token: str, rows: list[str], marked: str) -> None:
+        column = len(text[:text.index(token)].encode())
+        client.call("editor.right_click", {"line": line, "column": column})
+        popover = wait_for(lambda: (state := client.call("editor.get")["popover"])
+                           and state["bounds"] and state,
+                           timeout=10, description=f"the menu under {token!r} is drawn")
+        assert [row["label"] for row in popover["rows"]] == rows, popover
+        assert [row["label"] for row in popover["rows"] if row["checked"]] == [marked], popover
+
+    status = ["Open", "Doing", "Done", "Cancelled"]
+    menu_at("runbook", status + ["Change due date…", "Priority…", "Edit task…"], "Doing")
+    shot_here("task-menu")
+    client.call("editor.key", {"key": "escape"})
+    menu_at("[", status, "Doing")
+    shot_here("task-menu-status")
+    client.call("editor.key", {"key": "escape"})
+    menu_at("⏫", ["High", "Medium", "Low", "Highest", "Lowest", "None"], "High")
+    shot_here("task-menu-priority")
+    client.call("editor.key", {"key": "escape"})
+
+    client.call("command.run", {"id": "editor.toggle_spell_check"})
+    wait_for(lambda: client.call("editor.spell")["ready"], timeout=20,
+             description="the dictionary loads")
+    original = client.call("editor.get")["text"]
+    bank = 7
+    assert original.split("\n")[bank] == "- [ ] Call the bank 📅 2026-11-20"
+    client.call("editor.cursor", {"line": bank, "column": len("- [ ] Call the bank"),
+                                  "selection": None})
+    client.call("editor.insert", {"text": " acount"})
+    client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
+    wait_for(lambda: any(mark["word"] == "acount" for mark in client.call("editor.spell")["marks"]),
+             timeout=10, description="the misspelling is marked")
+    client.call("editor.right_click", {"line": bank, "column": len("- [ ] Call the bank a")})
+    wait_for(lambda: (menu := client.call("editor.spell")["menu"]) and menu["bounds"],
+             timeout=10, description="spelling's menu is drawn")
+    assert client.call("editor.get")["popover"]["spelling"] is True
+    shot_here("task-menu-spelling")
+    client.call("editor.spell_event", {"event": "close"})
+    client.call("editor.undo")
+    assert client.call("editor.get")["text"] == original
+    if not spelling_was_on:
+        client.call("command.run", {"id": "editor.toggle_spell_check"})
+
+
+def command_scenes(client, shot_here) -> None:
+    """The task line commands (discovery/tasks-build.md item 3.3): the
+    palette filtered to them with the caret on a task line, then an open
+    task before and after `task.cycle_status` (doing), and after the toggle
+    (done, with today's stamp). Both edits are undone after, so the scenes
+    that follow see the note as it was."""
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+    line = 3
+    original = client.call("editor.get")["text"]
+    before = original.split("\n")[line]
+    assert before == "- [ ] Send the deck to finance @sam @priya 🔼 📅 2026-11-16", before
+    client.call("editor.cursor", {"line": line, "column": len("- [ ] Send the deck".encode()),
+                                  "selection": None})
+    client.call("editor.focus")
+    client.call("palette.open", {"mode": "commands"})
+    rows = client.call("palette.query", {"query": "task"})["navigation"]["modal"]["results"]
+    tasks = [row for row in rows if row["group"] == "Tasks"]
+    # The status and priority menus (item 3.4) and the calendar (item 4.1)
+    # are the advanced engine's.
+    menus = {"task.set_status", "task.set_priority", "task.set_due"}
+    assert len(tasks) == 14 and all(row["enabled"] or row["key"]["command"] in menus
+                                    for row in tasks), tasks
+    shot_here("task-commands-palette")
+    client.call("palette.close")
+    client.call("editor.focus")
+    shot_here("task-commands-before")
+    client.call("command.run", {"id": "task.cycle_status"})
+    after = client.call("editor.get")["text"].split("\n")[line]
+    assert after == "- [/] Send the deck to finance @sam @priya 🔼 📅 2026-11-16", after
+    shot_here("task-commands-cycled")
+    client.call("command.run", {"id": "markdown.toggle_task"})
+    after = client.call("editor.get")["text"].split("\n")[line]
+    assert after == f"- [x] Send the deck to finance @sam @priya 🔼 📅 2026-11-16 ✅ {TASKS_TODAY}", after
+    shot_here("task-commands-toggled")
+    client.call("editor.undo")
+    client.call("editor.undo")
+    assert client.call("editor.get")["text"] == original
+
+
+# The windows the tight, cutoff and narrow footer scenes size to; at these
+# widths the browser columns take 624 px, so the editor's footer is the rest.
+# In the tight one (516 px of footer) the task line has room for its first
+# pieces only; the cutoff one's footer (446 px) is just wider than the 440 px
+# below which the footer keeps only the position and the save status, as the
+# narrow one's does.
+TIGHT_WINDOW = "1140x560"
+CUTOFF_WINDOW = "1070x560"
+NARROW_WINDOW = "620x560"
+
+
+def footer_scenes(client, shot_here, resize) -> None:
+    """The status bar's task line (discovery/tasks-build.md item 2.3): the
+    design's example on a doing task, an overdue task, and then, on X11, a
+    window so narrow that the line gives way to the save status. The window
+    is resized last, so the scenes before keep the platform's size. The
+    tight window and the one just above the cutoff in between show the
+    pieces that do not fit dropping whole, from the end."""
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+
+    def footer_at(line: int) -> dict | None:
+        client.call("editor.cursor", {"line": line, "column": 0, "selection": None})
+        return client.call("tasks.get")["footer"]
+
+    client.call("editor.focus")
+    footer = footer_at(2)
+    assert footer["text"] == "Doing · due Mon 23 Nov, in 4 days · ⏫ High · @alice.chen", footer
+    shot_here("task-footer")
+    footer = footer_at(3)
+    assert footer["overdue"] and footer["text"] == \
+        "Open · due Mon 16 Nov, 3 days overdue · 🔼 Medium · @sam @priya", footer
+    shot_here("task-footer-overdue")
+    # Focus mode folds the browser columns away, so the footer is wide on
+    # any platform, macOS's small default window included.
+    client.call("command.run", {"id": "view.focus"})
+    footer_at(2)
+    shot_here("task-footer-wide")
+    client.call("command.run", {"id": "view.focus"})
+    if display_server() != "x11":
+        print(f"task-footer-narrow: skipped, resizing needs X11 ({display_server()})")
+        return
+    resize(TIGHT_WINDOW)
+    footer_at(2)
+    shot_here("task-footer-tight")
+    resize(CUTOFF_WINDOW)
+    shot_here("task-footer-cutoff")
+    resize(NARROW_WINDOW)
+    shot_here("task-footer-narrow")
+
+
+def colour_scenes(client, shot_here) -> None:
+    """Task colours (discovery/tasks-build.md item 2.2): due dates ahead,
+    today, past and on no real day, owners, every priority, and a done and a
+    cancelled task, with the caret on an overdue line; the same lines
+    selected; then two days later, when the dates passed turn overdue."""
+    open_note(client, "Due dates.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Due dates"),
+             timeout=10, description="the due dates note opens")
+    client.call("editor.cursor", {"line": 4, "column": 0, "selection": None})
+    client.call("editor.focus")
+    shot_here("task-colours")
+    client.call("editor.cursor", {"line": 13, "column": 0,
+                                  "selection": {"line": 2, "column": 0}})
+    shot_here("task-colours-selection")
+    client.call("editor.cursor", {"line": 4, "column": 0, "selection": None})
+    client.call("tasks.set_today", {"date": "2026-11-21"})
+    shot_here("task-colours-later")
+    client.call("tasks.set_today", {"date": TASKS_TODAY})
+
+
+def emoji_scenes(client, shot_here) -> None:
+    """The emoji spike's note (discovery/tasks-build.md item 0.3): every task
+    glyph bare and with U+FE0F in wrapped task lines, then the caret one
+    Right past a glyph on a wrapped row, and a Shift+Right selection of one
+    glyph. Each step is checked before its shot, with `assert` or without."""
+
+    def expect(actual, wanted, what: str) -> None:
+        if actual != wanted:
+            raise RuntimeError(f"{what}: got {actual!r}, wanted {wanted!r}")
+
+    open_note(client, "Emoji spike.md")
+    lines = wait_for(lambda: (text := client.call("editor.get")["text"]).startswith("# Emoji")
+                     and text, timeout=10, description="the emoji note opens").split("\n")
+
+    def cluster_at(prefix: str, cluster: str, last: bool) -> tuple[int, int, int]:
+        """The line starting with `prefix`, and the byte range of the first
+        or last `cluster` in it."""
+        line = next(i for i, text in enumerate(lines) if text.startswith(prefix))
+        text = lines[line]
+        found = text.rfind(cluster) if last else text.find(cluster)
+        start = len(text[:found].encode("utf-8"))
+        return line, start, start + len(cluster.encode("utf-8"))
+
+    def at(line: int, column: int) -> dict:
+        return {"line": line, "column": column}
+
+    def step(key: str, mods: list[str]) -> dict:
+        return client.call("editor.key", {"key": key, "mods": mods})
+
+    client.call("editor.cursor", {"line": 0, "column": 0, "selection": None})
+    client.call("editor.focus")
+    shot_here("tasks-emoji")
+
+    # The last line's last glyph, so the view scrolls to the lines the first
+    # scene leaves below it. The window's size is the platform's, so check
+    # that the glyph is on a wrapped row: Home there stops at the row's
+    # start, past the line's first glyph, and not at the task's text.
+    lowest = "\u23ec\ufe0f"
+    line, start, end = cluster_at("- [ ] Lowest VS16", lowest, last=True)
+    _, _, first_end = cluster_at("- [ ] Lowest VS16", lowest, last=False)
+    client.call("editor.cursor", {"line": line, "column": start, "selection": None})
+    expect(step("right", [])["cursor"], at(line, end), "one Right over the last U+23EC U+FE0F")
+    row = step("home", [])["cursor"]
+    if row["line"] != line or not first_end < row["column"] <= start:
+        raise RuntimeError(f"the last U+23EC U+FE0F is not on a wrapped row: Home went "
+                           f"to {row!r}, wanted line {line}, a column in "
+                           f"{first_end + 1}..={start}")
+    expect(client.call("editor.cursor", {"line": line, "column": end, "selection": None})
+           ["cursor"], at(line, end), "the caret back after the last U+23EC U+FE0F")
+    shot_here("tasks-emoji-caret")
+
+    # The line has two; Shift+Right from the first selects the first.
+    highest = "\U0001f53a\ufe0f"
+    line, start, end = cluster_at("- [ ] Highest VS16", highest, last=False)
+    client.call("editor.cursor", {"line": line, "column": start, "selection": None})
+    selected = step("right", ["shift"])
+    expect(selected["selected_text"], highest, "Shift+Right over the first U+1F53A U+FE0F")
+    expect((selected["selection"], selected["cursor"]), (at(line, start), at(line, end)),
+           "the selection's anchor and caret")
+    shot_here("tasks-emoji-selection")
 
 
 BOARD_GROUP = "Boards/Samples"
@@ -1003,32 +1505,44 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="dark")
     parser.add_argument("--out", type=Path, default=Path("target/scenes"))
-    parser.add_argument("--engine", choices=("classic", "advanced"), default="classic",
-                        help="the editor-engine setting")
+    parser.add_argument("--engine", choices=("classic", "advanced"),
+                        help="the editor-engine setting: classic, or advanced for --only tasks")
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown", "spell", "boards"),
+    parser.add_argument("--only", choices=("markdown", "spell", "boards", "tasks"),
                         help="shoot only these scenes")
+    parser.add_argument("--fonts", metavar="LABEL",
+                        help="with --only tasks, name the font setup in the output path "
+                             "(default: whether Noto Color Emoji is installed)")
     parser.add_argument("--window", metavar="WIDTHxHEIGHT",
                         help="with --only boards, resize the window first (X11 only); "
                              "pair it with --label")
     args = parser.parse_args()
+    if args.engine is None:
+        args.engine = "advanced" if args.only == "tasks" else "classic"
+    if args.fonts and args.only != "tasks":
+        parser.error("--fonts goes with --only tasks")
     if args.only == "spell" and args.engine != "advanced":
         parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
     if args.window and (args.only != "boards" or sys.platform == "darwin"
                         or "x" not in args.window):
         parser.error("--window takes WIDTHxHEIGHT, with --only boards, on X11")
-    out = args.out if args.engine == "classic" else args.out / args.engine
-    if args.label:
-        out = out / args.label
-    out = (out / args.theme).resolve()
     settings = f"editor-engine = {args.engine}\n"
     for setting in args.setting:
         key, separator, value = setting.partition("=")
         if not separator:
             parser.error(f"--setting {setting!r} is not KEY=VALUE")
         settings += f"{key.strip()} = {value.strip()}\n"
+    # A `--setting editor-engine=…` comes later in the file, so it wins.
+    engine = last_value(settings, "editor-engine")
+    if args.only == "tasks":
+        out = tasks_out(args.out, engine, args.fonts)
+    else:
+        out = args.out if engine == "classic" else args.out / engine
+    if args.label:
+        out = out / args.label
+    out = (out / args.theme).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     def settled(client) -> bool:
@@ -1065,6 +1579,27 @@ def main() -> int:
 
                 board_scenes(app.client, shot_board, out, workspace,
                              (app.settings_path, settings + "boards = on\n"))
+            return 0
+        if args.only == "tasks":
+            workspace = Path(temp).resolve() / "tasks"
+            shutil.copytree(TASKS_FIXTURE, workspace)
+            # Half an hour from an hour boundary, so "Edited" reads the same
+            # through the capture.
+            mtime = time.time() - 1.5 * 3600
+            for path in workspace.rglob("*.md"):
+                os.utime(path, (mtime, mtime))
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "tasks = on\n", today=TASKS_TODAY) as app:
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_tasks(name: str) -> None:
+                    shot(app.client, name)
+
+                task_scenes(app.client, shot_tasks, engine,
+                            lambda size: window_size(app, size))
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

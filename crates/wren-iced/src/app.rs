@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iced::theme::Mode;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, responsive, row, text, text_input};
 use iced::{Element, Fill, Subscription, Task};
 use wren_core::model::{GroupId, NoteId, SectionId};
 use wren_core::ops::{Op, Session};
@@ -20,6 +20,7 @@ mod board_footer;
 mod board_keys;
 mod board_spike;
 mod board_style_bar;
+mod calendar;
 mod columns;
 mod workspace;
 mod workspace_view;
@@ -30,6 +31,12 @@ mod navigation;
 mod palette;
 mod preferences;
 mod spelling;
+mod task_commands;
+mod task_footer;
+mod task_form;
+mod task_menus;
+mod task_suggest;
+mod tasks;
 mod workspaces;
 
 use crate::panes::Widths;
@@ -40,6 +47,8 @@ use workspace::{Dialog, LoadOutcome, Loading};
 
 #[cfg(feature = "smoke-test")]
 mod board_harness;
+#[cfg(feature = "smoke-test")]
+mod tasks_harness;
 #[cfg(feature = "smoke-test")]
 mod test_requests;
 
@@ -53,6 +62,31 @@ pub struct App {
     preview: preferences::Preview,
     preferences: preferences::Preferences,
     spelling: spelling::Spelling,
+    clock: tasks::Clock,
+    /// What the status bar's task line last found; see `App::caret_task`.
+    task_memo: tasks::TaskMemo,
+    /// The calendar, while it is open over the note.
+    calendar: Option<calendar::Open>,
+    /// Presses of Escape the calendar's field took that the app's key
+    /// handling has yet to hear of.
+    calendar_escapes: u32,
+    /// The task form, while it is open over the note.
+    task_form: Option<task_form::Open>,
+    /// Presses of Escape the task form, its calendar or its fields took
+    /// that the app's key handling has yet to hear of.
+    form_escapes: u32,
+    /// The editor's source of menus: the task menus' and the calendar's.
+    task_source: std::sync::Arc<calendar::TaskSource>,
+    /// What the calendar's source was last told the caret's line is for.
+    due_key: Option<calendar::DueKey>,
+    /// The editor's source of suggestions on task lines.
+    suggestions: std::sync::Arc<task_suggest::TaskSuggestions>,
+    /// Whether the editor has been given it.
+    suggest_installed: bool,
+    /// The owners the suggestions offer, kept up with the index.
+    owners: wren_core::owners::Owners,
+    /// The footers' measured label widths; see `task_footer::Widths`.
+    label_widths: task_footer::Widths,
     editor: EditorView,
     /// The open note as a board, when it is one and its text parses; see
     /// `board::Surface`. The editor is empty meanwhile.
@@ -188,6 +222,10 @@ pub enum Message {
     BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
+    /// Input from the calendar's card.
+    Calendar(calendar::Event),
+    /// Input from the task form.
+    TaskForm(task_form::Event),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
     /// The board's style bar opens one of its menus, or closes it.
@@ -200,6 +238,9 @@ pub enum Message {
     PaletteClose,
     PaletteRevealed,
     Key(crate::keys::Input),
+    /// The app's copy of a shortcut press the task form took
+    /// (`task_form::keys_with_form`).
+    FormShortcut(wren_core::keybind::Accel),
     /// A command key chosen from the native menu bar.
     #[cfg(target_os = "macos")]
     MenuCommand(String),
@@ -217,6 +258,8 @@ pub enum Message {
     Drag(u64, crate::drag::DragEvent),
     Resize(u64, crate::panes::ResizeEvent),
     Tick,
+    /// The tasks timer asks whether the local date has changed.
+    DayCheck,
     Loaded(u64, Arc<Mutex<Option<LoadOutcome>>>),
     /// The dictionary and the first read of `words.txt`, loaded off the UI
     /// thread at launch.
@@ -288,6 +331,10 @@ pub enum Message {
     ),
 }
 
+/// The evaluation editor's text size: iced's default, which its footer's
+/// labels take.
+const EVALUATION_TEXT: f32 = 16.0;
+
 /// How long the footer's word count may lag the text. Counting reads the
 /// whole note, too slow in a debug build to repeat on every keystroke.
 const WORD_COUNT_DELAY: Duration = Duration::from_millis(250);
@@ -356,6 +403,7 @@ impl App {
         };
         let words = contents.split_whitespace().count();
         let engine = preferences::backend_kind(preferences.settings.editor_engine);
+        let tasks = preferences.tasks;
         let mut app = Self {
             definition,
             toolkit_theme: theme::from_definition(definition),
@@ -364,6 +412,21 @@ impl App {
             preview: preferences::Preview::default(),
             preferences,
             spelling: spelling::Spelling::new(words_path.clone()),
+            #[cfg(feature = "smoke-test")]
+            clock: tasks::Clock::launch(options.today, tasks),
+            #[cfg(not(feature = "smoke-test"))]
+            clock: tasks::Clock::launch(None, tasks),
+            task_memo: tasks::TaskMemo::default(),
+            calendar: None,
+            calendar_escapes: 0,
+            task_form: None,
+            form_escapes: 0,
+            task_source: std::sync::Arc::default(),
+            due_key: None,
+            suggestions: std::sync::Arc::default(),
+            suggest_installed: false,
+            owners: wren_core::owners::Owners::default(),
+            label_widths: task_footer::Widths::default(),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
             board_error: None,
@@ -488,10 +551,22 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         // The palette and the dialogs take the keyboard, so the suggestions
-        // menu never stays open under one (rule 4.4.8).
+        // menu, or any popover of the editor's, never stays open under one
+        // (rule 4.4.8).
         if self.palette.is_some() || self.dialog.is_some() {
-            self.editor.close_spell_menu();
+            self.editor.close_popover();
         }
+        // With tasks off (a setting read at launch) none of it exists, and
+        // the app does no work for it.
+        let (calendar, form) = if self.preferences.tasks {
+            let calendar = self.sync_calendar();
+            let form = self.sync_task_form();
+            self.sync_due_target();
+            self.sync_suggestions();
+            (calendar, form)
+        } else {
+            (Task::none(), Task::none())
+        };
         // The note, the loading state and the setting can each change on any
         // message, and the editor must see the proofreader before it draws.
         self.sync_proofreader();
@@ -500,7 +575,7 @@ impl App {
         let preview = self.sync_preview();
         #[cfg(any(target_os = "macos", test))]
         self.sync_menu();
-        Task::batch([task, preview])
+        Task::batch([task, preview, calendar, form])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -534,6 +609,12 @@ impl App {
                     Some(wren_editor::KeyRoute::Suggest) => Some(wren_editor::Message::Spell(
                         wren_editor::SpellEvent::OpenAtCaret,
                     )),
+                    Some(wren_editor::KeyRoute::Popover(id)) => Some(wren_editor::Message::Spell(
+                        wren_editor::SpellEvent::Request(id),
+                    )),
+                    Some(wren_editor::KeyRoute::Command(payload)) => {
+                        Some(wren_editor::Message::Command(payload))
+                    }
                     Some(wren_editor::KeyRoute::Host | wren_editor::KeyRoute::Pass) | None => None,
                 };
                 let task = message
@@ -567,6 +648,8 @@ impl App {
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
+            Message::Calendar(event) => return self.calendar_event(event),
+            Message::TaskForm(event) => return self.task_form_event(event),
             // Opening a menu of a bar finishes an open label first, as a
             // click on one of its controls does: the keys typed next are
             // not the label's, and a style menu's rows preview on the
@@ -635,8 +718,10 @@ impl App {
             Message::Drag(generation, event) => return self.drag_event(generation, event),
             Message::Resize(generation, event) => return self.resize_event(generation, event),
             Message::Key(input) => return self.key_input(input),
+            Message::FormShortcut(accel) => return self.form_shortcut(&accel),
             #[cfg(target_os = "macos")]
             Message::MenuCommand(key) => return self.menu_command(&key),
+            Message::DayCheck => self.check_day(),
             Message::Tick => {
                 self.count_words(Instant::now());
                 #[cfg(feature = "smoke-test")]
@@ -695,9 +780,18 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
-                // An open suggestions menu is the topmost thing Escape
-                // closes; the editor keeps the keyboard and the find bar stays.
-                if self.editor.close_spell_menu() {
+                // The calendar and the task form are above everything else
+                // either can be open with.
+                if self.calendar.is_some() {
+                    return self.cancel_calendar();
+                }
+                if self.task_form.is_some() {
+                    return self.escape_task_form();
+                }
+                // An open suggestions menu, or any popover of the editor's,
+                // is the topmost thing Escape closes; the editor keeps the
+                // keyboard and the find bar stays.
+                if self.editor.dismiss_popover() {
                     return Task::none();
                 }
                 // So is a menu of the board's bars, and the board keeps it.
@@ -758,7 +852,9 @@ impl App {
                     return self.request_quit().unwrap_or_else(|_| Task::none());
                 }
                 iced::window::Event::Unfocused => {
+                    let calendar = self.close_calendar_for_window();
                     let _ = self.window_unfocused();
+                    return calendar;
                 }
                 iced::window::Event::Focused => {
                     let _ = self.reload_settings(false);
@@ -801,8 +897,44 @@ impl App {
         Task::none()
     }
 
+    /// A key in the batch of the handover to the calendar or the form,
+    /// which the editor dropped: a plain Escape (no Ctrl, Alt or logo
+    /// key), which the app's key handling hears of too, is claimed for it
+    /// so that it closes nothing. Any other Escape the key handling reads
+    /// as a shortcut, which claims nothing, so neither does it here.
+    fn claim_handover_escape(
+        &mut self,
+        named: Option<iced::keyboard::key::Named>,
+        modifiers: iced::keyboard::Modifiers,
+    ) {
+        if named != Some(iced::keyboard::key::Named::Escape)
+            || !wren_editor::is_plain_escape(modifiers)
+        {
+            return;
+        }
+        if self.calendar.is_some() {
+            self.calendar_escapes += 1;
+        } else if self.task_form.is_some() {
+            self.form_escapes += 1;
+        }
+    }
+
     fn edit(&mut self, message: wren_editor::Message) -> Task<Message> {
         if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
+            return Task::none();
+        }
+        // The calendar or the task form has the keyboard: what the editor
+        // publishes after the request that opened it, in that request's
+        // batch of events, was typed before it could be seen, and is no
+        // one's.
+        if self.calendar.is_some() || self.task_form.is_some() {
+            // An Escape in that batch, after "Due date…" chosen from the
+            // suggestions, which the app's key handling hears of too: it
+            // is dropped there, and does not close what it could not see.
+            // So is one after the request that opened the form.
+            if let wren_editor::Message::Spell(wren_editor::SpellEvent::Stroke(stroke)) = message {
+                self.claim_handover_escape(stroke.named(), stroke.modifiers());
+            }
             return Task::none();
         }
         let started = Instant::now();
@@ -828,19 +960,72 @@ impl App {
                     event,
                     SpellEvent::OpenAtCaret
                         | SpellEvent::OpenAt(_)
+                        | SpellEvent::Context { .. }
                         | SpellEvent::Accept(_)
                         | SpellEvent::AcceptSelected
+                        | SpellEvent::AcceptOf { .. }
                         | SpellEvent::Key(_)
+                        | SpellEvent::Stroke(_)
+                        | SpellEvent::Request(_)
                         | SpellEvent::Press(_)
                 ) {
                     self.column = columns::Column::Editor;
                 }
                 // A right-click takes the keyboard from a text field too,
                 // which a right press alone does not unfocus.
-                if matches!(event, SpellEvent::OpenAt(_)) {
+                if matches!(event, SpellEvent::OpenAt(_) | SpellEvent::Context { .. }) {
                     task = focus_editor();
                 }
-                self.editor.spell(event)
+                // A request for the task form, the calendar or a task menu:
+                // the app opens it at the caret's task, as the command does.
+                if let SpellEvent::Request(id) = event {
+                    if let Some(opened) = self.request_task_form(id) {
+                        return opened;
+                    }
+                    if let Some(opened) = self.request_calendar(id) {
+                        return opened;
+                    }
+                    if let Some(opened) = self.request_task_menu(id) {
+                        return opened;
+                    }
+                }
+                let changed = self.editor.spell(event);
+                // A provider that took a right-click by taking the keyboard:
+                // the calendar, on a due date.
+                // Its field alone takes the keyboard: no focus of the
+                // editor's competes with it.
+                if let Some((_, clicked)) = self.editor.take_keyboard() {
+                    let opened = self.calendar_for_click(&clicked);
+                    return if self.calendar.is_some() {
+                        opened
+                    } else {
+                        task
+                    };
+                }
+                // A row that runs a command runs it, for the place its menu
+                // was opened on. Any other row is its menu's owner's: the
+                // provider's that opened it for a right-click, or the
+                // app's own.
+                let chosen = if let Some(choice) = self.editor.take_command() {
+                    Some(self.run_command_row(&choice))
+                } else if let Some((provider, choice)) = self.editor.take_provided() {
+                    Some(self.provided_row(provider, &choice))
+                } else {
+                    (self.editor.take_choice()).map(|choice| self.chosen_row(&choice))
+                };
+                if let Some(chosen) = chosen {
+                    if changed {
+                        self.text_changed(started);
+                    }
+                    return Task::batch([task, chosen]);
+                }
+                changed
+            }
+            wren_editor::Message::Command(payload) => return self.run_payload(payload),
+            wren_editor::Message::BoxClick(click) => return self.click_box(click),
+            wren_editor::Message::HandbackOver => {
+                self.editor.handback_over();
+                false
             }
             wren_editor::Message::Clip(clip) => {
                 self.column = columns::Column::Editor;
@@ -919,7 +1104,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         #[cfg(feature = "smoke-test")]
         let started = Instant::now();
-        let view = crate::keys::alt_filter(self.contents()).into();
+        let view = crate::keys::alt_filter(self.calendar_view(self.contents())).into();
         #[cfg(feature = "smoke-test")]
         {
             let mut times = self.view_micros.borrow_mut();
@@ -1003,30 +1188,65 @@ impl App {
                 .view(style, palette, self.editor_measure())
                 .map(Message::Editor),
         );
-        let cursor = self.editor.cursor();
+        // With tasks on, the footer learns its width, to fit the caret's
+        // task in; its height is then set to the one its text gives it.
         body = body.push(
-            container(
-                row![
-                    text(format!(
-                        "Markdown · {} lines · {} words",
-                        self.editor.line_count(),
-                        self.words
-                    )),
-                    iced::widget::space::horizontal(),
-                    text(format!(
-                        "Ln {}, byte col {}",
-                        cursor.position.line + 1,
-                        cursor.position.column + 1
-                    ))
-                    .font(fonts::EDITOR),
-                    text("Not saved · spike").color(theme::color(colors.warning)),
-                ]
-                .spacing(20),
-            )
+            if self.preferences.tasks {
+                container(responsive(move |size| {
+                    self.evaluation_footer(Some(size.width))
+                }))
+                .height(EVALUATION_TEXT * 1.3 + 2.0 * 8.0)
+            } else {
+                container(self.evaluation_footer(None))
+            }
             .padding([8, 16])
             .width(Fill),
         );
         self.palette_view(body.width(Fill).height(Fill).into())
+    }
+
+    /// The evaluation editor's footer row, `width` wide inside its insets
+    /// when the caret's task may show in it.
+    fn evaluation_footer(&self, width: Option<f32>) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let cursor = self.editor.cursor();
+        let position = format!(
+            "Ln {}, byte col {}",
+            cursor.position.line + 1,
+            cursor.position.column + 1
+        );
+        let saved = "Not saved · spike";
+        // The caret's task after the line count, in the room the rest
+        // leaves, as under a note.
+        let task = width.and_then(|width| {
+            let summary = self.caret_task()?;
+            let counts = format!("Markdown · {} lines", self.editor.line_count());
+            let label = |content: &str, font| self.label_widths.of(content, EVALUATION_TEXT, font);
+            let room = width
+                - label(&counts, fonts::UI)
+                - label(&position, fonts::EDITOR)
+                - label(saved, fonts::UI)
+                - 3.0 * 20.0;
+            Some((counts, self.task_line(&summary, room, EVALUATION_TEXT)?))
+        });
+        let (counts, middle) = task.unwrap_or_else(|| {
+            (
+                format!(
+                    "Markdown · {} lines · {} words",
+                    self.editor.line_count(),
+                    self.words
+                ),
+                iced::widget::space::horizontal().into(),
+            )
+        });
+        row![
+            text(counts),
+            middle,
+            text(position).font(fonts::EDITOR),
+            text(saved).color(theme::color(colors.warning)),
+        ]
+        .spacing(20)
+        .into()
     }
 
     #[cfg(feature = "smoke-test")]
@@ -1063,22 +1283,17 @@ impl App {
         let mut subscriptions = vec![
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::window::events().map(|(id, event)| Message::Window(id, event)),
-            iced::event::listen_with(|event, status, _| match event {
-                iced::Event::Keyboard(event) => crate::keys::input(&event)
-                    .filter(|input| crate::keys::reaches_app(input, status))
-                    .map(|input| Message::Key(crate::keys::with_status(input, status)))
-                    .or_else(|| {
-                        (status == iced::event::Status::Ignored)
-                            .then(|| workspace::tab(&event))
-                            .flatten()
-                            .map(Message::Tab)
-                    }),
-                _ => None,
-            }),
+            // With tasks on, a shortcut the task form took is told apart.
+            if self.preferences.tasks {
+                iced::event::listen_with(task_form::keys_with_form)
+            } else {
+                iced::event::listen_with(key_message)
+            },
         ];
         if self.session.is_some() || self.words_due.is_some() {
             subscriptions.push(iced::time::every(Duration::from_millis(25)).map(|_| Message::Tick));
         }
+        subscriptions.extend(self.day_subscription());
         #[cfg(target_os = "macos")]
         subscriptions.push(crate::macos_menu::events().map(Message::MenuCommand));
         #[cfg(feature = "smoke-test")]
@@ -1094,6 +1309,27 @@ impl App {
     }
 }
 
+/// The app's copy of a key press: a navigation key or a shortcut, or a
+/// Tab no widget took.
+fn key_message(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(event) => crate::keys::input(&event)
+            .filter(|input| crate::keys::reaches_app(input, status))
+            .map(|input| Message::Key(crate::keys::with_status(input, status)))
+            .or_else(|| {
+                (status == iced::event::Status::Ignored)
+                    .then(|| workspace::tab(&event))
+                    .flatten()
+                    .map(Message::Tab)
+            }),
+        _ => None,
+    }
+}
+
 fn focus_editor() -> Task<Message> {
     iced::widget::operation::focus("note-editor")
 }
@@ -1103,6 +1339,9 @@ mod board_edit_tests;
 
 #[cfg(test)]
 mod navigation_tests;
+
+#[cfg(test)]
+mod tasks_baseline;
 
 #[cfg(test)]
 mod tests {

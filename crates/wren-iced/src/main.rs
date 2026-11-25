@@ -2,10 +2,12 @@ mod app;
 mod board_export;
 mod chrome;
 mod cli;
+mod date_field;
 mod drag;
 mod drag_view;
 mod ellipsis;
 mod fonts;
+mod form_keys;
 mod keys;
 mod layers;
 #[cfg(target_os = "macos")]
@@ -129,6 +131,7 @@ fn launch(options: cli::Options) -> Result<(), Box<dyn Error>> {
         if let Some(path) = &options.test_socket {
             options.endpoint = Some(test_ipc::Endpoint::bind(path)?);
         }
+        options.today = cli::test_today(std::env::var_os("WREN_TEST_TODAY").as_deref())?;
         options
     };
     #[cfg(feature = "smoke-test")]

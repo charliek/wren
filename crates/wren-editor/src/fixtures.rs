@@ -10,8 +10,13 @@ use iced::{Color, Font};
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use wren_markdown::span::SpanKind;
+
 use crate::highlighter::Settings;
-use crate::{MenuStyle, Palette, Proofreader, Style};
+use crate::{
+    Accelerator, Clicked, Hit, MenuProvider, MenuSource, MenuStyle, Palette, Proofreader,
+    Requested, Row, Style, SuggestSource, Suggestion,
+};
 
 pub const FONT: Font = Font::with_name("JetBrains Mono");
 
@@ -32,6 +37,7 @@ pub const STYLE: Style = Style {
         selected: Color::from_rgb8(0x2a, 0x31, 0x40),
         text: Color::from_rgb8(0xe6, 0xe8, 0xec),
         muted: Color::from_rgb8(0xa3, 0xaa, 0xb5),
+        accent: Color::from_rgb8(0xf0, 0xb4, 0x5a),
         font: FONT,
         text_size: 13.0,
     },
@@ -51,12 +57,16 @@ pub const DARK: Palette = Palette {
     code: Color::from_rgb8(0x7f, 0xd1, 0xa0),
     quote: Color::from_rgb8(0xa3, 0xaa, 0xb6),
     completed: Color::from_rgb8(0x9a, 0xa1, 0xac),
+    date: Color::from_rgb8(0x72, 0xd6, 0xe3),
+    overdue: Color::from_rgb8(0xf0, 0x88, 0x88),
+    owner: Color::from_rgb8(0x7e, 0xb1, 0xe7),
 };
 
 pub const SETTINGS: Settings = Settings {
     palette: DARK,
     font: FONT,
     front_matter_end: None,
+    tasks: None,
 };
 
 pub const LIGHT: Palette = Palette {
@@ -70,6 +80,9 @@ pub const LIGHT: Palette = Palette {
     code: Color::from_rgb8(0x19, 0x73, 0x42),
     quote: Color::from_rgb8(0x58, 0x61, 0x71),
     completed: Color::from_rgb8(0x50, 0x5a, 0x68),
+    date: Color::from_rgb8(0x04, 0x77, 0x84),
+    overdue: Color::from_rgb8(0xb3, 0x2d, 0x36),
+    owner: Color::from_rgb8(0x04, 0x4e, 0xa4),
 };
 
 /// Registers every face of [`FONT`] so layout tests measure real glyphs
@@ -154,5 +167,281 @@ impl Proofreader for Rejects {
             .find(|(wrong, _)| *wrong == word)
             .map(|(_, right)| right.iter().map(|&right| right.to_owned()).collect())
             .unwrap_or_default()
+    }
+}
+
+/// A source of suggestions that completes the word before the caret from a
+/// fixed list, once two of its characters are typed, and keeps what it was
+/// asked.
+pub struct Completes {
+    words: &'static [&'static str],
+    /// The `(line, caret)` of each request.
+    asked: Mutex<Vec<(String, usize)>>,
+}
+
+impl Completes {
+    pub fn new(words: &'static [&'static str]) -> Self {
+        Self {
+            words,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The `(line, caret)` of each request so far.
+    pub fn asked(&self) -> Vec<(String, usize)> {
+        self.asked.lock().expect("asked").clone()
+    }
+}
+
+impl SuggestSource for Completes {
+    /// The words that start with the letters before the caret, each named
+    /// by its place in the list, under those letters.
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        self.asked
+            .lock()
+            .expect("asked")
+            .push((line.to_owned(), caret));
+        let before = line.get(..caret)?;
+        let start = before
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_alphanumeric())
+            .last()
+            .map_or(caret, |(at, _)| at);
+        let typed = &before[start..];
+        let rows: Vec<Row> = (0..)
+            .zip(self.words)
+            .filter(|(_, word)| typed.chars().count() >= 2 && word.starts_with(typed))
+            .map(|(id, word)| Row::new(id, *word))
+            .collect();
+        (!rows.is_empty()).then_some(Suggestion {
+            range: start..caret,
+            rows,
+        })
+    }
+}
+
+/// The task suggestions a host offers (`wren_markdown::task::suggest`),
+/// with today Thursday 19 November 2026 and the owners `sam` and
+/// `Samantha`: each row numbered by its place, "Due date…" a row that
+/// opens a menu of the host's, and a row Enter may not choose as offered
+/// tentative.
+pub struct TaskWords;
+
+impl SuggestSource for TaskWords {
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        use wren_markdown::block::{Boxes, Scanner};
+        use wren_markdown::task::suggest::{suggest, Item, Known};
+        let today = wren_markdown::date::Date::new(2026, 11, 19)?;
+        let task = Scanner::new(Boxes::Status).next_line(line).item?.task?;
+        let owners = [Known::new("sam"), Known::new("Samantha")];
+        let offer = suggest(line, caret, task, today, &owners)?;
+        let rows = (0..)
+            .zip(offer.items)
+            .map(|(id, item)| {
+                let row = Row::new(id, item.label).tentative(!item.enter);
+                if item.item == Item::Calendar {
+                    row.opens_menu()
+                } else {
+                    row
+                }
+            })
+            .collect();
+        Some(Suggestion {
+            range: offer.range,
+            rows,
+        })
+    }
+}
+
+/// Suggestions of rows that run commands: after two letters at a word's
+/// start, a row running command 7 and one running command 8, under the
+/// letters typed.
+pub struct CommandSuggestions;
+
+impl SuggestSource for CommandSuggestions {
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        let before = line.get(..caret)?;
+        let start = before.rfind(' ').map_or(0, |at| at + 1);
+        (caret - start >= 2).then(|| Suggestion {
+            range: start..caret,
+            rows: vec![Row::command(7, "seven"), Row::command(8, "eight")],
+        })
+    }
+}
+
+/// Owners offered after `@` and the start of a name, ranked as they were
+/// last ranked ([`Owners::rank`]): each row numbered by its place in the
+/// ranking, as a host numbers its owners, and bound to the suggestions it
+/// is offered in ([`Row::bound`]).
+pub struct Owners(Mutex<Vec<&'static str>>);
+
+impl Owners {
+    pub fn new(ranked: &[&'static str]) -> Self {
+        Self(Mutex::new(ranked.to_vec()))
+    }
+
+    /// Rank the owners anew, as a host does when its index changes.
+    pub fn rank(&self, ranked: &[&'static str]) {
+        *self.0.lock().expect("ranked") = ranked.to_vec();
+    }
+}
+
+impl SuggestSource for Owners {
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        let before = line.get(..caret)?;
+        let at = before.rfind('@')?;
+        let typed = &before[at + 1..];
+        if typed.is_empty() || !typed.chars().all(char::is_alphanumeric) {
+            return None;
+        }
+        let rows: Vec<Row> = (0..)
+            .zip(self.0.lock().expect("ranked").iter())
+            .filter(|(_, name)| name.starts_with(typed))
+            .map(|(id, name)| Row::new(id, format!("@{name}")).bound())
+            .collect();
+        (!rows.is_empty()).then_some(Suggestion {
+            range: at..caret,
+            rows,
+        })
+    }
+}
+
+/// The request [`Menus`] answers with the status menu.
+pub const STATUS: u32 = 1;
+/// The request [`Menus`] answers by taking the keyboard.
+pub const KEYBOARD: u32 = 3;
+/// The request [`Menus`] answers by taking the keyboard for a dialog,
+/// whose request holds Escape too ([`MenuSource::holds_escape`]).
+pub const DIALOG: u32 = 4;
+
+/// The status menu: three rows, numbered from 20, each with its key.
+pub fn status_rows() -> Vec<Row> {
+    vec![
+        Row::new(20, "Open").accelerator(Accelerator::plain(' ')),
+        Row::new(21, "Doing").accelerator(Accelerator::plain('/')),
+        Row::new(22, "Done").accelerator(Accelerator::plain('x')),
+    ]
+}
+
+/// A source of menus: [`STATUS`] opens the status menu on the box of a
+/// line that starts a task, [`KEYBOARD`] has the host take the keyboard,
+/// and any other request opens nothing. It keeps what it was asked.
+#[derive(Default)]
+pub struct Menus {
+    /// The `(request, line, caret)` of each request.
+    asked: Mutex<Vec<(u32, String, usize)>>,
+}
+
+impl Menus {
+    /// The `(request, line, caret)` of each request so far.
+    pub fn asked(&self) -> Vec<(u32, String, usize)> {
+        self.asked.lock().expect("asked").clone()
+    }
+}
+
+impl MenuSource for Menus {
+    fn menu(&self, id: u32, line: &str, caret: usize) -> Option<Requested> {
+        self.asked
+            .lock()
+            .expect("asked")
+            .push((id, line.to_owned(), caret));
+        match id {
+            STATUS if line.starts_with("- [") => Some(Requested::Rows {
+                range: 2..5,
+                rows: status_rows(),
+            }),
+            KEYBOARD | DIALOG => Some(Requested::Keyboard),
+            _ => None,
+        }
+    }
+
+    fn holds_escape(&self, id: u32) -> bool {
+        id == DIALOG
+    }
+}
+
+/// The menu [`on_tokens`] opens: two rows, numbered from 30, the first
+/// with a key.
+pub fn token_rows() -> Vec<Row> {
+    vec![
+        Row::new(30, "Rename").accelerator(Accelerator::plain('r')),
+        Row::new(31, "Remove"),
+    ]
+}
+
+/// A provider's answer that takes a task's owner or tag, when that is the
+/// hit: [`token_rows`] under it. A misspelled owner is a misspelling, which
+/// it passes on.
+pub fn on_tokens(clicked: &Clicked) -> Option<Requested> {
+    let Some(Hit::Span(span)) = &clicked.hit else {
+        return None;
+    };
+    matches!(span.kind, SpanKind::Owner { .. } | SpanKind::Tag).then(|| Requested::Rows {
+        range: span.range.clone(),
+        rows: token_rows(),
+    })
+}
+
+/// A provider's answer that takes any place on a line that starts a task,
+/// whatever is there: a token, a misspelled word, a place in no span, or
+/// the row past the end of its text. The status menu under the box.
+pub fn on_task_lines(clicked: &Clicked) -> Option<Requested> {
+    clicked.text.starts_with("- [").then(|| Requested::Rows {
+        range: 2..5,
+        rows: status_rows(),
+    })
+}
+
+/// A provider's answer that takes a task's date by having the host take
+/// the keyboard, as it would for a calendar.
+pub fn on_dates(clicked: &Clicked) -> Option<Requested> {
+    let Some(Hit::Span(span)) = &clicked.hit else {
+        return None;
+    };
+    matches!(span.kind, SpanKind::Date { .. }).then_some(Requested::Keyboard)
+}
+
+/// A provider's answer that takes any place on a line of text that starts
+/// no task, by having the host take the keyboard.
+pub fn off_task_lines(clicked: &Clicked) -> Option<Requested> {
+    (!clicked.text.is_empty() && !clicked.text.starts_with("- [")).then_some(Requested::Keyboard)
+}
+
+/// A provider's answer on a line that starts a task: a menu under the
+/// box's dash of a row of its own (11) and a row that runs the host's
+/// command 7, as a task menu's rows do.
+pub fn commands_on_task_lines(clicked: &Clicked) -> Option<Requested> {
+    clicked.text.starts_with("- [").then(|| Requested::Rows {
+        range: 0..1,
+        rows: vec![Row::new(11, "Own"), Row::command(7, "Command")],
+    })
+}
+
+/// A provider of menus for a right-click that answers as `answer` does,
+/// and keeps what it was asked about.
+pub struct Provides {
+    answer: fn(&Clicked) -> Option<Requested>,
+    pub asked: Mutex<Vec<Clicked>>,
+}
+
+impl Provides {
+    pub fn new(answer: fn(&Clicked) -> Option<Requested>) -> Self {
+        Self {
+            answer,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Each place it was asked about so far.
+    pub fn asked(&self) -> Vec<Clicked> {
+        self.asked.lock().expect("asked").clone()
+    }
+}
+
+impl MenuProvider for Provides {
+    fn menu(&self, clicked: &Clicked) -> Option<Requested> {
+        self.asked.lock().expect("asked").push(clicked.clone());
+        (self.answer)(clicked)
     }
 }

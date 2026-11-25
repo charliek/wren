@@ -61,6 +61,10 @@ pub struct Preferences {
     /// with: a Session lists boards or not for its whole life, so a later
     /// value waits for a restart.
     pub boards: bool,
+    /// The `tasks` setting as it was at launch, which is what the app runs
+    /// with: the macOS menu bar is built once, so a later value waits for a
+    /// restart.
+    pub tasks: bool,
     /// The bytes last loaded, so focus-triggered reloads skip unchanged files.
     loaded: Option<String>,
     /// The warning last shown for these settings, so a clean reload can
@@ -78,12 +82,13 @@ pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
 
 /// The editor's say over its keys, from the keymap and key reading the app's
 /// own shortcuts use: a host command's key is the app's, and an editor
-/// command's key is the editor's intent.
-fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
+/// command's key is the editor's intent, or with `tasks` on a task
+/// command's, the toggle's included, the command itself.
+fn key_policy(keymap: &Keymap, markdown_assist: bool, tasks: bool) -> KeyPolicy {
     let keymap = keymap.clone();
     std::sync::Arc::new(move |key, physical, modifiers| {
         crate::keys::shortcut(key, physical, modifiers).map_or(KeyRoute::Pass, |trigger| {
-            key_route(&keymap, &trigger, markdown_assist)
+            key_route(&keymap, &trigger, markdown_assist, tasks)
         })
     })
 }
@@ -91,20 +96,29 @@ fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
 /// Where the editor sends a press of `trigger`. Without Markdown assist the
 /// Markdown commands are off, so their keys keep the editor's own meaning:
 /// Ctrl+Enter breaks the line and Alt+↑ moves up. The suggest key is the
-/// editor's either way.
-pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool) -> KeyRoute {
+/// editor's either way. With `tasks` on the toggle writes stamps, which
+/// the app does, so its key comes back to the app as the command.
+pub(super) fn key_route(
+    keymap: &Keymap,
+    trigger: &Accel,
+    markdown_assist: bool,
+    tasks: bool,
+) -> KeyRoute {
     match keymap.action(trigger).and_then(CommandId::parse) {
         None => KeyRoute::Pass,
         Some(id) => match id.editor_route() {
             None => KeyRoute::Host,
             Some(KeyRoute::Intent(_)) if !markdown_assist => KeyRoute::Pass,
+            Some(KeyRoute::Intent(wren_editor::Intent::ToggleTask)) if tasks => {
+                KeyRoute::Command(id.payload())
+            }
             Some(route) => route,
         },
     }
 }
 
 /// The keymap layer of a command key; `None` for a key that names none.
-fn layer_of(action: &str) -> Option<Layer> {
+pub(super) fn layer_of(action: &str) -> Option<Layer> {
     CommandId::parse(action).map(|id| match id.scope() {
         Scope::Board => Layer::Board,
         Scope::App | Scope::Editor => Layer::Base,
@@ -235,6 +249,34 @@ fn read(path: Option<&Path>) -> (Option<String>, Settings) {
     }
 }
 
+/// The keymap of `platform`'s defaults and the user's `keybinds`, before
+/// the board bindings the app shadows are dropped. The task defaults join
+/// only while `tasks` is on.
+pub(super) fn build_keymap(
+    platform: Platform,
+    keybinds: &[(String, String)],
+    tasks: bool,
+) -> (Keymap, Vec<String>) {
+    let task_defaults = if tasks {
+        keybind::default_task_bindings(platform)
+    } else {
+        Vec::new()
+    };
+    Keymap::build(
+        keybind::default_bindings(platform)
+            .into_iter()
+            .chain(keybind::default_board_bindings(platform))
+            .chain(task_defaults),
+        keybinds,
+        // With tasks off a task command does not exist, so a `keybind`
+        // line naming one is an unknown action.
+        |action| {
+            layer_of(action)
+                .filter(|_| tasks || !CommandId::parse(action).is_some_and(CommandId::tasks))
+        },
+    )
+}
+
 impl Preferences {
     /// Load from `path`; `None` means defaults with nowhere to persist.
     pub fn load(path: Option<PathBuf>) -> Self {
@@ -242,6 +284,7 @@ impl Preferences {
         let mut preferences = Self {
             keymap: Keymap::default(),
             boards: settings.boards,
+            tasks: settings.tasks,
             settings,
             path,
             loaded,
@@ -252,14 +295,8 @@ impl Preferences {
     }
 
     pub(super) fn rebuild_keymap(&mut self) {
-        let platform = Platform::current();
-        let (mut keymap, mut warnings) = Keymap::build(
-            keybind::default_bindings(platform)
-                .into_iter()
-                .chain(keybind::default_board_bindings(platform)),
-            &self.settings.keybinds,
-            layer_of,
-        );
+        let (mut keymap, mut warnings) =
+            build_keymap(Platform::current(), &self.settings.keybinds, self.tasks);
         // A board binding on a trigger the base layer gives an App command
         // could never run, since the app's shortcut wins, and neither could
         // one on Escape, which `board_policy` keeps for the ladder; drop
@@ -338,10 +375,17 @@ impl Preferences {
         }
     }
 
-    /// What to say when the file asks for a `boards` value other than the
-    /// one the app launched with.
+    /// What to say when the file asks for a `boards` or `tasks` value other
+    /// than the one the app launched with.
     fn restart_notice(&self) -> Option<String> {
-        (self.settings.boards != self.boards).then(|| "Restart Wren to apply `boards`.".to_owned())
+        let waiting: Vec<&str> = [
+            ("`boards`", self.settings.boards != self.boards),
+            ("`tasks`", self.settings.tasks != self.tasks),
+        ]
+        .into_iter()
+        .filter_map(|(name, waits)| waits.then_some(name))
+        .collect();
+        (!waiting.is_empty()).then(|| format!("Restart Wren to apply {}.", waiting.join(" and ")))
     }
 
     fn warning(&self) -> Option<String> {
@@ -395,7 +439,7 @@ impl App {
                 .unwrap_or_else(|| self.preferences.theme(self.system_mode).0),
         };
         if theme != self.definition {
-            self.editor.close_spell_menu();
+            self.editor.close_popover();
             self.definition = theme;
             self.toolkit_theme = crate::theme::from_definition(theme);
             let palette = self.board_palette();
@@ -467,9 +511,10 @@ impl App {
     }
 
     /// Apply the settings to the theme and editor. A change of settings
-    /// closes the suggestions menu (rule 4.4.8).
+    /// closes the suggestions menu, as any popover of the editor's (rule
+    /// 4.4.8).
     pub(super) fn apply_preferences(&mut self) {
-        self.editor.close_spell_menu();
+        self.editor.close_popover();
         self.apply_shown();
         let settings = &self.preferences.settings;
         self.editor.set_line_height(settings.editor_line_height);
@@ -477,8 +522,12 @@ impl App {
         self.editor.set_line_numbers(settings.line_numbers);
         let assist = self.markdown_assist();
         self.editor.set_markdown_assist(assist);
-        self.editor
-            .set_key_policy(key_policy(&self.preferences.keymap, assist));
+        self.editor.set_key_policy(key_policy(
+            &self.preferences.keymap,
+            assist,
+            self.preferences.tasks,
+        ));
+        self.sync_task_options();
         let covered = self.board_covered();
         if let Some(view) = &mut self.board {
             view.set_key_policy(board_policy(&self.preferences.keymap));
@@ -494,14 +543,18 @@ impl App {
         self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
     }
 
-    /// Bring the editor's Markdown keys, and its proofreader, in step with
-    /// the surface.
+    /// Bring the editor's Markdown keys, its task menus and its
+    /// proofreader in step with the surface.
     pub(super) fn apply_markdown_assist(&mut self) {
+        self.sync_task_menus();
         let assist = self.markdown_assist();
         if assist != self.editor.markdown_assist() {
             self.editor.set_markdown_assist(assist);
-            self.editor
-                .set_key_policy(key_policy(&self.preferences.keymap, assist));
+            self.editor.set_key_policy(key_policy(
+                &self.preferences.keymap,
+                assist,
+                self.preferences.tasks,
+            ));
         }
         self.sync_proofreader();
     }
@@ -763,8 +816,11 @@ impl App {
     /// rebuilds the menu keeps or leaves out the Board menu as before.
     #[cfg(target_os = "macos")]
     pub(super) fn install_menu(&mut self) {
-        let installed =
-            crate::macos_menu::install(&self.preferences.keymap, self.preferences.boards);
+        let installed = crate::macos_menu::install(
+            &self.preferences.keymap,
+            self.preferences.boards,
+            self.preferences.tasks,
+        );
         // The new items start enabled, whatever the last sync set.
         self.menu_inputs = None;
         if let Err(error) = installed {
@@ -905,9 +961,43 @@ impl App {
 
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
+        // A press of Escape the calendar's field took: it was the
+        // calendar's alone.
+        if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape))
+            && (self.take_calendar_escape() || self.take_form_escape())
+        {
+            return Task::none();
+        }
+        // The task form owns the keyboard: its own keys took what it gives
+        // a meaning, Escape and its save keys included (`form_keys.rs`), so
+        // they are taken only once the form is shown, never while an input
+        // method composes or its calendar is open; of the app's shortcuts
+        // only quitting runs.
+        if self.task_form.is_some() {
+            return match input {
+                Input::Nav(Nav::Escape | Nav::FieldEscape) => self.update(Message::Escape),
+                Input::Nav(_) => Task::none(),
+                Input::Accel(accel) => {
+                    match self
+                        .preferences
+                        .keymap
+                        .action(&accel)
+                        .and_then(CommandId::parse)
+                    {
+                        Some(CommandId::Quit) => self.run_shortcut(CommandId::Quit),
+                        _ => Task::none(),
+                    }
+                }
+            };
+        }
         let accel = match input {
-            // The editor leaves Escape to the app while its menu is open.
-            Input::Nav(Nav::Escape | Nav::FieldEscape) if self.editor.close_spell_menu() => {
+            // A press the editor's popover has already taken, in the key's
+            // order with the typing around it, does nothing more here. The
+            // suggestions menu is closed from here instead: the editor
+            // leaves it Escape with no word.
+            Input::Nav(Nav::Escape | Nav::FieldEscape)
+                if self.editor.take_claimed_escape() || self.editor.dismiss_popover() =>
+            {
                 return Task::none();
             }
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),
@@ -993,7 +1083,7 @@ impl App {
         // palette owns the keyboard: only the palette shortcut (to close it)
         // gets through.
         if id != CommandId::Quit {
-            if self.dialog.is_some() {
+            if self.dialog.is_some() || self.task_form.is_some() {
                 return Task::none();
             }
             if let Some(palette) = &self.palette {
@@ -1614,7 +1704,7 @@ mod tests {
             layer_of,
         );
         assert!(warnings.is_empty());
-        let policy = key_policy(&keymap, true);
+        let policy = key_policy(&keymap, true, false);
         let (editing, app) = match Platform::current() {
             Platform::Mac => (Modifiers::LOGO, Modifiers::LOGO),
             Platform::Linux => (Modifiers::CTRL, Modifiers::ALT),
@@ -1674,7 +1764,7 @@ mod tests {
         );
         // Without assist the editor commands' keys are the editor's own
         // again, and the app's stay the app's.
-        let plain = key_policy(&keymap, false);
+        let plain = key_policy(&keymap, false, false);
         assert_eq!(
             plain(
                 &Key::Named(Named::Enter),

@@ -109,8 +109,14 @@ beside the text you are writing.
 - **Toggle a task** checks `- [ ] a` as `- [x] a` and back. A list item
   or a plain line becomes an open task (`- a` and `a` both become
   `- [ ] a`), and a numbered item keeps its number (`1. [ ] a`). Over a
-  selection, every task is checked if any is open, otherwise all are
-  reopened.
+  selection that holds a task, every task that is not done is checked if
+  any is unfinished (open, doing, or a box with no status of its own), and
+  a done task stays as it is; otherwise all are reopened, cancelled ones
+  too. Lines that are not tasks get a box only when the selection holds no
+  task. With `tasks = on`, checking a task also writes today's done date
+  (`✅ 2026-11-19`) and reopening one removes it, and a cancelled task
+  (`[-]`) reopens and loses its `❌` date. Typing `x` between the brackets
+  yourself writes no date. See [Tasks](../reference/tasks.md#toggle-a-task).
 - **Bold, Italic, and Inline code** wrap the selection, or the word at the
   cursor, in `**`, `*`, or `` ` ``; with no word there, they insert an empty
   pair around the cursor. Pressing the key again on wrapped text unwraps it.
@@ -140,6 +146,143 @@ corrections, ↵ replaces the word, and Esc closes the menu. Like the
 Markdown commands, the key belongs to the editor, and the palette lists
 the command under **Markdown**; unlike them, it works whether or not
 Markdown assist is on. See [Spell check](../reference/spell-check.md).
+
+### Task menus
+
+With `tasks = on`, on the `advanced` engine, a right-click on a task line,
+or on a line of its text after the box, opens a menu of what can be done to
+the task; on a misspelled word the
+corrections menu comes first, as before. A right-click on the box opens
+the status menu, on the priority glyph the priority menu, and on the due
+date the calendar (below); anywhere else on the line it opens the task
+menu, which holds the status rows, **Set due date…** (which opens the
+calendar; it reads **Change due date…** when the task has one),
+**Priority…** (which opens the priority menu) and **Edit task…** (which
+opens the [task form](#the-task-form) for the task you clicked, whatever
+line the caret is on).
+
+Each menu marks the task's current status or priority and opens on it; an
+unknown box has no status row to mark. ↑
+and ↓ move, ↵ chooses, Esc closes it and writes nothing, and a single key
+chooses a row directly:
+
+| Menu | Keys |
+|---|---|
+| Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
+| Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
+| Task | the status keys, then `d` Set or Change due date…, `p` Priority…, `e` Edit task… |
+
+A choice rewrites the task's line as one undo step, with the done or
+cancelled date the status asks for. A click on a task's box cycles its
+status, open → doing → done → open; a cancelled task reopens. The caret
+stays where it was. A box with a character that has no status (`[?]`,
+`[>]`) is not cycled: the click places the caret, and the right-click menu
+still sets its status. The status changes 300 ms after the press, once a
+double click could no longer follow; a second click in that time cancels
+it. While the button is held, a key, another button, a modifier or the
+window losing focus cancels it too. A click with a modifier held, a drag
+that starts on the box, and a press let go off the box select text or place
+the caret as they would anywhere else.
+
+**Set task due date** (⌘D / Ctrl+D) opens the calendar at the caret's
+task, on the `advanced` engine: on the task's due date, or today, hung
+under the date or the caret. Its field has the keyboard:
+
+| Key | Does |
+|---|---|
+| Typing | a date: `today`, `tomorrow`, a weekday (`fri`, the next one), `next mon`, `+3d`, `+2w`, `+1m`, or `2026-12-01` |
+| ↑ ↓ | a week earlier or later |
+| ← → | a day earlier or later, while the field is empty |
+| PgUp PgDn | a month earlier or later |
+| ↵ | writes the date, or replaces the one there |
+| Esc | closes it and writes nothing |
+
+The line under the field says what ↵ would write, or that the field holds
+no date, in which case ↵ writes nothing. A click on a day or on a quick
+pick writes it at once, and **Clear** removes the due date. A new date is
+written as `📅 2026-12-01`, before any done or cancelled date and the
+`^block-id` that follow it; a date already there is changed where it
+stands, keeping a `🗓`, a `📆` or a `[due:: …]` as written. Each is one undo
+step. A click outside the
+calendar, a scroll, or a change to the note closes it and writes nothing.
+Keys typed in the same instant as ⌘D / Ctrl+D, before the calendar shows,
+are dropped rather than typed into the note.
+
+### The task form
+
+**Create or edit task** (⇧⌘↵ / Ctrl+Shift+Enter, `task.edit`, or **Edit
+task…** in the task menu) opens a form for the line at the caret, on either
+engine: the description, the status, the due date, the priority and the
+owners, with a **Writes** line that shows the Markdown saving will write as
+you change them. It hangs near the top of the window, as the palette does,
+so the calendar can open under its due field. On a task it edits the task.
+On a blank line or an empty list item it makes a new task (`- [ ] `, inside
+a quote when the line is in one). On a list item or a line of text that is
+not a task it makes that text a task, with the text as the description, as
+**Toggle task** would. A heading, a thematic break, a code block or front
+matter has no form.
+
+| Key | Does |
+|---|---|
+| Tab, ⇧Tab | the next or the previous field, round the ends: description, status, due, priority, owners, Save, Cancel |
+| ← → | on the status or the priority, the previous or the next choice |
+| Space `/` `x` `-` | on the status, Open, Doing, Done or Cancelled |
+| `h` `m` `l` ⇧H ⇧L `n` | on the priority, High, Medium, Low, Highest, Lowest or None |
+| ↓ | in the due field, opens the calendar under it; whatever closes it gives the due field the keyboard back |
+| ↵ | saves, from any field but these: in the owners field with a name typed it adds that name as typed, or the owner chosen with ↑ ↓; on Save or Cancel it presses the button |
+| Space | on Save or Cancel, presses the button |
+| ↑ ↓ | in the owners field, choose among the owners already used in the workspace |
+| Tab | in the owners field with a name typed, adds the owner chosen with ↑ ↓, or else the first offered, then moves on |
+| ⌫ | in an empty owners field, removes the last owner |
+| Esc | in the owners field with a name typed, empties it; otherwise closes the form and writes nothing |
+| ⇧⌘↵ / Ctrl+Shift+Enter, ⌘↵ / Ctrl+Enter | save, from any field |
+
+A click outside the form closes it and writes nothing. The due field takes
+the same [date words](../reference/tasks.md#date-words) as the calendar; the
+line under it says what it names. A name left typed in the owners field is
+in the **Writes** line, and saved, as typed. Removing an owner and adding
+the name back puts the mention back where it was written.
+
+Saving writes only the fields you changed, as one undo step, so a line you
+wrote in your own order keeps it, and saving a form you did not change on
+a task writes nothing (on a line that is not a task yet, it makes the
+task). A due date already on the task that names no real day is kept as
+written when you change only other fields. A due field you typed that is
+not a date, or not a real day, cannot be saved: the line under it says so
+and the form stays open. If the note changed while the form was open (it
+was reloaded from disk, say), saving says so and writes nothing; Cancel and
+open the form again.
+
+While the form is open, the app's shortcuts do nothing, except Quit. A key
+that saves, cancels, presses a button or opens the calendar is the last
+input the form takes from its batch: keys typed in the same instant after
+it are dropped, not typed into the note. While an input method is
+composing, Enter and Esc belong to it. Closing the form gives the editor
+the keyboard back with its caret where it was.
+
+### Task suggestions
+
+With `tasks = on` and `tasks-suggest = on`, on the `advanced` engine, a
+task line offers a short list under the word you type. Two letters at the
+start of a word open a due date or a priority, never in the description's
+first word; `@` alone opens owners, in the first word too. See
+[Tasks](../reference/tasks.md#suggestions) for what each word offers.
+
+| Key | Does |
+|---|---|
+| Tab | picks the highlighted row |
+| ↑ ↓ | move; ↵ then picks the row moved to |
+| ↵ | with no ↑ or ↓ first, continues the list and keeps the word as typed. Only **Due date…** for `du`, `da` or `dat` opens the calendar |
+| Esc | hides the list for the rest of the line |
+| any other key | types, and the list follows the word |
+
+An owner is picked by Tab, or by ↑ or ↓ and ↵; ↵ alone never completes a
+name. A row that ↵ alone would not pick is drawn lightly, with "Tab picks
+· ↑↓ ↵" under the list. With no list open, Tab indents and ↵ continues the
+list as always. The list opens only with the caret at the end of a word,
+and not while an input method is composing. Tab typed in the same instant
+as the word, before the list shows, is dropped, and ↵ then continues the
+list (only **Due date…** still opens the calendar).
 
 ## Jumping to a heading
 
@@ -347,6 +490,22 @@ editor.toggle_markdown_assist  editor.toggle_engine
 editor.toggle_spell_check  editor.spell_suggest  settings.open_words
 note.new_board  note.export_svg  note.export_png  note.export_drawio
 ```
+
+With `tasks = on`, the task line commands can be bound too; they act on
+the task at the caret, and only `task.set_due` (⌘D / Ctrl+D) and
+`task.edit` (⇧⌘↵ / Ctrl+Shift+Enter) have default keys:
+
+```
+task.set_status  task.cycle_status  task.set_priority  task.priority.high
+task.priority.medium  task.priority.low  task.priority.highest
+task.priority.lowest  task.priority.none  task.priority.raise
+task.priority.lower  task.set_due  task.clear_due  task.edit
+```
+
+`task.set_status` and `task.set_priority` open the status and priority
+menus, and `task.set_due` the calendar, described under
+[Task menus](#task-menus), on the `advanced` engine. `task.edit` opens the
+task form, on either engine.
 
 The board actions are listed under [On a board](#on-a-board).
 

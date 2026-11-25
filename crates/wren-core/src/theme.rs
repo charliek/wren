@@ -45,6 +45,10 @@ pub struct Colors {
     /// The text of completed tasks and struck-through words: readable, but
     /// quieter than `body`. Their markers and strike lines stay `faint`.
     pub completed: Rgb,
+    /// A task's due date in the editor; an overdue one takes `danger`.
+    pub date: Rgb,
+    /// A task's `@owner` in the editor.
+    pub owner: Rgb,
     /// Selected rows in columns without keyboard focus.
     pub selected_inactive: Rgb,
     /// The editor's text-selection fill, kept apart from list rows so faint
@@ -104,6 +108,8 @@ pub const WREN_DARK: Theme = Theme {
         code_block: Rgb(0x18, 0x1b, 0x21),
         quote: Rgb(0xa3, 0xaa, 0xb5),
         completed: Rgb(0xa3, 0xaa, 0xb5),
+        date: Rgb(0x72, 0xd6, 0xe3),
+        owner: Rgb(0x7e, 0xb1, 0xe7),
         selected_inactive: Rgb(0x20, 0x24, 0x2c),
         text_selection: Rgb(0x28, 0x30, 0x42),
         red: Rgb(0xfd, 0x94, 0x94),
@@ -149,6 +155,8 @@ pub const WREN_LIGHT: Theme = Theme {
         code_block: Rgb(0xef, 0xf1, 0xf5),
         quote: Rgb(0x58, 0x61, 0x70),
         completed: Rgb(0x58, 0x61, 0x70),
+        date: Rgb(0x04, 0x77, 0x84),
+        owner: Rgb(0x04, 0x4e, 0xa4),
         selected_inactive: Rgb(0xe2, 0xe7, 0xed),
         text_selection: Rgb(0xd3, 0xde, 0xf0),
         red: Rgb(0xbd, 0x36, 0x3d),
@@ -194,6 +202,8 @@ pub const NORD: Theme = Theme {
         code_block: Rgb(0x2a, 0x2f, 0x3a),
         quote: Rgb(0xc0, 0xc8, 0xd6),
         completed: Rgb(0xa8, 0xb2, 0xc3),
+        date: Rgb(0x92, 0xd3, 0xe3),
+        owner: Rgb(0x83, 0xb4, 0xe0),
         selected_inactive: Rgb(0x3d, 0x44, 0x56),
         text_selection: Rgb(0x40, 0x48, 0x60),
         red: Rgb(0xed, 0x7b, 0x8e),
@@ -239,6 +249,8 @@ pub const GRUVBOX_DARK: Theme = Theme {
         code_block: Rgb(0x1d, 0x20, 0x21),
         quote: Rgb(0xbd, 0xae, 0x93),
         completed: Rgb(0xbd, 0xae, 0x93),
+        date: Rgb(0x4e, 0xb1, 0xa0),
+        owner: Rgb(0x72, 0x9d, 0xbb),
         selected_inactive: Rgb(0x3c, 0x38, 0x36),
         text_selection: Rgb(0x45, 0x40, 0x3a),
         red: Rgb(0xff, 0x56, 0x3d),
@@ -284,6 +296,8 @@ pub const SOLARIZED_LIGHT: Theme = Theme {
         code_block: Rgb(0xf2, 0xe9, 0xce),
         quote: Rgb(0x58, 0x6e, 0x75),
         completed: Rgb(0x58, 0x6e, 0x75),
+        date: Rgb(0x02, 0x69, 0x60),
+        owner: Rgb(0x21, 0x6f, 0xab),
         selected_inactive: Rgb(0xeb, 0xe3, 0xca),
         text_selection: Rgb(0xe9, 0xe0, 0xc0),
         red: Rgb(0x85, 0x00, 0x04),
@@ -329,6 +343,8 @@ pub const ROSE_PINE: Theme = Theme {
         code_block: Rgb(0x21, 0x1f, 0x30),
         quote: Rgb(0xb6, 0xb2, 0xcf),
         completed: Rgb(0x98, 0x93, 0xb2),
+        date: Rgb(0x88, 0xcc, 0xd5),
+        owner: Rgb(0x5c, 0x8d, 0xaf),
         selected_inactive: Rgb(0x26, 0x23, 0x3a),
         text_selection: Rgb(0x2f, 0x2b, 0x45),
         red: Rgb(0xec, 0x72, 0x93),
@@ -374,6 +390,8 @@ pub const EVERFOREST_DARK: Theme = Theme {
         code_block: Rgb(0x28, 0x30, 0x35),
         quote: Rgb(0xa9, 0xb4, 0xab),
         completed: Rgb(0xa9, 0xb4, 0xab),
+        date: Rgb(0x8e, 0xd2, 0xcd),
+        owner: Rgb(0x82, 0xa9, 0xe6),
         selected_inactive: Rgb(0x3a, 0x44, 0x49),
         text_selection: Rgb(0x40, 0x50, 0x4a),
         red: Rgb(0xe2, 0x83, 0x89),
@@ -419,6 +437,8 @@ pub const TOKYO_NIGHT: Theme = Theme {
         code_block: Rgb(0x16, 0x16, 0x1e),
         quote: Rgb(0x9a, 0xa5, 0xce),
         completed: Rgb(0x9a, 0xa5, 0xce),
+        date: Rgb(0xa3, 0xf5, 0xff),
+        owner: Rgb(0x69, 0x92, 0xe3),
         selected_inactive: Rgb(0x26, 0x2a, 0x3d),
         text_selection: Rgb(0x25, 0x2d, 0x49),
         red: Rgb(0xf4, 0x6d, 0x86),
@@ -464,6 +484,8 @@ pub const DRACULA: Theme = Theme {
         code_block: Rgb(0x22, 0x23, 0x2e),
         quote: Rgb(0xc0, 0xc3, 0xab),
         completed: Rgb(0xb8, 0xbc, 0xd8),
+        date: Rgb(0x8e, 0xe9, 0xfd),
+        owner: Rgb(0x84, 0xb1, 0xff),
         selected_inactive: Rgb(0x34, 0x37, 0x46),
         text_selection: Rgb(0x3a, 0x3d, 0x4e),
         red: Rgb(0xfe, 0x60, 0x61),
@@ -509,6 +531,8 @@ pub const CATPPUCCIN_MOCHA: Theme = Theme {
         code_block: Rgb(0x18, 0x18, 0x25),
         quote: Rgb(0xa6, 0xad, 0xc8),
         completed: Rgb(0xa6, 0xad, 0xc8),
+        date: Rgb(0x79, 0xc5, 0xd2),
+        owner: Rgb(0x72, 0xa0, 0xe7),
         selected_inactive: Rgb(0x2e, 0x2f, 0x41),
         text_selection: Rgb(0x31, 0x32, 0x4c),
         red: Rgb(0xe9, 0x7d, 0x9d),
@@ -554,6 +578,8 @@ pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
         code_block: Rgb(0x1e, 0x20, 0x30),
         quote: Rgb(0xa5, 0xad, 0xcb),
         completed: Rgb(0xa5, 0xad, 0xcb),
+        date: Rgb(0x77, 0xc1, 0xce),
+        owner: Rgb(0x78, 0x99, 0xdb),
         selected_inactive: Rgb(0x31, 0x35, 0x4a),
         text_selection: Rgb(0x36, 0x3a, 0x53),
         red: Rgb(0xee, 0x84, 0x94),
@@ -798,6 +824,59 @@ mod tests {
             ] {
                 assert!(distance(a, b) >= 40.0, "{}: {a:?} vs {b:?}", theme.name);
             }
+        }
+    }
+
+    /// A task's due date and owner are read where the text is: on the
+    /// editor, on the caret's line and inside a selection. They hold the
+    /// reading-text bar on the first two and the bar the other syntax
+    /// colours hold in a selection. An overdue date reuses `danger`, which
+    /// the editor draws bold and which predates tasks; it must stay legible
+    /// on the caret's line and in a selection, though in one theme it sits
+    /// below the reading-text bar there.
+    #[test]
+    fn task_colours_are_readable_where_the_text_is_and_read_apart() {
+        let distance = |Rgb(r1, g1, b1): Rgb, Rgb(r2, g2, b2): Rgb| {
+            let d = |a: u8, b: u8| (f64::from(a) - f64::from(b)).powi(2);
+            (d(r1, r2) + d(g1, g2) + d(b1, b2)).sqrt()
+        };
+        for theme in BUILT_INS {
+            let c = theme.colors;
+            let name = theme.name;
+            for (role, color) in [("date", c.date), ("owner", c.owner)] {
+                for (surface, background) in
+                    [("editor", c.editor), ("current line", c.current_line)]
+                {
+                    assert!(
+                        contrast(color, background) >= 4.5,
+                        "{name}: {role} on the {surface}"
+                    );
+                }
+                assert!(
+                    contrast(color, c.text_selection) >= 3.5,
+                    "{name}: {role} in a selection"
+                );
+                // A coloured token must not read as body text, nor a due
+                // date as an overdue one.
+                assert!(distance(color, c.body) >= 40.0, "{name}: {role} vs body");
+                assert!(
+                    distance(color, c.danger) >= 40.0,
+                    "{name}: {role} vs overdue"
+                );
+            }
+            assert!(
+                distance(c.date, c.owner) >= 30.0,
+                "{name}: a date vs an owner"
+            );
+            assert!(contrast(c.danger, c.editor) >= 4.5, "{name}: overdue");
+            assert!(
+                contrast(c.danger, c.current_line) >= 3.5,
+                "{name}: overdue on the current line"
+            );
+            assert!(
+                contrast(c.danger, c.text_selection) >= 3.0,
+                "{name}: overdue in a selection"
+            );
         }
     }
 

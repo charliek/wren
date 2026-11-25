@@ -22,8 +22,25 @@ use crate::layers::layers;
 use crate::panes::{self, Pane};
 use crate::{fonts, theme};
 
+/// The width below which the editor's footer drops its counts and the
+/// caret's task, leaving the position and the save status: inside its
+/// insets for the counts, as it always was, and across them for the task.
+const NARROW_FOOTER: f32 = 440.0;
+
+/// The editor footer's insets at either side.
+const FOOTER_INSET: f32 = 16.0;
+
+/// The space between the parts of the editor's footer.
+const FOOTER_GAP: f32 = 16.0;
+
+/// The footer's button for a failed save.
+const RETRY: &str = "Retry save";
+
+/// A small button's padding, vertical and horizontal.
+const SMALL_BUTTON_PADDING: [f32; 2] = [5.0, 9.0];
+
 /// The footer's height under the editor or a board, its rule included.
-const FOOTER: f32 = 30.0;
+pub(super) const FOOTER: f32 = 30.0;
 
 impl App {
     /// The width of the browser columns left of the editor; 0 when hidden.
@@ -1031,7 +1048,7 @@ impl App {
         let footer = chrome::top_rule(
             container(responsive(move |size| self.editor_footer(size.width)))
                 .height(FOOTER - 1.0)
-                .padding([6, 16]),
+                .padding([6.0, FOOTER_INSET]),
             self.definition,
         );
         // The footer is a layer over the column, which keeps its room: a
@@ -1057,6 +1074,7 @@ impl App {
         .into()
     }
 
+    /// The footer under the editor, `width` wide inside its insets.
     fn editor_footer(&self, width: f32) -> Element<'_, Message> {
         if let Some(view) = &self.board {
             return self.board_footer(view, width);
@@ -1064,41 +1082,74 @@ impl App {
         let colors = self.definition.colors;
         let (status, status_color) = self.save_status();
         let cursor = self.editor.cursor();
-        let stats = if width < 440.0 {
-            String::new()
-        } else if self.surface() == Surface::Raw {
-            format!("Board as text · {} lines", self.editor.line_count())
-        } else {
-            format!(
-                "Markdown · {} lines · {} words",
-                self.editor.line_count(),
-                self.words
-            )
-        };
-        let mut footer = row![
-            chrome::label(stats, 11, colors.muted),
-            iced::widget::space::horizontal(),
-            chrome::label(
-                format!(
-                    "Ln {}, Col {}",
-                    cursor.position.line + 1,
-                    cursor.position.column + 1
-                ),
-                11,
-                colors.muted
-            ),
-            chrome::label(format!("● {status}"), 11, status_color)
-        ]
-        .spacing(16)
-        .align_y(iced::Center)
-        .clip(true);
-        if self.session.as_ref().is_some_and(|session| {
+        let position = format!(
+            "Ln {}, Col {}",
+            cursor.position.line + 1,
+            cursor.position.column + 1
+        );
+        let status = format!("● {status}");
+        let retry = self.session.as_ref().is_some_and(|session| {
             session
                 .document()
                 .is_some_and(|document| document.error.is_some())
                 || session.pending_durability()
-        }) {
-            footer = footer.push(self.small_button("Retry save", Message::Core(Op::Flush)));
+        });
+        // The caret's task goes where the counts go, after the line count,
+        // and takes the room the rest leaves: the position, the save status
+        // and its Retry keep theirs. Pieces that do not fit drop whole from
+        // the end, and with none left the footer is as it is off a task,
+        // but for counts that would crowd the save status, which go.
+        let summary = (width + 2.0 * FOOTER_INSET >= NARROW_FOOTER)
+            .then(|| self.caret_task())
+            .flatten();
+        let label = |content: &str| self.label_widths.of(content, 11.0, fonts::UI);
+        // The position, the save status and Retry, and the gaps between the
+        // footer's parts.
+        let fixed = || {
+            let mut fixed = label(&position) + label(&status) + 3.0 * FOOTER_GAP;
+            if retry {
+                fixed += self.label_widths.of(RETRY, 12.0, fonts::UI)
+                    + 2.0 * SMALL_BUTTON_PADDING[1]
+                    + FOOTER_GAP;
+            }
+            fixed
+        };
+        let task = summary.as_ref().and_then(|summary| {
+            let counts = format!("Markdown · {} lines", self.editor.line_count());
+            let room = width - label(&counts) - fixed();
+            Some((counts, self.task_line(summary, room, 11.0)?))
+        });
+        let (stats, middle) = match task {
+            Some((counts, line)) => (counts, line),
+            None => {
+                let mut stats = if width < NARROW_FOOTER {
+                    String::new()
+                } else if self.surface() == Surface::Raw {
+                    format!("Board as text · {} lines", self.editor.line_count())
+                } else {
+                    format!(
+                        "Markdown · {} lines · {} words",
+                        self.editor.line_count(),
+                        self.words
+                    )
+                };
+                if summary.is_some() && !stats.is_empty() && label(&stats) > width - fixed() {
+                    stats.clear();
+                }
+                (stats, iced::widget::space::horizontal().into())
+            }
+        };
+        let mut footer = row![
+            chrome::label(stats, 11, colors.muted),
+            middle,
+            chrome::label(position, 11, colors.muted),
+            chrome::label(status, 11, status_color)
+        ]
+        .spacing(FOOTER_GAP)
+        .align_y(iced::Center)
+        .clip(true);
+        if retry {
+            footer = footer.push(self.small_button(RETRY, Message::Core(Op::Flush)));
         }
         footer.into()
     }
@@ -1203,7 +1254,7 @@ impl App {
     fn small_button<'a>(&'a self, label: &'a str, message: Message) -> button::Button<'a, Message> {
         button(text(label).size(12))
             .on_press(message)
-            .padding([5, 9])
+            .padding(SMALL_BUTTON_PADDING)
             .style(move |_, status| chrome::control(self.definition, status, false, false))
     }
 

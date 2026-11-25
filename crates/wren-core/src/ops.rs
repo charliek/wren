@@ -138,8 +138,28 @@ pub trait Trash: Send {
     fn trash(&mut self, path: &Path) -> Result<(), String>;
 }
 
-pub fn dated_title() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+/// Today in local time, kept to the years 1 to 9999 a date can spell: a
+/// clock outside them reads as the nearest end.
+pub fn local_today() -> wren_markdown::date::Date {
+    use chrono::Datelike;
+    let today = chrono::Local::now().date_naive();
+    civil(today.year(), today.month(), today.day())
+}
+
+/// The date chrono gives as `year`, `month` and `day`, or the nearest end
+/// of the four-digit years for one outside them.
+fn civil(year: i32, month: u32, day: u32) -> wren_markdown::date::Date {
+    use wren_markdown::date::Date;
+    if year < 1 {
+        return Date::new(1, 1, 1).expect("1 January of year 1 is a date");
+    }
+    let last = Date::new(9999, 12, 31).expect("31 December 9999 is a date");
+    u16::try_from(year)
+        .ok()
+        .zip(u8::try_from(month).ok())
+        .zip(u8::try_from(day).ok())
+        .and_then(|((year, month), day)| Date::new(year, month, day))
+        .unwrap_or(last)
 }
 
 pub struct SystemTrash;
@@ -215,6 +235,9 @@ pub const INDEX_REST: Duration = Duration::from_millis(250);
 pub struct SessionOptions {
     /// Whether board notes are scanned, listed, indexed and opened.
     pub boards: bool,
+    /// Whether the app's tasks are on: previews and search snippets then
+    /// read a task box of any status, as the editor does.
+    pub tasks: bool,
 }
 
 impl SessionOptions {
@@ -224,6 +247,10 @@ impl SessionOptions {
         } else {
             scan::Kinds::MARKDOWN
         }
+    }
+
+    fn boxes(self) -> wren_markdown::block::Boxes {
+        wren_markdown::block::Boxes::with_tasks(self.tasks)
     }
 }
 
@@ -314,7 +341,7 @@ impl Session {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
-        let mut index = Index::default();
+        let mut index = Index::with_boxes(options.boxes());
         let mut model =
             scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
                 index.ingest(note, contents);
@@ -1917,6 +1944,34 @@ mod tests {
     }
 
     #[test]
+    fn local_today_is_the_local_calendar_date() {
+        // Read on both sides of the call, so a midnight between them still
+        // gives one of the two days.
+        let local = || chrono::Local::now().format("%Y-%m-%d").to_string();
+        let before = local();
+        let today = local_today().to_string();
+        let after = local();
+        assert!(today == before || today == after, "{today}");
+    }
+
+    #[test]
+    fn a_clock_outside_the_four_digit_years_reads_as_the_nearest_end() {
+        for (year, month, day, expected) in [
+            (2026, 11, 19, "2026-11-19"),
+            (1, 1, 1, "0001-01-01"),
+            (9999, 12, 31, "9999-12-31"),
+            (0, 6, 15, "0001-01-01"),
+            (-44, 3, 15, "0001-01-01"),
+            (i32::MIN, 1, 1, "0001-01-01"),
+            (10000, 1, 1, "9999-12-31"),
+            (262_143, 12, 31, "9999-12-31"),
+            (i32::MAX, 1, 1, "9999-12-31"),
+        ] {
+            assert_eq!(civil(year, month, day).to_string(), expected, "{year}");
+        }
+    }
+
+    #[test]
     fn periodic_reconciliation_without_a_watcher_refreshes_exact_closed_note_bytes() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("S/H")).unwrap();
@@ -2029,7 +2084,14 @@ mod tests {
         };
         fs::write(root.path().join("S/G/Flow.wren-board"), text("Start")).unwrap();
         fs::write(root.path().join("S/G/Note.md"), "note\n").unwrap();
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        let mut session = Session::open_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        )
+        .unwrap();
         session.watcher = None;
         let board = id_at(&session, "S/G/Flow.wren-board");
         let ms = Duration::from_millis;
@@ -2110,7 +2172,13 @@ mod tests {
     #[test]
     fn a_workspace_opens_without_parsing_a_board_and_the_first_job_extracts_them() {
         let root = labelled_boards(200);
-        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        let mut session = background_session_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        );
         assert_eq!(session.model.notes.len(), 201);
         let labelled = id_at(&session, "S/G/Board 123.wren-board");
         // The open read every board and parsed none.
@@ -2161,7 +2229,13 @@ mod tests {
     #[test]
     fn labels_a_job_took_from_an_older_source_are_not_kept() {
         let root = labelled_boards(2);
-        let mut session = background_session_with(root.path(), SessionOptions { boards: true });
+        let mut session = background_session_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        );
         let board = id_at(&session, "S/G/Board 1.wren-board");
         let result = begin(&mut session, 1).run();
         // Read again before the job returns: an own rescan finds the edit.
@@ -2187,7 +2261,14 @@ mod tests {
     #[test]
     fn without_a_job_boards_are_extracted_by_a_search_or_the_next_tick() {
         let root = labelled_boards(200);
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        let mut session = Session::open_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        )
+        .unwrap();
         session.watcher = None;
         let labelled = id_at(&session, "S/G/Board 123.wren-board");
         assert_eq!(session.index.extractions, 0);
@@ -2197,7 +2278,14 @@ mod tests {
         assert_eq!(found(&session, "label 123"), [labelled]);
         drop(session);
 
-        let mut session = Session::open_with(root.path(), SessionOptions { boards: true }).unwrap();
+        let mut session = Session::open_with(
+            root.path(),
+            SessionOptions {
+                boards: true,
+                tasks: false,
+            },
+        )
+        .unwrap();
         session.watcher = None;
         session.apply_at(Op::Tick, secs(1)).unwrap();
         assert_eq!(session.index.extractions, 200);

@@ -907,7 +907,7 @@ fn deselect_if_empty(editor: &mut cosmic_text::Editor<'static>) {
 }
 
 /// The visual row of `layout` holding `cursor`, and the caret's x in it.
-fn caret_row(
+pub(super) fn caret_row(
     layout: &[cosmic_text::LayoutLine],
     cursor: cosmic_text::Cursor,
 ) -> Option<(usize, f32)> {
@@ -1024,6 +1024,7 @@ mod tests {
             palette: fixtures::DARK,
             font: fixtures::FONT,
             front_matter_end: None,
+            tasks: None,
         })
     }
 

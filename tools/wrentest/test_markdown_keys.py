@@ -345,7 +345,11 @@ def test_markdown_commands_act_at_the_cursor_from_the_palette(keys_app) -> None:
 
         editor.load("- [ ] a", 0, 7)
         assert run(app, "markdown.toggle_task") == "completed"
-        assert (get()["text"], cursor(get())) == ("- [x] a", (0, 7))
+        # With tasks on (the lane's WRENTEST_TASKS), the toggle writes the
+        # done stamp, dated by the app's own today, after the caret.
+        state = app.client.call("tasks.get")
+        done = "- [x] a" + (f" ✅ {state['today']}" if state["tasks"] else "")
+        assert (get()["text"], cursor(get())) == (done, (0, 7))
         run(app, "markdown.toggle_task")
         assert get()["text"] == "- [ ] a"
         editor.load("plain", 0, 2)
@@ -469,18 +473,22 @@ def test_native_markdown_command_keys(keys_app) -> None:
 
         key("ctrl+End", "ctrl+Return")
         native_text(app, "# Title\n- [ ] hello world", "ctrl+Return makes a task")
+        # With tasks on the toggle also writes the done stamp, dated by the
+        # app's own today, after the caret.
+        state = call("tasks.get")
+        stamp = f" ✅ {state['today']}" if state["tasks"] else ""
         key("ctrl+Return")
-        native_text(app, "# Title\n- [x] hello world", "ctrl+Return checks it")
+        native_text(app, f"# Title\n- [x] hello world{stamp}", "ctrl+Return checks it")
         key("ctrl+b")
-        native_text(app, "# Title\n- [x] hello **world**", "ctrl+b bolds the word")
+        native_text(app, f"# Title\n- [x] hello **world**{stamp}", "ctrl+b bolds the word")
         key("ctrl+i")
-        native_text(app, "# Title\n- [x] hello ***world***", "ctrl+i adds italics")
+        native_text(app, f"# Title\n- [x] hello ***world***{stamp}", "ctrl+i adds italics")
         key("alt+Up")
-        native_text(app, "- [x] hello ***world***\n# Title", "alt+Up moves the line")
+        native_text(app, f"- [x] hello ***world***{stamp}\n# Title", "alt+Up moves the line")
         key("alt+Down")
-        native_text(app, "# Title\n- [x] hello ***world***", "alt+Down moves it back")
+        native_text(app, f"# Title\n- [x] hello ***world***{stamp}", "alt+Down moves it back")
         key("ctrl+z")
-        native_text(app, "- [x] hello ***world***\n# Title", "one undo per command")
+        native_text(app, f"- [x] hello ***world***{stamp}\n# Title", "one undo per command")
 
         # In the find bar the keys neither format the note nor type.
         key("ctrl+f")
@@ -489,7 +497,7 @@ def test_native_markdown_command_keys(keys_app) -> None:
         key("ctrl+b", "ctrl+Return", "alt+Up")
         typed("l")
         wait_for(lambda: call("editor.get")["find_query"] == "worl", description="find typing")
-        assert call("editor.get")["text"] == "- [x] hello ***world***\n# Title"
+        assert call("editor.get")["text"] == f"- [x] hello ***world***{stamp}\n# Title"
 
 
 @pytest.mark.native_x11

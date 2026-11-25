@@ -13,6 +13,58 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **Tasks** (`tasks = on` in `config.conf`, off by default; restart Wren to
+  apply). A task line's box takes a status: `[ ]` open, `[/]` doing,
+  `[x]` or `[X]` done, `[-]` cancelled, and any other character reads as
+  open.
+  After the description go a due date (`📅 2026-12-01`), a priority
+  (`🔺 ⏫ 🔼 🔽 ⏬`), `@owner`s, and the done and cancelled dates (`✅`,
+  `❌`), in Obsidian Tasks' syntax, with a few documented differences, and tokens
+  Wren does not write are kept as they are. See
+  [Tasks](https://charliek.github.io/wren/reference/tasks/). With tasks off, nothing changes.
+- **Task colours:** due dates, overdue dates (bold, in the danger colour),
+  owners, and done and cancelled tasks, dimmed and struck, in every theme
+  and both editor engines. Spell check skips the tokens.
+- **A status-bar line for the caret's task**, for example "Doing · due Mon
+  23 Nov, in 4 days · ⏫ High · @alice.chen".
+- **Toggle a task writes the date:** ⌘↵ / Ctrl+Enter adds `✅ <today>`
+  when a task becomes done and removes it when it reopens. Typing `x` in
+  the box yourself writes nothing.
+- **Task commands in the palette:** **Cycle task status**, **Set task
+  priority** at each level, **Raise** and **Lower task priority**,
+  **Remove task priority**, **Clear task due date**, **Set task status…**,
+  **Set task priority…**, **Set task due date…** and **Create or edit
+  task…**. ⌘D / Ctrl+D opens the calendar and ⇧⌘↵ / Ctrl+Shift+Enter opens
+  the form.
+- **Right-click menus on task lines** (advanced engine): the box opens the
+  status menu, a priority glyph the priority menu, a due date the
+  calendar, and the rest of the line the task menu. Each takes single
+  keys. A click on a box cycles open, doing, done.
+- **A calendar for the due date** (advanced engine): a month of days with
+  a field that takes `fri`, `next mon`, `+2w` or an ISO date, quick picks
+  and **Clear**.
+- **Suggestions while typing a task** (advanced engine, `tasks-suggest`):
+  two letters at the start of a word offer a due date or a priority, and `@`
+  alone offers an owner already used in the workspace. Tab picks; Enter never rewrites a word you meant.
+- **The task form:** description, status, due date, priority and owners, and
+  the Markdown it will write. It saves only what you changed, as one undo
+  step, and makes a task of a blank line, an empty list item, a list item
+  or a line of text. It refuses to save a due field that is not a date.
+- **`tasks-suggest`** turns the suggestions off.
+
+### Changed
+
+- The spelling menu is now one of several menus built on a shared anchored
+  popover. Its keys and look are the same.
+
+### Fixed
+
+- In a spelling menu, ↵ and a click on a row that arrive together now act
+  in that order, and keys typed while an input method is composing are no
+  longer taken by an open menu.
+
 ## v0.2.1 — 2026-11-19
 
 ### Added

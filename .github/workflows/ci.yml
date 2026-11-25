@@ -52,7 +52,7 @@ jobs:
       - run: make test-python
 
   linux-smoke:
-    name: Linux smoke (${{ matrix.display }}, ${{ matrix.renderer }})
+    name: Linux smoke (${{ matrix.display }}, ${{ matrix.renderer }}${{ matrix.tasks == 'on' && ', tasks on' || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -60,10 +60,15 @@ jobs:
       matrix:
         display: [x11, wayland]
         renderer: [wgpu, tiny-skia]
+        include:
+          - display: x11
+            renderer: tiny-skia
+            tasks: "on"
     env:
       DISPLAY_BACKEND: ${{ matrix.display }}
       ICED_BACKEND: ${{ matrix.renderer }}
       WRENTEST_ENGINE: classic,advanced
+      WRENTEST_TASKS: ${{ matrix.tasks }}
       WGPU_BACKEND: vulkan
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
@@ -74,7 +79,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xauth xdotool weston dbus-daemon dbus-x11 fonts-dejavu-core \
+            xvfb xauth xdotool weston dbus-daemon dbus-x11 fonts-dejavu-core fonts-noto-color-emoji \
             libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 libxinerama1 \
             libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
             libwayland-cursor0 libwayland-egl1 libegl1 libegl-mesa0 \

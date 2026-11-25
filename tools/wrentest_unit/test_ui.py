@@ -206,6 +206,7 @@ class _WrenAppTestBase(unittest.TestCase):
         self._environment.start()
         os.environ.pop("WRENTEST_SPELL", None)
         os.environ.pop("WRENTEST_BOARDS", None)
+        os.environ.pop("WRENTEST_TASKS", None)
 
     def tearDown(self) -> None:
         self._environment.stop()
@@ -355,10 +356,12 @@ class TestBuildEnv(unittest.TestCase):
                     "LANG": "en_US.UTF-8",
                     "GIO_USE_VFS": "local",
                     "GSETTINGS_BACKEND": "memory",
+                    "FONTCONFIG_FILE": "/tmp/fonts.conf",
                 },
                 clear=True,
             ):
                 env = ui._build_env(Path(d))
+        self.assertEqual(env["FONTCONFIG_FILE"], "/tmp/fonts.conf")
         self.assertEqual(env["DISPLAY"], ":99")
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertEqual(env["LANG"], "en_US.UTF-8")
@@ -544,6 +547,64 @@ class TestWrenAppReadiness(_WrenAppTestBase):
             with self.subTest(value=value), patch.dict(os.environ, {"WRENTEST_BOARDS": value}), \
                     self.assertRaisesRegex(ValueError, "WRENTEST_BOARDS"):
                 WrenApp(settings=None)
+
+    def test_wrentest_tasks_writes_an_explicit_tasks_line(self) -> None:
+        factory = self._make_popen(_good_identify())
+        cases = [
+            ("on", None, "spell-check = off\ntasks = on\n"),
+            ("off", "editor-engine = advanced\n",
+             "editor-engine = advanced\nspell-check = off\ntasks = off\n"),
+            # A task case that sets it itself keeps its own.
+            ("off", "tasks = on\n", "tasks = on\nspell-check = off\n"),
+        ]
+        for value, settings, expected in cases:
+            with self.subTest(value=value, settings=settings), \
+                    patch.dict(os.environ, {"WRENTEST_TASKS": value}), \
+                    patch.object(subprocess, "Popen", side_effect=factory):
+                with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                             settings=settings) as app:
+                    self.assertEqual(app.settings_path.read_text(encoding="utf-8"), expected)
+                    self.assertEqual(ui.tasks_setting(), value)
+        # After the boards line, when both lanes are set.
+        with patch.dict(os.environ, {"WRENTEST_TASKS": "on", "WRENTEST_BOARDS": "off"}), \
+                patch.object(subprocess, "Popen", side_effect=factory):
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
+                self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
+                                 "spell-check = off\nboards = off\ntasks = on\n")
+
+    def test_wrentest_tasks_unset_or_empty_adds_nothing(self) -> None:
+        for environment in ({}, {"WRENTEST_TASKS": ""}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                self.assertIsNone(ui._tasks_setting(None))
+                self.assertEqual(ui._tasks_setting("x = 1\n"), "x = 1\n")
+                self.assertIsNone(ui.tasks_setting())
+
+    def test_wrentest_tasks_must_be_off_or_on(self) -> None:
+        for value in ("yes", "ON", "1"):
+            with self.subTest(value=value), patch.dict(os.environ, {"WRENTEST_TASKS": value}), \
+                    self.assertRaisesRegex(ValueError, "WRENTEST_TASKS"):
+                WrenApp(settings=None)
+
+    def test_today_reaches_every_launch_as_wren_test_today(self) -> None:
+        seen = []
+        factory = self._make_popen(_good_identify())
+
+        def launch(cmd, **kwargs):
+            seen.append(kwargs["env"].get("WREN_TEST_TODAY"))
+            return factory(cmd, **kwargs)
+
+        with patch.object(subprocess, "Popen", side_effect=launch), \
+                patch.dict(os.environ, {"WREN_TEST_TODAY": "1999-01-01"}):
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                         today="2026-11-19") as app:
+                app.restart(hard=True)
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5):
+                pass
+        # The caller's own variable never leaks in.
+        self.assertEqual(seen, ["2026-11-19", "2026-11-19", None])
+        for value in ("2026-11-1", "today", 20261119):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "today"):
+                WrenApp(today=value)
 
     def test_settings_must_be_text(self) -> None:
         for value in (b"editor-engine = advanced", 1, ["editor-engine = advanced"]):

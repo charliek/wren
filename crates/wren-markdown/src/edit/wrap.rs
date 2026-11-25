@@ -13,9 +13,14 @@ pub(super) enum Style {
 
 /// Wrap the selection (or the word at the cursor) in `style`'s markers, or
 /// unwrap it when it is already wrapped.
-pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection, style: Style) -> EditPlan {
+pub(super) fn toggle<L: Lines + ?Sized>(
+    base: &L,
+    sel: Selection,
+    style: Style,
+    opts: &Options,
+) -> EditPlan {
     let sel = clamp_selection(base, sel);
-    let an = Analysis::new(base, None);
+    let an = Analysis::new(base, None, opts.boxes());
     let mut d = Draft::new(base);
     let (start, end) = (sel.start(), sel.end());
     let forward = sel.anchor <= sel.head;

@@ -12,7 +12,7 @@ pub(super) fn backspace<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Opti
         return delete_between(sel.start(), sel.end());
     }
     let p = sel.head;
-    if may_end_markup(&base.line(p.line)[..p.col]) {
+    if may_end_markup(&base.line(p.line)[..p.col], opts.boxes()) {
         if let Some(plan) = markup_or_indentation(base, p, sel, opts) {
             return plan;
         }
@@ -37,16 +37,27 @@ pub(super) fn backspace<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Opti
 
 /// Whether `before`, a line's text before the cursor, could all be
 /// indentation and markup: only then can rules 1 and 2 apply, and only then
-/// is the document scanned.
-pub(super) fn may_end_markup(before: &str) -> bool {
-    before.chars().all(|c| {
+/// is the document scanned. With [`Boxes::Status`] a task box may hold any
+/// character, so one between `[` and `]` is markup too.
+pub(super) fn may_end_markup(before: &str, boxes: Boxes) -> bool {
+    let markup = |c: char| {
         c.is_whitespace()
             || c.is_ascii_digit()
             || matches!(
                 c,
                 '>' | '-' | '*' | '+' | '.' | ')' | '[' | ']' | 'x' | 'X' | '#' | '\u{feff}'
             )
-    })
+    };
+    let mut previous = None;
+    let mut chars = before.chars().peekable();
+    while let Some(c) = chars.next() {
+        let symbol = boxes == Boxes::Status && previous == Some('[') && chars.peek() == Some(&']');
+        if !markup(c) && !symbol {
+            return false;
+        }
+        previous = Some(c);
+    }
+    true
 }
 
 /// Rules 1 and 2 at the caret `p`, when one applies.
@@ -56,7 +67,7 @@ pub(super) fn markup_or_indentation<L: Lines + ?Sized>(
     sel: Selection,
     opts: &Options,
 ) -> Option<EditPlan> {
-    let an = Analysis::new(base, Some(p.line));
+    let an = Analysis::new(base, Some(p.line), opts.boxes());
     let mut d = Draft::new(base);
     let mut marks = sel;
     let mut runs = Vec::new();
@@ -68,7 +79,7 @@ pub(super) fn markup_or_indentation<L: Lines + ?Sized>(
             for request in requests {
                 renumber(&mut d, &an, request, &mut marks);
             }
-            renumber_runs(&mut d, &runs, &[], &mut marks);
+            renumber_runs(&mut d, &runs, &[], opts.boxes(), &mut marks);
         }
         return Some(finish(base, &d, marks));
     }
@@ -104,10 +115,9 @@ fn markup(
     let slot = segs.len() - 1;
     let canonical = match container {
         Container::Quote { .. } => after_space(&text, marker + 1),
-        Container::Item(item) => after_space(
-            &text,
-            item.task.map_or(item.marker_end, |task| task.start + 3),
-        ),
+        Container::Item(item) => {
+            after_space(&text, item.task.map_or(item.marker_end, |task| task.end))
+        }
     };
     if canonical < p.col {
         edit_line(d, l, canonical..p.col, "", marks);
@@ -342,7 +352,11 @@ fn is_cjk(c: char) -> bool {
 
 /// Delete back to the line's text start, or from there (or from inside the
 /// markup) to column 0; at column 0, the line break.
-pub(super) fn to_text_start<L: Lines + ?Sized>(base: &L, sel: Selection) -> EditPlan {
+pub(super) fn to_text_start<L: Lines + ?Sized>(
+    base: &L,
+    sel: Selection,
+    opts: &Options,
+) -> EditPlan {
     let sel = clamp_selection(base, sel);
     if !sel.is_empty() {
         return delete_between(sel.start(), sel.end());
@@ -353,7 +367,7 @@ pub(super) fn to_text_start<L: Lines + ?Sized>(base: &L, sel: Selection) -> Edit
     if p.col <= floor {
         return join_back(base, p);
     }
-    let text_start = super::motion::text_start(base, p.line, floor);
+    let text_start = super::motion::text_start(base, p.line, floor, opts.boxes());
     let from = if p.col > text_start {
         text_start
     } else {
@@ -390,7 +404,8 @@ pub(super) fn delete_between(from: Pos, to: Pos) -> EditPlan {
 
 #[cfg(test)]
 mod tests {
-    use crate::edit::tests::{check, check_with};
+    use crate::block::Boxes;
+    use crate::edit::tests::{check, check_with, tasks_on};
     use crate::{plan, Document, Intent, Lines, Options, Pos, Selection};
 
     #[test]
@@ -418,6 +433,98 @@ mod tests {
                 ("1. [X] |a", "1. |a"),
                 ("> - [ ] |", "> - |"),
             ],
+        );
+    }
+
+    /// Backspace at a status task's text takes the whole box, however
+    /// many bytes its symbol is, and the marker goes on the next press.
+    #[test]
+    fn backspace_removes_a_status_box_whole() {
+        let on = tasks_on();
+        check_with(
+            Intent::Backspace,
+            &on,
+            &[
+                ("- [/] |", "- |"),
+                ("- [/] |foo", "- |foo"),
+                ("- [-] |foo", "- |foo"),
+                ("- [a] |foo", "- |foo"),
+                ("- [界] |foo", "- |foo"),
+                ("- [界]|", "- |"),
+                ("- [😀]\t|foo", "- |foo"),
+                ("1. [é] |a", "1. |a"),
+                ("> - [✓] |", "> - |"),
+                ("- [[] |a", "- |a"),
+                // Extra spaces after the box go first.
+                ("- [界]   |a", "- [界] |a"),
+                // Then the marker, as on any item.
+                ("- |foo", "|foo"),
+                // Inside the box, or after one that is not a box, one
+                // character goes.
+                ("- [界|] a", "- [|] a"),
+                ("- [/|] a", "- [|] a"),
+                ("- [✔\u{fe0f}] |a", "- [✔\u{fe0f}]|a"),
+                ("- []] |a", "- []]|a"),
+                ("- [a]: |x", "- [a]:|x"),
+            ],
+        );
+        check(
+            Intent::Backspace,
+            &[
+                ("- [/] |foo", "- [/]|foo"),
+                ("- [-] |", "- [-]|"),
+                ("- [界] |foo", "- [界]|foo"),
+                ("- [界]|", "- [界|"),
+                ("- [1] |x", "- [1]|x"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_status_box_may_end_markup_only_with_tasks_on() {
+        for (before, plain, status) in [
+            ("", true, true),
+            ("- [ ] ", true, true),
+            ("> 1. [x]  ", true, true),
+            ("- [/] ", false, true),
+            ("- [界] ", false, true),
+            ("\u{feff}> - [😀]\t", false, true),
+            ("- [/]", false, true),
+            ("- [/", false, false),
+            ("- [ab] ", false, false),
+            ("- [✔\u{fe0f}] ", false, false),
+            ("- [/] a", false, false),
+            ("- /] ", false, false),
+            ("a", false, false),
+        ] {
+            assert_eq!(
+                super::may_end_markup(before, Boxes::Plain),
+                plain,
+                "{before:?}"
+            );
+            assert_eq!(
+                super::may_end_markup(before, Boxes::Status),
+                status,
+                "{before:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_to_text_start_stops_after_a_status_box() {
+        let on = tasks_on();
+        check_with(
+            Intent::DeleteToTextStart,
+            &on,
+            &[
+                ("- [界] wide|", "- [界] |"),
+                ("- [界] |", "|"),
+                ("- [/] do|ing", "- [/] |ing"),
+            ],
+        );
+        check(
+            Intent::DeleteToTextStart,
+            &[("- [/] do|ing", "- |ing"), ("- [x] do|ne", "- [x] |ne")],
         );
     }
 

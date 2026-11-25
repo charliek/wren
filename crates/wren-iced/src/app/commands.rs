@@ -75,6 +75,20 @@ pub enum CommandId {
     ExportSvg,
     ExportPng,
     ExportDrawio,
+    TaskSetStatus,
+    TaskCycleStatus,
+    TaskSetPriority,
+    TaskPriorityHigh,
+    TaskPriorityMedium,
+    TaskPriorityLow,
+    TaskPriorityHighest,
+    TaskPriorityLowest,
+    TaskPriorityNone,
+    TaskRaisePriority,
+    TaskLowerPriority,
+    TaskSetDue,
+    TaskClearDue,
+    TaskEdit,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -125,10 +139,11 @@ const REVEAL_GROUP: &str = "Reveal group in Files";
 const REVEAL_SECTION: &str = "Reveal section in Files";
 
 /// Palette section order; `Hidden` commands are bindable but not listed.
-pub const GROUPS: [&str; 7] = [
+pub const GROUPS: [&str; 8] = [
     "This note",
     "Markdown",
     "Board",
+    "Tasks",
     "Go",
     "View",
     "Workspace",
@@ -221,6 +236,112 @@ definitions![
         "editor.spell_suggest",
         "Suggest spelling",
         "Markdown",
+        Editor
+    ),
+    // The task line commands (discovery/tasks.md §6), listed only while
+    // the `tasks` setting is on; the priorities in Q7's order, High,
+    // Medium and Low first.
+    // The status and priority menus open at the caret's task, on the
+    // advanced engine only, as every popover does.
+    (
+        TaskSetStatus,
+        "task.set_status",
+        "Set task status…",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskCycleStatus,
+        "task.cycle_status",
+        "Cycle task status",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskSetPriority,
+        "task.set_priority",
+        "Set task priority…",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityHigh,
+        "task.priority.high",
+        "Set task priority: High",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityMedium,
+        "task.priority.medium",
+        "Set task priority: Medium",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityLow,
+        "task.priority.low",
+        "Set task priority: Low",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityHighest,
+        "task.priority.highest",
+        "Set task priority: Highest",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityLowest,
+        "task.priority.lowest",
+        "Set task priority: Lowest",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityNone,
+        "task.priority.none",
+        "Remove task priority",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskRaisePriority,
+        "task.priority.raise",
+        "Raise task priority",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskLowerPriority,
+        "task.priority.lower",
+        "Lower task priority",
+        "Tasks",
+        Editor
+    ),
+    // The calendar (item 4.1) opens at the caret's task, on the advanced
+    // engine only, as every popover does.
+    (
+        TaskSetDue,
+        "task.set_due",
+        "Set task due date…",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskClearDue,
+        "task.clear_due",
+        "Clear task due date",
+        "Tasks",
+        Editor
+    ),
+    // The task form (item 6.1), on both engines: it is the app's dialog.
+    (
+        TaskEdit,
+        "task.edit",
+        "Create or edit task…",
+        "Tasks",
         Editor
     ),
     (NewGroup, "group.new", "New group…", "Workspace", App),
@@ -715,6 +836,9 @@ pub const BOARD_DEFINITIONS: [Definition; 94] = {
     ]
 };
 
+/// The bit that marks a [`CommandId::payload`].
+const PAYLOAD: u32 = 1 << 31;
+
 /// Every command row: the app's, then the board's.
 pub fn definitions() -> impl Iterator<Item = &'static Definition> {
     DEFINITIONS.iter().chain(&BOARD_DEFINITIONS)
@@ -801,12 +925,66 @@ impl CommandId {
         self.definition().scope
     }
 
-    /// Where the editor sends an Editor-scoped command's key.
+    /// Where the editor sends an Editor-scoped command's key: a task
+    /// command comes back to the app as itself ([`CommandId::payload`]).
     pub fn editor_route(self) -> Option<wren_editor::KeyRoute> {
         match self {
             Self::SpellSuggest => Some(wren_editor::KeyRoute::Suggest),
+            // A request for a menu of the app's, which the editor asks the
+            // app's source of menus about, so that the keys after it in
+            // their batch reach the menu.
+            Self::TaskSetStatus | Self::TaskSetPriority => {
+                Some(wren_editor::KeyRoute::Popover(self.payload()))
+            }
+            // A request the app's source of menus answers by taking the
+            // keyboard for the calendar, so that the keys after it in
+            // their batch reach neither the note nor the calendar.
+            Self::TaskSetDue => Some(wren_editor::KeyRoute::Popover(self.payload())),
+            // So does the task form's, on either engine.
+            Self::TaskEdit => Some(wren_editor::KeyRoute::Popover(self.payload())),
+            _ if self.task_change().is_some() => {
+                Some(wren_editor::KeyRoute::Command(self.payload()))
+            }
             _ => self.intent().map(wren_editor::KeyRoute::Intent),
         }
+    }
+
+    /// The number the editor carries this command to the app by, from a
+    /// key ([`wren_editor::KeyRoute::Command`]) or a popover's row: its
+    /// row's place in [`definitions`], tagged so that no plain row number
+    /// is taken for one.
+    pub fn payload(self) -> u32 {
+        let place = definitions()
+            .position(|definition| definition.id == self)
+            .expect("complete command table");
+        PAYLOAD | u32::try_from(place).expect("a short command table")
+    }
+
+    /// The command a [`CommandId::payload`] names.
+    pub fn from_payload(payload: u32) -> Option<Self> {
+        if payload & PAYLOAD == 0 {
+            return None;
+        }
+        let place = usize::try_from(payload & !PAYLOAD).ok()?;
+        definitions().nth(place).map(|definition| definition.id)
+    }
+
+    /// The change a task line command makes to the caret's task.
+    pub fn task_change(self) -> Option<wren_markdown::task::Change> {
+        use wren_markdown::task::{Change, Priority};
+        Some(match self {
+            Self::TaskCycleStatus => Change::Cycle,
+            Self::TaskPriorityHighest => Change::SetPriority(Some(Priority::Highest)),
+            Self::TaskPriorityHigh => Change::SetPriority(Some(Priority::High)),
+            Self::TaskPriorityMedium => Change::SetPriority(Some(Priority::Medium)),
+            Self::TaskPriorityLow => Change::SetPriority(Some(Priority::Low)),
+            Self::TaskPriorityLowest => Change::SetPriority(Some(Priority::Lowest)),
+            Self::TaskPriorityNone => Change::SetPriority(None),
+            Self::TaskRaisePriority => Change::RaisePriority,
+            Self::TaskLowerPriority => Change::LowerPriority,
+            Self::TaskClearDue => Change::SetDue(None),
+            _ => return None,
+        })
     }
 
     /// The editing intent of a Markdown command.
@@ -842,6 +1020,25 @@ impl CommandId {
                 | Self::NewBoard
                 | Self::Board(_)
         )
+    }
+
+    /// Whether the command exists only while the `tasks` setting is on:
+    /// with it off it is not listed anywhere, its key is unbound, and it
+    /// does not run.
+    pub fn tasks(self) -> bool {
+        self.task_change().is_some()
+            || self.task_menu().is_some()
+            || matches!(self, Self::TaskSetDue | Self::TaskEdit)
+    }
+
+    /// The task menu a command opens at the caret's task.
+    pub(super) fn task_menu(self) -> Option<super::task_menus::MenuKind> {
+        use super::task_menus::MenuKind;
+        match self {
+            Self::TaskSetStatus => Some(MenuKind::Status),
+            Self::TaskSetPriority => Some(MenuKind::Priority),
+            _ => None,
+        }
     }
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -978,7 +1175,7 @@ impl App {
 
     pub(super) fn command_enabled(&self, id: CommandId) -> bool {
         use CommandId::*;
-        if self.loading.is_some() {
+        if self.loading.is_some() || (id.tasks() && !self.preferences.tasks) {
             return false;
         }
         match id {
@@ -1020,6 +1217,14 @@ impl App {
                     && self.ensure_editor_ready().is_ok()
                     && self.editor.markdown_assist()
             }
+            TaskCycleStatus | TaskPriorityHigh | TaskPriorityMedium | TaskPriorityLow
+            | TaskPriorityHighest | TaskPriorityLowest | TaskPriorityNone | TaskRaisePriority
+            | TaskLowerPriority | TaskClearDue => self.caret_on_task(),
+            TaskSetStatus | TaskSetPriority => {
+                self.editor.backend() == wren_editor::BackendKind::Owned && self.caret_on_task()
+            }
+            TaskSetDue => self.calendar_can_open(),
+            TaskEdit => self.task_form_can_open(),
             SpellSuggest => {
                 self.surface() == Surface::Text
                     && self.editor.backend() == wren_editor::BackendKind::Owned
@@ -1190,7 +1395,7 @@ impl App {
             NewDatedNote => {
                 let outcome = self.process_core(Op::CreateNote {
                     group: self.selected_group.expect("enabled group"),
-                    title: wren_core::ops::dated_title(),
+                    title: self.today().to_string(),
                     kind: NoteKind::Markdown,
                 });
                 if outcome.processed.disposition.committed() {
@@ -1333,6 +1538,16 @@ impl App {
                     focus_editor(),
                 )
             }
+            ToggleTask if self.preferences.tasks => self.run_task_command(id),
+            TaskCycleStatus | TaskPriorityHigh | TaskPriorityMedium | TaskPriorityLow
+            | TaskPriorityHighest | TaskPriorityLowest | TaskPriorityNone | TaskRaisePriority
+            | TaskLowerPriority | TaskClearDue => self.run_task_command(id),
+            TaskSetStatus | TaskSetPriority => {
+                let kind = id.task_menu().expect("a task menu command");
+                self.run_task_menu(kind)
+            }
+            TaskSetDue => self.run_set_due(),
+            TaskEdit => self.run_task_form(),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 // From the palette: act at the editor's cursor, as the
                 // shortcut does in the editor, then give it the keyboard.

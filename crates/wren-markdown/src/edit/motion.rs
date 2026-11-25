@@ -6,12 +6,17 @@ use super::*;
 /// column 0. A cursor inside the indentation or markup moves forward to the
 /// text start. The editor handles the stop at a wrapped row's start before
 /// planning (see [`Intent::Home`]).
-pub(super) fn home<L: Lines + ?Sized>(base: &L, sel: Selection, extend: bool) -> EditPlan {
+pub(super) fn home<L: Lines + ?Sized>(
+    base: &L,
+    sel: Selection,
+    extend: bool,
+    opts: &Options,
+) -> EditPlan {
     let sel = clamp_selection(base, sel);
     let head = sel.head;
     let text = base.line(head.line);
     let floor = bom_len(head.line, text);
-    let text_start = text_start(base, head.line, floor);
+    let text_start = text_start(base, head.line, floor, opts.boxes());
     let col = if head.col == text_start {
         floor
     } else {
@@ -21,14 +26,19 @@ pub(super) fn home<L: Lines + ?Sized>(base: &L, sel: Selection, extend: bool) ->
 }
 
 /// Line `l`'s text start, at or after `floor` (its byte order mark).
-pub(super) fn text_start<L: Lines + ?Sized>(base: &L, l: usize, floor: usize) -> usize {
+pub(super) fn text_start<L: Lines + ?Sized>(
+    base: &L,
+    l: usize,
+    floor: usize,
+    boxes: Boxes,
+) -> usize {
     let text = base.line(l);
     // No block markup starts with a letter, so the scan, which reads every
     // line up to this one, can be skipped.
     if text[floor..].starts_with(char::is_alphabetic) {
         return floor;
     }
-    let an = Analysis::through(base, l);
+    let an = Analysis::through(base, l, boxes);
     an.recs[l].info.text_start.clamp(floor, text.len())
 }
 
@@ -63,6 +73,26 @@ mod tests {
 
     const HOME: Intent = Intent::Home { extend: false };
     const SHIFT_HOME: Intent = Intent::Home { extend: true };
+
+    #[test]
+    fn home_stops_after_a_status_box_only_with_tasks_on() {
+        crate::edit::tests::check_with(
+            HOME,
+            &crate::edit::tests::tasks_on(),
+            &[
+                ("- [界] te|xt", "- [界] |text"),
+                ("- [界] |text", "|- [界] text"),
+                ("|- [/] text", "- [/] |text"),
+            ],
+        );
+        check(
+            HOME,
+            &[
+                ("- [界] te|xt", "- |[界] text"),
+                ("|- [/] text", "- |[/] text"),
+            ],
+        );
+    }
 
     #[test]
     fn home_cycles_between_text_start_and_column_0() {

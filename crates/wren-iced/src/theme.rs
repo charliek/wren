@@ -41,6 +41,7 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
             selected: color(c.selected),
             text: color(c.text),
             muted: color(c.muted),
+            accent: color(c.accent),
             font: crate::fonts::UI,
             text_size: 13.0,
         },
@@ -56,6 +57,9 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
         code: color(c.code),
         quote: color(c.quote),
         completed: color(c.completed),
+        date: color(c.date),
+        overdue: color(c.danger),
+        owner: color(c.owner),
     };
     (style, palette)
 }
@@ -149,6 +153,19 @@ mod tests {
             assert_eq!(palette.code, color(c.code));
             assert_eq!(palette.quote, color(c.quote));
             assert_eq!(palette.completed, color(c.completed));
+        }
+    }
+
+    #[test]
+    fn task_tokens_take_the_theme_date_owner_and_danger_colours() {
+        for theme in theme::BUILT_INS {
+            let c = theme.colors;
+            let (style, palette) = editor_colors(*theme);
+            assert_eq!(palette.date, color(c.date), "{}", theme.id);
+            assert_eq!(palette.owner, color(c.owner), "{}", theme.id);
+            // Overdue is the theme's danger, as a misspelling's zigzag is.
+            assert_eq!(palette.overdue, color(c.danger), "{}", theme.id);
+            assert_eq!(palette.overdue, style.misspelling, "{}", theme.id);
         }
     }
 

@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(trigger.key, ".");
         for assist in [true, false] {
             assert_eq!(
-                super::super::preferences::key_route(&keymap, &trigger, assist),
+                super::super::preferences::key_route(&keymap, &trigger, assist, false),
                 KeyRoute::Suggest
             );
         }

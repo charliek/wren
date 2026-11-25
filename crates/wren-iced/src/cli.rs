@@ -20,6 +20,9 @@ pub struct Options {
     pub test_socket: Option<PathBuf>,
     #[cfg(feature = "smoke-test")]
     pub endpoint: Option<crate::test_ipc::Endpoint>,
+    /// The date `WREN_TEST_TODAY` pins today to.
+    #[cfg(feature = "smoke-test")]
+    pub today: Option<wren_markdown::date::Date>,
 }
 
 #[derive(Debug)]
@@ -104,6 +107,20 @@ Exit status: 0 written (warnings about the board go to standard error);
 }
 
 const MAX_SPIKE_SHAPES: usize = 100_000;
+
+/// The date `WREN_TEST_TODAY` pins today to: none when it is unset, and a
+/// refusal to launch when it is not `YYYY-MM-DD`.
+#[cfg(any(test, feature = "smoke-test"))]
+pub fn test_today(value: Option<&OsStr>) -> Result<Option<wren_markdown::date::Date>, String> {
+    value
+        .map(|value| {
+            value
+                .to_str()
+                .and_then(wren_markdown::date::Date::parse_iso)
+                .ok_or_else(|| format!("WREN_TEST_TODAY must be a YYYY-MM-DD date, not {value:?}"))
+        })
+        .transpose()
+}
 
 pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, Refusal> {
     if args.first().is_some_and(|arg| arg == "export") {
@@ -323,6 +340,18 @@ fn format_named(name: &str) -> Option<Format> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_test_date_is_an_iso_date_or_refused() {
+        assert_eq!(test_today(None), Ok(None));
+        assert_eq!(
+            test_today(Some(OsStr::new("2026-11-19"))),
+            Ok(Some(wren_markdown::date::Date::new(2026, 11, 19).unwrap()))
+        );
+        for bad in ["", "2026-11-31", "19/11/2026", "today"] {
+            assert!(test_today(Some(OsStr::new(bad))).is_err(), "{bad:?}");
+        }
+    }
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()

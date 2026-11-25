@@ -53,6 +53,17 @@ BOARD_COMMANDS = {
     "note.export_drawio": "board",
     "note.new_board": "group",
 }
+# The commands that exist only with the `tasks` setting on (discovery/
+# tasks.md §6), the palette's Tasks group: each acts on the caret's task, so
+# none is enabled with the caret on a line of no task but the task form,
+# which makes a task of a plain line.
+TASK_COMMANDS = {
+    "task.set_status", "task.set_priority",
+    "task.cycle_status", "task.priority.high", "task.priority.medium", "task.priority.low",
+    "task.priority.highest", "task.priority.lowest", "task.priority.none",
+    "task.priority.raise", "task.priority.lower", "task.set_due", "task.clear_due",
+    "task.edit",
+}
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
@@ -264,7 +275,11 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         boards = app.client.call("board.get")["enabled"]
         if os.environ.get("WRENTEST_BOARDS"):
             assert boards is (os.environ["WRENTEST_BOARDS"] == "on")
-        expected = COMMANDS | (set(BOARD_COMMANDS) if boards else set())
+        tasks = app.client.call("tasks.get")["tasks"]
+        if os.environ.get("WRENTEST_TASKS"):
+            assert tasks is (os.environ["WRENTEST_TASKS"] == "on")
+        expected = (COMMANDS | (set(BOARD_COMMANDS) if boards else set())
+                    | (TASK_COMMANDS if tasks else set()))
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
         unexpected = sorted(set(by_id) - expected)
@@ -275,7 +290,7 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         assert not missing, f"expected with boards={'on' if boards else 'off'} but not listed: {missing}"
         assert len(rows) == len(expected)
         assert {row["group"] for row in rows} == {"This note", "Markdown", "Go", "View", "Workspace",
-                                                   "App"}
+                                                   "App"} | ({"Tasks"} if tasks else set())
         assert all(row["title"] for row in rows)
         assert {key: row["state"] for key, row in by_id.items() if row["state"]} == {
             "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic",
@@ -287,6 +302,10 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
         assert by_id["note.open_conflict"]["enabled"] is False
+        # The caret is on the note's first line, a plain line, which is no
+        # task's: only the form, which can make it one, is enabled.
+        for key in TASK_COMMANDS if tasks else ():
+            assert by_id[key]["enabled"] is (key == "task.edit"), key
         # A Markdown note is open in a group: a new board can be made here,
         # and nothing is exported.
         for key, where in BOARD_COMMANDS.items():
@@ -358,7 +377,13 @@ def test_fuzzy_commands_create_real_items_through_dialogs(
 ) -> None:
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory(f"palette-{command_id}")) as app:
         jump(app, FIRST)
-        assert palette(app, "commands", "srt ttl")["results"][0]["key"] == {"command": "notes.sort_title"}
+        sort_rows = [row["key"] for row in palette(app, "commands", "srt ttl")["results"]]
+        # With tasks on, "Set task priority: Low" also matches the query and
+        # may rank first; the sort command is still offered.
+        if app.client.call("tasks.get")["tasks"]:
+            assert {"command": "notes.sort_title"} in sort_rows
+        else:
+            assert sort_rows[0] == {"command": "notes.sort_title"}
         activate(app, {"command": "notes.sort_title"})
         assert navigation(app)["sort"] == "title"
         rows = palette(app, "commands", query)["results"]

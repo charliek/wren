@@ -90,6 +90,23 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("WGPU_BACKEND: vulkan", smoke)
         # Every display and renderer lane runs the editor suite on both engines.
         self.assertIn("WRENTEST_ENGINE: classic,advanced", smoke)
+        # The emoji font, and exactly one lane (x11, tiny-skia) with tasks on.
+        self.assertRegex(smoke, r"apt-get install -y --no-install-recommends \\\n[^#\n]* fonts-noto-color-emoji ")
+        self.assertIn("WRENTEST_TASKS: ${{ matrix.tasks }}", smoke)
+        self.assertIn(
+            "      matrix:\n"
+            "        display: [x11, wayland]\n"
+            "        renderer: [wgpu, tiny-skia]\n"
+            "        include:\n"
+            "          - display: x11\n"
+            "            renderer: tiny-skia\n"
+            '            tasks: "on"\n'
+            "    env:\n",
+            smoke,
+        )
+        self.assertEqual(re.findall(r"(?m)^ +tasks: (.*)$", smoke), ['"on"'])
+        self.assertNotIn("exclude:", smoke)
+        self.assertEqual(smoke.count("WRENTEST_ENGINE:"), 1)
         self.assertRegex(smoke, r"if: always\(\)\n +uses: actions/upload-artifact@")
         self.assertIn("name: wrentest-${{ matrix.display }}-${{ matrix.renderer }}", smoke)
         self.assertIn("path: target/wrentest/", smoke)

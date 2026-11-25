@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use crate::block::{self, Kind};
+use crate::block::{self, Boxes, Kind};
 use crate::Lines;
 
 /// One heading of the outline.
@@ -39,8 +39,11 @@ pub struct Outline {
 }
 
 impl Outline {
-    pub fn new<L: Lines + ?Sized>(lines: &L) -> Self {
-        let infos = block::scan(lines);
+    /// The outline of `lines`, classified with the task boxes `boxes`
+    /// names: an empty task is no paragraph, so what a `===` under it means
+    /// depends on them.
+    pub fn new<L: Lines + ?Sized>(lines: &L, boxes: Boxes) -> Self {
+        let infos = block::scan(lines, boxes);
         let mut headings: Vec<Heading> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
         // The text range of each paragraph line since the last non-paragraph
@@ -401,7 +404,7 @@ mod tests {
     use crate::Document;
 
     fn outline(text: &str) -> Outline {
-        Outline::new(&Document::new(text))
+        Outline::new(&Document::new(text), Boxes::Plain)
     }
 
     /// `(level, text, line)` for each heading.
@@ -430,6 +433,23 @@ mod tests {
                 h(6, "Six", 9),
             ]
         );
+    }
+
+    /// The outline reads the boxes its host reads. An empty `[/]` task is
+    /// a paragraph line only while tasks are off, so only then does the
+    /// `===` under it make a heading of it; headings after it are the same.
+    #[test]
+    fn the_outline_classifies_with_the_hosts_boxes() {
+        let text = "- [/]\n  ===\n- [界] # not a heading\n\n# Real";
+        let headings = |boxes| {
+            Outline::new(&Document::new(text), boxes)
+                .headings()
+                .iter()
+                .map(|h| (h.level, h.text.clone(), h.line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(headings(Boxes::Plain), [h(1, "[/]", 0), h(1, "Real", 4)]);
+        assert_eq!(headings(Boxes::Status), [h(1, "Real", 4)]);
     }
 
     #[test]
@@ -612,13 +632,13 @@ mod tests {
         let start = std::time::Instant::now();
         let mut kinds = 0;
         for _ in 0..rounds {
-            kinds += block::scan(&doc).len();
+            kinds += block::scan(&doc, Boxes::Plain).len();
         }
         let scan = start.elapsed() / rounds;
         let start = std::time::Instant::now();
         let mut headings = 0;
         for _ in 0..rounds {
-            headings += Outline::new(&doc).headings().len();
+            headings += Outline::new(&doc, Boxes::Plain).headings().len();
         }
         let outline = start.elapsed() / rounds;
         println!(

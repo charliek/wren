@@ -45,6 +45,7 @@
 
 use std::ops::Range;
 
+use crate::status::{self, Status, StatusType};
 use crate::Lines;
 
 /// Tab stops are every 4 columns, as in CommonMark.
@@ -234,12 +235,58 @@ pub enum Marker {
     },
 }
 
-/// A task box: `[ ]`, `[x]`, or `[X]` right at the item's content column.
+/// Which task boxes the classifier reads. It is the one thing a host's
+/// tasks setting changes about a line's classification, so every scan
+/// takes it: a host with tasks on that scanned with [`Boxes::Plain`] would
+/// read `- [/] x` as a task in one place and as text in another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Boxes {
+    /// `[ ]`, `[x]` and `[X]` only, as a host with tasks off reads them.
+    #[default]
+    Plain,
+    /// `[`, any one character but `]`, then `]`. The character is the
+    /// task's status symbol ([`crate::status`]).
+    Status,
+}
+
+impl Boxes {
+    /// The boxes a host reads with its tasks on or off.
+    pub const fn with_tasks(on: bool) -> Self {
+        if on {
+            Self::Status
+        } else {
+            Self::Plain
+        }
+    }
+}
+
+/// A task box right at the item's content column: `[`, one character, `]`,
+/// followed by a space, a tab or the end of the line. Which characters the
+/// box may hold is the scan's [`Boxes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Task {
-    pub done: bool,
     /// Byte offset of the `[` on the item's first line.
     pub start: usize,
+    /// Byte offset just past the `]`. The box is `start..end`; it is three
+    /// bytes only when its symbol is ASCII.
+    pub end: usize,
+    /// The character between the brackets: one Unicode scalar value.
+    pub symbol: char,
+    /// The type of the symbol's status. A symbol with no status of its own
+    /// is an open task.
+    pub status: StatusType,
+}
+
+impl Task {
+    /// The byte range of the symbol, between the brackets.
+    pub fn symbol_range(&self) -> Range<usize> {
+        self.start + 1..self.end - 1
+    }
+
+    /// The row of the status table the symbol reads as.
+    pub fn row(&self) -> Status {
+        status::status(self.symbol)
+    }
 }
 
 /// A list item, as opened on its first line.
@@ -359,9 +406,9 @@ fn looks_like_yaml(line: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
-/// Classify every line of a document.
-pub fn scan<L: Lines + ?Sized>(lines: &L) -> Vec<LineInfo> {
-    let mut scanner = Scanner::with_front_matter(front_matter_end(lines));
+/// Classify every line of a document, reading the task boxes `boxes` names.
+pub fn scan<L: Lines + ?Sized>(lines: &L, boxes: Boxes) -> Vec<LineInfo> {
+    let mut scanner = Scanner::with_front_matter(front_matter_end(lines), boxes);
     (0..lines.line_count())
         .map(|i| scanner.next_line(lines.line(i)))
         .collect()
@@ -387,6 +434,7 @@ enum Leaf {
 pub struct Scanner {
     line: usize,
     front_matter_end: Option<usize>,
+    boxes: Boxes,
     stack: Vec<Container>,
     leaf: Leaf,
     /// The stack index of an item that opened empty on the previous line;
@@ -395,26 +443,22 @@ pub struct Scanner {
     continued: usize,
 }
 
-impl Default for Scanner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Scanner {
     /// A scanner for text without front matter: a `---` on line 0 is a
     /// thematic break even if front matter follows. For a whole document,
     /// use [`Scanner::with_front_matter`].
-    pub fn new() -> Self {
-        Self::with_front_matter(None)
+    pub fn new(boxes: Boxes) -> Self {
+        Self::with_front_matter(None, boxes)
     }
 
     /// A scanner that treats lines `0..=end` as front matter; pass the
-    /// result of [`front_matter_end`].
-    pub fn with_front_matter(end: Option<usize>) -> Self {
+    /// result of [`front_matter_end`]. It reads the task boxes `boxes`
+    /// names.
+    pub fn with_front_matter(end: Option<usize>, boxes: Boxes) -> Self {
         Self {
             line: 0,
             front_matter_end: end,
+            boxes,
             stack: Vec::new(),
             leaf: Leaf::None,
             empty_item: None,
@@ -431,6 +475,11 @@ impl Scanner {
     /// only good for a document whose [`front_matter_end`] still matches.
     pub fn front_matter_end(&self) -> Option<usize> {
         self.front_matter_end
+    }
+
+    /// The task boxes this scanner reads.
+    pub fn boxes(&self) -> Boxes {
+        self.boxes
     }
 
     /// The containers open after the last scanned line, outermost first.
@@ -563,7 +612,8 @@ impl Scanner {
                 break;
             }
             let quote_depth = self.quote_depth_at(matched);
-            let Some((new, p, c)) = list_marker(text, p, c, in_paragraph, quote_depth) else {
+            let Some((new, p, c)) = list_marker(text, p, c, in_paragraph, quote_depth, self.boxes)
+            else {
                 break;
             };
             self.open(&mut matched, &mut opened);
@@ -942,6 +992,7 @@ fn list_marker(
     c: usize,
     in_paragraph: bool,
     quote_depth: usize,
+    boxes: Boxes,
 ) -> Option<(ListItem, usize, usize)> {
     let b = text.as_bytes();
     let (marker, end) = match b[p] {
@@ -978,10 +1029,10 @@ fn list_marker(
         (qc, q, qc)
     };
     let task = (!empty && col == content_column)
-        .then(|| task_box(b, pos))
+        .then(|| task_box(text, pos, boxes))
         .flatten();
     let text_start = match task {
-        Some(_) => skip_ws(b, pos + 3, 0).0,
+        Some(task) => skip_ws(b, task.end, 0).0,
         None => skip_ws(b, pos, col).0,
     };
     let item = ListItem {
@@ -997,13 +1048,33 @@ fn list_marker(
     Some((item, pos, col))
 }
 
-fn task_box(b: &[u8], pos: usize) -> Option<Task> {
-    let done = match b.get(pos..pos + 3)? {
-        b"[ ]" => false,
-        b"[x]" | b"[X]" => true,
-        _ => return None,
+/// The symbol of a task box that `text` starts with: `[`, the symbol, `]`.
+/// With [`Boxes::Plain`] the symbol is a space, `x` or `X`; with
+/// [`Boxes::Status`] it is any one Unicode scalar value but `]`, so a
+/// character written as two (a check mark and U+FE0F, a letter and a
+/// combining mark) makes no box. What follows the `]` is the caller's to
+/// judge; the box is `2 + symbol.len_utf8()` bytes.
+fn box_symbol(text: &str, boxes: Boxes) -> Option<char> {
+    let mut chars = text.strip_prefix('[')?.chars();
+    let symbol = chars.next()?;
+    let allowed = match boxes {
+        Boxes::Plain => matches!(symbol, ' ' | 'x' | 'X'),
+        Boxes::Status => symbol != ']',
     };
-    matches!(b.get(pos + 3), None | Some(b' ' | b'\t')).then_some(Task { done, start: pos })
+    (allowed && chars.next() == Some(']')).then_some(symbol)
+}
+
+/// The task box at byte `pos` of `line`: a box ([`box_symbol`]) followed by
+/// a space, a tab or the end of the line.
+pub(crate) fn task_box(line: &str, pos: usize, boxes: Boxes) -> Option<Task> {
+    let symbol = box_symbol(line.get(pos..)?, boxes)?;
+    let end = pos + 2 + symbol.len_utf8();
+    matches!(line.as_bytes().get(end), None | Some(b' ' | b'\t')).then_some(Task {
+        start: pos,
+        end,
+        symbol,
+        status: status::status(symbol).kind,
+    })
 }
 
 #[cfg(test)]
@@ -1029,10 +1100,10 @@ mod tests {
                     delimiter,
                 } => s.push_str(&format!("{number:0width$}{delimiter}")),
             }
-            match item.task {
-                Some(Task { done: true, .. }) => s.push_str("[x]"),
-                Some(Task { done: false, .. }) => s.push_str("[ ]"),
-                None => {}
+            if let Some(task) = item.task {
+                // A capital `X` is written as the done box it is.
+                let symbol = if task.symbol == 'X' { 'x' } else { task.symbol };
+                s.push_str(&format!("[{symbol}]"));
             }
         }
         if info.lazy {
@@ -1055,7 +1126,11 @@ mod tests {
     }
 
     fn codes(text: &str) -> Vec<String> {
-        scan(&Document::new(text)).iter().map(code).collect()
+        codes_with(text, Boxes::Plain)
+    }
+
+    fn codes_with(text: &str, boxes: Boxes) -> Vec<String> {
+        scan(&Document::new(text), boxes).iter().map(code).collect()
     }
 
     const ENDINGS: [&str; 4] = ["\n", "\r\n", "\r", "\n\r"];
@@ -1077,6 +1152,12 @@ mod tests {
     /// trailing line ending (which adds one blank line).
     #[track_caller]
     fn check(cases: &[(&str, &[&str])]) {
+        check_with(Boxes::Plain, cases);
+    }
+
+    /// [`check`] reading the task boxes `boxes` names.
+    #[track_caller]
+    fn check_with(boxes: Boxes, cases: &[(&str, &[&str])]) {
         for (doc, expected) in cases {
             let lines: Vec<&str> = doc.split('\n').collect();
             let mixed = ["\r\n", "\n", "\n\r", "\r"];
@@ -1085,10 +1166,10 @@ mod tests {
                 .map(|e| (*e, join(&lines, &[e])))
                 .chain([("mixed", join(&lines, &mixed))]);
             for (name, text) in variants {
-                let got = codes(&text);
+                let got = codes_with(&text, boxes);
                 assert_eq!(got, *expected, "{doc:?} with {name:?} endings");
                 let ending = if name == "mixed" { "\r" } else { name };
-                let trailing = codes(&format!("{text}{ending}"));
+                let trailing = codes_with(&format!("{text}{ending}"), boxes);
                 assert_eq!(&trailing[..expected.len()], *expected, "{doc:?} + {name:?}");
                 assert_eq!(trailing.len(), expected.len() + 1, "{doc:?} + {name:?}");
                 // Blank, or a blank line inside an unclosed fence.
@@ -1101,7 +1182,11 @@ mod tests {
     }
 
     fn infos(text: &str) -> Vec<LineInfo> {
-        scan(&Document::new(text))
+        infos_with(text, Boxes::Plain)
+    }
+
+    fn infos_with(text: &str, boxes: Boxes) -> Vec<LineInfo> {
+        scan(&Document::new(text), boxes)
     }
 
     #[test]
@@ -1309,12 +1394,184 @@ mod tests {
         assert_eq!(
             item.task,
             Some(Task {
-                done: true,
-                start: 4
+                start: 4,
+                end: 7,
+                symbol: 'x',
+                status: StatusType::Done,
             })
         );
         assert_eq!((item.text_start, info.text_start), (9, 9));
         assert_eq!(info.prefix_end, 4);
+    }
+
+    /// Each line as a host with tasks off reads it and as one with tasks
+    /// on does: `(line, plain, status)`.
+    const BOXES: &[(&str, &str, &str)] = &[
+        // The three boxes every host reads.
+        ("- [ ] a", "1-[ ]P", "1-[ ]P"),
+        ("- [x] a", "1-[x]P", "1-[x]P"),
+        ("- [X] a", "1-[x]P", "1-[x]P"),
+        // The other two statuses.
+        ("- [/] a", "1-P", "1-[/]P"),
+        ("- [-] a", "1-P", "1-[-]P"),
+        // ASCII letters, digits and punctuation.
+        ("- [a] a", "1-P", "1-[a]P"),
+        ("- [y] a", "1-P", "1-[y]P"),
+        ("- [1] x", "1-P", "1-[1]P"),
+        ("- [?] a", "1-P", "1-[?]P"),
+        ("- [!] a", "1-P", "1-[!]P"),
+        ("- [>] a", "1-P", "1-[>]P"),
+        ("- [#] a", "1-P", "1-[#]P"),
+        ("- [*] a", "1-P", "1-[*]P"),
+        ("- [\t] a", "1-P", "1-[\t]P"),
+        // The brackets themselves: `[` is a character like any other, `]`
+        // is the one a box cannot hold, and a wiki link is not a box.
+        ("- [[] a", "1-P", "1-[[]P"),
+        ("- []] a", "1-P", "1-P"),
+        ("- [] a", "1-P", "1-P"),
+        ("- [[]] a", "1-P", "1-P"),
+        ("- [[link]] a", "1-P", "1-P"),
+        // One scalar value of two, three and four bytes.
+        ("- [é] a", "1-P", "1-[é]P"),
+        ("- [界] a", "1-P", "1-[界]P"),
+        ("- [✓] a", "1-P", "1-[✓]P"),
+        ("- [😀] a", "1-P", "1-[😀]P"),
+        ("- [ｘ] a", "1-P", "1-[ｘ]P"),
+        ("- [\u{301}] a", "1-P", "1-[\u{301}]P"),
+        // Two scalar values are no box, however they are drawn: a
+        // variation selector, a combining mark, a flag, two letters.
+        ("- [✔\u{fe0f}] a", "1-P", "1-P"),
+        ("- [e\u{301}] a", "1-P", "1-P"),
+        ("- [🇫🇷] a", "1-P", "1-P"),
+        ("- [  ] a", "1-P", "1-P"),
+        ("- [ab] a", "1-P", "1-P"),
+        // What follows the box: a space, a tab or the line's end.
+        ("- [/]\ta", "1-P", "1-[/]P"),
+        ("- [界]\ta", "1-P", "1-[界]P"),
+        ("- [/]", "1-P", "1-[/]B"),
+        ("- [/] ", "1-P", "1-[/]B"),
+        ("- [界]", "1-P", "1-[界]B"),
+        ("- [/]a", "1-P", "1-P"),
+        ("- [ ]a", "1-P", "1-P"),
+        ("- [a]: http://u", "1-P", "1-P"),
+        ("- [a]:", "1-P", "1-P"),
+        ("- [/]\u{a0}a", "1-P", "1-P"),
+        // Where the box sits: right at an item's content column.
+        ("[/] a", "P", "P"),
+        ("> [/] a", "1>P", "1>P"),
+        ("-  [/] a", "1-P", "1-[/]P"),
+        ("- x [/] a", "1-P", "1-P"),
+        ("* [/] a", "1*P", "1*[/]P"),
+        ("+ [-] a", "1+P", "1+[-]P"),
+        ("1. [/] a", "11.P", "11.[/]P"),
+        ("12) [界] a", "112)P", "112)[界]P"),
+        ("> - [/] a", "2>-P", "2>-[/]P"),
+        ("> 1. [✓] a", "2>1.P", "2>1.[✓]P"),
+        ("- - [/] a", "2-P", "2-[/]P"),
+        // A box keeps what follows it from opening another block.
+        ("- [/] # a", "1-P", "1-[/]P"),
+        ("- [/] - a", "1-P", "1-[/]P"),
+        ("- [/] > a", "1-P", "1-[/]P"),
+    ];
+
+    #[test]
+    fn a_box_holds_the_three_plain_characters_or_any_one_with_tasks_on() {
+        for (line, plain, status) in BOXES {
+            check_with(Boxes::Plain, &[(line, &[plain])]);
+            check_with(Boxes::Status, &[(line, &[status])]);
+        }
+    }
+
+    #[test]
+    fn a_task_carries_its_box_range_its_symbol_and_its_status() {
+        let task = |text: &str, boxes| {
+            let info = &infos_with(text, boxes)[0];
+            let item = info.item.expect("an item");
+            assert_eq!(item.text_start, info.text_start, "{text:?}");
+            (item.task, info.text_start)
+        };
+        let boxed = |start, end, symbol, status| {
+            Some(Task {
+                start,
+                end,
+                symbol,
+                status,
+            })
+        };
+        for (text, expected, text_start) in [
+            ("- [ ] a", boxed(2, 5, ' ', StatusType::Open), 6),
+            ("- [/] a", boxed(2, 5, '/', StatusType::Doing), 6),
+            ("- [x] a", boxed(2, 5, 'x', StatusType::Done), 6),
+            ("- [X] a", boxed(2, 5, 'X', StatusType::Done), 6),
+            ("- [-] a", boxed(2, 5, '-', StatusType::Cancelled), 6),
+            ("- [a] a", boxed(2, 5, 'a', StatusType::Open), 6),
+            ("- [é] a", boxed(2, 6, 'é', StatusType::Open), 7),
+            ("  - [界]  wide", boxed(4, 9, '界', StatusType::Open), 11),
+            ("> 1. [😀]\tb", boxed(5, 11, '😀', StatusType::Open), 12),
+            ("- [✓]", boxed(2, 7, '✓', StatusType::Open), 7),
+        ] {
+            assert_eq!(
+                task(text, Boxes::Status),
+                (expected, text_start),
+                "{text:?}"
+            );
+        }
+        // Off, the same lines keep the three plain boxes and lose the rest.
+        for (text, expected, text_start) in [
+            ("- [ ] a", boxed(2, 5, ' ', StatusType::Open), 6),
+            ("- [x] a", boxed(2, 5, 'x', StatusType::Done), 6),
+            ("- [X] a", boxed(2, 5, 'X', StatusType::Done), 6),
+            ("- [/] a", None, 2),
+            ("- [-] a", None, 2),
+            ("  - [界]  wide", None, 4),
+        ] {
+            assert_eq!(task(text, Boxes::Plain), (expected, text_start), "{text:?}");
+        }
+        let task = Task {
+            start: 4,
+            end: 9,
+            symbol: '界',
+            status: StatusType::Open,
+        };
+        assert_eq!(task.symbol_range(), 5..8);
+        assert_eq!(task.row().name, status::UNKNOWN);
+        assert_eq!(Boxes::with_tasks(false), Boxes::Plain);
+        assert_eq!(Boxes::with_tasks(true), Boxes::Status);
+        assert_eq!(Boxes::default(), Boxes::Plain);
+        assert_eq!(Scanner::new(Boxes::Status).boxes(), Boxes::Status);
+    }
+
+    #[test]
+    fn box_symbol_reads_only_the_brackets_and_task_box_what_follows() {
+        for (text, plain, status) in [
+            ("[ ]", Some(' '), Some(' ')),
+            ("[x] a", Some('x'), Some('x')),
+            ("[X]a", Some('X'), Some('X')),
+            ("[/]a", None, Some('/')),
+            ("[界]", None, Some('界')),
+            ("[]]", None, None),
+            ("[]", None, None),
+            ("[", None, None),
+            ("[a", None, None),
+            ("", None, None),
+            (" [ ]", None, None),
+            ("[ab]", None, None),
+        ] {
+            assert_eq!(box_symbol(text, Boxes::Plain), plain, "{text:?}");
+            assert_eq!(box_symbol(text, Boxes::Status), status, "{text:?}");
+        }
+        assert_eq!(task_box("[/]a", 0, Boxes::Status), None);
+        assert_eq!(task_box("- [/]", 2, Boxes::Status).map(|t| t.end), Some(5));
+        assert_eq!(task_box("- [/]", 9, Boxes::Status), None);
+    }
+
+    /// An empty task is no paragraph, so a line under it that would
+    /// underline one does not: the two readings differ past the box's line.
+    #[test]
+    fn an_empty_status_box_changes_what_the_next_line_is() {
+        check_with(Boxes::Plain, &[("- [/]\n  ===", &["1-P", "1S1@0"])]);
+        check_with(Boxes::Status, &[("- [/]\n  ===", &["1-[/]B", "1P"])]);
+        check_with(Boxes::Plain, &[("- [ ]\n  ===", &["1-[ ]B", "1P"])]);
     }
 
     #[test]
@@ -1591,9 +1848,9 @@ mod tests {
         ];
         for text in docs {
             let lines: Vec<&str> = text.split('\n').collect();
-            let full = scan(&lines[..]);
+            let full = scan(&lines[..], Boxes::Plain);
             let end = front_matter_end(&lines[..]);
-            let mut scanner = Scanner::with_front_matter(end);
+            let mut scanner = Scanner::with_front_matter(end, Boxes::Plain);
             for (i, line) in lines.iter().enumerate() {
                 assert_eq!(scanner.next_line(line), full[i], "{text:?} line {i}");
                 let mut resumed = scanner.clone();
@@ -1608,7 +1865,7 @@ mod tests {
         // Without the end, line 0 cannot know a closing `---` follows: the
         // front matter reads as a break, prose, and a setext heading.
         let lines = ["---", "title: x", "---", "# H"];
-        let mut blind = Scanner::new();
+        let mut blind = Scanner::new(Boxes::Plain);
         let kinds: Vec<String> = lines.iter().map(|l| code(&blind.next_line(l))).collect();
         assert_eq!(kinds, ["TB", "P", "S2@1", "H1"]);
     }
@@ -1617,9 +1874,9 @@ mod tests {
     fn scanner_state_can_be_checkpointed_and_resumed() {
         let text = "> - a\n>   ```\n>   x\n>   ```\n> b\n\n1. c\n   d";
         let lines: Vec<&str> = text.split('\n').collect();
-        let full: Vec<LineInfo> = scan(&lines[..]);
+        let full: Vec<LineInfo> = scan(&lines[..], Boxes::Plain);
         for split in 0..lines.len() {
-            let mut scanner = Scanner::new();
+            let mut scanner = Scanner::new(Boxes::Plain);
             for line in &lines[..split] {
                 scanner.next_line(line);
             }
@@ -1635,7 +1892,7 @@ mod tests {
 
     #[test]
     fn containers_report_the_open_stack() {
-        let mut scanner = Scanner::new();
+        let mut scanner = Scanner::new(Boxes::Plain);
         scanner.next_line("> - a");
         let stack = scanner.containers();
         assert_eq!(stack.len(), 2);
@@ -1653,7 +1910,7 @@ mod tests {
 
     #[test]
     fn continued_counts_the_containers_a_line_kept() {
-        let mut scanner = Scanner::new();
+        let mut scanner = Scanner::new(Boxes::Plain);
         let continued: Vec<(usize, usize)> = ["> - a", ">   b", "> - c", "> d", "# e"]
             .iter()
             .map(|line| {
@@ -1670,7 +1927,7 @@ mod tests {
         let seg = |start, end, marker| Segment { start, end, marker };
         let segs_of = |text: &str| {
             let doc = Document::new(text);
-            let mut scanner = Scanner::new();
+            let mut scanner = Scanner::new(Boxes::Plain);
             let mut last = Vec::new();
             for i in 0..doc.line_count() {
                 scanner.next_line(doc.line(i));

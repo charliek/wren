@@ -78,6 +78,9 @@ impl App {
             "shortcut" => {
                 // A key binding firing, with its active-column scoping.
                 let id = CommandId::parse(string(params, "id")?).ok_or("Unknown command ID")?;
+                if id.tasks() && !self.preferences.tasks {
+                    return Err("The command is unavailable".into());
+                }
                 if id.scope() == Scope::Editor {
                     // The editor's key policy routes the bound key, and only
                     // a focused editor sees it.
@@ -87,10 +90,14 @@ impl App {
                         keymap,
                         trigger,
                         self.editor.markdown_assist(),
+                        self.preferences.tasks,
                     );
                     if !matches!(
                         route,
-                        wren_editor::KeyRoute::Intent(_) | wren_editor::KeyRoute::Suggest
+                        wren_editor::KeyRoute::Intent(_)
+                            | wren_editor::KeyRoute::Suggest
+                            | wren_editor::KeyRoute::Popover(_)
+                            | wren_editor::KeyRoute::Command(_)
                     ) {
                         return Err("The editor does not route this command's key".into());
                     }
@@ -189,8 +196,10 @@ impl App {
                 request.respond(Ok(Value::Null));
             }
             "window.blur" => {
+                let calendar = self.close_calendar_for_window();
                 self.window_unfocused()?;
                 request.respond(Ok(self.session_snapshot()));
+                return Ok(calendar);
             }
             "editor.get" => request.respond(Ok(self.editor_snapshot())),
             "perf.view" => {
@@ -277,7 +286,18 @@ impl App {
                 // same App::edit path.
                 self.ensure_editor_ready()?;
                 let intent = intent(string(params, "intent")?)?;
-                let task = self.edit(wren_editor::Message::Intent(intent));
+                // As the widget routes the toggle's key: with tasks on (and
+                // Markdown assist, without which the key is not the
+                // toggle's) the app runs it, writing the stamps.
+                let message = if intent == wren_editor::Intent::ToggleTask
+                    && self.preferences.tasks
+                    && self.editor.markdown_assist()
+                {
+                    wren_editor::Message::Command(CommandId::ToggleTask.payload())
+                } else {
+                    wren_editor::Message::Intent(intent)
+                };
+                let task = self.edit(message);
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
             }
@@ -290,12 +310,56 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task);
             }
+            "editor.open_menu" => {
+                self.ensure_editor_ready()?;
+                self.open_command_menu(params)?;
+                request.respond(Ok(self.editor_snapshot()));
+            }
             "editor.key" => {
                 self.ensure_editor_ready()?;
                 let (key, modifiers) = key_press(params)?;
                 let task = self.editor_key(key, modifiers);
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task);
+            }
+            "editor.right_click" => {
+                // A right-click on a character as the editor widget
+                // publishes it: the menu providers asked in order. Where
+                // none takes the click, it changes nothing.
+                self.ensure_editor_ready()?;
+                let at = position(params)?;
+                let message = self.editor.right_click_message(at.line, at.column);
+                let task = message
+                    .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task);
+            }
+            "editor.click" => {
+                // A primary click, pressed and released on a character, as
+                // the editor widget publishes it: on a task's box a click
+                // on the box, anywhere else the click that places the
+                // caret.
+                self.ensure_editor_ready()?;
+                let at = position(params)?;
+                let message = self.editor.click_message(at.line, at.column);
+                let task = message
+                    .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task);
+            }
+            "editor.bounds" => {
+                // Where bytes `start..end` of `line` are drawn, in window
+                // coordinates, for a native click on them.
+                self.ensure_editor_ready()?;
+                let line = usize_param(params, "line")?;
+                let range = usize_param(params, "start")?..usize_param(params, "end")?;
+                let bounds = self
+                    .editor
+                    .anchor_bounds(&wren_editor::Anchor::Range { line, range })
+                    .ok_or("Those bytes are not drawn")?;
+                request.respond(Ok(json!({
+                    "x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height,
+                })));
             }
             "editor.cursor" => {
                 self.ensure_editor_ready()?;
@@ -338,6 +402,9 @@ impl App {
             | "board.pinch" => {
                 return self.board_request(request)
             }
+            "tasks.get" | "tasks.set_today" | "tasks.calendar" | "tasks.calendar_type"
+            | "tasks.calendar_click" | "tasks.owners" | "tasks.form" | "tasks.form_type"
+            | "tasks.form_click" => return self.tasks_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -762,7 +829,95 @@ impl App {
                 iced::font::Family::Name(name) => name,
                 _ => "",
             },
+            "popover":self.popover_snapshot(),
         })
+    }
+
+    /// The editor's open popover, whichever it is: the suggestions menu,
+    /// a menu of the app's or suggestions. Each row has its number and,
+    /// when the number is a command's payload, that command's key.
+    fn popover_snapshot(&self) -> Value {
+        let Some(popover) = self.editor.popover() else {
+            return Value::Null;
+        };
+        let rows = (popover.labels().iter().enumerate())
+            .map(|(row, label)| {
+                let id = popover.id(row);
+                let command = (popover.kind(row) == Some(wren_editor::RowKind::Command))
+                    .then(|| id.and_then(CommandId::from_payload).map(CommandId::key))
+                    .flatten();
+                json!({
+                    "id":id,"label":label,"command":command,"glyph":popover.glyph(row),
+                    "key":popover.hint(row),"checked":popover.is_checked(row),
+                    "enabled":popover.is_enabled(row),
+                })
+            })
+            .collect::<Vec<_>>();
+        let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
+        // Where the last frame drew it, once it has been drawn.
+        let bounds = (self.surface() != super::board::Surface::Board)
+            .then(|| self.editor.spell_frame().menu)
+            .flatten();
+        json!({
+            "mode":match popover.mode() {
+                wren_editor::Mode::Menu => "menu",
+                wren_editor::Mode::Suggest => "suggest",
+            },
+            "spelling":self.editor.spell_menu().is_some(),
+            "provider":popover.provider(),"instance":popover.instance(),
+            "line":popover.line(),"start":popover.range().start,"end":popover.range().end,
+            "text":popover.text(),"rows":rows,"selected":popover.selected(),
+            "takes_enter":popover.takes_enter(),"footer":popover.footer(),
+            "bounds":bounds.map(rectangle),
+            "anchor":self.editor.popover_anchor().map(rectangle),
+        })
+    }
+
+    /// Open a menu of the app's at the caret whose rows run the commands
+    /// `params.rows` name (`{"command", "label", "key", "shift"}`), as a
+    /// menu of task rows does: for driving any popover's keys from a test.
+    /// A command that does not exist in this run (a task command with
+    /// tasks off) is refused, and so is a menu under the palette or a
+    /// dialog, which would close it. The classic engine opens none.
+    fn open_command_menu(&mut self, params: &Value) -> Result<(), String> {
+        use wren_editor::{Accelerator, Anchor, Mode, Row};
+        if self.palette.is_some() || self.dialog.is_some() {
+            return Err("Close the palette or dialog before opening a menu".into());
+        }
+        let rows = params
+            .get("rows")
+            .and_then(Value::as_array)
+            .ok_or("rows must be a list")?
+            .iter()
+            .map(|row| {
+                let id = CommandId::parse(string(row, "command")?).ok_or("Unknown command ID")?;
+                if (id.tasks() && !self.preferences.tasks)
+                    || (id.boards() && !self.preferences.boards)
+                {
+                    return Err("The command is unavailable".to_owned());
+                }
+                let label = row.get("label").and_then(Value::as_str).unwrap_or(id.key());
+                let mut row_ = Row::command(id.payload(), label);
+                if let Some(key) = row.get("key").and_then(Value::as_str) {
+                    let mut chars = key.chars();
+                    let (Some(key), None) = (chars.next(), chars.next()) else {
+                        return Err("key must be one character".to_owned());
+                    };
+                    let shift = row.get("shift").and_then(Value::as_bool).unwrap_or(false);
+                    row_ = row_.accelerator(if shift {
+                        Accelerator::shifted(key)
+                    } else {
+                        Accelerator::plain(key)
+                    });
+                }
+                Ok(row_)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if self.editor.open_popover(Anchor::Caret, Mode::Menu, rows) {
+            Ok(())
+        } else {
+            Err("The editor opened no menu".into())
+        }
     }
 
     /// Spell check as the last frame drew it: the marks of its rows and the
@@ -795,6 +950,7 @@ impl App {
                 "line":menu.line(),"start":menu.mark().start,"end":menu.mark().end,
                 "word":menu.word(),"items":menu.items(),"selected":menu.selected(),
                 "bounds":frame.menu.map(rectangle),
+                "anchor":self.editor.popover_anchor().map(rectangle),
             })
         });
         json!({
@@ -807,17 +963,29 @@ impl App {
     /// One key press as the focused editor and then the app would see it:
     /// the editor's own routing, each message it publishes applied in order,
     /// then the app's key handling for a key that reaches it. The editor
-    /// captures every key it publishes for, and Escape unless its menu is
-    /// open (it then drops focus, which this cannot show).
+    /// captures every key it publishes for, and Escape unless a popover of
+    /// its own is open (it then drops focus, which this cannot show).
     fn editor_key(
         &mut self,
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
-        let menu_open = self.editor.spell_menu().is_some();
-        let messages = self.editor.key_message(key.clone(), modifiers);
+        // The calendar's field has the keyboard while it is open, and the
+        // task form while it is.
+        if self.calendar.is_some() {
+            return self.calendar_key(key, modifiers);
+        }
+        if self.task_form.is_some() {
+            return self.form_key(key, modifiers);
+        }
+        let menu_open = self.editor.popover().is_some();
+        let (messages, captured) = self.editor.key_routing(key.clone(), modifiers);
         let escape = key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
-        let status = if messages.is_empty() && (!escape || menu_open) {
+        // Escape on a popover is never captured, whether or not the editor
+        // publishes for it. Any other press is captured as the widget
+        // captures it: not one that only closes a menu, so a shortcut
+        // still reaches the app.
+        let status = if (escape && menu_open) || (!escape && !captured) {
             iced::event::Status::Ignored
         } else {
             iced::event::Status::Captured
@@ -890,6 +1058,8 @@ fn key_press(params: &Value) -> Result<(iced::keyboard::Key, iced::keyboard::Mod
         "delete" => Some(Named::Delete),
         "home" => Some(Named::Home),
         "end" => Some(Named::End),
+        "page_up" => Some(Named::PageUp),
+        "page_down" => Some(Named::PageDown),
         "shift" => Some(Named::Shift),
         "control" => Some(Named::Control),
         "alt" => Some(Named::Alt),
@@ -1225,7 +1395,7 @@ fn parent_json(parent: Parent) -> Value {
     }
 }
 
-fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
+pub(super) fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
     params
         .get(name)
         .and_then(Value::as_str)
@@ -1233,17 +1403,18 @@ fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
 }
 
 fn position(params: &Value) -> Result<Position, String> {
-    let index = |name| {
-        params
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| format!("{name} must be usize"))
-    };
     Ok(Position {
-        line: index("line")?,
-        column: index("column")?,
+        line: usize_param(params, "line")?,
+        column: usize_param(params, "column")?,
     })
+}
+
+fn usize_param(params: &Value, name: &str) -> Result<usize, String> {
+    params
+        .get(name)
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| format!("{name} must be usize"))
 }
 
 /// Text-entry widgets the `focus.get` op reports by name.
@@ -1255,6 +1426,10 @@ const FOCUS_NAMES: &[&str] = &[
     "find-query",
     "palette-query",
     "item-name",
+    "calendar-field",
+    "task-form-description",
+    "task-form-due",
+    "task-form-owners",
 ];
 
 /// Every focused widget in the tree: the known ones by name, the rest (pane
@@ -1360,9 +1535,11 @@ impl App {
             rows: &'static [Row],
             kind: Kind,
             keymap: &wren_core::keybind::Keymap,
+            tasks: bool,
             enabled: &mut dyn FnMut(&str) -> bool,
         ) -> Vec<Value> {
             rows.iter()
+                .filter(|row| menu::row_built(row, tasks))
                 .map(|row| match *row {
                     Row::Command(key, title) => json!({
                         "key": key,
@@ -1376,7 +1553,7 @@ impl App {
                     Row::Separator => json!({"separator": true}),
                     Row::Submenu(title, inner) => json!({
                         "submenu": title,
-                        "items": listed(inner, kind, keymap, enabled),
+                        "items": listed(inner, kind, keymap, tasks, enabled),
                     }),
                 })
                 .collect()
@@ -1389,7 +1566,13 @@ impl App {
                     Kind::Board => "board",
                     Kind::Window => "window",
                 };
-                let items = listed(spec.rows, spec.kind, &self.preferences.keymap, &mut enabled);
+                let items = listed(
+                    spec.rows,
+                    spec.kind,
+                    &self.preferences.keymap,
+                    self.preferences.tasks,
+                    &mut enabled,
+                );
                 json!({"title": spec.title, "kind": kind, "items": items})
             })
             .collect();
@@ -2056,6 +2239,183 @@ mod tests {
         assert_eq!(snapshot["enabled"], true);
         assert_eq!(snapshot["ready"], true);
         assert!(snapshot["menu"].is_null());
+    }
+
+    #[test]
+    fn a_right_click_request_asks_the_editors_providers_and_is_refused_on_a_board() {
+        let (_directory, mut app) = spell_fixture();
+        let right_click = |app: &mut App, column: usize| {
+            let params = json!({"line":0,"column":column});
+            let (request, mut reply) = Request::detached("editor.right_click", params);
+            let _ = app.handle_test(request);
+            reply.try_recv().unwrap()
+        };
+        // A misspelled word is the suggestions menu's, the one provider an
+        // editor has until the app names more, and the click gives the
+        // editor the keyboard; a word spelled right is no one's.
+        app.column = super::super::columns::Column::Notes;
+        right_click(&mut app, 4).unwrap();
+        assert_eq!(
+            app.editor.spell_menu().map(|menu| menu.word()),
+            Some("mispelled")
+        );
+        assert_eq!(app.column, super::super::columns::Column::Editor);
+        // With the menu open, a press in the text only closes it, as the
+        // pointer's does: on a word spelled right, and on the misspelled
+        // word itself, which opens no second menu.
+        for column in [13, 4] {
+            right_click(&mut app, column).unwrap();
+            assert!(app.editor.popover().is_none(), "{column}");
+            right_click(&mut app, 4).unwrap();
+            assert!(app.editor.spell_menu().is_some(), "{column}");
+        }
+        right_click(&mut app, 0).unwrap();
+        assert!(app.editor.popover().is_none());
+        for column in [0, 13] {
+            app.column = super::super::columns::Column::Notes;
+            right_click(&mut app, column).unwrap();
+            assert!(app.editor.popover().is_none(), "{column}");
+            assert_eq!(app.column, super::super::columns::Column::Notes, "{column}");
+        }
+
+        use super::super::board::tests as boards;
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        let error = right_click(&mut app, 0).expect_err("a board");
+        assert!(error.contains("board"), "{error}");
+    }
+
+    /// A menu of the editor's own that is not the suggestions menu, hung
+    /// at the caret.
+    fn open_popover(app: &mut App) {
+        use wren_editor::{Accelerator, Anchor, Mode, Row};
+        let rows = vec![
+            Row::new(1, "Open"),
+            Row::new(2, "Done").accelerator(Accelerator::plain('x')),
+        ];
+        assert!(app.editor.open_popover(Anchor::Caret, Mode::Menu, rows));
+    }
+
+    #[test]
+    fn escape_and_the_apps_close_rules_reach_any_popover_of_the_editors() {
+        let (_directory, mut app) = spell_fixture();
+        open_popover(&mut app);
+        app.find_open = true;
+        press(&mut app, "down");
+        assert_eq!(app.editor.popover().unwrap().selected(), Some(1));
+        // The first Escape is the popover's alone; the next one is the find
+        // bar's.
+        press(&mut app, "escape");
+        assert!(app.editor.popover().is_none());
+        assert!(app.find_open);
+        press(&mut app, "escape");
+        assert!(!app.find_open);
+        // Each press had one owner: none is left claimed for a later one.
+        assert!(!app.editor.take_claimed_escape());
+
+        // The app's own Escape closes it first too.
+        open_popover(&mut app);
+        app.find_open = true;
+        let _ = app.update(Message::Escape);
+        assert!(app.editor.popover().is_none());
+        assert!(app.find_open);
+
+        // An accelerator chooses its row and the text stays; another key
+        // closes the popover and types.
+        open_popover(&mut app);
+        press(&mut app, "x");
+        assert!(app.editor.popover().is_none());
+        assert_eq!(app.editor.text(), "A mispelled word\n");
+        open_popover(&mut app);
+        press(&mut app, "y");
+        assert!(app.editor.popover().is_none());
+        assert_eq!(app.editor.text(), "A miyspelled word\n");
+
+        // It never stays open under a changed setting, an unfocused window
+        // or the palette.
+        open_popover(&mut app);
+        app.apply_preferences();
+        assert!(app.editor.popover().is_none());
+        open_popover(&mut app);
+        app.window_unfocused().unwrap();
+        assert!(app.editor.popover().is_none());
+        open_popover(&mut app);
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        assert!(app.palette.is_some());
+        assert!(app.editor.popover().is_none());
+    }
+
+    /// Offers one row for whatever is before the caret.
+    struct Offers;
+
+    impl wren_editor::SuggestSource for Offers {
+        fn suggest(&self, _line: &str, caret: usize) -> Option<wren_editor::Suggestion> {
+            Some(wren_editor::Suggestion {
+                range: 0..caret,
+                rows: vec![wren_editor::Row::new(1, "row")],
+            })
+        }
+    }
+
+    #[test]
+    fn escape_on_suggestions_is_handled_once_and_before_what_is_typed_next() {
+        use wren_editor::Mode;
+        let (_directory, mut app) = spell_fixture();
+        app.editor
+            .set_suggest_source(Some(std::sync::Arc::new(Offers)));
+        press(&mut app, "x");
+        assert_eq!(
+            app.editor.popover().map(|popover| popover.mode()),
+            Some(Mode::Suggest)
+        );
+        app.find_open = true;
+        // The editor sends Escape on in its order and the app hears of the
+        // same press from its own key handling: the suggestions close, and
+        // that is all the press does.
+        press(&mut app, "escape");
+        assert!(app.editor.popover().is_none());
+        assert!(app.find_open);
+        let line = app.editor.cursor().position.line;
+        assert_eq!(app.editor.suggest_suppressed(), Some(line));
+        // Hidden for the line, so the next letter is offered nothing.
+        press(&mut app, "y");
+        assert!(app.editor.popover().is_none());
+        // The next Escape is the find bar's.
+        press(&mut app, "escape");
+        assert!(!app.find_open);
+    }
+
+    #[test]
+    fn control_escape_is_no_popovers_escape_and_claims_nothing() {
+        let (_directory, mut app) = spell_fixture();
+        app.editor
+            .set_suggest_source(Some(std::sync::Arc::new(Offers)));
+        let control_escape = |app: &mut App| {
+            let (key, modifiers) = key_press(&json!({"key":"escape","mods":["ctrl"]})).unwrap();
+            let _ = app.editor_key(key, modifiers);
+        };
+        for open in [false, true] {
+            if open {
+                press(&mut app, "x");
+                assert!(app.editor.popover().is_some());
+            }
+            app.find_open = true;
+            // A shortcut, with or without suggestions open: the editor
+            // sends it to no popover, and the app's Escape handling never
+            // hears of it.
+            control_escape(&mut app);
+            assert!(app.find_open, "{open}");
+            assert!(!app.editor.take_claimed_escape(), "{open}");
+            assert_eq!(app.editor.suggest_suppressed(), None, "{open}");
+            // So the plain Escape after it is owned as any other: by the
+            // popover while one is open, and by the find bar after.
+            if app.editor.popover().is_some() {
+                press(&mut app, "escape");
+                assert!(app.editor.popover().is_none() && app.find_open);
+            }
+            press(&mut app, "escape");
+            assert!(!app.find_open, "{open}");
+        }
     }
 
     #[test]

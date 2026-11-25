@@ -44,7 +44,9 @@ when one lands, move what users need into `docs/` and trim the note.
   registry, `config.toml`), `settings.rs` (the user-owned `config.conf`),
   `keybind.rs` (triggers, platform default bindings, and the board
   layer), `kind.rs` (`NoteKind`, the kind a file name gives), and
-  `theme.rs` (built-in palettes, with each theme's board hues).
+  `theme.rs` (built-in palettes, with each theme's board hues and its task
+  date and owner colours), and `owners.rs` (the `@owner`s that suggestions
+  offer, read from the search index's notes).
 - `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
   types so it can be extracted later. It must not depend on `wren-core` or
   `wren-spell`, or know app messages; the host passes in a `Style`, a
@@ -58,8 +60,12 @@ when one lands, move what users need into `docs/` and trim the note.
   Markdown assist is off), `highlighter.rs` (spans and per-line
   decorations from `wren_markdown::block`), `history.rs` (snapshot
   undo), `find.rs`, `keys.rs` (the editor's own shortcuts), and
-  `proof.rs` (the `Proofreader` trait and the suggestions menu). Test-only
-  accessors sit behind its `test-support` feature, which
+  `proof.rs` (the `Proofreader` trait and the suggestions menu),
+  `popover.rs` plus `popover/` (the anchored popover that menu and the
+  host's task menus and suggestions share, in Menu and Suggest modes),
+  `hit.rs` (one hit test for a misspelling and the classifier's spans), and
+  `line_edit.rs` (a host's whole-task-line edits, applied as one undo
+  step). Test-only accessors sit behind its `test-support` feature, which
   `wren-iced/smoke-test` enables.
 - `crates/wren-iced/`: the desktop app (binary `wren`).
   - `app.rs` holds `App`, `Message`, `update`, `view`, and `subscription`;
@@ -81,6 +87,16 @@ when one lands, move what users need into `docs/` and trim the note.
     `tests/export_cli.rs` runs that command with no display.
   - `theme.rs` maps a `wren_core` theme to iced's and to the editor's
     `Style` and `Palette`.
+  - Tasks, all behind the restart-only `tasks` setting:
+    `app/tasks.rs` (the one clock, `App::today()`, and the day change),
+    `app/task_commands.rs` (the line commands and the toggle),
+    `app/task_menus.rs` (the status, priority and task menus and the box
+    click), `app/task_footer.rs` (the status-bar line, fitted to its
+    room), `app/task_suggest.rs` (suggestions and the owner cache),
+    `app/calendar.rs` with `date_field.rs` (the calendar overlay and its
+    text field), `app/task_form.rs` with `form_keys.rs` (the task form and
+    its key wrapper), `app/tasks_harness.rs` (the `tasks.*` test requests)
+    and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
     `ellipsis.rs`, `keys.rs`, and `layers.rs` (a stack whose layers all
     hear a press something before them took).
@@ -93,7 +109,13 @@ when one lands, move what users need into `docs/` and trim the note.
   `outline.rs` the heading outline, and `edit.rs` plus `edit/` plan each
   editing `Intent` as an `EditPlan` of replacements. `block` is Wren's one
   classifier: the editor's highlighter and the search index's previews use
-  it.
+  it. Tasks live here too: `status.rs` (the status table), `date.rs`
+  (civil dates and the date words), `span.rs` (typed spans of a line: its
+  inline Markdown and a task's tokens), `task.rs` plus `task/` (reading a
+  task line, writing it back token by token, `Change` and the line edit,
+  `summary.rs` for the status-bar words, `suggest.rs` for what typing
+  offers, `form.rs` for the task form's model), and `calendar.rs` (the
+  calendar's model).
 - `crates/wren-spell/`: spell checking, with no iced or Wren dependency
   (only `spellbook` and `unicode-segmentation`), so it can be extracted
   later. A `Speller` asks its `WordSource`s in order: a `Hunspell`
@@ -155,6 +177,16 @@ when one lands, move what users need into `docs/` and trim the note.
 - Settle before any non-passive op: `App::settle_board()` commits an open
   label, cancels a gesture and drops a preview before a note switch, a
   palette or dialog, a blur, or quit, so a flush never writes half a drag.
+- With `tasks = off` (the default; restart-only) the shared classifier
+  accepts only the boxes it always did, the toggle writes no stamp, and no
+  task command, key or file exists (the harness's `tasks.get` alone still
+  answers, `{"tasks": false}`): `tasks_baseline.rs` and
+  `test_tasks_baseline.py` pin it. Task dates come from `App::today()`,
+  which `WREN_TEST_TODAY` pins under `smoke-test`. A structured change to an
+  existing task (menus, commands, suggestions, the form's edits) goes
+  through `wren_markdown::task::edit`, as one `EditPlan` that carries the
+  line it expects; ordinary typing and the form's conversion of a plain
+  line do not.
 - With `boards = off` no board is listed, opened or written, and the state
   file stays byte-identical to what Wren 0.1 writes. Its v1 keys
   `history`, `history_position`, `recent` and `last_open_note` hold
@@ -183,6 +215,10 @@ uv run --locked --group docs zensical build --strict  # docs site; run for chang
 make fuzz-board && make perf-board   # after changing wren-board; perf-board needs a quiet machine
 ```
 
+- Task changes: `make smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on
+  both engines with `tasks` off and then on, and CI runs one lane (X11,
+  tiny-skia) with `WRENTEST_TASKS=on`. `capture_scenes.py --only tasks`
+  shoots the task scenes.
 - **Never run a normal `cargo build` while a smoke suite is running.** It
   replaces `target/debug/wren` (the smoke-test build), and every later
   launch in that run fails with "unsupported or duplicate option".

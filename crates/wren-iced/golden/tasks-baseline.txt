@@ -1,0 +1,379 @@
+# Wren task-line baseline, recorded by tasks build item 0.1 before any task
+# code existed. It pins what Wren does with these lines while `tasks = off`.
+# Do not regenerate this file to make a later item pass: a difference here
+# is a change users would see with the setting off.
+
+## line 0 "# Task lines"
+block heading 1 text 2..12 depth 0 quotes 0 prefix_end 0 text_start 2 content_column 0
+  open []
+  span 0..2 "# " faint scale 1/1.35
+  span 2..12 "Task lines" heading Bold scale 1.35/1.35
+  hang 0
+  prose [2..12 "Task lines"]
+  misspelled []
+preview Some("")
+enter at end @12: lines 2..2 [] -> [""], caret 1:0
+backspace at text @2: lines 0..1 ["# Task lines"] -> ["#Task lines"], caret 0:1
+toggle task @12: unchanged, caret 0:12
+
+## line 1 ""
+block blank depth 0 quotes 0 prefix_end 0 text_start 0 content_column 0
+  open []
+  hang 0
+  prose []
+  misspelled []
+preview Some("")
+enter at end @0: lines 2..2 [] -> [""], caret 2:0
+backspace at text @0: lines 1..2 [""] -> [], caret 0:12
+toggle task @0: lines 1..2 [""] -> ["- [ ] "], caret 1:6
+
+## line 2 "- [ ] Open alpha task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..21 "Open alpha task"]
+  misspelled []
+preview Some("Open alpha task")
+snippet alpha "Task lines · Open alpha task · Done bravo task · Done charlie…" Some(19..24) match Some(25..30)
+enter at end @21: lines 3..3 [] -> ["- [ ] "], caret 3:6
+backspace at text @6: lines 2..3 ["- [ ] Open alpha task"] -> ["- Open alpha task"], caret 2:2
+toggle task @21: lines 2..3 ["- [ ] Open alpha task"] -> ["- [x] Open alpha task"], caret 2:21
+
+## line 3 "- [x] Done bravo task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task done box 2..5
+  open [item 0/2]
+  span 0..6 "- [x] " faint
+  span 6..21 "Done bravo task" completed
+  hang 2
+  strikes [6..21 "Done bravo task"]
+  prose [6..21 "Done bravo task"]
+  misspelled []
+preview Some("Done bravo task")
+snippet bravo "Task lines · Open alpha task · Done bravo task · Done charlie task · [/] Doing delta…" Some(38..43) match Some(47..52)
+enter at end @21: lines 4..4 [] -> ["- [ ] "], caret 4:6
+backspace at text @6: lines 3..4 ["- [x] Done bravo task"] -> ["- Done bravo task"], caret 3:2
+toggle task @21: lines 3..4 ["- [x] Done bravo task"] -> ["- [ ] Done bravo task"], caret 3:21
+
+## line 4 "- [X] Done charlie task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task done box 2..5
+  open [item 0/2]
+  span 0..6 "- [X] " faint
+  span 6..23 "Done charlie task" completed
+  hang 2
+  strikes [6..23 "Done charlie task"]
+  prose [6..23 "Done charlie task"]
+  misspelled []
+preview Some("Done charlie task")
+snippet charlie "…alpha task · Done bravo task · Done charlie task · [/] Doing delta task · [-] Cancelled…" Some(41..48) match Some(69..76)
+enter at end @23: lines 5..5 [] -> ["- [ ] "], caret 5:6
+backspace at text @6: lines 4..5 ["- [X] Done charlie task"] -> ["- Done charlie task"], caret 4:2
+toggle task @23: lines 4..5 ["- [X] Done charlie task"] -> ["- [ ] Done charlie task"], caret 4:23
+
+## line 5 "- [/] Doing delta task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 2 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 2 quotes 0
+  task none
+  open [item 0/2]
+  span 0..2 "- " accent
+  hang 2
+  prose [2..22 "[/] Doing delta task"]
+  misspelled []
+preview Some("[/] Doing delta task")
+snippet delta "…bravo task · Done charlie task · [/] Doing delta task · [-] Cancelled echo task · [a] Unknown…" Some(48..53) match Some(94..99)
+enter at end @22: lines 6..6 [] -> ["- "], caret 6:2
+backspace at text @2: lines 5..6 ["- [/] Doing delta task"] -> ["  [/] Doing delta task"], caret 5:2
+toggle task @22: lines 5..6 ["- [/] Doing delta task"] -> ["- [ ] [/] Doing delta task"], caret 5:26
+
+## line 6 "- [-] Cancelled echo task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 2 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 2 quotes 0
+  task none
+  open [item 0/2]
+  span 0..2 "- " accent
+  hang 2
+  prose [2..25 "[-] Cancelled echo task"]
+  misspelled [6..15 "Cancelled"]
+preview Some("[-] Cancelled echo task")
+snippet echo "…task · [/] Doing delta task · [-] Cancelled echo task · [a] Unknown foxtrot box · Quoted…" Some(49..53) match Some(121..125)
+enter at end @25: lines 7..7 [] -> ["- "], caret 7:2
+backspace at text @2: lines 6..7 ["- [-] Cancelled echo task"] -> ["  [-] Cancelled echo task"], caret 6:2
+toggle task @25: lines 6..7 ["- [-] Cancelled echo task"] -> ["- [ ] [-] Cancelled echo task"], caret 6:29
+
+## line 7 "- [a] Unknown foxtrot box"
+block prose depth 1 quotes 0 prefix_end 2 text_start 2 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 2 quotes 0
+  task none
+  open [item 0/2]
+  span 0..2 "- " accent
+  hang 2
+  prose [2..25 "[a] Unknown foxtrot box"]
+  misspelled []
+preview Some("[a] Unknown foxtrot box")
+snippet foxtrot "…task · [-] Cancelled echo task · [a] Unknown foxtrot box · Quoted golf task · Numbered…" Some(50..57) match Some(145..152)
+enter at end @25: lines 8..8 [] -> ["- "], caret 8:2
+backspace at text @2: lines 7..8 ["- [a] Unknown foxtrot box"] -> ["  [a] Unknown foxtrot box"], caret 7:2
+toggle task @25: lines 7..8 ["- [a] Unknown foxtrot box"] -> ["- [ ] [a] Unknown foxtrot box"], caret 7:29
+
+## line 8 "> - [ ] Quoted golf task"
+block prose depth 2 quotes 1 prefix_end 4 text_start 8 content_column 4
+  item bullet '-' at 2..3 indent 2 content_column 4 text_start 8 quotes 1
+  task open box 4..7
+  open [quote 0/2, item 2/4]
+  span 0..2 "> " faint
+  span 2..8 "- [ ] " accent
+  span 8..24 "Quoted golf task" quote Italic
+  hang 4
+  prose [8..24 "Quoted golf task"]
+  misspelled []
+preview Some("Quoted golf task")
+snippet golf "…task · [a] Unknown foxtrot box · Quoted golf task · Numbered hotel task · [ ] Tab…" Some(45..49) match Some(172..176)
+enter at end @24: lines 9..9 [] -> ["> - [ ] "], caret 9:8
+backspace at text @8: lines 8..9 ["> - [ ] Quoted golf task"] -> ["> - Quoted golf task"], caret 8:4
+toggle task @24: lines 8..9 ["> - [ ] Quoted golf task"] -> ["> - [x] Quoted golf task"], caret 8:24
+
+## line 9 "1. [ ] Numbered hotel task"
+block prose depth 1 quotes 0 prefix_end 3 text_start 7 content_column 3
+  item ordered 1 width 1 '.' at 0..2 indent 0 content_column 3 text_start 7 quotes 0
+  task open box 3..6
+  open [item 0/3]
+  span 0..7 "1. [ ] " accent
+  hang 3
+  prose [7..26 "Numbered hotel task"]
+  misspelled []
+preview Some("Numbered hotel task")
+snippet hotel "…box · Quoted golf task · Numbered hotel task · [ ] Tab india task · Starred juliet…" Some(39..44) match Some(198..203)
+enter at end @26: lines 10..10 [] -> ["2. [ ] "], caret 10:7
+backspace at text @7: lines 9..10 ["1. [ ] Numbered hotel task"] -> ["1. Numbered hotel task"], caret 9:3
+toggle task @26: lines 9..10 ["1. [ ] Numbered hotel task"] -> ["1. [x] Numbered hotel task"], caret 9:26
+
+## line 10 "- [ ]\tTab india task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ]\t" accent
+  hang 2
+  prose [6..20 "Tab india task"]
+  misspelled [10..15 "india"]
+preview Some("Tab india task")
+snippet india "…golf task · Numbered hotel task · [ ] Tab india task · Starred juliet task · Nested…" Some(47..52) match Some(219..224)
+enter at end @20: lines 11..11 [] -> ["- [ ]\t"], caret 11:6
+backspace at text @6: lines 10..11 ["- [ ]\tTab india task"] -> ["- Tab india task"], caret 10:2
+toggle task @20: lines 10..11 ["- [ ]\tTab india task"] -> ["- [x]\tTab india task"], caret 10:20
+
+## line 11 "* [ ] Starred juliet task"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '*' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "* [ ] " accent
+  hang 2
+  prose [6..25 "Starred juliet task"]
+  misspelled [14..20 "juliet"]
+preview Some("Starred juliet task")
+snippet juliet "…hotel task · [ ] Tab india task · Starred juliet task · Nested kilo task · Owner lima…" Some(47..53) match Some(244..250)
+enter at end @25: lines 12..12 [] -> ["  - [ ] "], caret 12:8
+backspace at text @6: lines 11..12 ["* [ ] Starred juliet task"] -> ["* Starred juliet task"], caret 11:2
+toggle task @25: lines 11..12 ["* [ ] Starred juliet task"] -> ["* [x] Starred juliet task"], caret 11:25
+
+## line 12 "  - [ ] Nested kilo task"
+block prose depth 2 quotes 0 prefix_end 4 text_start 8 content_column 4
+  item bullet '-' at 2..3 indent 2 content_column 4 text_start 8 quotes 0
+  task open box 4..7
+  open [item 0/2, item 2/4]
+  span 2..8 "- [ ] " accent
+  hang 4
+  prose [8..24 "Nested kilo task"]
+  misspelled []
+preview Some("Nested kilo task")
+snippet kilo "…task · Starred juliet task · Nested kilo task · Owner lima task @alice.chen…" Some(41..45) match Some(271..275)
+enter at end @24: lines 13..13 [] -> ["  - [ ] "], caret 13:8
+backspace at text @8: lines 12..13 ["  - [ ] Nested kilo task"] -> ["  - Nested kilo task"], caret 12:4
+toggle task @24: lines 12..13 ["  - [ ] Nested kilo task"] -> ["  - [x] Nested kilo task"], caret 12:24
+
+## line 13 "- [ ] Owner lima task @alice.chen"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..33 "Owner lima task @alice.chen"]
+  misspelled [12..16 "lima"]
+preview Some("Owner lima task @alice.chen")
+snippet lima "…task · Nested kilo task · Owner lima task @alice.chen · Due mike task 📅…" Some(37..41) match Some(293..297)
+enter at end @33: lines 14..14 [] -> ["- [ ] "], caret 14:6
+backspace at text @6: lines 13..14 ["- [ ] Owner lima task @alice.chen"] -> ["- Owner lima task @alice.chen"], caret 13:2
+toggle task @33: lines 13..14 ["- [ ] Owner lima task @alice.chen"] -> ["- [x] Owner lima task @alice.chen"], caret 13:33
+
+## line 14 "- [ ] Due mike task 📅 2026-11-20"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..35 "Due mike task 📅 2026-11-20"]
+  misspelled []
+preview Some("Due mike task 📅 2026-11-20")
+snippet mike "…Owner lima task @alice.chen · Due mike task 📅 2026-11-20 · Priority november task…" Some(38..42) match Some(325..329)
+enter at end @35: lines 15..15 [] -> ["- [ ] "], caret 15:6
+backspace at text @6: lines 14..15 ["- [ ] Due mike task 📅 2026-11-20"] -> ["- Due mike task 📅 2026-11-20"], caret 14:2
+toggle task @35: lines 14..15 ["- [ ] Due mike task 📅 2026-11-20"] -> ["- [x] Due mike task 📅 2026-11-20"], caret 14:35
+
+## line 15 "- [ ] Priority november task ⏫"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..32 "Priority november task ⏫"]
+  misspelled [15..23 "november"]
+preview Some("Priority november task ⏫")
+snippet november "…[ ] Due mike task 📅 2026-11-20 · Priority november task ⏫ · Tagged oscar task #work…" Some(49..57) match Some(366..374)
+enter at end @32: lines 16..16 [] -> ["- [ ] "], caret 16:6
+backspace at text @6: lines 15..16 ["- [ ] Priority november task ⏫"] -> ["- Priority november task ⏫"], caret 15:2
+toggle task @32: lines 15..16 ["- [ ] Priority november task ⏫"] -> ["- [x] Priority november task ⏫"], caret 15:32
+
+## line 16 "- [ ] Tagged oscar task #work"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..29 "Tagged oscar task #work"]
+  misspelled [13..18 "oscar"]
+preview Some("Tagged oscar task #work")
+snippet oscar "…Priority november task ⏫ · Tagged oscar task #work · Every papa token ⏫ @bob 📅…" Some(40..45) match Some(397..402)
+enter at end @29: lines 17..17 [] -> ["- [ ] "], caret 17:6
+backspace at text @6: lines 16..17 ["- [ ] Tagged oscar task #work"] -> ["- Tagged oscar task #work"], caret 16:2
+toggle task @29: lines 16..17 ["- [ ] Tagged oscar task #work"] -> ["- [x] Tagged oscar task #work"], caret 16:29
+
+## line 17 "- [ ] Every papa token ⏫ @bob 📅 2026-11-18 #home"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..53 "Every papa token ⏫ @bob 📅 2026-11-18 #home"]
+  misspelled []
+preview Some("Every papa token ⏫ @bob 📅 2026-11-18 #home")
+snippet papa "…⏫ · Tagged oscar task #work · Every papa token ⏫ @bob 📅 2026-11-18 #home · Stamped…" Some(43..47) match Some(426..430)
+enter at end @53: lines 18..18 [] -> ["- [ ] "], caret 18:6
+backspace at text @6: lines 17..18 ["- [ ] Every papa token ⏫ @bob 📅 2026-11-18 #home"] -> ["- Every papa token ⏫ @bob 📅 2026-11-18 #home"], caret 17:2
+toggle task @53: lines 17..18 ["- [ ] Every papa token ⏫ @bob 📅 2026-11-18 #home"] -> ["- [x] Every papa token ⏫ @bob 📅 2026-11-18 #home"], caret 17:53
+
+## line 18 "- [x] Stamped quebec task ✅ 2026-11-19"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task done box 2..5
+  open [item 0/2]
+  span 0..6 "- [x] " faint
+  span 6..40 "Stamped quebec task ✅ 2026-11-19" completed
+  hang 2
+  strikes [6..40 "Stamped quebec task ✅ 2026-11-19"]
+  prose [6..40 "Stamped quebec task ✅ 2026-11-19"]
+  misspelled [14..20 "quebec"]
+preview Some("Stamped quebec task ✅ 2026-11-19")
+snippet quebec "…token ⏫ @bob 📅 2026-11-18 #home · Stamped quebec task ✅ 2026-11-19 · Fix the recieve romeo…" Some(51..57) match Some(482..488)
+enter at end @40: lines 19..19 [] -> ["- [ ] "], caret 19:6
+backspace at text @6: lines 18..19 ["- [x] Stamped quebec task ✅ 2026-11-19"] -> ["- Stamped quebec task ✅ 2026-11-19"], caret 18:2
+toggle task @40: lines 18..19 ["- [x] Stamped quebec task ✅ 2026-11-19"] -> ["- [ ] Stamped quebec task ✅ 2026-11-19"], caret 18:40
+
+## line 19 "- [ ] Fix the recieve romeo bug"
+block prose depth 1 quotes 0 prefix_end 2 text_start 6 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 6 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..6 "- [ ] " accent
+  hang 2
+  prose [6..31 "Fix the recieve romeo bug"]
+  misspelled [14..21 "recieve"]
+preview Some("Fix the recieve romeo bug")
+snippet romeo "…quebec task ✅ 2026-11-19 · Fix the recieve romeo bug · text · Fenced sierra task…" Some(49..54) match Some(531..536)
+enter at end @31: lines 20..20 [] -> ["- [ ] "], caret 20:6
+backspace at text @6: lines 19..20 ["- [ ] Fix the recieve romeo bug"] -> ["- Fix the recieve romeo bug"], caret 19:2
+toggle task @31: lines 19..20 ["- [ ] Fix the recieve romeo bug"] -> ["- [x] Fix the recieve romeo bug"], caret 19:31
+
+## line 20 "- [ ]"
+block blank depth 1 quotes 0 prefix_end 2 text_start 5 content_column 2
+  item bullet '-' at 0..1 indent 0 content_column 2 text_start 5 quotes 0
+  task open box 2..5
+  open [item 0/2]
+  span 0..5 "- [ ]" accent
+  hang 2
+  prose []
+  misspelled []
+preview Some("")
+enter at end @5: lines 20..21 ["- [ ]"] -> ["", ""], caret 21:0
+backspace at text @5: lines 20..21 ["- [ ]"] -> ["- "], caret 20:2
+toggle task @5: lines 20..21 ["- [ ]"] -> ["- [x]"], caret 20:5
+
+## line 21 ""
+block blank depth 1 quotes 0 prefix_end 0 text_start 0 content_column 2
+  open [item 0/2]
+  hang 0
+  prose []
+  misspelled []
+preview Some("")
+enter at end @0: lines 22..22 [] -> [""], caret 22:0
+backspace at text @0: lines 21..22 [""] -> [], caret 20:5
+toggle task @0: lines 21..22 [""] -> ["- [ ] "], caret 21:6
+
+## line 22 "```text"
+block fence open '`'x3 info 3..7 depth 0 quotes 0 prefix_end 0 text_start 0 content_column 0
+  open []
+  span 0..7 "```text" faint
+  hang 0 code
+  prose []
+  misspelled []
+preview Some("")
+enter at end @7: lines 23..23 [] -> [""], caret 23:0
+backspace at text @0: lines 21..22 [""] -> [], caret 21:0
+toggle task @7: unchanged, caret 22:7
+
+## line 23 "- [ ] Fenced sierra task"
+block fence body depth 0 quotes 0 prefix_end 0 text_start 0 content_column 0
+  open []
+  span 0..24 "- [ ] Fenced sierra task" muted
+  hang 0 code
+  prose []
+  misspelled []
+preview Some("Fenced sierra task")
+snippet sierra "…recieve romeo bug · text · Fenced sierra task" Some(39..45) match Some(569..575)
+enter at end @24: lines 24..24 [] -> [""], caret 24:0
+backspace at text @0: lines 22..24 ["```text", "- [ ] Fenced sierra task"] -> ["```text- [ ] Fenced sierra task"], caret 22:7
+toggle task @24: unchanged, caret 23:24
+
+## line 24 "```"
+block fence close depth 0 quotes 0 prefix_end 0 text_start 0 content_column 0
+  open []
+  span 0..3 "```" faint
+  hang 0 code
+  prose []
+  misspelled []
+preview Some("")
+enter at end @3: lines 26..26 [] -> [""], caret 25:0
+backspace at text @0: lines 23..25 ["- [ ] Fenced sierra task", "```"] -> ["- [ ] Fenced sierra task```"], caret 23:24
+toggle task @3: unchanged, caret 24:3
+
+## line 25 ""
+block blank depth 0 quotes 0 prefix_end 0 text_start 0 content_column 0
+  open []
+  hang 0
+  prose []
+  misspelled []
+preview Some("")
+enter at end @0: lines 26..26 [] -> [""], caret 26:0
+backspace at text @0: lines 25..26 [""] -> [], caret 24:3
+toggle task @0: lines 25..26 [""] -> ["- [ ] "], caret 25:6
