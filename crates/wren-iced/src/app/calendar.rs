@@ -520,7 +520,7 @@ impl App {
             // After a blur: with nothing else holding the keyboard, the
             // editor takes it back.
             Event::FocusChecked(held) => {
-                let free = !held && self.calendar.is_none();
+                let free = !held && self.calendar.is_none() && self.task_form.is_none();
                 return if free && self.palette.is_none() && self.dialog.is_none() {
                     self.return_to_editor()
                 } else {
@@ -1507,6 +1507,24 @@ mod tests {
         let none = app.update(Message::Calendar(Event::FocusChecked(false)));
         assert_eq!(none.units(), 0, "the palette keeps the keyboard");
         untouched(&app, cursor);
+    }
+
+    /// The blur's question is answered after the task form opened in the
+    /// same batch: the form keeps the keyboard, and the note behind it is
+    /// not given it.
+    #[test]
+    fn a_blur_answered_after_the_task_form_opened_leaves_the_form_the_keyboard() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "- [ ] Open");
+        app.editor.move_cursor(caret(at, 4));
+        set_due_key(&mut app);
+        let _ = app.update(Message::Calendar(Event::Field(FieldEvent::Blur)));
+        assert!(app.calendar.is_none());
+        assert!(app.open_task_form(at).is_some());
+        let none = app.update(Message::Calendar(Event::FocusChecked(false)));
+        assert_eq!(none.units(), 0, "the note is not given the keyboard");
+        let form = app.task_form.as_ref().expect("the form stays open");
+        assert_eq!(form.focus, super::super::task_form::Slot::Description);
     }
 
     #[test]

@@ -2511,9 +2511,16 @@ impl EditorView {
     /// Refresh what derives from the text after it changed, from line
     /// `from` on.
     fn text_changed(&mut self, from: usize) {
-        self.new_revision(from);
-        self.close_open();
+        // Where the front matter ends decides what each line before it is,
+        // so a move of its end may change any line from the first.
+        let before = self.front_matter_end;
         self.refresh_front_matter();
+        self.new_revision(if self.front_matter_end == before {
+            from
+        } else {
+            0
+        });
+        self.close_open();
         self.recompute_find();
     }
 
@@ -2675,6 +2682,26 @@ mod tests {
     /// is as it was at the revision asked about, on both engines and for
     /// every way the text changes; a revision it never had, or one too
     /// many changes ago, it cannot say.
+    #[test]
+    fn a_move_of_the_front_matters_end_changes_every_line_from_the_first() {
+        for kind in BackendKind::ALL {
+            let mut ev = EditorView::with_backend(kind, "---\ntitle: s\n- [ ] t\n\n---");
+            let first = ev.revision();
+            ev.move_cursor(Cursor {
+                position: Position { line: 4, column: 3 },
+                selection: None,
+            });
+            ev.perform(Action::Edit(Edit::Insert('x')));
+            assert_eq!(ev.line_text(4).as_deref(), Some("---x"), "{kind:?}");
+            assert_eq!(ev.changed_since(first), Some(0), "{kind:?}");
+            // An edit that leaves it where it was names a line near its own.
+            let second = ev.revision();
+            ev.perform(Action::Edit(Edit::Insert('y')));
+            let named = ev.changed_since(second).unwrap();
+            assert!((1..=4).contains(&named), "{kind:?}: {named}");
+        }
+    }
+
     #[test]
     fn changed_since_names_no_line_after_the_first_changed_one() {
         type Change = fn(&mut EditorView);

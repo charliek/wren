@@ -330,7 +330,7 @@ impl App {
         }
         let focus = open.focus;
         let typed = !open.form.pending_owner().trim().is_empty()
-            || super::task_form::chosen_at(open, &self.owner_suggestions()).is_some();
+            || (focus == Slot::Owners && open.suggestion.is_some());
         let text = match focus {
             Slot::Description => Some(open.form.description().to_owned()),
             Slot::Due => Some(open.form.due().to_owned()),

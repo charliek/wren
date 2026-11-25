@@ -589,6 +589,12 @@ def menu_scenes(client, shot_here, resize) -> None:
     assert text == "- [/] Draft the cutover runbook @alice.chen ⏫ 📅 2026-11-23", text
     client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
     client.call("editor.focus")
+    # Spelling may be on already (`--setting spell-check=on`): off for the
+    # task menus, which a misspelled `runbook` would open spelling's menu
+    # over, and as it was once the scenes are done.
+    spelling_was_on = client.call("editor.spell")["enabled"]
+    if spelling_was_on:
+        client.call("command.run", {"id": "editor.toggle_spell_check"})
 
     def menu_at(token: str, rows: list[str], marked: str) -> None:
         column = len(text[:text.index(token)].encode())
@@ -630,7 +636,8 @@ def menu_scenes(client, shot_here, resize) -> None:
     client.call("editor.spell_event", {"event": "close"})
     client.call("editor.undo")
     assert client.call("editor.get")["text"] == original
-    client.call("command.run", {"id": "editor.toggle_spell_check"})
+    if not spelling_was_on:
+        client.call("command.run", {"id": "editor.toggle_spell_check"})
 
 
 def command_scenes(client, shot_here) -> None:

@@ -77,6 +77,9 @@ impl App {
         change: Option<Change>,
         line: Option<usize>,
     ) -> Gateway {
+        // A done or cancelled stamp is today's, though the day changed
+        // since the timer last looked.
+        self.check_day();
         self.palette = None;
         let focus = self.return_to_editor();
         let started = Instant::now();
@@ -1080,5 +1083,20 @@ mod tests {
             snapshot["text"].as_str().unwrap().split('\n').nth(open),
             Some("- [x] Open task @sam 📅 2026-11-23")
         );
+    }
+
+    /// Midnight passed after the timer last looked: the toggle stamps the
+    /// new day, not the one the editor was last told of.
+    #[test]
+    fn a_toggle_after_midnight_stamps_today() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", "- [ ] x\n");
+            app.sync_task_options();
+            app.clock
+                .pass_midnight(Date::parse_iso("2026-11-20").unwrap());
+            let (after, _, disposition) = run_at_end(&mut app, 0, CommandId::ToggleTask);
+            assert_eq!(after, "- [x] x ✅ 2026-11-20", "{engine}");
+            assert_eq!(disposition, Disposition::Completed);
+        }
     }
 }

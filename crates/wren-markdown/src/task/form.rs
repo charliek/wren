@@ -421,23 +421,35 @@ impl Form {
     /// the description field's text once that is the user's own.
     pub fn remove_owner(&mut self, name: &str) {
         let name = name.strip_prefix('@').unwrap_or(name);
+        let added = self.added.len();
         self.added.retain(|owner| !same_name(owner, name));
+        let mut shown = self.added.len() != added;
         for (place, (owner, in_description)) in self.original.owners.iter().enumerate() {
             let typed_over = *in_description && self.edited;
             if same_name(owner, name) && !typed_over && !self.removed.contains(&place) {
                 self.removed.push(place);
+                shown = true;
             }
         }
-        if self.edited {
-            let spellings: Vec<String> = description_owners(&self.description)
-                .into_iter()
-                .filter(|owner| same_name(owner, name))
-                .collect();
-            for spelling in spellings {
-                self.description = without_owner(&self.description, &spelling);
-            }
-        } else {
+        if !self.edited {
             self.refresh_description();
+            // A mention a removal revealed (`@bob` once `@sam@bob` lost
+            // `@sam`) is no original owner's: it goes from the description's
+            // text, which becomes the user's own. One the owner's own chip
+            // stood for is gone, and one its removal revealed (`@sam` of
+            // `@Sam@sam`) stays for a click of its own.
+            if shown || !self.owners().iter().any(|owner| same_name(owner, name)) {
+                return;
+            }
+            let description = self.description.clone();
+            self.set_description(&description);
+        }
+        let spellings: Vec<String> = description_owners(&self.description)
+            .into_iter()
+            .filter(|owner| same_name(owner, name))
+            .collect();
+        for spelling in spellings {
+            self.description = without_owner(&self.description, &spelling);
         }
     }
 
@@ -917,6 +929,32 @@ mod tests {
         assert_eq!(form.preview(), "- [ ] Plan 📅 2026-12-01");
         assert!(form.add_owner("BOB"));
         assert_eq!(compound(&form), []);
+    }
+
+    /// `@bob` of `@sam@bob` is an owner only once `@sam` is removed: its
+    /// chip's remove takes it out too.
+    /// One click removes the mentions its chip stood for: `@sam`, which
+    /// removing `@Sam` revealed, stays for a click of its own.
+    #[test]
+    fn a_click_removes_only_the_mentions_its_chip_showed() {
+        let mut form = form("- [ ] Call @Sam@sam", 0);
+        assert_eq!(form.owners(), ["Sam"]);
+        form.remove_owner("Sam");
+        assert_eq!(form.owners(), ["sam"]);
+        assert_eq!(form.preview(), "- [ ] Call @sam");
+        form.remove_owner("sam");
+        assert_eq!(form.owners(), Vec::<String>::new());
+        assert_eq!(form.written().unwrap(), "- [ ] Call");
+    }
+
+    #[test]
+    fn an_owner_a_removal_revealed_is_removed_too() {
+        let mut form = form("- [ ] Call @sam@bob", 0);
+        form.remove_owner("sam");
+        assert_eq!(form.owners(), ["bob"]);
+        form.remove_owner("bob");
+        assert_eq!(form.owners(), Vec::<String>::new());
+        assert_eq!(form.written().unwrap(), "- [ ] Call");
     }
 
     #[test]

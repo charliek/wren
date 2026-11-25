@@ -78,6 +78,13 @@ impl Clock {
     pub(super) fn changes(&self) -> u64 {
         self.changes
     }
+
+    /// Move the pinned day to `date` without the check the timer makes,
+    /// as midnight passes between two of its ticks.
+    #[cfg(test)]
+    pub(super) fn pass_midnight(&mut self, date: Date) {
+        self.pinned = Some(date);
+    }
 }
 
 /// The caret line's task box as [`App::caret_task`] last found it, or that

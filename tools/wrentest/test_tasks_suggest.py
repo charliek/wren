@@ -297,11 +297,10 @@ def test_native_du_and_enter_at_full_speed_open_the_calendar(
         end_of_task(app)
         # `du` and Return in one go: the suggestions they open in that
         # batch take the Return, and what follows is dropped, never typed.
-        # On the advanced engine, Escape in that batch too: typed before the
-        # calendar could be seen, it closes nothing.
-        escape = [] if engine == "classic" else ["Escape"]
+        # No Escape among it: should xdotool split the batch, a later one's
+        # Escape is the calendar field's own and closes it.
         xdo("key", "--window", window, "--clearmodifiers", "--delay", "0",
-            "space", "d", "u", "Return", *escape, "x", "y")
+            "space", "d", "u", "Return", "x", "y")
         if engine == "classic":
             expected = with_task("- [ ] Meet sam du", "- [ ] xy")
             wait_for(lambda: call("editor.get")["text"] == expected,

@@ -23,7 +23,7 @@
 //! The words are English, as the date words the task line is typed with
 //! are ([`crate::date`]).
 
-use super::{DateField, DateToken, TaskLine};
+use super::{fold_name, DateField, DateToken, TaskLine};
 use crate::date::{Date, Parsed};
 use crate::status::{StatusType, STATUSES};
 
@@ -134,7 +134,12 @@ pub fn summary(line: &TaskLine<'_>, today: Date) -> Summary {
 
     let mut owners: Vec<&str> = Vec::new();
     for name in line.owner_names() {
-        if !owners.contains(&name) {
+        // Owners are compared without regard to case: the first spelling
+        // shows.
+        if !owners
+            .iter()
+            .any(|owner| fold_name(owner) == fold_name(name))
+        {
             owners.push(name);
         }
     }
@@ -278,6 +283,11 @@ mod tests {
             ]
         );
         assert!(!spelled(line, today()).overdue());
+    }
+
+    #[test]
+    fn an_owner_written_in_two_cases_shows_once() {
+        assert_eq!(text("- [ ] Call @Sam and @sam"), "Open · @Sam");
     }
 
     #[test]

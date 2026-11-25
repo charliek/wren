@@ -25,7 +25,13 @@
 //! - In the due field Down opens the calendar; in the owners field Up and
 //!   Down move through the suggestions, Tab with a name typed takes the
 //!   owner offered for it before it moves on, and Backspace with nothing
-//!   typed removes the last owner.
+//!   typed removes the last owner. How many owners are offered is the
+//!   host's word as it drew the form: once the keyboard has moved, or the
+//!   card published anything (an edit, an owner removed, a choice), in the
+//!   batch, it is unknown, and Up or Down counts as a choice, so that Enter
+//!   hands it to the host, which adds the owner it chose or none, and never
+//!   saves. What the card publishes forgets the owner chosen, as the host
+//!   does.
 //! - Every other key, the shortcuts included, is the focused input's, or
 //!   no one's.
 //!
@@ -255,7 +261,7 @@ pub fn form_keys<'a, Message, Theme, Renderer>(
         passive: false,
         handback: false,
         handback_over: Cell::new(false),
-        suggestions: 0,
+        suggestions: Cell::new(Some(0)),
         chosen: Cell::new(false),
         save: None,
         claims: None,
@@ -277,8 +283,10 @@ pub struct FormKeys<'a, Message, Theme, Renderer> {
     handback: bool,
     /// Input of the field's own came in this batch.
     handback_over: Cell<bool>,
-    /// How many owners the owners field offers.
-    suggestions: usize,
+    /// How many owners the owners field offers, while the host's count
+    /// holds: `None` once the keyboard moved, or the card published
+    /// anything, in this batch.
+    suggestions: Cell<Option<usize>>,
     /// One of them is chosen with Up or Down, as this batch leaves it.
     chosen: Cell<bool>,
     save: Option<SaveKeys>,
@@ -296,13 +304,15 @@ impl<'a, Message, Theme, Renderer> FormKeys<'a, Message, Theme, Renderer> {
         self
     }
 
-    /// The owners field offers `count` owners, one of them chosen with Up
-    /// or Down when `chosen`: Enter and Tab then add it, and Escape forgets
-    /// it, whether or not a name is typed.
+    /// The owners field offers `count` owners, and the host holds an owner
+    /// chosen with Up or Down when `chosen`, offered still or not: Enter and
+    /// Tab then hand it to the host, never saving, and Escape forgets it,
+    /// whether or not a name is typed. The count holds until the keyboard
+    /// moves, or the form's content publishes anything, in the batch.
     #[must_use]
     pub fn owner_choice(mut self, count: usize, chosen: bool) -> Self {
-        self.suggestions = count;
-        self.chosen = Cell::new(chosen && count > 0);
+        self.suggestions = Cell::new(Some(count));
+        self.chosen = Cell::new(chosen);
         self
     }
 
@@ -399,6 +409,7 @@ where
             ),
         }
         self.slot.set(slot);
+        self.suggestions.set(None);
     }
 
     /// Empty the owners field's text input at once, as the host empties its
@@ -658,10 +669,6 @@ where
                             .is_some_and(|save| save(key, *physical_key, *modifiers));
                         match route(kind, routed_key, *modifiers, state.composing, typed, save) {
                             Routed::Pass => {
-                                // Typing offers other owners: none is chosen.
-                                if kind == SlotKind::Owners {
-                                    self.chosen.set(false);
-                                }
                                 // The text input reads the modifiers it last
                                 // heard change, which a press's own say.
                                 self.content.as_widget_mut().update(
@@ -682,6 +689,7 @@ where
                             Routed::Tab(back) => {
                                 if kind == SlotKind::Owners && typed {
                                     self.chosen.set(false);
+                                    self.suggestions.set(None);
                                     self.publish(shell, FormKey::Complete);
                                     self.empty_owners(
                                         tree, child, cursor, renderer, clipboard, shell, viewport,
@@ -696,10 +704,16 @@ where
                             Routed::Key(key) => {
                                 let empties = matches!(key, FormKey::Accept | FormKey::Clear);
                                 match key {
-                                    FormKey::Suggest(_) if self.suggestions > 0 => {
-                                        self.chosen.set(true)
+                                    // With the count unknown the host may
+                                    // have chosen one: Enter hands it over.
+                                    FormKey::Suggest(_) if self.suggestions.get() != Some(0) => {
+                                        self.chosen.set(true);
                                     }
-                                    FormKey::Accept | FormKey::Clear => self.chosen.set(false),
+                                    FormKey::Accept | FormKey::Clear => {
+                                        self.chosen.set(false);
+                                        self.suggestions.set(None);
+                                    }
+                                    FormKey::RemoveLast => self.suggestions.set(None),
                                     _ => {}
                                 }
                                 let key = match key {
@@ -720,6 +734,14 @@ where
                     _ => {}
                 }
             }
+            // Whatever the form's content publishes (an edit of a field, an
+            // input method's commit, an owner's remove button, a choice, a
+            // suggestion taken) may change the owners offered, and the host
+            // forgets the owner chosen for it: the count is unknown and none
+            // is chosen. A key that only moves a caret publishes nothing and
+            // keeps the choice.
+            let mut published = Vec::new();
+            let mut inner = Shell::new(&mut published);
             self.content.as_widget_mut().update(
                 &mut tree.children[0],
                 event,
@@ -727,9 +749,14 @@ where
                 cursor,
                 renderer,
                 clipboard,
-                shell,
+                &mut inner,
                 viewport,
             );
+            if !inner.is_empty() {
+                self.chosen.set(false);
+                self.suggestions.set(None);
+            }
+            shell.merge(inner, std::convert::identity);
             // A press that gave a text input of the form the keyboard moves
             // the slot to it.
             let pressed = matches!(
@@ -745,7 +772,14 @@ where
                         .position(|slot| slot.id.as_ref() == Some(&id))
                 });
                 if let Some(found) = found.filter(|found| *found != self.slot.get()) {
+                    // The host forgets the owner chosen once the keyboard
+                    // leaves the owners field, as Tab's move does.
+                    let left = self.slots.get(self.slot.get()).map(|slot| slot.kind);
+                    if left == Some(SlotKind::Owners) {
+                        self.chosen.set(false);
+                    }
                     self.slot.set(found);
+                    self.suggestions.set(None);
                     tree.state.downcast_mut::<State>().composing = false;
                     shell.publish((self.on_key)(FormKey::Focus(found)));
                 }
@@ -1534,5 +1568,243 @@ mod tests {
         );
         assert_eq!(next_slot(0, 7, true), 6);
         assert_eq!(next_slot(6, 7, false), 0);
+    }
+
+    /// A key that only moves the owners field's caret publishes no edit,
+    /// so the owner chosen stays chosen, as the host keeps it: Enter adds
+    /// it and does not save.
+    #[test]
+    fn a_caret_key_keeps_the_owner_chosen() {
+        for caret in [Named::Home, Named::End, Named::ArrowLeft, Named::ArrowRight] {
+            let mut form = Form::new();
+            form.batch(&[named(Named::Tab), named(Named::Tab), named(Named::Tab)]);
+            let (messages, _) =
+                form.batch(&[named(Named::ArrowDown), named(caret), named(Named::Enter)]);
+            assert_eq!(
+                messages,
+                [
+                    key(FormKey::Suggest(1)),
+                    key(FormKey::Accept),
+                    typed_text("owners", ""),
+                ],
+                "{caret:?}"
+            );
+        }
+        // An edit, even one that leaves the text as it was, forgets it.
+        let mut form = Form::new();
+        form.batch(&[named(Named::Tab), named(Named::Tab), named(Named::Tab)]);
+        let (messages, _) = form.batch(&[
+            named(Named::ArrowDown),
+            named(Named::Delete),
+            named(Named::Enter),
+        ]);
+        assert_eq!(
+            messages,
+            [
+                key(FormKey::Suggest(1)),
+                typed_text("owners", ""),
+                key(FormKey::Save),
+            ]
+        );
+    }
+
+    /// A form whose owners field offered `count` owners as it was drawn
+    /// with slot `focused` holding the keyboard, fed one batch of `events`.
+    fn owners_batch(count: usize, focused: usize, events: &[Event]) -> Vec<Out> {
+        owners_batch_at(count, false, focused, None, events)
+    }
+
+    /// [`owners_batch`] with the host holding an owner chosen when
+    /// `chosen`, and the pointer over the card's child `over`: the three
+    /// text inputs, then a button (an owner's remove, or a choice).
+    fn owners_batch_at(
+        count: usize,
+        chosen: bool,
+        focused: usize,
+        over: Option<usize>,
+        events: &[Event],
+    ) -> Vec<Out> {
+        let live = Rc::new(RefCell::new(String::new()));
+        let typed = Rc::clone(&live);
+        let content = column![
+            text_input("", "").id(IDS[0]),
+            text_input("", "").id(IDS[1]),
+            text_input("", "").id(IDS[2]).on_input(move |text: String| {
+                live.borrow_mut().clone_from(&text);
+                Out::Typed(IDS[2], text)
+            }),
+            button("×").on_press(Out::Pressed),
+        ];
+        let mut element: Element<'static, Out, Theme, ()> =
+            form_keys(content, slots(), focused, typed, Out::Key)
+                .owner_choice(count, chosen)
+                .into();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+        );
+        if let Some(id) = slots()[focused].id.clone() {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &(),
+                &mut operation::focusable::focus(id),
+            );
+        }
+        let cursor = over.map_or(mouse::Cursor::Unavailable, |at| {
+            let card = Layout::new(&node).children().next().unwrap();
+            let input = card.children().nth(at).unwrap();
+            mouse::Cursor::Available(input.bounds().center())
+        });
+        let mut messages = Vec::new();
+        for event in events {
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                event,
+                Layout::new(&node),
+                cursor,
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+            );
+        }
+        messages
+    }
+
+    /// A press that takes the keyboard out of the owners field forgets the
+    /// owner chosen, as the host does: back in the field in the same
+    /// batch, Tab adds nothing the user did not pick.
+    #[test]
+    fn a_press_that_leaves_the_owners_field_forgets_the_owner_chosen() {
+        let (due, owners) = (2, 3);
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let messages = owners_batch_at(
+            2,
+            false,
+            owners,
+            Some(1),
+            &[
+                named(Named::ArrowDown),
+                press,
+                named(Named::Tab),
+                named(Named::Tab),
+            ],
+        );
+        assert_eq!(
+            messages,
+            [
+                key(FormKey::Suggest(1)),
+                key(FormKey::Focus(due)),
+                key(FormKey::Focus(owners)),
+                key(FormKey::Focus(4)),
+            ]
+        );
+    }
+
+    /// The host counts the owners offered only for the owners field with
+    /// the keyboard. Moved there in the batch, the form does not know how
+    /// many there are, so Down counts as a choice and Enter hands it to
+    /// the host, which adds the owner it chose, or none: never a save.
+    #[test]
+    fn an_owner_chosen_where_the_count_is_unknown_is_never_saved_past() {
+        let (due, owners) = (2, 3);
+        let messages = owners_batch(
+            0,
+            due,
+            &[
+                named(Named::Tab),
+                named(Named::ArrowDown),
+                named(Named::Enter),
+            ],
+        );
+        assert_eq!(
+            messages,
+            [
+                key(FormKey::Focus(owners)),
+                key(FormKey::Suggest(1)),
+                key(FormKey::Accept),
+                typed_text("owners", ""),
+            ]
+        );
+        // Nor once an owner is removed, which may offer it again.
+        let messages = owners_batch(
+            0,
+            owners,
+            &[
+                named(Named::Backspace),
+                named(Named::ArrowDown),
+                named(Named::Enter),
+            ],
+        );
+        assert!(!messages.contains(&key(FormKey::Save)), "{messages:?}");
+        // With none offered, as the host counted them, Down chooses nothing
+        // and Enter saves; with no Down, Enter saves.
+        let messages = owners_batch(0, owners, &[named(Named::ArrowDown), named(Named::Enter)]);
+        assert_eq!(messages, [key(FormKey::Suggest(1)), key(FormKey::Save)]);
+        let messages = owners_batch(0, due, &[named(Named::Tab), named(Named::Enter)]);
+        assert_eq!(messages, [key(FormKey::Focus(owners)), key(FormKey::Save)]);
+    }
+
+    fn click() -> [Event; 2] {
+        [
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ]
+    }
+
+    /// An owner's remove button (or anything else the card publishes)
+    /// may change the owners offered: none were, as the host counted
+    /// them, but Down then counts as a choice and Enter never saves.
+    #[test]
+    fn what_the_card_publishes_leaves_the_count_unknown() {
+        let owners = 3;
+        let [press, release] = click();
+        let messages = owners_batch_at(
+            0,
+            false,
+            owners,
+            Some(3),
+            &[press, release, named(Named::ArrowDown), named(Named::Enter)],
+        );
+        assert_eq!(
+            messages,
+            [Out::Pressed, key(FormKey::Suggest(1)), key(FormKey::Accept)]
+        );
+    }
+
+    /// A choice clicked forgets the owner chosen, as the host does: back
+    /// in the owners field in the same batch, Tab adds nothing.
+    #[test]
+    fn a_choice_clicked_forgets_the_owner_chosen() {
+        let owners = 3;
+        let [press, release] = click();
+        let messages = owners_batch_at(
+            2,
+            false,
+            owners,
+            Some(3),
+            &[named(Named::ArrowDown), press, release, named(Named::Tab)],
+        );
+        assert_eq!(
+            messages,
+            [
+                key(FormKey::Suggest(1)),
+                Out::Pressed,
+                key(FormKey::Focus(4)),
+            ]
+        );
+    }
+
+    /// The host holds an owner chosen that is no longer offered: Enter
+    /// hands it back as Accept, and never saves.
+    #[test]
+    fn an_owner_chosen_no_longer_offered_is_never_saved_past() {
+        let owners = 3;
+        let messages = owners_batch_at(0, true, owners, None, &[named(Named::Enter)]);
+        assert_eq!(messages, [key(FormKey::Accept), typed_text("owners", "")]);
     }
 }

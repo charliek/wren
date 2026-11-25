@@ -1098,7 +1098,8 @@ fn plain_markdown(text: &str, at_line_start: bool) -> (String, Vec<usize>) {
 /// were before tasks.
 ///
 /// The note is classified from its first line down to the window, and only
-/// when the window's lines hold a `[`.
+/// when the window's lines, whole, hold a `[`: a window may end at a list
+/// marker with the box just past it.
 fn task_prefixes(text: &str, window: Range<usize>, boxes: Boxes) -> Vec<Range<usize>> {
     if boxes != Boxes::Status {
         return Vec::new();
@@ -1106,7 +1107,10 @@ fn task_prefixes(text: &str, window: Range<usize>, boxes: Boxes) -> Vec<Range<us
     let first = text[..window.start]
         .rfind(['\n', '\r'])
         .map_or(0, |ending| ending + 1);
-    if !text[first..window.end].contains('[') {
+    let last = text[window.end..]
+        .find(['\n', '\r'])
+        .map_or(text.len(), |ending| window.end + ending);
+    if !text[first..last].contains('[') {
         return Vec::new();
     }
     let lines = wren_markdown::line_ranges(text).map(|(line, _)| line);
@@ -2470,6 +2474,20 @@ labels = [{ text = "when paid" }]
     /// The context window may open or close inside a task line's markup:
     /// the box is found on the whole line, so what the window shows of it
     /// is dropped, and the hit keeps its place.
+    #[test]
+    fn a_snippet_window_that_ends_before_a_tasks_box_shows_none_of_its_markup() {
+        let long = "a".repeat(42);
+        let text = format!("needle {long}\n\n1. [/] next");
+        let (on, highlight) = shown(&text, "needle", Boxes::Status);
+        assert!(
+            on.starts_with("needle aaaa") && !on.contains("1."),
+            "{on:?}"
+        );
+        assert_eq!(highlight.as_deref(), Some("needle"));
+        let (plain, _) = shown(&text, "needle", Boxes::Plain);
+        assert!(plain.contains("1."), "{plain:?}");
+    }
+
     #[test]
     fn a_snippet_window_that_cuts_a_task_lines_markup_shows_none_of_it() {
         let long = "a".repeat(42);

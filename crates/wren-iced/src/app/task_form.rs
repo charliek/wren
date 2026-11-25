@@ -585,13 +585,17 @@ impl App {
                         open.form.set_pending_owner(&text);
                         open.suggestion = None;
                     }
+                    // A choice clicked takes the keyboard from the owners
+                    // field, as Tab does, and the owner chosen is forgotten.
                     Event::Status(status) => {
                         open.form.set_status(status);
                         open.focus = Slot::Status;
+                        open.suggestion = None;
                     }
                     Event::Priority(priority) => {
                         open.form.set_priority(priority);
                         open.focus = Slot::Priority;
+                        open.suggestion = None;
                     }
                     Event::AddOwner(name) => {
                         open.form.add_owner(&name);
@@ -600,7 +604,12 @@ impl App {
                         open.focus = Slot::Owners;
                         return Slot::Owners.focus();
                     }
-                    Event::RemoveOwner(name) => open.form.remove_owner(&name),
+                    // The owners offered change: the owner chosen is
+                    // forgotten, as the form's keys forget it.
+                    Event::RemoveOwner(name) => {
+                        open.form.remove_owner(&name);
+                        open.suggestion = None;
+                    }
                     _ => {}
                 }
                 Task::none()
@@ -722,7 +731,8 @@ impl App {
     /// left out, the one it names exactly first, as the suggestions in the
     /// note offer them (`task_suggest.rs`). Found again only once the
     /// owners, the name typed or the owners chosen change, and from the
-    /// owners' case-folded names, reading no more of them than it shows.
+    /// owners' case-folded names: the exact match is looked for among all
+    /// of them, the rest only until the list is full.
     pub(super) fn owner_suggestions(&self) -> Vec<String> {
         let Some(open) = &self.task_form else {
             return Vec::new();
@@ -778,6 +788,7 @@ impl App {
         open.calendar = Some(Calendar::new(today, open.form.due_date()));
         open.calendar_composing = false;
         open.focus = Slot::Due;
+        open.suggestion = None;
         iced::widget::operation::focus(CALENDAR_FIELD)
     }
 
@@ -895,8 +906,18 @@ impl App {
     /// Write the form's change to its task as one line edit.
     fn write_task_edit(&mut self, form: &Form) -> Result<bool, String> {
         let change = form.change().map_err(|problem| problem.to_string())?;
+        // A stamp is the day the form's preview showed, though the editor
+        // has not yet heard the day changed.
+        let today = form.today();
         let edit = self.editor.plan_markdown(|lines, selection, options| {
-            task::edit(lines, form.line(), selection, &change, options)
+            let options = wren_markdown::Options {
+                tasks: options.tasks.map(|mut tasks| {
+                    tasks.today = today;
+                    tasks
+                }),
+                ..*options
+            };
+            task::edit(lines, form.line(), selection, &change, &options)
         });
         let Some(edit) =
             edit.filter(|edit| edit.line == form.line() && edit.expect == form.expect())
@@ -1279,10 +1300,9 @@ impl App {
         )
         .save_keys(save)
         .claims(&FORM_CLAIMS)
-        .owner_choice(
-            self.owner_suggestions().len(),
-            chosen_at(open, &self.owner_suggestions()).is_some(),
-        )
+        // A choice no longer offered is held all the same: Enter hands it
+        // to the app, which adds nothing for it, and never saves.
+        .owner_choice(self.owner_suggestions().len(), open.suggestion.is_some())
         .handback(open.due_handback)
         .passive(open.calendar.is_some())
         .into()
@@ -2105,6 +2125,75 @@ mod tests {
             text(&app),
             replaced(at, "- [/] Draft the runbook @sam ⏫ 📅 2026-11-23")
         );
+    }
+
+    /// Down and Enter in the batch whose Tab moved to the owners field:
+    /// the form's keys cannot know whether an owner is offered, so Enter
+    /// reaches the app as Accept, which adds the owner chosen, or with
+    /// none chosen and nothing typed adds nothing. Neither saves.
+    /// A choice clicked, or an owner's remove, forgets the owner chosen,
+    /// as Tab out of the owners field does: back there, Enter adds none.
+    #[test]
+    fn a_choice_or_a_remove_clicked_forgets_the_owner_chosen() {
+        let clicks: [Event; 3] = [
+            Event::Status(StatusType::Doing),
+            Event::Priority(Some(Priority::Low)),
+            Event::RemoveOwner("nobody".into()),
+        ];
+        for click in clicks {
+            let (_directory, mut app) = note_app("advanced", "on", NOTE);
+            let at = line_of(NOTE, "- [ ] Two");
+            app.editor.move_cursor(caret(at, 3));
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            key(&mut app, FormKey::Focus(Slot::Owners.index()));
+            key(&mut app, FormKey::Suggest(1));
+            assert_eq!(open(&app).suggestion.as_deref(), Some("alice"));
+            send(&mut app, click.clone());
+            assert_eq!(open(&app).suggestion, None, "{click:?}");
+            key(&mut app, FormKey::Focus(Slot::Owners.index()));
+            let generation = app.owners.generation();
+            send(&mut app, Event::OwnerKey(FormKey::Accept, generation));
+            assert!(open(&app).form.owners().is_empty(), "{click:?}");
+        }
+    }
+
+    /// Midnight passed after the timer last looked: the form's preview
+    /// shows the new day's stamp, and Save writes that stamp.
+    #[test]
+    fn a_save_after_midnight_writes_the_stamp_the_preview_showed() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "- [ ] Two");
+        app.editor.move_cursor(caret(at, 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        app.clock
+            .pass_midnight(Date::parse_iso("2026-11-20").unwrap());
+        send(&mut app, Event::Status(StatusType::Done));
+        let preview = open(&app).form.preview();
+        assert!(preview.ends_with("✅ 2026-11-20"), "{preview}");
+        key(&mut app, FormKey::Save);
+        assert!(app.task_form.is_none());
+        assert_eq!(text(&app), replaced(at, &preview));
+    }
+
+    #[test]
+    fn accept_adds_the_owner_chosen_or_nothing_and_never_saves() {
+        for (down, owners) in [(true, vec!["alice".to_owned()]), (false, vec![])] {
+            let (_directory, mut app) = note_app("advanced", "on", NOTE);
+            let at = line_of(NOTE, "- [ ] Two");
+            app.editor.move_cursor(caret(at, 3));
+            let before = text(&app);
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            key(&mut app, FormKey::Focus(Slot::Priority.index()));
+            key(&mut app, FormKey::Focus(Slot::Owners.index()));
+            assert_eq!(app.owner_suggestions(), ["alice"]);
+            if down {
+                key(&mut app, FormKey::Suggest(1));
+            }
+            let generation = app.owners.generation();
+            send(&mut app, Event::OwnerKey(FormKey::Accept, generation));
+            assert_eq!(open(&app).form.owners(), owners, "down: {down}");
+            assert_eq!(text(&app), before, "nothing is written");
+        }
     }
 
     #[test]
