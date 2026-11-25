@@ -315,7 +315,14 @@ def test_native_du_and_enter_at_full_speed_open_the_calendar(
         assert call("tasks.calendar")["open"] is True
         assert call("focus.get")["named"] == ["calendar-field"]
         assert call("editor.get")["text"] == with_task("- [ ] Meet sam du")
-        assert call("tasks.calendar")["typed"] == ""
+        # The keys after Return never reach the note. xdotool does not
+        # promise one input batch: those in Return's batch are dropped, and
+        # any that land in a later one are the calendar field's.
+        typed = call("tasks.calendar")["typed"]
+        assert "xy".endswith(typed), typed
+        for _ in typed:
+            xdo("key", "--window", window, "--clearmodifiers", "BackSpace")
+        wait_for(lambda: call("tasks.calendar")["typed"] == "", description="the field is empty")
         xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", "fri")
         wait_for(lambda: call("tasks.calendar")["typed"] == "fri", description="typing reaches the field")
         xdo("key", "--window", window, "--clearmodifiers", "Return")
