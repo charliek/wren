@@ -194,7 +194,10 @@ keeps its dates.
 
 On the `advanced` engine, a click on a task's box changes its status: open
 to doing, doing to done, done to open. A cancelled task reopens. The
-change is one undo step, and the caret stays where it was.
+change is one undo step, and the caret stays where it was. A box with a
+character Wren has no status for (`[?]`, `[>]`, `[1]`) is not cycled, so
+its character is never lost: the click places the caret, and the
+right-click status menu still sets a status.
 
 The status changes 300 ms after the press, once a double click could no
 longer follow, so a second click in that time selects a word instead and
@@ -251,11 +254,15 @@ lacks. Two rules open the list:
 | `@`, `@sa` | Owners already on task lines in the workspace |
 
 Suggestions use these words only: `+3d` and ISO dates are typed in the
-calendar or the form. Owners come from the task lines of every note in the
-workspace. They are compared without regard to case and offered in their
-most common spelling. They are ranked by the notes they appear in, each
-note counting less the longer ago it changed (half as much after 30 days),
-so this week's co-workers come before a name from a year ago. A name you
+calendar or the form. Owners come from the task lines of the notes whose
+text the search index holds. In a workspace past the index's memory limit
+(128 MiB, counting each note's text and its lowercase copy), a note whose
+content search is unavailable is left out, so a name written only there is
+not offered. Owners are compared without regard to case (Unicode case
+folding, so `@µ` and `@μ` are one owner) and offered in their most common
+spelling. They are ranked by the notes they appear in, each note counting
+less the longer ago it changed (half as much after 30 days), so this week's
+co-workers come before a name from a year ago. A name you
 have typed whole goes first. A suggestion is never offered for what the line
 has: no second due date, no second priority, no owner it names already.
 
@@ -284,9 +291,13 @@ Markdown it will write.
 - A heading, a thematic break, a code block and front matter have no form.
 
 Saving writes only the fields you changed, as one undo step, so a line in
-your own order keeps its order and an untouched form writes nothing. It is
-refused, with the form left open, when the due field is not a date or not a
-real day, and when the line changed while the form was open. The due field
+your own order keeps its order, and an untouched form on a task writes
+nothing. On a line that is not a task yet, saving makes the task even with
+nothing changed. A due date that names no real day (`📅 2026-02-30`) is
+kept as written when you change only other fields. Saving is refused, with
+the form and what you typed in it left open, when the due field is not a
+date or not a real day, and when the note changed in any way while the form
+was open (it was reloaded from disk, say). The due field
 takes the [date words](#date-words) and opens the calendar under it. See
 [The task form](../getting-started/keybindings.md#the-task-form) for its
 keys.

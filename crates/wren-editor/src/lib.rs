@@ -344,7 +344,13 @@ pub struct EditorView {
     spell_frame: std::cell::RefCell<SpellFrame>,
     /// See [`EditorView::revision`].
     revision: u64,
+    /// The last revisions the text left, each with the first line its
+    /// change could touch: see [`EditorView::changed_since`].
+    changes: std::collections::VecDeque<(u64, usize)>,
 }
+
+/// How many changes [`EditorView::changed_since`] can look back over.
+const CHANGES_KEPT: usize = 64;
 
 /// A row chosen from the host's popover, until the host takes it.
 struct Chosen {
@@ -418,6 +424,7 @@ impl EditorView {
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: Default::default(),
             revision: next_revision(),
+            changes: std::collections::VecDeque::new(),
         };
         view.refresh_front_matter();
         view
@@ -464,7 +471,7 @@ impl EditorView {
         }
         if tasks.is_some() != self.tasks.is_some() {
             // The boxes read change, and with them what a line is.
-            self.revision = next_revision();
+            self.new_revision(0);
         }
         self.tasks = tasks;
     }
@@ -476,6 +483,33 @@ impl EditorView {
     /// [`spans_at`](Self::spans_at).
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// The first line that may differ from the text at `revision`, one of
+    /// this editor's recent revisions ([`revision`](Self::revision)):
+    /// every line before it is as it was then, so what a host read from
+    /// them still holds. `usize::MAX` when `revision` is the current one,
+    /// and `None` when the editor cannot say (a revision it never had, or
+    /// one too many changes ago): then the host reads afresh.
+    pub fn changed_since(&self, revision: u64) -> Option<usize> {
+        if revision == self.revision {
+            return Some(usize::MAX);
+        }
+        let from = self
+            .changes
+            .iter()
+            .position(|(left, _)| *left == revision)?;
+        self.changes.range(from..).map(|(_, line)| *line).min()
+    }
+
+    /// A new revision, whose change could touch line `from` and those after
+    /// it, and none before.
+    fn new_revision(&mut self, from: usize) {
+        if self.changes.len() == CHANGES_KEPT {
+            self.changes.pop_front();
+        }
+        self.changes.push_back((self.revision, from));
+        self.revision = next_revision();
     }
 
     pub fn tasks(&self) -> Option<wren_markdown::TaskOptions> {
@@ -683,7 +717,8 @@ impl EditorView {
                 return false;
             }
             self.history.before_edit(before, kind, now);
-            self.text_changed();
+            // Backspace at a line's start joins it to the line before.
+            self.text_changed(edited.saturating_sub(1));
             true
         } else {
             self.history.break_group();
@@ -707,6 +742,11 @@ impl EditorView {
             return false;
         };
         let before = self.snapshot();
+        let first = order
+            .iter()
+            .map(|replace| replace.start.line)
+            .min()
+            .unwrap_or(0);
         for replace in order.iter().rev() {
             let ending = self.content.with_lines(|lines| {
                 edit::break_ending(lines, replace.start, replace.end, &replace.text)
@@ -721,7 +761,7 @@ impl EditorView {
         if changed {
             self.history
                 .before_edit(before, EditKind::Replace, Instant::now());
-            self.text_changed();
+            self.text_changed(first.saturating_sub(1));
         } else {
             self.history.break_group();
         }
@@ -1061,7 +1101,7 @@ impl EditorView {
         self.history.clear();
         self.find_current = None;
         self.suppressed = None;
-        self.text_changed();
+        self.text_changed(0);
     }
 
     /// The engine the editor runs on.
@@ -1084,7 +1124,7 @@ impl EditorView {
         self.history.clear();
         self.find_current = None;
         self.suppressed = None;
-        self.text_changed();
+        self.text_changed(0);
         true
     }
 
@@ -2461,16 +2501,17 @@ impl EditorView {
         let cursor = self.clamped(snapshot.cursor);
         self.content.restore_view(cursor, snapshot.scroll);
         self.find_current = None;
-        self.text_changed();
+        self.text_changed(start.line.saturating_sub(1));
     }
 
     fn clamped(&self, cursor: Cursor) -> Cursor {
         self.content.with_lines(|lines| clamp_cursor(cursor, lines))
     }
 
-    /// Refresh what derives from the text after it changed.
-    fn text_changed(&mut self) {
-        self.revision = next_revision();
+    /// Refresh what derives from the text after it changed, from line
+    /// `from` on.
+    fn text_changed(&mut self, from: usize) {
+        self.new_revision(from);
         self.close_open();
         self.refresh_front_matter();
         self.recompute_find();
@@ -2612,6 +2653,155 @@ mod tests {
     /// The revision moves on every change to the text and to how its lines
     /// are read, on both engines, and on nothing else; no two editors share
     /// one.
+    /// The first line `text` and `other` differ on, as the editor splits
+    /// lines; `usize::MAX` when they are the same.
+    fn first_difference(text: &str, other: &str) -> usize {
+        if text == other {
+            return usize::MAX;
+        }
+        let lines = |text: &str| -> Vec<(String, wren_markdown::LineEnding)> {
+            wren_markdown::line_ranges(text)
+                .map(|(range, ending)| (text[range].to_owned(), ending))
+                .collect()
+        };
+        let (a, b) = (lines(text), lines(other));
+        a.iter()
+            .zip(&b)
+            .position(|(x, y)| x.0 != y.0)
+            .unwrap_or(a.len().min(b.len()))
+    }
+
+    /// After any change, every line before the one `changed_since` names
+    /// is as it was at the revision asked about, on both engines and for
+    /// every way the text changes; a revision it never had, or one too
+    /// many changes ago, it cannot say.
+    #[test]
+    fn changed_since_names_no_line_after_the_first_changed_one() {
+        type Change = fn(&mut EditorView);
+        let at = |line: usize, column: usize| Cursor {
+            position: Position { line, column },
+            selection: None,
+        };
+        let changes: [(&str, Change); 11] = [
+            ("type mid-line", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 3, column: 2 },
+                    selection: None,
+                });
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            }),
+            ("enter", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 3, column: 2 },
+                    selection: None,
+                });
+                ev.perform(Action::Edit(Edit::Enter));
+            }),
+            ("backspace at a line's start", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 4, column: 0 },
+                    selection: None,
+                });
+                ev.perform(Action::Edit(Edit::Backspace));
+            }),
+            ("delete at a line's end", |ev| {
+                let end = ev.line_text(2).unwrap().len();
+                ev.move_cursor(Cursor {
+                    position: Position {
+                        line: 2,
+                        column: end,
+                    },
+                    selection: None,
+                });
+                ev.perform(Action::Edit(Edit::Delete));
+            }),
+            ("a selection typed over", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 2, column: 1 },
+                    selection: Some(Position { line: 5, column: 1 }),
+                });
+                ev.perform(Action::Edit(Edit::Insert('y')));
+            }),
+            ("a paste", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 1, column: 0 },
+                    selection: None,
+                });
+                ev.perform(Action::Edit(Edit::Paste(Arc::new("a\nb\r\nc".into()))));
+            }),
+            ("undo", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 4, column: 1 },
+                    selection: None,
+                });
+                ev.perform(Action::Edit(Edit::Insert('z')));
+                ev.undo();
+            }),
+            ("replacements", |ev| {
+                let replace = |line, text: &str| Replace {
+                    start: Position { line, column: 0 },
+                    end: Position { line, column: 0 },
+                    text: text.into(),
+                };
+                ev.apply(
+                    &[replace(5, "five "), replace(3, "three\n")],
+                    Cursor {
+                        position: Position { line: 0, column: 0 },
+                        selection: None,
+                    },
+                );
+            }),
+            ("a toggle", |ev| {
+                ev.move_cursor(Cursor {
+                    position: Position { line: 2, column: 0 },
+                    selection: None,
+                });
+                ev.intent(Intent::ToggleTask);
+            }),
+            ("new text", |ev| ev.replace_text("other\ntext", true)),
+            ("an engine change", |ev| {
+                let text = ev.text();
+                let other = match ev.backend() {
+                    BackendKind::Iced => BackendKind::Owned,
+                    BackendKind::Owned => BackendKind::Iced,
+                };
+                ev.set_backend(other, &text);
+            }),
+        ];
+        let text = "# one\r\ntwo\n- [ ] three\rfour\nfive\n\nsix\nseven";
+        for kind in BackendKind::ALL {
+            for (what, change) in changes {
+                let mut ev = EditorView::with_backend(kind, text);
+                ev.move_cursor(at(0, 0));
+                let first = ev.revision();
+                let before = ev.text();
+                assert_eq!(ev.changed_since(first), Some(usize::MAX));
+                change(&mut ev);
+                let after = ev.text();
+                let named = ev.changed_since(first).expect(what);
+                assert!(
+                    named <= first_difference(&before, &after),
+                    "{kind:?} {what}: {named} after {:?}",
+                    first_difference(&before, &after)
+                );
+                // Over several changes, the earliest of them.
+                let second = ev.revision();
+                let middle = ev.text();
+                ev.move_cursor(at(0, 1));
+                ev.perform(Action::Edit(Edit::Insert('w')));
+                assert_eq!(ev.changed_since(first), Some(0), "{kind:?} {what}");
+                assert!(ev.changed_since(second).unwrap() <= first_difference(&middle, &ev.text()));
+            }
+            let mut ev = EditorView::with_backend(kind, text);
+            assert_eq!(ev.changed_since(0), None, "never this editor's");
+            let first = ev.revision();
+            for _ in 0..=CHANGES_KEPT {
+                ev.perform(Action::Edit(Edit::Insert('q')));
+            }
+            assert_eq!(ev.changed_since(first), None, "too long ago");
+        }
+    }
+
     #[test]
     fn the_revision_moves_with_the_text_and_the_boxes_read() {
         let today = wren_markdown::date::Date::new(2026, 11, 19).unwrap();

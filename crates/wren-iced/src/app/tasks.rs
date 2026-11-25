@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use iced::Subscription;
-use wren_markdown::block::{self, Boxes};
+use wren_markdown::block::{self, Boxes, LineInfo, Scanner};
+use wren_markdown::checkpoints::{self, Checkpoints};
 use wren_markdown::date::Date;
 use wren_markdown::span::SpanKind;
 use wren_markdown::task::{self, Summary};
@@ -15,6 +16,11 @@ use wren_markdown::TaskOptions;
 
 use super::board::Surface;
 use super::{App, Message};
+
+/// The day a clock that never read the local date holds (tasks off).
+fn unread() -> Date {
+    Date::new(1970, 1, 1).expect("a date")
+}
 
 /// How often a running Wren looks for a new local date while tasks are on.
 const DAY_CHECK: Duration = Duration::from_secs(60);
@@ -43,6 +49,20 @@ impl Clock {
             #[cfg(any(test, feature = "smoke-test"))]
             pinned,
             seen,
+            changes: 0,
+        }
+    }
+
+    /// The clock the app launches with: with tasks off, which reads no
+    /// date and handles no day change, one that never read the local date.
+    pub(super) fn launch(pinned: Option<Date>, tasks: bool) -> Self {
+        if tasks {
+            return Self::new(pinned);
+        }
+        Self {
+            #[cfg(any(test, feature = "smoke-test"))]
+            pinned,
+            seen: pinned.unwrap_or_else(unread),
             changes: 0,
         }
     }
@@ -79,6 +99,13 @@ pub(super) struct TaskMemo {
     /// How many times a task was spelled out.
     #[cfg(test)]
     formats: std::cell::Cell<usize>,
+    /// The editor's lines as the whole note reads them, kept across edits
+    /// with the revision of the text they were last brought up to:
+    /// see [`App::read_task_line`].
+    lines: RefCell<Option<(Option<u64>, Checkpoints)>>,
+    /// The note and surface the caches were last kept for: see
+    /// [`App::release_task_caches`].
+    shown: std::cell::Cell<Option<(Option<wren_core::model::NoteId>, bool)>>,
 }
 
 #[derive(Debug)]
@@ -236,16 +263,102 @@ impl App {
         if !text.contains('[') {
             return None;
         }
+        let boxes = Boxes::with_tasks(self.editor.tasks().is_some());
         let box_ = self
-            .editor
-            .spans_at(number)
-            .spans
-            .iter()
-            .find_map(|span| match span.kind {
-                SpanKind::Box(task) => Some(task),
-                _ => None,
-            })?;
+            .read_task_line(number, |text, info, _| {
+                wren_markdown::span::spans(text, info, boxes)
+                    .spans
+                    .iter()
+                    .find_map(|span| match span.kind {
+                        SpanKind::Box(task) => Some(task),
+                        _ => None,
+                    })
+            })
+            .flatten()?;
         Some((text, box_))
+    }
+
+    /// Line `line` of the editor's text as the whole note reads it, handed
+    /// to `read` with its text, its classification and the scanner just
+    /// after it; `None` past the last line. The scanner's states are kept
+    /// across edits (`wren_markdown::checkpoints`), and forgotten from the
+    /// first line an edit changed, which the editor names
+    /// ([`wren_editor::EditorView::changed_since`]), so a read after typing
+    /// compares no lines and scans a few dozen, not the note down to
+    /// `line`: what finds the caret line's task after every edit, near the
+    /// end of a long note too.
+    pub(super) fn read_task_line<R>(
+        &self,
+        line: usize,
+        read: impl FnOnce(&str, &LineInfo, &Scanner) -> R,
+    ) -> Option<R> {
+        let revision = self.editor.revision();
+        // The boxes the editor reads, as its highlighter and plans do.
+        let boxes = Boxes::with_tasks(self.editor.tasks().is_some());
+        let mut kept = self.task_memo.lines.borrow_mut();
+        if kept
+            .as_ref()
+            .is_none_or(|(_, checkpoints)| checkpoints.boxes() != boxes)
+        {
+            *kept = Some((None, Checkpoints::new(boxes)));
+        }
+        let (seen, checkpoints) = kept.as_mut().expect("just made");
+        // The editor says which line its changes since the last read began
+        // on, when it can; else the lines kept are compared.
+        let changed = seen.and_then(|seen| self.editor.changed_since(seen));
+        self.editor.read_markdown(|lines, _| {
+            if *seen != Some(revision) {
+                match changed {
+                    Some(first) => checkpoints.update_from(lines, first),
+                    None => checkpoints.update(lines),
+                };
+                *seen = Some(revision);
+            }
+            checkpoints.line(lines, line, read)
+        })
+    }
+
+    /// Give back what is kept of a note's lines, here and in the owners'
+    /// copy of the note typed in, once the editor shows another note, or a
+    /// board, or no note. After every message, with tasks on.
+    pub(super) fn release_task_caches(&mut self) {
+        let shown = (self.selected_note, self.surface() == Surface::Text);
+        if self.task_memo.shown.get() == Some(shown) {
+            return;
+        }
+        self.task_memo.shown.set(Some(shown));
+        *self.task_memo.lines.borrow_mut() = None;
+        self.owners.release_typing();
+    }
+
+    /// Whether lines of the editor's text are kept.
+    #[cfg(test)]
+    pub(super) fn task_lines_kept(&self) -> bool {
+        self.task_memo.lines.borrow().is_some()
+    }
+
+    /// How many lines [`App::read_task_line`] has scanned.
+    #[cfg(test)]
+    pub(super) fn task_lines_scanned(&self) -> u64 {
+        self.task_memo
+            .lines
+            .borrow()
+            .as_ref()
+            .map_or(0, |(_, checkpoints)| checkpoints.scanned())
+    }
+
+    /// The task whose box line `line` of the editor's text opens, as the
+    /// whole note reads it: not a line in a fenced block, nor a later line
+    /// of a task's text. `None` with tasks off.
+    pub(super) fn box_on(&self, line: usize) -> Option<block::Task> {
+        if !self.preferences.tasks || self.editor.tasks().is_none() {
+            return None;
+        }
+        self.read_task_line(line, |text, info, scanner| {
+            let task = checkpoints::opened_task(info, scanner)?;
+            task::parse(text, task).map(|_| task)
+        })
+        .flatten()
     }
 
     /// The timer that looks for a new day: only while tasks are on.
@@ -340,6 +453,15 @@ mod tests {
             (app.clock.changes(), app.clock.seen()),
             (2, date("2026-11-19"))
         );
+    }
+
+    /// With tasks off, launching reads no local date.
+    #[test]
+    fn with_tasks_off_the_clock_reads_no_date_at_launch() {
+        let (_directory, off) = app("tasks = off\n");
+        assert_eq!(off.clock.seen(), unread());
+        let (_directory, on) = app("tasks = on\n");
+        assert_ne!(on.clock.seen(), unread());
     }
 
     #[test]

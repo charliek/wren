@@ -75,9 +75,6 @@ pub struct App {
     /// Presses of Escape the task form, its calendar or its fields took
     /// that the app's key handling has yet to hear of.
     form_escapes: u32,
-    /// Shortcuts pressed after the form closed in their batch, which the
-    /// app's key handling has yet to hear of.
-    form_shortcuts: u32,
     /// The editor's source of menus: the task menus' and the calendar's.
     task_source: std::sync::Arc<calendar::TaskSource>,
     /// What the calendar's source was last told the caret's line is for.
@@ -241,6 +238,9 @@ pub enum Message {
     PaletteClose,
     PaletteRevealed,
     Key(crate::keys::Input),
+    /// The app's copy of a shortcut press the task form took
+    /// (`task_form::keys_with_form`).
+    FormShortcut(wren_core::keybind::Accel),
     /// A command key chosen from the native menu bar.
     #[cfg(target_os = "macos")]
     MenuCommand(String),
@@ -403,6 +403,7 @@ impl App {
         };
         let words = contents.split_whitespace().count();
         let engine = preferences::backend_kind(preferences.settings.editor_engine);
+        let tasks = preferences.tasks;
         let mut app = Self {
             definition,
             toolkit_theme: theme::from_definition(definition),
@@ -412,15 +413,14 @@ impl App {
             preferences,
             spelling: spelling::Spelling::new(words_path.clone()),
             #[cfg(feature = "smoke-test")]
-            clock: tasks::Clock::new(options.today),
+            clock: tasks::Clock::launch(options.today, tasks),
             #[cfg(not(feature = "smoke-test"))]
-            clock: tasks::Clock::new(None),
+            clock: tasks::Clock::launch(None, tasks),
             task_memo: tasks::TaskMemo::default(),
             calendar: None,
             calendar_escapes: 0,
             task_form: None,
             form_escapes: 0,
-            form_shortcuts: 0,
             task_source: std::sync::Arc::default(),
             due_key: None,
             suggestions: std::sync::Arc::default(),
@@ -556,10 +556,17 @@ impl App {
         if self.palette.is_some() || self.dialog.is_some() {
             self.editor.close_popover();
         }
-        let calendar = self.sync_calendar();
-        let form = self.sync_task_form();
-        self.sync_due_target();
-        self.sync_suggestions();
+        // With tasks off (a setting read at launch) none of it exists, and
+        // the app does no work for it.
+        let (calendar, form) = if self.preferences.tasks {
+            let calendar = self.sync_calendar();
+            let form = self.sync_task_form();
+            self.sync_due_target();
+            self.sync_suggestions();
+            (calendar, form)
+        } else {
+            (Task::none(), Task::none())
+        };
         // The note, the loading state and the setting can each change on any
         // message, and the editor must see the proofreader before it draws.
         self.sync_proofreader();
@@ -711,6 +718,7 @@ impl App {
             Message::Drag(generation, event) => return self.drag_event(generation, event),
             Message::Resize(generation, event) => return self.resize_event(generation, event),
             Message::Key(input) => return self.key_input(input),
+            Message::FormShortcut(accel) => return self.form_shortcut(&accel),
             #[cfg(target_os = "macos")]
             Message::MenuCommand(key) => return self.menu_command(&key),
             Message::DayCheck => self.check_day(),
@@ -889,6 +897,28 @@ impl App {
         Task::none()
     }
 
+    /// A key in the batch of the handover to the calendar or the form,
+    /// which the editor dropped: a plain Escape (no Ctrl, Alt or logo
+    /// key), which the app's key handling hears of too, is claimed for it
+    /// so that it closes nothing. Any other Escape the key handling reads
+    /// as a shortcut, which claims nothing, so neither does it here.
+    fn claim_handover_escape(
+        &mut self,
+        named: Option<iced::keyboard::key::Named>,
+        modifiers: iced::keyboard::Modifiers,
+    ) {
+        if named != Some(iced::keyboard::key::Named::Escape)
+            || !wren_editor::is_plain_escape(modifiers)
+        {
+            return;
+        }
+        if self.calendar.is_some() {
+            self.calendar_escapes += 1;
+        } else if self.task_form.is_some() {
+            self.form_escapes += 1;
+        }
+    }
+
     fn edit(&mut self, message: wren_editor::Message) -> Task<Message> {
         if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
@@ -903,13 +933,7 @@ impl App {
             // is dropped there, and does not close what it could not see.
             // So is one after the request that opened the form.
             if let wren_editor::Message::Spell(wren_editor::SpellEvent::Stroke(stroke)) = message {
-                if stroke.named() == Some(iced::keyboard::key::Named::Escape) {
-                    if self.calendar.is_some() {
-                        self.calendar_escapes += 1;
-                    } else {
-                        self.form_escapes += 1;
-                    }
-                }
+                self.claim_handover_escape(stroke.named(), stroke.modifiers());
             }
             return Task::none();
         }
@@ -1259,18 +1283,12 @@ impl App {
         let mut subscriptions = vec![
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::window::events().map(|(id, event)| Message::Window(id, event)),
-            iced::event::listen_with(|event, status, _| match event {
-                iced::Event::Keyboard(event) => crate::keys::input(&event)
-                    .filter(|input| crate::keys::reaches_app(input, status))
-                    .map(|input| Message::Key(crate::keys::with_status(input, status)))
-                    .or_else(|| {
-                        (status == iced::event::Status::Ignored)
-                            .then(|| workspace::tab(&event))
-                            .flatten()
-                            .map(Message::Tab)
-                    }),
-                _ => None,
-            }),
+            // With tasks on, a shortcut the task form took is told apart.
+            if self.preferences.tasks {
+                iced::event::listen_with(task_form::keys_with_form)
+            } else {
+                iced::event::listen_with(key_message)
+            },
         ];
         if self.session.is_some() || self.words_due.is_some() {
             subscriptions.push(iced::time::every(Duration::from_millis(25)).map(|_| Message::Tick));
@@ -1288,6 +1306,27 @@ impl App {
             subscriptions
         };
         Subscription::batch(subscriptions)
+    }
+}
+
+/// The app's copy of a key press: a navigation key or a shortcut, or a
+/// Tab no widget took.
+fn key_message(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(event) => crate::keys::input(&event)
+            .filter(|input| crate::keys::reaches_app(input, status))
+            .map(|input| Message::Key(crate::keys::with_status(input, status)))
+            .or_else(|| {
+                (status == iced::event::Status::Ignored)
+                    .then(|| workspace::tab(&event))
+                    .flatten()
+                    .map(Message::Tab)
+            }),
+        _ => None,
     }
 }
 

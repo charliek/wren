@@ -329,7 +329,8 @@ impl App {
             });
         }
         let focus = open.focus;
-        let typed = !open.form.pending_owner().trim().is_empty() || open.suggestion.is_some();
+        let typed = !open.form.pending_owner().trim().is_empty()
+            || super::task_form::chosen_at(open, &self.owner_suggestions()).is_some();
         let text = match focus {
             Slot::Description => Some(open.form.description().to_owned()),
             Slot::Due => Some(open.form.due().to_owned()),
@@ -455,7 +456,7 @@ impl App {
             "owners": form.owners(),
             "owner_text": open.form.pending_owner(),
             "suggestions": self.owner_suggestions(),
-            "suggestion": open.suggestion,
+            "suggestion": super::task_form::chosen_at(open, &self.owner_suggestions()),
             "writes": form.preview(),
             "error": open.error,
             "calendar": open.calendar.as_ref().map(|model| json!({

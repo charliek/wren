@@ -39,11 +39,19 @@
 //! button or opens the calendar is the last input the form takes in its
 //! batch: the rest was typed before the user could see the form go, and is
 //! dropped, never typed and never claimed. A plain Escape among it is
-//! reported as [`FormKey::HeldEscape`], and a shortcut as
-//! [`FormKey::HeldShortcut`], so the host's key handling drops its copies.
+//! reported as [`FormKey::HeldEscape`], so the host's key handling drops
+//! its copy. The host's key handling hears of a batch's shortcuts after
+//! the form has, so of those in a batch that closed the form only once
+//! the form is gone: every shortcut press the form hears is counted and
+//! captured ([`FormKeys::claims`]), so the host knows its copy for the
+//! form's.
 //!
 //! While the calendar is open over the form ([`FormKeys::passive`]) the
 //! wrapper takes nothing: the calendar's field has the keyboard.
+//!
+//! It reports [`FormKey::Composing`] whenever an input method starts or
+//! stops composing in one of the form's fields, so the host knows whether
+//! one was composing when the form closed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -116,12 +124,11 @@ pub enum FormKey {
     Calendar,
     /// Backspace in the owners field with nothing typed.
     RemoveLast,
-    /// A shortcut of the host's after the form closed in its batch: the
-    /// host's key handling, which hears of it too, drops its copy.
-    HeldShortcut,
     /// The due field saw input of its own after the calendar gave it back
     /// the keyboard: see [`FormKeys::handback`].
     HandbackOver,
+    /// An input method started (`true`) or stopped composing in a field.
+    Composing(bool),
 }
 
 impl FormKey {
@@ -251,6 +258,7 @@ pub fn form_keys<'a, Message, Theme, Renderer>(
         suggestions: 0,
         chosen: Cell::new(false),
         save: None,
+        claims: None,
         typed,
         on_key: Box::new(on_key),
     }
@@ -274,6 +282,7 @@ pub struct FormKeys<'a, Message, Theme, Renderer> {
     /// One of them is chosen with Up or Down, as this batch leaves it.
     chosen: Cell<bool>,
     save: Option<SaveKeys>,
+    claims: Option<&'static std::sync::atomic::AtomicUsize>,
     typed: Rc<RefCell<String>>,
     on_key: Box<dyn Fn(FormKey) -> Message + 'a>,
 }
@@ -303,6 +312,16 @@ impl<'a, Message, Theme, Renderer> FormKeys<'a, Message, Theme, Renderer> {
     #[must_use]
     pub fn save_keys(mut self, save: SaveKeys) -> Self {
         self.save = Some(save);
+        self
+    }
+
+    /// Count each shortcut press the form takes in `claims`, and capture
+    /// it: the host's key handling hears of the same press after the form,
+    /// captured, and drops its copy as the form's, whether the form has
+    /// closed by then or not.
+    #[must_use]
+    pub fn claims(mut self, claims: &'static std::sync::atomic::AtomicUsize) -> Self {
+        self.claims = Some(claims);
         self
     }
 
@@ -515,201 +534,232 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let child = layout.children().next().expect("the content's layout");
-        // A form that closed in this batch takes nothing more: what is left
-        // of the batch is dropped, and the host told to drop its copy of a
-        // plain Escape.
-        if self.stopped.get() && !matches!(event, Event::Window(_)) {
-            if let Event::Keyboard(keyboard::Event::KeyPressed {
-                key,
-                physical_key,
-                modifiers,
-                ..
-            }) = event
-            {
-                if *key == Key::Named(Named::Escape) && wren_editor::is_plain_escape(*modifiers) {
-                    shell.publish((self.on_key)(FormKey::HeldEscape));
-                } else if crate::keys::shortcut(key, *physical_key, *modifiers).is_some() {
-                    shell.publish((self.on_key)(FormKey::HeldShortcut));
-                }
-            }
-            shell.capture_event();
-            return;
-        }
-        let passive = self.passive || self.stopped.get();
-        // After the calendar gave the due field the keyboard: what an input
-        // method commits, and a preedit that empties, before input of the
-        // field's own, was the calendar's.
-        let held = self.handback && !self.handback_over.get();
-        match event {
-            Event::InputMethod(input_method::Event::Commit(_)) if held && !passive => {
-                shell.capture_event();
-                return;
-            }
-            Event::InputMethod(input_method::Event::Preedit(content, _))
-                if held && !passive && content.is_empty() =>
-            {
-                shell.capture_event();
-                return;
-            }
-            Event::InputMethod(input_method::Event::Preedit(..))
-            | Event::Keyboard(keyboard::Event::KeyPressed { .. })
-            | Event::Mouse(mouse::Event::ButtonPressed(_))
-                if held && !passive =>
-            {
-                self.end_handback(shell);
-            }
-            _ => {}
-        }
-        if passive {
-            // The calendar's field has the keyboard: a composition the form
-            // had is over for it.
-            tree.state.downcast_mut::<State>().composing = false;
-        } else {
-            // A composition whose text input lost the keyboard (to a choice,
-            // a button or another field) is over, whatever the input method
-            // says.
-            if tree.state.downcast_ref::<State>().composing {
-                let now = self.focused_id(tree, child, renderer);
-                let state = tree.state.downcast_mut::<State>();
-                if now.is_none() || now != state.composing_in {
-                    state.composing = false;
-                }
-            }
-            let composing_in = match event {
-                Event::InputMethod(input_method::Event::Preedit(content, _))
-                    if !content.is_empty() =>
-                {
-                    self.focused_id(tree, child, renderer)
-                }
-                _ => None,
-            };
-            let state = tree.state.downcast_mut::<State>();
-            match event {
-                // A composition the window lost the keyboard in has ended,
-                // whether or not the input method says so.
-                Event::Window(iced::window::Event::Unfocused) => state.composing = false,
-                Event::InputMethod(input_method::Event::Preedit(content, _)) => {
-                    state.composing = !content.is_empty();
-                    if state.composing {
-                        state.composing_in = composing_in;
-                    }
-                }
-                Event::InputMethod(
-                    input_method::Event::Commit(_)
-                    | input_method::Event::Closed
-                    | input_method::Event::Opened,
-                ) => state.composing = false,
+        let was = tree.state.downcast_ref::<State>().composing;
+        // A shortcut press while the form has the keyboard is the form's,
+        // its save keys and those after it closed in its batch included:
+        // whatever the form or its field does with it, the host's copy is
+        // claimed.
+        let claimed = !self.passive
+            && match event {
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key,
                     physical_key,
                     modifiers,
                     ..
-                }) => {
-                    let slot = self.slot.get();
-                    let kind = self
-                        .slots
-                        .get(slot)
-                        .map_or(SlotKind::Button, |slot| slot.kind);
-                    let typed = !self.typed.borrow().trim().is_empty()
-                        || (kind == SlotKind::Owners && self.chosen.get());
-                    let save = self
-                        .save
-                        .as_ref()
-                        .is_some_and(|save| save(key, *physical_key, *modifiers));
-                    match route(kind, key, *modifiers, state.composing, typed, save) {
-                        Routed::Pass => {
-                            // Typing offers other owners: none is chosen.
-                            if kind == SlotKind::Owners {
-                                self.chosen.set(false);
-                            }
-                            // The text input reads the modifiers it last
-                            // heard change, which a press's own say.
-                            self.content.as_widget_mut().update(
-                                &mut tree.children[0],
-                                &Event::Keyboard(keyboard::Event::ModifiersChanged(*modifiers)),
-                                child,
-                                cursor,
-                                renderer,
-                                clipboard,
-                                shell,
-                                viewport,
-                            );
-                        }
-                        Routed::Drop => {
-                            shell.capture_event();
-                            return;
-                        }
-                        Routed::Tab(back) => {
-                            if kind == SlotKind::Owners && typed {
-                                self.chosen.set(false);
-                                self.publish(shell, FormKey::Complete);
-                                self.empty_owners(
-                                    tree, child, cursor, renderer, clipboard, shell, viewport,
-                                );
-                            }
-                            let next = next_slot(slot, self.slots.len(), back);
-                            self.focus(next, tree, child, renderer);
-                            shell.publish((self.on_key)(FormKey::Focus(next)));
-                            shell.capture_event();
-                            return;
-                        }
-                        Routed::Key(key) => {
-                            let empties = matches!(key, FormKey::Accept | FormKey::Clear);
-                            match key {
-                                FormKey::Suggest(_) if self.suggestions > 0 => {
-                                    self.chosen.set(true)
-                                }
-                                FormKey::Accept | FormKey::Clear => self.chosen.set(false),
-                                _ => {}
-                            }
-                            let key = match key {
-                                FormKey::Press(_) => FormKey::Press(slot),
-                                key => key,
-                            };
-                            self.publish(shell, key);
-                            if empties {
-                                self.empty_owners(
-                                    tree, child, cursor, renderer, clipboard, shell, viewport,
-                                );
-                            }
-                            shell.capture_event();
-                            return;
-                        }
+                }) => crate::keys::shortcut(key, *physical_key, *modifiers).is_some(),
+                _ => false,
+            };
+        'update: {
+            let child = layout.children().next().expect("the content's layout");
+            // A form that closed in this batch takes nothing more: what is left
+            // of the batch is dropped, and the host told to drop its copy of a
+            // plain Escape.
+            if self.stopped.get() && !matches!(event, Event::Window(_)) {
+                if let Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Named(Named::Escape),
+                    modifiers,
+                    ..
+                }) = event
+                {
+                    if wren_editor::is_plain_escape(*modifiers) {
+                        shell.publish((self.on_key)(FormKey::HeldEscape));
                     }
+                }
+                shell.capture_event();
+                break 'update;
+            }
+            let passive = self.passive || self.stopped.get();
+            // After the calendar gave the due field the keyboard: what an input
+            // method commits, and a preedit that empties, before input of the
+            // field's own, was the calendar's.
+            let held = self.handback && !self.handback_over.get();
+            match event {
+                Event::InputMethod(input_method::Event::Commit(_)) if held && !passive => {
+                    shell.capture_event();
+                    break 'update;
+                }
+                Event::InputMethod(input_method::Event::Preedit(content, _))
+                    if held && !passive && content.is_empty() =>
+                {
+                    shell.capture_event();
+                    break 'update;
+                }
+                Event::InputMethod(input_method::Event::Preedit(..))
+                | Event::Keyboard(keyboard::Event::KeyPressed { .. })
+                | Event::Mouse(mouse::Event::ButtonPressed(_))
+                    if held && !passive =>
+                {
+                    self.end_handback(shell);
                 }
                 _ => {}
             }
-        }
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            child,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
-        // A press that gave a text input of the form the keyboard moves
-        // the slot to it.
-        let pressed = matches!(
-            event,
-            Event::Mouse(mouse::Event::ButtonPressed(_))
-                | Event::Touch(iced::touch::Event::FingerPressed { .. })
-        );
-        if pressed && !passive {
-            let focused = self.focused_id(tree, child, renderer);
-            let found = focused.and_then(|id| {
-                self.slots
-                    .iter()
-                    .position(|slot| slot.id.as_ref() == Some(&id))
-            });
-            if let Some(found) = found.filter(|found| *found != self.slot.get()) {
-                self.slot.set(found);
+            if passive {
+                // The calendar's field has the keyboard: a composition the form
+                // had is over for it.
                 tree.state.downcast_mut::<State>().composing = false;
-                shell.publish((self.on_key)(FormKey::Focus(found)));
+            } else {
+                // A composition whose text input lost the keyboard (to a choice,
+                // a button or another field) is over, whatever the input method
+                // says.
+                if tree.state.downcast_ref::<State>().composing {
+                    let now = self.focused_id(tree, child, renderer);
+                    let state = tree.state.downcast_mut::<State>();
+                    if now.is_none() || now != state.composing_in {
+                        state.composing = false;
+                    }
+                }
+                let composing_in = match event {
+                    Event::InputMethod(input_method::Event::Preedit(content, _))
+                        if !content.is_empty() =>
+                    {
+                        self.focused_id(tree, child, renderer)
+                    }
+                    _ => None,
+                };
+                let state = tree.state.downcast_mut::<State>();
+                match event {
+                    // A composition the window lost the keyboard in has ended,
+                    // whether or not the input method says so.
+                    Event::Window(iced::window::Event::Unfocused) => state.composing = false,
+                    Event::InputMethod(input_method::Event::Preedit(content, _)) => {
+                        state.composing = !content.is_empty();
+                        if state.composing {
+                            state.composing_in = composing_in;
+                        }
+                    }
+                    Event::InputMethod(
+                        input_method::Event::Commit(_)
+                        | input_method::Event::Closed
+                        | input_method::Event::Opened,
+                    ) => state.composing = false,
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key,
+                        modified_key,
+                        physical_key,
+                        modifiers,
+                        ..
+                    }) => {
+                        // A character is offered to a row of choices as typed,
+                        // Shift and all: Shift+H picks Highest, not High.
+                        let routed_key = match (key, modified_key) {
+                            (Key::Character(_), Key::Character(_)) => modified_key,
+                            _ => key,
+                        };
+                        let slot = self.slot.get();
+                        let kind = self
+                            .slots
+                            .get(slot)
+                            .map_or(SlotKind::Button, |slot| slot.kind);
+                        let typed = !self.typed.borrow().trim().is_empty()
+                            || (kind == SlotKind::Owners && self.chosen.get());
+                        let save = self
+                            .save
+                            .as_ref()
+                            .is_some_and(|save| save(key, *physical_key, *modifiers));
+                        match route(kind, routed_key, *modifiers, state.composing, typed, save) {
+                            Routed::Pass => {
+                                // Typing offers other owners: none is chosen.
+                                if kind == SlotKind::Owners {
+                                    self.chosen.set(false);
+                                }
+                                // The text input reads the modifiers it last
+                                // heard change, which a press's own say.
+                                self.content.as_widget_mut().update(
+                                    &mut tree.children[0],
+                                    &Event::Keyboard(keyboard::Event::ModifiersChanged(*modifiers)),
+                                    child,
+                                    cursor,
+                                    renderer,
+                                    clipboard,
+                                    shell,
+                                    viewport,
+                                );
+                            }
+                            Routed::Drop => {
+                                shell.capture_event();
+                                break 'update;
+                            }
+                            Routed::Tab(back) => {
+                                if kind == SlotKind::Owners && typed {
+                                    self.chosen.set(false);
+                                    self.publish(shell, FormKey::Complete);
+                                    self.empty_owners(
+                                        tree, child, cursor, renderer, clipboard, shell, viewport,
+                                    );
+                                }
+                                let next = next_slot(slot, self.slots.len(), back);
+                                self.focus(next, tree, child, renderer);
+                                shell.publish((self.on_key)(FormKey::Focus(next)));
+                                shell.capture_event();
+                                break 'update;
+                            }
+                            Routed::Key(key) => {
+                                let empties = matches!(key, FormKey::Accept | FormKey::Clear);
+                                match key {
+                                    FormKey::Suggest(_) if self.suggestions > 0 => {
+                                        self.chosen.set(true)
+                                    }
+                                    FormKey::Accept | FormKey::Clear => self.chosen.set(false),
+                                    _ => {}
+                                }
+                                let key = match key {
+                                    FormKey::Press(_) => FormKey::Press(slot),
+                                    key => key,
+                                };
+                                self.publish(shell, key);
+                                if empties {
+                                    self.empty_owners(
+                                        tree, child, cursor, renderer, clipboard, shell, viewport,
+                                    );
+                                }
+                                shell.capture_event();
+                                break 'update;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                child,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+            // A press that gave a text input of the form the keyboard moves
+            // the slot to it.
+            let pressed = matches!(
+                event,
+                Event::Mouse(mouse::Event::ButtonPressed(_))
+                    | Event::Touch(iced::touch::Event::FingerPressed { .. })
+            );
+            if pressed && !passive {
+                let focused = self.focused_id(tree, child, renderer);
+                let found = focused.and_then(|id| {
+                    self.slots
+                        .iter()
+                        .position(|slot| slot.id.as_ref() == Some(&id))
+                });
+                if let Some(found) = found.filter(|found| *found != self.slot.get()) {
+                    self.slot.set(found);
+                    tree.state.downcast_mut::<State>().composing = false;
+                    shell.publish((self.on_key)(FormKey::Focus(found)));
+                }
+            }
+        }
+        if claimed {
+            if let Some(claims) = self.claims {
+                shell.capture_event();
+                claims.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let now = tree.state.downcast_ref::<State>().composing;
+        if now != was {
+            shell.publish((self.on_key)(FormKey::Composing(now)));
         }
     }
 
@@ -984,6 +1034,90 @@ mod tests {
         Out::Key(key)
     }
 
+    /// Shift on a row of choices is kept: the character offered is the
+    /// one the key types, so Shift+H offers `H` (Highest), not `h`.
+    #[test]
+    fn a_shifted_character_is_offered_as_typed() {
+        let mut form = Form::new();
+        let shifted = |base: &str, typed: &str| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(base.into()),
+                modified_key: Key::Character(typed.into()),
+                physical_key: Physical::Code(Code::KeyH),
+                location: Location::Standard,
+                modifiers: Modifiers::SHIFT,
+                text: Some(typed.into()),
+                repeat: false,
+            })
+        };
+        let (messages, _) = form.batch(&[
+            named(Named::Tab),
+            shifted("h", "H"),
+            shifted("l", "L"),
+            typed("h"),
+            shifted("/", "?"),
+        ]);
+        assert_eq!(
+            messages,
+            [
+                key(FormKey::Focus(1)),
+                key(FormKey::Pick("H".into())),
+                key(FormKey::Pick("L".into())),
+                key(FormKey::Pick("h".into())),
+                key(FormKey::Pick("?".into())),
+            ]
+        );
+    }
+
+    /// With claims to count in, every shortcut press the form hears is
+    /// captured and counted, before and after the key that closes it, its
+    /// save keys included; a key that types is neither.
+    #[test]
+    fn every_shortcut_the_form_hears_is_captured_and_counted() {
+        let claims: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let values = [String::new(), String::new(), String::new()];
+        let live = Rc::new(RefCell::new(String::new()));
+        let save: SaveKeys = Rc::new(|key: &Key, _, modifiers: Modifiers| {
+            *key == Key::Named(Named::Enter) && modifiers == Modifiers::CTRL
+        });
+        let mut element: Element<'static, Out, Theme, ()> = form_keys(
+            column![text_input("", &values[0]).id(IDS[0])],
+            slots(),
+            0,
+            live,
+            Out::Key,
+        )
+        .save_keys(save)
+        .claims(claims)
+        .into();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+        );
+        let jump = press(Key::Character("p".into()), Modifiers::ALT, None);
+        let mut captured = Vec::new();
+        for event in [jump.clone(), typed("a"), ctrl_enter(), jump] {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+            );
+            captured.push(shell.event_status() == iced::event::Status::Captured);
+        }
+        assert_eq!(captured, [true, false, true, true]);
+        assert_eq!(claims.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
     #[test]
     fn tab_walks_the_slots_within_one_batch() {
         let mut form = Form::new();
@@ -1163,8 +1297,10 @@ mod tests {
         assert_eq!(
             messages,
             [
+                key(FormKey::Composing(true)),
                 key(FormKey::HeldEscape),
                 typed_text("description", "家"),
+                key(FormKey::Composing(false)),
                 key(FormKey::Save),
             ]
         );
@@ -1245,7 +1381,7 @@ mod tests {
         let mut form = Form::new();
         let preedit = Event::InputMethod(input_method::Event::Preedit("か".into(), None));
         let (messages, captured) = form.batch(&[preedit, ctrl_enter()]);
-        assert_eq!(messages, []);
+        assert_eq!(messages, [key(FormKey::Composing(true))]);
         assert!(captured[1], "taken, and dropped");
     }
 
@@ -1290,11 +1426,14 @@ mod tests {
         let mut form = Form::new();
         let preedit = Event::InputMethod(input_method::Event::Preedit("か".into(), None));
         let (messages, _) = form.batch(&[preedit]);
-        assert_eq!(messages, []);
+        assert_eq!(messages, [key(FormKey::Composing(true))]);
         // A click on a choice takes the keyboard from the field.
         form.operate(&mut operation::focusable::unfocus());
         let (messages, _) = form.batch(&[named(Named::Enter)]);
-        assert_eq!(messages, [key(FormKey::Save)]);
+        assert_eq!(
+            messages,
+            [key(FormKey::Save), key(FormKey::Composing(false))]
+        );
     }
 
     #[test]
@@ -1302,7 +1441,7 @@ mod tests {
         let mut form = Form::new();
         let jump = press(Key::Character("p".into()), Modifiers::ALT, None);
         let (messages, captured) = form.batch(&[named(Named::Enter), jump]);
-        assert_eq!(messages, [key(FormKey::Save), key(FormKey::HeldShortcut)]);
+        assert_eq!(messages, [key(FormKey::Save)]);
         assert_eq!(captured, [true, true]);
     }
 
@@ -1312,7 +1451,14 @@ mod tests {
         let preedit = Event::InputMethod(input_method::Event::Preedit("か".into(), None));
         let blur = Event::Window(iced::window::Event::Unfocused);
         let (messages, _) = form.batch(&[preedit, blur, named(Named::Enter)]);
-        assert_eq!(messages, [key(FormKey::Save)]);
+        assert_eq!(
+            messages,
+            [
+                key(FormKey::Composing(true)),
+                key(FormKey::Composing(false)),
+                key(FormKey::Save)
+            ]
+        );
     }
 
     #[test]

@@ -26,9 +26,12 @@
 //! typing reads the one note typed in, leaving out the line typed on. The
 //! owners offered are always those of the index as it is now, of this
 //! workspace: another index starts afresh, and with none they are dropped.
-//! When they change, open suggestions are asked for again, and a row of
-//! owners carries the generation of the list it was offered from, so a
-//! row of an older list chooses nothing.
+//! When they change, open suggestions are asked for again. A row of owners
+//! carries the owner it shows, not its place in the list: a serial number
+//! of the row's own, which the source maps to that owner's case-folded
+//! name and the list it was offered from ([`Offered`]). So a row of an
+//! older list chooses nothing, and a row chosen writes the owner it showed
+//! or nothing, however far down the list.
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,10 +53,6 @@ use super::{App, Message};
 const ROW: u32 = 0x2000_0000;
 const KIND_SHIFT: u32 = 24;
 const PAYLOAD_MASK: u32 = (1 << KIND_SHIFT) - 1;
-/// Where an owner row's list generation sits in its payload, over the
-/// owner's place in that list.
-const GENERATION_SHIFT: u32 = 16;
-const PLACE_MASK: u32 = (1 << GENERATION_SHIFT) - 1;
 
 /// What a suggestion row does, carried as its number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +60,10 @@ pub(super) enum SuggestRow {
     Calendar,
     Due(Date),
     Priority(Priority),
-    /// The owner at `place` of the list of `generation` (its low 8 bits).
+    /// The owner row the source gave serial number `serial` (24 bits):
+    /// see [`Offered`].
     Owner {
-        generation: u8,
-        place: u16,
+        serial: u32,
     },
 }
 
@@ -79,10 +78,7 @@ impl SuggestRow {
                     | u32::from(date.day()),
             ),
             Self::Priority(level) => (3, level_number(level)),
-            Self::Owner { generation, place } => (
-                4,
-                (u32::from(generation) << GENERATION_SHIFT) | u32::from(place),
-            ),
+            Self::Owner { serial } => (4, serial & PAYLOAD_MASK),
         };
         ROW | (kind << KIND_SHIFT) | payload
     }
@@ -103,10 +99,7 @@ impl SuggestRow {
             3 => {
                 Self::Priority(*Priority::ALL.get(usize::try_from(payload).ok()?.checked_sub(1)?)?)
             }
-            4 => Self::Owner {
-                generation: u8::try_from(payload >> GENERATION_SHIFT).ok()?,
-                place: u16::try_from(payload & PLACE_MASK).ok()?,
-            },
+            4 => Self::Owner { serial: payload },
             _ => return None,
         };
         (row.id() == id).then_some(row)
@@ -119,9 +112,46 @@ fn level_number(level: Priority) -> u32 {
     u32::try_from(place.expect("every level is listed") + 1).expect("five levels")
 }
 
-/// The low 8 bits of a list generation, which an owner row carries.
-fn short(generation: u64) -> u8 {
-    (generation & 0xff) as u8
+/// How many owner rows the source remembers: far more than any popup
+/// shows, so a row chosen while a few refreshes are queued still names
+/// its owner, and an older row names none.
+const REMEMBERED: usize = 4096;
+
+/// The owner rows the source has made: each row's serial number, the
+/// list of owners it was offered from (its generation) and the owner it
+/// shows (its case-folded name). Serial numbers count up, round 24 bits,
+/// and only the last [`REMEMBERED`] rows are kept, so a number names the
+/// one row it was given to or nothing: a row chosen after its list
+/// changed, or after thousands more rows were made, chooses nothing.
+#[derive(Default)]
+struct Offered {
+    next: u32,
+    rows: std::collections::HashMap<u32, (u64, String)>,
+    made: std::collections::VecDeque<u32>,
+}
+
+impl Offered {
+    /// A new row for the owner whose case-folded name is `key`, offered
+    /// from the list of `generation`.
+    fn row(&mut self, generation: u64, key: &str) -> SuggestRow {
+        let serial = self.next;
+        self.next = (self.next + 1) & PAYLOAD_MASK;
+        if self.made.len() == REMEMBERED {
+            if let Some(old) = self.made.pop_front() {
+                self.rows.remove(&old);
+            }
+        }
+        self.made.push_back(serial);
+        self.rows.insert(serial, (generation, key.to_owned()));
+        SuggestRow::Owner { serial }
+    }
+
+    /// The case-folded name of the owner row `serial` shows, if it was
+    /// offered from the list of `generation`.
+    fn key(&self, serial: u32, generation: u64) -> Option<&str> {
+        let (offered, key) = self.rows.get(&serial)?;
+        (*offered == generation).then_some(key.as_str())
+    }
 }
 
 /// What the source answers from.
@@ -135,6 +165,8 @@ struct State {
     known: Arc<Vec<Known>>,
     /// The generation of that list ([`wren_core::owners::Owners`]).
     generation: u64,
+    /// The owners its rows have shown.
+    offered: Offered,
 }
 
 /// The editor's source of suggestions while they are on. It holds what
@@ -153,6 +185,7 @@ impl Default for TaskSuggestions {
                 owners: Arc::default(),
                 known: Arc::default(),
                 generation: 0,
+                offered: Offered::default(),
             }),
         }
     }
@@ -163,18 +196,14 @@ impl TaskSuggestions {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The owner an owner row names, if it was offered from the list the
-    /// source holds now.
-    fn owner(&self, generation: u8, place: u16) -> Option<String> {
+    /// The owner an owner row showed, as it is in the list the source
+    /// holds now, and its place there: `None` for a row of an older list,
+    /// one it no longer remembers, or of an owner no longer in the list.
+    fn owner(&self, serial: u32) -> Option<(String, usize)> {
         let state = self.state();
-        (short(state.generation) == generation)
-            .then(|| {
-                state
-                    .owners
-                    .get(usize::from(place))
-                    .map(|owner| owner.name.clone())
-            })
-            .flatten()
+        let key = state.offered.key(serial, state.generation)?;
+        let index = state.owners.iter().position(|owner| owner.key == key)?;
+        Some((state.owners[index].name.clone(), index))
     }
 
     /// Offer `owners`, the list of `generation`.
@@ -189,6 +218,12 @@ impl TaskSuggestions {
         state.generation = generation;
     }
 
+    /// The day it was last told.
+    #[cfg(test)]
+    pub(super) fn state_today(&self) -> Date {
+        self.state().today
+    }
+
     /// The owners it offers now, best first.
     #[cfg(any(test, feature = "smoke-test"))]
     pub(super) fn owners(&self) -> Arc<Vec<Owner>> {
@@ -197,7 +232,7 @@ impl TaskSuggestions {
 }
 
 impl State {
-    fn row(&self, suggested: &suggest::Suggested) -> Option<Row> {
+    fn row(&mut self, suggested: &suggest::Suggested) -> Option<Row> {
         let row = match &suggested.item {
             Item::Calendar => Row::new(SuggestRow::Calendar.id(), &suggested.label)
                 .glyph(task::DateField::Due.glyph().to_string())
@@ -209,18 +244,17 @@ impl State {
             Item::Priority(level) => Row::new(SuggestRow::Priority(*level).id(), &suggested.label)
                 .glyph(level.glyph().to_string()),
             Item::Owner { index, .. } => {
-                let notes = self.owners.get(*index)?.notes;
-                let place = u16::try_from(*index).ok()?;
-                let id = SuggestRow::Owner {
-                    generation: short(self.generation),
-                    place,
-                }
-                .id();
-                Row::new(id, &suggested.label).detail(if notes == 1 {
-                    "1 note".to_owned()
-                } else {
-                    format!("{notes} notes")
-                })
+                let owner = self.owners.get(*index)?;
+                let notes = owner.notes;
+                let key = owner.key.clone();
+                let id = self.offered.row(self.generation, &key).id();
+                Row::new(id, &suggested.label)
+                    .bound()
+                    .detail(if notes == 1 {
+                        "1 note".to_owned()
+                    } else {
+                        format!("{notes} notes")
+                    })
             }
         };
         Some(row.tentative(!suggested.enter))
@@ -235,7 +269,7 @@ impl SuggestSource for TaskSuggestions {
     }
 
     fn suggest_on(&self, index: usize, line: &str, caret: usize) -> Option<Suggestion> {
-        let state = self.state();
+        let mut state = self.state();
         let (_, task) = state.line.filter(|(at, _)| *at == index)?;
         let offer = suggest::suggest(line, caret, task, state.today, &state.known)?;
         let rows = offer
@@ -333,18 +367,6 @@ impl App {
         self.editor.refresh_suggestions();
     }
 
-    /// The task box the whole note reads on line `line`, when the line is
-    /// a task's box line.
-    pub(super) fn box_on(&self, line: usize) -> Option<block::Task> {
-        let nothing = task::Change::Compound(Vec::new());
-        let at = wren_markdown::Selection::caret(wren_markdown::Pos::new(line, 0));
-        self.editor.read_markdown(|lines, options| {
-            task::edit(lines, line, at, &nothing, options)
-                .filter(|edit| edit.line == line)
-                .map(|edit| edit.task)
-        })
-    }
-
     /// A row chosen from the suggestions ([`wren_editor::Mode::Suggest`]):
     /// rewrite the task's line, or open the calendar. `None` for a row of
     /// no suggestion's. A row of owners offered from a list that has since
@@ -366,14 +388,11 @@ impl App {
             }
             SuggestRow::Due(date) => Item::Due(date),
             SuggestRow::Priority(level) => Item::Priority(level),
-            SuggestRow::Owner { generation, place } => {
-                let Some(name) = self.suggestions.owner(generation, place) else {
+            SuggestRow::Owner { serial } => {
+                let Some((name, index)) = self.suggestions.owner(serial) else {
                     return Some(Task::none());
                 };
-                Item::Owner {
-                    name,
-                    index: usize::from(place),
-                }
+                Item::Owner { name, index }
             }
         };
         let change = suggest::completion(&text, range.clone(), task, &item)?;
@@ -587,13 +606,9 @@ mod tests {
             SuggestRow::Due(Date::parse_iso("9999-12-31").unwrap()),
             SuggestRow::Priority(Priority::High),
             SuggestRow::Priority(Priority::Lowest),
+            SuggestRow::Owner { serial: 0 },
             SuggestRow::Owner {
-                generation: 0,
-                place: 0,
-            },
-            SuggestRow::Owner {
-                generation: 255,
-                place: u16::MAX,
+                serial: PAYLOAD_MASK,
             },
         ];
         for row in rows {
@@ -923,9 +938,9 @@ mod tests {
         assert!(names(&app).contains(&"zoe".to_owned()));
         assert!(!names(&app).contains(&"zed".to_owned()));
         // A row of a list that has since changed chooses nothing.
-        let old = SuggestRow::Owner {
-            generation: short(app.owners.generation().wrapping_sub(1)),
-            place: 0,
+        let old = {
+            let older = app.owners.generation().wrapping_sub(1);
+            app.suggestions.state().offered.row(older, "zoe")
         };
         let at = app.editor.cursor().position.line;
         type_text(&mut app, "Ask @z");
@@ -1004,5 +1019,141 @@ mod tests {
         type_text(&mut app, "du");
         assert!(app.editor.popover().is_none());
         assert_eq!(line(&app, 2), "- [ ] Run `echo du now`");
+    }
+
+    fn owner(name: &str, notes: usize) -> Owner {
+        Owner {
+            name: name.to_owned(),
+            key: task::fold_name(name),
+            notes,
+            score: notes as f64,
+        }
+    }
+
+    /// The row Tab would take now: the open suggestions' selected row.
+    fn choice_at(app: &App, row: usize) -> Choice {
+        let popover = app.editor.popover().unwrap();
+        Choice {
+            id: popover.id(row).unwrap(),
+            mode: Mode::Suggest,
+            line: app.editor.cursor().position.line,
+            range: popover.range(),
+        }
+    }
+
+    /// A row of owners names the owner it shows: chosen after the list
+    /// changed under it, it writes nothing, never the owner now at its
+    /// place.
+    #[test]
+    fn an_owner_row_writes_the_owner_it_showed_or_nothing() {
+        let (_directory, mut app) = app("advanced");
+        let generation = app.owners.generation() + 100;
+        app.suggestions.set_owners(
+            Arc::new(vec![owner("alice", 3), owner("bob", 1)]),
+            generation,
+        );
+        type_text(&mut app, " @");
+        assert_eq!(labels(&app), ["@alice", "@bob"]);
+        let alice = choice_at(&app, 0);
+        // An index update moves `@bob` first while the choice of `@alice`
+        // is queued.
+        app.suggestions.set_owners(
+            Arc::new(vec![owner("bob", 9), owner("alice", 3)]),
+            generation + 1,
+        );
+        app.editor.refresh_suggestions();
+        assert_eq!(labels(&app), ["@bob", "@alice"]);
+        let at = alice.line;
+        let _ = app.suggestion_row(&alice);
+        assert_eq!(line(&app, at), "- [ ] Mail the deck @", "nothing written");
+        // A row of the list as it is now writes its own owner.
+        let alice = choice_at(&app, 1);
+        let _ = app.suggestion_row(&alice);
+        assert_eq!(line(&app, at), "- [ ] Mail the deck @alice");
+    }
+
+    /// Tab on the owners shown, queued while an index update replaces
+    /// them with a list that puts `@bob` first: the Tab names the
+    /// suggestions it was pressed on, so it writes nothing, never `@bob`.
+    /// Pressed on the suggestions shown, it writes the owner highlighted.
+    #[test]
+    fn a_queued_tab_on_replaced_owners_writes_nothing() {
+        for refreshed in [true, false] {
+            let (_directory, mut app) = app("advanced");
+            let generation = app.owners.generation() + 100;
+            app.suggestions.set_owners(
+                Arc::new(vec![owner("alice", 3), owner("bob", 1)]),
+                generation,
+            );
+            type_text(&mut app, " @");
+            assert_eq!(labels(&app), ["@alice", "@bob"]);
+            let at = app.editor.cursor().position.line;
+            // The widget routes Tab on the suggestions it shows.
+            let tab = app
+                .editor
+                .key_message(Key::Named(Named::Tab), Modifiers::empty());
+            assert!(
+                tab.iter().any(|message| matches!(
+                    message,
+                    wren_editor::Message::Spell(wren_editor::SpellEvent::AcceptOf { .. })
+                )),
+                "a bound row's Tab names its suggestions: {tab:?}"
+            );
+            if refreshed {
+                app.suggestions.set_owners(
+                    Arc::new(vec![owner("bob", 9), owner("alice", 3)]),
+                    generation + 1,
+                );
+                app.editor.refresh_suggestions();
+                assert_eq!(labels(&app), ["@bob", "@alice"]);
+            }
+            for message in tab {
+                let _ = app.update(Message::Editor(message));
+            }
+            let written = if refreshed {
+                "- [ ] Mail the deck @"
+            } else {
+                "- [ ] Mail the deck @alice"
+            };
+            assert_eq!(line(&app, at), written, "refreshed: {refreshed}");
+        }
+    }
+
+    /// An owner far down a long list, typed whole, is offered first and
+    /// written: a row's number is no place in the list.
+    #[test]
+    fn an_exact_owner_far_down_the_list_is_offered_and_written() {
+        let (_directory, mut app) = app("advanced");
+        let mut owners: Vec<Owner> = (0..70_000).map(|n| owner(&format!("p{n}"), 1)).collect();
+        owners.push(owner("zed", 1));
+        let generation = app.owners.generation() + 100;
+        app.suggestions.set_owners(Arc::new(owners), generation);
+        type_text(&mut app, " @p69999");
+        assert_eq!(labels(&app).first().map(String::as_str), Some("@p69999"));
+        let at = app.editor.cursor().position.line;
+        let _ = app.suggestion_row(&choice_at(&app, 0));
+        assert_eq!(line(&app, at), "- [ ] Mail the deck @p69999");
+        // A row names its own owner, of its own list, or nothing: never
+        // another owner, however many rows came after it.
+        let serial = |row: SuggestRow| match row {
+            SuggestRow::Owner { serial } => serial,
+            _ => unreachable!(),
+        };
+        let mut offered = Offered::default();
+        let first = serial(offered.row(7, "alice"));
+        assert_eq!(offered.key(first, 7), Some("alice"));
+        assert_eq!(offered.key(first, 8), None, "another list's");
+        for n in 0..REMEMBERED {
+            let row = serial(offered.row(7, &format!("k{n}")));
+            assert_ne!(row, first);
+        }
+        assert_eq!(offered.key(first, 7), None, "forgotten, not reused");
+        // Round 24 bits the numbers start again, long after the rows that
+        // had them were forgotten.
+        offered.next = PAYLOAD_MASK;
+        assert_eq!(serial(offered.row(7, "bob")), PAYLOAD_MASK);
+        assert_eq!(serial(offered.row(7, "carol")), 0);
+        assert_eq!(offered.key(0, 7), Some("carol"));
+        assert_eq!(offered.rows.len(), REMEMBERED);
     }
 }

@@ -24,10 +24,12 @@
 //! a fenced block, where a line may read as a task's but is none
 //! ([`TaskSource`]). The same holds the other way. A key that closes the
 //! calendar is the last its field takes in its batch, as is the window
-//! losing the keyboard (`date_field.rs`). And whatever closes it, the
-//! editor then drops what an input method commits until it sees input of
-//! its own ([`wren_editor::EditorView::hand_back`]): a composition begun in
-//! the field is never the note's.
+//! losing the keyboard (`date_field.rs`). And when it closes while an input
+//! method composes in its field, the editor then drops what one commits
+//! until it sees input of its own ([`wren_editor::EditorView::hand_back`]):
+//! a composition begun in the field is never the note's. Closed with none
+//! composing, what an input method commits next (the emoji picker's,
+//! dictation's) is the note's.
 //!
 //! It closes, writing nothing and leaving the note's caret and selection
 //! as they were, on a plain Escape (Ctrl, Alt or logo with it make it no
@@ -108,6 +110,8 @@ pub(super) struct Open {
     /// the `du` a suggestion opened it for (`task_suggest.rs`). Cancelled,
     /// the word stays.
     erase: Option<std::ops::Range<usize>>,
+    /// An input method is composing in the field, as it last said.
+    composing: bool,
 }
 
 #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
@@ -122,6 +126,13 @@ impl Open {
 
     pub(super) fn has_due(&self) -> bool {
         self.has_due
+    }
+}
+
+impl Open {
+    /// Whether an input method is composing in the field, as it last said.
+    pub(super) fn composing(&self) -> bool {
+        self.composing
     }
 }
 
@@ -289,6 +300,7 @@ impl App {
     /// is the line of a task's box, as the whole note reads it; once for
     /// each text, caret line and setting. After every message.
     pub(super) fn sync_due_target(&mut self) {
+        self.release_task_caches();
         let form = self.task_form_takes_keys();
         self.task_source
             .form
@@ -425,6 +437,7 @@ impl App {
             anchor,
             top: self.editor.first_visible_line(),
             erase: None,
+            composing: false,
         });
         Some(iced::widget::operation::focus(FIELD))
     }
@@ -459,12 +472,16 @@ impl App {
         })
     }
 
-    /// Close the calendar, whatever the reason. An input method may still
-    /// be composing for its field: the editor drops what that commits until
-    /// it sees input of its own ([`wren_editor::EditorView::hand_back`]).
+    /// Close the calendar, whatever the reason. An input method composing
+    /// in its field may still commit: the editor then drops what one
+    /// commits until it sees input of its own
+    /// ([`wren_editor::EditorView::hand_back`]). With none composing, what
+    /// one commits next (the emoji picker's, dictation's) is the note's.
     fn take_calendar(&mut self) -> Option<Open> {
         let open = self.calendar.take()?;
-        self.editor.hand_back();
+        if open.composing {
+            self.editor.hand_back();
+        }
         Some(open)
     }
 
@@ -516,6 +533,7 @@ impl App {
             return Task::none();
         };
         match event {
+            Event::Field(FieldEvent::Composing(composing)) => open.composing = composing,
             Event::Field(FieldEvent::Typed(text)) => {
                 open.model.set_typed(&text);
             }
@@ -583,15 +601,43 @@ impl App {
         let Some(edit) = edit.filter(|edit| edit.line == open.line) else {
             return Task::batch([focus, self.blocked("Put the caret on a task line").task]);
         };
-        // The caret and the selection as they were when it opened, where
-        // they still name places in the text: a line edit moves an end
-        // inside the replaced token to the end of the new one, and the date
-        // is only the token's middle.
-        let kept = self.editor.cursor();
+        // The caret and the selection where the line edit moved them,
+        // except an end inside a due date that another date replaces: the
+        // line edit moves it to the end of the new token, and a date is
+        // written at the same length, so it stays where it was.
+        let before = self.editor.cursor();
+        let replaced = due
+            .and_then(|_| task::parse(&edit.expect, edit.task))
+            .and_then(|line| line.due().map(|token| token.range.clone()));
         match self.editor.apply_line_edits(&[edit]) {
             Ok(changed) => {
                 if changed {
-                    self.editor.move_cursor(kept);
+                    if let Some(replaced) = replaced {
+                        let after = self.editor.cursor();
+                        let inside = |at: iced::widget::text_editor::Position| {
+                            at.line == open.line
+                                && replaced.start < at.column
+                                && at.column < replaced.end
+                        };
+                        let keep = |old: iced::widget::text_editor::Position, new| {
+                            if inside(old) {
+                                old
+                            } else {
+                                new
+                            }
+                        };
+                        let position = keep(before.position, after.position);
+                        let selection = before
+                            .selection
+                            .map(|anchor| keep(anchor, after.selection.unwrap_or(after.position)))
+                            .filter(|anchor| *anchor != position);
+                        if position != after.position || selection != after.selection {
+                            self.editor.move_cursor(iced::widget::text_editor::Cursor {
+                                position,
+                                selection,
+                            });
+                        }
+                    }
                     self.text_changed(started);
                 }
                 focus
@@ -1258,25 +1304,43 @@ mod tests {
             ("clear", |app| send(app, Event::Clear)),
         ];
         for (name, close) in closes {
-            let (_directory, mut app) = note_app("advanced", "on", NOTE);
-            app.editor
-                .move_cursor(caret(line_of(NOTE, "- [ ] Open"), 4));
-            set_due_key(&mut app);
-            assert!(!app.editor.handed_back(), "{name}");
-            close(&mut app);
-            let _ = app.update(Message::Tick);
-            assert!(app.calendar.is_none(), "{name}");
-            // An input method's commits are dropped until the editor's own
-            // input (`wren_editor::EditorView::hand_back`).
-            assert!(app.editor.handed_back(), "{name}");
-            // The editor's own input ends it (with the palette closed, which
-            // takes the keyboard while it is open).
-            let _ = app.close_palette();
-            let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
-                iced::widget::text_editor::Motion::Right,
-            ))));
-            assert!(!app.editor.handed_back(), "{name}");
+            for composing in [false, true] {
+                let (_directory, mut app) = note_app("advanced", "on", NOTE);
+                app.editor
+                    .move_cursor(caret(line_of(NOTE, "- [ ] Open"), 4));
+                set_due_key(&mut app);
+                assert!(!app.editor.handed_back(), "{name}");
+                if composing {
+                    field(&mut app, FieldEvent::Composing(true));
+                }
+                close(&mut app);
+                let _ = app.update(Message::Tick);
+                assert!(app.calendar.is_none(), "{name}");
+                // Closed mid-composition, an input method's commits are
+                // dropped until the editor's own input
+                // (`wren_editor::EditorView::hand_back`); with none
+                // composing, what one commits next (the emoji picker's,
+                // dictation's) is the note's.
+                assert_eq!(app.editor.handed_back(), composing, "{name}");
+                // The editor's own input ends it (with the palette closed,
+                // which takes the keyboard while it is open).
+                let _ = app.close_palette();
+                let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
+                    iced::widget::text_editor::Motion::Right,
+                ))));
+                assert!(!app.editor.handed_back(), "{name}");
+            }
         }
+        // A composition that ended before the close holds back nothing.
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [ ] Open"), 4));
+        set_due_key(&mut app);
+        field(&mut app, FieldEvent::Composing(true));
+        field(&mut app, FieldEvent::Composing(false));
+        field(&mut app, FieldEvent::Escape);
+        assert!(app.calendar.is_none());
+        assert!(!app.editor.handed_back());
     }
 
     #[test]
@@ -1349,6 +1413,49 @@ mod tests {
             app.editor.cursor(),
             caret(open, "- [ ] Open task @sam".len())
         );
+    }
+
+    /// Clearing a due date keeps a selection of text that survives it
+    /// where the line edit moved it: the block id after the date.
+    #[test]
+    fn clearing_the_date_keeps_a_selection_after_it() {
+        let note = "- [ ] Ship 📅 2026-12-01 ^abc\n";
+        let (_directory, mut app) = note_app("advanced", "on", note);
+        let text = "- [ ] Ship 📅 2026-12-01 ^abc";
+        let id = text.find('^').unwrap();
+        let selected = Cursor {
+            position: Position {
+                line: 0,
+                column: text.len(),
+            },
+            selection: Some(Position {
+                line: 0,
+                column: id,
+            }),
+        };
+        app.editor.move_cursor(selected);
+        set_due_key(&mut app);
+        assert!(app.calendar.is_some());
+        send(&mut app, Event::Clear);
+        assert_eq!(line(&app, 0), "- [ ] Ship ^abc");
+        assert_eq!(app.editor.selected_text().as_deref(), Some("^abc"));
+        // Backwards, and with a date picked: the same text stays selected.
+        let _ = app.update(Message::Editor(wren_editor::Message::Undo));
+        let backwards = Cursor {
+            position: selected.selection.unwrap(),
+            selection: Some(selected.position),
+        };
+        app.editor.move_cursor(backwards);
+        set_due_key(&mut app);
+        send(&mut app, Event::Clear);
+        assert_eq!(app.editor.selected_text().as_deref(), Some("^abc"));
+        let _ = app.update(Message::Editor(wren_editor::Message::Undo));
+        app.editor.move_cursor(selected);
+        set_due_key(&mut app);
+        typed(&mut app, "fri");
+        field(&mut app, FieldEvent::Enter);
+        assert_eq!(line(&app, 0), "- [ ] Ship 📅 2026-11-20 ^abc");
+        assert_eq!(app.editor.cursor(), selected);
     }
 
     #[test]
@@ -1684,6 +1791,190 @@ mod tests {
             assert!(at.y >= MARGIN, "{top}");
             assert!(at.y + HEIGHT <= mac.height - footer - MARGIN, "{top}");
             assert!(at.x + WIDTH <= mac.width - MARGIN, "{top}");
+        }
+    }
+
+    /// A note of 20,000 lines: headings, prose, lists with continuations,
+    /// tasks and a fenced block in every block of ten, ending on `last`.
+    fn long_note(last: &str) -> String {
+        note_of(2_000, last)
+    }
+
+    /// `blocks` blocks of ten lines, as [`long_note`]'s, ending on `last`.
+    fn note_of(blocks: usize, last: &str) -> String {
+        let mut text = String::new();
+        for block in 0..blocks {
+            text.push_str(&format!(
+                "## Section {block}\n\
+                 Ordinary prose about the work, with a few words.\n\
+                 - [ ] Task {block} @sam 📅 2026-12-01\n\
+                 \x20 its next line\n\
+                 - item {block}\n\
+                 ```\n\
+                 - [ ] fenced\n\
+                 ```\n\
+                 > quoted\n\
+                 \n"
+            ));
+        }
+        text.push_str(last);
+        text
+    }
+
+    /// With tasks off, a message syncs none of the tasks' state: no
+    /// calendar, form, caret target or suggestions, and no read of today.
+    #[test]
+    fn with_tasks_off_a_message_does_no_task_work() {
+        for tasks in ["off", "on"] {
+            let (_directory, mut app) = note_app("advanced", tasks, NOTE);
+            app.due_key = None;
+            let open = line_of(NOTE, "- [ ] Open");
+            app.editor.move_cursor(caret(open, 3));
+            let _ = app.update(Message::Tick);
+            let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+                Edit::Insert('x'),
+            ))));
+            let today = app.suggestions.state_today();
+            if tasks == "off" {
+                assert_eq!(app.due_key, None);
+                assert_eq!(today, Date::new(2026, 1, 1).unwrap(), "never set");
+                assert_eq!(app.task_lines_scanned(), 0);
+            } else {
+                assert!(app.due_key.is_some());
+                assert_eq!(today, day("2026-11-19"));
+            }
+        }
+    }
+
+    /// Another note in the editor gives back the lines kept of the one
+    /// before, and the owners' copy of it.
+    #[test]
+    fn another_note_gives_back_what_was_kept() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let open = line_of(NOTE, "- [ ] Open");
+        let end = NOTE.split('\n').nth(open).unwrap().len();
+        app.editor.move_cursor(caret(open, end));
+        let _ = app.update(Message::Tick);
+        for c in " @z".chars() {
+            let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+                Edit::Insert(c),
+            ))));
+        }
+        assert!(app.task_lines_kept());
+        assert!(app.owners.holds_typing());
+        let other = first_note(&app, "B Other");
+        let _ = app.process_core(Op::OpenNote { note: Some(other) });
+        app.release_task_caches();
+        assert!(!app.task_lines_kept());
+        assert!(!app.owners.holds_typing());
+        // A message reads only the note shown now.
+        let _ = app.update(Message::Tick);
+        assert!(!app.owners.holds_typing());
+    }
+
+    /// Typing at the end of a 20,000-line note reads a bounded number of
+    /// lines a keystroke to find the caret line's task, for the calendar's
+    /// source, the suggestions and the footer, not the note down to the
+    /// caret.
+    #[test]
+    fn typing_at_the_end_of_a_long_note_reads_a_few_lines() {
+        for last in ["Plain words ", "- [ ] Last task "] {
+            let text = long_note(last);
+            let (_directory, mut app) = note_app("advanced", "on", &text);
+            let end = app.editor.line_count() - 1;
+            assert!(end >= 20_000);
+            app.editor.move_cursor(caret(end, last.len()));
+            let _ = app.update(Message::Tick);
+            let _ = app.caret_task();
+            for c in "typed words".chars() {
+                let before = app.task_lines_scanned();
+                let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+                    Edit::Insert(c),
+                ))));
+                let _ = app.caret_task();
+                let read = app.task_lines_scanned() - before;
+                assert!(
+                    read <= 2 * wren_markdown::checkpoints::EVERY as u64,
+                    "{last:?}: {read} lines read for one keystroke"
+                );
+            }
+            let task = app.box_on(end);
+            assert_eq!(task.is_some(), last.starts_with("- [ ]"), "{last:?}");
+        }
+    }
+
+    /// The caret line's task found from the kept states is the one a read
+    /// of the whole note finds, on every line, after edits anywhere.
+    #[test]
+    fn the_box_found_from_kept_states_is_the_whole_notes() {
+        let text = note_of(30, "- [ ] Last task");
+        let (_directory, mut app) = note_app("advanced", "on", &text);
+        let full = |app: &App, line: usize| {
+            let nothing = Change::Compound(Vec::new());
+            let at = Selection::caret(Pos::new(line, 0));
+            app.editor.read_markdown(|lines, options| {
+                task::edit(lines, line, at, &nothing, options)
+                    .filter(|edit| edit.line == line)
+                    .map(|edit| edit.task)
+            })
+        };
+        let check = |app: &App| {
+            for line in 0..app.editor.line_count() {
+                assert_eq!(app.box_on(line), full(app, line), "line {line}");
+            }
+        };
+        check(&app);
+        // A fence opened, then closed, near the top; a list item made lazy.
+        for (line, insert) in [(3, "```\n"), (3, "x"), (40, "- [/] ")] {
+            app.editor.move_cursor(caret(line, 0));
+            for c in insert.chars() {
+                let action = if c == '\n' {
+                    Edit::Enter
+                } else {
+                    Edit::Insert(c)
+                };
+                let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Edit(
+                    action,
+                ))));
+            }
+            check(&app);
+        }
+        let _ = app.update(Message::Editor(wren_editor::Message::Undo));
+        check(&app);
+    }
+
+    /// Typing at the end of a 20,000-line note, with tasks on, on a prose
+    /// line and on a task line: the time of each keystroke's message,
+    /// the footer's read of the caret's task included, against the same
+    /// with tasks off.
+    #[test]
+    #[ignore = "release performance benchmark: 20,000 lines; run explicitly with --release"]
+    fn perf_typing_at_the_end_of_a_20000_line_note() {
+        for (what, last) in [("prose", "Plain words "), ("task", "- [ ] Last task ")] {
+            for tasks in ["off", "on"] {
+                let text = long_note(last);
+                let (_directory, mut app) = note_app("advanced", tasks, &text);
+                let end = app.editor.line_count() - 1;
+                app.editor.move_cursor(caret(end, last.len()));
+                let _ = app.update(Message::Editor(wren_editor::Message::Action(Action::Move(
+                    iced::widget::text_editor::Motion::DocumentEnd,
+                ))));
+                let mut times = Vec::new();
+                for c in "and some more words typed".chars().cycle().take(200) {
+                    let started = std::time::Instant::now();
+                    let _ = app.update(Message::Editor(wren_editor::Message::Action(
+                        Action::Edit(Edit::Insert(c)),
+                    )));
+                    let _ = std::hint::black_box(app.caret_task());
+                    times.push(started.elapsed());
+                }
+                times.sort();
+                eprintln!(
+                    "typing at the end of 20,000 lines, {what} line, tasks {tasks}: \
+                     min {:?}, median {:?}, p90 {:?}",
+                    times[0], times[100], times[180]
+                );
+            }
         }
     }
 }

@@ -175,7 +175,9 @@ chooses a row directly:
 A choice rewrites the task's line as one undo step, with the done or
 cancelled date the status asks for. A click on a task's box cycles its
 status, open → doing → done → open; a cancelled task reopens. The caret
-stays where it was. The status changes 300 ms after the press, once a
+stays where it was. A box with a character that has no status (`[?]`,
+`[>]`) is not cycled: the click places the caret, and the right-click menu
+still sets its status. The status changes 300 ms after the press, once a
 double click could no longer follow; a second click in that time cancels
 it. While the button is held, a key, another button, a modifier or the
 window losing focus cancels it too. A click with a modifier held, a drag
@@ -242,11 +244,14 @@ in the **Writes** line, and saved, as typed. Removing an owner and adding
 the name back puts the mention back where it was written.
 
 Saving writes only the fields you changed, as one undo step, so a line you
-wrote in your own order keeps it, and saving a form you did not change
-writes nothing. A due field that is not a date, or not a real day, cannot
-be saved: the line under it says so and the form stays open. If the line
-changed while the form was open (the note was reloaded from disk, say),
-saving says so and writes nothing; Cancel and open the form again.
+wrote in your own order keeps it, and saving a form you did not change on
+a task writes nothing (on a line that is not a task yet, it makes the
+task). A due date already on the task that names no real day is kept as
+written when you change only other fields. A due field you typed that is
+not a date, or not a real day, cannot be saved: the line under it says so
+and the form stays open. If the note changed while the form was open (it
+was reloaded from disk, say), saving says so and writes nothing; Cancel and
+open the form again.
 
 While the form is open, the app's shortcuts do nothing, except Quit. A key
 that saves, cancels, presses a button or opens the calendar is the last
@@ -275,7 +280,9 @@ An owner is picked by Tab, or by ↑ or ↓ and ↵; ↵ alone never completes a
 name. A row that ↵ alone would not pick is drawn lightly, with "Tab picks
 · ↑↓ ↵" under the list. With no list open, Tab indents and ↵ continues the
 list as always. The list opens only with the caret at the end of a word,
-and not while an input method is composing.
+and not while an input method is composing. Tab typed in the same instant
+as the word, before the list shows, is dropped, and ↵ then continues the
+list (only **Due date…** still opens the calendar).
 
 ## Jumping to a heading
 

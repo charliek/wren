@@ -37,6 +37,11 @@
 //! An Enter that writes nothing, and an Escape the input method holds,
 //! close nothing, and the field keeps the keyboard.
 //!
+//! The field reports [`FieldEvent::Composing`] whenever an input method
+//! starts or stops composing in it, so the host knows whether one was
+//! composing when the calendar closed: only then may a commit still come
+//! for it after the field has gone.
+//!
 //! The field reports [`FieldEvent::Blur`] when a focus moved elsewhere takes
 //! the keyboard from it. Presses of the pointer are the host's to judge,
 //! since a press on the calendar's own buttons moves the toolkit's focus
@@ -79,6 +84,8 @@ pub enum FieldEvent {
     Blur,
     /// The window lost the keyboard while the field had it.
     WindowLost,
+    /// An input method started (`true`) or stopped composing in the field.
+    Composing(bool),
 }
 
 /// The field's text input, given its look by the host.
@@ -304,113 +311,120 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let child = layout.children().next().expect("the input's layout");
-        // A field that closed in this batch takes nothing more: what is left
-        // of the batch is dropped, and the host told to drop its copy of a
-        // plain Escape.
-        if tree.state.downcast_ref::<State>().closed {
-            if let Event::Keyboard(keyboard::Event::KeyPressed {
-                key: Key::Named(Named::Escape),
-                modifiers,
-                ..
-            }) = event
-            {
-                if wren_editor::is_plain_escape(*modifiers) {
-                    shell.publish((self.on_event)(FieldEvent::HeldEscape));
+        let was = tree.state.downcast_ref::<State>().composing;
+        'update: {
+            let child = layout.children().next().expect("the input's layout");
+            // A field that closed in this batch takes nothing more: what is left
+            // of the batch is dropped, and the host told to drop its copy of a
+            // plain Escape.
+            if tree.state.downcast_ref::<State>().closed {
+                if let Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Named(Named::Escape),
+                    modifiers,
+                    ..
+                }) = event
+                {
+                    if wren_editor::is_plain_escape(*modifiers) {
+                        shell.publish((self.on_event)(FieldEvent::HeldEscape));
+                    }
                 }
-            }
-            if !matches!(event, Event::Window(_)) {
-                shell.capture_event();
-                return;
-            }
-        }
-        let before = self.input_focused(&mut tree.children[0], child, renderer);
-        let state = tree.state.downcast_mut::<State>();
-        // A focus moved by an operation since the last event.
-        if state.focused && !before {
-            state.focused = false;
-            state.composing = false;
-            shell.publish((self.on_event)(FieldEvent::Blur));
-        }
-        match event {
-            Event::Window(window::Event::Unfocused) if before => {
-                state.closed = true;
-                state.focused = false;
-                shell.publish((self.on_event)(FieldEvent::WindowLost));
-                return;
-            }
-            Event::InputMethod(input_method::Event::Preedit(content, _)) if before => {
-                state.composing = !content.is_empty();
-            }
-            Event::InputMethod(
-                input_method::Event::Commit(_)
-                | input_method::Event::Closed
-                | input_method::Event::Opened,
-            ) => state.composing = false,
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if before => {
-                let empty = self.live.borrow().is_empty();
-                if let Some(taken) = route(key, *modifiers, state.composing, empty) {
-                    match &taken {
-                        Some(FieldEvent::Key(
-                            calendar::Key::Up
-                            | calendar::Key::Down
-                            | calendar::Key::PageUp
-                            | calendar::Key::PageDown,
-                        )) => self.empty(&mut tree.children[0]),
-                        Some(FieldEvent::Escape) => {
-                            tree.state.downcast_mut::<State>().closed = true;
-                        }
-                        Some(FieldEvent::Enter) if self.enter_writes() => {
-                            tree.state.downcast_mut::<State>().closed = true;
-                        }
-                        _ => {}
-                    }
-                    if let Some(taken) = taken {
-                        shell.publish((self.on_event)(taken));
-                    }
+                if !matches!(event, Event::Window(_)) {
                     shell.capture_event();
-                    return;
+                    break 'update;
                 }
-                // The text input reads the modifiers it last heard change,
-                // which a field made while one was held never heard: the
-                // press's own say what it is, ⌘V or Ctrl+V say.
-                self.input.as_widget_mut().update(
-                    &mut tree.children[0],
-                    &Event::Keyboard(keyboard::Event::ModifiersChanged(*modifiers)),
-                    child,
-                    cursor,
-                    renderer,
-                    clipboard,
-                    shell,
-                    viewport,
-                );
             }
-            _ => {}
-        }
-        self.input.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            child,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
-        let after = self.input_focused(&mut tree.children[0], child, renderer);
-        let state = tree.state.downcast_mut::<State>();
-        let pressed = matches!(
-            event,
-            Event::Mouse(mouse::Event::ButtonPressed(_))
-                | Event::Touch(iced::touch::Event::FingerPressed { .. })
-        );
-        if before && !after {
-            state.composing = false;
-            if !pressed {
+            let before = self.input_focused(&mut tree.children[0], child, renderer);
+            let state = tree.state.downcast_mut::<State>();
+            // A focus moved by an operation since the last event.
+            if state.focused && !before {
+                state.focused = false;
+                state.composing = false;
                 shell.publish((self.on_event)(FieldEvent::Blur));
             }
+            match event {
+                Event::Window(window::Event::Unfocused) if before => {
+                    state.closed = true;
+                    state.focused = false;
+                    shell.publish((self.on_event)(FieldEvent::WindowLost));
+                    break 'update;
+                }
+                Event::InputMethod(input_method::Event::Preedit(content, _)) if before => {
+                    state.composing = !content.is_empty();
+                }
+                Event::InputMethod(
+                    input_method::Event::Commit(_)
+                    | input_method::Event::Closed
+                    | input_method::Event::Opened,
+                ) => state.composing = false,
+                Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if before => {
+                    let empty = self.live.borrow().is_empty();
+                    if let Some(taken) = route(key, *modifiers, state.composing, empty) {
+                        match &taken {
+                            Some(FieldEvent::Key(
+                                calendar::Key::Up
+                                | calendar::Key::Down
+                                | calendar::Key::PageUp
+                                | calendar::Key::PageDown,
+                            )) => self.empty(&mut tree.children[0]),
+                            Some(FieldEvent::Escape) => {
+                                tree.state.downcast_mut::<State>().closed = true;
+                            }
+                            Some(FieldEvent::Enter) if self.enter_writes() => {
+                                tree.state.downcast_mut::<State>().closed = true;
+                            }
+                            _ => {}
+                        }
+                        if let Some(taken) = taken {
+                            shell.publish((self.on_event)(taken));
+                        }
+                        shell.capture_event();
+                        break 'update;
+                    }
+                    // The text input reads the modifiers it last heard change,
+                    // which a field made while one was held never heard: the
+                    // press's own say what it is, ⌘V or Ctrl+V say.
+                    self.input.as_widget_mut().update(
+                        &mut tree.children[0],
+                        &Event::Keyboard(keyboard::Event::ModifiersChanged(*modifiers)),
+                        child,
+                        cursor,
+                        renderer,
+                        clipboard,
+                        shell,
+                        viewport,
+                    );
+                }
+                _ => {}
+            }
+            self.input.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                child,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+            let after = self.input_focused(&mut tree.children[0], child, renderer);
+            let state = tree.state.downcast_mut::<State>();
+            let pressed = matches!(
+                event,
+                Event::Mouse(mouse::Event::ButtonPressed(_))
+                    | Event::Touch(iced::touch::Event::FingerPressed { .. })
+            );
+            if before && !after {
+                state.composing = false;
+                if !pressed {
+                    shell.publish((self.on_event)(FieldEvent::Blur));
+                }
+            }
+            state.focused = after;
         }
-        state.focused = after;
+        let now = tree.state.downcast_ref::<State>().composing;
+        if now != was {
+            shell.publish((self.on_event)(FieldEvent::Composing(now)));
+        }
     }
 
     fn mouse_interaction(
@@ -812,7 +826,13 @@ mod tests {
         );
         assert_eq!(
             messages,
-            [FieldEvent::HeldEscape, text("\u{3075}"), text("\u{3075}x")]
+            [
+                FieldEvent::Composing(true),
+                FieldEvent::HeldEscape,
+                text("\u{3075}"),
+                FieldEvent::Composing(false),
+                text("\u{3075}x")
+            ]
         );
     }
 
@@ -872,14 +892,28 @@ mod tests {
         // it), Enter during the composition is taken and does nothing,
         // and a plain Escape is the input method's; after the commit,
         // Enter is the calendar's again (and writes nothing for `ふ`).
+        // The host hears when the composition starts and ends.
         assert_eq!(
             messages,
-            [FieldEvent::HeldEscape, text("ふ"), FieldEvent::Enter]
+            [
+                FieldEvent::Composing(true),
+                FieldEvent::HeldEscape,
+                text("ふ"),
+                FieldEvent::Composing(false),
+                FieldEvent::Enter
+            ]
         );
         assert_eq!(captured, [false, false, true, true, true, true, true]);
         // A preedit that empties again ends the composition.
         let (messages, _) = date.batch(&[preedit("x"), preedit(""), named(Named::Enter)], None);
-        assert_eq!(messages, [FieldEvent::Enter]);
+        assert_eq!(
+            messages,
+            [
+                FieldEvent::Composing(true),
+                FieldEvent::Composing(false),
+                FieldEvent::Enter
+            ]
+        );
     }
 
     #[test]
@@ -899,7 +933,12 @@ mod tests {
             ],
             None,
         );
-        assert_eq!(messages, [FieldEvent::WindowLost]);
+        // Closed mid-composition: the host was told it began, and never
+        // that it ended.
+        assert_eq!(
+            messages,
+            [FieldEvent::Composing(true), FieldEvent::WindowLost]
+        );
         assert_eq!(captured, [false, false, true, true, true]);
         // With no composition, nothing but the loss.
         let mut date = Field::new("fri");

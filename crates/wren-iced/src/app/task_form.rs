@@ -21,9 +21,10 @@
 //! `wren_markdown::task::edit` and [`wren_editor::EditorView::apply_line_edits`],
 //! and on a line that is no task yet as one replacement of the line
 //! ([`wren_editor::EditorView::apply`]). It is refused, and the form stays
-//! open with a message, once the line no longer reads as it did when the
-//! form opened (an edit, a reload of the note from disk), and while the due
-//! field names no date. A form nobody changed closes and writes nothing.
+//! open with a message and what was typed in it, once the note's text
+//! changed in any way since the form opened (a reload of the note from
+//! disk), and while the due field names no date. A form nobody changed
+//! closes and writes nothing.
 //!
 //! **Keys** (`form_keys.rs`): Tab and Shift+Tab walk the description, the
 //! status, the due date, the priority, the owners, Save and Cancel; Enter
@@ -36,13 +37,15 @@
 //! and when what it was opened for goes: another note, a workspace
 //! loading, the palette or a dialog opening. Closing gives the editor back
 //! the keyboard with its caret and selection as they were (after a save,
-//! where the line edit moved them), and the editor then drops what an
-//! input method commits until it sees input of its own
-//! ([`wren_editor::EditorView::hand_back`]): a composition begun in the
-//! form is never the note's.
+//! where the line edit moved them). Closed while an input method composes
+//! in one of its fields, the editor then drops what one commits until it
+//! sees input of its own ([`wren_editor::EditorView::hand_back`]): a
+//! composition begun in the form is never the note's. Closed with none
+//! composing, what one commits next (the emoji picker's) is the note's.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use iced::widget::{
     button, column, container, mouse_area, opaque, pin, row, stack, text, text_input,
@@ -60,6 +63,47 @@ use super::{App, Message};
 use crate::date_field::FieldEvent;
 use crate::form_keys::{self, FormKey, Slot as KeySlot, SlotKind};
 use crate::{chrome, fonts, theme};
+
+/// The shortcut presses the task form's keys took and captured
+/// ([`form_keys::FormKeys::claims`]) whose copies the app's key handling
+/// has yet to hear of. Read by [`keys_with_form`], which runs where the
+/// app is not.
+pub(super) static FORM_CLAIMS: AtomicUsize = AtomicUsize::new(0);
+
+/// The app's copies of key presses with tasks on: as with tasks off
+/// ([`super::key_message`]), but a shortcut the task form took is the
+/// form's ([`Message::FormShortcut`]).
+pub(super) fn keys_with_form(
+    event: iced::Event,
+    status: iced::event::Status,
+    window: iced::window::Id,
+) -> Option<Message> {
+    copy_of(event, status, window, &FORM_CLAIMS)
+}
+
+/// The app's copy of a key press, the form having taken `claims` shortcut
+/// presses it has yet to hear of. Each such press reaches the app
+/// captured, in order, so a captured shortcut while one is owed is that
+/// press: whether the form was still open when its copy arrives or not.
+fn copy_of(
+    event: iced::Event,
+    status: iced::event::Status,
+    window: iced::window::Id,
+    claims: &AtomicUsize,
+) -> Option<Message> {
+    let message = super::key_message(event, status, window)?;
+    match message {
+        Message::Key(crate::keys::Input::Accel(accel))
+            if status == iced::event::Status::Captured
+                && claims
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                    .is_ok() =>
+        {
+            Some(Message::FormShortcut(accel))
+        }
+        message => Some(message),
+    }
+}
 
 /// The fields' widget ids.
 pub(super) const DESCRIPTION: &str = "task-form-description";
@@ -159,6 +203,9 @@ const SUGGESTIONS: usize = 6;
 pub enum Event {
     /// A key the form's keys took, or the keyboard moved.
     Key(FormKey),
+    /// Enter or Tab in the owners field ([`FormKey::Accept`],
+    /// [`FormKey::Complete`]), on the owners of this generation as drawn.
+    OwnerKey(FormKey, u64),
     /// The description field's text is now this.
     Description(String),
     /// The due field's text is now this.
@@ -186,8 +233,11 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub(super) struct Open {
     pub(super) form: Form,
-    /// The note it was opened over.
+    /// The note it was opened over, and its text's revision then: any
+    /// change to the text since (a reload from disk, say) refuses Save,
+    /// for the same line at the same place may be another task now.
     note: Option<NoteId>,
+    revision: u64,
     /// Where the task is, as the header says it.
     place: String,
     pub(super) focus: Slot,
@@ -196,13 +246,34 @@ pub(super) struct Open {
     /// The calendar gave the due field back the keyboard, and the field
     /// has seen no input of its own since: see `FormKeys::handback`.
     pub(super) due_handback: bool,
-    /// The suggested owner chosen with Up and Down, if any.
-    pub(super) suggestion: Option<usize>,
+    /// An input method is composing in one of the form's fields, and in
+    /// the calendar's, as they last said; the calendar's until the due
+    /// field sees input of its own after it closed.
+    composing: bool,
+    calendar_composing: bool,
+    /// A choice of an owner was refused, and the owners field's emptying,
+    /// which the form's keys report right after it, is ignored: the name
+    /// typed stays.
+    keep_owner: bool,
+    /// The suggested owner chosen with Up and Down, if any, by its
+    /// case-folded name: a refresh of the owners that moves it keeps it
+    /// chosen, and one that drops it chooses no other.
+    pub(super) suggestion: Option<String>,
     /// The calendar, while it is open under the due field.
     pub(super) calendar: Option<Calendar>,
     /// Why the last save wrote nothing.
     pub(super) error: Option<String>,
+    /// The owners suggested, with what they were found for: the owners'
+    /// generation, the name typed and the owners chosen, case folded. A
+    /// view reads them three times, and a key once.
+    suggested: RefCell<Option<(SuggestedFor, Vec<String>)>>,
+    /// How many times they were found.
+    #[cfg(test)]
+    found: std::cell::Cell<usize>,
 }
+
+/// What the owners the form suggests were found for.
+type SuggestedFor = (u64, String, Vec<String>);
 
 impl Open {
     pub(super) fn title(&self) -> &'static str {
@@ -356,21 +427,31 @@ impl App {
         self.editor.close_popover();
         self.palette = None;
         // The calendar over the note closes for it, writing nothing.
-        if self.calendar.take().is_some() {
+        if self.calendar.take().is_some_and(|open| open.composing()) {
             self.editor.hand_back();
         }
         self.column = super::columns::Column::Editor;
         let place = format!("{} · line {}", self.task_form_note(), form.line() + 1);
+        // Claims a form before it left and the app never heard of are no
+        // one's now.
+        FORM_CLAIMS.store(0, Ordering::Relaxed);
         self.task_form = Some(Open {
             form,
             note: self.selected_note,
+            revision: self.editor.revision(),
             place,
             focus: Slot::Description,
             engine: self.editor.backend(),
             due_handback: false,
+            composing: false,
+            calendar_composing: false,
+            keep_owner: false,
             suggestion: None,
             calendar: None,
             error: None,
+            suggested: RefCell::new(None),
+            #[cfg(test)]
+            found: std::cell::Cell::new(0),
         });
         Some(iced::widget::operation::focus(DESCRIPTION))
     }
@@ -399,12 +480,15 @@ impl App {
         parts.join(" › ")
     }
 
-    /// Close the form, whatever the reason. An input method may still be
-    /// composing for one of its fields: the editor drops what that commits
-    /// until it sees input of its own.
+    /// Close the form, whatever the reason. An input method composing for
+    /// one of its fields, or its calendar's, may still commit: the editor
+    /// then drops what one commits until it sees input of its own. With
+    /// none composing, what one commits next is the note's.
     fn take_task_form(&mut self) -> Option<Open> {
         let open = self.task_form.take()?;
-        self.editor.hand_back();
+        if open.composing || open.calendar_composing || open.due_handback {
+            self.editor.hand_back();
+        }
         Some(open)
     }
 
@@ -417,17 +501,24 @@ impl App {
         self.return_to_editor()
     }
 
+    /// A shortcut the form took, as the app's key handling hears it:
+    /// pressed for the form, it runs nothing but Quit.
+    pub(super) fn form_shortcut(&mut self, accel: &wren_core::keybind::Accel) -> Task<Message> {
+        let id = self
+            .preferences
+            .keymap
+            .action(accel)
+            .and_then(CommandId::parse);
+        if id == Some(CommandId::Quit) {
+            self.run_shortcut(CommandId::Quit)
+        } else {
+            Task::none()
+        }
+    }
+
     /// Whether a press of Escape the app's key handling hears was the
     /// form's, once for each: the form, its calendar, or an input method
     /// composing in one of its fields, took it.
-    /// Whether a shortcut the app's key handling hears was pressed after
-    /// the form closed in its batch, once for each.
-    pub(super) fn take_form_shortcut(&mut self) -> bool {
-        let claimed = self.form_shortcuts > 0;
-        self.form_shortcuts = self.form_shortcuts.saturating_sub(1);
-        claimed
-    }
-
     pub(super) fn take_form_escape(&mut self) -> bool {
         let claimed = self.form_escapes > 0;
         self.form_escapes = self.form_escapes.saturating_sub(1);
@@ -440,7 +531,7 @@ impl App {
         match &mut self.task_form {
             Some(open) if open.calendar.is_some() => {
                 open.calendar = None;
-                open.due_handback = true;
+                open.due_handback = open.calendar_composing;
                 Slot::Due.focus()
             }
             Some(_) => self.cancel_task_form(),
@@ -461,15 +552,22 @@ impl App {
         ) {
             self.form_escapes += 1;
         }
-        if event == Event::Key(FormKey::HeldShortcut) {
-            self.form_shortcuts += 1;
-            return Task::none();
-        }
         if self.task_form.is_none() {
             return Task::none();
         }
         match event {
             Event::Key(key) => self.task_form_key(key),
+            Event::OwnerKey(key, generation) => {
+                // The owners changed since the form was drawn: a key that
+                // takes one of them takes nothing, and the name typed stays.
+                let open = self.task_form.as_mut().expect("open");
+                let takes = key == FormKey::Complete || open.suggestion.is_some();
+                if takes && generation != self.owners.generation() {
+                    open.keep_owner = true;
+                    return Task::none();
+                }
+                self.task_form_key(key)
+            }
             Event::Save => self.save_task_form(),
             Event::Cancel => self.cancel_task_form(),
             Event::Calendar(event) => self.task_form_calendar(event),
@@ -481,6 +579,9 @@ impl App {
                     Event::Description(text) => open.form.set_description(&text),
                     Event::Due(text) => open.form.set_due(&text),
                     Event::Owner(text) => {
+                        if std::mem::take(&mut open.keep_owner) && text.is_empty() {
+                            return Task::none();
+                        }
                         open.form.set_pending_owner(&text);
                         open.suggestion = None;
                     }
@@ -525,7 +626,7 @@ impl App {
                 open.form.set_pending_owner("");
                 open.suggestion = None;
             }
-            FormKey::HeldEscape | FormKey::HeldShortcut => {}
+            FormKey::HeldEscape => {}
             FormKey::Press(index) => {
                 return match Slot::ALL.get(index) {
                     Some(Slot::Save) => self.save_task_form(),
@@ -537,9 +638,17 @@ impl App {
                 // Enter adds the name as typed, or the owner chosen with Up
                 // and Down; Tab the owner chosen, or else the one offered
                 // first, as Tab takes a suggestion in the note.
-                let chosen = match key {
-                    FormKey::Complete => open.suggestion.or(Some(0)),
-                    _ => open.suggestion,
+                let chosen = match (&open.suggestion, key) {
+                    // The owner chosen has gone from the list: nothing is
+                    // taken, and the name typed stays for another try.
+                    (Some(_), _) if chosen_at(open, &suggestions).is_none() => {
+                        open.suggestion = None;
+                        open.keep_owner = true;
+                        return Task::none();
+                    }
+                    (Some(_), _) => chosen_at(open, &suggestions),
+                    (None, FormKey::Complete) => Some(0),
+                    (None, _) => None,
                 };
                 let name = match chosen.and_then(|at| suggestions.get(at)) {
                     Some(name) => name.clone(),
@@ -551,7 +660,11 @@ impl App {
                 open.suggestion = None;
                 open.error = None;
             }
+            // The due field's own input: it takes what an input method
+            // commits now. A composition the calendar left may still commit
+            // once the form has gone, so the editor's guard stays armed.
             FormKey::HandbackOver => open.due_handback = false,
+            FormKey::Composing(composing) => open.composing = composing,
             FormKey::Step(by) => match open.focus {
                 Slot::Status => {
                     let at = STATUSES
@@ -586,12 +699,13 @@ impl App {
             },
             FormKey::Suggest(by) => {
                 let count = suggestions.len();
-                open.suggestion = match (open.suggestion, count) {
+                let at = match (chosen_at(open, &suggestions), count) {
                     (_, 0) => None,
                     (None, _) if by > 0 => Some(0),
                     (None, _) => Some(count - 1),
-                    (Some(at), _) => Some(stepped(at.min(count - 1), count, by)),
+                    (Some(at), _) => Some(stepped(at, count, by)),
                 };
+                open.suggestion = at.map(|at| task::fold_name(&suggestions[at]));
             }
             FormKey::Calendar => return self.open_form_calendar(),
             FormKey::RemoveLast => {
@@ -605,7 +719,10 @@ impl App {
 
     /// The owners the form suggests for what the owners field holds: the
     /// workspace's owners whose names start with it, those the task has
-    /// left out, the one it names exactly first.
+    /// left out, the one it names exactly first, as the suggestions in the
+    /// note offer them (`task_suggest.rs`). Found again only once the
+    /// owners, the name typed or the owners chosen change, and from the
+    /// owners' case-folded names, reading no more of them than it shows.
     pub(super) fn owner_suggestions(&self) -> Vec<String> {
         let Some(open) = &self.task_form else {
             return Vec::new();
@@ -621,30 +738,34 @@ impl App {
             .iter()
             .map(|name| task::fold_name(name))
             .collect();
-        let mut found: Vec<String> = self
-            .known_owners()
-            .into_iter()
-            .filter(|name| {
-                let key = task::fold_name(name);
-                !have.contains(&key) && key.starts_with(&typed)
-            })
-            .collect();
-        if let Some(exact) = found.iter().position(|name| task::fold_name(name) == typed) {
-            let name = found.remove(exact);
-            found.insert(0, name);
+        let key = (self.owners.generation(), typed, have);
+        if let Some((kept, found)) = &*open.suggested.borrow() {
+            if *kept == key {
+                return found.clone();
+            }
         }
-        found.truncate(SUGGESTIONS);
-        found
-    }
-
-    /// The workspace's owners, the most used first, as the suggestions in
-    /// the note offer them (`task_suggest.rs`).
-    fn known_owners(&self) -> Vec<String> {
-        self.owners
-            .ranked()
+        #[cfg(test)]
+        open.found.set(open.found.get() + 1);
+        let (_, typed, have) = &key;
+        let ranked = self.owners.ranked();
+        let offered = |owner: &&wren_core::owners::Owner| {
+            !have.contains(&owner.key) && owner.key.starts_with(typed.as_str())
+        };
+        let exact = ranked
             .iter()
-            .map(|owner| owner.name.clone())
-            .collect()
+            .filter(offered)
+            .find(|owner| owner.key == *typed);
+        let mut found: Vec<String> = exact.map(|owner| owner.name.clone()).into_iter().collect();
+        found.extend(
+            ranked
+                .iter()
+                .filter(offered)
+                .filter(|owner| owner.key != *typed)
+                .take(SUGGESTIONS - found.len())
+                .map(|owner| owner.name.clone()),
+        );
+        *open.suggested.borrow_mut() = Some((key, found.clone()));
+        found
     }
 
     /// Open the calendar under the due field, on the date the field
@@ -655,6 +776,7 @@ impl App {
             return Task::none();
         };
         open.calendar = Some(Calendar::new(today, open.form.due_date()));
+        open.calendar_composing = false;
         open.focus = Slot::Due;
         iced::widget::operation::focus(CALENDAR_FIELD)
     }
@@ -669,6 +791,10 @@ impl App {
             return Task::none();
         };
         let picked = match event {
+            CalendarEvent::Field(FieldEvent::Composing(composing)) => {
+                open.calendar_composing = composing;
+                return Task::none();
+            }
             CalendarEvent::Field(FieldEvent::Typed(text)) => {
                 model.set_typed(&text);
                 return Task::none();
@@ -702,7 +828,7 @@ impl App {
             open.error = None;
         }
         open.calendar = None;
-        open.due_handback = true;
+        open.due_handback = open.calendar_composing;
         open.focus = Slot::Due;
         Slot::Due.focus()
     }
@@ -750,8 +876,9 @@ impl App {
         }
     }
 
-    /// Whether what the form was opened for has gone, or its line no
-    /// longer reads as it did.
+    /// Whether what the form was opened for has gone, or the note's text
+    /// changed at all: a line that reads as it did may be another task's
+    /// (the first of two equal lines deleted), so no edit is mapped.
     fn task_form_stale(&self) -> bool {
         let Some(open) = &self.task_form else {
             return true;
@@ -759,6 +886,7 @@ impl App {
         !self.task_form_takes_keys()
             || self.selected_note != open.note
             || self.editor.backend() != open.engine
+            || self.editor.revision() != open.revision
             || !self
                 .editor
                 .read_markdown(|lines, options| open.form.holds(lines, options))
@@ -1134,11 +1262,27 @@ impl App {
                 .and_then(|accel| keymap.action(&accel).and_then(CommandId::parse))
                 .is_some_and(|id| matches!(id, CommandId::TaskEdit | CommandId::ToggleTask))
         });
-        form_keys::form_keys(card, Self::key_slots(), open.focus.index(), live, |key| {
-            Message::TaskForm(Event::Key(key))
-        })
+        // Enter and Tab on the owners carry the owners' generation the form
+        // was drawn with: a key queued while the list changed takes nothing.
+        let generation = self.owners.generation();
+        form_keys::form_keys(
+            card,
+            Self::key_slots(),
+            open.focus.index(),
+            live,
+            move |key| match key {
+                FormKey::Accept | FormKey::Complete => {
+                    Message::TaskForm(Event::OwnerKey(key, generation))
+                }
+                key => Message::TaskForm(Event::Key(key)),
+            },
+        )
         .save_keys(save)
-        .owner_choice(self.owner_suggestions().len(), open.suggestion.is_some())
+        .claims(&FORM_CLAIMS)
+        .owner_choice(
+            self.owner_suggestions().len(),
+            chosen_at(open, &self.owner_suggestions()).is_some(),
+        )
         .handback(open.due_handback)
         .passive(open.calendar.is_some())
         .into()
@@ -1208,7 +1352,10 @@ impl App {
         let suggestions = self.owner_suggestions();
         let mut offered = row![].spacing(4).align_y(iced::Center);
         for (at, name) in suggestions.iter().enumerate() {
-            let chosen = open.suggestion == Some(at);
+            let chosen = open
+                .suggestion
+                .as_ref()
+                .is_some_and(|key| *key == task::fold_name(name));
             // The one Tab takes, drawn in the accent with no fill.
             let tentative = open.suggestion.is_none()
                 && at == 0
@@ -1254,6 +1401,15 @@ impl App {
         .spacing(LABEL_GAP)
         .into()
     }
+}
+
+/// Where the owner chosen with Up and Down is among `suggestions`, if it
+/// is there still.
+pub(super) fn chosen_at(open: &Open, suggestions: &[String]) -> Option<usize> {
+    let key = open.suggestion.as_ref()?;
+    suggestions
+        .iter()
+        .position(|name| task::fold_name(name) == *key)
 }
 
 /// `at` moved `by` among `count`, round the ends.
@@ -1347,6 +1503,7 @@ mod tests {
     use super::super::tasks::Clock;
     use super::super::Options;
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     const NOTE: &str = "# Tasks\n\
         \n\
@@ -1490,11 +1647,89 @@ mod tests {
                 caret(at, "- [x] Draft the plan @alice".len()),
                 "{engine}"
             );
-            assert!(app.editor.handed_back(), "{engine}");
+            // No input method composed in it: what one commits next (the
+            // emoji picker's) is the note's.
+            assert!(!app.editor.handed_back(), "{engine}");
             let _ = app.update(Message::Editor(wren_editor::Message::Undo));
             assert_eq!(text(&app), NOTE, "{engine}: one undo step");
             assert!(!app.editor.can_undo(), "{engine}");
         }
+    }
+
+    /// Closed while an input method composes in one of its fields, or in
+    /// its calendar's, the form leaves the editor dropping what one
+    /// commits until its own input; closed with none composing, what one
+    /// commits next (the emoji picker's) is the note's.
+    #[test]
+    fn only_a_close_mid_composition_holds_back_what_an_input_method_commits() {
+        type Close = fn(&mut App);
+        let closes: [(&str, Close); 3] = [
+            ("escape", |app| key(app, FormKey::Escape)),
+            ("save", |app| key(app, FormKey::Save)),
+            ("outside", |app| send(app, Event::Cancel)),
+        ];
+        for (name, close) in closes {
+            for composing in ["none", "field", "calendar", "calendar closed"] {
+                let (_directory, mut app) = note_app("advanced", "on", NOTE);
+                app.editor
+                    .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+                let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+                match composing {
+                    "field" => key(&mut app, FormKey::Composing(true)),
+                    "calendar" | "calendar closed" => {
+                        send(&mut app, Event::OpenCalendar);
+                        send(
+                            &mut app,
+                            Event::Calendar(CalendarEvent::Field(FieldEvent::Composing(true))),
+                        );
+                        if composing == "calendar closed" {
+                            send(&mut app, Event::Calendar(CalendarEvent::Outside));
+                            assert!(open(&app).calendar.is_none());
+                        }
+                    }
+                    _ => {}
+                }
+                close(&mut app);
+                assert!(app.task_form.is_none(), "{name} {composing}");
+                assert_eq!(
+                    app.editor.handed_back(),
+                    composing != "none",
+                    "{name} {composing}"
+                );
+            }
+        }
+        // The reviewer's sequence: a composition in the calendar, the
+        // calendar dismissed, then Escape on the form, whose keys report the
+        // due field's own input (the Escape) first. The calendar's late
+        // commit is still held back from the note.
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::OpenCalendar);
+        send(
+            &mut app,
+            Event::Calendar(CalendarEvent::Field(FieldEvent::Composing(true))),
+        );
+        send(&mut app, Event::Calendar(CalendarEvent::Outside));
+        key(&mut app, FormKey::HandbackOver);
+        key(&mut app, FormKey::Escape);
+        assert!(app.task_form.is_none());
+        assert!(app.editor.handed_back(), "the late commit is dropped");
+        // Compositions that ended before the close hold back nothing.
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Composing(true));
+        key(&mut app, FormKey::Composing(false));
+        send(&mut app, Event::OpenCalendar);
+        let composing = |on| Event::Calendar(CalendarEvent::Field(FieldEvent::Composing(on)));
+        send(&mut app, composing(true));
+        send(&mut app, composing(false));
+        send(&mut app, Event::Calendar(CalendarEvent::Outside));
+        key(&mut app, FormKey::Escape);
+        assert!(!app.editor.handed_back());
     }
 
     #[test]
@@ -1654,6 +1889,53 @@ mod tests {
         key(&mut app, FormKey::Save);
         assert!(open(&app).error.is_some());
         assert_eq!(app.editor.text(), changed);
+    }
+
+    /// The first of two equal task lines deleted under the form: the
+    /// second now reads as the first did, at its place, and is another
+    /// task. Save is refused, the second task is left as it was, and the
+    /// form keeps what was typed in it.
+    #[test]
+    fn saving_is_refused_once_an_equal_line_takes_the_tasks_place() {
+        let note = "# Tasks\n- [ ] Follow up\n- [ ] Follow up\n";
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", note);
+            app.editor.move_cursor(caret(1, 3));
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            send(&mut app, Event::Description("Follow up with Sam".into()));
+            // The first is deleted on disk, and the note reloaded.
+            let changed = "# Tasks\n- [ ] Follow up\n";
+            app.editor.replace_text(changed, true);
+            assert_eq!(app.editor.line_text(1).as_deref(), Some("- [ ] Follow up"));
+            key(&mut app, FormKey::Save);
+            let form = open(&app);
+            assert_eq!(
+                form.error.as_deref(),
+                Some("The task changed since the form opened; nothing was written"),
+                "{engine}"
+            );
+            assert_eq!(form.form.description(), "Follow up with Sam", "{engine}");
+            assert_eq!(app.editor.text(), changed, "{engine}");
+            // So is an edit elsewhere: no line of the old text is trusted.
+            let elsewhere = "# Tasks!\n- [ ] Follow up\n- [ ] Follow up\n";
+            app.editor.replace_text(elsewhere, true);
+            key(&mut app, FormKey::Save);
+            assert!(open(&app).error.is_some(), "{engine}");
+            assert_eq!(app.editor.text(), elsewhere, "{engine}");
+            key(&mut app, FormKey::Escape);
+            assert!(app.task_form.is_none());
+            // Opened again on the text as it is now, it saves.
+            app.editor.move_cursor(caret(1, 3));
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            send(&mut app, Event::Description("Follow up with Sam".into()));
+            key(&mut app, FormKey::Save);
+            assert!(app.task_form.is_none(), "{engine}");
+            assert_eq!(
+                app.editor.text(),
+                "# Tasks!\n- [ ] Follow up with Sam\n- [ ] Follow up\n",
+                "{engine}"
+            );
+        }
     }
 
     #[test]
@@ -1900,7 +2182,11 @@ mod tests {
         key(&mut app, FormKey::Suggest(1));
         key(&mut app, FormKey::Suggest(1));
         key(&mut app, FormKey::Suggest(1));
-        assert_eq!(open(&app).suggestion, Some(0), "round the ends");
+        assert_eq!(
+            open(&app).suggestion.as_deref(),
+            Some("alice"),
+            "round the ends"
+        );
         key(&mut app, FormKey::Suggest(-1));
         key(&mut app, FormKey::Accept);
         assert_eq!(open(&app).form.owners(), ["sama", "samantha"]);
@@ -1983,6 +2269,70 @@ mod tests {
         );
     }
 
+    /// The owners suggested are found once for each owners' generation,
+    /// name typed and owners chosen, however many times a view reads
+    /// them; a long list is read no further than they need.
+    #[test]
+    fn the_owners_suggested_are_found_once_for_what_they_are_for() {
+        let (_directory, mut app) = note_app("classic", "on", NOTE);
+        app.editor.move_cursor(caret(line_of(NOTE, "- [ ] Two"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Focus(Slot::Owners.index()));
+        let found = |app: &App| open(app).found.get();
+        let _ = app.view();
+        let first = app.owner_suggestions();
+        assert_eq!(first, ["alice"]);
+        let before = found(&app);
+        for _ in 0..3 {
+            let _ = app.view();
+            assert_eq!(app.owner_suggestions(), first);
+        }
+        assert_eq!(found(&app), before, "kept");
+        send(&mut app, Event::Owner("al".into()));
+        assert_eq!(app.owner_suggestions(), ["alice"]);
+        assert_eq!(found(&app), before + 1, "another name typed");
+        key(&mut app, FormKey::Complete);
+        assert!(app.owner_suggestions().is_empty());
+        assert_eq!(found(&app), before + 2, "another owner chosen");
+        // Thousands of owners: the one typed whole first, then the best
+        // ranked, six in all.
+        let mut many: Vec<wren_core::owners::Owner> = (0..5_000)
+            .map(|n| wren_core::owners::Owner {
+                name: format!("p{n}"),
+                key: format!("p{n}"),
+                notes: 1,
+                score: 1.0,
+            })
+            .collect();
+        many.push(wren_core::owners::Owner {
+            name: "P4999x".into(),
+            key: "p4999x".into(),
+            notes: 1,
+            score: 0.5,
+        });
+        let sources = vec![(
+            NoteId(1_000_000),
+            std::time::SystemTime::now(),
+            std::sync::Arc::<str>::from(
+                many.iter()
+                    .map(|owner| format!("- [ ] @{}\n", owner.name))
+                    .collect::<String>(),
+            ),
+        )];
+        // Read straight into the owners, with no message after it, which
+        // would bring them back to the index.
+        app.owners
+            .update(1, 1, sources, None, std::time::SystemTime::now());
+        let typed = |app: &mut App, text: &str| {
+            app.task_form.as_mut().unwrap().form.set_pending_owner(text);
+        };
+        typed(&mut app, "p4999");
+        let offered = app.owner_suggestions();
+        assert_eq!(offered, ["p4999", "P4999x"]);
+        typed(&mut app, "p1");
+        assert_eq!(app.owner_suggestions().len(), SUGGESTIONS);
+    }
+
     #[test]
     fn the_batch_that_opens_it_neither_saves_nor_closes_it_on_both_engines() {
         for engine in ["classic", "advanced"] {
@@ -2005,21 +2355,276 @@ mod tests {
         }
     }
 
+    fn accel_of(app: &App, action: &str) -> wren_core::keybind::Accel {
+        app.preferences.keymap.accel(action).unwrap().clone()
+    }
+
+    /// The key press `accel` names, as the window reports it.
+    fn press_of(accel: &wren_core::keybind::Accel) -> iced::Event {
+        use iced::keyboard::{self, key};
+        let key = if accel.key == "enter" {
+            Key::Named(Named::Enter)
+        } else {
+            Key::Character(accel.key.as_str().into())
+        };
+        let mut modifiers = Modifiers::empty();
+        modifiers.set(Modifiers::CTRL, accel.mods.ctrl);
+        modifiers.set(Modifiers::ALT, accel.mods.alt);
+        modifiers.set(Modifiers::SHIFT, accel.mods.shift);
+        modifiers.set(Modifiers::LOGO, accel.mods.logo);
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: key::Physical::Code(key::Code::KeyA),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// The app's copy of the press `accel` with `status`, the form having
+    /// taken `claims` presses the app has yet to hear of.
+    fn copy(
+        app: &mut App,
+        accel: &wren_core::keybind::Accel,
+        status: iced::event::Status,
+        claims: &AtomicUsize,
+    ) {
+        let id = iced::window::Id::unique();
+        if let Some(message) = copy_of(press_of(accel), status, id, claims) {
+            let _ = app.update(message);
+        }
+    }
+
     #[test]
     fn a_shortcut_the_closing_form_dropped_runs_nothing_but_quit() {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
         app.editor
             .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
         let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
-        // Enter saved, and the form's keys dropped the shortcut after it.
+        // Enter saved, and the form's keys took the shortcut after it.
+        let claims = AtomicUsize::new(1);
+        let jump = accel_of(&app, "navigation.jump");
         key(&mut app, FormKey::Save);
-        key(&mut app, FormKey::HeldShortcut);
         assert!(app.task_form.is_none());
-        let _ = app.update(super::super::preferences::shortcut(CommandId::Jump));
+        copy(&mut app, &jump, iced::event::Status::Captured, &claims);
         assert!(app.palette.is_none(), "the app drops its copy");
-        // The next press of it is the app's again.
-        let _ = app.update(super::super::preferences::shortcut(CommandId::Jump));
+        // The next press of it, in the next batch, is the app's again.
+        copy(&mut app, &jump, iced::event::Status::Ignored, &claims);
         assert!(app.palette.is_some());
+    }
+
+    /// The save chord and then the Jump palette's key, in one batch: the
+    /// form's keys take and capture both, and the app's copies of them,
+    /// heard before the form's messages or after them, run nothing: the
+    /// task is saved once, the form stays closed and Jump does not open.
+    /// Jump in the next batch, which the editor does not capture, opens;
+    /// and a shortcut another widget captured is never taken for the
+    /// form's.
+    #[test]
+    fn shortcuts_of_the_closing_batch_run_nothing_in_either_order() {
+        for copies_first in [false, true] {
+            let (_directory, mut app) = note_app("advanced", "on", NOTE);
+            let at = line_of(NOTE, "- [/] Draft");
+            app.editor.move_cursor(caret(at, 3));
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            send(&mut app, Event::Status(StatusType::Done));
+            let save = accel_of(&app, "task.edit");
+            let jump = accel_of(&app, "navigation.jump");
+            // The form's keys took both presses.
+            let claims = AtomicUsize::new(2);
+            let captured = iced::event::Status::Captured;
+            if copies_first {
+                copy(&mut app, &save, captured, &claims);
+                copy(&mut app, &jump, captured, &claims);
+                assert!(app.task_form.is_some());
+            }
+            key(&mut app, FormKey::Save);
+            assert!(app.task_form.is_none());
+            if !copies_first {
+                copy(&mut app, &save, captured, &claims);
+                assert!(app.task_form.is_none(), "the save chord opens no form");
+                copy(&mut app, &jump, captured, &claims);
+            }
+            assert!(app.palette.is_none(), "Jump does not open");
+            assert_eq!(claims.load(Ordering::Relaxed), 0);
+            let saved = replaced(
+                at,
+                "- [x] Draft the runbook @alice ⏫ 📅 2026-11-23 ✅ 2026-11-19",
+            );
+            assert_eq!(text(&app), saved);
+            // The next batch: the editor passes Jump on.
+            copy(&mut app, &jump, iced::event::Status::Ignored, &claims);
+            assert!(app.palette.is_some(), "a later batch's Jump opens");
+            // With no claim owed, a captured shortcut is the app's as before.
+            let _ = app.close_palette();
+            copy(&mut app, &jump, captured, &claims);
+            assert!(app.palette.is_some(), "another widget's capture runs");
+        }
+    }
+
+    /// The owner chosen with Down is held by name: a refresh that moves
+    /// it keeps it chosen, and Enter adds it, not the owner now at its
+    /// place; a refresh that drops it chooses none, and Enter then adds
+    /// nothing and keeps the name typed.
+    #[test]
+    fn the_owner_chosen_is_held_by_name_across_a_refresh() {
+        let owners = |names: &[&str]| -> Vec<(NoteId, std::time::SystemTime, std::sync::Arc<str>)> {
+            names
+                .iter()
+                .enumerate()
+                .map(|(n, name)| {
+                    (
+                        NoteId(1_000 + n as u64),
+                        std::time::SystemTime::now()
+                            - std::time::Duration::from_secs(86_400 * n as u64),
+                        std::sync::Arc::<str>::from(format!("- [ ] @{name}\n")),
+                    )
+                })
+                .collect()
+        };
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor.move_cursor(caret(line_of(NOTE, "- [ ] Two"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Focus(Slot::Owners.index()));
+        // The form's keys straight, with no message after them, which
+        // would bring the owners back to the index.
+        let press = |app: &mut App, key: FormKey| {
+            let _ = app.task_form_key(key);
+        };
+        let refresh = |app: &mut App, names: &[&str], revision: u64| {
+            let now = std::time::SystemTime::now();
+            app.owners.update(1, revision, owners(names), None, now);
+        };
+        refresh(&mut app, &["alice", "bob"], 1);
+        app.task_form.as_mut().unwrap().form.set_pending_owner("");
+        assert_eq!(app.owner_suggestions(), ["alice", "bob"]);
+        press(&mut app, FormKey::Suggest(1));
+        assert_eq!(open(&app).suggestion.as_deref(), Some("alice"));
+        // Bob takes Alice's place before Enter.
+        refresh(&mut app, &["bob", "alice"], 2);
+        assert_eq!(app.owner_suggestions(), ["bob", "alice"]);
+        assert_eq!(chosen_at(open(&app), &app.owner_suggestions()), Some(1));
+        press(&mut app, FormKey::Accept);
+        assert_eq!(open(&app).form.owners(), ["alice"]);
+        // Chosen, then dropped from the list: nothing is added, the name
+        // typed stays, and nothing is chosen.
+        app.task_form.as_mut().unwrap().form.set_pending_owner("b");
+        press(&mut app, FormKey::Suggest(1));
+        assert_eq!(open(&app).suggestion.as_deref(), Some("bob"));
+        refresh(&mut app, &["carol"], 3);
+        press(&mut app, FormKey::Accept);
+        assert_eq!(open(&app).form.owners(), ["alice"]);
+        assert_eq!(open(&app).form.pending_owner(), "b");
+        assert_eq!(open(&app).suggestion, None);
+        // The form's keys emptied the field as they took the key: that is
+        // ignored, and the name typed stays; what is typed next is not.
+        let _ = app.task_form_event(Event::Owner(String::new()));
+        assert_eq!(open(&app).form.pending_owner(), "b");
+        let _ = app.task_form_event(Event::Owner(String::new()));
+        assert_eq!(open(&app).form.pending_owner(), "");
+    }
+
+    /// Tab and Enter on the owners carry the owners' generation the form
+    /// was drawn with: queued while a refresh put another owner first,
+    /// Tab takes nothing and the name typed stays; on the owners as drawn
+    /// it takes the first. Enter with none chosen adds the name as typed
+    /// whatever the list.
+    #[test]
+    fn a_queued_owner_key_on_changed_owners_takes_nothing() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor.move_cursor(caret(line_of(NOTE, "- [ ] Two"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Focus(Slot::Owners.index()));
+        send(&mut app, Event::Owner("al".into()));
+        assert_eq!(app.owner_suggestions(), ["alice"]);
+        let drawn = app.owners.generation();
+        // `@albert` comes first before the queued Tab is handled. Read
+        // straight into the owners, with no message after it.
+        let now = std::time::SystemTime::now();
+        let sources = vec![(
+            NoteId(1_000),
+            now,
+            std::sync::Arc::<str>::from("- [ ] @albert\n- [ ] @albert again\n"),
+        )];
+        app.owners.update(1, 1, sources, None, now);
+        assert_ne!(app.owners.generation(), drawn);
+        assert_eq!(app.owner_suggestions()[0], "albert");
+        let _ = app.task_form_event(Event::OwnerKey(FormKey::Complete, drawn));
+        let _ = app.task_form_event(Event::Owner(String::new()));
+        assert!(open(&app).form.owners().is_empty(), "nothing taken");
+        assert_eq!(open(&app).form.pending_owner(), "al");
+        // On the owners as drawn now, Tab takes the first.
+        let current = app.owners.generation();
+        let _ = app.task_form_event(Event::OwnerKey(FormKey::Complete, current));
+        assert_eq!(open(&app).form.owners(), ["albert"]);
+        // Enter adds a name as typed, the list changed or not.
+        let _ = app.task_form_event(Event::Owner("zed".into()));
+        let _ = app.task_form_event(Event::OwnerKey(FormKey::Accept, drawn));
+        assert_eq!(open(&app).form.owners(), ["albert", "zed"]);
+    }
+
+    /// The calendar over the form closed with no input method composing:
+    /// the due field takes what one commits next (an emoji picker's), and
+    /// only a close mid-composition makes it drop it.
+    #[test]
+    fn the_due_field_holds_back_a_commit_only_after_a_composing_calendar() {
+        for composing in [false, true] {
+            for close in ["escape", "outside"] {
+                let (_directory, mut app) = note_app("advanced", "on", NOTE);
+                app.editor
+                    .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+                let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+                send(&mut app, Event::OpenCalendar);
+                if composing {
+                    send(
+                        &mut app,
+                        Event::Calendar(CalendarEvent::Field(FieldEvent::Composing(true))),
+                    );
+                }
+                match close {
+                    "escape" => {
+                        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+                            crate::keys::Nav::FieldEscape,
+                        )));
+                    }
+                    _ => send(&mut app, Event::Calendar(CalendarEvent::Outside)),
+                }
+                let form = open(&app);
+                assert!(form.calendar.is_none(), "{close}");
+                assert_eq!(form.due_handback, composing, "{close} {composing}");
+            }
+        }
+    }
+
+    /// A Ctrl, Alt or logo Escape dropped in the batch that opened the
+    /// form claims nothing: the app's key handling reads it as a shortcut,
+    /// so a later plain Escape still closes the form.
+    #[test]
+    fn a_modified_escape_in_the_opening_batch_claims_nothing() {
+        use iced::keyboard::key::Named as Key;
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        for modifiers in [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO] {
+            app.claim_handover_escape(Some(Key::Escape), modifiers);
+        }
+        app.claim_handover_escape(Some(Key::Enter), Modifiers::empty());
+        assert_eq!(app.form_escapes, 0);
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::Escape,
+        )));
+        assert!(app.task_form.is_none(), "a plain Escape closes it");
+        // A plain one, Shift or not, is claimed.
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        app.claim_handover_escape(Some(Key::Escape), Modifiers::SHIFT);
+        assert_eq!(app.form_escapes, 1);
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::Escape,
+        )));
+        assert!(app.task_form.is_some(), "the claimed press closes nothing");
     }
 
     #[test]

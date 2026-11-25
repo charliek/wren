@@ -280,8 +280,11 @@ Every `tasks.*` request but `tasks.get` is refused with tasks off.
 `editor.open_menu`, `editor.click`, `editor.bounds` and `editor.right_click`
 drive the popovers and clicks; `editor.cursor` places the caret.
 `editor.command` `{"intent": "toggle_task"}` runs the toggle as the keys do:
-with tasks on it writes the done and cancelled dates, and with tasks off it
-is the plain toggle and writes none. The `native_x11` cases use real clicks
+with tasks on it writes the done date when it completes a task and removes
+the done or cancelled date when it reopens one, and with tasks off it is the
+plain toggle and writes none. The toggle never cancels a task: the cancelled
+date is written by a change of status to Cancelled (`task.set_status`, the
+status menu, the form). The `native_x11` cases use real clicks
 and chords.
 
 `WRENTEST_TASKS=off` or `on` does the same for the `tasks` line. CI runs

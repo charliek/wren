@@ -968,22 +968,6 @@ impl App {
         {
             return Task::none();
         }
-        // A shortcut typed after the form closed in its batch was the form's
-        // to drop; quitting stays everyone's.
-        if let Input::Accel(accel) = &input {
-            if self.take_form_shortcut() {
-                let id = self
-                    .preferences
-                    .keymap
-                    .action(accel)
-                    .and_then(CommandId::parse);
-                return if id == Some(CommandId::Quit) {
-                    self.run_shortcut(CommandId::Quit)
-                } else {
-                    Task::none()
-                };
-            }
-        }
         // The task form owns the keyboard: its own keys took what it gives
         // a meaning, Escape and its save keys included (`form_keys.rs`), so
         // they are taken only once the form is shown, never while an input

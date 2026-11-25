@@ -189,10 +189,7 @@ pub fn suggest(
 
 /// The owners offered for `@name`, none of those `rest` names already.
 fn owner_items(name: &str, rest: &TaskLine<'_>, owners: &[Known]) -> Vec<Suggested> {
-    let mut chars = name.chars();
-    let shaped = chars.next().is_none_or(char::is_alphabetic)
-        && chars.all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'));
-    if !shaped {
+    if !super::is_owner_prefix(name) {
         return Vec::new();
     }
     let typed = fold_name(name);
@@ -767,5 +764,26 @@ mod tests {
             &["sam"]
         )
         .is_none());
+    }
+
+    /// What may follow the `@` being typed is what a task line reads as a
+    /// name: a combining mark stays with its letter, as the parser keeps
+    /// it, and a `.` may go on to more of the name.
+    #[test]
+    fn a_typed_name_follows_the_parsers_rules() {
+        let owners = ["Jose\u{301}", "José", "priya.k", "Sam"];
+        for typed in ["Jose\u{301}", "José", "priya.", "priya.k", ""] {
+            let line = format!("- [ ] Ask @{typed}");
+            let offer = at(&line, line.len(), &owners);
+            assert!(offer.is_some(), "{typed:?}");
+        }
+        let line = "- [ ] Ask @Jose\u{301}";
+        let offer = at(line, line.len(), &owners).unwrap();
+        assert_eq!(offer.items[0].label, "@Jose\u{301}");
+        // A name never starts with a mark or a digit, nor holds a `/`.
+        for typed in ["\u{301}a", "1sam", "sa/m"] {
+            let line = format!("- [ ] Ask @{typed}");
+            assert_eq!(at(&line, line.len(), &owners), None, "{typed:?}");
+        }
     }
 }

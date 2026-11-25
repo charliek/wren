@@ -22,11 +22,13 @@
 //! name half typed there is no one's yet.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use wren_markdown::block::{front_matter_end, Boxes, Scanner};
-use wren_markdown::task;
+use wren_markdown::block::{front_matter_end, Boxes, LineInfo, Scanner};
+use wren_markdown::checkpoints::Checkpoints;
+use wren_markdown::{task, Document, Lines};
 
 use crate::model::NoteId;
 
@@ -46,33 +48,139 @@ pub struct Owner {
     pub score: f64,
 }
 
-/// The `@name`s on the task lines of `source`, as `(key, spelling)`, one
-/// for each time it is written, skipping line `skip`.
-fn names_in(source: &str, skip: Option<usize>) -> Vec<(String, String)> {
+/// One `@name` written on a task line: the line's number, the name's key
+/// and its spelling.
+type Named = (usize, String, String);
+
+/// The `@name`s on the task line `text`, numbered `index`, which the
+/// whole note reads as `info`, added to `names`.
+fn names_on(index: usize, text: &str, info: &LineInfo, names: &mut Vec<Named>) {
+    if !text.contains('@') {
+        return;
+    }
+    let parsed = info
+        .item
+        .and_then(|item| item.task)
+        .and_then(|found| task::parse(text, found));
+    if let Some(parsed) = parsed {
+        names.extend(
+            parsed
+                .owner_names()
+                .map(|name| (index, task::fold_name(name), name.to_owned())),
+        );
+    }
+}
+
+/// The `@name`s on the task lines of `source`, one for each time it is
+/// written, its lines split as the editor splits them
+/// ([`wren_markdown::line_ranges`]).
+fn names_in(source: &str) -> Vec<Named> {
     if !source.contains('@') {
         return Vec::new();
     }
-    let lines: Vec<&str> = source.lines().collect();
-    let mut scanner = Scanner::with_front_matter(front_matter_end(&lines[..]), Boxes::Status);
+    let document = Document::new(source);
+    let mut scanner = Scanner::with_front_matter(front_matter_end(&document), Boxes::Status);
     let mut names = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
+    for index in 0..document.line_count() {
+        let line = document.line(index);
         let info = scanner.next_line(line);
-        if Some(index) == skip || !line.contains('@') {
-            continue;
-        }
-        let parsed = info
-            .item
-            .and_then(|item| item.task)
-            .and_then(|found| task::parse(line, found));
-        if let Some(parsed) = parsed {
-            names.extend(
-                parsed
-                    .owner_names()
-                    .map(|name| (task::fold_name(name), name.to_owned())),
-            );
-        }
+        names_on(index, line, &info, &mut names);
     }
     names
+}
+
+/// A note's lines as byte ranges of its source, split as
+/// [`wren_markdown::line_ranges`] splits them.
+struct Split<'a> {
+    source: &'a str,
+    ranges: &'a [Range<usize>],
+}
+
+impl Lines for Split<'_> {
+    fn line_count(&self) -> usize {
+        self.ranges.len()
+    }
+
+    fn line(&self, i: usize) -> &str {
+        &self.source[self.ranges[i].clone()]
+    }
+}
+
+/// How many bytes `a` and `b` start with alike, found a block at a time.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    const BLOCK: usize = 4096;
+    let len = a.len().min(b.len());
+    let mut at = 0;
+    while at + BLOCK <= len && a[at..at + BLOCK] == b[at..at + BLOCK] {
+        at += BLOCK;
+    }
+    at + a[at..len]
+        .iter()
+        .zip(&b[at..len])
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
+/// The note being typed in, as it was last read: its source, its lines'
+/// ranges in it and the scanner states its lines left.
+struct Typing {
+    note: NoteId,
+    source: Arc<str>,
+    ranges: Vec<Range<usize>>,
+    kept: Checkpoints,
+}
+
+impl Typing {
+    /// Typing that has read nothing yet.
+    fn fresh(note: NoteId) -> Self {
+        Self {
+            note,
+            source: Arc::from(""),
+            ranges: Vec::new(),
+            kept: Checkpoints::new(Boxes::Status),
+        }
+    }
+
+    /// Read `source`, the note's text after an edit of the source this
+    /// last read, whose names were `old`: the lines before the first one
+    /// the edit touched keep their ranges, states and names, found by one
+    /// comparison of the two texts' bytes, and only the lines from there
+    /// on are split and read. Returns the names, the old names of the
+    /// lines read again, and the first of those lines.
+    fn read(&mut self, source: &Arc<str>, mut old: Vec<Named>) -> (Vec<Named>, Vec<Named>, usize) {
+        let same = common_prefix(self.source.as_bytes(), source.as_bytes());
+        // A line is as it was while its text, its ending and the byte
+        // after it (which may make the ending another) lie in that prefix.
+        let first = self.ranges.partition_point(|range| range.end + 2 <= same);
+        let start = self.ranges.get(first).map_or(0, |range| range.start);
+        self.ranges.truncate(first);
+        self.ranges.extend(
+            wren_markdown::line_ranges(&source[start..])
+                .map(|(range, _)| range.start + start..range.end + start),
+        );
+        self.source = Arc::clone(source);
+        let lines = Split {
+            source,
+            ranges: &self.ranges,
+        };
+        let first = self.kept.update_from(&lines, first);
+        let cut = old.partition_point(|(line, _, _)| *line < first);
+        let read_again = old.split_off(cut);
+        let mut names = old;
+        self.kept
+            .read(&lines, first..lines.line_count(), |index, text, info, _| {
+                names_on(index, text, info, &mut names);
+            });
+        (names, read_again, first)
+    }
+}
+
+/// `names`, but those on line `skip`.
+fn counted(names: &[Named], skip: Option<usize>) -> impl Iterator<Item = (&str, &str)> {
+    names
+        .iter()
+        .filter(move |(line, _, _)| Some(*line) != skip)
+        .map(|(_, key, spelling)| (key.as_str(), spelling.as_str()))
 }
 
 /// How much a note changed at `modified` counts at `now`.
@@ -84,12 +192,25 @@ fn weight(modified: SystemTime, now: SystemTime) -> f64 {
 /// A line of a note left out: the one being typed on.
 pub type Skip = (NoteId, usize);
 
-/// What one note was read as.
+/// What one note was read as: every name on its task lines, and the line
+/// left out of them, if any.
 struct Read {
     source: Arc<str>,
     modified: SystemTime,
     skip: Option<usize>,
-    names: Vec<(String, String)>,
+    names: Vec<Named>,
+}
+
+impl Read {
+    /// The names that count: those off the line left out.
+    fn counted(&self) -> impl Iterator<Item = (&str, &str)> {
+        counted(&self.names, self.skip)
+    }
+
+    /// Whether line `line`, if any, names anyone.
+    fn names_on(&self, line: Option<usize>) -> bool {
+        line.is_some_and(|line| self.names.iter().any(|(at, _, _)| *at == line))
+    }
 }
 
 /// The owners of one workspace's notes, kept up with its index.
@@ -101,6 +222,12 @@ pub struct Owners {
     ranked: Arc<Vec<Owner>>,
     /// Counts the changes of [`Owners::ranked`].
     generation: u64,
+    /// The note being typed in, the one whose line is left out, as last
+    /// read, so that reading it again reads from its first changed line.
+    typing: Option<Typing>,
+    /// How many times a note was read.
+    #[cfg(test)]
+    reads: usize,
 }
 
 impl Owners {
@@ -117,6 +244,25 @@ impl Owners {
     /// The revision of the index last read, if any.
     pub fn revision(&self) -> Option<u64> {
         self.read.map(|(_, revision, _)| revision)
+    }
+
+    /// How many lines the note being typed in has been read for.
+    #[cfg(test)]
+    fn typing_scanned(&self) -> u64 {
+        self.typing
+            .as_ref()
+            .map_or(0, |typing| typing.kept.scanned())
+    }
+
+    /// Give back the copy kept of the note being typed in: the editor
+    /// shows another note, or a board.
+    pub fn release_typing(&mut self) {
+        self.typing = None;
+    }
+
+    /// Whether it keeps a copy of a note being typed in.
+    pub fn holds_typing(&self) -> bool {
+        self.typing.is_some()
     }
 
     /// A number that changes whenever [`Owners::ranked`] does.
@@ -142,8 +288,10 @@ impl Owners {
     /// Bring it up to the index `identity` at `revision`, whose Markdown
     /// notes are `sources`, leaving out line `skip` of a note, scored at
     /// `now`. Another index than the one before starts afresh. Only a
-    /// note whose source, change time or left-out line differs from the
-    /// last read is read again. Returns whether the owners changed.
+    /// note whose source or change time differs from the last read is read
+    /// again, and the note `skip` names from its first changed line: a
+    /// caret moved to another line reads nothing. Returns whether the
+    /// owners changed.
     pub fn update(
         &mut self,
         identity: u64,
@@ -152,25 +300,83 @@ impl Owners {
         skip: Option<(NoteId, usize)>,
         now: SystemTime,
     ) -> bool {
-        if self.read.is_some_and(|(known, _, _)| known != identity) {
+        // Another index: what was read from the one before goes, and the
+        // owners are ranked again, even from no notes at all.
+        let another = self.read.is_some_and(|(known, _, _)| known != identity);
+        if another {
             self.notes.clear();
+            self.typing = None;
+        }
+        // The note typed in is kept read only while its line is the one
+        // left out: another note, or none, gives back its copy.
+        if self
+            .typing
+            .as_ref()
+            .is_some_and(|typing| skip.map(|(at, _)| at) != Some(typing.note))
+        {
+            self.typing = None;
         }
         self.read = Some((identity, revision, skip));
-        let mut changed = self.notes.len() != sources.len();
+        let mut changed = another || self.notes.len() != sources.len();
         let mut kept: HashMap<NoteId, Read> = HashMap::with_capacity(sources.len());
         for (note, modified, source) in sources {
             let skipped = skip.and_then(|(at, line)| (at == note).then_some(line));
             let read = match self.notes.remove(&note) {
-                Some(read)
-                    if Arc::ptr_eq(&read.source, &source)
-                        && read.modified == modified
-                        && read.skip == skipped =>
+                Some(mut read)
+                    if Arc::ptr_eq(&read.source, &source) && read.modified == modified =>
                 {
+                    // Only the line left out moved: what it subtracts.
+                    if read.skip != skipped {
+                        changed |= read.names_on(read.skip) || read.names_on(skipped);
+                        read.skip = skipped;
+                    }
                     read
                 }
                 old => {
-                    let names = names_in(&source, skipped);
-                    changed |= old.is_none_or(|old| old.names != names || old.modified != modified);
+                    #[cfg(test)]
+                    {
+                        self.reads += 1;
+                    }
+                    let (names, names_changed) = match (old, skipped) {
+                        (Some(old), Some(_)) => {
+                            // As last read from the source the old names
+                            // were, or afresh.
+                            let mut typing = self
+                                .typing
+                                .take()
+                                .filter(|typing| {
+                                    typing.note == note && Arc::ptr_eq(&typing.source, &old.source)
+                                })
+                                .unwrap_or_else(|| Typing::fresh(note));
+                            let skip = old.skip;
+                            let (names, read_again, first) = if typing.ranges.is_empty() {
+                                let (names, _, _) = typing.read(&source, Vec::new());
+                                (names, old.names, 0)
+                            } else {
+                                typing.read(&source, old.names)
+                            };
+                            self.typing = Some(typing);
+                            // What was read again, and the line left out of
+                            // what was kept, are all that may differ.
+                            let kept_names = names.partition_point(|(line, _, _)| *line < first);
+                            let (before, after) = names.split_at(kept_names);
+                            let differs = !counted(&read_again, skip).eq(counted(after, skipped))
+                                || (skip != skipped
+                                    && before.iter().any(|(line, _, _)| {
+                                        Some(*line) == skip || Some(*line) == skipped
+                                    }));
+                            (names, differs || old.modified != modified)
+                        }
+                        (old, _) => {
+                            let names = names_in(&source);
+                            let differs = old.is_none_or(|old| {
+                                !old.counted().eq(counted(&names, skipped))
+                                    || old.modified != modified
+                            });
+                            (names, differs)
+                        }
+                    };
+                    changed |= names_changed;
                     Read {
                         source,
                         modified,
@@ -211,10 +417,10 @@ fn rank(notes: &HashMap<NoteId, Read>, now: SystemTime) -> Vec<Owner> {
             continue;
         }
         let weight = weight(read.modified, now);
-        for (key, spelling) in &read.names {
+        for (key, spelling) in read.counted() {
             let tally = tallies.entry(key).or_default();
             tally.notes.insert(*note, weight);
-            *tally.spellings.entry(spelling.clone()).or_default() += 1;
+            *tally.spellings.entry(spelling.to_owned()).or_default() += 1;
         }
     }
     let mut owners: Vec<Owner> = tallies
@@ -415,6 +621,187 @@ mod tests {
         assert_eq!(names(owners.ranked()), ["sa", "sam"]);
         owners.update(1, 1, note, Some((NoteId(1), 0)), now());
         assert_eq!(names(owners.ranked()), ["sa"]);
+    }
+
+    /// Lines split as the editor splits them: a lone CR ends a line, so
+    /// the task after it names its owner, and the line left out is the
+    /// editor's line of that number.
+    #[test]
+    fn lines_split_as_the_editor_splits_them() {
+        for note in [
+            "Intro\r- [ ] Call @sam",
+            "Intro\n\r- [ ] Call @sam",
+            "Intro\r\n- [ ] Call @sam",
+        ] {
+            assert_eq!(names(&scan([(now(), note)], now())), ["sam"], "{note:?}");
+            let mut owners = Owners::default();
+            owners.update(1, 1, sources(&[(1, note)]), Some((NoteId(1), 1)), now());
+            assert!(owners.ranked().is_empty(), "{note:?}");
+        }
+    }
+
+    /// A caret moved from one task line to another reads no note again:
+    /// the line left out is subtracted from what was read.
+    #[test]
+    fn a_caret_move_reads_nothing_again() {
+        let mut owners = Owners::default();
+        let note = sources(&[
+            (1, "- [ ] Ask @sam\n- [ ] Call @priya\n- [ ] Plain"),
+            (2, "- [ ] @zoe"),
+        ]);
+        owners.update(1, 1, note.clone(), Some((NoteId(1), 0)), now());
+        assert_eq!(names(owners.ranked()), ["priya", "zoe"]);
+        let reads = owners.reads;
+        let generation = owners.generation();
+        assert!(owners.update(1, 1, note.clone(), Some((NoteId(1), 1)), now()));
+        assert_eq!(names(owners.ranked()), ["sam", "zoe"]);
+        assert!(owners.generation() > generation);
+        // Leaving out a line that names no one leaves out no one.
+        assert!(owners.update(1, 1, note.clone(), Some((NoteId(1), 2)), now()));
+        assert_eq!(names(owners.ranked()), ["priya", "sam", "zoe"]);
+        let generation = owners.generation();
+        assert!(!owners.update(1, 1, note.clone(), None, now()));
+        assert_eq!(owners.generation(), generation);
+        assert_eq!(owners.reads, reads, "no note was read again");
+    }
+
+    /// Typing in the note whose line is left out reads it again from the
+    /// first changed line, and finds what a fresh read finds.
+    #[test]
+    fn typing_reads_the_note_from_the_first_changed_line() {
+        let block =
+            "# Week\n- [ ] Ask @sam\n  more\n```\n- [ ] fenced @ghost\n```\n- [x] @Priya done\n\n";
+        let mut text = block.repeat(2_500);
+        text.push_str("- [ ] Last @");
+        let last = text.split('\n').count() - 1;
+        assert!(last >= 20_000);
+        let mut owners = Owners::default();
+        let skip = Some((NoteId(1), last));
+        owners.update(1, 0, sources(&[(1, text.as_str())]), skip, now());
+        assert_eq!(names(owners.ranked()), ["Priya", "sam"]);
+        for (round, typed) in ["z", "zo", "zoe", "zoe more"].iter().enumerate() {
+            let now_text = format!("{text}{typed}");
+            let before = owners.typing_scanned();
+            owners.update(
+                1,
+                round as u64 + 1,
+                sources(&[(1, now_text.as_str())]),
+                skip,
+                now(),
+            );
+            if round > 0 {
+                let read = owners.typing_scanned() - before;
+                assert!(read <= wren_markdown::checkpoints::EVERY as u64, "{read}");
+            }
+            assert_eq!(names(owners.ranked()), ["Priya", "sam"]);
+        }
+        // The caret leaves the line: what it typed counts.
+        let done = format!("{text}zoe more");
+        owners.update(
+            1,
+            9,
+            sources(&[(1, done.as_str())]),
+            Some((NoteId(1), 0)),
+            now(),
+        );
+        // Another note's line, or none, gives back the copy kept.
+        assert!(owners.typing.is_some());
+        owners.update(1, 9, sources(&[(1, done.as_str())]), None, now());
+        assert!(owners.typing.is_none());
+        let mut found = names(owners.ranked());
+        found.sort_unstable();
+        assert_eq!(found, ["Priya", "sam", "zoe"]);
+        // A fence opened near the top hides what follows, as a fresh read.
+        let fenced = format!("```\n{done}");
+        owners.update(
+            1,
+            10,
+            sources(&[(1, fenced.as_str())]),
+            Some((NoteId(1), 1)),
+            now(),
+        );
+        let fresh = scan([(now(), fenced.as_str())], now());
+        let mut fresh = names(&fresh)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        fresh.sort_unstable();
+        let mut found: Vec<String> = names(owners.ranked())
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, fresh);
+    }
+
+    /// Read again from the first changed line, a note typed in finds the
+    /// names a fresh read finds, whatever the edit: line endings changed
+    /// or merged, fences and front matter opened, lines added and taken.
+    #[test]
+    fn typing_finds_what_a_fresh_read_finds() {
+        let base = "---\ntitle: x\n---\n- [ ] a @sam\r\n- [ ] b @priya\r- [ ] c @zoe\n```\n- [ ] d @code\n```\n- [ ] e @end";
+        let edits: Vec<String> = vec![
+            base.replace("\r\n", "\n"),
+            base.replace("\r- [ ] c", "\r\n- [ ] c"),
+            base.replace("title: x\n---\n", "title: x\n"),
+            base.replace("```\n- [ ] d", "- [ ] d"),
+            format!("{base} @more\n- [ ] f @new"),
+            base[..base.len() / 2].to_owned(),
+            format!("```\n{base}"),
+            base.replace("@zoe", "@zed"),
+            String::new(),
+            base.to_owned(),
+        ];
+        let mut owners = Owners::default();
+        let mut text = base.to_owned();
+        owners.update(
+            1,
+            0,
+            sources(&[(1, text.as_str())]),
+            Some((NoteId(1), 1)),
+            now(),
+        );
+        for (round, edited) in edits.iter().enumerate() {
+            for skip in [1, 4] {
+                text.clone_from(edited);
+                owners.update(
+                    1,
+                    round as u64 * 2 + skip as u64,
+                    sources(&[(1, text.as_str())]),
+                    Some((NoteId(1), skip)),
+                    now(),
+                );
+                let read = &owners.notes[&NoteId(1)];
+                assert_eq!(read.names, names_in(&text), "{round} {edited:?}");
+                assert_eq!(
+                    names(owners.ranked()),
+                    names(&{
+                        let mut fresh = Owners::default();
+                        fresh.update(
+                            1,
+                            0,
+                            sources(&[(1, text.as_str())]),
+                            Some((NoteId(1), skip)),
+                            now(),
+                        );
+                        fresh.ranked.to_vec()
+                    }),
+                    "{round} {skip}"
+                );
+            }
+        }
+    }
+
+    /// Another index with no notes at all ranks no one, at once.
+    #[test]
+    fn another_index_with_no_notes_ranks_no_one() {
+        let mut owners = Owners::default();
+        assert!(owners.update(1, 0, sources(&[(1, "- [ ] @alice")]), None, now()));
+        assert_eq!(names(owners.ranked()), ["alice"]);
+        let generation = owners.generation();
+        assert!(owners.update(2, 0, Vec::new(), None, now()));
+        assert!(owners.ranked().is_empty());
+        assert!(owners.generation() > generation);
     }
 
     /// The perf-search workload: 5,000 notes, 25 MB, with a task line naming an owner in every note, so no note is
