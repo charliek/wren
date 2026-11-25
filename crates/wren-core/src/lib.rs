@@ -6,6 +6,7 @@ pub mod keybind;
 pub mod kind;
 pub mod model;
 pub mod ops;
+pub mod owners;
 pub mod reconcile;
 pub mod scan;
 pub mod settings;

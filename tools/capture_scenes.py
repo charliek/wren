@@ -385,6 +385,49 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
     if engine == "advanced":
         menu_scenes(client, shot_here, resize)
         calendar_scenes(client, shot_here, resize)
+        suggestion_scenes(client, shot_here)
+
+
+def suggestion_scenes(client, shot_here) -> None:
+    """Task suggestions (discovery/tasks-build.md item 5.1), typed at the
+    end of a task line: `to` offers the dates, `hi` the priorities, and `@`
+    the owners of the workspace's task lines, each drawn tentative (Enter
+    would continue the list), and the dates again once Down has picked
+    Tomorrow, which Enter would then write. Each word is taken back with
+    Backspace, which leaves the note as it was."""
+    open_note(client, "Task lines.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Task lines"),
+             timeout=10, description="the task lines note opens")
+    original = client.call("editor.get")["text"]
+    line = 2
+    text = original.split("\n")[line]
+    assert text == "- [ ] Open alpha task", text
+    client.call("editor.cursor", {"line": line, "column": len(text.encode()), "selection": None})
+    client.call("editor.focus")
+    wait_for(lambda: client.call("tasks.owners")["current"], timeout=10,
+             description="the owners are read")
+
+    def offered(word: str, labels: list[str], name: str, confirmed: str | None = None) -> None:
+        for character in f" {word}":
+            client.call("editor.key", {"key": "space" if character == " " else character})
+        popover = client.call("editor.get")["popover"]
+        assert popover is not None and popover["mode"] == "suggest", popover
+        shown = [row["label"] for row in popover["rows"]]
+        assert shown[:len(labels)] == labels, shown
+        assert popover["takes_enter"] is False and popover["footer"], popover
+        shot_here(name)
+        if confirmed:
+            client.call("editor.key", {"key": "down"})
+            popover = client.call("editor.get")["popover"]
+            assert popover["takes_enter"] is True and popover["selected"] == 1, popover
+            shot_here(confirmed)
+        for _ in f" {word}":
+            client.call("editor.key", {"key": "backspace"})
+        assert client.call("editor.get")["text"] == original
+
+    offered("to", ["Today", "Tomorrow"], "task-suggest-dates", "task-suggest-dates-confirmed")
+    offered("hi", ["High priority", "Highest priority"], "task-suggest-priority")
+    offered("@", ["@alice.chen", "@bob"], "task-suggest-owners")
 
 
 def calendar_scenes(client, shot_here, resize) -> None:

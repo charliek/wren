@@ -363,6 +363,15 @@ pub fn links(line: &str, text: Range<usize>) -> Vec<Span> {
     spans
 }
 
+/// The inline spans of `line[text]` read as a paragraph's text is, with
+/// nothing else on the line in mind: for a reader of one part of a line
+/// whose kind only the whole document says, as a task's description.
+pub fn inline_spans(line: &str, text: Range<usize>) -> Vec<Span> {
+    let (mut spans, _) = inline(&line[text.clone()]);
+    shift(&mut spans, text.start);
+    spans
+}
+
 /// Whether `text` holds a character some inline Markdown starts with or,
 /// for a bare URL, has in its scheme. Text with none has no span, and is
 /// most of what anyone writes.

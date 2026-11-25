@@ -12,6 +12,10 @@
 //! a quick pick, a month arrow, Clear, inside the card off its controls,
 //! or outside it. While it is open `editor.key` presses a key in its field
 //! ([`App::calendar_key`]).
+//!
+//! Suggestions (item 5.1): `tasks.owners`, the owners they offer after an
+//! `@`, best first, and whether those have been read from the index as it
+//! is now; the suggestions themselves are `editor.get`'s `popover`.
 
 use std::sync::Arc;
 
@@ -43,12 +47,13 @@ impl App {
                 self.pin_today(date);
                 request.respond(Ok(self.tasks_snapshot()));
             }
-            "tasks.calendar" | "tasks.calendar_type" | "tasks.calendar_click"
+            "tasks.calendar" | "tasks.calendar_type" | "tasks.calendar_click" | "tasks.owners"
                 if !self.preferences.tasks =>
             {
                 return Err("Tasks are off".into());
             }
             "tasks.calendar" => request.respond(Ok(self.calendar_snapshot())),
+            "tasks.owners" => request.respond(Ok(self.owners_snapshot())),
             "tasks.calendar_type" | "tasks.calendar_click" => {
                 if self.calendar.is_none() {
                     return Err("The calendar is not open".into());

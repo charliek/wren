@@ -410,6 +410,9 @@ pub struct TextEditor<'a> {
     /// The host took the keyboard earlier in this batch: the input after
     /// the handover is dropped; see [`popover`].
     handed_over: Cell<bool>,
+    /// It took it for a row of suggestions chosen in this batch: Escape
+    /// after it is dropped too ([`Target::Handed`]).
+    handed_by_suggestion: Cell<bool>,
     /// The open popover as the events this widget has handled leave it; see
     /// [`popover::OpenMenu`]. The host builds a new widget once it has
     /// applied them.
@@ -459,6 +462,7 @@ impl<'a> TextEditor<'a> {
             providers: &popover::SPELLING_ALONE,
             edition: Edition::default(),
             handed_over: Cell::new(false),
+            handed_by_suggestion: Cell::new(false),
             menu_now: Now::new(),
             origin: None,
             resolved_press: ResolvedPress::default(),
@@ -719,7 +723,11 @@ impl<'a> TextEditor<'a> {
         let held = self.handed_over.get();
         let routes = Routes {
             presses: target,
-            keys: if held { Some(Target::Keyboard) } else { target },
+            keys: match (held, self.handed_by_suggestion.get()) {
+                (true, true) => Some(Target::Handed),
+                (true, false) => Some(Target::Keyboard),
+                (false, _) => target,
+            },
         };
         // A dropped composition that ended is committed at once or not at
         // all: any press shows that it was not.
@@ -984,8 +992,13 @@ impl<'a> TextEditor<'a> {
                 // A key the field of a host that took the keyboard would
                 // take: dropped, for the rest of the handover's batch.
                 Update::Key(Routed::Binding(Binding::Custom(Message::Spell(
-                    SpellEvent::Stroke(_),
+                    SpellEvent::Stroke(stroke),
                 )))) => {
+                    // The host hears of an Escape from its own key handling
+                    // as well: told of it here, in its order, it drops it.
+                    if stroke.named() == Some(keyboard::key::Named::Escape) {
+                        self.publish(shell, Message::Spell(SpellEvent::Stroke(stroke)));
+                    }
                     shell.capture_event();
                 }
                 // So is what an input method composes or commits in that
@@ -1135,9 +1148,18 @@ impl<'a> TextEditor<'a> {
             }
             _ => None,
         };
+        // Enter and Tab choose the selected row of open suggestions.
+        let suggestion = matches!(
+            message,
+            Message::Spell(SpellEvent::Key(proof::MenuKey::Enter | proof::MenuKey::Tab))
+        ) && self
+            .menu_now
+            .live()
+            .is_some_and(|(opened, _)| opened == Opened::Suggest);
         // A row whose choice opens a menu of the host's, which the widget
         // cannot open the same: the keys after it are dropped.
-        let opens = row.is_some_and(|row| self.menu_now.opens_menu(self.popover, row));
+        let opens = (row.or(suggestion.then_some(None)))
+            .is_some_and(|row| self.menu_now.opens_menu(self.popover, row));
         let message = match row.zip(self.menu_now.bound(self.popover)) {
             Some((row, menu)) => Message::Spell(SpellEvent::AcceptOf { menu, row }),
             None => message,
@@ -1146,6 +1168,7 @@ impl<'a> TextEditor<'a> {
             .publish(shell, message, &|| self.caret_line(), self.sources);
         if opens {
             self.menu_now.hand_over();
+            self.handed_by_suggestion.set(suggestion);
         }
     }
 
@@ -1176,6 +1199,7 @@ impl<'a> TextEditor<'a> {
             Opened::Menu if open.opening => Target::SpellOpening,
             Opened::Menu if spelling => Target::SpellMenu,
             Opened::Menu => Target::Menu(accelerators),
+            Opened::Suggest if !self.menu_now.takes_enter(self.popover) => Target::Tentative,
             Opened::Suggest => Target::Suggest,
             Opened::Keyboard => Target::Keyboard,
         })
@@ -1297,7 +1321,7 @@ impl<'a> TextEditor<'a> {
         }
         let state = &*state;
         let (_, fit) = state.menu_fit.as_ref()?;
-        let size = Size::new(fit.width, popover::height(fit.labels.len()));
+        let size = Size::new(fit.width, popover::height_of(menu, fit.labels.len()));
         Some(MenuOverlay {
             menu,
             labels: &fit.labels,
@@ -6313,6 +6337,309 @@ mod tests {
             line: 0,
             range,
         })
+    }
+
+    /// An editor over the task line `text`, the caret at its end, whose
+    /// host offers task suggestions ([`fixtures::TaskWords`]).
+    fn task_words(text: &str) -> crate::EditorView {
+        let mut ev = editing(BackendKind::Owned, text, 0, text.len());
+        ev.set_suggest_source(Some(Arc::new(fixtures::TaskWords)));
+        ev
+    }
+
+    /// The keys that type `text`.
+    fn typing(text: &str) -> Vec<Event> {
+        text.chars()
+            .map(|c| {
+                if c == ' ' {
+                    space()
+                } else {
+                    typed(&c.to_string())
+                }
+            })
+            .collect()
+    }
+
+    /// The Enter table (item 5.1): Enter at the end of a task line after
+    /// a word that is suggestions' and may be ordinary writing continues
+    /// the list, and the word stays, whether the suggestions were drawn
+    /// before Enter or opened in its batch, as typing at xdotool speed
+    /// opens them.
+    #[test]
+    fn enter_after_an_ordinary_word_continues_the_list() {
+        use keyboard::key::Named;
+        let line = "- [ ] Meet sam";
+        for word in [
+            "to", "hi", "lo", "me", "fr", "sa", "due", "today", "@sa", "@sam",
+        ] {
+            let expected = format!("{line} {word}\n- [ ] ");
+            // In one batch with the typing.
+            let mut ev = task_words(line);
+            let mut events = typing(&format!(" {word}"));
+            events.push(named(Named::Enter));
+            let (messages, captured, choice) = keys_batch(&mut ev, events);
+            assert_eq!(choice, None, "{word}");
+            assert!(
+                matches!(messages.last(), Some(Message::Intent(Intent::Enter))),
+                "{word}: {messages:?}"
+            );
+            assert!(captured.iter().all(|captured| *captured), "{word}");
+            assert_eq!(ev.text(), expected, "{word}");
+            assert!(ev.popover().is_none(), "{word}");
+            // In a batch of its own, the suggestions open and drawn.
+            let mut ev = task_words(line);
+            let mut state = None;
+            let typed = typing(&format!(" {word}"));
+            popover_batch(
+                &mut ev,
+                &mut state,
+                typed.into_iter().map(|e| (e, None)).collect(),
+            );
+            assert!(ev.popover().is_some(), "{word}: something is offered");
+            assert!(!ev.popover().unwrap().takes_enter(), "{word}");
+            let (messages, captured, choice) =
+                popover_batch(&mut ev, &mut state, vec![(named(Named::Enter), None)]);
+            assert_eq!(choice, None, "{word}");
+            assert!(
+                matches!(messages.as_slice(), [Message::Intent(Intent::Enter)]),
+                "{word}: {messages:?}"
+            );
+            assert_eq!(captured, [true], "{word}");
+            assert_eq!(ev.text(), expected, "{word}");
+            // The host's own resolution of a popover's Enter agrees.
+            let mut ev = task_words(line);
+            popover_batch(
+                &mut ev,
+                &mut None,
+                typing(&format!(" {word}"))
+                    .into_iter()
+                    .map(|e| (e, None))
+                    .collect(),
+            );
+            ev.spell(SpellEvent::Key(MenuKey::Enter));
+            assert_eq!(ev.take_choice(), None, "{word}");
+            assert_eq!(ev.text(), expected, "{word}");
+        }
+    }
+
+    /// The Enter table's edge rows: Up on the first row and Down on the
+    /// last move nothing, so they pick nothing, and Enter after them still
+    /// continues the list.
+    #[test]
+    fn a_move_that_moves_nothing_picks_nothing() {
+        use keyboard::key::Named;
+        let line = "- [ ] Meet sam";
+        for (word, key) in [
+            ("to", Named::ArrowUp),
+            ("fr", Named::ArrowDown),
+            ("sa", Named::ArrowUp),
+        ] {
+            let expected = format!("{line} {word}\n- [ ] ");
+            let mut ev = task_words(line);
+            let mut events = typing(&format!(" {word}"));
+            events.extend([named(key), named(Named::Enter)]);
+            let (messages, _, choice) = keys_batch(&mut ev, events);
+            assert_eq!(choice, None, "{word} {key:?}: {messages:?}");
+            assert_eq!(ev.text(), expected, "{word} {key:?}");
+            // Across batches.
+            let mut ev = task_words(line);
+            let mut state = None;
+            let typed = typing(&format!(" {word}"))
+                .into_iter()
+                .map(|e| (e, None))
+                .collect();
+            popover_batch(&mut ev, &mut state, typed);
+            popover_batch(&mut ev, &mut state, vec![(named(key), None)]);
+            assert!(!ev.popover().unwrap().takes_enter(), "{word} {key:?}");
+            let (_, _, choice) =
+                popover_batch(&mut ev, &mut state, vec![(named(Named::Enter), None)]);
+            assert_eq!(choice, None, "{word} {key:?}");
+            assert_eq!(ev.text(), expected, "{word} {key:?}");
+        }
+    }
+
+    /// A deletion the widget does not follow, then Enter, in one batch:
+    /// whatever the host offers for the word the deletion leaves (`du`'s
+    /// "Due date…" here), Enter is the text's, as 3.1 routes every key
+    /// after such a deletion, so nothing is chosen and nothing is left
+    /// open: the key that acts closes what the host opened.
+    #[test]
+    fn backspace_then_enter_in_one_batch_continues_the_list() {
+        use keyboard::key::Named;
+        for (line, keys, expected) in [
+            (
+                "- [ ] Mail the deck due",
+                vec![Named::Backspace, Named::Enter],
+                "- [ ] Mail the deck du\n- [ ] ",
+            ),
+            (
+                "- [ ] Mail the deck tod",
+                vec![Named::Backspace, Named::Tab],
+                "- [ ] Mail the deck to",
+            ),
+            (
+                "- [ ] Mail the deck tod",
+                vec![Named::Backspace, Named::ArrowUp, Named::Enter],
+                "- [ ] Mail the deck to\n- [ ] ",
+            ),
+        ] {
+            let mut ev = task_words(line);
+            let events = keys.iter().map(|key| named(*key)).collect();
+            let (messages, _, choice) = keys_batch(&mut ev, events);
+            assert_eq!(choice, None, "{keys:?}: {messages:?}");
+            assert!(ev.popover().is_none(), "{keys:?}: {messages:?}");
+            // Tab is the text's too, which indents no first item.
+            assert_eq!(ev.text(), expected, "{keys:?}: {messages:?}");
+        }
+    }
+
+    #[test]
+    fn tab_or_a_move_then_enter_choose_a_suggestion_of_an_ordinary_word() {
+        use keyboard::key::Named;
+        let line = "- [ ] Meet sam";
+        let to = 15..17;
+        let mut ev = task_words(line);
+        let mut events = typing(" to");
+        events.push(named(Named::Tab));
+        let (_, _, choice) = keys_batch(&mut ev, events);
+        assert_eq!(choice, suggested(0, to.clone()));
+        // Down then Enter, in one batch and across two.
+        let mut ev = task_words(line);
+        let mut events = typing(" to");
+        events.extend([named(Named::ArrowDown), named(Named::Enter)]);
+        let (_, _, choice) = keys_batch(&mut ev, events);
+        assert_eq!(choice, suggested(1, to.clone()));
+        let mut ev = task_words(line);
+        let mut state = None;
+        let mut events: Vec<_> = typing(" to").into_iter().map(|e| (e, None)).collect();
+        events.push((named(Named::ArrowDown), None));
+        popover_batch(&mut ev, &mut state, events);
+        assert!(ev.popover().unwrap().takes_enter());
+        let (_, _, choice) =
+            popover_batch(&mut ev, &mut state, vec![(named(Named::ArrowUp), None)]);
+        assert_eq!(choice, None);
+        let (_, _, choice) = popover_batch(&mut ev, &mut state, vec![(named(Named::Enter), None)]);
+        assert_eq!(choice, suggested(0, to));
+        // Typing on after a move offers afresh, and Enter is the text's.
+        let mut ev = task_words(line);
+        let mut events = typing(" t");
+        events.extend([named(Named::ArrowDown)]);
+        events.extend(typing("o"));
+        events.push(named(Named::Enter));
+        let (_, _, choice) = keys_batch(&mut ev, events);
+        assert_eq!(choice, None);
+        assert_eq!(ev.text(), format!("{line} to\n- [ ] "));
+    }
+
+    /// `du` and Enter at xdotool speed: "Due date…" is chosen, and since it
+    /// opens a menu of the host's (the calendar), what follows in the batch
+    /// is dropped, never typed into the note. An owner is chosen by Tab.
+    #[test]
+    fn enter_chooses_the_calendar_for_du_and_tab_an_owner() {
+        use keyboard::key::Named;
+        let line = "- [ ] Mail the deck";
+        let mut ev = task_words(line);
+        let mut events = typing(" du");
+        events.push(named(Named::Enter));
+        events.extend(typing("fri"));
+        let (messages, _, choice) = keys_batch(&mut ev, events);
+        assert_eq!(choice, suggested(0, 20..22), "{messages:?}");
+        assert_eq!(ev.text(), format!("{line} du"));
+        let mut ev = task_words(line);
+        let mut events = typing(" @sa");
+        events.push(named(Named::Tab));
+        let (_, _, choice) = keys_batch(&mut ev, events);
+        assert_eq!(choice, suggested(0, 20..23));
+        assert_eq!(ev.text(), format!("{line} @sa"));
+    }
+
+    /// `du`, Enter and Escape in one batch: Enter chooses "Due date…",
+    /// whose calendar the host opens, and the Escape after it, typed
+    /// before the calendar could be seen, is dropped and claimed, so the
+    /// host's own key handling drops it too, and the calendar stays.
+    #[test]
+    fn escape_after_choosing_the_calendar_in_one_batch_is_dropped() {
+        use keyboard::key::Named;
+        let line = "- [ ] Mail the deck";
+        let mut ev = task_words(line);
+        let mut events = typing(" du");
+        events.extend([named(Named::Enter), named(Named::Escape), typed("x")]);
+        let (messages, captured, choice) = keys_batch(&mut ev, events);
+        assert_eq!(choice, suggested(0, 20..22), "{messages:?}");
+        assert!(
+            matches!(
+                messages.last(),
+                Some(Message::Spell(SpellEvent::Stroke(stroke)))
+                    if stroke.named() == Some(Named::Escape)
+            ),
+            "{messages:?}"
+        );
+        assert_eq!(captured[captured.len() - 2..], [true, true]);
+        assert_eq!(ev.text(), format!("{line} du"));
+        // The host hands the editor the stroke, which claims the Escape.
+        if let Some(Message::Spell(event)) = messages.last() {
+            ev.spell(*event);
+        }
+        assert!(ev.take_claimed_escape());
+        assert!(!ev.take_claimed_escape());
+        // After a choice that opens nothing, Escape stays the host's, as it
+        // was.
+        let mut ev = task_words(line);
+        let mut events = typing(" to");
+        events.extend([named(Named::Tab), named(Named::Escape)]);
+        let (messages, _, _) = keys_batch(&mut ev, events);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, Message::Spell(SpellEvent::Stroke(_)))),
+            "{messages:?}"
+        );
+        assert!(!ev.take_claimed_escape());
+    }
+
+    /// Composing never opens suggestions: what an input method commits is
+    /// not typed key by key, and the source is not asked about it.
+    #[test]
+    fn an_input_method_composing_a_word_never_opens_suggestions() {
+        use keyboard::key::Named;
+        let line = "- [ ] Mail the deck ";
+        // As winit sends a composition: its preedits, an empty one, and
+        // the text committed.
+        for events in [
+            vec![
+                composing("d"),
+                composing("du"),
+                composing(""),
+                committing("du"),
+            ],
+            vec![
+                composing("t"),
+                composing("to"),
+                composing(""),
+                committing("to"),
+            ],
+            vec![composing("ｔｏ"), composing(""), committing("to")],
+        ] {
+            let mut ev = task_words(line);
+            let mut state = None;
+            popover_batch(&mut ev, &mut state, events.clone());
+            assert!(ev.popover().is_none(), "{events:?}");
+            let (messages, _, choice) =
+                popover_batch(&mut ev, &mut state, vec![(named(Named::Enter), None)]);
+            assert_eq!(choice, None);
+            assert!(
+                matches!(messages.as_slice(), [Message::Intent(Intent::Enter)]),
+                "{messages:?}"
+            );
+            assert!(ev.text().ends_with("\n- [ ] "), "{:?}", ev.text());
+            // And with the Enter in the composition's batch.
+            let mut ev = task_words(line);
+            let mut events = events.clone();
+            events.push((named(Named::Enter), None));
+            let (_, _, choice) = popover_batch(&mut ev, &mut None, events);
+            assert_eq!(choice, None);
+            assert!(ev.popover().is_none());
+        }
     }
 
     #[test]

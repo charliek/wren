@@ -66,6 +66,13 @@ pub enum Change {
     RemoveOwner(String),
     /// The description, keeping every token after it.
     SetDescription(String),
+    /// Bytes `range` of the line, as this step reads it, replaced with
+    /// the text: a word typed on the line that auto-suggest completes
+    /// (`@sa` to `@sam`), or with no text takes out, as a token is taken
+    /// out, with the white space before it. Refused for a range off the
+    /// line, inside a character or before the description, and for text
+    /// with a line break.
+    ReplaceWord(Range<usize>, String),
     /// Each change in order, each reading what the one before wrote, as
     /// one replacement: what the task form sends. It should hold only the
     /// fields the user changed, since setting a priority tidies duplicate
@@ -259,6 +266,7 @@ impl Writer<'_> {
             Change::AddOwner(name) => self.step(|r| r.owner_addition(name)),
             Change::RemoveOwner(name) => self.step(|r| Some(r.owner_removals(name))),
             Change::SetDescription(text) => self.step(|r| Some(r.description_edits(text))),
+            Change::ReplaceWord(range, text) => self.step(|r| r.word_edits(range, text)),
             Change::Compound(_) => self.change(change),
         }
     }

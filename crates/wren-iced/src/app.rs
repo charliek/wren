@@ -34,6 +34,7 @@ mod spelling;
 mod task_commands;
 mod task_footer;
 mod task_menus;
+mod task_suggest;
 mod tasks;
 mod workspaces;
 
@@ -72,6 +73,12 @@ pub struct App {
     task_source: std::sync::Arc<calendar::TaskSource>,
     /// What the calendar's source was last told the caret's line is for.
     due_key: Option<calendar::DueKey>,
+    /// The editor's source of suggestions on task lines.
+    suggestions: std::sync::Arc<task_suggest::TaskSuggestions>,
+    /// Whether the editor has been given it.
+    suggest_installed: bool,
+    /// The owners the suggestions offer, kept up with the index.
+    owners: wren_core::owners::Owners,
     /// The footers' measured label widths; see `task_footer::Widths`.
     label_widths: task_footer::Widths,
     editor: EditorView,
@@ -402,6 +409,9 @@ impl App {
             calendar_escapes: 0,
             task_source: std::sync::Arc::default(),
             due_key: None,
+            suggestions: std::sync::Arc::default(),
+            suggest_installed: false,
+            owners: wren_core::owners::Owners::default(),
             label_widths: task_footer::Widths::default(),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
@@ -534,6 +544,7 @@ impl App {
         }
         let calendar = self.sync_calendar();
         self.sync_due_target();
+        self.sync_suggestions();
         // The note, the loading state and the setting can each change on any
         // message, and the editor must see the proofreader before it draws.
         self.sync_proofreader();
@@ -866,6 +877,14 @@ impl App {
         // the request that opened it, in that request's batch of events,
         // was typed before it could be seen, and is no one's.
         if self.calendar.is_some() {
+            // An Escape in that batch, after "Due date…" chosen from the
+            // suggestions, which the app's key handling hears of too: it
+            // is dropped there, and does not close what it could not see.
+            if let wren_editor::Message::Spell(wren_editor::SpellEvent::Stroke(stroke)) = message {
+                if stroke.named() == Some(iced::keyboard::key::Named::Escape) {
+                    self.calendar_escapes += 1;
+                }
+            }
             return Task::none();
         }
         let started = Instant::now();

@@ -403,7 +403,7 @@ impl App {
                 return self.board_request(request)
             }
             "tasks.get" | "tasks.set_today" | "tasks.calendar" | "tasks.calendar_type"
-            | "tasks.calendar_click" => return self.tasks_request(request),
+            | "tasks.calendar_click" | "tasks.owners" => return self.tasks_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -866,6 +866,7 @@ impl App {
             "provider":popover.provider(),"instance":popover.instance(),
             "line":popover.line(),"start":popover.range().start,"end":popover.range().end,
             "text":popover.text(),"rows":rows,"selected":popover.selected(),
+            "takes_enter":popover.takes_enter(),"footer":popover.footer(),
             "bounds":bounds.map(rectangle),
             "anchor":self.editor.popover_anchor().map(rectangle),
         })

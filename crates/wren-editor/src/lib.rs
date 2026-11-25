@@ -1212,7 +1212,7 @@ impl EditorView {
     /// ([`SpellEvent::Press`]) only closes an open menu; over suggestions,
     /// or with nothing open, it clicks or opens the suggestions menu as
     /// that press would. A stroke ([`SpellEvent::Stroke`]) is the host's to
-    /// take, and does nothing here.
+    /// take, and does nothing here but claim an Escape.
     pub fn spell(&mut self, event: SpellEvent) -> bool {
         self.choice = None;
         self.keyboard = None;
@@ -1230,6 +1230,14 @@ impl EditorView {
             self.handback = false;
         }
         match event {
+            // Suggestions whose selected row Enter does not choose: Enter
+            // is the text's, as with none open.
+            SpellEvent::Key(MenuKey::Enter)
+                if self.popover().is_some_and(|open| !open.takes_enter()) =>
+            {
+                self.close_open();
+                return self.press_without_popover(MenuKey::Enter);
+            }
             SpellEvent::Key(key) => {
                 return match self.popover().map(|popover| key.on(popover.mode())) {
                     Some(Some(event)) => {
@@ -1311,6 +1319,14 @@ impl EditorView {
             }
             SpellEvent::Close => {
                 self.close_open();
+            }
+            // An Escape dropped in the frame of a handover to a row of
+            // suggestions: the host's key handling, hearing of the same
+            // press, drops it ([`EditorView::take_claimed_escape`]).
+            SpellEvent::Stroke(stroke)
+                if stroke.named() == Some(iced::keyboard::key::Named::Escape) =>
+            {
+                self.escapes += 1;
             }
             SpellEvent::Stroke(_) | SpellEvent::Hold => {}
         }
@@ -1687,6 +1703,18 @@ impl EditorView {
         }
         self.suppressed = None;
         self.suggester = source;
+    }
+
+    /// Ask the host's source again for the suggestions that are open, its
+    /// answer having changed: they follow it, or close. Nothing else open
+    /// is touched, and nothing opens where none is: suggestions are open
+    /// only with the caret where they were asked, nothing selected and no
+    /// input method composing. Returns whether suggestions are open after.
+    pub fn refresh_suggestions(&mut self) -> bool {
+        if self.popover.as_ref().map(Popover::mode) == Some(Mode::Suggest) {
+            self.suggest();
+        }
+        self.popover.as_ref().map(Popover::mode) == Some(Mode::Suggest)
     }
 
     /// The host's source of the popovers it names by number, or `None`. A

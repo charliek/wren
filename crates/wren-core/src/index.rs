@@ -37,6 +37,9 @@ const CONTEXT_CHARS: usize = 48;
 const BLOCK_SEPARATOR: &str = " · ";
 const MAX_QUEUED_WARNINGS: usize = 64;
 
+/// The next [`Index::identity`].
+static NEXT_IDENTITY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Workspace,
@@ -126,6 +129,9 @@ pub struct Index {
     budget: usize,
     sequence: u64,
     revision: u64,
+    /// A number no other index of this run has: with [`Index::revision`],
+    /// what names one state of one workspace's notes.
+    identity: u64,
     warnings: Vec<String>,
     /// The newest source of a note whose extraction waits for
     /// [`Index::settle`]: the open board while its labels are typed, which
@@ -165,6 +171,7 @@ impl Index {
             budget,
             sequence: 0,
             revision: 0,
+            identity: NEXT_IDENTITY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             warnings: Vec::new(),
             pending: None,
             boxes: Boxes::Plain,
@@ -184,6 +191,28 @@ impl Index {
     /// Changes for content, paths, ordering, limitations, and opened recency.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// A number no other index of this run has, so a workspace opened
+    /// again, whose revisions count from the start, is never taken for the
+    /// one before it.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Each Markdown note's source as the index holds it, with the time the
+    /// note was last changed on disk: what the owners of tasks are read
+    /// from (`crate::owners`). Boards, and notes whose content the index
+    /// dropped, are left out. The sources are shared, not copied.
+    pub fn markdown_sources(&self) -> Vec<(NoteId, SystemTime, Arc<str>)> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.kind == NoteKind::Markdown)
+            .filter_map(|(note, entry)| {
+                let content = entry.content.as_ref()?;
+                Some((*note, entry.modified, Arc::clone(&content.source)))
+            })
+            .collect()
     }
 
     /// Retained source, extracted and lowercase content bytes, excluding title

@@ -176,6 +176,9 @@ pub struct Settings {
     /// Whether task lines get their statuses, dates and commands, read
     /// at launch.
     pub tasks: bool,
+    /// Whether typing on a task line offers dates, priorities and owners,
+    /// with `tasks` on.
+    pub tasks_suggest: bool,
     /// When the tool dock's buttons show their keys.
     pub board_key_badges: KeyBadges,
     /// `(trigger, action)` in file order; later lines win.
@@ -200,6 +203,7 @@ impl Default for Settings {
             board_toolbar: true,
             board_key_badges: KeyBadges::Hold,
             tasks: false,
+            tasks_suggest: true,
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -316,6 +320,10 @@ impl Settings {
                 },
                 "tasks" => match parse_bool(value) {
                     Some(enabled) => settings.tasks = enabled,
+                    None => invalid(),
+                },
+                "tasks-suggest" => match parse_bool(value) {
+                    Some(enabled) => settings.tasks_suggest = enabled,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -581,6 +589,11 @@ pub const TEMPLATE: &str = "\
 # Applies when Wren restarts.
 # tasks = off
 
+# Task suggestions: on a task line, typing `du`, `to`, `fri`, `hi` or `@`
+# offers a due date, a priority or an owner. Tab picks one. It needs
+# tasks = on and editor-engine = advanced.
+# tasks-suggest = on
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
 # to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
 # keybind = ctrl+shift+p = palette.commands
@@ -828,6 +841,32 @@ mod tests {
         let on = with_value(TEMPLATE, "tasks", "on");
         assert!(Settings::parse(&on).tasks);
         assert!(on.contains("\n# tasks = off\n") && on.ends_with("tasks = on\n"));
+    }
+
+    #[test]
+    fn task_suggestions_default_on_and_parse_booleans() {
+        assert!(Settings::default().tasks_suggest);
+        assert!(Settings::parse("").tasks_suggest);
+        assert!(Settings::parse(TEMPLATE).tasks_suggest);
+        for (value, enabled) in [
+            ("on", true),
+            ("yes", true),
+            ("off", false),
+            ("false", false),
+        ] {
+            let settings = Settings::parse(&format!("tasks-suggest = {value}\n"));
+            assert_eq!(settings.tasks_suggest, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+            // It is its own setting: `tasks` stays as it was.
+            assert!(!settings.tasks, "{value}");
+        }
+        let settings = Settings::parse("tasks-suggest = off\ntasks-suggest = maybe\n");
+        assert!(!settings.tasks_suggest, "a bad value keeps the earlier one");
+        assert!(settings.warnings[0].contains("line 2: invalid tasks-suggest value"));
+        assert!(TEMPLATE.contains("\n# tasks-suggest = on\n"));
+        let off = with_value(TEMPLATE, "tasks-suggest", "off");
+        assert!(!Settings::parse(&off).tasks_suggest);
+        assert!(Settings::parse(&off).tasks == Settings::parse(TEMPLATE).tasks);
     }
 
     #[test]

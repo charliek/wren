@@ -7,8 +7,10 @@
 //!
 //! It opens from `task.set_due` (⌘D / Ctrl+D, the palette), on the
 //! advanced engine with tasks on, at the caret's task; from a right-click
-//! on a due date (a provider that takes the keyboard); and from the task
-//! menu's Set due date… row. Opening gives its field the keyboard.
+//! on a due date (a provider that takes the keyboard); from the task
+//! menu's Set due date… row; and from the suggestions' "Due date…" for a
+//! typed `du` (`task_suggest.rs`), under that word, which the date written
+//! takes the place of. Opening gives its field the keyboard.
 //!
 //! **Input in the frame of a handover is dropped.** The keys after ⌘D in
 //! its batch of events were typed before the calendar could be seen, so
@@ -102,6 +104,10 @@ pub(super) struct Open {
     opened_at: Option<Rectangle>,
     /// The first line in view when it opened: a scroll closes it.
     top: usize,
+    /// A word on the task's line that the date written takes the place of:
+    /// the `du` a suggestion opened it for (`task_suggest.rs`). Cancelled,
+    /// the word stays.
+    erase: Option<std::ops::Range<usize>>,
 }
 
 #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
@@ -272,11 +278,11 @@ impl App {
             return;
         }
         self.due_key = Some(key);
-        let target = can
-            .then(|| (self.box_line_of(line) == Some(line)).then(|| self.editor.line_text(line)))
-            .flatten()
-            .flatten()
+        let boxed = can.then(|| self.box_on(line)).flatten();
+        let target = boxed
+            .and_then(|_| self.editor.line_text(line))
             .map(|text| (line, text));
+        self.suggest_on_line(boxed.map(|task| (line, task)));
         *self.task_source.due() = target;
     }
 
@@ -388,8 +394,30 @@ impl App {
             opened_at: self.editor.anchor_bounds(&anchor),
             anchor,
             top: self.editor.first_visible_line(),
+            erase: None,
         });
         Some(iced::widget::operation::focus(FIELD))
+    }
+
+    /// Open the calendar for the task whose box is on `line`, under the
+    /// word at `range` of it, which the date it writes takes the place of:
+    /// "📅 Due date…" chosen from the suggestions for `du`.
+    pub(super) fn open_calendar_for_word(
+        &mut self,
+        line: usize,
+        range: std::ops::Range<usize>,
+    ) -> Task<Message> {
+        let at = Anchor::Range {
+            line,
+            range: range.clone(),
+        };
+        let Some(task) = self.open_calendar(line, at) else {
+            return Task::none();
+        };
+        if let Some(open) = self.calendar.as_mut().filter(|open| open.line == line) {
+            open.erase = Some(range);
+        }
+        task
     }
 
     /// The line of the box of the task line `line` belongs to.
@@ -508,6 +536,14 @@ impl App {
                 focus,
                 self.blocked("The task changed; nothing was written").task,
             ]);
+        }
+        if let Some(range) = open.erase.clone().filter(|_| due.is_some()) {
+            let change = Change::Compound(vec![
+                task::suggest::erase(range.clone()),
+                Change::SetDue(due),
+            ]);
+            let written = self.write_completion(open.line, &open.text, &range, &change);
+            return Task::batch([focus, written]);
         }
         let started = std::time::Instant::now();
         let change = Change::SetDue(due);

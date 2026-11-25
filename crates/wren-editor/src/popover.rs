@@ -14,7 +14,9 @@
 //! and a press in the editor only closes it.
 //!
 //! **Suggest** leaves the keyboard with the text. Up, Down, Enter and Tab
-//! are the popover's, whatever the host has bound them to; Escape closes it
+//! are the popover's, whatever the host has bound them to, but for Enter on
+//! a row the host marks tentative ([`Row::tentative`]), which is the
+//! text's until Up or Down has moved the selection; Escape closes it
 //! and hides suggestions for the caret's line; every other key and every
 //! press is the editor's, as with no popover. After a character is typed
 //! or deleted the host's [`SuggestSource`] is asked again, so the popover
@@ -151,7 +153,7 @@ use crate::hit::Hit;
 use crate::Message;
 
 pub(crate) use menu::{
-    fit_with, height, hint_size, measure, place, Extras, Fit, InOrder, MenuOverlay,
+    fit_with, height_of, hint_size, measure, place, Extras, Fit, InOrder, MenuOverlay,
 };
 
 /// Where a popover hangs: under the first row that holds its anchor, at the
@@ -312,6 +314,17 @@ pub struct Row {
     /// dropped, as after a handover of the keyboard (see the module's
     /// description).
     pub opens_menu: bool,
+    /// Among suggestions, a row Enter does not choose as it is offered:
+    /// while it is selected and the selection has not been moved with Up
+    /// or Down, Enter closes the suggestions and is the text's, as with
+    /// none open. Tab and the pointer still choose it. For suggestions
+    /// that may be ordinary words, so that a line ending in one is never
+    /// rewritten by the Enter that ends it.
+    pub tentative: bool,
+    /// A short note drawn muted at the row's right, where a menu names a
+    /// row's key: a date, how often a name is used. A row's key, if it
+    /// has one, is drawn there instead.
+    pub detail: Option<String>,
 }
 
 impl Row {
@@ -325,6 +338,8 @@ impl Row {
             checked: false,
             enabled: true,
             opens_menu: false,
+            tentative: false,
+            detail: None,
         }
     }
 
@@ -362,6 +377,19 @@ impl Row {
         self.opens_menu = true;
         self
     }
+
+    /// A suggestion Enter does not choose as it is offered
+    /// ([`Row::tentative`]).
+    pub fn tentative(mut self, tentative: bool) -> Self {
+        self.tentative = tentative;
+        self
+    }
+
+    /// A note drawn at the row's right ([`Row::detail`]).
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
 }
 
 /// A row as an open popover keeps it, but for its label and its key: its
@@ -375,6 +403,8 @@ struct Entry {
     checked: bool,
     enabled: bool,
     opens_menu: bool,
+    tentative: bool,
+    detail: Option<String>,
 }
 
 /// An open popover: where it hangs and what it offers. The host opens one
@@ -401,6 +431,9 @@ pub struct Popover {
     /// Which of the popovers the editor has opened this is; see
     /// [`Self::instance`].
     instance: u64,
+    /// Up or Down has moved the selection since it opened: Enter then
+    /// chooses even a tentative row ([`Row::tentative`]).
+    confirmed: bool,
 }
 
 impl Popover {
@@ -426,6 +459,7 @@ impl Popover {
             spelling: false,
             provider: None,
             instance: 0,
+            confirmed: false,
         };
         for row in rows {
             let enabled = row.enabled;
@@ -441,6 +475,8 @@ impl Popover {
                 checked: row.checked,
                 enabled,
                 opens_menu: row.opens_menu,
+                tentative: row.tentative,
+                detail: row.detail,
             });
         }
         let entries = &popover.entries;
@@ -487,9 +523,45 @@ impl Popover {
     }
 
     /// Move the selection `delta` rows that can be chosen, stopping at the
-    /// ends.
+    /// ends. A move that moved it picks from the rows, so Enter chooses the
+    /// one selected ([`Self::takes_enter`]); one stopped at an end picks
+    /// nothing.
     pub(crate) fn step(&mut self, delta: i32) {
+        let was = self.selected;
         self.selected = stepped(self.selected, self.labels.len(), &self.live(), delta);
+        self.confirmed |= self.selected != was;
+    }
+
+    /// Whether Enter chooses its selected row: always on a menu; among
+    /// suggestions, unless that row is tentative ([`Row::tentative`]) and
+    /// the selection has not been moved with Up or Down since they opened.
+    pub fn takes_enter(&self) -> bool {
+        self.mode == Mode::Menu
+            || self.confirmed
+            || self
+                .selected
+                .is_none_or(|row| !self.entries.get(row).is_some_and(|entry| entry.tentative))
+    }
+
+    /// Whether Up or Down has moved the selection since it opened.
+    pub(crate) fn is_confirmed(&self) -> bool {
+        self.confirmed
+    }
+
+    /// Whether `row` is drawn as tentative: a tentative row of suggestions
+    /// whose selection Up or Down has not moved, which Enter does not
+    /// choose ([`Self::takes_enter`]).
+    pub fn is_tentative(&self, row: usize) -> bool {
+        self.mode == Mode::Suggest
+            && !self.confirmed
+            && self.entries.get(row).is_some_and(|entry| entry.tentative)
+    }
+
+    /// The hint drawn under the rows: for suggestions with a tentative row,
+    /// how to choose one, since Enter alone does not.
+    pub fn footer(&self) -> Option<&'static str> {
+        (self.mode == Mode::Suggest && self.entries.iter().any(|entry| entry.tentative))
+            .then_some(TENTATIVE_FOOTER)
     }
 
     /// Select `row`, if the popover has it and it can be chosen.
@@ -559,6 +631,19 @@ impl Popover {
             .map(Accelerator::label)
     }
 
+    /// The note drawn at `row`'s right ([`Row::detail`]), if it has one.
+    pub fn detail(&self, row: usize) -> Option<&str> {
+        self.entries
+            .get(row)
+            .and_then(|entry| entry.detail.as_deref())
+    }
+
+    /// What is drawn at `row`'s right: its key's name, or else its note.
+    pub(crate) fn note(&self, row: usize) -> Option<String> {
+        self.hint(row)
+            .or_else(|| self.detail(row).map(str::to_owned))
+    }
+
     /// The glyph drawn before `row`'s label ([`Row::glyph`]).
     pub fn glyph(&self, row: usize) -> Option<&str> {
         self.entries
@@ -602,6 +687,9 @@ impl Popover {
     }
 }
 
+/// The hint under suggestions with a tentative row ([`Popover::footer`]).
+pub const TENTATIVE_FOOTER: &str = "Tab picks · ↑↓ ↵";
+
 /// The row a user chose from the host's popover; see
 /// [`crate::EditorView::take_choice`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -625,6 +713,17 @@ pub trait SuggestSource: Send + Sync {
     /// caret, with nothing selected, is at byte `caret` of `line`. `None`
     /// offers nothing, which closes the open suggestions.
     fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion>;
+
+    /// [`SuggestSource::suggest`], told also the number of the caret's
+    /// line in the text as the host has it, for a source that knows more
+    /// of that text than the line: whether the whole text reads it as a
+    /// task's, say. It must answer the same for the same line number,
+    /// line and caret. What the editor asks; by default,
+    /// [`SuggestSource::suggest`]'s answer.
+    fn suggest_on(&self, index: usize, line: &str, caret: usize) -> Option<Suggestion> {
+        let _ = index;
+        self.suggest(line, caret)
+    }
 }
 
 /// A [`SuggestSource`]'s answer: rows, and the bytes of the line they
@@ -920,7 +1019,7 @@ pub(crate) fn suggested(source: &dyn SuggestSource, line: &CaretLine) -> Option<
     if line.selected {
         return None;
     }
-    let suggestion = source.suggest(&line.text, line.caret)?;
+    let suggestion = source.suggest_on(line.index, &line.text, line.caret)?;
     let anchored = line.text.get(suggestion.range.clone())?.to_owned();
     (!suggestion.rows.is_empty()).then(|| {
         Popover::new(
@@ -1469,6 +1568,9 @@ pub(crate) struct Now {
     /// Whether each row of what is open can be chosen
     /// ([`Popover::live`]).
     live: RefCell<Vec<bool>>,
+    /// Up or Down has moved the selection of what is open since it
+    /// opened ([`Popover::takes_enter`]).
+    confirmed: Cell<bool>,
 }
 
 impl Now {
@@ -1485,6 +1587,7 @@ impl Now {
             count: Cell::new(None),
             own_instance: Cell::new(None),
             live: RefCell::new(Vec::new()),
+            confirmed: Cell::new(false),
         }
     }
 
@@ -1497,6 +1600,8 @@ impl Now {
     /// Start from `popover`, the one the host has open.
     pub(crate) fn start(&self, popover: Option<&Popover>) {
         self.handed.set(popover.is_some());
+        self.confirmed
+            .set(popover.is_some_and(Popover::is_confirmed));
         self.live
             .replace(popover.map_or_else(Vec::new, Popover::live));
         self.set(popover.map(|popover| (popover.mode().into(), OpenMenu::of(popover))));
@@ -1577,6 +1682,27 @@ impl Now {
             .zip(row)
             .is_some_and(|(popover, row)| {
                 popover.is_enabled(row) && popover.entries[row].opens_menu
+            })
+    }
+
+    /// Whether Enter chooses the selected row of what is open, of the
+    /// popover the host handed over (`handed`) or the one opened in this
+    /// batch ([`Popover::takes_enter`]), as the batch's moves leave it.
+    pub(crate) fn takes_enter(&self, handed: Option<&Popover>) -> bool {
+        let Some(open) = self.open.get() else {
+            return true;
+        };
+        let own = self.own.borrow();
+        let Some(popover) = own.as_ref().or(handed) else {
+            return true;
+        };
+        popover.mode() == Mode::Menu
+            || self.confirmed.get()
+            || open.selected.is_none_or(|row| {
+                !popover
+                    .entries
+                    .get(row)
+                    .is_some_and(|entry| entry.tentative)
             })
     }
 
@@ -1758,7 +1884,22 @@ impl Now {
                     PopoverEvent::Move(_) | PopoverEvent::Hover(_) | PopoverEvent::Key(_)
                 )
             );
+        // Up or Down that moves the selection of what is open picks from
+        // its rows; stopped at an end, it picks nothing.
+        let moved = was.map(|(_, menu)| menu.selected) != next.map(|(_, menu)| menu.selected);
+        if kept
+            && moved
+            && matches!(
+                message,
+                Message::Spell(
+                    PopoverEvent::Move(_) | PopoverEvent::Key(MenuKey::Up | MenuKey::Down)
+                )
+            )
+        {
+            self.confirmed.set(true);
+        }
         if !kept {
+            self.confirmed.set(false);
             let provided = matches!(message, Message::Spell(PopoverEvent::Context { .. }));
             let instance = match &own {
                 Some(menu) if provided => Some(menu.instance()),
@@ -1880,6 +2021,61 @@ mod tests {
         empty.step(1);
         empty.hover(0);
         assert_eq!(empty.selected(), None);
+    }
+
+    #[test]
+    fn enter_chooses_a_tentative_suggestion_only_once_the_selection_moved() {
+        let rows = vec![
+            Row::new(0, "Today").tentative(true).detail("Thu 19 Nov"),
+            Row::new(1, "Tomorrow").tentative(true),
+            Row::new(2, "Due date…"),
+        ];
+        let mut popover = Popover::new(Mode::Suggest, 0, 4..6, "to".into(), rows.clone());
+        assert!(!popover.takes_enter());
+        assert!(!popover.is_confirmed());
+        // Drawn tentative, with the hint under it, a row's height taller.
+        assert!(popover.is_tentative(0) && popover.is_tentative(1));
+        assert!(!popover.is_tentative(2));
+        assert_eq!(popover.footer(), Some(TENTATIVE_FOOTER));
+        assert_eq!(height_of(&popover, 3), menu::height(3) + 24.0);
+        // Up at the top or Down at the bottom moves nothing, and picks
+        // nothing.
+        popover.step(-1);
+        assert!(!popover.takes_enter());
+        let mut one = Popover::new(Mode::Suggest, 0, 4..6, "fr".into(), rows[..1].to_vec());
+        one.step(1);
+        assert_eq!(one.selected(), Some(0));
+        assert!(!one.takes_enter());
+        // Moved, even back where it was, the user has picked.
+        popover.step(1);
+        popover.step(-1);
+        assert_eq!(popover.selected(), Some(0));
+        assert!(popover.takes_enter());
+        assert!(!popover.is_tentative(0));
+        assert_eq!(popover.footer(), Some(TENTATIVE_FOOTER));
+        // A hover is no pick.
+        let mut popover = Popover::new(Mode::Suggest, 0, 4..6, "to".into(), rows.clone());
+        popover.hover(1);
+        assert!(!popover.takes_enter());
+        popover.hover(2);
+        assert!(popover.takes_enter());
+        // A menu takes Enter whatever its rows say, and has no hint.
+        let menu = Popover::new(Mode::Menu, 0, 4..6, "to".into(), rows.clone());
+        assert!(menu.takes_enter() && !menu.is_tentative(0));
+        assert_eq!(
+            (menu.footer(), height_of(&menu, 3)),
+            (None, menu::height(3))
+        );
+        // A note is drawn where a key would be, and a key wins.
+        let popover = Popover::new(Mode::Suggest, 0, 4..6, "to".into(), rows);
+        assert_eq!(popover.detail(0), Some("Thu 19 Nov"));
+        assert_eq!(popover.note(0).as_deref(), Some("Thu 19 Nov"));
+        assert_eq!((popover.detail(1), popover.note(1)), (None, None));
+        let keyed = Row::new(0, "Open")
+            .accelerator(Accelerator::plain(' '))
+            .detail("now");
+        let menu = Popover::new(Mode::Menu, 0, 2..5, "[ ]".into(), vec![keyed]);
+        assert_eq!(menu.note(0).as_deref(), Some("Space"));
     }
 
     #[test]

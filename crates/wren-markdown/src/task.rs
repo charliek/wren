@@ -93,6 +93,7 @@ use crate::date::{Date, Parsed};
 
 mod change;
 mod selection;
+pub mod suggest;
 mod summary;
 
 pub use change::{edit, Change, LineEdit, Stale};
@@ -738,6 +739,30 @@ fn tags_in(line: &str, range: Range<usize>) -> Vec<Range<usize>> {
     tags
 }
 
+/// The key two spellings of one owner share: `name` with its case folded
+/// (Unicode's simple case folding), so `@Sam` and `@SAM`, and `@Σ` and
+/// `@ς`, are one owner. Only for comparing; a name is shown as written.
+pub fn fold_name(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            // Where folding differs from lowercasing.
+            'ς' => 'σ',
+            'ſ' => 's',
+            'ϐ' => 'β',
+            'ϑ' => 'θ',
+            'ϕ' => 'φ',
+            'ϖ' => 'π',
+            'ϰ' => 'κ',
+            'ϱ' => 'ρ',
+            'ϵ' => 'ε',
+            'ẛ' => 'ṡ',
+            '\u{345}' | '\u{1fbe}' => 'ι',
+            c => c,
+        })
+        .collect()
+}
+
 /// Whether `name` can be written as an `@owner` and read back whole.
 pub fn is_owner_name(name: &str) -> bool {
     !name.is_empty() && owner_len(name) == name.len()
@@ -982,6 +1007,21 @@ impl<'a> TaskLine<'a> {
             Vec::new()
         } else {
             vec![self.insert_at(0, &format!("@{name}"))]
+        })
+    }
+
+    fn word_edits(&self, range: &Range<usize>, text: &str) -> Option<Vec<Edit>> {
+        let fits = range.start <= range.end
+            && range.start >= self.description.start
+            && self.line.get(range.clone()).is_some()
+            && !text.contains(['\n', '\r']);
+        if !fits {
+            return None;
+        }
+        Some(if text.is_empty() {
+            self.removals(std::iter::once(range.clone()))
+        } else {
+            vec![(range.clone(), text.to_owned())]
         })
     }
 

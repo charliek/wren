@@ -46,6 +46,7 @@ test-python:
 perf-search:
 	cargo test -p wren-core --lib --release --locked index::tests::benchmark_search_5000_notes_25mb_under_30ms -- --ignored --exact --nocapture
 	cargo test -p wren-core --test navigation --release --locked benchmark_filesystem_5000_notes_25mb_load_reconcile_and_edits -- --ignored --exact --nocapture
+	cargo test -p wren-core --lib --release --locked owners::tests::perf_owner_scan_5000_notes_25mb -- --ignored --exact --nocapture
 
 # Full counts of the ignored wren-board tests; the default run keeps small
 # counts so `make test` stays fast. Names start fuzz_ or perf_ to be picked here.

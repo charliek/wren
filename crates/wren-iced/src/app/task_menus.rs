@@ -478,8 +478,12 @@ impl App {
 
     /// A row chosen from a menu the app opened itself
     /// ([`wren_editor::EditorView::take_choice`]): a task menu's opened by
-    /// a request, or the priority menu Priority… opens.
+    /// a request, the priority menu Priority… opens, or the suggestions'
+    /// (`task_suggest.rs`).
     pub(super) fn chosen_row(&mut self, choice: &Choice) -> Task<Message> {
+        if choice.mode == PopoverMode::Suggest {
+            return self.suggestion_row(choice).unwrap_or_else(Task::none);
+        }
         self.task_row(choice)
     }
 

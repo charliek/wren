@@ -76,9 +76,17 @@ pub(crate) enum Target<'a> {
     Menu(&'a [Option<Accelerator>]),
     /// Suggestions.
     Suggest,
+    /// Suggestions whose selected row Enter does not choose
+    /// ([`crate::Row::tentative`]): Enter is the text's, and closes them.
+    Tentative,
     /// Nothing of the editor's: the host took the keyboard for a request
     /// of this batch.
     Keyboard,
+    /// Nothing of the editor's: the host took the keyboard for a row of
+    /// suggestions chosen in this batch ("Due date…"), which Escape after
+    /// it, typed before the user could see what opened, must not close.
+    /// Escape is dropped too.
+    Handed,
 }
 
 impl<'a> Target<'a> {
@@ -88,6 +96,7 @@ impl<'a> Target<'a> {
         match popover.mode() {
             Mode::Menu if popover.is_spelling() => Self::SpellMenu,
             Mode::Menu => Self::Menu(popover.accelerators()),
+            Mode::Suggest if !popover.takes_enter() => Self::Tentative,
             Mode::Suggest => Self::Suggest,
         }
     }
@@ -98,7 +107,7 @@ impl<'a> Target<'a> {
         match self {
             Self::SpellMenu | Self::Menu(_) => Some(false),
             Self::SpellOpening => Some(true),
-            Self::Suggest | Self::Keyboard => None,
+            Self::Suggest | Self::Tentative | Self::Keyboard | Self::Handed => None,
         }
     }
 
@@ -137,8 +146,10 @@ pub(crate) fn route<'a>(
         Some(Target::SpellMenu) => route_spell_menu(key_press, context, false),
         Some(Target::SpellOpening) => route_spell_menu(key_press, context, true),
         Some(Target::Menu(accelerators)) => route_menu(key_press, context, accelerators),
-        Some(Target::Suggest) => route_suggest(key_press, context),
-        Some(Target::Keyboard) => route_keyboard(key_press, context),
+        Some(Target::Suggest) => route_suggest(key_press, context, true),
+        Some(Target::Tentative) => route_suggest(key_press, context, false),
+        Some(Target::Keyboard) => route_keyboard(key_press, context, false),
+        Some(Target::Handed) => route_keyboard(key_press, context, true),
     }
 }
 
@@ -244,8 +255,10 @@ fn route_menu(
 /// the host as [`SpellEvent::Key`], captured. Escape with no Ctrl, Alt or
 /// logo key goes the same way but uncaptured, as on a menu of the host's.
 /// Every other press is routed by [`key_binding`] as with nothing open,
-/// and what it does to the text decides whether the suggestions stay.
-fn route_suggest(key_press: KeyPress, context: Context) -> Option<Routed> {
+/// and what it does to the text decides whether the suggestions stay. So
+/// is Enter, unless `enter`: the selected row is one Enter does not
+/// choose ([`crate::Row::tentative`]), and Enter is the text's.
+fn route_suggest(key_press: KeyPress, context: Context, enter: bool) -> Option<Routed> {
     let plain = key_press.modifiers.is_empty();
     let key = match key_press.key.as_ref() {
         Key::Named(Named::Escape) if is_plain_escape(key_press.modifiers) => {
@@ -255,7 +268,7 @@ fn route_suggest(key_press: KeyPress, context: Context) -> Option<Routed> {
         }
         Key::Named(Named::ArrowUp) if plain => MenuKey::Up,
         Key::Named(Named::ArrowDown) if plain => MenuKey::Down,
-        Key::Named(Named::Enter) if plain => MenuKey::Enter,
+        Key::Named(Named::Enter) if plain && enter => MenuKey::Enter,
         Key::Named(Named::Tab) if plain => MenuKey::Tab,
         _ => return key_binding(key_press, context).map(Routed::Binding),
     };
@@ -269,9 +282,14 @@ fn route_suggest(key_press: KeyPress, context: Context) -> Option<Routed> {
 /// Every other press is one the host's field would take: it is routed as
 /// a [`SpellEvent::Stroke`], which the widget takes and drops, since input
 /// in the frame of a handover is no one's ([`crate::popover`]). A key that
-/// is neither named nor one character is no stroke, and is not taken.
-fn route_keyboard(key_press: KeyPress, context: Context) -> Option<Routed> {
+/// is neither named nor one character is no stroke, and is not taken. With
+/// `escape`, for a handover to a row of suggestions ([`Target::Handed`]),
+/// Escape is such a stroke too, whatever the policy says of it.
+fn route_keyboard(key_press: KeyPress, context: Context, escape: bool) -> Option<Routed> {
     match key_press.key.as_ref() {
+        Key::Named(Named::Escape) if escape => {
+            return Stroke::of(&key_press).map(|stroke| popover_event(SpellEvent::Stroke(stroke)));
+        }
         Key::Named(Named::Escape) => return key_binding(key_press, context).map(Routed::Binding),
         Key::Named(named) if is_modifier(named) => return None,
         _ => {}

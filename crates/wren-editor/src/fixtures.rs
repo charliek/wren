@@ -221,6 +221,39 @@ impl SuggestSource for Completes {
     }
 }
 
+/// The task suggestions a host offers (`wren_markdown::task::suggest`),
+/// with today Thursday 19 November 2026 and the owners `sam` and
+/// `Samantha`: each row numbered by its place, "Due date…" a row that
+/// opens a menu of the host's, and a row Enter may not choose as offered
+/// tentative.
+pub struct TaskWords;
+
+impl SuggestSource for TaskWords {
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        use wren_markdown::block::{Boxes, Scanner};
+        use wren_markdown::task::suggest::{suggest, Item, Known};
+        let today = wren_markdown::date::Date::new(2026, 11, 19)?;
+        let task = Scanner::new(Boxes::Status).next_line(line).item?.task?;
+        let owners = [Known::new("sam"), Known::new("Samantha")];
+        let offer = suggest(line, caret, task, today, &owners)?;
+        let rows = (0..)
+            .zip(offer.items)
+            .map(|(id, item)| {
+                let row = Row::new(id, item.label).tentative(!item.enter);
+                if item.item == Item::Calendar {
+                    row.opens_menu()
+                } else {
+                    row
+                }
+            })
+            .collect();
+        Some(Suggestion {
+            range: offer.range,
+            rows,
+        })
+    }
+}
+
 /// Suggestions of rows that run commands: after two letters at a word's
 /// start, a row running command 7 and one running command 8, under the
 /// letters typed.

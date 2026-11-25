@@ -9,7 +9,9 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::{self, LineHeight, Paragraph as _, Renderer as _, Text, Wrapping};
 use iced::advanced::{mouse, overlay, Clipboard, Shell};
-use iced::{alignment, Border, Event, Font, Pixels, Point, Rectangle, Renderer, Size, Theme};
+use iced::{
+    alignment, Border, Color, Event, Font, Pixels, Point, Rectangle, Renderer, Size, Theme,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{publish, OpenMenu, Popover, PopoverEvent};
@@ -33,6 +35,8 @@ const BORDER: f32 = 1.0;
 /// Between a row's edges and its text.
 const TEXT_INSET: f32 = 8.0;
 const ROW_RADIUS: f32 = 4.0;
+/// How much of the selection's fill a tentative row gets.
+const TENTATIVE_FILL: f32 = 0.35;
 const ELLIPSIS: &str = "…";
 /// The one inactive row of a menu with nothing to offer.
 pub const NO_SUGGESTIONS: &str = "No suggestions";
@@ -120,13 +124,13 @@ const HINT_GAP: f32 = 16.0;
 const HINT_SHRINK: f32 = 1.5;
 
 /// What a menu's rows hold beside their labels: a column of glyphs before
-/// them, and the keys named after them, right-aligned.
+/// them, and the keys or notes named after them, right-aligned.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct Extras {
     /// The glyph column's width, or nothing when no row has a glyph.
     pub glyphs: f32,
-    /// The widest key's width and the gap before it, or nothing when no
-    /// row names a key.
+    /// The widest key's or note's width and the gap before it, or nothing
+    /// when no row names one.
     pub hints: f32,
 }
 
@@ -140,7 +144,7 @@ impl Extras {
             0.0
         };
         let widest = (0..rows)
-            .filter_map(|row| menu.hint(row))
+            .filter_map(|row| menu.note(row))
             .map(|hint| measure_hint(&hint))
             .fold(None, |widest: Option<f32>, width| {
                 Some(widest.map_or(width, |w| w.max(width)))
@@ -164,6 +168,14 @@ pub(crate) fn hint_size(size: f32) -> f32 {
 /// The menu's height for `rows` rows.
 pub(crate) fn height(rows: usize) -> f32 {
     2.0 * PADDING + ROW_HEIGHT * rows as f32
+}
+
+/// The height of the hint under the rows ([`Popover::footer`]).
+const FOOTER_HEIGHT: f32 = 24.0;
+
+/// The height of `menu` with `rows` rows: with its footer, if it has one.
+pub(crate) fn height_of(menu: &Popover, rows: usize) -> f32 {
+    height(rows) + menu.footer().map_or(0.0, |_| FOOTER_HEIGHT)
 }
 
 /// Where the menu of `size` goes for a word whose glyphs start at
@@ -349,13 +361,27 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
             style.background,
         );
         if let Some(selected) = self.now.get().and_then(|open| open.selected) {
+            // A row Enter does not choose is marked, not filled: a lighter
+            // fill inside an outline.
+            let tentative = self.menu.is_tentative(selected);
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: row_bounds(self.bounds, selected),
-                    border: Border::default().rounded(ROW_RADIUS),
+                    border: Border {
+                        color: style.selected,
+                        width: if tentative { BORDER } else { 0.0 },
+                        radius: ROW_RADIUS.into(),
+                    },
                     ..renderer::Quad::default()
                 },
-                style.selected,
+                if tentative {
+                    Color {
+                        a: style.selected.a * TENTATIVE_FILL,
+                        ..style.selected
+                    }
+                } else {
+                    style.selected
+                },
             );
         }
         let color = if self.menu.labels().is_empty() {
@@ -422,7 +448,7 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
                 color,
                 self.bounds,
             );
-            if let Some(hint) = self.menu.hint(row) {
+            if let Some(hint) = self.menu.note(row) {
                 renderer.fill_text(
                     text(
                         hint,
@@ -436,6 +462,42 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
                     self.bounds,
                 );
             }
+        }
+        if let Some(footer) = self.menu.footer() {
+            let top = self.bounds.y + self.bounds.height - FOOTER_HEIGHT;
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: self.bounds.x + PADDING,
+                        y: top,
+                        width: (self.bounds.width - 2.0 * PADDING).max(0.0),
+                        height: BORDER,
+                    },
+                    ..renderer::Quad::default()
+                },
+                style.border,
+            );
+            renderer.fill_text(
+                Text {
+                    bounds: Size::new(
+                        (self.bounds.width - 2.0 * (PADDING + TEXT_INSET)).max(0.0),
+                        FOOTER_HEIGHT,
+                    ),
+                    ..text(
+                        footer.to_owned(),
+                        hints,
+                        style.font,
+                        0.0,
+                        text::Alignment::Default,
+                    )
+                },
+                Point::new(
+                    self.bounds.x + PADDING + TEXT_INSET,
+                    top + FOOTER_HEIGHT / 2.0,
+                ),
+                style.muted,
+                self.bounds,
+            );
         }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(frame) = self.frame {
