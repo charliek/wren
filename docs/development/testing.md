@@ -180,70 +180,6 @@ make smoke-wayland SMOKE_TESTS='tools/wrentest/test_board*.py'
 already, so the whole suite can run with the setting on. Unset, nothing is
 added and the build's default holds.
 
-`WRENTEST_TASKS=off` or `on` does the same for the `tasks` line. CI runs
-one lane (X11, tiny-skia) with it `on`; the others pass it empty, which adds no line, so the
-build's default (`off`) holds. `make
-smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on both engines, once with
-tasks `off` and once `on`, for `DISPLAY_BACKEND` (default `x11`) and the
-current `ICED_BACKEND`, and fails if either run ran no task test (none collected, or all skipped).
-
-The task line commands (`task.cycle_status`, `task.priority.high` and the
-rest) run through `command.run` as the palette runs them, at the caret, and
-through `shortcut` once a `keybind` line gives one a key. `editor.get`
-reports the editor's open popover, whichever it is, as `popover`: its
-`mode` (`menu` or `suggest`), whether it is the `spelling` menu, the
-`line`, `start`, `end` and `text` it hangs under, its `rows` (each with its
-`id`, `label`, the `command` key the id names or `null`, its `glyph`, the
-`key` named beside it, and whether it is `checked` and `enabled`), the
-`selected` row, the `provider` that opened it for a right-click, its
-`instance` number, and its `bounds` and `anchor` in window coordinates once
-a frame has drawn it; `null` with none open. `editor.open_menu` `{"rows":
-[{"command": "task.priority.high", "label": "High", "key": "h", "shift":
-false}]}` opens a menu at the caret whose rows run those commands, on the
-advanced engine only, so `editor.key` can press a row's key, Up, Down,
-Enter or Escape into a menu of the app's as into the spelling menu.
-
-The calendar (`task.set_due`, `tools/wrentest/test_tasks_calendar.py`)
-opens through `shortcut` or `command.run`, and from a right-click on a due
-date. While it is open, `editor.key` presses a key in its field instead of
-the editor: the calendar's keys (also `page_up` and `page_down`), a
-character typed or Backspace at the end of its text, and Escape and
-shortcuts heard by the app as a real press is. `tasks.calendar` returns
-`{"open": false}`, or its `line`, the field's `typed` text, the
-`selected`, `today` and `current` dates, the `month` shown, the `caption`
-under the field and whether it is `invalid`, whether Clear is shown
-(`clear`), its `anchor` (`line` and byte `range`) and the card's `bounds`
-in window coordinates. `tasks.calendar_type` `{"text": …}` sets the
-field's text as a paste or an input method's commit does, and
-`tasks.calendar_click` clicks `{"day": "YYYY-MM-DD"}`, a quick pick
-`{"chip": "Fri"}`, or `{"target": …}`, one of `previous`, `next`, `clear`,
-`inside` (the card off its controls) and `outside`. `focus.get` names the
-field `calendar-field`. With tasks off each of them is refused.
-
-The task form (`task.edit`, `tools/wrentest/test_tasks_form.py`) opens
-through `shortcut` or `command.run`, on either engine. While it is open,
-`editor.key` presses a key in it: the form's own keys (Tab, the arrows,
-Enter, Escape, and on the status and priority rows their characters), a
-character typed or Backspace at the end of the focused field's text, and
-Escape and shortcuts heard by the app as a real press is; with the
-calendar open over it, the calendar's field takes the key. `tasks.form`
-returns `{"open": false}`, or its `kind` (`edit`, `new` or `make`),
-`title`, `line`, the slot with the keyboard (`focus`), the fields
-(`description`, `status`, `due`, `priority`, `owners`, and `owner_text`,
-what the owners field holds), the due field's `due_caption` and
-`due_invalid`, the owners `suggestions` and the chosen `suggestion`, the
-`writes` line, the last save's `error`, the `calendar` over it (`typed`,
-`selected`, `month`, `caption` and `bounds`) and the due field's
-`due_bounds`. `tasks.form_type` `{"field": "description" | "due" |
-"owners", "text": …}` sets a field's text, and `tasks.form_click` clicks
-`{"status": name}`, `{"priority": name}` (`"None"` for none),
-`{"suggestion": name}`, `{"remove": name}` (an owner's remove button),
-`{"target": …}` (`save`, `cancel`, `outside` or `calendar`), or on the
-calendar over the form `{"day": …}`, `{"chip": …}` or `{"calendar": …}`
-(`previous`, `next`, `clear`, `inside` or `outside`). `focus.get` names
-the fields `task-form-description`, `task-form-due` and
-`task-form-owners`.
-
 `WRENTEST_PERF=release` makes `test_board_perf.py` assert the release
 budgets instead of the debug ceilings. Build the release binary in its own
 target directory so the smoke build is not replaced:
@@ -303,6 +239,115 @@ use. Headless Weston gives the app no clipboard, so the paste case turns it
 on there and still tests the board's copy and paste; `{"own": false}` goes
 back to the system clipboard.
 
+### Tasks
+
+Every task case writes its own `tasks` and `editor-engine` lines, takes the
+engine `WRENTEST_ENGINE` names, and pins today to Thursday 19 November
+2026 with `WrenApp(today="2026-11-19")`, which sets `WREN_TEST_TODAY` on
+every launch (a `YYYY-MM-DD` date; the `smoke-test` build only). Dates in
+a case are written relative to that day. The cases are
+`tools/wrentest/test_tasks_*.py`, and `tools/wrentest/fixtures/tasks/` is
+their sample workspace. A feature that only the advanced engine has is
+checked absent on classic, and with tasks off.
+
+| File | What it covers |
+|---|---|
+| `test_tasks_gate.py` | Tasks off: no task command or key, every `tasks.*` request but `tasks.get` refused (it answers `{"tasks": false}`), and the pinned date reaching the app with tasks on. |
+| `test_tasks_baseline.py` | The baseline note with tasks off: Enter, Backspace, toggle, highlighting, previews and spelling as before the feature. `make check` pins the same note in `crates/wren-iced/golden/tasks-baseline.txt`. |
+| `test_tasks_emoji.py` | The task glyphs: caret steps, one-press Backspace, selection and hit-testing. |
+| `test_tasks_status.py` | The statuses of the box, and the toggle's stamps. |
+| `test_tasks_colours.py` | Which role each token is drawn in, and the day change. |
+| `test_tasks_footer.py` | The status-bar line's full text and pieces; `capture_scenes.py --only tasks` draws its narrow, cutoff and wide layouts. |
+| `test_tasks_commands.py` | The Tasks palette group, its keys, and the Editor-scope routing. |
+| `test_tasks_menus.py` | The status, priority and task menus, the box click, and right-clicks on each token, including native X11 input. |
+| `test_tasks_calendar.py` | The calendar. |
+| `test_tasks_suggest.py` | Suggestions, including a native X11 case that types `du` and Enter at xdotool speed. |
+| `test_tasks_form.py` | The task form. |
+
+`tasks.get` reports the task state and is the one request that answers with
+tasks off (`{"tasks": false}`). With them on it gives `today`, the date the
+app last `seen` and how many times the day has changed (`day_changes`), the
+`engine`, the caret's `line` (its number, its text and its task: the box's
+byte range, symbol, status name and type, or `null`), its `tokens` (each
+with its kind, text and byte range, the palette role it is drawn in and
+whether it is bold), and the status bar's `footer` (its text, whether it is
+overdue and its pieces). `tasks.set_today` `{"date": "YYYY-MM-DD"}` moves
+the clock as midnight would, so the colours, the footer and the calendar
+refresh. `tasks.owners` returns the owners suggestions would offer, each
+with its note count, and whether the list is current for the workspace.
+Every `tasks.*` request but `tasks.get` is refused with tasks off.
+
+`editor.open_menu`, `editor.click`, `editor.bounds` and `editor.right_click`
+drive the popovers and clicks; `editor.cursor` places the caret.
+`editor.command` `{"intent": "toggle_task"}` runs the toggle as the keys do:
+with tasks on it writes the done and cancelled dates, and with tasks off it
+is the plain toggle and writes none. The `native_x11` cases use real clicks
+and chords.
+
+`WRENTEST_TASKS=off` or `on` does the same for the `tasks` line. CI runs
+one lane (X11, tiny-skia) with it `on`; the others pass it empty, which adds no line, so the
+build's default (`off`) holds. `make
+smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on both engines, once with
+tasks `off` and once `on`, for `DISPLAY_BACKEND` (default `x11`) and the
+current `ICED_BACKEND`, and fails if either run ran no task test (none collected, or all skipped).
+
+The task line commands (`task.cycle_status`, `task.priority.high` and the
+rest) run through `command.run` as the palette runs them, at the caret, and
+through `shortcut` once a `keybind` line gives one a key. `editor.get`
+reports the editor's open popover, whichever it is, as `popover`: its
+`mode` (`menu` or `suggest`), whether it is the `spelling` menu, the
+`line`, `start`, `end` and `text` it hangs under, its `rows` (each with its
+`id`, `label`, the `command` key the id names or `null`, its `glyph`, the
+`key` named beside it, and whether it is `checked` and `enabled`), the
+`selected` row, the `provider` that opened it for a right-click, its
+`instance` number, and its `bounds` and `anchor` in window coordinates once
+a frame has drawn it; `null` with none open. `editor.open_menu` `{"rows":
+[{"command": "task.priority.high", "label": "High", "key": "h", "shift":
+false}]}` opens a menu at the caret whose rows run those commands, on the
+advanced engine only, so `editor.key` can press a row's key, Up, Down,
+Enter or Escape into a menu of the app's as into the spelling menu.
+
+The calendar (`task.set_due`, `tools/wrentest/test_tasks_calendar.py`)
+opens through `shortcut` or `command.run`, and from a right-click on a due
+date. While it is open, `editor.key` presses a key in its field instead of
+the editor: the calendar's keys (also `page_up` and `page_down`), a
+character typed or Backspace at the end of its text, and Escape and
+shortcuts heard by the app as a real press is. `tasks.calendar` returns
+`{"open": false}`, or its `line`, the field's `typed` text, the
+`selected`, `today` and `current` dates, the `month` shown, the `caption`
+under the field and whether it is `invalid`, whether Clear is shown
+(`clear`), its `anchor` (`line` and byte `range`) and the card's `bounds`
+in window coordinates. `tasks.calendar_type` `{"text": …}` sets the
+field's text as a paste or an input method's commit does, and
+`tasks.calendar_click` clicks `{"day": "YYYY-MM-DD"}`, a quick pick
+`{"chip": "Fri"}`, or `{"target": …}`, one of `previous`, `next`, `clear`,
+`inside` (the card off its controls) and `outside`. `focus.get` names the
+field `calendar-field`. With tasks off each of them is refused.
+
+The task form (`task.edit`, `tools/wrentest/test_tasks_form.py`) opens
+through `shortcut` or `command.run`, on either engine. While it is open,
+`editor.key` presses a key in it: the form's own keys (Tab, the arrows,
+Enter, Escape, and on the status and priority rows their characters), a
+character typed or Backspace at the end of the focused field's text, and
+Escape and shortcuts heard by the app as a real press is; with the
+calendar open over it, the calendar's field takes the key. `tasks.form`
+returns `{"open": false}`, or its `kind` (`edit`, `new` or `make`),
+`title`, `line`, the slot with the keyboard (`focus`), the fields
+(`description`, `status`, `due`, `priority`, `owners`, and `owner_text`,
+what the owners field holds), the due field's `due_caption` and
+`due_invalid`, `due_value` (what the due field names), the owners `suggestions` and the chosen `suggestion`, the
+`writes` line, the last save's `error`, the `calendar` over it (`typed`,
+`selected`, `month`, `caption` and `bounds`) and the due field's
+`due_bounds`. `tasks.form_type` `{"field": "description" | "due" |
+"owners", "text": …}` sets a field's text, and `tasks.form_click` clicks
+`{"status": name}`, `{"priority": name}` (`"None"` for none),
+`{"suggestion": name}`, `{"remove": name}` (an owner's remove button),
+`{"target": …}` (`save`, `cancel`, `outside` or `calendar`), or on the
+calendar over the form `{"day": …}`, `{"chip": …}` or `{"calendar": …}`
+(`previous`, `next`, `clear`, `inside` or `outside`). `focus.get` names
+the fields `task-form-description`, `task-form-due` and
+`task-form-owners`.
+
 ## Looking at real screens
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`
@@ -326,6 +371,13 @@ ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
   python3 tools/capture_scenes.py --engine advanced --theme light \
   --setting editor-line-height=2 --label tall --only markdown
 ```
+
+`--only tasks` (task lines, colours, the line commands, the status bar, the menus, the calendar and the suggestions) opens the tasks fixture workspace with `tasks = on` and today
+pinned to 19 November 2026, on the advanced engine unless `--engine` says
+otherwise, and shoots task lines, colours, the line commands, the status bar
+and the menus into `target/scenes/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`;
+`--fonts` names the emoji font setup in that path. Check them in three
+themes on both engines after changing task colours or the status bar.
 
 `--only spell`, which needs `--engine advanced`, turns spell check on and
 shoots the acceptance note: `spell-marks` (its marks, with the caret

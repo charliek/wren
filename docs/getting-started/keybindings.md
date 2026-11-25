@@ -109,11 +109,14 @@ beside the text you are writing.
 - **Toggle a task** checks `- [ ] a` as `- [x] a` and back. A list item
   or a plain line becomes an open task (`- a` and `a` both become
   `- [ ] a`), and a numbered item keeps its number (`1. [ ] a`). Over a
-  selection, every task is checked if any is open, otherwise all are
-  reopened. With `tasks = on`, checking a task also writes today's done
-  date (`✅ 2026-11-19`) and reopening one removes it; a cancelled task
-  (`[-]`) reopens. Typing `x` between the brackets yourself writes no
-  date.
+  selection that holds a task, every task that is not done is checked if
+  any is unfinished (open, doing, or a box with no status of its own), and
+  a done task stays as it is; otherwise all are reopened, cancelled ones
+  too. Lines that are not tasks get a box only when the selection holds no
+  task. With `tasks = on`, checking a task also writes today's done date
+  (`✅ 2026-11-19`) and reopening one removes it, and a cancelled task
+  (`[-]`) reopens and loses its `❌` date. Typing `x` between the brackets
+  yourself writes no date. See [Tasks](../reference/tasks.md#toggle-a-task).
 - **Bold, Italic, and Inline code** wrap the selection, or the word at the
   cursor, in `**`, `*`, or `` ` ``; with no word there, they insert an empty
   pair around the cursor. Pressing the key again on wrapped text unwraps it.
@@ -153,10 +156,13 @@ corrections menu comes first, as before. A right-click on the box opens
 the status menu, on the priority glyph the priority menu, and on the due
 date the calendar (below); anywhere else on the line it opens the task
 menu, which holds the status rows, **Set due date…** (which opens the
-calendar), **Priority…** (which opens the priority menu) and **Edit
-task…** (which opens the task form, below).
+calendar; it reads **Change due date…** when the task has one),
+**Priority…** (which opens the priority menu) and **Edit task…** (which
+opens the [task form](#the-task-form) for the task you clicked, whatever
+line the caret is on).
 
-Each menu marks the task's current status or priority and opens on it. ↑
+Each menu marks the task's current status or priority and opens on it; an
+unknown box has no status row to mark. ↑
 and ↓ move, ↵ chooses, Esc closes it and writes nothing, and a single key
 chooses a row directly:
 
@@ -164,15 +170,17 @@ chooses a row directly:
 |---|---|
 | Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
 | Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
-| Task | the status keys, then `d` Set due date…, `p` Priority…, `e` Edit task… |
+| Task | the status keys, then `d` Set or Change due date…, `p` Priority…, `e` Edit task… |
 
 A choice rewrites the task's line as one undo step, with the done or
 cancelled date the status asks for. A click on a task's box cycles its
 status, open → doing → done → open; a cancelled task reopens. The caret
-stays where it was. The status changes once a double click could no
-longer follow, a fraction of a second later. A double click, a click with
-a modifier held, a drag that starts on the box, and a press let go off the
-box select text or place the caret as they would anywhere else.
+stays where it was. The status changes 300 ms after the press, once a
+double click could no longer follow; a second click in that time cancels
+it. While the button is held, a key, another button, a modifier or the
+window losing focus cancels it too. A click with a modifier held, a drag
+that starts on the box, and a press let go off the box select text or place
+the caret as they would anywhere else.
 
 **Set task due date** (⌘D / Ctrl+D) opens the calendar at the caret's
 task, on the `advanced` engine: on the task's due date, or today, hung
@@ -189,44 +197,85 @@ under the date or the caret. Its field has the keyboard:
 
 The line under the field says what ↵ would write, or that the field holds
 no date, in which case ↵ writes nothing. A click on a day or on a quick
-pick writes it, and **Clear** removes the due date. The date is written as
-`📅 2026-12-01` at the end of the line, before a `^block-id`, as one undo
-step; a `🗓` or `📆` already there keeps its glyph. A click outside the
+pick writes it at once, and **Clear** removes the due date. A new date is
+written as `📅 2026-12-01`, before any done or cancelled date and the
+`^block-id` that follow it; a date already there is changed where it
+stands, keeping a `🗓`, a `📆` or a `[due:: …]` as written. Each is one undo
+step. A click outside the
 calendar, a scroll, or a change to the note closes it and writes nothing.
 Keys typed in the same instant as ⌘D / Ctrl+D, before the calendar shows,
 are dropped rather than typed into the note.
 
-**Create or edit task** (⇧⌘↵ / Ctrl+Shift+Enter) opens the task form at
-the caret's line, on either engine: the description, the status, the due
-date, the priority and the owners, with a **Writes** line that shows the
-Markdown saving will write as you change them. On a task it edits the
-task. On a blank line it makes a new one (`- [ ] `, inside a quote when
-the line is in one); on a list item or a line of text it makes that text a
-task, as **Toggle task** would. A heading, a code block or front matter
-has no form.
+### The task form
+
+**Create or edit task** (⇧⌘↵ / Ctrl+Shift+Enter, `task.edit`, or **Edit
+task…** in the task menu) opens a form for the line at the caret, on either
+engine: the description, the status, the due date, the priority and the
+owners, with a **Writes** line that shows the Markdown saving will write as
+you change them. It hangs near the top of the window, as the palette does,
+so the calendar can open under its due field. On a task it edits the task.
+On a blank line or an empty list item it makes a new task (`- [ ] `, inside
+a quote when the line is in one). On a list item or a line of text that is
+not a task it makes that text a task, with the text as the description, as
+**Toggle task** would. A heading, a thematic break, a code block or front
+matter has no form.
 
 | Key | Does |
 |---|---|
-| Tab, ⇧Tab | the next or the previous field: description, status, due, priority, owners, Save, Cancel |
+| Tab, ⇧Tab | the next or the previous field, round the ends: description, status, due, priority, owners, Save, Cancel |
 | ← → | on the status or the priority, the previous or the next choice |
 | Space `/` `x` `-` | on the status, Open, Doing, Done or Cancelled |
 | `h` `m` `l` ⇧H ⇧L `n` | on the priority, High, Medium, Low, Highest, Lowest or None |
 | ↓ | in the due field, opens the calendar under it; whatever closes it gives the due field the keyboard back |
-| ↵ | saves; in the owners field with a name typed, adds that name as typed (never completed), or the owner chosen with ↑ ↓, first |
-| ↑ ↓ | in the owners field, chooses among the owners already used in the workspace |
+| ↵ | saves, from any field but these: in the owners field with a name typed it adds that name as typed, or the owner chosen with ↑ ↓; on Save or Cancel it presses the button |
+| Space | on Save or Cancel, presses the button |
+| ↑ ↓ | in the owners field, choose among the owners already used in the workspace |
 | Tab | in the owners field with a name typed, adds the owner chosen with ↑ ↓, or else the first offered, then moves on |
 | ⌫ | in an empty owners field, removes the last owner |
 | Esc | in the owners field with a name typed, empties it; otherwise closes the form and writes nothing |
+| ⇧⌘↵ / Ctrl+Shift+Enter, ⌘↵ / Ctrl+Enter | save, from any field |
 
-The due field takes the same words as the calendar; the line under it
-says what it names. A name left typed in the owners field is in the
-**Writes** line, and saved, as typed. ⇧⌘↵ / Ctrl+Shift+Enter, or ⌘↵ / Ctrl+Enter, saves
-from any field too. Saving writes only the fields you changed, as one
-undo step, so a line you wrote in your own order keeps it, and saving a
-form you did not change writes nothing. If the line changed while the form
-was open (the note was reloaded from disk, say), saving says so and writes
-nothing; Cancel and open the form again. Closing the form gives the editor
-back the keyboard with its caret where it was.
+A click outside the form closes it and writes nothing. The due field takes
+the same [date words](../reference/tasks.md#date-words) as the calendar; the
+line under it says what it names. A name left typed in the owners field is
+in the **Writes** line, and saved, as typed. Removing an owner and adding
+the name back puts the mention back where it was written.
+
+Saving writes only the fields you changed, as one undo step, so a line you
+wrote in your own order keeps it, and saving a form you did not change
+writes nothing. A due field that is not a date, or not a real day, cannot
+be saved: the line under it says so and the form stays open. If the line
+changed while the form was open (the note was reloaded from disk, say),
+saving says so and writes nothing; Cancel and open the form again.
+
+While the form is open, the app's shortcuts do nothing, except Quit. A key
+that saves, cancels, presses a button or opens the calendar is the last
+input the form takes from its batch: keys typed in the same instant after
+it are dropped, not typed into the note. While an input method is
+composing, Enter and Esc belong to it. Closing the form gives the editor
+the keyboard back with its caret where it was.
+
+### Task suggestions
+
+With `tasks = on` and `tasks-suggest = on`, on the `advanced` engine, a
+task line offers a short list under the word you type. Two letters at the
+start of a word open a due date or a priority, never in the description's
+first word; `@` alone opens owners, in the first word too. See
+[Tasks](../reference/tasks.md#suggestions) for what each word offers.
+
+| Key | Does |
+|---|---|
+| Tab | picks the highlighted row |
+| ↑ ↓ | move; ↵ then picks the row moved to |
+| ↵ | with no ↑ or ↓ first, continues the list and keeps the word as typed. Only **Due date…** for `du`, `da` or `dat` opens the calendar |
+| Esc | hides the list for the rest of the line |
+| any other key | types, and the list follows the word |
+
+An owner is picked by Tab, or by ↑ or ↓ and ↵; ↵ alone never completes a
+name. A row that ↵ alone would not pick is drawn lightly, with "Tab picks
+· ↑↓ ↵" under the list. With no list open, Tab indents and ↵ continues the
+list as always. The list opens only with the caret at the end of a word,
+and not while an input method is composing.
 
 ## Jumping to a heading
 

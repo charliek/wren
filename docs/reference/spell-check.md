@@ -33,7 +33,9 @@ A task's box is never checked, only the text after it. Without
 other bracket after a list marker, such as `[/]`, is the item's text. With
 `tasks = on`, a box holds any one character, so a task of any status is
 read the same way: open, doing (`[/]`), done, cancelled (`[-]`), or a
-character with no status of its own.
+character with no status of its own. See [Tasks](tasks.md). On a task line,
+a right-click on a misspelled word opens the corrections menu, not the task
+menu.
 
 Inside checked text, these are skipped:
 
