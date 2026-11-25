@@ -10,10 +10,12 @@ use iced::{Color, Font};
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use wren_markdown::span::SpanKind;
+
 use crate::highlighter::Settings;
 use crate::{
-    Accelerator, MenuSource, MenuStyle, Palette, Proofreader, Requested, Row, Style, SuggestSource,
-    Suggestion,
+    Accelerator, Clicked, Hit, MenuProvider, MenuSource, MenuStyle, Palette, Proofreader,
+    Requested, Row, Style, SuggestSource, Suggestion,
 };
 
 pub const FONT: Font = Font::with_name("JetBrains Mono");
@@ -262,5 +264,80 @@ impl MenuSource for Menus {
             KEYBOARD => Some(Requested::Keyboard),
             _ => None,
         }
+    }
+}
+
+/// The menu [`on_tokens`] opens: two rows, numbered from 30, the first
+/// with a key.
+pub fn token_rows() -> Vec<Row> {
+    vec![
+        Row::new(30, "Rename").accelerator(Accelerator::plain('r')),
+        Row::new(31, "Remove"),
+    ]
+}
+
+/// A provider's answer that takes a task's owner or tag, when that is the
+/// hit: [`token_rows`] under it. A misspelled owner is a misspelling, which
+/// it passes on.
+pub fn on_tokens(clicked: &Clicked) -> Option<Requested> {
+    let Some(Hit::Span(span)) = &clicked.hit else {
+        return None;
+    };
+    matches!(span.kind, SpanKind::Owner { .. } | SpanKind::Tag).then(|| Requested::Rows {
+        range: span.range.clone(),
+        rows: token_rows(),
+    })
+}
+
+/// A provider's answer that takes any place on a line that starts a task,
+/// whatever is there: a token, a misspelled word, a place in no span, or
+/// the row past the end of its text. The status menu under the box.
+pub fn on_task_lines(clicked: &Clicked) -> Option<Requested> {
+    clicked.text.starts_with("- [").then(|| Requested::Rows {
+        range: 2..5,
+        rows: status_rows(),
+    })
+}
+
+/// A provider's answer that takes a task's date by having the host take
+/// the keyboard, as it would for a calendar.
+pub fn on_dates(clicked: &Clicked) -> Option<Requested> {
+    let Some(Hit::Span(span)) = &clicked.hit else {
+        return None;
+    };
+    matches!(span.kind, SpanKind::Date { .. }).then_some(Requested::Keyboard)
+}
+
+/// A provider's answer that takes any place on a line of text that starts
+/// no task, by having the host take the keyboard.
+pub fn off_task_lines(clicked: &Clicked) -> Option<Requested> {
+    (!clicked.text.is_empty() && !clicked.text.starts_with("- [")).then_some(Requested::Keyboard)
+}
+
+/// A provider of menus for a right-click that answers as `answer` does,
+/// and keeps what it was asked about.
+pub struct Provides {
+    answer: fn(&Clicked) -> Option<Requested>,
+    pub asked: Mutex<Vec<Clicked>>,
+}
+
+impl Provides {
+    pub fn new(answer: fn(&Clicked) -> Option<Requested>) -> Self {
+        Self {
+            answer,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Each place it was asked about so far.
+    pub fn asked(&self) -> Vec<Clicked> {
+        self.asked.lock().expect("asked").clone()
+    }
+}
+
+impl MenuProvider for Provides {
+    fn menu(&self, clicked: &Clicked) -> Option<Requested> {
+        self.asked.lock().expect("asked").push(clicked.clone());
+        (self.answer)(clicked)
     }
 }

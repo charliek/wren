@@ -48,6 +48,11 @@ impl SpellMenu {
         Self(Popover::new(Mode::Menu, line, mark, word, rows.collect()).spelling())
     }
 
+    /// The menu as the `instance`th popover the editor opens.
+    pub(crate) fn opened_as(self, instance: u64) -> Self {
+        Self(self.0.opened_as(instance))
+    }
+
     /// The line that holds the word.
     pub fn line(&self) -> usize {
         self.0.line()

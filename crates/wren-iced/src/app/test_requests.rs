@@ -300,6 +300,18 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task);
             }
+            "editor.right_click" => {
+                // A right-click on a character as the editor widget
+                // publishes it: the menu providers asked in order. Where
+                // none takes the click, it changes nothing.
+                self.ensure_editor_ready()?;
+                let at = position(params)?;
+                let message = self.editor.right_click_message(at.line, at.column);
+                let task = message
+                    .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task);
+            }
             "editor.cursor" => {
                 self.ensure_editor_ready()?;
                 let cursor_position = position(params)?;
@@ -2071,6 +2083,50 @@ mod tests {
         assert_eq!(snapshot["enabled"], true);
         assert_eq!(snapshot["ready"], true);
         assert!(snapshot["menu"].is_null());
+    }
+
+    #[test]
+    fn a_right_click_request_asks_the_editors_providers_and_is_refused_on_a_board() {
+        let (_directory, mut app) = spell_fixture();
+        let right_click = |app: &mut App, column: usize| {
+            let params = json!({"line":0,"column":column});
+            let (request, mut reply) = Request::detached("editor.right_click", params);
+            let _ = app.handle_test(request);
+            reply.try_recv().unwrap()
+        };
+        // A misspelled word is the suggestions menu's, the one provider an
+        // editor has until the app names more, and the click gives the
+        // editor the keyboard; a word spelled right is no one's.
+        app.column = super::super::columns::Column::Notes;
+        right_click(&mut app, 4).unwrap();
+        assert_eq!(
+            app.editor.spell_menu().map(|menu| menu.word()),
+            Some("mispelled")
+        );
+        assert_eq!(app.column, super::super::columns::Column::Editor);
+        // With the menu open, a press in the text only closes it, as the
+        // pointer's does: on a word spelled right, and on the misspelled
+        // word itself, which opens no second menu.
+        for column in [13, 4] {
+            right_click(&mut app, column).unwrap();
+            assert!(app.editor.popover().is_none(), "{column}");
+            right_click(&mut app, 4).unwrap();
+            assert!(app.editor.spell_menu().is_some(), "{column}");
+        }
+        right_click(&mut app, 0).unwrap();
+        assert!(app.editor.popover().is_none());
+        for column in [0, 13] {
+            app.column = super::super::columns::Column::Notes;
+            right_click(&mut app, column).unwrap();
+            assert!(app.editor.popover().is_none(), "{column}");
+            assert_eq!(app.column, super::super::columns::Column::Notes, "{column}");
+        }
+
+        use super::super::board::tests as boards;
+        let (_directory, mut app) = boards::fixture();
+        boards::open_board(&mut app, "Flow");
+        let error = right_click(&mut app, 0).expect_err("a board");
+        assert!(error.contains("board"), "{error}");
     }
 
     /// A menu of the editor's own that is not the suggestions menu, hung

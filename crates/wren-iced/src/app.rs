@@ -855,8 +855,10 @@ impl App {
                     event,
                     SpellEvent::OpenAtCaret
                         | SpellEvent::OpenAt(_)
+                        | SpellEvent::Context { .. }
                         | SpellEvent::Accept(_)
                         | SpellEvent::AcceptSelected
+                        | SpellEvent::AcceptOf { .. }
                         | SpellEvent::Key(_)
                         | SpellEvent::Stroke(_)
                         | SpellEvent::Request(_)
@@ -866,7 +868,7 @@ impl App {
                 }
                 // A right-click takes the keyboard from a text field too,
                 // which a right press alone does not unfocus.
-                if matches!(event, SpellEvent::OpenAt(_)) {
+                if matches!(event, SpellEvent::OpenAt(_) | SpellEvent::Context { .. }) {
                     task = focus_editor();
                 }
                 self.editor.spell(event)

@@ -60,8 +60,8 @@ use crate::highlighter::{MarkdownHighlighter, Settings as HighlighterSettings};
 use crate::hit::{self, Hit};
 use crate::keys::{KeyPolicy, Routed, Target};
 use crate::popover::{
-    self, CaretLine, MenuOverlay, MenuPress, MenuSource, Now, Opened, Popover, ResolvedPress,
-    Sources, SuggestSource,
+    self, Answer, CaretLine, Edition, MenuOverlay, MenuPress, MenuSource, Now, Opened, Popover,
+    Provider, ResolvedPress, Seen, Sources, SuggestSource, Taken,
 };
 use crate::proof::{self, Proofreader, SpellEvent, SpellMenu};
 #[cfg(any(test, feature = "test-support"))]
@@ -387,6 +387,14 @@ pub struct TextEditor<'a> {
     /// The host's sources of menus and suggestions, asked for what a
     /// message of this batch opens.
     sources: Sources<'a>,
+    /// Who a right-click asks for a menu, in order.
+    providers: &'a [Provider],
+    /// The host's text and list of providers, which a right-click a
+    /// provider takes is bound to.
+    edition: Edition,
+    /// The host took the keyboard earlier in this batch: the input after
+    /// the handover is dropped; see [`popover`].
+    handed_over: Cell<bool>,
     /// The open popover as the events this widget has handled leave it; see
     /// [`popover::OpenMenu`]. The host builds a new widget once it has
     /// applied them.
@@ -427,6 +435,9 @@ impl<'a> TextEditor<'a> {
             proofreader: None,
             popover: None,
             sources: Sources::default(),
+            providers: &popover::SPELLING_ALONE,
+            edition: Edition::default(),
+            handed_over: Cell::new(false),
             menu_now: Now::new(),
             origin: None,
             resolved_press: ResolvedPress::default(),
@@ -474,6 +485,16 @@ impl<'a> TextEditor<'a> {
     /// The host's source of menus, asked what a request for one opens.
     pub fn menu_source(mut self, source: Option<&'a dyn MenuSource>) -> Self {
         self.sources.menus = source;
+        self
+    }
+
+    /// Who a right-click asks for a menu, in order; the suggestions menu
+    /// alone unless the host says otherwise. `edition` is the host's text
+    /// and this list of its providers, which the editor checks a click
+    /// against when the host hands it over.
+    pub(crate) fn providers(mut self, providers: &'a [Provider], edition: Edition) -> Self {
+        self.providers = providers;
+        self.edition = edition;
         self
     }
 
@@ -645,6 +666,23 @@ impl<'a> TextEditor<'a> {
         }
         let mut accelerators = Vec::new();
         let target = self.target(&mut accelerators);
+        // The host took the keyboard earlier in this batch: until the
+        // batch ends, the keys its field would take are dropped, whatever
+        // has opened or closed since.
+        let held = self.handed_over.get();
+        let routes = Routes {
+            presses: target,
+            keys: if held { Some(Target::Keyboard) } else { target },
+        };
+        // A dropped composition that ended is committed at once or not at
+        // all: any press shows that it was not.
+        if matches!(
+            event,
+            Event::Keyboard(keyboard::Event::KeyPressed { .. })
+                | Event::Mouse(mouse::Event::ButtonPressed(_))
+        ) {
+            state.dropped.pressed();
+        }
         // Whether the open popover closes (rule 4.4.8).
         let mut closing = false;
 
@@ -701,7 +739,7 @@ impl<'a> TextEditor<'a> {
                 composing: state.is_composing(),
                 policy: self.key_policy,
             },
-            target,
+            routes,
         ) {
             let update = match update {
                 Update::Click(click) if self.left_to_host.get() => {
@@ -725,16 +763,48 @@ impl<'a> TextEditor<'a> {
                     shell.capture_event();
                 }
                 Update::RightClick(position) => {
-                    // Only a misspelled word answers; anywhere else the
-                    // press leaves focus and the caret alone.
-                    if self.misspelling_under(state, position).is_some() {
+                    // Only what a provider takes answers, as the
+                    // suggestions menu takes a misspelled word; anywhere
+                    // else the press leaves focus and the caret alone.
+                    if let Some(taken) = self.taken(state, position) {
                         state.focus = Some(Focus::now());
                         state.drag_click = None;
                         // So a slight drift of the fingers during the click
                         // cannot add up with an earlier scroll's remainder
                         // to a whole line, which would close the menu.
                         state.partial_scroll = 0.0;
-                        self.publish(shell, Message::Spell(SpellEvent::OpenAt(position)));
+                        match taken {
+                            Taken::Spelling => {
+                                let event = SpellEvent::OpenAt(position);
+                                self.publish(shell, Message::Spell(event));
+                            }
+                            Taken::Host {
+                                provider,
+                                answer,
+                                fingerprint,
+                            } => {
+                                let event = SpellEvent::Context {
+                                    provider,
+                                    at: position,
+                                    seen: Seen::new(self.edition, fingerprint),
+                                };
+                                // The menu as the editor will open it: the
+                                // next popover it opens.
+                                let answer = match answer {
+                                    Answer::Menu(menu) => {
+                                        Answer::Menu(menu.opened_as(self.edition.opened + 1))
+                                    }
+                                    answer => answer,
+                                };
+                                self.menu_now.publish_provided(
+                                    shell,
+                                    Message::Spell(event),
+                                    &|| self.caret_line(),
+                                    self.sources,
+                                    answer,
+                                );
+                            }
+                        }
                         shell.capture_event();
                     }
                 }
@@ -799,8 +869,22 @@ impl<'a> TextEditor<'a> {
                     }
                     shell.capture_event();
                 }
+                // A key the field of a host that took the keyboard would
+                // take: dropped, for the rest of the handover's batch.
+                Update::Key(Routed::Binding(Binding::Custom(Message::Spell(
+                    SpellEvent::Stroke(_),
+                )))) => {
+                    shell.capture_event();
+                }
+                // So is what an input method composes or commits in that
+                // batch, and whatever the composition that was dropped
+                // commits later: none of it is the note's.
+                Update::InputMethod(Ime::Preedit { content, .. })
+                    if state.dropped.preedit(content.is_empty(), held) => {}
+                Update::InputMethod(Ime::Commit(_)) if state.dropped.commit(held) => {}
                 Update::InputMethod(update) => match update {
                     Ime::Toggle(is_open) => {
+                        state.dropped = Dropped::Nothing;
                         state.set_preedit(is_open.then(input_method::Preedit::new));
                         shell.request_redraw();
                     }
@@ -851,6 +935,18 @@ impl<'a> TextEditor<'a> {
                         }
                     }
                 }
+            }
+        }
+
+        // The host took the keyboard for what this event asked for: a
+        // composition the note has under way is cancelled, and from here
+        // to the end of the batch the input is dropped.
+        if !held && matches!(self.menu_now.live(), Some((Opened::Keyboard, _))) {
+            self.handed_over.set(true);
+            if state.is_composing() {
+                state.preedit = Some(input_method::Preedit::new());
+                state.dropped = Dropped::Composing;
+                shell.request_redraw();
             }
         }
 
@@ -906,6 +1002,17 @@ impl<'a> TextEditor<'a> {
     /// Publish `message`, keeping what is open as the host will leave it
     /// once it applies the message.
     fn publish(&self, shell: &mut Shell<'_, Message>, message: Message) {
+        // A row of a provider's menu is chosen from that menu or from
+        // none: the choice names the menu.
+        let row = match message {
+            Message::Spell(SpellEvent::Accept(row)) => Some(Some(row)),
+            Message::Spell(SpellEvent::AcceptSelected) => Some(None),
+            _ => None,
+        };
+        let message = match row.zip(self.menu_now.bound(self.popover)) {
+            Some((row, menu)) => Message::Spell(SpellEvent::AcceptOf { menu, row }),
+            None => message,
+        };
         self.menu_now
             .publish(shell, message, &|| self.caret_line(), self.sources);
     }
@@ -1082,6 +1189,35 @@ impl<'a> TextEditor<'a> {
         Some((line, hit.misspelling()?))
     }
 
+    /// Who takes a right-click at `point`, relative to the text origin, of
+    /// the host's providers in order ([`popover::taken`]). The suggestions
+    /// menu takes a misspelled word as it is drawn; a provider of the
+    /// host's is asked about the place as the editor will read it when the
+    /// host hands it the click ([`hit::Reading`]), and only while the
+    /// widget sees the text as the host will then
+    /// ([`Now::sees_the_text`]).
+    fn taken(&self, state: &State, point: Point) -> Option<Taken> {
+        // An earlier message of the batch may have changed what is under
+        // the pointer by the time the host hears of the click: no provider
+        // of the host's is asked then, and the press is what it was before
+        // there were any.
+        if !self.menu_now.sees_the_text() {
+            let spelled = popover::spelling_leads(self.providers)
+                && self.misspelling_under(state, point).is_some();
+            return spelled.then_some(Taken::Spelling);
+        }
+        let reading = hit::Reading {
+            speller: self.speller(),
+            front_matter_end: self.highlighter_settings.front_matter_end,
+            tasks: self.highlighter_settings.tasks,
+        };
+        popover::taken(
+            self.providers,
+            || self.misspelling_under(state, point).is_some(),
+            || reading.clicked(self.content, point),
+        )
+    }
+
     /// What lies under `point`, relative to the text origin, and its line:
     /// a misspelled word before a span ([`crate::hit`]), as the last layout
     /// placed them and the widget's highlighter read the line. Only the
@@ -1125,6 +1261,8 @@ impl<'a> TextEditor<'a> {
 struct State {
     focus: Option<Focus>,
     preedit: Option<input_method::Preedit>,
+    /// The composition whose text is not the note's; see [`Dropped`].
+    dropped: Dropped,
     /// The last left press inside the editor, as iced counts clicks.
     last_click: Option<mouse::Click>,
     /// What the last left press was taken as, `None` when it only closed
@@ -1146,6 +1284,55 @@ struct State {
     /// change to them while it is open closes it.
     menu_look: Option<(Size, Look)>,
     zigzags: RefCell<Zigzags>,
+}
+
+/// A composition of the input method that was under way, or began, in a
+/// batch of events in which the host took the keyboard: it was typed
+/// before the user could see what the host opened, so it is dropped, and
+/// what it commits is not the note's whenever it arrives, the editor
+/// having the keyboard still or again (see [`popover`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Dropped {
+    /// No such composition.
+    #[default]
+    Nothing,
+    /// It has a preedit.
+    Composing,
+    /// Its preedit has emptied, as it does just before it commits, and
+    /// when it is cancelled.
+    Ending,
+}
+
+impl Dropped {
+    /// Whether a preedit is dropped: one of the dropped composition, or
+    /// any while the host holds the keyboard (`held`), which starts one.
+    /// A preedit that fills again after the dropped composition ended is
+    /// a new composition, and the note's.
+    fn preedit(&mut self, empty: bool, held: bool) -> bool {
+        *self = match (*self, empty) {
+            (Self::Nothing | Self::Ending, false) if !held => Self::Nothing,
+            (_, false) => Self::Composing,
+            (Self::Nothing, true) => Self::Nothing,
+            (Self::Composing | Self::Ending, true) => Self::Ending,
+        };
+        held || *self != Self::Nothing
+    }
+
+    /// Whether committed text is dropped: the dropped composition's, which
+    /// ends with it, or any while the host holds the keyboard (`held`).
+    fn commit(&mut self, held: bool) -> bool {
+        let dropped = held || *self != Self::Nothing;
+        *self = Self::Nothing;
+        dropped
+    }
+
+    /// A key or a button was pressed: a composition that had ended
+    /// committed nothing.
+    fn pressed(&mut self) {
+        if *self == Self::Ending {
+            *self = Self::Nothing;
+        }
+    }
 }
 
 /// What a menu's width and rows were fitted to.
@@ -1204,6 +1391,7 @@ impl State {
         Self {
             focus: None,
             preedit: None,
+            dropped: Dropped::Nothing,
             last_click: None,
             click_kind: None,
             resolved_seen: 0,
@@ -1288,6 +1476,7 @@ impl operation::Focusable for State {
         // Preedit events reach only a focused editor, so one that ends while
         // another field has the keyboard would leave the guard on.
         self.preedit = None;
+        self.dropped = Dropped::Nothing;
     }
 }
 
@@ -1739,6 +1928,18 @@ fn apply_binding(
     }
 }
 
+/// What an event is routed against: what is open, as the widget's events
+/// have left it.
+#[derive(Clone, Copy)]
+struct Routes<'a> {
+    /// For a press of the pointer.
+    presses: Option<Target<'a>>,
+    /// For a key: the same, but for the rest of a batch in which the host
+    /// took the keyboard, whose keys are dropped whatever has opened or
+    /// closed since.
+    keys: Option<Target<'a>>,
+}
+
 enum Update {
     Click(mouse::Click),
     /// A right-click, relative to the text origin.
@@ -1778,11 +1979,11 @@ impl Update {
         padding: Padding,
         cursor: mouse::Cursor,
         keys: crate::keys::Context<'_>,
-        popover: Option<Target<'_>>,
+        routes: Routes<'_>,
     ) -> Option<Self> {
         // Only a menu takes the editor's presses, or what may be one;
         // suggestions leave them to the text.
-        let menu = popover.and_then(Target::modal);
+        let menu = routes.presses.and_then(Target::modal);
         match event {
             Event::Mouse(event) => match event {
                 mouse::Event::ButtonPressed(button) if menu.is_some() && cursor.is_over(bounds) => {
@@ -1888,7 +2089,7 @@ impl Update {
                         status,
                     },
                     keys,
-                    popover,
+                    routes.keys,
                 )
                 .map(Update::Key)
             }
@@ -2387,9 +2588,9 @@ pub struct Place {
     pub line: usize,
     /// The misspelled word there.
     pub mark: Option<Range<usize>>,
-    /// The byte in the line at which the glyph under the point starts.
-    /// Not looked for under a misspelled word, which is the hit there
-    /// ([`crate::hit`]).
+    /// The byte in the line at which the glyph under the point starts;
+    /// `None` where the row has no glyph there. Under a misspelled word
+    /// the word is the hit ([`crate::hit`]), whatever its glyph is.
     pub column: Option<usize>,
 }
 
@@ -2397,7 +2598,7 @@ pub struct Place {
 /// holding it, and on that row
 ///
 /// - the first of the marks `marks` gives for the row's line whose glyphs
-///   on the row span `point`'s x, and with none
+///   on the row span `point`'s x, and
 /// - the glyph that holds `point`'s x. A span is hit by its glyph and not
 ///   by the extent of its glyphs: in text of two directions the glyphs of
 ///   a span can lie apart, with a glyph of no span between them.
@@ -2419,12 +2620,9 @@ fn place_under(
         glyph_span(run.text, glyphs(), mark.clone())
             .is_some_and(|(left, right)| point.x >= left && point.x < right)
     });
-    let column = match mark {
-        Some(_) => None,
-        None => glyphs()
-            .find(|(_, x, width)| point.x >= *x && point.x < x + width)
-            .map(|(bytes, _, _)| bytes.start),
-    };
+    let column = glyphs()
+        .find(|(_, x, width)| point.x >= *x && point.x < x + width)
+        .map(|(bytes, _, _)| bytes.start);
     Some(Place {
         line: run.line_i,
         mark,
@@ -5202,6 +5400,10 @@ mod tests {
     struct Applied {
         choice: Option<Choice>,
         stroke: Option<Stroke>,
+        /// The row chosen from a provider's menu, with the provider.
+        provided: Option<(usize, Choice)>,
+        /// The right-click a provider took the keyboard for.
+        keyboard: Option<(usize, Clicked)>,
     }
 
     /// Carry out `message` as a host does.
@@ -5217,6 +5419,8 @@ mod tests {
             Message::Spell(event) => {
                 let changed = ev.spell(event);
                 applied.choice = ev.take_choice();
+                applied.provided = ev.take_provided();
+                applied.keyboard = ev.take_keyboard();
                 changed
             }
             Message::Clip(clip) => ev.clip(clip),
@@ -5245,9 +5449,12 @@ mod tests {
             .proofreader(ev.proofreader.as_deref())
             .popover(ev.popover())
             .menu_source(ev.menu_source())
+            .providers(ev.providers(), ev.edition())
             .suggest_source(ev.suggest_source(), ev.suggest_suppressed())
             .origin(&ev.origin)
             .resolved_press(ev.resolved_press);
+        // The host's tasks, as the editor's view hands them to the widget.
+        editor.highlighter_settings.tasks = ev.tasks;
         let state = state.get_or_insert_with(|| {
             let mut state = laid_out_state(&editor);
             state.focus = Some(Focus::now());
@@ -6643,7 +6850,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_takes_the_keyboard_is_handed_the_keys_after_its_request() {
+    fn the_keys_after_a_request_the_host_takes_the_keyboard_for_are_dropped() {
         use keyboard::key::Named;
         let mut ev = requesting(BackendKind::Owned, TASK, 0, 8);
         let events: Vec<(Event, Option<Point>)> = [
@@ -6658,36 +6865,27 @@ mod tests {
         .map(|event| (event, None))
         .collect();
         let (messages, captured) = widget_batch(&ev, &mut None, events);
+        // Each key after the request is taken, so that it is no one
+        // else's, and nothing is published for it: the host's field has
+        // the keyboard from the next batch on, and the editor does
+        // nothing with any of them.
         assert_eq!(captured, [true; 6]);
-        assert!(matches!(
-            messages[0],
-            Message::Spell(SpellEvent::Request(KEYBOARD))
-        ));
-        // Each key in its order, with what it types, for the field the
-        // host opened; the editor does nothing with any of them.
-        let strokes: Vec<Stroke> = messages[1..]
-            .iter()
-            .map(|message| host_applies(&mut ev, message.clone()).stroke.unwrap())
-            .collect();
-        assert_eq!(
-            strokes
-                .iter()
-                .map(|stroke| (stroke.text(), stroke.named()))
-                .collect::<Vec<_>>(),
-            [
-                (Some('f'), None),
-                (Some('r'), None),
-                (None, Some(Named::Backspace)),
-                (None, Some(Named::ArrowDown)),
-                (None, Some(Named::Enter)),
-            ]
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::Spell(SpellEvent::Request(KEYBOARD))]
+            ),
+            "{messages:?}"
         );
+        for message in messages {
+            host_applies(&mut ev, message);
+        }
         assert_eq!((ev.text().as_str(), ev.cursor()), (TASK, caret(0, 8)));
         assert!(ev.popover().is_none());
 
         // Nothing of the editor's is open: Escape is the host's alone, and
-        // a press in the editor is the click it is, after which the keys
-        // are the text's again.
+        // a press in the editor is the click it is. The keys after it are
+        // dropped all the same, to the end of the batch.
         let mut ev = requesting(BackendKind::Owned, TASK, 0, 8);
         let (messages, captured, _) =
             keys_batch(&mut ev, vec![request_key("k"), named(Named::Escape)]);
@@ -6695,7 +6893,7 @@ mod tests {
         assert_eq!(captured, [true, false]);
         assert!(!ev.take_claimed_escape());
         let mut ev = requesting(BackendKind::Owned, TASK, 0, 8);
-        let (messages, _, _) = popover_batch(
+        let (messages, captured, _) = popover_batch(
             &mut ev,
             &mut None,
             vec![
@@ -6705,16 +6903,11 @@ mod tests {
             ],
         );
         assert!(
-            matches!(
-                &messages[1..],
-                [
-                    Message::Action(Action::Click(_)),
-                    Message::Action(Action::Edit(Edit::Insert('x')))
-                ]
-            ),
+            matches!(&messages[1..], [Message::Action(Action::Click(_))]),
             "{messages:?}"
         );
-        assert_eq!(ev.text(), "-x [ ] call sam");
+        assert_eq!(captured, [true; 3]);
+        assert_eq!((ev.text().as_str(), ev.cursor()), (TASK, caret(0, 1)));
     }
 
     #[test]
@@ -7248,6 +7441,1164 @@ mod tests {
         assert_eq!(fitted(&ev, narrow).2, 134.0);
     }
 
+    // ── A right-click's providers ──────────────────────────────────────────
+
+    use crate::fixtures::{
+        off_task_lines, on_dates, on_task_lines, on_tokens, token_rows, Provides,
+    };
+    use crate::{Clicked, Provider, Requested};
+
+    /// A task with an owner whose name is misspelled, one whose name is
+    /// not, a misspelled word, a tag and a due date; and a line that is no
+    /// task, with the same misspelled word.
+    const PROVIDED: &str = "- [ ] Mail @sam and @lee teh #home [due:: 2026-11-30]\nplain teh text";
+
+    fn provider(answer: fn(&Clicked) -> Option<Requested>) -> Arc<Provides> {
+        Arc::new(Provides::new(answer))
+    }
+
+    /// An editor on `kind` over [`PROVIDED`], the caret on its second
+    /// line, whose host has tasks on, rejects `sam` and `teh`, and names
+    /// `providers`.
+    fn providing(kind: BackendKind, providers: Vec<Provider>) -> crate::EditorView {
+        let mut ev = editing(kind, PROVIDED, 1, 5);
+        ev.set_tasks(Some(wren_markdown::TaskOptions {
+            today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+        }));
+        let proofreader = fixtures::Rejects::new(&["sam", "teh"]).suggesting(&[("teh", &["the"])]);
+        ev.set_proofreader(Some(Arc::new(proofreader)));
+        ev.set_menu_providers(providers);
+        ev
+    }
+
+    /// A right press over cell `cells` of row `row`.
+    fn right_click(cells: f32, row: f32) -> (Event, Option<Point>) {
+        (press(mouse::Button::Right), Some(over(cells, row)))
+    }
+
+    /// Who took a right-click: the suggestions menu, the host's provider
+    /// at a place in its list, or no one.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Took {
+        Spelling,
+        Host(usize),
+        Nobody,
+    }
+
+    /// Who the widget found to take the right-click that `messages` were
+    /// published for, at cell `cells` of row `row`.
+    fn took(messages: &[Message], cells: f32, row: f32) -> Took {
+        let at = match spell_events(messages).as_slice() {
+            [] => {
+                assert!(messages.is_empty(), "{messages:?}");
+                return Took::Nobody;
+            }
+            [SpellEvent::OpenAt(at)] => (Took::Spelling, *at),
+            [SpellEvent::Context { provider, at, .. }] => (Took::Host(*provider), *at),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        // The point is relative to the text origin.
+        let (took, at) = at;
+        assert!(
+            (at.x - cells * ADVANCE).abs() < 0.01 && at.y == row * LINE_HEIGHT + 12.0,
+            "{at:?}"
+        );
+        took
+    }
+
+    /// One right-click over cell `cells` of row `row`, alone in its batch:
+    /// who the widget finds to take it, and whose menu the host then has
+    /// open.
+    fn who_takes(ev: &mut crate::EditorView, cells: f32, row: f32) -> Took {
+        let (messages, captured) = widget_batch(ev, &mut None, vec![right_click(cells, row)]);
+        let took = took(&messages, cells, row);
+        assert_eq!(captured, [took != Took::Nobody]);
+        for message in messages {
+            host_applies(ev, message);
+        }
+        match took {
+            Took::Nobody => assert!(ev.popover().is_none()),
+            Took::Spelling => assert!(ev.spell_menu().is_some()),
+            Took::Host(index) => {
+                assert!(ev.spell_menu().is_none());
+                assert_eq!(ev.popover().and_then(Popover::provider), Some(index));
+            }
+        }
+        took
+    }
+
+    /// The cells of [`PROVIDED`]'s first row a right-click is tried on.
+    mod cell {
+        pub const BOX: f32 = 3.5;
+        pub const MAIL: f32 = 7.5;
+        /// The `@` of the owner whose name is misspelled, and the name.
+        pub const AT_SAM: f32 = 11.5;
+        pub const SAM: f32 = 13.5;
+        pub const LEE: f32 = 21.5;
+        pub const TEH: f32 = 26.5;
+        pub const HOME: f32 = 30.5;
+        pub const DATE: f32 = 44.5;
+        pub const PAST_THE_END: f32 = 57.0;
+    }
+
+    #[test]
+    fn a_right_click_asks_the_providers_in_order_and_the_first_to_answer_takes_it() {
+        use Took::{Host, Nobody, Spelling};
+        // The providers of a list: the suggestions menu, one that takes an
+        // owner or a tag, and one that takes any place on a task line.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum Asks {
+            S,
+            Tokens,
+            Lines,
+        }
+        use Asks::{Lines, Tokens, S};
+        type Case = (f32, f32, Took);
+        let orders: [(&[Asks], &[Case]); 5] = [
+            // Spelling first, as a host has it: a misspelled word is the
+            // suggestions menu's, an owner's name included, and no other
+            // provider hears of it.
+            (
+                &[S, Tokens, Lines],
+                &[
+                    (cell::SAM, 0.0, Spelling),
+                    (cell::TEH, 0.0, Spelling),
+                    (7.5, 1.0, Spelling),
+                    // A token that is no misspelling is the first
+                    // provider's that takes it.
+                    (cell::AT_SAM, 0.0, Host(1)),
+                    (cell::LEE, 0.0, Host(1)),
+                    (cell::HOME, 0.0, Host(1)),
+                    // What it passes on is the next one's: a span it does
+                    // not take, a place in no span, and the row past the
+                    // end of the line's text.
+                    (cell::BOX, 0.0, Host(2)),
+                    (cell::DATE, 0.0, Host(2)),
+                    (cell::MAIL, 0.0, Host(2)),
+                    (cell::PAST_THE_END, 0.0, Host(2)),
+                    // No one takes a place on a line that is no task, or
+                    // under the text.
+                    (1.5, 1.0, Nobody),
+                    (1.5, 3.0, Nobody),
+                ],
+            ),
+            // A provider put before spelling takes a misspelled word it
+            // answers for, and spelling what it passes on.
+            (
+                &[Lines, S, Tokens],
+                &[
+                    (cell::SAM, 0.0, Host(0)),
+                    (cell::TEH, 0.0, Host(0)),
+                    (cell::LEE, 0.0, Host(0)),
+                    (7.5, 1.0, Spelling),
+                    (1.5, 1.0, Nobody),
+                ],
+            ),
+            // Where two of the host's take a place, the first does.
+            (
+                &[Tokens, Lines],
+                &[
+                    (cell::LEE, 0.0, Host(0)),
+                    // A misspelled owner is no token, and a list without
+                    // the suggestions menu opens none.
+                    (cell::SAM, 0.0, Host(1)),
+                    (7.5, 1.0, Nobody),
+                ],
+            ),
+            (&[Lines, Tokens], &[(cell::LEE, 0.0, Host(0))]),
+            // The suggestions menu alone, as with no list named.
+            (
+                &[S],
+                &[(cell::SAM, 0.0, Spelling), (cell::LEE, 0.0, Nobody)],
+            ),
+        ];
+        for kind in BackendKind::ALL {
+            let owned = kind == BackendKind::Owned;
+            for (order, cases) in orders {
+                for &(cells, row, expected) in cases {
+                    let (tokens, lines) = (provider(on_tokens), provider(on_task_lines));
+                    let providers = order.iter().map(|asks| match asks {
+                        S => Provider::Spelling,
+                        Tokens => Provider::Host(tokens.clone()),
+                        Lines => Provider::Host(lines.clone()),
+                    });
+                    let providers: Vec<Provider> = providers.collect();
+                    let mut ev = providing(kind, providers.clone());
+                    let case = format!("{kind:?} {order:?} cell {cells} row {row}");
+                    // The classic engine opens no menu for a right-click.
+                    let expected = if owned { expected } else { Nobody };
+                    assert_eq!(who_takes(&mut ev, cells, row), expected, "{case}");
+                    // The menu is the provider's, under what it named.
+                    if let Host(index) = expected {
+                        let open = ev.popover().unwrap();
+                        let (rows, range) = match order[index] {
+                            Tokens => (
+                                token_rows(),
+                                ev.hit_at(0, cells as usize).unwrap().range().clone(),
+                            ),
+                            _ => (status_rows(), 2..5),
+                        };
+                        let labels: Vec<String> = rows.into_iter().map(|row| row.label).collect();
+                        assert_eq!(
+                            (open.labels(), open.line(), open.range()),
+                            (&labels[..], 0, range),
+                            "{case}"
+                        );
+                        assert_eq!(open.mode(), Mode::Menu, "{case}");
+                    }
+                    // Each of the host's providers ahead of the one that
+                    // took the click was asked and passed; the one that
+                    // took it was asked by the widget and again by the
+                    // editor, about the same place; and none after it was
+                    // asked at all.
+                    let taker = match expected {
+                        Spelling => order.iter().position(|asks| *asks == S),
+                        Host(index) => Some(index),
+                        Nobody => None,
+                    };
+                    for (index, asks) in order.iter().enumerate() {
+                        let asked = match asks {
+                            S => continue,
+                            Tokens => tokens.asked(),
+                            Lines => lines.asked(),
+                        };
+                        let times = match taker {
+                            _ if !owned => 0,
+                            Some(taker) if index > taker => 0,
+                            Some(taker) if index == taker => 2,
+                            Some(_) => 1,
+                            // Under the text there is no place to ask of.
+                            None if row > 1.0 => 0,
+                            None => 1,
+                        };
+                        assert_eq!(asked.len(), times, "{case} {asks:?}");
+                        assert!(asked.windows(2).all(|pair| pair[0] == pair[1]), "{case}");
+                    }
+                    // Without a window, the same provider takes a click
+                    // on the character under the cell.
+                    let mut ev = providing(kind, providers);
+                    widget_batch(&ev, &mut None, Vec::new());
+                    let (line, column) = (row as usize, cells as usize);
+                    if ev.line_text(line).is_some_and(|text| column < text.len()) {
+                        let alone = ev.right_click_message(line, column);
+                        assert_eq!(
+                            took(alone.as_slice(), cells.floor() + 0.5, row),
+                            expected,
+                            "{case}"
+                        );
+                        if let Some(Message::Spell(event)) = alone {
+                            ev.spell(event);
+                            assert_eq!(ev.popover().is_some(), expected != Nobody, "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_provider_is_asked_about_the_place_under_the_pointer() {
+        use wren_markdown::span::SpanKind;
+        let lines = provider(on_task_lines);
+        let asked = |cells: f32, row: f32| {
+            let mut ev = providing(BackendKind::Owned, vec![Provider::Host(lines.clone())]);
+            let before = lines.asked().len();
+            who_takes(&mut ev, cells, row);
+            lines.asked().get(before).cloned()
+        };
+        let first = PROVIDED.lines().next().unwrap();
+        // A token: its span is the hit, and the line's spans come along.
+        let lee = asked(cell::LEE, 0.0).unwrap();
+        assert_eq!(
+            (lee.line, lee.text.as_str(), lee.column),
+            (0, first, Some(21))
+        );
+        assert!(matches!(
+            &lee.hit,
+            Some(Hit::Span(span))
+                if span.range == (20..24) && matches!(span.kind, SpanKind::Owner { .. })
+        ));
+        assert!(lee
+            .spans
+            .spans
+            .iter()
+            .any(|span| matches!(span.kind, SpanKind::Box(_))));
+        // A misspelled word is the hit before the span it lies in, with
+        // the glyph under the pointer still named.
+        let sam = asked(cell::SAM, 0.0).unwrap();
+        assert_eq!(
+            (sam.column, &sam.hit),
+            (Some(13), &Some(Hit::Misspelling(12..15)))
+        );
+        // A place in no span is no hit, on a line whose spans say what it
+        // is; past the end of the text there is no glyph either.
+        let mail = asked(cell::MAIL, 0.0).unwrap();
+        assert_eq!(
+            (mail.column, &mail.hit, &mail.spans),
+            (Some(7), &None, &lee.spans)
+        );
+        let past = asked(cell::PAST_THE_END, 0.0).unwrap();
+        assert_eq!((past.line, past.column, &past.hit), (0, None, &None));
+        // The second line is no task, and under the text nothing is asked.
+        let plain = asked(1.5, 1.0).unwrap();
+        assert_eq!(
+            (plain.line, plain.text.as_str(), plain.column),
+            (1, "plain teh text", Some(1))
+        );
+        assert!(plain.hit.is_none() && plain.spans.spans.is_empty());
+        assert_eq!(asked(1.5, 3.0), None);
+    }
+
+    #[test]
+    fn a_right_click_a_provider_takes_takes_the_keyboard_and_any_other_changes_nothing() {
+        let unfocused = |ev: &crate::EditorView| {
+            let editor = editor_with(&ev.content, true, Measure::default());
+            let mut state = laid_out_state(&editor);
+            state.drag_click = Some(mouse::click::Kind::Single);
+            assert!(state.focus.is_none());
+            Some(state)
+        };
+        for kind in BackendKind::ALL {
+            let tokens = provider(on_tokens);
+            let providers = vec![Provider::Spelling, Provider::Host(tokens.clone())];
+            let ev = providing(kind, providers);
+            // On a token the provider takes: the editor takes the
+            // keyboard, a drag in progress ends, and the caret stays.
+            let mut state = unfocused(&ev);
+            let (messages, captured) =
+                widget_batch(&ev, &mut state, vec![right_click(cell::LEE, 0.0)]);
+            let state = state.unwrap();
+            if kind == BackendKind::Owned {
+                assert_eq!(took(&messages, cell::LEE, 0.0), Took::Host(1));
+                assert_eq!(captured, [true]);
+                assert!(state.focus.is_some() && state.drag_click.is_none());
+            } else {
+                assert!(messages.is_empty() && captured == [false], "{messages:?}");
+                assert!(state.focus.is_none() && state.drag_click.is_some());
+            }
+            assert_eq!(ev.cursor(), caret(1, 5));
+            // Where no provider answers, the press is no one's.
+            for (cells, row) in [(cell::MAIL, 0.0), (cell::BOX, 0.0), (1.5, 1.0), (1.5, 3.0)] {
+                let mut state = unfocused(&ev);
+                let (messages, captured) =
+                    widget_batch(&ev, &mut state, vec![right_click(cells, row)]);
+                let state = state.unwrap();
+                assert!(messages.is_empty(), "{kind:?} {cells} {row}: {messages:?}");
+                assert_eq!(captured, [false], "{kind:?} {cells} {row}");
+                assert!(state.focus.is_none() && state.drag_click.is_some());
+            }
+        }
+    }
+
+    /// The text, the caret, the provider and the row chosen, and whether a
+    /// popover is open after `batches` of events go, each batch in turn,
+    /// to an editor over [`PROVIDED`] whose host asks the suggestions
+    /// menu, then the status menu of a task line.
+    fn after_right_clicks(
+        batches: Vec<Vec<(Event, Option<Point>)>>,
+    ) -> (String, Cursor, Option<(usize, u32)>, bool) {
+        let providers = vec![Provider::Spelling, Provider::Host(provider(on_task_lines))];
+        let mut ev = providing(BackendKind::Owned, providers);
+        let mut state = None;
+        let mut chosen = None;
+        for batch in batches {
+            let (published, _) = widget_batch(&ev, &mut state, batch);
+            for message in published {
+                let provided = host_applies(&mut ev, message).provided;
+                chosen = provided
+                    .map(|(provider, choice)| (provider, choice.id))
+                    .or(chosen);
+            }
+        }
+        (ev.text(), ev.cursor(), chosen, ev.popover().is_some())
+    }
+
+    #[test]
+    fn keys_after_a_right_click_do_the_same_in_its_batch_as_in_the_next() {
+        use keyboard::key::Named;
+        let key = |event: Event| (event, None);
+        let typing = "- [ ] Mail @sam and @lee teh #home [due:: 2026-11-30]\nplain";
+        // What follows the click, the text it leaves, and the row chosen.
+        type Case = (
+            &'static str,
+            Vec<(Event, Option<Point>)>,
+            String,
+            Option<u32>,
+        );
+        let cases: [Case; 7] = [
+            // An accelerator of the provider's menu chooses its row.
+            (
+                "an accelerator",
+                vec![key(typed("x"))],
+                PROVIDED.into(),
+                Some(22),
+            ),
+            (
+                "the space bar",
+                vec![key(space())],
+                PROVIDED.into(),
+                Some(20),
+            ),
+            // The menu's own keys drive it.
+            (
+                "down and enter",
+                vec![key(named(Named::ArrowDown)), key(named(Named::Enter))],
+                PROVIDED.into(),
+                Some(21),
+            ),
+            // Escape closes it, and the letter after it is the text's.
+            (
+                "escape and a letter",
+                vec![key(named(Named::Escape)), key(typed("x"))],
+                format!("{typing}x teh text"),
+                None,
+            ),
+            // Any other key closes it and is the text's.
+            (
+                "another letter",
+                vec![key(typed("y"))],
+                format!("{typing}y teh text"),
+                None,
+            ),
+            // A press in the editor, of either button, only closes it.
+            (
+                "a left press",
+                vec![(press(mouse::Button::Left), Some(over(1.0, 0.0)))],
+                PROVIDED.into(),
+                None,
+            ),
+            (
+                "a right press",
+                vec![right_click(cell::LEE, 0.0)],
+                PROVIDED.into(),
+                None,
+            ),
+        ];
+        for (name, after, text, chosen) in cases {
+            let mut one = vec![right_click(cell::MAIL, 0.0)];
+            one.extend(after.iter().cloned());
+            let together = after_right_clicks(vec![one]);
+            let apart = after_right_clicks(vec![vec![right_click(cell::MAIL, 0.0)], after]);
+            assert_eq!(together, apart, "{name}");
+            let chosen = chosen.map(|id| (1, id));
+            assert_eq!(
+                (together.0, together.2, together.3),
+                (text, chosen, false),
+                "{name}"
+            );
+            // But for what the text took, the caret stays where it was.
+            if chosen.is_some() || name.ends_with("press") {
+                assert_eq!(together.1, caret(1, 5), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_right_click_opens_the_providers_menu_for_the_keys_after_it_in_its_batch() {
+        use keyboard::key::Named;
+        // The widget asks the provider what the click opens, so the keys
+        // after it are published as the menu's own events, routed against
+        // its rows.
+        let lines = provider(on_task_lines);
+        let providers = vec![Provider::Spelling, Provider::Host(lines.clone())];
+        let mut ev = providing(BackendKind::Owned, providers.clone());
+        let events = vec![
+            right_click(cell::MAIL, 0.0),
+            (named(Named::ArrowDown), None),
+            (typed("x"), None),
+        ];
+        let (messages, captured) = widget_batch(&ev, &mut None, events);
+        assert!(
+            matches!(
+                spell_events(&messages).as_slice(),
+                [
+                    SpellEvent::Context { provider: 1, .. },
+                    SpellEvent::Move(1),
+                    // A row of a provider's menu names its menu: the
+                    // next popover the editor opens.
+                    SpellEvent::AcceptOf {
+                        menu: 1,
+                        row: Some(2)
+                    }
+                ]
+            ),
+            "{messages:?}"
+        );
+        assert_eq!(captured, [true; 3]);
+        let mut provided = None;
+        for message in messages {
+            provided = host_applies(&mut ev, message).provided.or(provided);
+        }
+        // The row comes back with its provider, and only so.
+        let row = Choice {
+            id: 22,
+            mode: Mode::Menu,
+            line: 0,
+            range: 2..5,
+        };
+        assert_eq!(provided, Some((1, row)));
+        assert_eq!((ev.text().as_str(), ev.cursor()), (PROVIDED, caret(1, 5)));
+        assert!(ev.popover().is_none());
+
+        // Once the host has drawn the menu, a key or a press on a row
+        // names the menu the same way, by the number the editor opened it
+        // under.
+        for (name, chooses) in [
+            ("a key", (typed("/"), None)),
+            ("enter", (named(Named::Enter), None)),
+            (
+                "a press on a row",
+                (press(mouse::Button::Left), Some(on_task_row(1))),
+            ),
+        ] {
+            let mut ev = providing(BackendKind::Owned, providers.clone());
+            let mut state = None;
+            popover_batch(&mut ev, &mut state, vec![right_click(cell::MAIL, 0.0)]);
+            let menu = ev.popover().unwrap().instance();
+            let row = (name != "enter").then_some(1);
+            let (messages, _) = widget_batch(&ev, &mut state, vec![chooses]);
+            assert_eq!(
+                spell_events(&messages),
+                [SpellEvent::AcceptOf { menu, row }],
+                "{name}"
+            );
+            let chosen = host_applies(&mut ev, messages[0].clone()).provided;
+            let id = if name == "enter" { 20 } else { 21 };
+            assert_eq!(
+                chosen.map(|(provider, row)| (provider, row.id)),
+                Some((1, id))
+            );
+        }
+        // A menu that is no provider's is chosen from as it always was.
+        let mut ev = providing(BackendKind::Owned, providers.clone());
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, status_rows()));
+        let (messages, _) = widget_batch(&ev, &mut None, vec![(typed("/"), None)]);
+        assert_eq!(spell_events(&messages), [SpellEvent::Accept(1)]);
+
+        // The suggestions menu a right-click asks for is as it was built:
+        // its keys go to the host, which resolves them against its menu.
+        let mut ev = providing(BackendKind::Owned, providers);
+        let events = vec![right_click(cell::TEH, 0.0), (named(Named::Enter), None)];
+        let (messages, _, _) = popover_batch(&mut ev, &mut None, events);
+        assert!(
+            matches!(
+                spell_events(&messages).as_slice(),
+                [SpellEvent::OpenAt(_), SpellEvent::Key(MenuKey::Enter)]
+            ),
+            "{messages:?}"
+        );
+        assert_eq!(
+            ev.line_text(0).unwrap(),
+            PROVIDED.lines().next().unwrap().replace("teh", "the")
+        );
+    }
+
+    #[test]
+    fn after_a_message_that_may_move_the_text_no_provider_of_the_hosts_answers() {
+        use keyboard::key::Named;
+        // What comes before the click in its batch: a letter typed, a
+        // caret motion, a scroll. The text under the pointer is then not
+        // known to be what the host will find there.
+        let earlier = || {
+            [
+                ("a letter", (typed("q"), None)),
+                ("a motion", (named(Named::ArrowLeft), None)),
+                (
+                    "a scroll",
+                    (
+                        wheel(mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 }),
+                        Some(over(1.0, 0.0)),
+                    ),
+                ),
+            ]
+        };
+        // The click with those providers, and the same click with the
+        // suggestions menu alone, as an editor had before there were any.
+        let lines = provider(on_task_lines);
+        let dates = provider(on_dates);
+        let providers = vec![
+            Provider::Spelling,
+            Provider::Host(dates.clone()),
+            Provider::Host(lines.clone()),
+        ];
+        for (name, before) in earlier() {
+            for (cells, row, spelled) in [
+                (cell::MAIL, 0.0, false),
+                (cell::BOX, 0.0, false),
+                (cell::LEE, 0.0, false),
+                (cell::DATE, 0.0, false),
+                (1.5, 1.0, false),
+                // A word drawn as misspelled is asked for as it always
+                // was.
+                (cell::TEH, 0.0, true),
+                (cell::SAM, 0.0, true),
+            ] {
+                let case = format!("{name} cell {cells} row {row}");
+                let events = vec![before.clone(), right_click(cells, row), (typed("x"), None)];
+                let mut ev = providing(BackendKind::Owned, providers.clone());
+                let (messages, captured) = widget_batch(&ev, &mut None, events.clone());
+                // No provider of the host's is asked, and the press is
+                // no one's unless it is on such a word.
+                assert_eq!((lines.asked().len(), dates.asked().len()), (0, 0), "{case}");
+                let click = spell_events(&messages);
+                assert_eq!(
+                    matches!(click.first(), Some(SpellEvent::OpenAt(_))),
+                    spelled,
+                    "{case}: {messages:?}"
+                );
+                assert!(
+                    !click.iter().any(|event| matches!(
+                        event,
+                        SpellEvent::Context { .. } | SpellEvent::Press(_)
+                    )),
+                    "{case}: {messages:?}"
+                );
+                assert_eq!(captured[1], spelled, "{case}");
+                // It publishes what the same batch does with no provider
+                // named at all.
+                let alone = providing(BackendKind::Owned, vec![Provider::Spelling]);
+                let (expected, _) = widget_batch(&alone, &mut None, events);
+                assert_eq!(format!("{messages:?}"), format!("{expected:?}"), "{case}");
+                // The host opens no provider's menu, hands no keyboard
+                // over, and the letter after the click is typed once.
+                let before = ev.text();
+                for message in messages {
+                    let applied = host_applies(&mut ev, message);
+                    assert_eq!((applied.provided, applied.keyboard), (None, None), "{case}");
+                    assert_eq!(ev.popover().and_then(Popover::provider), None, "{case}");
+                }
+                let typed = usize::from(name == "a letter");
+                assert_eq!(ev.text().len(), before.len() + 1 + typed, "{case}");
+                assert_eq!((lines.asked().len(), dates.asked().len()), (0, 0), "{case}");
+            }
+        }
+        // In a list where a provider of the host's comes before the
+        // suggestions menu, that provider would have to be asked first:
+        // the press is no one's, a misspelled word included.
+        let providers = vec![Provider::Host(lines.clone()), Provider::Spelling];
+        let ev = providing(BackendKind::Owned, providers);
+        let events = vec![(typed("q"), None), right_click(cell::TEH, 0.0)];
+        let (messages, captured) = widget_batch(&ev, &mut None, events);
+        assert!(spell_events(&messages).is_empty(), "{messages:?}");
+        assert_eq!(captured, [true, false]);
+        assert!(lines.asked().is_empty());
+        // The click in a batch of its own is the provider's, as ever.
+        let mut ev = providing(
+            BackendKind::Owned,
+            vec![Provider::Spelling, Provider::Host(lines.clone())],
+        );
+        assert_eq!(who_takes(&mut ev, cell::MAIL, 0.0), Took::Host(1));
+    }
+
+    /// The popover of `ev`, as its provider, its anchor and its rows.
+    fn provided_menu(ev: &crate::EditorView) -> Option<(Option<usize>, Range<usize>, Vec<String>)> {
+        ev.popover().map(|popover| {
+            (
+                popover.provider(),
+                popover.range(),
+                popover.labels().to_vec(),
+            )
+        })
+    }
+
+    #[test]
+    fn a_right_press_the_host_resolves_asks_for_the_suggestions_menu_alone() {
+        // After a request for the suggestions menu in the same batch,
+        // which may not have opened it, a right press is the host's to
+        // resolve, as it was built: it closes that menu, or with none
+        // open opens the suggestions menu on a misspelled word. The
+        // widget asks no provider of the host's about such a press, and
+        // none answers it.
+        let (tokens, lines, dates) = (
+            provider(on_tokens),
+            provider(on_task_lines),
+            provider(on_dates),
+        );
+        let spelling_first = [
+            Provider::Spelling,
+            Provider::Host(tokens.clone()),
+            Provider::Host(dates.clone()),
+            Provider::Host(lines.clone()),
+        ];
+        let no_spelling = [Provider::Host(tokens.clone())];
+        for (providers, cells, row, word) in [
+            (&spelling_first[..], cell::MAIL, 0.0, None),
+            (&spelling_first[..], cell::LEE, 0.0, None),
+            (&spelling_first[..], cell::DATE, 0.0, None),
+            (&spelling_first[..], 1.5, 1.0, None),
+            (&spelling_first[..], cell::TEH, 0.0, Some("teh")),
+            // A host that left the suggestions menu out of its list gets
+            // none.
+            (&no_spelling[..], cell::LEE, 0.0, None),
+            (&no_spelling[..], cell::TEH, 0.0, None),
+        ] {
+            let case = format!("{} providers, cell {cells} row {row}", providers.len());
+            let mut ev = providing(BackendKind::Owned, providers.to_vec());
+            ev.set_key_policy(suggest_policy());
+            // The caret is after `plain`, which is spelled right.
+            let events = vec![(suggest_key(), None), right_click(cells, row)];
+            let (messages, _) = widget_batch(&ev, &mut None, events);
+            assert!(
+                matches!(
+                    spell_events(&messages).as_slice(),
+                    [
+                        SpellEvent::OpenAtCaret,
+                        SpellEvent::Press(MenuPress::Right(_))
+                    ]
+                ),
+                "{case}: {messages:?}"
+            );
+            for message in messages {
+                let applied = host_applies(&mut ev, message);
+                assert_eq!((applied.provided, applied.keyboard), (None, None), "{case}");
+            }
+            assert_eq!(ev.spell_menu().map(SpellMenu::word), word, "{case}");
+            assert_eq!(ev.popover().and_then(Popover::provider), None, "{case}");
+        }
+        let asked = [&tokens, &lines, &dates].map(|provider| provider.asked().len());
+        assert_eq!(asked, [0; 3]);
+
+        // When the request did open the suggestions menu, the press only
+        // closes it.
+        let providers = spelling_first.to_vec();
+        let mut ev = providing(BackendKind::Owned, providers);
+        ev.set_key_policy(suggest_policy());
+        ev.move_cursor(caret(1, 7));
+        let events = vec![(suggest_key(), None), right_click(cell::MAIL, 0.0)];
+        let (messages, _) = widget_batch(&ev, &mut None, events);
+        let mut open = Vec::new();
+        for message in messages {
+            host_applies(&mut ev, message);
+            open.push((ev.spell_menu().is_some(), ev.popover().is_some()));
+        }
+        assert_eq!(open, [(true, true), (false, false)]);
+        assert!(lines.asked().is_empty());
+    }
+
+    /// An event of an input method.
+    fn composing(content: &str) -> (Event, Option<Point>) {
+        let event = input_method::Event::Preedit(content.into(), None);
+        (Event::InputMethod(event), None)
+    }
+
+    fn committing(content: &str) -> (Event, Option<Point>) {
+        let event = input_method::Event::Commit(content.into());
+        (Event::InputMethod(event), None)
+    }
+
+    /// An editor whose provider takes the keyboard for a date, and the
+    /// click on the date.
+    fn date_clicked() -> (crate::EditorView, (Event, Option<Point>)) {
+        let providers = vec![Provider::Spelling, Provider::Host(provider(on_dates))];
+        let ev = providing(BackendKind::Owned, providers);
+        (ev, right_click(cell::DATE, 0.0))
+    }
+
+    /// An editor whose source takes the keyboard for a request, and the
+    /// request's key.
+    fn keyboard_requested() -> (crate::EditorView, (Event, Option<Point>)) {
+        let ev = requesting(BackendKind::Owned, PROVIDED, 1, 5);
+        (ev, (request_key("k"), None))
+    }
+
+    #[test]
+    fn a_provider_that_takes_the_keyboard_has_the_rest_of_its_batch_dropped() {
+        use keyboard::key::Named;
+        use wren_markdown::span::SpanKind;
+        let (mut ev, click) = date_clicked();
+        let events = vec![
+            click,
+            (typed("f"), None),
+            (named(Named::Enter), None),
+            (named(Named::Backspace), None),
+            (space(), None),
+            // A press in the editor is the click it is, and the keys
+            // after it are dropped all the same.
+            (press(mouse::Button::Left), Some(over(1.0, 1.0))),
+            (typed("x"), None),
+            (named(Named::Delete), None),
+        ];
+        let (messages, captured) = widget_batch(&ev, &mut None, events);
+        // Each key is taken, so that it is no one else's, and nothing is
+        // published for it: not to the note, and not to the host.
+        assert_eq!(captured, [true; 8]);
+        let [click @ Message::Spell(SpellEvent::Context {
+            provider: 1, at, ..
+        }), Message::Action(Action::Click(_))] = messages.as_slice()
+        else {
+            panic!("{messages:?}");
+        };
+        // The editor opens nothing, and hands the host the click with what
+        // was clicked, once, to open its own there.
+        let at = *at;
+        let applied = host_applies(&mut ev, click.clone());
+        let (provider, clicked) = applied.keyboard.unwrap();
+        assert_eq!((provider, clicked.line), (1, 0));
+        assert!(matches!(
+            &clicked.hit,
+            Some(Hit::Span(span)) if matches!(span.kind, SpanKind::Date { .. })
+        ));
+        assert_eq!(Some(clicked), ev.clicked(at));
+        assert_eq!(ev.take_keyboard(), None);
+        assert!(ev.popover().is_none());
+        host_applies(&mut ev, messages[1].clone());
+        // The note is what it was, byte for byte.
+        assert_eq!(ev.text().as_bytes(), PROVIDED.as_bytes());
+        assert_eq!(ev.cursor(), caret(1, 1));
+
+        // Escape and a shortcut of the host's stay the host's own.
+        let (ev, click) = date_clicked();
+        let escape = (named(Named::Escape), None);
+        let (messages, captured) = widget_batch(&ev, &mut None, vec![click, escape]);
+        assert_eq!((messages.len(), captured), (1, vec![true, false]));
+        // The next batch is the editor's again, if it still has the
+        // keyboard: the host gives it to its field by then.
+        let (mut ev, click) = date_clicked();
+        let mut state = None;
+        popover_batch(&mut ev, &mut state, vec![click, (typed("f"), None)]);
+        popover_batch(&mut ev, &mut state, vec![(typed("g"), None)]);
+        assert_eq!(ev.line_text(1).unwrap(), "plaing teh text");
+    }
+
+    /// A preedit of the note's own, under way in the widget's state.
+    fn composing_state(ev: &crate::EditorView) -> Option<State> {
+        let editor = editor_with(&ev.content, true, Measure::default());
+        let mut state = laid_out_state(&editor);
+        state.focus = Some(Focus::now());
+        state.preedit = Some(input_method::Preedit {
+            content: "\u{304d}".into(),
+            selection: None,
+            text_size: None,
+        });
+        assert!(state.is_composing());
+        Some(state)
+    }
+
+    #[test]
+    fn what_an_input_method_composes_in_the_frame_of_a_handover_is_dropped() {
+        use keyboard::key::Named;
+        // The messages of each batch in turn, carried out by the host as
+        // they come; then the widget's state.
+        let run = |ev: &mut crate::EditorView,
+                   mut state: Option<State>,
+                   batches: Vec<Vec<(Event, Option<Point>)>>| {
+            let mut published = Vec::new();
+            for batch in batches {
+                let (messages, _) = widget_batch(ev, &mut state, batch);
+                for message in &messages {
+                    host_applies(ev, message.clone());
+                }
+                published.push(messages);
+            }
+            (published, state.unwrap())
+        };
+        let opens = |messages: &[Message]| {
+            matches!(
+                messages,
+                [Message::Spell(
+                    SpellEvent::Context { .. } | SpellEvent::Request(KEYBOARD)
+                )]
+            )
+        };
+        for (name, opened) in [
+            ("a right-click", date_clicked as fn() -> _),
+            ("a request", keyboard_requested),
+        ] {
+            // A composition begun and committed after the handover, in
+            // its batch: none of it is the note's, and none of it is
+            // handed on. The keys between are dropped with it.
+            let (mut ev, opener) = opened();
+            let batch = vec![
+                opener.clone(),
+                composing("\u{304d}"),
+                composing("\u{304d}\u{3093}"),
+                (named(Named::Backspace), None),
+                composing(""),
+                committing("\u{91d1}\u{66dc}"),
+                (typed("z"), None),
+            ];
+            let (published, state) = run(&mut ev, None, vec![batch]);
+            assert!(opens(&published[0]), "{name}: {published:?}");
+            assert!(state.preedit.is_none() && !state.is_composing(), "{name}");
+            assert_eq!(state.dropped, Dropped::Nothing, "{name}");
+            assert_eq!(ev.text().as_bytes(), PROVIDED.as_bytes(), "{name}");
+
+            // Its commit comes a batch later, with the editor still
+            // holding the keyboard, even after a click back into the
+            // text: it is discarded, never pasted.
+            let (mut ev, opener) = opened();
+            let batches = vec![
+                vec![
+                    opener.clone(),
+                    composing("\u{304d}"),
+                    (press(mouse::Button::Left), Some(over(1.0, 1.0))),
+                ],
+                vec![composing("\u{304d}\u{3093}")],
+                vec![composing(""), committing("\u{91d1}")],
+            ];
+            let (published, state) = run(&mut ev, None, batches);
+            assert!(
+                matches!(
+                    published[0].as_slice(),
+                    [_, Message::Action(Action::Click(_))]
+                ),
+                "{name}: {published:?}"
+            );
+            assert!(
+                published[1].is_empty() && published[2].is_empty(),
+                "{name}: {published:?}"
+            );
+            assert!(!state.is_composing(), "{name}");
+            assert_eq!(state.dropped, Dropped::Nothing, "{name}");
+            assert_eq!(ev.text().as_bytes(), PROVIDED.as_bytes(), "{name}");
+
+            // Once that composition is over, by its commit or with none,
+            // the next one is the note's again.
+            for ended in [
+                vec![composing(""), committing("\u{91d1}")],
+                vec![composing(""), (named(Named::ArrowRight), None)],
+            ] {
+                let (mut ev, opener) = opened();
+                let batches = vec![
+                    vec![opener, composing("\u{304d}")],
+                    ended,
+                    vec![composing("\u{306b}"), composing(""), committing("\u{65e5}")],
+                ];
+                let before = ev.cursor().position.line;
+                let (published, state) = run(&mut ev, None, batches);
+                assert!(published[1]
+                    .iter()
+                    .all(|m| matches!(m, Message::Action(Action::Move(_)))));
+                assert_eq!(state.dropped, Dropped::Nothing, "{name}");
+                let line = ev.line_text(before).unwrap();
+                assert_eq!(line.matches('\u{65e5}').count(), 1, "{name}: {line}");
+                assert!(!ev.text().contains('\u{91d1}'), "{name}");
+            }
+        }
+
+        // A composition the note had under way when a provider takes the
+        // keyboard is cancelled there. The preedit that follows leaves no
+        // key to the note, and what the composition commits is not the
+        // note's, in that batch or after.
+        let ends = || {
+            vec![
+                composing("\u{304d}\u{3093}"),
+                composing(""),
+                committing("\u{91d1}"),
+            ]
+        };
+        let keys = || vec![(typed("x"), None), (named(Named::Enter), None)];
+        for (name, batches) in [
+            ("in its batch", vec![[ends(), keys()].concat()]),
+            (
+                "emptied, then keys",
+                vec![[vec![composing("")], keys()].concat()],
+            ),
+            ("in the next batch", vec![keys(), ends()]),
+        ] {
+            let (mut ev, click) = date_clicked();
+            let state = composing_state(&ev);
+            let mut batches = batches;
+            batches[0].insert(0, click);
+            let (published, state) = run(&mut ev, state, batches);
+            assert!(opens(&published[0]), "{name}: {published:?}");
+            assert!(
+                published.iter().skip(1).all(Vec::is_empty),
+                "{name}: {published:?}"
+            );
+            assert!(!state.is_composing(), "{name}");
+            assert_eq!(ev.text().as_bytes(), PROVIDED.as_bytes(), "{name}");
+        }
+        // A click that opens a menu leaves a composition to the note.
+        let providers = vec![Provider::Spelling, Provider::Host(provider(on_task_lines))];
+        let mut ev = providing(BackendKind::Owned, providers);
+        let state = composing_state(&ev);
+        let (_, state) = run(&mut ev, state, vec![vec![right_click(cell::MAIL, 0.0)]]);
+        assert!(state.is_composing() && state.dropped == Dropped::Nothing);
+
+        // With no one taking the keyboard, a composition is the note's,
+        // as it was.
+        let (mut ev, _) = date_clicked();
+        let batch = vec![composing("\u{304d}"), composing(""), committing("\u{91d1}")];
+        run(&mut ev, None, vec![batch]);
+        assert_eq!(ev.line_text(1).unwrap(), "plain\u{91d1} teh text");
+    }
+
+    #[test]
+    fn a_dropped_composition_ends_with_its_commit_or_with_none() {
+        // Not held: nothing is dropped, and nothing is remembered.
+        let mut dropped = Dropped::Nothing;
+        assert!(!dropped.preedit(false, false) && !dropped.preedit(true, false));
+        assert!(!dropped.commit(false));
+        // Held: every preedit and commit is dropped, and a composition
+        // that began is remembered past the batch.
+        assert!(dropped.preedit(true, true) && dropped == Dropped::Nothing);
+        assert!(dropped.commit(true) && dropped == Dropped::Nothing);
+        assert!(dropped.preedit(false, true) && dropped == Dropped::Composing);
+        // Its later preedits are dropped, and a key pressed meanwhile
+        // changes nothing.
+        dropped.pressed();
+        assert!(dropped.preedit(false, false) && dropped == Dropped::Composing);
+        // It empties, and commits: dropped, and over.
+        assert!(dropped.preedit(true, false) && dropped == Dropped::Ending);
+        assert!(dropped.commit(false) && dropped == Dropped::Nothing);
+        assert!(!dropped.commit(false));
+        // It empties, and a press shows it committed nothing: the commit
+        // after that is another's.
+        dropped = Dropped::Composing;
+        assert!(dropped.preedit(true, false));
+        dropped.pressed();
+        assert!(dropped == Dropped::Nothing && !dropped.commit(false));
+        // It empties, and another composition begins: the note's.
+        dropped = Dropped::Ending;
+        assert!(!dropped.preedit(false, false) && dropped == Dropped::Nothing);
+        // But one that begins while the host still holds the keyboard
+        // is dropped as the first was.
+        dropped = Dropped::Ending;
+        assert!(dropped.preedit(false, true) && dropped == Dropped::Composing);
+    }
+
+    /// A provider whose answer for a task line changes when it is told
+    /// to: the status menu, then the token menu under the same range.
+    #[derive(Default)]
+    struct Flips(std::sync::atomic::AtomicBool);
+
+    impl crate::MenuProvider for Flips {
+        fn menu(&self, clicked: &Clicked) -> Option<Requested> {
+            let rows = if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+                token_rows()
+            } else {
+                status_rows()
+            };
+            (clicked.text.starts_with("- [")).then_some(Requested::Rows { range: 2..5, rows })
+        }
+    }
+
+    #[test]
+    fn a_right_click_made_over_another_text_or_menu_opens_nothing_and_chooses_no_row() {
+        // The status menu for a place in no span, the token menu for an
+        // owner or a tag.
+        fn either(clicked: &Clicked) -> Option<Requested> {
+            on_tokens(clicked).or_else(|| on_task_lines(clicked))
+        }
+        // A right-click on the task and the second row's key, in one
+        // batch: the widget vouches for the status menu, and publishes
+        // the key as a row of it.
+        let published = |ev: &crate::EditorView| {
+            let events = vec![right_click(cell::MAIL, 0.0), (typed("/"), None)];
+            let (messages, _) = widget_batch(ev, &mut None, events);
+            assert!(
+                matches!(
+                    spell_events(&messages).as_slice(),
+                    [
+                        SpellEvent::Context { provider: 1, .. },
+                        SpellEvent::AcceptOf { row: Some(1), .. }
+                    ]
+                ),
+                "{messages:?}"
+            );
+            messages
+        };
+        // What the host has open after each message, and the row chosen.
+        let applied = |ev: &mut crate::EditorView, messages: Vec<Message>| {
+            let mut open = Vec::new();
+            let mut provided = None;
+            for message in messages {
+                provided = host_applies(ev, message).provided.or(provided);
+                open.push(ev.popover().is_some());
+            }
+            (open, provided.map(|(provider, row)| (provider, row.id)))
+        };
+        let asks = provider(either);
+        let providers = || vec![Provider::Spelling, Provider::Host(asks.clone())];
+
+        // Nothing between: the menu opens and the row is chosen from it.
+        let mut ev = providing(BackendKind::Owned, providers());
+        let messages = published(&ev);
+        assert_eq!(
+            applied(&mut ev, messages),
+            (vec![true, false], Some((1, 21)))
+        );
+
+        // The host opens a menu of its own between the click and the key:
+        // the row was chosen from the provider's menu, which is no longer
+        // the one open, so it is chosen from none. The host's menu stays,
+        // with its second row unchosen.
+        let mut ev = providing(BackendKind::Owned, providers());
+        let messages = published(&ev);
+        let [click, key] = messages.as_slice() else {
+            panic!("{messages:?}");
+        };
+        host_applies(&mut ev, click.clone());
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        let mine = plain_rows(&["mine", "also mine"]);
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, mine));
+        let chosen = host_applies(&mut ev, key.clone());
+        assert_eq!((chosen.provided, chosen.choice), (None, None));
+        assert_eq!(
+            provided_menu(&ev).map(|menu| (menu.0, menu.2.len())),
+            Some((None, 2))
+        );
+
+        // The host opens another note before it hands the click on, where
+        // the same point is on an owner: the provider would answer with
+        // another menu, and the key would choose its second row. Nothing
+        // opens, no row is chosen, and the provider is not asked again.
+        let other = "- [ ] @lee calls\nplain";
+        let mut ev = providing(BackendKind::Owned, providers());
+        let messages = published(&ev);
+        let asked = asks.asked().len();
+        ev.replace_text(other, false);
+        assert_eq!(applied(&mut ev, messages), (vec![false, false], None));
+        assert_eq!((ev.text().as_str(), asks.asked().len()), (other, asked));
+        // In a batch of its own, the click there opens the token menu.
+        ev.content.lay_out(BOUNDS.size());
+        let messages = widget_batch(&ev, &mut None, vec![right_click(cell::MAIL, 0.0)]).0;
+        applied(&mut ev, messages);
+        assert_eq!(provided_menu(&ev).map(|menu| menu.2.len()), Some(2));
+
+        // The same text loaded again is another text all the same.
+        let mut ev = providing(BackendKind::Owned, providers());
+        let messages = published(&ev);
+        ev.replace_text(PROVIDED, true);
+        assert_eq!(applied(&mut ev, messages), (vec![false, false], None));
+
+        // The text as it was, but the provider now answers with another
+        // menu for the place: not the menu the key chose from.
+        let flips = Arc::new(Flips::default());
+        let providers = vec![Provider::Spelling, Provider::Host(flips.clone())];
+        let mut ev = providing(BackendKind::Owned, providers);
+        let messages = published(&ev);
+        flips.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(applied(&mut ev, messages), (vec![false, false], None));
+        assert_eq!(ev.text(), PROVIDED);
+
+        // The host names other providers before it hands the click on:
+        // whoever has the place in the new list is not asked for it.
+        let mut ev = providing(
+            BackendKind::Owned,
+            vec![Provider::Spelling, Provider::Host(asks.clone())],
+        );
+        let messages = published(&ev);
+        let replaced = provider(either);
+        ev.set_menu_providers(vec![Provider::Spelling, Provider::Host(replaced.clone())]);
+        assert_eq!(applied(&mut ev, messages), (vec![false, false], None));
+        assert!(replaced.asked().is_empty());
+
+        // A provider that took the keyboard has it on the same terms.
+        let dates = provider(on_dates);
+        let mut ev = providing(
+            BackendKind::Owned,
+            vec![Provider::Spelling, Provider::Host(dates.clone())],
+        );
+        let (messages, _) = widget_batch(&ev, &mut None, vec![right_click(cell::DATE, 0.0)]);
+        ev.replace_text(PROVIDED, true);
+        for message in messages {
+            assert_eq!(host_applies(&mut ev, message).keyboard, None);
+        }
+    }
+
     // ── Every opener and every key ─────────────────────────────────────────
 
     /// Who a press went to.
@@ -7271,6 +8622,14 @@ mod tests {
         SuggestKeyOnAWord,
         SuggestKeyOffAWord,
         RightClickOnAWord,
+        RightClickOnATask,
+        RightClickOffEveryProvider,
+        RightClickForTheKeyboard,
+        // A caret motion first, in the click's batch: the widget cannot
+        // vouch for what is under the pointer.
+        MotionThenRightClickOnAWord,
+        MotionThenRightClickOnATask,
+        MotionThenRightClickForTheKeyboard,
         RequestForAMenu,
         RequestForNothing,
         RequestForTheKeyboard,
@@ -7281,11 +8640,17 @@ mod tests {
         SuggestionsOpen,
     }
 
-    const OPENERS: [Opener; 12] = [
+    const OPENERS: [Opener; 18] = [
         Opener::Nothing,
         Opener::SuggestKeyOnAWord,
         Opener::SuggestKeyOffAWord,
         Opener::RightClickOnAWord,
+        Opener::RightClickOnATask,
+        Opener::RightClickOffEveryProvider,
+        Opener::RightClickForTheKeyboard,
+        Opener::MotionThenRightClickOnAWord,
+        Opener::MotionThenRightClickOnATask,
+        Opener::MotionThenRightClickForTheKeyboard,
         Opener::RequestForAMenu,
         Opener::RequestForNothing,
         Opener::RequestForTheKeyboard,
@@ -7335,21 +8700,32 @@ mod tests {
 
     /// Who each of [`PRESSES`] goes to after `opener` on the owned engine,
     /// one letter a press: `P` the popover, `T` the text, `A` the host's
-    /// key handling, `F` the host's field.
+    /// key handling, and `D` no one, the press being dropped.
     fn owners(opener: Opener) -> &'static str {
         match opener {
+            // After a motion in its batch, a click a provider of the
+            // host's would take opens nothing, as one no provider takes.
             Opener::Nothing
             | Opener::SuggestKeyOffAWord
+            | Opener::RightClickOffEveryProvider
+            | Opener::MotionThenRightClickOnATask
+            | Opener::MotionThenRightClickForTheKeyboard
             | Opener::RequestForNothing
             | Opener::TypingThatOffersNothing => "TTTTAATTTT",
             // The suggestions menu: Tab and a letter close it and are the
-            // text's, and a press in the editor only closes it.
-            Opener::SuggestKeyOnAWord | Opener::RightClickOnAWord | Opener::SpellMenuOpen => {
-                "PPPTPATTTP"
-            }
+            // text's, and a press in the editor only closes it. A word
+            // drawn as misspelled is asked for after a motion too.
+            Opener::SuggestKeyOnAWord
+            | Opener::RightClickOnAWord
+            | Opener::MotionThenRightClickOnAWord
+            | Opener::SpellMenuOpen => "PPPTPATTTP",
             // A menu of the host's, which has an accelerator.
-            Opener::RequestForAMenu | Opener::MenuOpen => "PPPTPATPTP",
-            Opener::RequestForTheKeyboard => "FFFFAAFFFT",
+            Opener::RightClickOnATask | Opener::RequestForAMenu | Opener::MenuOpen => "PPPTPATPTP",
+            // The host took the keyboard: the keys its field would take
+            // are dropped to the end of the batch. Escape and a shortcut
+            // stay the host's, and a press in the editor is the click it
+            // is.
+            Opener::RightClickForTheKeyboard | Opener::RequestForTheKeyboard => "DDDDAADDDT",
             // Suggestions leave every other key and the press to the text.
             Opener::TypingThatOffers | Opener::SuggestionsOpen => "PPPPPATTTT",
         }
@@ -7366,6 +8742,14 @@ mod tests {
         let proofreader = fixtures::Rejects::new(&["teh"]).suggesting(&[("teh", &["the", "ten"])]);
         ev.set_proofreader(Some(Arc::new(proofreader)));
         ev.set_menu_source(Some(Arc::new(fixtures::Menus::default())));
+        // A right-click asks the suggestions menu first, then a provider
+        // with a menu for a task line, then one that takes the keyboard on
+        // any other line of text.
+        ev.set_menu_providers(vec![
+            Provider::Spelling,
+            Provider::Host(provider(on_task_lines)),
+            Provider::Host(provider(off_task_lines)),
+        ]);
         ev.set_suggest_source(Some(Arc::new(fixtures::Completes::new(&[
             "due",
             "duplicate",
@@ -7415,12 +8799,28 @@ mod tests {
         (ev, state)
     }
 
+    /// A caret motion, which leaves the text as it is.
+    fn motion() -> (Event, Option<Point>) {
+        (named(keyboard::key::Named::ArrowLeft), None)
+    }
+
     /// The events of `opener` that share the press's batch.
     fn opening_events(opener: Opener) -> Vec<(Event, Option<Point>)> {
         match opener {
             Opener::SuggestKeyOnAWord | Opener::SuggestKeyOffAWord => vec![(suggest_key(), None)],
             Opener::RightClickOnAWord => {
                 vec![(press(mouse::Button::Right), Some(over(7.0, 0.0)))]
+            }
+            // The task's box, the second line, and under the text.
+            Opener::RightClickOnATask => vec![right_click(3.0, 0.0)],
+            Opener::RightClickForTheKeyboard => vec![right_click(1.0, 1.0)],
+            Opener::RightClickOffEveryProvider => vec![right_click(1.0, 3.0)],
+            Opener::MotionThenRightClickOnAWord => {
+                vec![motion(), right_click(7.0, 0.0)]
+            }
+            Opener::MotionThenRightClickOnATask => vec![motion(), right_click(3.0, 0.0)],
+            Opener::MotionThenRightClickForTheKeyboard => {
+                vec![motion(), right_click(1.0, 1.0)]
             }
             Opener::RequestForAMenu => vec![(request_key("s"), None)],
             Opener::RequestForNothing => vec![(request_key("n"), None)],
@@ -7452,6 +8852,12 @@ mod tests {
                     | SpellEvent::AcceptSelected
                     | SpellEvent::Dismiss => {
                         assert!(open.is_some(), "{name}: {event:?} with nothing open");
+                        took.push(Owner::Popover);
+                    }
+                    // A row of a provider's menu, which names it.
+                    SpellEvent::AcceptOf { menu, .. } => {
+                        let named = ev.popover().map(Popover::instance);
+                        assert_eq!(named, Some(*menu), "{name}: {event:?}");
                         took.push(Owner::Popover);
                     }
                     // Escape with nothing open is no one's yet: the host's
@@ -7511,7 +8917,7 @@ mod tests {
                     events.push(the_press(name));
                     // The opener's messages come first: in its batch nothing
                     // is drawn, so no overlay publishes ahead of them.
-                    let (published, _) = widget_events(&ev, &mut state, events);
+                    let (published, captured) = widget_events(&ev, &mut state, events);
                     let mut messages = Vec::new();
                     for (at, message) in published {
                         if at < opening {
@@ -7524,21 +8930,30 @@ mod tests {
                     let before = (ev.text(), ev.cursor());
                     let took = who_took(&mut ev, name, messages.clone());
                     let owner = match letter {
-                        'P' => Owner::Popover,
-                        'T' => Owner::Text,
-                        'A' => Owner::App,
-                        _ => Owner::Field,
+                        'P' => Some(Owner::Popover),
+                        'T' => Some(Owner::Text),
+                        'A' => Some(Owner::App),
+                        // Dropped: the press is no one's.
+                        _ => None,
                     };
                     let case = format!("{kind:?} {opener:?} {name}: {messages:?}");
-                    assert_eq!(took, [owner], "{case}");
+                    assert_eq!(took, Vec::from_iter(owner), "{case}");
                     // And it was carried out once: a letter the text took
                     // is in the text once more, and what another owner
                     // took left the text alone.
                     let count = |text: &str| text.matches(name).count();
-                    let typed = usize::from(owner == Owner::Text && name.len() == 1);
+                    let typed = usize::from(owner == Some(Owner::Text) && name.len() == 1);
                     assert_eq!(count(&ev.text()), count(&before.0) + typed, "{case}");
-                    if matches!(owner, Owner::App | Owner::Field) {
+                    if matches!(owner, Some(Owner::App) | None) {
                         assert_eq!((ev.text(), ev.cursor()), before, "{case}");
+                    }
+                    // A dropped press is taken by the widget, so that the
+                    // host's key handling does not act on it either, and
+                    // nothing is published for it: the note is what it
+                    // was, byte for byte.
+                    if owner.is_none() {
+                        assert!(messages.is_empty() && captured[opening], "{case}");
+                        assert_eq!(ev.text().as_bytes(), before.0.as_bytes(), "{case}");
                     }
                     // No Escape is left claimed for a later press.
                     assert!(!ev.take_claimed_escape(), "{case}");

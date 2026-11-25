@@ -220,7 +220,15 @@ impl MenuOverlay<'_> {
                 Some(point) if self.bounds.contains(point) => {
                     if *button == mouse::Button::Left {
                         if let Some(row) = self.active_row_at(point) {
-                            tell(PopoverEvent::Accept(row));
+                            // A row of a provider's menu is chosen from
+                            // that menu or from none.
+                            tell(match self.menu.provider() {
+                                Some(_) => PopoverEvent::AcceptOf {
+                                    menu: self.menu.instance(),
+                                    row: Some(row),
+                                },
+                                None => PopoverEvent::Accept(row),
+                            });
                         } else if self.menu.labels().is_empty()
                             && row_at(self.bounds, 1, point).is_some()
                         {

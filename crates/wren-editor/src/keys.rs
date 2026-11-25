@@ -237,14 +237,14 @@ fn route_suggest(key_press: KeyPress, context: Context) -> Option<Routed> {
     Some(popover_event(SpellEvent::Key(key)))
 }
 
-/// Route a key press made after a request, earlier in the batch, that the
-/// host answered by taking the keyboard. Nothing of the editor's is open,
-/// so Escape and a key the policy gives the host are the host's, as with
-/// nothing open, and a modifier alone does nothing. Every other press is
-/// the host's too, for what it opened: it goes to the host as a
-/// [`SpellEvent::Stroke`], captured, and the editor does nothing with it.
-/// A key that is neither named nor one character cannot be carried, and
-/// is dropped.
+/// Route a key press made after a request or a right-click, earlier in
+/// the batch, that the host answered by taking the keyboard. Nothing of
+/// the editor's is open, so Escape and a key the policy gives the host are
+/// the host's, as with nothing open, and a modifier alone does nothing.
+/// Every other press is one the host's field would take: it is routed as
+/// a [`SpellEvent::Stroke`], which the widget takes and drops, since input
+/// in the frame of a handover is no one's ([`crate::popover`]). A key that
+/// is neither named nor one character is no stroke, and is not taken.
 fn route_keyboard(key_press: KeyPress, context: Context) -> Option<Routed> {
     match key_press.key.as_ref() {
         Key::Named(Named::Escape) => return key_binding(key_press, context).map(Routed::Binding),

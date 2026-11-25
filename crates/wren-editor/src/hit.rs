@@ -24,10 +24,23 @@
 //! of no span between them. Whatever acts on a place, a right-click's menu
 //! or a click, reads its `Hit` and takes it or leaves it to the next in
 //! line.
+//!
+//! A right-click's providers are asked about the whole place ([`Clicked`]):
+//! the line, its spans, the glyph under the pointer and the hit there, so
+//! that one of them can take a place that is no hit at all. The widget and
+//! the editor both read it from the lines themselves ([`Reading`]), never
+//! from the widget's highlighter, so that the two ask a provider about the
+//! same thing.
 
 use std::ops::Range;
 
+use iced::Point;
 use wren_markdown::span::{LineSpans, Span};
+use wren_markdown::TaskOptions;
+
+use crate::popover::Clicked;
+use crate::proof::{self, Proofreader};
+use crate::widget::Content;
 
 /// What a place in a line is: a misspelled word, or else the innermost of
 /// the line's typed spans. Spelling comes first, so a misspelled owner, tag
@@ -69,6 +82,61 @@ pub(crate) fn resolve(
     match mark {
         Some(mark) => Some(Hit::Misspelling(mark)),
         None => span().map(Hit::Span),
+    }
+}
+
+/// How the lines are read for a hit test made without the widget's
+/// highlighter: by a fresh scan of the lines down to the one asked about
+/// (§3.3), with the editor's settings.
+#[derive(Clone, Copy)]
+pub(crate) struct Reading<'a> {
+    /// The host's proofreader, on the engine that checks spelling.
+    pub speller: Option<&'a dyn Proofreader>,
+    /// The text's `block::front_matter_end`.
+    pub front_matter_end: Option<usize>,
+    /// The host's tasks, when they are on.
+    pub tasks: Option<TaskOptions>,
+}
+
+impl Reading<'_> {
+    /// The two lists a hit test reads for `line` of `content`: the
+    /// misspellings, the same marks a frame draws there, and the typed
+    /// spans, whose prose the proofreader was asked about. Both empty past
+    /// the text.
+    pub(crate) fn ranges(self, content: &Content, line: usize) -> (Vec<Range<usize>>, LineSpans) {
+        content.with_lines(|lines| {
+            let Some(text) = lines.get(line) else {
+                return Default::default();
+            };
+            let spans =
+                crate::highlighter::spans_at(&lines, line, self.front_matter_end, self.tasks);
+            let marks = self
+                .speller
+                .map(|proofreader| proof::line_marks(proofreader, &text.text, &spans.prose()))
+                .unwrap_or_default();
+            (marks, spans)
+        })
+    }
+
+    /// What a right-click at `point`, relative to the text origin, falls
+    /// on, as `content` is laid out. `None` off every row of the text.
+    pub(crate) fn clicked(self, content: &Content, point: Point) -> Option<Clicked> {
+        let mut spans = LineSpans::default();
+        let place = content.place_under(point, |line, _| {
+            let (marks, read) = self.ranges(content, line);
+            spans = read;
+            marks
+        })?;
+        let text =
+            content.with_lines(|lines| lines.get(place.line).map(|line| line.text.into_owned()))?;
+        let hit = resolve(place.mark, || spans.at(place.column?).cloned());
+        Some(Clicked {
+            line: place.line,
+            text,
+            spans,
+            column: place.column,
+            hit,
+        })
     }
 }
 

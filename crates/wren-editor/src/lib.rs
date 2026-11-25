@@ -46,8 +46,8 @@ pub use highlighter::{highlight_lines, Highlight, Highlights, LineDecor, Scale};
 pub use hit::Hit;
 pub use keys::{KeyPolicy, KeyRoute};
 pub use popover::{
-    is_plain_escape, Accelerator, Anchor, Choice, MenuSource, Mode, Popover, PopoverEvent,
-    Requested, Row, Stroke, SuggestSource, Suggestion,
+    is_plain_escape, Accelerator, Anchor, Choice, Clicked, MenuProvider, MenuSource, Mode, Popover,
+    PopoverEvent, Provider, Requested, Row, Seen, Stroke, SuggestSource, Suggestion,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
@@ -232,11 +232,23 @@ pub struct EditorView {
     /// The host's open popover; see [`EditorView::open_popover`]. At most
     /// one of it and `menu` is open.
     popover: Option<Popover>,
-    /// The row the last popover event chose from the host's popover, and
-    /// the revision of the text it was chosen over.
-    choice: Option<(u64, Choice)>,
+    /// The row the last popover event chose from the host's popover.
+    choice: Option<Chosen>,
     suggester: Option<Arc<dyn SuggestSource>>,
     menus: Option<Arc<dyn MenuSource>>,
+    /// Who a right-click asks, in order; see
+    /// [`EditorView::set_menu_providers`].
+    providers: Vec<Provider>,
+    /// Which list `providers` is: it changes when the host names another,
+    /// so that a click or a row waiting on a provider of the old list is
+    /// not handed to whoever has its place in the new one.
+    provider_list: u64,
+    /// The right-click the last popover event handed to the host, whose
+    /// provider took the keyboard; see [`EditorView::take_keyboard`].
+    keyboard: Option<Handed>,
+    /// How many popovers the editor has opened: the
+    /// [`Popover::instance`] of the last.
+    opened: u64,
     /// The line Escape hid suggestions for, until the caret leaves it.
     suppressed: Option<usize>,
     /// The next edit asks the source of suggestions nothing; see
@@ -268,6 +280,24 @@ pub struct EditorView {
     spell_frame: std::cell::RefCell<SpellFrame>,
     /// See [`EditorView::revision`].
     revision: u64,
+}
+
+/// A row chosen from the host's popover, until the host takes it.
+struct Chosen {
+    /// The revision of the text it was chosen over.
+    revision: u64,
+    choice: Choice,
+    /// The provider whose menu it was chosen from
+    /// ([`Popover::provider`]).
+    provider: Option<usize>,
+}
+
+/// A right-click whose provider took the keyboard, until the host takes it.
+struct Handed {
+    /// The revision of the text it was made over.
+    revision: u64,
+    provider: usize,
+    clicked: Clicked,
 }
 
 /// The last revision any editor took; see [`EditorView::revision`].
@@ -305,6 +335,10 @@ impl EditorView {
             choice: None,
             suggester: None,
             menus: None,
+            providers: popover::SPELLING_ALONE.to_vec(),
+            provider_list: 0,
+            keyboard: None,
+            opened: 0,
             suppressed: None,
             hold: false,
             escapes: 0,
@@ -456,6 +490,7 @@ impl EditorView {
         .key_policy(self.key_policy.as_ref())
         .proofreader(self.proofreader.as_deref())
         .menu_source(self.menu_source())
+        .providers(self.providers(), self.edition())
         .suggest_source(self.suggest_source(), self.suggest_suppressed())
         .origin(&self.origin)
         .resolved_press(self.resolved_press)
@@ -1080,10 +1115,20 @@ impl EditorView {
     /// ([`SpellEvent::Request`]) closes what is open and then opens what
     /// the host's [`MenuSource`] answers for the caret, so a host that acts
     /// on the request itself may do so before or after it hands the event
-    /// here. Accepting a suggestion replaces the word through
-    /// [`EditorView::apply`], so it is one undo step; accepting a row of
-    /// the host's popover closes it and leaves the row for
-    /// [`EditorView::take_choice`].
+    /// here. A right-click one of the host's providers takes
+    /// ([`SpellEvent::Context`]) does the same with what that provider
+    /// answers for what lies under the point
+    /// ([`EditorView::set_menu_providers`]), if the text, the list of
+    /// providers, the place and the answer are what the widget saw when
+    /// it published the click; otherwise it only closes what is open. A
+    /// provider that so takes the keyboard leaves the click for
+    /// [`EditorView::take_keyboard`]. A row chosen from a provider's menu
+    /// names the menu ([`SpellEvent::AcceptOf`]), and is chosen only if
+    /// that menu is the one open. Accepting a suggestion
+    /// replaces the word through [`EditorView::apply`], so it is one undo
+    /// step; accepting a row of the host's popover closes it and leaves
+    /// the row for [`EditorView::take_choice`], or for
+    /// [`EditorView::take_provided`] when a provider opened it.
     ///
     /// A popover's key ([`SpellEvent::Key`]) acts on the open popover as
     /// its mode has it, or with none open is handled as the editor handles
@@ -1098,6 +1143,7 @@ impl EditorView {
     /// take, and does nothing here.
     pub fn spell(&mut self, event: SpellEvent) -> bool {
         self.choice = None;
+        self.keyboard = None;
         self.hold = matches!(event, SpellEvent::Hold);
         match event {
             SpellEvent::Key(key) => {
@@ -1133,11 +1179,21 @@ impl EditorView {
                 let answer = (self.menu_source().zip(self.asked_line()))
                     .map(|(source, line)| popover::requested(source, id, &line));
                 if let Some(popover::Answer::Menu(menu)) = answer {
-                    self.content.reveal(Position {
-                        line: menu.line(),
-                        column: menu.range().start,
-                    });
-                    self.popover = Some(menu);
+                    self.open_answered(menu);
+                }
+            }
+            SpellEvent::Context { provider, at, seen } => {
+                self.close_open();
+                match self.provided(provider, at, seen) {
+                    Some((_, popover::Answer::Menu(menu))) => self.open_answered(menu),
+                    Some((clicked, popover::Answer::Keyboard)) => {
+                        self.keyboard = Some(Handed {
+                            revision: self.revision,
+                            provider,
+                            clicked,
+                        });
+                    }
+                    Some((_, popover::Answer::Nothing)) | None => {}
                 }
             }
             SpellEvent::Move(delta) => {
@@ -1155,6 +1211,17 @@ impl EditorView {
                 Some(row) => return self.accept(row),
                 None => self.close_open(),
             },
+            SpellEvent::AcceptOf { menu, row } => {
+                // Another popover, or none, is not the menu the row was
+                // chosen from: the choice is no one's.
+                let Some(open) = self.popover().filter(|open| open.instance() == menu) else {
+                    return false;
+                };
+                match row.or(open.selected()) {
+                    Some(row) => return self.accept(row),
+                    None => self.close_open(),
+                }
+            }
             SpellEvent::Dismiss => {
                 self.dismiss_popover();
             }
@@ -1179,6 +1246,60 @@ impl EditorView {
             // Only Ctrl or Cmd+F routes to Find, never a plain key.
             Message::Find => false,
         }
+    }
+
+    /// Open `menu`, which a source or a provider of the host's answered,
+    /// and scroll its anchor's row into view if it is not.
+    fn open_answered(&mut self, menu: Popover) {
+        self.content.reveal(Position {
+            line: menu.line(),
+            column: menu.range().start,
+        });
+        self.popover = Some(self.opening(menu));
+    }
+
+    /// `popover` as the next the editor opens, with its number
+    /// ([`Popover::instance`]).
+    fn opening(&mut self, popover: Popover) -> Popover {
+        self.opened += 1;
+        popover.opened_as(self.opened)
+    }
+
+    /// What the host's provider at `provider` of its list opens for a
+    /// right-click at `at`, relative to the text origin, and the place
+    /// clicked, if they are what the widget saw when it published the
+    /// click (`seen`). `None` when the text or the list of providers has
+    /// changed since, in which case no provider is asked; when the place
+    /// under the point or the provider's answer for it is another; for a
+    /// place in the list that holds no provider of the host's; and off the
+    /// text.
+    fn provided(
+        &self,
+        provider: usize,
+        at: iced::Point,
+        seen: Seen,
+    ) -> Option<(Clicked, popover::Answer)> {
+        if !seen.over(self.edition()) {
+            return None;
+        }
+        let Some(Provider::Host(asked)) = self.providers().get(provider) else {
+            return None;
+        };
+        let clicked = self.clicked(at)?;
+        let answer = popover::provided(&**asked, provider, &clicked);
+        seen.answered(popover::fingerprint(provider, &clicked, &answer))
+            .then_some((clicked, answer))
+    }
+
+    /// Who takes a right-click at `at`, relative to the text origin, of
+    /// the providers in order, asked about the text as it is now.
+    #[cfg(any(test, feature = "test-support"))]
+    fn taken(&self, at: iced::Point) -> Option<popover::Taken> {
+        let misspelled = || {
+            let place = self.speller().and_then(|_| self.place_under(at));
+            place.is_some_and(|place| place.mark.is_some())
+        };
+        popover::taken(self.providers(), misspelled, || self.clicked(at))
     }
 
     /// The caret's line: what the host's sources are asked about.
@@ -1217,16 +1338,18 @@ impl EditorView {
             .filter(|_| unchanged)
             .map(|id| (id, popover.mode()));
         let suggestion = popover.labels().get(row).filter(|_| unchanged).cloned();
+        let provider = popover.provider();
         self.popover = None;
         if menu.is_none() {
-            self.choice = chosen.map(|(id, mode)| {
-                let choice = Choice {
+            self.choice = chosen.map(|(id, mode)| Chosen {
+                revision: self.revision,
+                choice: Choice {
                     id,
                     mode,
                     line,
                     range,
-                };
-                (self.revision, choice)
+                },
+                provider,
             });
             return false;
         }
@@ -1281,7 +1404,8 @@ impl EditorView {
             line,
             column: range.start,
         });
-        self.popover = Some(Popover::new(mode, line, range, text, rows));
+        let popover = Popover::new(mode, line, range, text, rows);
+        self.popover = Some(self.opening(popover));
         true
     }
 
@@ -1318,10 +1442,38 @@ impl EditorView {
 
     /// The row the last event given to [`EditorView::spell`] chose from the
     /// host's popover, once: taking it leaves none. A choice made over a
-    /// text that has changed since, or been replaced, is dropped.
+    /// text that has changed since, or been replaced, is dropped. A row of
+    /// a menu one of the host's providers opened is not given here; see
+    /// [`EditorView::take_provided`].
     pub fn take_choice(&mut self) -> Option<Choice> {
-        let (revision, choice) = self.choice.take()?;
-        (revision == self.revision).then_some(choice)
+        let chosen = self.choice.take_if(|chosen| chosen.provider.is_none())?;
+        (chosen.revision == self.revision).then_some(chosen.choice)
+    }
+
+    /// As [`EditorView::take_choice`], for a row of a menu that one of the
+    /// host's providers opened for a right-click: the provider's place in
+    /// the host's list, for the host to hand the row back to it, and the
+    /// row.
+    pub fn take_provided(&mut self) -> Option<(usize, Choice)> {
+        let chosen = self.choice.take_if(|chosen| chosen.provider.is_some())?;
+        let provider = chosen.provider?;
+        (chosen.revision == self.revision).then_some((provider, chosen.choice))
+    }
+
+    /// The right-click that the last event given to [`EditorView::spell`]
+    /// handed to the host, once: one of the host's providers took it by
+    /// taking the keyboard ([`Requested::Keyboard`]). With the provider's
+    /// place in the host's list and what was clicked, for the host to open
+    /// its own there and give it the keyboard. What the batch of events
+    /// still holds after such a click is dropped by the widget, not kept
+    /// for the host: the keys, and whatever an input method composes or
+    /// commits (see [`popover`]). `None` for a click the editor did not
+    /// find as the widget saw it ([`SpellEvent::Context`]), over a text
+    /// that has changed since, or after the host named other providers:
+    /// the host then opens nothing.
+    pub fn take_keyboard(&mut self) -> Option<(usize, Clicked)> {
+        let handed = self.keyboard.take()?;
+        (handed.revision == self.revision).then_some((handed.provider, handed.clicked))
     }
 
     /// Whether a popover took a press of Escape that the host has yet to
@@ -1388,6 +1540,116 @@ impl EditorView {
         self.menus = source;
     }
 
+    /// Who a right-click asks for a menu, in this order: the first whose
+    /// answer opens something takes the click, and those after it are not
+    /// asked. [`Provider::Spelling`] is the editor's own suggestions menu,
+    /// which takes a misspelled word; a [`Provider::Host`] is asked about
+    /// what lies under the pointer ([`Clicked`]), which may be a place in
+    /// no span, and answers as a [`MenuSource`] does. A row chosen from
+    /// its menu comes back through [`EditorView::take_provided`]. The list
+    /// is the suggestions menu alone until the host sets another, and a
+    /// host that wants a misspelled word to come first keeps it first.
+    ///
+    /// Only the owned engine asks the providers, as only it opens
+    /// popovers. The widget asks them too, for the keys that follow a
+    /// right-click before the editor has applied it, so each must answer
+    /// the same for the same place. Setting other providers closes a menu
+    /// that one of them opened, and drops what waited on one of them: a
+    /// row chosen ([`EditorView::take_provided`]), the keyboard handed
+    /// over ([`EditorView::take_keyboard`]), and a right-click the widget
+    /// has published and the host has yet to hand here.
+    pub fn set_menu_providers(&mut self, providers: Vec<Provider>) {
+        let same = providers.len() == self.providers.len()
+            && (providers.iter().zip(&self.providers)).all(|(new, old)| new.is(old));
+        if !same {
+            if (self.popover.as_ref()).is_some_and(|open| open.provider().is_some()) {
+                self.popover = None;
+            }
+            self.choice.take_if(|chosen| chosen.provider.is_some());
+            self.keyboard = None;
+            self.provider_list += 1;
+        }
+        self.providers = providers;
+    }
+
+    /// The text and the list of providers a right-click is asked about,
+    /// and the popovers opened so far.
+    fn edition(&self) -> popover::Edition {
+        popover::Edition {
+            revision: self.revision,
+            list: self.provider_list,
+            opened: self.opened,
+        }
+    }
+
+    /// The providers a right-click asks, on the engine that opens
+    /// popovers.
+    fn providers(&self) -> &[Provider] {
+        if self.content.kind() == BackendKind::Owned {
+            &self.providers
+        } else {
+            &[]
+        }
+    }
+
+    /// What a right-click at `point`, relative to the text origin as a
+    /// click action's position is, falls on, as the last layout placed the
+    /// text: what a provider is asked about. `None` off every row of the
+    /// text.
+    pub fn clicked(&self, point: iced::Point) -> Option<Clicked> {
+        self.reading().clicked(&self.content, point)
+    }
+
+    /// How a hit test made without the widget reads the lines.
+    fn reading(&self) -> hit::Reading<'_> {
+        hit::Reading {
+            speller: self.speller(),
+            front_matter_end: self.front_matter_end,
+            tasks: self.tasks,
+        }
+    }
+
+    /// The message the widget publishes for a right-click, alone in its
+    /// batch of events, on the middle of the character that starts at byte
+    /// `column` of `line`, or on the end of the line when `column` is its
+    /// length; without a window. With a menu open the press only closes it
+    /// (rule 4.4.5); otherwise the providers are asked in order. `None`
+    /// where no provider takes the click, which then changes nothing, and
+    /// for a place that is not laid out.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn right_click_message(&self, line: usize, column: usize) -> Option<Message> {
+        let end = self.content.with_lines(|lines| {
+            let text = lines.get(line)?;
+            let rest = text.text.get(column..)?;
+            Some(column + rest.chars().next().map_or(0, char::len_utf8))
+        })?;
+        let row = self.content.anchor_row(line, column..end)?;
+        let mut at = row.bounds().center();
+        // A blank has no glyphs to be in the middle of: the middle of its
+        // cell, between the places on either side of it.
+        let after = (self.content.anchor_row(line, end..end))
+            .filter(|after| end > column && row.right <= row.left && after.top == row.top);
+        if let Some(after) = after {
+            at.x = (row.left + after.left) / 2.0;
+        }
+        if self.popover().map(Popover::mode) == Some(Mode::Menu) {
+            return Some(Message::Spell(SpellEvent::Close));
+        }
+        let event = match self.taken(at)? {
+            popover::Taken::Spelling => SpellEvent::OpenAt(at),
+            popover::Taken::Host {
+                provider,
+                fingerprint,
+                ..
+            } => SpellEvent::Context {
+                provider,
+                at,
+                seen: Seen::new(self.edition(), fingerprint),
+            },
+        };
+        Some(Message::Spell(event))
+    }
+
     /// The line Escape hid suggestions for ([`EditorView::dismiss_popover`]):
     /// typing there asks the source nothing until the caret has left the
     /// line, the text is replaced, or the host clears it.
@@ -1452,10 +1714,11 @@ impl EditorView {
             return;
         }
         self.close_open();
-        self.popover = self
+        let suggested = self
             .asked_line()
             .filter(|line| self.suppressed != Some(line.index))
             .and_then(|line| popover::suggested(self.suggest_source()?, &line));
+        self.popover = suggested.map(|popover| self.opening(popover));
     }
 
     /// Open the menu for the misspelled word at `target`, a line and a byte
@@ -1486,7 +1749,9 @@ impl EditorView {
             line,
             column: mark.start,
         });
-        self.menu = Some(SpellMenu::new(line, mark, word.to_owned(), items));
+        self.opened += 1;
+        let menu = SpellMenu::new(line, mark, word.to_owned(), items);
+        self.menu = Some(menu.opened_as(self.opened));
     }
 
     /// The marks and the menu as the last frame drew them.
@@ -1551,6 +1816,12 @@ impl EditorView {
             MenuPress::Right(point) => {
                 if self.close_menu() {
                     self.drop_drags = false;
+                    return false;
+                }
+                // The widget left the press here without asking the
+                // host's providers, so none answers it; nor does the
+                // suggestions menu ahead of one that comes before it.
+                if !popover::spelling_leads(self.providers()) {
                     return false;
                 }
                 return self.spell(SpellEvent::OpenAt(point));
@@ -1683,17 +1954,7 @@ impl EditorView {
     /// the same marks a frame draws there, and the typed spans, whose
     /// prose the proofreader was asked about.
     fn ranges_at(&self, line: usize) -> (Vec<Range<usize>>, LineSpans) {
-        self.content.with_lines(|lines| {
-            let Some(text) = lines.get(line) else {
-                return Default::default();
-            };
-            let spans = highlighter::spans_at(&lines, line, self.front_matter_end, self.tasks);
-            let marks = self
-                .speller()
-                .map(|proofreader| proof::line_marks(proofreader, &text.text, &spans.prose()))
-                .unwrap_or_default();
-            (marks, spans)
-        })
+        self.reading().ranges(&self.content, line)
     }
 
     // -----------------------------------------------------------------------
@@ -7058,5 +7319,644 @@ mod tests {
         ev.perform(Action::Move(Motion::Right));
         ev.set_find_query("call");
         assert_eq!(ev.take_choice().map(|choice| choice.id), Some(11));
+    }
+
+    // ── A right-click's providers ───────────────────────────────────────────
+
+    use fixtures::{on_dates, on_task_lines, on_tokens, Provides};
+
+    /// A task with an owner whose name is misspelled, one whose name is
+    /// not, a misspelled word, a tag and a due date; and a line that is no
+    /// task, with the same misspelled word.
+    const PROVIDED: &str = "- [ ] Mail @sam and @lee teh #home [due:: 2026-11-30]\nplain teh text";
+
+    fn provider(answer: fn(&Clicked) -> Option<Requested>) -> Arc<Provides> {
+        Arc::new(Provides::new(answer))
+    }
+
+    /// An editor on `kind` over [`PROVIDED`], laid out, the caret on its
+    /// second line, whose host has tasks on, rejects `sam` and `teh`, and
+    /// names `providers`, when it names any.
+    fn providing(kind: BackendKind, providers: Option<Vec<Provider>>) -> EditorView {
+        let mut ev = EditorView::with_backend(kind, PROVIDED);
+        ev.set_tasks(Some(wren_markdown::TaskOptions {
+            today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+        }));
+        let proofreader = fixtures::Rejects::new(&["sam", "teh"]).suggesting(TEH);
+        ev.set_proofreader(Some(Arc::new(proofreader)));
+        if let Some(providers) = providers {
+            ev.set_menu_providers(providers);
+        }
+        ev.move_cursor(at(1, 5));
+        ev.content.lay_out(iced::Size::new(600.0, 400.0));
+        ev
+    }
+
+    /// What a right-click on the character at `column` of `line` asks for.
+    fn right_click(ev: &EditorView, line: usize, column: usize) -> Option<SpellEvent> {
+        match ev.right_click_message(line, column) {
+            Some(Message::Spell(event)) => Some(event),
+            None => None,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A right-click at `at` that the provider at `provider` takes, as a
+    /// widget publishes it that saw the editor as it is now.
+    fn context(ev: &EditorView, provider: usize, at: iced::Point) -> SpellEvent {
+        let clicked = ev.clicked(at);
+        let answer = match (ev.providers().get(provider), &clicked) {
+            (Some(Provider::Host(asked)), Some(clicked)) => {
+                popover::provided(&**asked, provider, clicked)
+            }
+            _ => popover::Answer::Nothing,
+        };
+        let print = clicked.map_or(0, |clicked| {
+            popover::fingerprint(provider, &clicked, &answer)
+        });
+        SpellEvent::Context {
+            provider,
+            at,
+            seen: Seen::new(ev.edition(), print),
+        }
+    }
+
+    /// The middle of the character at `column` of `line`, relative to the
+    /// text origin.
+    fn middle(ev: &EditorView, line: usize, column: usize) -> iced::Point {
+        let row = ev.content.anchor_row(line, column..column + 1).unwrap();
+        row.bounds().center()
+    }
+
+    /// The columns of [`PROVIDED`]'s first line a right-click is tried on.
+    const MAIL: usize = 7;
+    const SAM: usize = 13;
+    const LEE: usize = 21;
+    const TEH_WORD: usize = 26;
+    const DATE: usize = 44;
+
+    #[test]
+    fn a_right_click_a_provider_takes_opens_its_menu_and_the_row_comes_back_with_it() {
+        let (tokens, lines) = (provider(on_tokens), provider(on_task_lines));
+        let providers = || {
+            Some(vec![
+                Provider::Spelling,
+                Provider::Host(tokens.clone()),
+                Provider::Host(lines.clone()),
+            ])
+        };
+        let mut ev = providing(BackendKind::Owned, providers());
+        let Some(
+            event @ SpellEvent::Context {
+                provider: 1, at, ..
+            },
+        ) = right_click(&ev, 0, LEE)
+        else {
+            panic!("{:?}", right_click(&ev, 0, LEE));
+        };
+        assert_eq!(at, middle(&ev, 0, LEE));
+        assert_eq!(event, context(&ev, 1, at));
+        tokens.asked.lock().expect("asked").clear();
+        assert!(!ev.spell(event));
+        let labels = strings(&["Rename", "Remove"]);
+        assert_eq!(
+            popover_of(&ev),
+            Some((Mode::Menu, 0, 20..24, "@lee".into(), labels, Some(0)))
+        );
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(ev.cursor(), at_caret());
+        // The editor asked the provider the click names, once, about the
+        // place the click was on, and the one after it never.
+        let asked = tokens.asked();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(Some(&asked[0]), ev.clicked(at).as_ref());
+        assert!(lines.asked().is_empty());
+
+        // The row chosen comes back with its provider, once, and not as a
+        // row of a popover the host opened itself.
+        assert!(!ev.spell(SpellEvent::Accept(1)));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.take_choice(), None);
+        let row = Choice {
+            id: 31,
+            mode: Mode::Menu,
+            line: 0,
+            range: 20..24,
+        };
+        assert_eq!(ev.take_provided(), Some((1, row)));
+        assert_eq!(ev.take_provided(), None);
+        assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows(&["mine"])));
+        assert_eq!(ev.popover().and_then(Popover::provider), None);
+        ev.spell(SpellEvent::Accept(0));
+        assert_eq!(ev.take_provided(), None);
+        assert_eq!(ev.take_choice().map(|choice| choice.id), Some(10));
+        // Nor does it outlive the text it was chosen over, or the event
+        // after it.
+        for after in [
+            |ev: &mut EditorView| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            },
+            |ev: &mut EditorView| {
+                ev.spell(SpellEvent::Close);
+            },
+        ] {
+            ev = providing(BackendKind::Owned, providers());
+            ev.spell(right_click(&ev, 0, LEE).unwrap());
+            ev.spell(SpellEvent::AcceptSelected);
+            after(&mut ev);
+            assert_eq!(ev.take_provided(), None);
+        }
+
+        // Whatever was open closes first: suggestions the host had open
+        // when the click was made give way to the menu.
+        let mut ev = providing(BackendKind::Owned, providers());
+        ev.popover = Some(Popover::new(
+            Mode::Suggest,
+            1,
+            0..5,
+            "plain".into(),
+            rows(&["a"]),
+        ));
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        // A popover opened after the click was made closes too, but the
+        // click, which was made with none of it there, opens nothing.
+        let mut ev = providing(BackendKind::Owned, providers());
+        let event = right_click(&ev, 0, LEE).unwrap();
+        ev.spell(SpellEvent::OpenAt(middle(&ev, 0, TEH_WORD)));
+        assert!(ev.spell_menu().is_some());
+        ev.spell(event);
+        assert!(ev.popover().is_none());
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        let on_mail = middle(&ev, 0, MAIL);
+        ev.spell(context(&ev, 1, on_mail));
+        assert!(ev.popover().is_none());
+        // Only the provider the click names is asked: the one after it,
+        // which takes that place, does not answer for it.
+        assert!(lines.asked().is_empty());
+        ev.spell(context(&ev, 2, on_mail));
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(2));
+        assert_eq!(ev.popover().map(Popover::range), Some(2..5));
+
+        // A place in the list that holds no provider of the host's opens
+        // nothing, the suggestions menu's included, which has its own
+        // event; nor does a point off the text.
+        let on_teh = middle(&ev, 0, TEH_WORD);
+        for (provider, at) in [(0, on_teh), (3, on_teh), (2, iced::Point::new(10.0, 900.0))] {
+            ev.close_popover();
+            ev.spell(context(&ev, provider, at));
+            assert!(ev.popover().is_none(), "{provider} {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_right_click_opens_a_menu_only_over_what_the_widget_saw() {
+        let (tokens, lines) = (provider(on_tokens), provider(on_task_lines));
+        let providers = || {
+            Some(vec![
+                Provider::Spelling,
+                Provider::Host(tokens.clone()),
+                Provider::Host(lines.clone()),
+            ])
+        };
+        // The click as a widget publishes it, and then what the host
+        // does before it hands the click to the editor.
+        type Step = fn(&mut EditorView);
+        let steps: [(&str, Step, bool); 7] = [
+            ("nothing", |_| {}, true),
+            ("a caret motion", |ev| ev.move_cursor(at(0, 3)), true),
+            (
+                "a new note",
+                |ev| ev.replace_text("- [ ] @ann #x", false),
+                false,
+            ),
+            (
+                "the same text loaded again",
+                |ev| ev.replace_text(PROVIDED, true),
+                false,
+            ),
+            (
+                "an edit",
+                |ev| {
+                    ev.perform(Action::Edit(Edit::Insert('x')));
+                },
+                false,
+            ),
+            ("tasks turned off", |ev| ev.set_tasks(None), false),
+            (
+                "another engine",
+                |ev| {
+                    ev.set_backend(BackendKind::Iced, PROVIDED);
+                },
+                false,
+            ),
+        ];
+        for (name, step, opens) in steps {
+            let mut ev = providing(BackendKind::Owned, providers());
+            let event = right_click(&ev, 0, LEE).unwrap();
+            step(&mut ev);
+            ev.content.lay_out(iced::Size::new(600.0, 400.0));
+            let asked = tokens.asked().len();
+            assert!(!ev.spell(event), "{name}");
+            assert_eq!(ev.popover().is_some(), opens, "{name}");
+            // Over another text the provider is not even asked.
+            assert_eq!(tokens.asked().len(), asked + usize::from(opens), "{name}");
+            // A row chosen by a key of the same batch chooses nothing.
+            ev.spell(SpellEvent::Accept(1));
+            assert_eq!(ev.take_provided().is_some(), opens, "{name}");
+        }
+        // A click bound to another place or another answer opens nothing:
+        // here one on the tag, handed over as if it had been on the owner.
+        let mut ev = providing(BackendKind::Owned, providers());
+        let (Some(SpellEvent::Context { seen, .. }), on_lee) =
+            (right_click(&ev, 0, 30), middle(&ev, 0, LEE))
+        else {
+            panic!("no click on the tag");
+        };
+        ev.spell(SpellEvent::Context {
+            provider: 1,
+            at: on_lee,
+            seen,
+        });
+        assert!(ev.popover().is_none());
+        // A click that closes what is open, whatever it finds.
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, rows(&["mine"])));
+        ev.spell(SpellEvent::Context {
+            provider: 1,
+            at: on_lee,
+            seen,
+        });
+        assert!(ev.popover().is_none());
+    }
+
+    #[test]
+    fn naming_other_providers_drops_what_waited_on_the_old_ones() {
+        let (tokens, dates) = (provider(on_tokens), provider(on_dates));
+        let list = |second: &Arc<Provides>| {
+            vec![
+                Provider::Spelling,
+                Provider::Host(tokens.clone()),
+                Provider::Host(second.clone()),
+            ]
+        };
+        // A row chosen from one provider's menu is not handed to whoever
+        // has its place in another list.
+        let mut ev = providing(BackendKind::Owned, Some(list(&dates)));
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        ev.spell(SpellEvent::Accept(0));
+        let replaced = provider(on_tokens);
+        ev.set_menu_providers(vec![Provider::Spelling, Provider::Host(replaced.clone())]);
+        assert_eq!(ev.take_provided(), None);
+        // The same list named again keeps it.
+        let mut ev = providing(BackendKind::Owned, Some(list(&dates)));
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        ev.spell(SpellEvent::Accept(0));
+        ev.set_menu_providers(list(&dates));
+        assert_eq!(
+            ev.take_provided().map(|(provider, row)| (provider, row.id)),
+            Some((1, 30))
+        );
+        // Nor is the keyboard a provider took.
+        let mut ev = providing(BackendKind::Owned, Some(list(&dates)));
+        ev.spell(right_click(&ev, 0, DATE).unwrap());
+        ev.set_menu_providers(list(&provider(on_dates)));
+        assert_eq!(ev.take_keyboard(), None);
+        // A click the widget published over the old list opens nothing,
+        // and the provider that now has its place is not asked.
+        let mut ev = providing(BackendKind::Owned, Some(list(&dates)));
+        let click = right_click(&ev, 0, LEE).unwrap();
+        ev.set_menu_providers(vec![Provider::Spelling, Provider::Host(replaced.clone())]);
+        ev.spell(click);
+        assert!(ev.popover().is_none() && replaced.asked().is_empty());
+        // A row of a popover the host opened itself waits on no provider.
+        let mut ev = providing(BackendKind::Owned, Some(list(&dates)));
+        assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows(&["mine"])));
+        ev.spell(SpellEvent::Accept(0));
+        ev.set_menu_providers(Vec::new());
+        assert_eq!(ev.take_choice().map(|choice| choice.id), Some(10));
+    }
+
+    #[test]
+    fn a_right_press_left_to_the_editor_closes_a_menu_or_asks_for_the_suggestions_menu_alone() {
+        let (tokens, lines, dates) = (
+            provider(on_tokens),
+            provider(on_task_lines),
+            provider(on_dates),
+        );
+        let providers = || {
+            Some(vec![
+                Provider::Spelling,
+                Provider::Host(tokens.clone()),
+                Provider::Host(dates.clone()),
+                Provider::Host(lines.clone()),
+            ])
+        };
+        let press = |ev: &mut EditorView, line: usize, column: usize| {
+            let at = middle(ev, line, column);
+            assert!(!ev.spell(SpellEvent::Press(MenuPress::Right(at))));
+            (
+                ev.spell_menu().map(|menu| menu.word().to_owned()),
+                ev.popover().and_then(Popover::provider),
+            )
+        };
+        // The widget leaves a right press to the editor without asking
+        // the host's providers, so none answers it, whatever it is on: it
+        // opens the suggestions menu on a misspelled word, as it always
+        // did, and with a menu open it only closes that.
+        let mut ev = providing(BackendKind::Owned, providers());
+        assert_eq!(press(&mut ev, 0, TEH_WORD), (Some("teh".into()), None));
+        assert_eq!(press(&mut ev, 0, LEE), (None, None));
+        for column in [LEE, MAIL, DATE] {
+            assert_eq!(press(&mut ev, 0, column), (None, None), "{column}");
+            assert_eq!((ev.take_keyboard(), ev.take_provided()), (None, None));
+        }
+        assert_eq!(press(&mut ev, 1, 2), (None, None));
+        let asked = [&tokens, &lines, &dates].map(|provider| provider.asked().len());
+        assert_eq!(asked, [0; 3]);
+        // A provider's menu that is open closes for it, as any.
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        assert_eq!(press(&mut ev, 0, TEH_WORD), (None, None));
+
+        // The suggestions menu answers only where no provider of the
+        // host's comes before it, which would have to be asked first; a
+        // host that left it out of its list gets none.
+        for providers in [
+            vec![Provider::Host(tokens.clone())],
+            vec![Provider::Host(tokens.clone()), Provider::Spelling],
+            Vec::new(),
+        ] {
+            let mut ev = providing(BackendKind::Owned, Some(providers));
+            assert_eq!(press(&mut ev, 0, TEH_WORD), (None, None));
+            assert_eq!(press(&mut ev, 0, LEE), (None, None));
+        }
+        // A host that names no providers has it alone, as it always had.
+        let mut ev = providing(BackendKind::Owned, None);
+        assert_eq!(press(&mut ev, 0, TEH_WORD), (Some("teh".into()), None));
+        ev.close_popover();
+        assert_eq!(press(&mut ev, 0, LEE), (None, None));
+        // The classic engine opens nothing.
+        let mut ev = providing(BackendKind::Iced, providers());
+        for column in [TEH_WORD, LEE, MAIL] {
+            assert_eq!(press(&mut ev, 0, column), (None, None), "{column}");
+        }
+    }
+
+    #[test]
+    fn a_row_named_with_its_menu_is_chosen_from_that_menu_or_from_none() {
+        let tokens = provider(on_tokens);
+        let providers = || Some(vec![Provider::Spelling, Provider::Host(tokens.clone())]);
+        // The provider's menu, open, and its number.
+        let opened = || {
+            let mut ev = providing(BackendKind::Owned, providers());
+            ev.spell(right_click(&ev, 0, LEE).unwrap());
+            let menu = ev.popover().unwrap().instance();
+            (ev, menu)
+        };
+        let chosen = |ev: &mut EditorView, menu: u64, row: Option<usize>| {
+            assert!(!ev.spell(SpellEvent::AcceptOf { menu, row }));
+            let provided = ev.take_provided().map(|(provider, row)| (provider, row.id));
+            (provided, ev.take_choice().map(|row| row.id))
+        };
+        // A row, or the selected row, of the menu that is open.
+        let (mut ev, menu) = opened();
+        assert_eq!(chosen(&mut ev, menu, Some(1)), (Some((1, 31)), None));
+        assert!(ev.popover().is_none());
+        let (mut ev, menu) = opened();
+        ev.spell(SpellEvent::Move(1));
+        assert_eq!(chosen(&mut ev, menu, None), (Some((1, 31)), None));
+        // A choice that names another menu is no one's: the menu that is
+        // open stays as it is.
+        let (mut ev, menu) = opened();
+        for other in [menu + 1, menu - 1, 0] {
+            assert_eq!(chosen(&mut ev, other, Some(1)), (None, None), "{other}");
+            assert_eq!(ev.popover().map(Popover::instance), Some(menu), "{other}");
+        }
+        // The host opens a menu of its own between the click and the row
+        // chosen after it: the row was not chosen from that menu, though
+        // it has a row there, and nothing is chosen.
+        let (mut ev, menu) = opened();
+        assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows(&["mine", "also mine"])));
+        let hosts = ev.popover().unwrap().instance();
+        assert_ne!(hosts, menu);
+        for row in [Some(1), None] {
+            assert_eq!(chosen(&mut ev, menu, row), (None, None), "{row:?}");
+            assert_eq!(ev.popover().map(Popover::instance), Some(hosts), "{row:?}");
+        }
+        // So with the same menu opened again, by another click on the
+        // same place, and with nothing open.
+        let (mut ev, menu) = opened();
+        ev.close_popover();
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        let again = ev.popover().unwrap().instance();
+        assert_eq!(chosen(&mut ev, menu, Some(1)), (None, None));
+        assert_eq!(ev.popover().map(Popover::instance), Some(again));
+        ev.close_popover();
+        assert_eq!(chosen(&mut ev, again, Some(1)), (None, None));
+
+        // Every popover the editor opens has its own number, whoever
+        // opens it: the suggestions menu, the host, a source, a provider.
+        let mut ev = providing(BackendKind::Owned, providers());
+        ev.set_menu_source(Some(Arc::new(fixtures::Menus::default())));
+        let mut numbers = Vec::new();
+        ev.spell(SpellEvent::OpenAt(middle(&ev, 0, TEH_WORD)));
+        numbers.push(ev.popover().unwrap().instance());
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, rows(&["mine"])));
+        numbers.push(ev.popover().unwrap().instance());
+        ev.move_cursor(at(0, 8));
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        numbers.push(ev.popover().unwrap().instance());
+        ev.close_popover();
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        numbers.push(ev.popover().unwrap().instance());
+        assert!(
+            numbers.windows(2).all(|pair| pair[0] < pair[1]),
+            "{numbers:?}"
+        );
+    }
+
+    #[test]
+    fn a_right_click_without_a_window_only_closes_an_open_menu() {
+        let tokens = provider(on_tokens);
+        let providers = || Some(vec![Provider::Spelling, Provider::Host(tokens.clone())]);
+        let closes = |ev: &EditorView, line: usize, column: usize| {
+            matches!(
+                ev.right_click_message(line, column),
+                Some(Message::Spell(SpellEvent::Close))
+            )
+        };
+        // The suggestions menu is open: a press anywhere in the text,
+        // where a provider would answer or where none would, closes it
+        // and does no more, as the pointer's press does (rule 4.4.5).
+        let mut ev = providing(BackendKind::Owned, providers());
+        ev.spell(SpellEvent::OpenAt(middle(&ev, 0, TEH_WORD)));
+        assert!(ev.spell_menu().is_some());
+        for (line, column) in [
+            (1, 2),
+            (0, MAIL),
+            (0, LEE),
+            (0, TEH_WORD),
+            (0, PROVIDED.len() - 15),
+        ] {
+            assert!(closes(&ev, line, column), "{line} {column}");
+        }
+        ev.spell(SpellEvent::Close);
+        assert!(ev.popover().is_none());
+        // So it is with a menu of the host's, a provider's included.
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        assert!(closes(&ev, 1, 2) && closes(&ev, 0, LEE));
+        // A place that is not in the text is no press at all.
+        assert_eq!(right_click(&ev, 9, 0), None);
+        assert_eq!(right_click(&ev, 1, 99), None);
+        // Suggestions leave presses to the text: the providers are asked.
+        ev.close_popover();
+        ev.popover = Some(Popover::new(
+            Mode::Suggest,
+            1,
+            0..5,
+            "plain".into(),
+            rows(&["a"]),
+        ));
+        assert_eq!(right_click(&ev, 1, 2), None);
+        assert!(matches!(
+            right_click(&ev, 0, LEE),
+            Some(SpellEvent::Context { provider: 1, .. })
+        ));
+    }
+
+    fn at_caret() -> Cursor {
+        at(1, 5)
+    }
+
+    #[test]
+    fn a_provider_that_takes_the_keyboard_opens_nothing_of_the_editors() {
+        let dates = provider(on_dates);
+        let mut ev = providing(
+            BackendKind::Owned,
+            Some(vec![Provider::Spelling, Provider::Host(dates.clone())]),
+        );
+        let Some(
+            event @ SpellEvent::Context {
+                provider: 1, at, ..
+            },
+        ) = right_click(&ev, 0, DATE)
+        else {
+            panic!("{:?}", right_click(&ev, 0, DATE));
+        };
+        assert!(!ev.spell(event));
+        assert!(ev.popover().is_none());
+        assert_eq!((ev.text().as_str(), ev.cursor()), (PROVIDED, at_caret()));
+        // The host is handed the click, once, with the place clicked, for
+        // what it opens there.
+        let (provider, clicked) = ev.take_keyboard().unwrap();
+        assert_eq!((provider, clicked.line, clicked.column), (1, 0, Some(DATE)));
+        assert_eq!(Some(&clicked), ev.clicked(at).as_ref());
+        assert_eq!(on_dates(&clicked), Some(Requested::Keyboard));
+        assert_eq!(ev.take_keyboard(), None);
+        // It does not outlive the next event, or the text.
+        ev.spell(event);
+        ev.spell(SpellEvent::Close);
+        assert_eq!(ev.take_keyboard(), None);
+        ev.spell(event);
+        ev.perform(Action::Edit(Edit::Insert('x')));
+        assert_eq!(ev.take_keyboard(), None);
+        let ev = providing(
+            BackendKind::Owned,
+            Some(vec![Provider::Spelling, Provider::Host(dates.clone())]),
+        );
+        // Elsewhere on the line the provider passes, and no one answers.
+        assert_eq!(right_click(&ev, 0, MAIL), None);
+    }
+
+    #[test]
+    fn the_suggestions_menu_alone_answers_a_right_click_until_the_host_names_providers() {
+        // A host that names no providers has the suggestions menu, as an
+        // editor always had.
+        let ev = providing(BackendKind::Owned, None);
+        for column in [SAM, TEH_WORD] {
+            let at = middle(&ev, 0, column);
+            assert_eq!(right_click(&ev, 0, column), Some(SpellEvent::OpenAt(at)));
+        }
+        for column in [MAIL, LEE, DATE] {
+            assert_eq!(right_click(&ev, 0, column), None, "{column}");
+        }
+        // A list without it opens none for a right-click; the menu's own
+        // events open it as before.
+        let mut ev = providing(BackendKind::Owned, Some(Vec::new()));
+        assert_eq!(right_click(&ev, 0, TEH_WORD), None);
+        ev.spell(SpellEvent::OpenAt(middle(&ev, 0, TEH_WORD)));
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+
+        // Naming the same providers again leaves a provider's menu open,
+        // and naming others closes it, which no other popover minds.
+        let (tokens, lines) = (provider(on_tokens), provider(on_task_lines));
+        let list = |ev: &mut EditorView, swapped: bool| {
+            let mut providers = vec![
+                Provider::Host(tokens.clone()),
+                Provider::Host(lines.clone()),
+            ];
+            if swapped {
+                providers.reverse();
+            }
+            providers.insert(0, Provider::Spelling);
+            ev.set_menu_providers(providers);
+        };
+        let mut ev = providing(BackendKind::Owned, None);
+        list(&mut ev, false);
+        let event = right_click(&ev, 0, LEE).unwrap();
+        ev.spell(event);
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        list(&mut ev, false);
+        assert_eq!(ev.popover().and_then(Popover::provider), Some(1));
+        list(&mut ev, true);
+        assert!(ev.popover().is_none());
+        // In the new order the other provider is first, and takes it.
+        assert!(matches!(
+            right_click(&ev, 0, LEE),
+            Some(SpellEvent::Context { provider: 1, .. })
+        ));
+        ev.spell(right_click(&ev, 0, LEE).unwrap());
+        assert_eq!(ev.popover().map(Popover::range), Some(2..5));
+        ev.close_popover();
+        ev.spell(SpellEvent::OpenAt(middle(&ev, 0, TEH_WORD)));
+        list(&mut ev, false);
+        assert!(ev.spell_menu().is_some());
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, rows(&["mine"])));
+        list(&mut ev, true);
+        assert!(ev.popover().is_some());
+    }
+
+    #[test]
+    fn the_classic_engine_asks_no_provider_and_reads_the_same_place() {
+        use wren_markdown::span::SpanKind;
+        let tokens = provider(on_tokens);
+        let providers = || Some(vec![Provider::Spelling, Provider::Host(tokens.clone())]);
+        let mut ev = providing(BackendKind::Iced, providers());
+        for column in [MAIL, SAM, LEE, TEH_WORD, DATE] {
+            assert_eq!(right_click(&ev, 0, column), None, "{column}");
+        }
+        let at = middle(&ev, 0, LEE);
+        ev.spell(context(&ev, 1, at));
+        assert!(ev.popover().is_none() && tokens.asked().is_empty());
+        // What lies under a point is read on both engines; only the owned
+        // one has misspellings, so there a misspelled owner is its name.
+        for kind in BackendKind::ALL {
+            let ev = providing(kind, providers());
+            let clicked = ev.clicked(middle(&ev, 0, SAM)).unwrap();
+            assert_eq!((clicked.line, clicked.column), (0, Some(SAM)), "{kind:?}");
+            assert_eq!(clicked.text, PROVIDED.lines().next().unwrap(), "{kind:?}");
+            assert_eq!(clicked.spans, ev.spans_at(0), "{kind:?}");
+            match (kind, &clicked.hit) {
+                (BackendKind::Owned, Some(Hit::Misspelling(word))) => assert_eq!(*word, 12..15),
+                (BackendKind::Iced, Some(Hit::Span(span))) => {
+                    assert!(matches!(span.kind, SpanKind::Owner { .. }) && span.range == (11..15));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(ev.clicked(iced::Point::new(10.0, 900.0)), None, "{kind:?}");
+        }
     }
 }

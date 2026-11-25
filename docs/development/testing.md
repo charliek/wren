@@ -123,6 +123,7 @@ and press the real suggest key. These requests drive it:
 | `editor.spell` | none | `enabled` (the setting on the advanced engine), `ready` (the dictionary has loaded), `marks` as the last frame drew them (none while a board is shown, since the editor draws nothing then), and `menu`, or `null` when it is closed. |
 | `editor.spell_event` | `event`: `open_at_caret`, `move`, `hover`, `accept`, or `close`; `arg`: a row for `hover` and `accept`, a step for `move` | The `editor.get` snapshot, after the event went through the app as the widget would send it. |
 | `editor.key` | `key`: a name (`up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `shift`, `control`, `alt`, `super`, `caps_lock`) or one character; `mods`: a list of `shift`, `ctrl`, `alt`, `logo` | The `editor.get` snapshot, after the editor's own key routing and then the app's key handling, as a real press in the focused editor. |
+| `editor.right_click` | `line`, `column`: the byte offset in the line of the character to click on, or the line's length for the end of its text | The `editor.get` snapshot, after a right-click on that character went through the app as the editor would send it: on a misspelled word, the menu opens, and with a menu open the click only closes it. A click nothing answers changes nothing. |
 
 Each mark has its `line`, its `start` and `end` byte offsets in the line,
 its `word`, whether it is `shown` (the caret at its end hides it), and the

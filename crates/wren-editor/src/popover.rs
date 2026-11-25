@@ -43,8 +43,7 @@
 //!   menu, so the keys after the request are routed against its rows, as
 //!   in any later batch. A source may answer that the host takes the
 //!   keyboard for something of its own ([`Requested::Keyboard`]): the keys
-//!   after the request are then the host's, handed over as
-//!   [`PopoverEvent::Stroke`].
+//!   after the request are then no one's, and dropped (see below).
 //! - A character typed asks the host's [`SuggestSource`] the same way, and
 //!   the keys after it find the suggestions open, or not.
 //!
@@ -61,6 +60,52 @@
 //! the host as [`PopoverEvent::Key`] and a press in the editor as
 //! [`PopoverEvent::Press`], which the host resolves against the menu it
 //! opened, or handles as the editor would with none.
+//!
+//! **A right-click** asks the host's [`Provider`]s, in the host's order,
+//! about what lies under the pointer ([`Clicked`]): the first whose answer
+//! opens something takes the click, and those after it are not asked. With
+//! none, the press changes nothing. The suggestions menu is one of them,
+//! the editor's own ([`Provider::Spelling`]), first unless the host says
+//! otherwise: it takes a misspelled word, and is asked for as it always
+//! was ([`PopoverEvent::OpenAt`]). A [`MenuProvider`] of the host's is
+//! asked like a [`MenuSource`], in the same pass, and the host is handed
+//! [`PopoverEvent::Context`], which names the provider that answered and
+//! what the widget saw ([`Seen`]): the text's revision, the host's list
+//! of providers, the popovers the editor had opened, the place clicked,
+//! the provider and its answer. The editor asks that provider again and
+//! opens its menu only if all of it is still so: a click made over a note
+//! the host has since replaced opens nothing.
+//!
+//! A row of a provider's menu is chosen from that menu or from none. Each
+//! popover the editor opens has its own number ([`Popover::instance`]),
+//! and a row of a provider's menu is chosen by an event that names the
+//! menu ([`PopoverEvent::AcceptOf`]): the editor ignores it when another
+//! popover is open by then, one the host opened in between included.
+//!
+//! The widget asks about the text as it is laid out, which is the text
+//! the host has only while the batch's earlier messages left the text,
+//! the caret and the scroll alone. After any that did not, **no provider
+//! of the host's is asked, and none answers**: the press does what it did
+//! before there were providers, which is to ask for the suggestions menu
+//! on a word drawn as misspelled, where the suggestions menu comes before
+//! every provider of the host's, and otherwise nothing. So does a right
+//! press the host resolves after a request for the suggestions menu in
+//! its batch ([`PopoverEvent::Press`]). The user right-clicks again.
+//!
+//! **Input in the frame of a handover is dropped.** When a source or a
+//! provider has the host take the keyboard ([`Requested::Keyboard`]), the
+//! host opens its own, a field say, and gives it the keyboard once it has
+//! been handed the request or the click, which is after the batch. What
+//! the batch still holds was typed before the user could see that field,
+//! and belongs to no one. So from the handover to the end of its batch
+//! the widget takes every key the host's field would take and does
+//! nothing with it; a composition the note had under way is cancelled,
+//! and no preedit or committed text reaches the note. What that
+//! composition, or one begun in that batch, commits later is discarded
+//! too, though the editor still has the keyboard then. Escape and the
+//! host's shortcuts stay the host's, as with nothing open. From the next
+//! batch on the host's field has the keyboard, by the toolkit's own
+//! focus.
 //!
 //! **Escape** belongs to whoever has the keyboard when it is pressed, with
 //! no Ctrl, Alt or logo key held, which is the Escape a host navigates
@@ -84,14 +129,18 @@
 pub(crate) mod menu;
 
 use std::cell::{Cell, RefCell};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::Arc;
 
 use iced::advanced::mouse::click::Kind;
 use iced::keyboard::key::{Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text_editor::{Action, Edit, KeyPress};
 use iced::Point;
+use wren_markdown::span::LineSpans;
 
+use crate::hit::Hit;
 use crate::Message;
 
 pub(crate) use menu::{fit, height, measure, place, Fit, InOrder, MenuOverlay};
@@ -120,7 +169,7 @@ pub enum Mode {
 /// A key that chooses a row of a menu directly: one key, alone or with
 /// Shift. Letters match in either case and by the key's position on a
 /// keyboard of another script; Ctrl, Alt and the logo key never match.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Accelerator {
     key: char,
     shift: bool,
@@ -193,6 +242,12 @@ pub struct Popover {
     /// The suggestions menu, whose word is tinted while it is open and
     /// which leaves Escape to the host's key handling.
     spelling: bool,
+    /// The provider of the host's list that answered the right-click this
+    /// opened for.
+    provider: Option<usize>,
+    /// Which of the popovers the editor has opened this is; see
+    /// [`Self::instance`].
+    instance: u64,
 }
 
 impl Popover {
@@ -215,6 +270,8 @@ impl Popover {
             accelerators: Vec::with_capacity(rows.len()),
             selected: (!rows.is_empty()).then_some(0),
             spelling: false,
+            provider: None,
+            instance: 0,
         };
         for row in rows {
             popover.labels.push(row.label);
@@ -232,6 +289,32 @@ impl Popover {
 
     pub(crate) fn is_spelling(&self) -> bool {
         self.spelling
+    }
+
+    /// A menu the provider at `index` of the host's list answered a
+    /// right-click with.
+    pub(crate) fn provided_by(mut self, index: usize) -> Self {
+        self.provider = Some(index);
+        self
+    }
+
+    /// The place in the host's list of the [`MenuProvider`] whose answer to
+    /// a right-click this is; `None` for any other popover.
+    pub fn provider(&self) -> Option<usize> {
+        self.provider
+    }
+
+    /// The popover as the `instance`th the editor opens.
+    pub(crate) fn opened_as(mut self, instance: u64) -> Self {
+        self.instance = instance;
+        self
+    }
+
+    /// A number no other popover the editor opens has: each one it opens
+    /// gets the next. What a queued choice of a row names its menu by
+    /// ([`PopoverEvent::AcceptOf`]).
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     /// Move the selection `delta` rows, stopping at the ends.
@@ -332,16 +415,217 @@ pub trait MenuSource: Send + Sync {
     fn menu(&self, id: u32, line: &str, caret: usize) -> Option<Requested>;
 }
 
-/// A [`MenuSource`]'s answer.
+/// A [`MenuSource`]'s answer, or a [`MenuProvider`]'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Requested {
-    /// A menu of these rows, hung under `range` of the caret's line.
+    /// A menu of these rows, hung under `range` of the line asked about:
+    /// the caret's, or the one under a right-click.
     Rows { range: Range<usize>, rows: Vec<Row> },
     /// Something of the host's own that takes the keyboard, a field say,
-    /// which the host opens when it is handed the request. The keys
-    /// pressed after the request in its batch of events are the host's:
-    /// each goes to it as a [`PopoverEvent::Stroke`].
+    /// which the host opens, and gives the keyboard, when it is handed the
+    /// request or the right-click ([`PopoverEvent::Context`], then
+    /// [`crate::EditorView::take_keyboard`]). What is typed or composed
+    /// after it in its batch of events is dropped: it reaches neither the
+    /// note nor the host (see the module's description).
     Keyboard,
+}
+
+/// What a right-click fell on: what a [`MenuProvider`] is asked about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clicked {
+    /// The line of the row under the pointer.
+    pub line: usize,
+    /// The line's text, without its ending.
+    pub text: String,
+    /// The line's typed spans: what says, of a place outside every one of
+    /// them, what kind of line it is on.
+    pub spans: LineSpans,
+    /// The byte of the line at which the glyph under the pointer starts.
+    /// `None` where the row has no glyph under the pointer: past the end
+    /// of its text, or left of it.
+    pub column: Option<usize>,
+    /// What lies there: a misspelled word before one of the line's typed
+    /// spans ([`Hit`]). `None` outside every span.
+    pub hit: Option<Hit>,
+}
+
+/// What the host gives the editor to open a menu of its own for a
+/// right-click; see [`Provider`]. It must answer the same for the same
+/// place, for the reason a [`SuggestSource`] must: the widget asks it
+/// while it routes a batch of events, and the editor asks it again when
+/// the host hands it the right-click.
+pub trait MenuProvider: Send + Sync {
+    /// What a right-click on `clicked` opens. `None` passes the click to
+    /// the next provider, as an answer that opens nothing does: a menu
+    /// with no rows, or one whose range is off the line.
+    fn menu(&self, clicked: &Clicked) -> Option<Requested>;
+}
+
+/// One of the providers a right-click asks, in the order of the host's
+/// list ([`crate::EditorView::set_menu_providers`]). The first whose
+/// answer opens something takes the click.
+#[derive(Clone)]
+pub enum Provider {
+    /// The editor's own: the suggestions menu on a misspelled word, from
+    /// the host's [`crate::Proofreader`]. It takes every misspelled word,
+    /// so it comes first unless the host puts a provider before it; a list
+    /// without it opens no suggestions menu for a right-click.
+    Spelling,
+    /// One of the host's.
+    Host(Arc<dyn MenuProvider>),
+}
+
+impl Provider {
+    /// Whether `self` and `other` are the same provider: the editor's
+    /// own, or one object of the host's.
+    pub(crate) fn is(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Spelling, Self::Spelling) => true,
+            (Self::Host(one), Self::Host(other)) => {
+                std::ptr::addr_eq(Arc::as_ptr(one), Arc::as_ptr(other))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether the suggestions menu comes before every provider of the host's
+/// in `providers`, so that it answers a right-click on a misspelled word
+/// with no other provider asked first. Not in a list without it.
+pub(crate) fn spelling_leads(providers: &[Provider]) -> bool {
+    matches!(providers.first(), Some(Provider::Spelling))
+}
+
+/// The list a host that names none has: the suggestions menu alone.
+pub(crate) static SPELLING_ALONE: [Provider; 1] = [Provider::Spelling];
+
+/// The text and the list of providers a right-click was asked about: the
+/// editor's, as the widget was built over them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Edition {
+    /// [`crate::EditorView::revision`] of the text.
+    pub revision: u64,
+    /// Which list of providers the host had named; it changes with the
+    /// list.
+    pub list: u64,
+    /// How many popovers the editor had opened: the
+    /// [`Popover::instance`] of the last, and one less than the next's.
+    pub opened: u64,
+}
+
+/// What the widget saw of a right-click that a provider of the host's
+/// took, carried by [`PopoverEvent::Context`]: the text, the list of
+/// providers, the popovers opened so far, the place clicked, and which
+/// provider answered what for it. The editor opens nothing for a click it
+/// finds otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seen {
+    edition: Edition,
+    /// The place and the answer ([`fingerprint`]).
+    answer: u64,
+}
+
+impl Seen {
+    pub(crate) fn new(edition: Edition, answer: u64) -> Self {
+        Self { edition, answer }
+    }
+
+    /// Whether the click was made over this text and this list of
+    /// providers, with no popover opened since.
+    pub(crate) fn over(self, edition: Edition) -> bool {
+        self.edition == edition
+    }
+
+    /// Whether the click was on the place, and answered with the answer,
+    /// that `print` is of.
+    pub(crate) fn answered(self, print: u64) -> bool {
+        self.answer == print
+    }
+}
+
+/// A number that stands for the place a right-click fell on, for the
+/// provider at `provider` of the host's list, and for what it answered:
+/// two that differ in the line, its text, the glyph, the hit, the
+/// provider, or the menu's anchor or any of its rows have different
+/// numbers, but for chance.
+pub(crate) fn fingerprint(provider: usize, clicked: &Clicked, answer: &Answer) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (provider, clicked.line, &clicked.text, clicked.column).hash(&mut hasher);
+    match &clicked.hit {
+        None => 0_u8.hash(&mut hasher),
+        Some(Hit::Misspelling(word)) => (1_u8, word).hash(&mut hasher),
+        // A span's kind is read from the line's text, which is hashed.
+        Some(Hit::Span(span)) => (2_u8, &span.range).hash(&mut hasher),
+    }
+    match answer {
+        Answer::Nothing => 0_u8.hash(&mut hasher),
+        Answer::Keyboard => 1_u8.hash(&mut hasher),
+        Answer::Menu(menu) => {
+            (2_u8, menu.line, &menu.range, &menu.text).hash(&mut hasher);
+            (&menu.labels, &menu.ids, &menu.accelerators).hash(&mut hasher);
+            (menu.selected, menu.provider).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Who takes a right-click; see [`taken`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Taken {
+    /// The suggestions menu.
+    Spelling,
+    /// One of the host's providers.
+    Host {
+        /// Its place in the host's list.
+        provider: usize,
+        /// What it opens: a menu, or the host's own with the keyboard.
+        answer: Answer,
+        /// The place clicked and the answer ([`fingerprint`]).
+        fingerprint: u64,
+    },
+}
+
+/// The first of `providers` that takes a right-click. `misspelled` says
+/// whether a misspelled word is under the pointer, which is all the
+/// suggestions menu takes, and `clicked` what is there for the host's
+/// providers, each looked for only when a provider that reads it is asked.
+/// A provider after the one that takes the click is not asked.
+pub(crate) fn taken(
+    providers: &[Provider],
+    misspelled: impl FnOnce() -> bool,
+    clicked: impl FnOnce() -> Option<Clicked>,
+) -> Option<Taken> {
+    let (mut misspelled, mut clicked) = (Some(misspelled), Some(clicked));
+    let (mut word, mut place) = (false, None);
+    for (index, provider) in providers.iter().enumerate() {
+        match provider {
+            Provider::Spelling => {
+                if let Some(misspelled) = misspelled.take() {
+                    word = misspelled();
+                }
+                if word {
+                    return Some(Taken::Spelling);
+                }
+            }
+            Provider::Host(provider) => {
+                if let Some(clicked) = clicked.take() {
+                    place = clicked();
+                }
+                let Some(place) = &place else {
+                    continue;
+                };
+                let answer = provided(&**provider, index, place);
+                if answer != Answer::Nothing {
+                    return Some(Taken::Host {
+                        provider: index,
+                        fingerprint: fingerprint(index, place, &answer),
+                        answer,
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The caret's line: what a source is asked about.
@@ -389,16 +673,35 @@ pub(crate) enum Answer {
 /// its rows, unless it has none or its range is off the line or inside a
 /// character. The widget and the editor both ask through here.
 pub(crate) fn requested(source: &dyn MenuSource, id: u32, line: &CaretLine) -> Answer {
-    match source.menu(id, &line.text, line.caret) {
+    answered(
+        source.menu(id, &line.text, line.caret),
+        line.index,
+        &line.text,
+    )
+}
+
+/// What `provider`, the one at `index` of the host's list, opens for a
+/// right-click on `clicked`: a menu of its rows, checked as a request's
+/// are ([`requested`]). The widget and the editor both ask through here.
+pub(crate) fn provided(provider: &dyn MenuProvider, index: usize, clicked: &Clicked) -> Answer {
+    match answered(provider.menu(clicked), clicked.line, &clicked.text) {
+        Answer::Menu(menu) => Answer::Menu(menu.provided_by(index)),
+        answer => answer,
+    }
+}
+
+/// What a source's or a provider's `answer` about line `index`, which
+/// reads `text`, opens.
+fn answered(answer: Option<Requested>, index: usize, text: &str) -> Answer {
+    match answer {
         None => Answer::Nothing,
         Some(Requested::Keyboard) => Answer::Keyboard,
-        Some(Requested::Rows { range, rows }) => line
-            .text
+        Some(Requested::Rows { range, rows }) => text
             .get(range.clone())
             .filter(|_| !rows.is_empty())
             .map_or(Answer::Nothing, |anchored| {
                 let anchored = anchored.to_owned();
-                Answer::Menu(Popover::new(Mode::Menu, line.index, range, anchored, rows))
+                Answer::Menu(Popover::new(Mode::Menu, index, range, anchored, rows))
             }),
     }
 }
@@ -413,6 +716,18 @@ pub enum PopoverEvent {
     /// Open the suggestions menu for the misspelled word under a
     /// right-click.
     OpenAt(Point),
+    /// A right-click at `at` that the host's [`MenuProvider`] at
+    /// `provider` of its list takes: whatever popover was open closes, and
+    /// that provider is asked what to open for what lies there. Its menu
+    /// opens only if the text, the host's list of providers, the place
+    /// and the answer are all as the widget saw them (`seen`), and a
+    /// provider that takes the keyboard has it on the same terms
+    /// ([`crate::EditorView::take_keyboard`]).
+    Context {
+        provider: usize,
+        at: Point,
+        seen: Seen,
+    },
     /// Move the selection by this many rows.
     Move(i32),
     /// The pointer is over this row.
@@ -424,16 +739,27 @@ pub enum PopoverEvent {
     /// Enter sends it, so it chooses the row the host's popover holds even
     /// when keys of one batch were routed before the host had opened it.
     AcceptSelected,
+    /// Choose `row` of the popover that is the `menu`th the editor opened
+    /// ([`Popover::instance`]), or its selected row for no `row`; the
+    /// editor does nothing if another popover is open by then, or none. A
+    /// row of a menu that one of the host's providers opened is chosen
+    /// this way, by its accelerator, Enter or the pointer, so that a
+    /// choice waiting to be applied is never made from another menu.
+    AcceptOf {
+        menu: u64,
+        row: Option<usize>,
+    },
     /// A press of one of a popover's keys with no modifier: of
     /// suggestions' while they are open, or of the suggestions menu's after
     /// a request for it earlier in the same batch of events, which may not
     /// have opened it. An open popover takes the key as its mode does;
     /// with none open the editor handles the press as it would any other.
     Key(MenuKey),
-    /// A key pressed after a request, earlier in the same batch, that the
-    /// host answers by taking the keyboard ([`Requested::Keyboard`]): the
-    /// key and what it types, for the host to give to what it opened. The
-    /// editor does nothing with it.
+    /// A key the field of a host that took the keyboard
+    /// ([`Requested::Keyboard`]) would take: the key and what it types.
+    /// The widget publishes none: in the batch of a handover it drops
+    /// those keys (see the module's description). The editor does nothing
+    /// with one handed to it.
     Stroke(Stroke),
     /// Open the popover the host names with this number: whatever popover
     /// was open closes, and the host's [`MenuSource`] is asked what to
@@ -463,7 +789,9 @@ pub enum MenuPress {
     /// it in its batch that the host resolves is a click. The host takes it
     /// as a single click when the press it follows only closed the menu.
     Left(Point, Kind),
-    /// A right press, which opens the menu on a misspelled word.
+    /// A right press, which opens the menu on a misspelled word. No
+    /// provider of the host's answers it: the widget, which leaves the
+    /// press to the host, did not ask them.
     Right(Point),
 }
 
@@ -535,8 +863,8 @@ impl MenuKey {
     }
 }
 
-/// A key press the editor hands to a host that took the keyboard
-/// ([`PopoverEvent::Stroke`]): the key and what it types.
+/// A key press that the field of a host that took the keyboard would
+/// take ([`PopoverEvent::Stroke`]): the key and what it types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stroke {
     key: StrokeKey,
@@ -607,7 +935,7 @@ pub(crate) enum Opened {
     Menu,
     Suggest,
     /// Nothing of the editor's: the host took the keyboard for a request
-    /// of this batch ([`Requested::Keyboard`]).
+    /// or a right-click of this batch ([`Requested::Keyboard`]).
     Keyboard,
 }
 
@@ -696,7 +1024,9 @@ impl OpenMenu {
 /// The popover `message` leaves `open` as, once the host applies it, and
 /// what it is, for every message whose effect the message alone decides.
 /// (A request for a popover of the host's and a character typed open what
-/// the host's sources say, which [`Now::publish`] asks.)
+/// the host's sources say, which [`Now::publish`] asks, and a right-click
+/// a provider of the host's takes opens what the provider answered
+/// ([`Now::publish_provided`]).)
 ///
 /// A request for the suggestions menu may or may not open a menu
 /// ([`OpenMenu::opening`]), and so may a right press the host resolves:
@@ -778,6 +1108,11 @@ pub(crate) struct Now {
     held: Cell<bool>,
     /// The line Escape hid suggestions for.
     suppressed: Cell<Option<usize>>,
+    /// The host had a popover open when the batch started.
+    handed: Cell<bool>,
+    /// Every message of the batch so far left the text, the caret and the
+    /// scroll as the host has them; see [`Self::sees_the_text`].
+    still: Cell<bool>,
 }
 
 impl Now {
@@ -789,12 +1124,27 @@ impl Now {
             typed: RefCell::new(Some(String::new())),
             held: Cell::new(false),
             suppressed: Cell::new(None),
+            handed: Cell::new(false),
+            still: Cell::new(true),
         }
     }
 
     /// Start from `popover`, the one the host has open.
     pub(crate) fn start(&self, popover: Option<&Popover>) {
+        self.handed.set(popover.is_some());
         self.set(popover.map(|popover| (popover.mode().into(), OpenMenu::of(popover))));
+    }
+
+    /// Whether the widget sees the text as the host will have it when it
+    /// applies the next message, laid out and scrolled as it is drawn: a
+    /// right-click is then on what the host will find under it. Not once a
+    /// message of the batch may have changed the text, moved the caret or
+    /// scrolled, as the host scrolls to show what it opens. Nor once the
+    /// popover the host had open has closed: a row chosen from it with the
+    /// pointer closes it, which the overlay publishes and the widget does
+    /// not see, and the host acts on the row.
+    pub(crate) fn sees_the_text(&self) -> bool {
+        self.still.get() && !(self.handed.get() && self.open.get().is_none())
     }
 
     /// The line the host hides suggestions for.
@@ -846,6 +1196,16 @@ impl Now {
         })
     }
 
+    /// The [`Popover::instance`] of what is open, of the popover the host
+    /// handed over (`handed`) or the one opened in this batch, when it is
+    /// a menu one of the host's providers opened: what a choice of one of
+    /// its rows names it by.
+    pub(crate) fn bound(&self, handed: Option<&Popover>) -> Option<u64> {
+        let own = self.own.borrow();
+        let open = self.open.get().and(own.as_ref().or(handed))?;
+        open.provider().map(|_| open.instance())
+    }
+
     /// The host closes its popover without a message from the widget.
     pub(crate) fn closed(&self) {
         self.open.set(None);
@@ -876,7 +1236,28 @@ impl Now {
         start: &dyn Fn() -> Option<CaretLine>,
         sources: Sources<'_>,
     ) {
+        self.publish_provided(shell, message, start, sources, Answer::Nothing);
+    }
+
+    /// [`Self::publish`], for a right-click that a provider of the host's
+    /// takes ([`PopoverEvent::Context`]): `provided` is what the widget
+    /// found that provider to answer for the text as it is laid out, as
+    /// the editor will open it, or else open nothing. The widget publishes
+    /// such a click only while it sees the text as the host will
+    /// ([`Self::sees_the_text`]).
+    pub(crate) fn publish_provided(
+        &self,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        message: Message,
+        start: &dyn Fn() -> Option<CaretLine>,
+        sources: Sources<'_>,
+        provided: Answer,
+    ) {
         let was = self.live();
+        let known = was.is_some_and(|(_, menu)| !menu.opening);
+        if !leaves_the_view(&message, known) {
+            self.still.set(false);
+        }
         let held = self
             .held
             .replace(matches!(message, Message::Spell(PopoverEvent::Hold)));
@@ -896,29 +1277,31 @@ impl Now {
                 Some(typed) => typed.push(c),
                 None => *typed = None,
             }
-        } else if !keeps_the_text(&message, was.is_some_and(|(_, menu)| !menu.opening)) {
+        } else if !keeps_the_text(&message, known) {
             self.typed.replace(None);
         }
         let line = || self.line(start);
 
         let mut next = after(was, &message);
         let mut own = None;
+        let mut answered = |answer| match answer {
+            Answer::Menu(popover) => {
+                let open = OpenMenu::of(&popover);
+                own = Some(popover);
+                Some((Opened::Menu, open))
+            }
+            Answer::Keyboard => Some((Opened::Keyboard, OpenMenu::OPENING)),
+            Answer::Nothing => None,
+        };
         match &message {
             Message::Spell(PopoverEvent::Request(id)) => {
                 let answer = (sources.menus.zip(line()))
                     .map_or(Answer::Nothing, |(source, line)| {
                         requested(source, *id, &line)
                     });
-                next = match answer {
-                    Answer::Menu(popover) => {
-                        let open = OpenMenu::of(&popover);
-                        own = Some(popover);
-                        Some((Opened::Menu, open))
-                    }
-                    Answer::Keyboard => Some((Opened::Keyboard, OpenMenu::OPENING)),
-                    Answer::Nothing => None,
-                };
+                next = answered(answer);
             }
+            Message::Spell(PopoverEvent::Context { .. }) => next = answered(provided),
             Message::Action(Action::Edit(Edit::Insert(_))) if !held => {
                 let popover = (sources.suggestions.zip(line()))
                     .filter(|(_, line)| self.suppressed.get() != Some(line.index))
@@ -965,6 +1348,7 @@ fn keeps_the_text(message: &Message, open: bool) -> bool {
         Message::Spell(event) => match event {
             PopoverEvent::OpenAtCaret
             | PopoverEvent::OpenAt(_)
+            | PopoverEvent::Context { .. }
             | PopoverEvent::Request(_)
             | PopoverEvent::Move(_)
             | PopoverEvent::Hover(_)
@@ -977,10 +1361,30 @@ fn keeps_the_text(message: &Message, open: bool) -> bool {
             PopoverEvent::Key(_)
             | PopoverEvent::Accept(_)
             | PopoverEvent::AcceptSelected
+            | PopoverEvent::AcceptOf { .. }
             | PopoverEvent::Press(MenuPress::Left(..)) => false,
         },
         _ => false,
     }
+}
+
+/// Whether `message` leaves the text, the caret and the scroll where they
+/// were, with `open` as [`keeps_the_text`] has it. A message that asks for
+/// a popover does not: the host scrolls to show what it opens. Nor does a
+/// stroke, which is the host's.
+fn leaves_the_view(message: &Message, open: bool) -> bool {
+    keeps_the_text(message, open)
+        && !matches!(
+            message,
+            Message::Spell(
+                PopoverEvent::OpenAtCaret
+                    | PopoverEvent::OpenAt(_)
+                    | PopoverEvent::Context { .. }
+                    | PopoverEvent::Request(_)
+                    | PopoverEvent::Stroke(_)
+                    | PopoverEvent::Press(MenuPress::Right(_))
+            )
+        )
 }
 
 #[cfg(test)]
@@ -1575,5 +1979,482 @@ mod tests {
             assert_eq!(now.live(), None);
         }
         assert_eq!(messages.len(), 2);
+    }
+
+    // ── A right-click's providers ───────────────────────────────────────────
+
+    /// A place on the line `text`, in no span.
+    fn place(text: &str, column: Option<usize>) -> Clicked {
+        Clicked {
+            line: 3,
+            text: text.to_owned(),
+            spans: LineSpans::default(),
+            column,
+            hit: None,
+        }
+    }
+
+    fn host(answer: fn(&Clicked) -> Option<Requested>) -> (Arc<fixtures::Provides>, Provider) {
+        let provides = Arc::new(fixtures::Provides::new(answer));
+        (provides.clone(), Provider::Host(provides))
+    }
+
+    #[test]
+    fn a_providers_answer_is_checked_as_a_requests_is_and_names_its_provider() {
+        let task = place("- [ ] call", Some(7));
+        let Answer::Menu(menu) =
+            provided(&fixtures::Provides::new(fixtures::on_task_lines), 4, &task)
+        else {
+            panic!("no menu");
+        };
+        assert_eq!(
+            (menu.mode(), menu.line(), menu.range(), menu.text()),
+            (Mode::Menu, 3, 2..5, "[ ]")
+        );
+        assert_eq!((menu.provider(), menu.labels().len()), (Some(4), 3));
+        assert!(!menu.is_spelling());
+        // A popover opened any other way names none.
+        assert_eq!(
+            Popover::new(Mode::Menu, 0, 0..1, "a".into(), rows(&["a"])).provider(),
+            None
+        );
+        // No answer, no rows, or a range off the line or inside a
+        // character open nothing; the keyboard is the host's to take.
+        fn no_rows(_: &Clicked) -> Option<Requested> {
+            Some(Requested::Rows {
+                range: 0..1,
+                rows: Vec::new(),
+            })
+        }
+        fn off_the_line(clicked: &Clicked) -> Option<Requested> {
+            let end = clicked.text.len() + 1;
+            let range = if clicked.text.is_ascii() {
+                0..end
+            } else {
+                0..1
+            };
+            Some(Requested::Rows {
+                range,
+                rows: vec![Row::new(1, "a")],
+            })
+        }
+        let ask =
+            |answer, clicked: &Clicked| provided(&fixtures::Provides::new(answer), 0, clicked);
+        assert_eq!(
+            ask(fixtures::on_task_lines, &place("call", Some(1))),
+            Answer::Nothing
+        );
+        assert_eq!(ask(no_rows, &task), Answer::Nothing);
+        assert_eq!(ask(off_the_line, &task), Answer::Nothing);
+        assert_eq!(ask(off_the_line, &place("é", Some(0))), Answer::Nothing);
+        assert_eq!(
+            ask(fixtures::off_task_lines, &place("call", None)),
+            Answer::Keyboard
+        );
+    }
+
+    #[test]
+    fn the_first_provider_whose_answer_opens_something_takes_a_right_click() {
+        use std::cell::Cell;
+        fn no_rows(_: &Clicked) -> Option<Requested> {
+            Some(Requested::Rows {
+                range: 0..1,
+                rows: Vec::new(),
+            })
+        }
+        // What each case looked for: the word, and the place.
+        let looked = (Cell::new(0), Cell::new(0));
+        let ask = |providers: &[Provider], word: bool, text: Option<&str>| {
+            looked.0.set(0);
+            looked.1.set(0);
+            let misspelled = || {
+                looked.0.set(looked.0.get() + 1);
+                word
+            };
+            let clicked = || {
+                looked.1.set(looked.1.get() + 1);
+                text.map(|text| place(text, Some(0)))
+            };
+            let taken = taken(providers, misspelled, clicked).map(|taken| match taken {
+                Taken::Spelling => (None, None),
+                Taken::Host {
+                    provider,
+                    answer,
+                    fingerprint: found,
+                } => {
+                    // The fingerprint is of the place asked about and
+                    // the answer given.
+                    let place = place(text.unwrap(), Some(0));
+                    assert_eq!(found, fingerprint(provider, &place, &answer));
+                    match answer {
+                        Answer::Menu(menu) => (Some(provider), menu.provider()),
+                        _ => (Some(provider), None),
+                    }
+                }
+            });
+            (taken, looked.0.get(), looked.1.get())
+        };
+        let (lines, on_lines) = host(fixtures::on_task_lines);
+        let (others, off_lines) = host(fixtures::off_task_lines);
+        let (empty, opens_nothing) = host(no_rows);
+        let spelling = Some((None, None));
+        let task = Some("- [ ] call");
+
+        // The suggestions menu first: a misspelled word is its own, and
+        // nothing is looked for or asked on behalf of those after it.
+        let list = [Provider::Spelling, on_lines.clone(), off_lines.clone()];
+        assert_eq!(ask(&list, true, task), (spelling, 1, 0));
+        assert!(lines.asked().is_empty() && others.asked().is_empty());
+        // With no such word, the first of the host's that answers; the
+        // place is looked for once, and the one after it is not asked.
+        assert_eq!(ask(&list, false, task), (Some((Some(1), Some(1))), 1, 1));
+        assert_eq!((lines.asked().len(), others.asked().len()), (1, 0));
+        // One that passes hands the click on, as one whose answer opens
+        // nothing does; taking the keyboard is an answer.
+        assert_eq!(
+            ask(&list, false, Some("call")),
+            (Some((Some(2), None)), 1, 1)
+        );
+        assert_eq!((lines.asked().len(), others.asked().len()), (2, 1));
+        let list = [opens_nothing.clone(), on_lines.clone()];
+        assert_eq!(ask(&list, true, task), (Some((Some(1), Some(1))), 0, 1));
+        assert_eq!(empty.asked().len(), 1);
+
+        // A provider ahead of the suggestions menu takes a misspelled
+        // word it answers for, and the word is not even looked for.
+        let list = [on_lines.clone(), Provider::Spelling];
+        assert_eq!(ask(&list, true, task), (Some((Some(0), Some(0))), 0, 1));
+        assert_eq!(ask(&list, true, Some("call")), (spelling, 1, 1));
+        assert_eq!(ask(&list, false, Some("call")), (None, 1, 1));
+        // Off the text there is no place to ask the host's about, and
+        // the suggestions menu has no word there.
+        let asked = lines.asked().len();
+        assert_eq!(ask(&list, false, None), (None, 1, 1));
+        assert_eq!(lines.asked().len(), asked);
+        // No provider, no menu: an empty list takes nothing.
+        assert_eq!(ask(&[], true, task), (None, 0, 0));
+        // One provider is itself and no other.
+        assert!(Provider::Spelling.is(&Provider::Spelling) && on_lines.is(&on_lines.clone()));
+        assert!(!on_lines.is(&off_lines) && !on_lines.is(&Provider::Spelling));
+        assert!(!on_lines.is(&host(fixtures::on_task_lines).1));
+    }
+
+    /// What the test provider of task lines answers for a click on `text`.
+    fn answer(text: &str) -> Answer {
+        provided(
+            &fixtures::Provides::new(fixtures::on_task_lines),
+            1,
+            &place(text, Some(0)),
+        )
+    }
+
+    fn context() -> PopoverEvent {
+        PopoverEvent::Context {
+            provider: 1,
+            at: Point::ORIGIN,
+            seen: Seen::new(Edition::default(), 0),
+        }
+    }
+
+    impl Batch {
+        /// Publish a right-click that the provider answered `provided`.
+        fn right_click(&mut self, provided: Answer) -> Option<(Opened, OpenMenu)> {
+            let mut messages = Vec::new();
+            let mut shell = iced::advanced::Shell::new(&mut messages);
+            let start = self.start.clone();
+            self.now.publish_provided(
+                &mut shell,
+                Message::Spell(context()),
+                &|| Some(start.clone()),
+                Sources::default(),
+                provided,
+            );
+            self.published += messages.len();
+            self.now.live()
+        }
+    }
+
+    #[test]
+    fn a_right_click_opens_what_its_provider_answered_for_the_keys_after_it() {
+        let mut batch = Batch::over("- [ ] call", 8);
+        let opened = batch.right_click(answer("- [ ] call"));
+        assert_eq!(
+            opened,
+            Some((
+                Opened::Menu,
+                OpenMenu {
+                    selected: Some(0),
+                    items: 3,
+                    opening: false
+                }
+            ))
+        );
+        assert_eq!(batch.published, 1);
+        // Its rows are known for the keys that follow, it is the widget's
+        // own until the host has drawn it, and it is no suggestions menu.
+        let (spelling, accelerators) = batch.now.rows(None);
+        assert!(!spelling && batch.now.is_own());
+        assert_eq!(
+            accelerators,
+            [' ', '/', 'x'].map(|key| Some(Accelerator::plain(key)))
+        );
+        let moved = batch.event(PopoverEvent::Move(1));
+        assert_eq!(moved.map(|(_, menu)| menu.selected), Some(Some(1)));
+        assert_eq!(batch.event(PopoverEvent::Accept(1)), None);
+        // It closes whatever was open, the provider's answer or none.
+        let mut batch = Batch::over("- [ ] ", 6);
+        batch.publish(typed('d'));
+        assert_eq!(batch.publish(typed('u')), suggesting(2));
+        assert_eq!(batch.right_click(Answer::Nothing), None);
+        // A provider that has the host take the keyboard: the keys after
+        // the click are the host's.
+        let mut batch = Batch::over("call", 2);
+        let keyboard = Some((Opened::Keyboard, OpenMenu::OPENING));
+        assert_eq!(batch.right_click(Answer::Keyboard), keyboard);
+        assert!(!batch.now.is_own());
+        assert_eq!(batch.event(PopoverEvent::Stroke(letter())), keyboard);
+        // A right-click asks for a popover and changes no text, so the
+        // caret's line stays known for a request after it.
+        let mut batch = Batch::over("- [ ] call", 8);
+        batch.right_click(Answer::Nothing);
+        assert!(batch
+            .event(PopoverEvent::Request(fixtures::STATUS))
+            .is_some());
+        // As any message `after` does not decide alone, it closes a copy.
+        assert_eq!(
+            after(Some((Opened::Menu, OPEN)), &Message::Spell(context())),
+            None
+        );
+    }
+
+    #[test]
+    fn the_widget_vouches_for_a_right_click_only_while_it_sees_the_text_as_the_host_will() {
+        let open = || answer("- [ ] call");
+        // What leaves the text, the caret and the scroll alone: the
+        // popover's own events on a popover known to be open.
+        let mut batch = Batch::over("- [ ] ", 6);
+        assert!(batch.now.sees_the_text());
+        batch.publish(typed('d'));
+        batch.publish(typed('u'));
+        assert!(!batch.now.sees_the_text(), "typing changes the text");
+        let menu = Popover::new(Mode::Menu, 0, 2..5, "[ ]".into(), rows(&["a", "b"]));
+        let passive = [
+            PopoverEvent::Move(1),
+            PopoverEvent::Hover(0),
+            PopoverEvent::Key(MenuKey::Down),
+        ];
+        for event in passive {
+            let mut batch = Batch::over("- [ ] call", 8);
+            batch.now.start(Some(&menu));
+            batch.event(event);
+            assert!(batch.now.sees_the_text(), "{event:?}");
+            // The menu the host has open is in the way of a right-click,
+            // which the widget takes as a press that closes it; once the
+            // batch has, the click is vouched for no more (see below).
+        }
+        // Closing leaves the text too, with nothing handed over to close.
+        for event in [
+            PopoverEvent::Close,
+            PopoverEvent::Dismiss,
+            PopoverEvent::Hold,
+        ] {
+            let mut batch = Batch::over("- [ ] call", 8);
+            batch.event(event);
+            assert!(batch.now.sees_the_text(), "{event:?}");
+            assert!(batch.right_click(open()).is_some(), "{event:?}");
+        }
+        // Whatever may change the text, move the caret or scroll: an
+        // edit, a motion, a scroll, a click, a row chosen, a key with
+        // nothing known to be open, a stroke the host's field may act on,
+        // and every request for a popover, which the host scrolls to show.
+        for message in [
+            typed('d'),
+            Message::Action(Action::Edit(Edit::Backspace)),
+            Message::Action(Action::Move(Motion::Left)),
+            Message::Action(Action::Scroll { lines: 1 }),
+            Message::Action(Action::Click(Point::ORIGIN)),
+            Message::Intent(Intent::Backspace),
+            Message::Undo,
+            Message::Spell(PopoverEvent::Accept(0)),
+            Message::Spell(PopoverEvent::AcceptSelected),
+            Message::Spell(PopoverEvent::Key(MenuKey::Down)),
+            Message::Spell(PopoverEvent::Key(MenuKey::Enter)),
+            Message::Spell(PopoverEvent::Stroke(letter())),
+            Message::Spell(PopoverEvent::OpenAtCaret),
+            Message::Spell(PopoverEvent::OpenAt(Point::ORIGIN)),
+            Message::Spell(PopoverEvent::Press(MenuPress::Right(Point::ORIGIN))),
+            Message::Spell(PopoverEvent::Request(9)),
+            Message::Spell(context()),
+        ] {
+            let mut batch = Batch::over("- [ ] call", 8);
+            batch.publish(message.clone());
+            assert!(!batch.now.sees_the_text(), "{message:?}");
+            // A click published all the same would open what it is
+            // handed: the widget is the one that must not publish it.
+            assert!(batch.right_click(open()).is_some(), "{message:?}");
+        }
+        // A popover the host had open that has closed in the batch: a row
+        // chosen from it with the pointer closes the copy with no word to
+        // the widget, and the host acts on the row.
+        for mode in [Mode::Menu, Mode::Suggest] {
+            let handed = Popover::new(mode, 0, 2..5, "[ ]".into(), rows(&["a", "b"]));
+            let batch = Batch::over("- [ ] call", 8);
+            batch.now.start(Some(&handed));
+            assert!(batch.now.sees_the_text(), "{mode:?}");
+            let mut messages = Vec::new();
+            let mut shell = iced::advanced::Shell::new(&mut messages);
+            let accept = Message::Spell(PopoverEvent::Accept(1));
+            publish(&mut shell, batch.now.cell(), accept);
+            assert!(!batch.now.sees_the_text(), "{mode:?}");
+        }
+        // Suggestions the host has open stay open under a right-click's
+        // routing, and the click is vouched for.
+        let handed = Popover::new(Mode::Suggest, 0, 2..5, "[ ]".into(), rows(&["a"]));
+        let mut batch = Batch::over("- [ ] call", 8);
+        batch.now.start(Some(&handed));
+        assert!(batch.now.sees_the_text());
+        assert_eq!(
+            batch.right_click(open()).map(|(opened, _)| opened),
+            Some(Opened::Menu)
+        );
+    }
+
+    #[test]
+    fn what_the_widget_saw_of_a_right_click_binds_all_that_the_click_depends_on() {
+        let task = place("- [ ] call", Some(7));
+        let menu = |clicked: &Clicked| {
+            provided(
+                &fixtures::Provides::new(fixtures::on_task_lines),
+                1,
+                clicked,
+            )
+        };
+        let print = fingerprint(1, &task, &menu(&task));
+        assert_eq!(print, fingerprint(1, &task.clone(), &menu(&task)));
+        // Which popover the editor opens it as is no part of the answer.
+        let Answer::Menu(opened) = menu(&task) else {
+            panic!("no menu");
+        };
+        assert_eq!(
+            print,
+            fingerprint(1, &task, &Answer::Menu(opened.opened_as(9)))
+        );
+        // Another line, another text, another glyph, another hit, another
+        // provider, another answer: each is another click. So is the
+        // keyboard taken by another provider, which has no menu to tell
+        // the two apart by.
+        let mut others = vec![
+            (
+                1,
+                Clicked {
+                    line: 4,
+                    ..task.clone()
+                },
+                menu(&task),
+            ),
+            (1, place("- [ ] calls", Some(7)), menu(&task)),
+            (1, place("- [ ] call", Some(8)), menu(&task)),
+            (1, place("- [ ] call", None), menu(&task)),
+            (2, task.clone(), menu(&task)),
+            (1, task.clone(), Answer::Keyboard),
+            (2, task.clone(), Answer::Keyboard),
+            (1, task.clone(), Answer::Nothing),
+        ];
+        let misspelled = Clicked {
+            hit: Some(Hit::Misspelling(6..10)),
+            ..task.clone()
+        };
+        others.push((1, misspelled, menu(&task)));
+        let other_word = Clicked {
+            hit: Some(Hit::Misspelling(6..9)),
+            ..task.clone()
+        };
+        others.push((1, other_word, menu(&task)));
+        let fewer = Popover::new(Mode::Menu, 3, 2..5, "[ ]".into(), rows(&["Open"]));
+        others.push((1, task.clone(), Answer::Menu(fewer.provided_by(1))));
+        let elsewhere = Popover::new(Mode::Menu, 3, 0..1, "-".into(), fixtures::status_rows());
+        others.push((1, task.clone(), Answer::Menu(elsewhere.provided_by(1))));
+        let mut prints: Vec<u64> = (others.iter())
+            .map(|(provider, clicked, answer)| fingerprint(*provider, clicked, answer))
+            .collect();
+        prints.push(print);
+        let all = prints.len();
+        prints.sort_unstable();
+        prints.dedup();
+        assert_eq!(prints.len(), all);
+
+        // And it is bound to the text's revision, the list of providers,
+        // and the popovers opened so far.
+        let edition = Edition {
+            revision: 7,
+            list: 2,
+            opened: 4,
+        };
+        let seen = Seen::new(edition, print);
+        assert!(seen.over(edition) && seen.answered(print));
+        assert!(!seen.answered(print.wrapping_add(1)));
+        for other in [
+            Edition {
+                revision: 8,
+                ..edition
+            },
+            Edition { list: 3, ..edition },
+            Edition {
+                opened: 5,
+                ..edition
+            },
+            Edition::default(),
+        ] {
+            assert!(!seen.over(other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_row_of_a_providers_menu_is_chosen_by_the_menus_own_number() {
+        // A provider's menu, the host's own, and the suggestions menu,
+        // each as the seventh popover the editor opened.
+        let rows = || rows(&["a", "b"]);
+        let provided = Popover::new(Mode::Menu, 0, 2..5, "[ ]".into(), rows())
+            .provided_by(1)
+            .opened_as(7);
+        let hosts = Popover::new(Mode::Menu, 0, 2..5, "[ ]".into(), rows()).opened_as(7);
+        let spelling = Popover::new(Mode::Menu, 0, 2..5, "[ ]".into(), rows())
+            .spelling()
+            .opened_as(7);
+        assert_eq!((provided.instance(), provided.provider()), (7, Some(1)));
+        // Only a provider's menu binds the choice of its rows, whether the
+        // host has drawn it or the widget opened it in this batch.
+        let now = Now::new();
+        assert_eq!(now.bound(Some(&provided)), None, "nothing is open");
+        now.start(Some(&provided));
+        assert_eq!(now.bound(Some(&provided)), Some(7));
+        for other in [&hosts, &spelling] {
+            now.start(Some(other));
+            assert_eq!(now.bound(Some(other)), None);
+        }
+        let mut batch = Batch::over("- [ ] call", 8);
+        let Answer::Menu(own) = answer("- [ ] call") else {
+            panic!("no menu");
+        };
+        batch.right_click(Answer::Menu(own.opened_as(3)));
+        assert_eq!(batch.now.bound(None), Some(3));
+        // A row so chosen closes the copy, as any chosen row.
+        let chosen = PopoverEvent::AcceptOf {
+            menu: 3,
+            row: Some(1),
+        };
+        assert_eq!(batch.event(chosen), None);
+        assert_eq!(batch.now.bound(None), None);
+        assert!(!batch.now.sees_the_text());
+    }
+
+    #[test]
+    fn the_suggestions_menu_leads_a_list_it_is_first_in() {
+        let (_, host) = host(fixtures::on_task_lines);
+        assert!(spelling_leads(&SPELLING_ALONE));
+        assert!(spelling_leads(&[Provider::Spelling, host.clone()]));
+        assert!(!spelling_leads(&[host.clone(), Provider::Spelling]));
+        assert!(!spelling_leads(&[host]));
+        assert!(!spelling_leads(&[]));
     }
 }
