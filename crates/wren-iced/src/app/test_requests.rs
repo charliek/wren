@@ -90,10 +90,13 @@ impl App {
                         keymap,
                         trigger,
                         self.editor.markdown_assist(),
+                        self.preferences.tasks,
                     );
                     if !matches!(
                         route,
-                        wren_editor::KeyRoute::Intent(_) | wren_editor::KeyRoute::Suggest
+                        wren_editor::KeyRoute::Intent(_)
+                            | wren_editor::KeyRoute::Suggest
+                            | wren_editor::KeyRoute::Command(_)
                     ) {
                         return Err("The editor does not route this command's key".into());
                     }
@@ -280,7 +283,18 @@ impl App {
                 // same App::edit path.
                 self.ensure_editor_ready()?;
                 let intent = intent(string(params, "intent")?)?;
-                let task = self.edit(wren_editor::Message::Intent(intent));
+                // As the widget routes the toggle's key: with tasks on (and
+                // Markdown assist, without which the key is not the
+                // toggle's) the app runs it, writing the stamps.
+                let message = if intent == wren_editor::Intent::ToggleTask
+                    && self.preferences.tasks
+                    && self.editor.markdown_assist()
+                {
+                    wren_editor::Message::Command(CommandId::ToggleTask.payload())
+                } else {
+                    wren_editor::Message::Intent(intent)
+                };
+                let task = self.edit(message);
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task.chain(focus_editor()));
             }
@@ -292,6 +306,11 @@ impl App {
                 let task = self.update(Message::Editor(wren_editor::Message::Spell(event)));
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task);
+            }
+            "editor.open_menu" => {
+                self.ensure_editor_ready()?;
+                self.open_command_menu(params)?;
+                request.respond(Ok(self.editor_snapshot()));
             }
             "editor.key" => {
                 self.ensure_editor_ready()?;
@@ -778,7 +797,82 @@ impl App {
                 iced::font::Family::Name(name) => name,
                 _ => "",
             },
+            "popover":self.popover_snapshot(),
         })
+    }
+
+    /// The editor's open popover, whichever it is: the suggestions menu,
+    /// a menu of the app's or suggestions. Each row has its number and,
+    /// when the number is a command's payload, that command's key.
+    fn popover_snapshot(&self) -> Value {
+        let Some(popover) = self.editor.popover() else {
+            return Value::Null;
+        };
+        let rows = (popover.labels().iter().enumerate())
+            .map(|(row, label)| {
+                let id = popover.id(row);
+                let command = (popover.kind(row) == Some(wren_editor::RowKind::Command))
+                    .then(|| id.and_then(CommandId::from_payload).map(CommandId::key))
+                    .flatten();
+                json!({"id":id,"label":label,"command":command})
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "mode":match popover.mode() {
+                wren_editor::Mode::Menu => "menu",
+                wren_editor::Mode::Suggest => "suggest",
+            },
+            "spelling":self.editor.spell_menu().is_some(),
+            "line":popover.line(),"start":popover.range().start,"end":popover.range().end,
+            "text":popover.text(),"rows":rows,"selected":popover.selected(),
+        })
+    }
+
+    /// Open a menu of the app's at the caret whose rows run the commands
+    /// `params.rows` name (`{"command", "label", "key", "shift"}`), as a
+    /// menu of task rows does: for driving any popover's keys from a test.
+    /// A command that does not exist in this run (a task command with
+    /// tasks off) is refused, and so is a menu under the palette or a
+    /// dialog, which would close it. The classic engine opens none.
+    fn open_command_menu(&mut self, params: &Value) -> Result<(), String> {
+        use wren_editor::{Accelerator, Anchor, Mode, Row};
+        if self.palette.is_some() || self.dialog.is_some() {
+            return Err("Close the palette or dialog before opening a menu".into());
+        }
+        let rows = params
+            .get("rows")
+            .and_then(Value::as_array)
+            .ok_or("rows must be a list")?
+            .iter()
+            .map(|row| {
+                let id = CommandId::parse(string(row, "command")?).ok_or("Unknown command ID")?;
+                if (id.tasks() && !self.preferences.tasks)
+                    || (id.boards() && !self.preferences.boards)
+                {
+                    return Err("The command is unavailable".to_owned());
+                }
+                let label = row.get("label").and_then(Value::as_str).unwrap_or(id.key());
+                let mut row_ = Row::command(id.payload(), label);
+                if let Some(key) = row.get("key").and_then(Value::as_str) {
+                    let mut chars = key.chars();
+                    let (Some(key), None) = (chars.next(), chars.next()) else {
+                        return Err("key must be one character".to_owned());
+                    };
+                    let shift = row.get("shift").and_then(Value::as_bool).unwrap_or(false);
+                    row_ = row_.accelerator(if shift {
+                        Accelerator::shifted(key)
+                    } else {
+                        Accelerator::plain(key)
+                    });
+                }
+                Ok(row_)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if self.editor.open_popover(Anchor::Caret, Mode::Menu, rows) {
+            Ok(())
+        } else {
+            Err("The editor opened no menu".into())
+        }
     }
 
     /// Spell check as the last frame drew it: the marks of its rows and the
@@ -832,11 +926,13 @@ impl App {
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
         let menu_open = self.editor.popover().is_some();
-        let messages = self.editor.key_message(key.clone(), modifiers);
+        let (messages, captured) = self.editor.key_routing(key.clone(), modifiers);
         let escape = key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
         // Escape on a popover is never captured, whether or not the editor
-        // publishes for it.
-        let status = if (escape && menu_open) || (!escape && messages.is_empty()) {
+        // publishes for it. Any other press is captured as the widget
+        // captures it: not one that only closes a menu, so a shortcut
+        // still reaches the app.
+        let status = if (escape && menu_open) || (!escape && !captured) {
             iced::event::Status::Ignored
         } else {
             iced::event::Status::Captured

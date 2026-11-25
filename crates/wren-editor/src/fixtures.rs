@@ -220,6 +220,22 @@ impl SuggestSource for Completes {
     }
 }
 
+/// Suggestions of rows that run commands: after two letters at a word's
+/// start, a row running command 7 and one running command 8, under the
+/// letters typed.
+pub struct CommandSuggestions;
+
+impl SuggestSource for CommandSuggestions {
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        let before = line.get(..caret)?;
+        let start = before.rfind(' ').map_or(0, |at| at + 1);
+        (caret - start >= 2).then(|| Suggestion {
+            range: start..caret,
+            rows: vec![Row::command(7, "seven"), Row::command(8, "eight")],
+        })
+    }
+}
+
 /// The request [`Menus`] answers with the status menu.
 pub const STATUS: u32 = 1;
 /// The request [`Menus`] answers by taking the keyboard.
@@ -312,6 +328,16 @@ pub fn on_dates(clicked: &Clicked) -> Option<Requested> {
 /// no task, by having the host take the keyboard.
 pub fn off_task_lines(clicked: &Clicked) -> Option<Requested> {
     (!clicked.text.is_empty() && !clicked.text.starts_with("- [")).then_some(Requested::Keyboard)
+}
+
+/// A provider's answer on a line that starts a task: a menu under the
+/// box's dash of a row of its own (11) and a row that runs the host's
+/// command 7, as a task menu's rows do.
+pub fn commands_on_task_lines(clicked: &Clicked) -> Option<Requested> {
+    clicked.text.starts_with("- [").then(|| Requested::Rows {
+        range: 0..1,
+        rows: vec![Row::new(11, "Own"), Row::command(7, "Command")],
+    })
 }
 
 /// A provider of menus for a right-click that answers as `answer` does,

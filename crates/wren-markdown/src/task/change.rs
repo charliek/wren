@@ -122,8 +122,7 @@ impl LineEdit {
     /// the plan, which then writes the very same line. A host that needs
     /// the document itself unchanged checks its own revision.
     pub fn plan_for<L: Lines + ?Sized>(&self, lines: &L) -> Result<&EditPlan, Stale> {
-        let holds = self.line < lines.line_count()
-            && lines.line(self.line) == self.expect
+        let holds = self.reads(lines)
             && crate::edit::task_item(lines, self.line, Boxes::Status)
                 == Some((self.line, self.task));
         if holds {
@@ -131,6 +130,13 @@ impl LineEdit {
         } else {
             Err(Stale)
         }
+    }
+
+    /// Whether line [`line`](Self::line) of `lines` is still
+    /// [`expect`](Self::expect): the part of [`plan_for`](Self::plan_for)'s
+    /// check that reads no other line.
+    pub(super) fn reads<L: Lines + ?Sized>(&self, lines: &L) -> bool {
+        self.line < lines.line_count() && lines.line(self.line) == self.expect
     }
 }
 
@@ -155,8 +161,23 @@ pub fn edit<L: Lines + ?Sized>(
     change: &Change,
     opts: &Options,
 ) -> Option<LineEdit> {
-    let today = opts.tasks?.today;
+    opts.tasks?;
     let (k, task) = crate::edit::task_item(lines, line, opts.boxes())?;
+    edit_task(lines, k, task, sel, change, opts)
+}
+
+/// [`edit`] of the task whose box `task` is on line `k`, as
+/// `task_item` found it: for a caller that has found many tasks in one
+/// scan.
+pub(super) fn edit_task<L: Lines + ?Sized>(
+    lines: &L,
+    k: usize,
+    task: block::Task,
+    sel: Selection,
+    change: &Change,
+    opts: &Options,
+) -> Option<LineEdit> {
+    let today = opts.tasks?.today;
     let first = task;
     let expect = lines.line(k);
     let col = |pos: Pos| (pos.line == k).then(|| floor_char(expect, pos.col));

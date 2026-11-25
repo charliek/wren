@@ -185,6 +185,19 @@ smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on both engines, once with
 tasks `off` and once `on`, for `DISPLAY_BACKEND` (default `x11`) and the
 current `ICED_BACKEND`, and fails if either run ran no task test (none collected, or all skipped).
 
+The task line commands (`task.cycle_status`, `task.priority.high` and the
+rest) run through `command.run` as the palette runs them, at the caret, and
+through `shortcut` once a `keybind` line gives one a key. `editor.get`
+reports the editor's open popover, whichever it is, as `popover`: its
+`mode` (`menu` or `suggest`), whether it is the `spelling` menu, the
+`line`, `start`, `end` and `text` it hangs under, its `rows` (each with its
+`id`, `label`, and the `command` key the id names, or `null`) and the
+`selected` row; `null` with none open. `editor.open_menu` `{"rows":
+[{"command": "task.priority.high", "label": "High", "key": "h", "shift":
+false}]}` opens a menu at the caret whose rows run those commands, on the
+advanced engine only, so `editor.key` can press a row's key, Up, Down,
+Enter or Escape into a menu of the app's as into the spelling menu.
+
 `WRENTEST_PERF=release` makes `test_board_perf.py` assert the release
 budgets instead of the debug ceilings. Build the release binary in its own
 target directory so the smoke build is not replaced:

@@ -30,6 +30,7 @@ mod navigation;
 mod palette;
 mod preferences;
 mod spelling;
+mod task_commands;
 mod task_footer;
 mod tasks;
 mod workspaces;
@@ -559,6 +560,9 @@ impl App {
                     Some(wren_editor::KeyRoute::Popover(id)) => Some(wren_editor::Message::Spell(
                         wren_editor::SpellEvent::Request(id),
                     )),
+                    Some(wren_editor::KeyRoute::Command(payload)) => {
+                        Some(wren_editor::Message::Command(payload))
+                    }
                     Some(wren_editor::KeyRoute::Host | wren_editor::KeyRoute::Pass) | None => None,
                 };
                 let task = message
@@ -871,8 +875,20 @@ impl App {
                 if matches!(event, SpellEvent::OpenAt(_) | SpellEvent::Context { .. }) {
                     task = focus_editor();
                 }
-                self.editor.spell(event)
+                let changed = self.editor.spell(event);
+                // A row that runs a command runs it, for the place its menu
+                // was opened on. Any other row is its menu's owner's
+                // (`take_choice`, `take_provided`): the app opens no menu
+                // of its own yet and names no provider, so none is taken.
+                if let Some(choice) = self.editor.take_command() {
+                    if changed {
+                        self.text_changed(started);
+                    }
+                    return Task::batch([task, self.run_command_row(&choice)]);
+                }
+                changed
             }
+            wren_editor::Message::Command(payload) => return self.run_payload(payload),
             wren_editor::Message::Clip(clip) => {
                 self.column = columns::Column::Editor;
                 self.editor.clip(clip)

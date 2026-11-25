@@ -200,6 +200,20 @@ impl Accelerator {
     }
 }
 
+/// What choosing a row does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RowKind {
+    /// The row goes back to whoever opened its popover, by its id: the
+    /// host ([`crate::EditorView::take_choice`]) or the provider that
+    /// answered the right-click ([`crate::EditorView::take_provided`]).
+    #[default]
+    Own,
+    /// The row runs the host command its id names, whoever opened the
+    /// popover ([`crate::EditorView::take_command`]). Only such a row's id
+    /// is ever read as a command.
+    Command,
+}
+
 /// One row of a popover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -208,6 +222,7 @@ pub struct Row {
     pub label: String,
     /// The key that chooses the row while a menu is open.
     pub accelerator: Option<Accelerator>,
+    pub kind: RowKind,
 }
 
 impl Row {
@@ -216,6 +231,15 @@ impl Row {
             id,
             label: label.into(),
             accelerator: None,
+            kind: RowKind::Own,
+        }
+    }
+
+    /// A row that runs the host command `id` names.
+    pub fn command(id: u32, label: impl Into<String>) -> Self {
+        Self {
+            kind: RowKind::Command,
+            ..Self::new(id, label)
         }
     }
 
@@ -236,7 +260,8 @@ pub struct Popover {
     /// The anchor's text as it was when the popover opened.
     text: String,
     labels: Vec<String>,
-    ids: Vec<u32>,
+    /// Each row's id and what choosing it does.
+    ids: Vec<(u32, RowKind)>,
     accelerators: Vec<Option<Accelerator>>,
     selected: Option<usize>,
     /// The suggestions menu, whose word is tinted while it is open and
@@ -275,7 +300,7 @@ impl Popover {
         };
         for row in rows {
             popover.labels.push(row.label);
-            popover.ids.push(row.id);
+            popover.ids.push((row.id, row.kind));
             popover.accelerators.push(row.accelerator);
         }
         popover
@@ -358,7 +383,19 @@ impl Popover {
 
     /// The host's name for `row`.
     pub fn id(&self, row: usize) -> Option<u32> {
-        self.ids.get(row).copied()
+        self.ids.get(row).map(|(id, _)| *id)
+    }
+
+    /// What choosing `row` does, if the popover has it.
+    pub fn kind(&self, row: usize) -> Option<RowKind> {
+        self.ids.get(row).map(|(_, kind)| *kind)
+    }
+
+    /// Whether a row of it runs a command of the host's
+    /// ([`RowKind::Command`]): a choice of one names the popover by its
+    /// [`instance`](Self::instance), as a provider's menu's does.
+    pub fn runs_commands(&self) -> bool {
+        self.ids.iter().any(|(_, kind)| *kind == RowKind::Command)
     }
 
     /// Each row's accelerator.
@@ -1113,6 +1150,13 @@ pub(crate) struct Now {
     /// Every message of the batch so far left the text, the caret and the
     /// scroll as the host has them; see [`Self::sees_the_text`].
     still: Cell<bool>,
+    /// How many popovers the editor will have opened once it applies the
+    /// batch's messages so far ([`Popover::instance`] of the last); `None`
+    /// once a message may or may not have opened one.
+    count: Cell<Option<u64>>,
+    /// The instance the editor will give `own` when it opens it, when
+    /// [`Self::count`] is known.
+    own_instance: Cell<Option<u64>>,
 }
 
 impl Now {
@@ -1126,7 +1170,15 @@ impl Now {
             suppressed: Cell::new(None),
             handed: Cell::new(false),
             still: Cell::new(true),
+            count: Cell::new(None),
+            own_instance: Cell::new(None),
         }
+    }
+
+    /// Count the popovers the editor opens from `opened`, how many it had
+    /// opened when the widget was built.
+    pub(crate) fn count_from(&self, opened: u64) {
+        self.count.set(Some(opened));
     }
 
     /// Start from `popover`, the one the host has open.
@@ -1203,7 +1255,25 @@ impl Now {
     pub(crate) fn bound(&self, handed: Option<&Popover>) -> Option<u64> {
         let own = self.own.borrow();
         let open = self.open.get().and(own.as_ref().or(handed))?;
-        open.provider().map(|_| open.instance())
+        if open.provider().is_some() {
+            return Some(open.instance());
+        }
+        // A popover with a row that runs a command, by the number the
+        // editor gave it or will give it; with that not known, none.
+        match &*own {
+            _ if !open.runs_commands() => None,
+            Some(_) => self.own_instance.get(),
+            None => Some(open.instance()),
+        }
+    }
+
+    /// Whether what is open are suggestions with a row that runs a command:
+    /// Enter and Tab then choose from them only by naming them
+    /// ([`PopoverEvent::AcceptOf`]).
+    pub(crate) fn binds_its_keys(&self, handed: Option<&Popover>) -> bool {
+        let own = self.own.borrow();
+        let open = self.open.get().and(own.as_ref().or(handed));
+        open.is_some_and(|open| open.mode() == Mode::Suggest && open.runs_commands())
     }
 
     /// The host closes its popover without a message from the widget.
@@ -1284,6 +1354,17 @@ impl Now {
 
         let mut next = after(was, &message);
         let mut own = None;
+        // Whether the editor may open a popover for the message that the
+        // widget does not open the same, which leaves the count unknown.
+        let mut unknown = !keeps_the_text(&message, known)
+            || matches!(
+                message,
+                Message::Spell(
+                    PopoverEvent::OpenAtCaret
+                        | PopoverEvent::OpenAt(_)
+                        | PopoverEvent::Press(MenuPress::Right(_))
+                )
+            );
         let mut answered = |answer| match answer {
             Answer::Menu(popover) => {
                 let open = OpenMenu::of(&popover);
@@ -1295,14 +1376,21 @@ impl Now {
         };
         match &message {
             Message::Spell(PopoverEvent::Request(id)) => {
+                unknown = sources.menus.is_some() && line().is_none();
                 let answer = (sources.menus.zip(line()))
                     .map_or(Answer::Nothing, |(source, line)| {
                         requested(source, *id, &line)
                     });
                 next = answered(answer);
             }
-            Message::Spell(PopoverEvent::Context { .. }) => next = answered(provided),
+            Message::Spell(PopoverEvent::Context { .. }) => {
+                if let Answer::Menu(menu) = &provided {
+                    self.count.set(Some(menu.instance()));
+                }
+                next = answered(provided);
+            }
             Message::Action(Action::Edit(Edit::Insert(_))) if !held => {
+                unknown = sources.suggestions.is_some() && line().is_none();
                 let popover = (sources.suggestions.zip(line()))
                     .filter(|(_, line)| self.suppressed.get() != Some(line.index))
                     .and_then(|(source, line)| suggested(source, &line));
@@ -1330,7 +1418,20 @@ impl Now {
                 )
             );
         if !kept {
+            let provided = matches!(message, Message::Spell(PopoverEvent::Context { .. }));
+            let instance = match &own {
+                Some(menu) if provided => Some(menu.instance()),
+                Some(_) => self.count.get().map(|count| count + 1),
+                None => None,
+            };
+            if own.is_some() && !provided {
+                self.count.set(instance);
+            }
+            self.own_instance.set(instance.filter(|_| !unknown));
             self.own.replace(own);
+        }
+        if unknown {
+            self.count.set(None);
         }
         self.set(next);
         shell.publish(message);

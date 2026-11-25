@@ -378,7 +378,45 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
     shot_here("task-lines")
     colour_scenes(client, shot_here)
     emoji_scenes(client, shot_here)
+    command_scenes(client, shot_here)
     footer_scenes(client, shot_here, resize)
+
+
+def command_scenes(client, shot_here) -> None:
+    """The task line commands (discovery/tasks-build.md item 3.3): the
+    palette filtered to them with the caret on a task line, then an open
+    task before and after `task.cycle_status` (doing), and after the toggle
+    (done, with today's stamp). Both edits are undone after, so the scenes
+    that follow see the note as it was."""
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+    line = 3
+    original = client.call("editor.get")["text"]
+    before = original.split("\n")[line]
+    assert before == "- [ ] Send the deck to finance @sam @priya 🔼 📅 2026-11-16", before
+    client.call("editor.cursor", {"line": line, "column": len("- [ ] Send the deck".encode()),
+                                  "selection": None})
+    client.call("editor.focus")
+    client.call("palette.open", {"mode": "commands"})
+    rows = client.call("palette.query", {"query": "task"})["navigation"]["modal"]["results"]
+    tasks = [row for row in rows if row["group"] == "Tasks"]
+    assert len(tasks) == 10 and all(row["enabled"] for row in tasks), tasks
+    shot_here("task-commands-palette")
+    client.call("palette.close")
+    client.call("editor.focus")
+    shot_here("task-commands-before")
+    client.call("command.run", {"id": "task.cycle_status"})
+    after = client.call("editor.get")["text"].split("\n")[line]
+    assert after == "- [/] Send the deck to finance @sam @priya 🔼 📅 2026-11-16", after
+    shot_here("task-commands-cycled")
+    client.call("command.run", {"id": "markdown.toggle_task"})
+    after = client.call("editor.get")["text"].split("\n")[line]
+    assert after == f"- [x] Send the deck to finance @sam @priya 🔼 📅 2026-11-16 ✅ {TASKS_TODAY}", after
+    shot_here("task-commands-toggled")
+    client.call("editor.undo")
+    client.call("editor.undo")
+    assert client.call("editor.get")["text"] == original
 
 
 # The windows the tight, cutoff and narrow footer scenes size to; at these

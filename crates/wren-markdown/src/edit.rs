@@ -21,7 +21,7 @@ mod tab;
 mod task;
 mod wrap;
 
-pub(crate) use task::task_item;
+pub(crate) use task::{task_item, task_items};
 
 /// The box a new item's task starts with.
 const OPEN_BOX: &str = "[ ]";
@@ -1175,6 +1175,7 @@ impl Analysis {
 
     /// Every container open on line `l`, including those a lazy line does
     /// not continue.
+    #[cfg(test)]
     fn open_stack(&self, l: usize) -> Vec<Container> {
         (0..self.recs[l].len)
             .map(|slot| self.opened(l, slot).1)
@@ -2553,6 +2554,60 @@ pub(crate) mod tests {
     fn scan_shortcuts_agree_with_the_full_scan_of_status_boxes() {
         let lines = [&LINES[..], &BOX_LINES[..]].concat();
         scan_shortcuts(0x0b0d_5ca1_ab1e_0043, &lines, Some(tasks()));
+    }
+
+    /// The toggle's targets, read forwards, are the ones it found walking
+    /// back from each line, for any selection of any document, with tasks
+    /// on and off; so its plans are byte for byte the same.
+    #[test]
+    fn toggle_targets_read_forwards_agree_with_walking_back() {
+        let mut rng = Rng(0x0b0d_5ca1_ab1e_0045);
+        let lines = [&LINES[..], &BOX_LINES[..]].concat();
+        for boxes in [Boxes::Plain, Boxes::Status] {
+            for _ in 0..2_000 {
+                let text = random_text(&mut rng, &lines);
+                let doc = Document::new(&text);
+                let an = Analysis::new(&doc, None, boxes);
+                let count = doc.line_count();
+                for _ in 0..4 {
+                    let pos = |rng: &mut Rng| {
+                        let line = rng.below(count);
+                        Pos::new(line, rng.below(doc.line(line).len() + 1))
+                    };
+                    let sel = Selection::new(pos(&mut rng), pos(&mut rng));
+                    let (first, last) = if sel.is_empty() {
+                        (sel.head.line, sel.head.line)
+                    } else {
+                        covered(&sel)
+                    };
+                    assert_eq!(
+                        task::targets(&doc, &an, sel, first, last),
+                        task::targets_walking_back(&doc, &an, sel, first, last),
+                        "{boxes:?} {sel:?} {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// One scan for many lines finds the task each belongs to, as a scan
+    /// per line does.
+    #[test]
+    fn task_items_agree_with_task_item() {
+        let mut rng = Rng(0x0b0d_5ca1_ab1e_0044);
+        let lines = [&LINES[..], &BOX_LINES[..]].concat();
+        for boxes in [Boxes::Plain, Boxes::Status] {
+            for _ in 0..2_000 {
+                let text = random_text(&mut rng, &lines);
+                let doc = Document::new(&text);
+                let count = doc.line_count();
+                let mut wanted: Vec<usize> = (0..count + 2).rev().collect();
+                wanted.push(0);
+                let one: Vec<_> = wanted.iter().map(|&l| task_item(&doc, l, boxes)).collect();
+                assert_eq!(task_items(&doc, &wanted, boxes), one, "{boxes:?} {text:?}");
+            }
+        }
+        assert_eq!(task_items(&Document::new("- [ ] a"), &[], Boxes::Plain), []);
     }
 
     fn scan_shortcuts(seed: u64, lines: &[&str], tasks: Option<TaskOptions>) {

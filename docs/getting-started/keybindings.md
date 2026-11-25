@@ -110,7 +110,10 @@ beside the text you are writing.
   or a plain line becomes an open task (`- a` and `a` both become
   `- [ ] a`), and a numbered item keeps its number (`1. [ ] a`). Over a
   selection, every task is checked if any is open, otherwise all are
-  reopened.
+  reopened. With `tasks = on`, checking a task also writes today's done
+  date (`✅ 2026-11-19`) and reopening one removes it; a cancelled task
+  (`[-]`) reopens. Typing `x` between the brackets yourself writes no
+  date.
 - **Bold, Italic, and Inline code** wrap the selection, or the word at the
   cursor, in `**`, `*`, or `` ` ``; with no word there, they insert an empty
   pair around the cursor. Pressing the key again on wrapped text unwraps it.
@@ -346,6 +349,15 @@ markdown.code  edit.move_line_up  edit.move_line_down
 editor.toggle_markdown_assist  editor.toggle_engine
 editor.toggle_spell_check  editor.spell_suggest  settings.open_words
 note.new_board  note.export_svg  note.export_png  note.export_drawio
+```
+
+With `tasks = on`, the task line commands can be bound too; they have no
+default key and act on the task at the caret:
+
+```
+task.cycle_status  task.priority.high  task.priority.medium
+task.priority.low  task.priority.highest  task.priority.lowest
+task.priority.none  task.priority.raise  task.priority.lower  task.clear_due
 ```
 
 The board actions are listed under [On a board](#on-a-board).

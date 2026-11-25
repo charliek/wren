@@ -7,7 +7,7 @@ use crate::status::{self, StatusType};
 
 /// What toggling does to one line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Target {
+pub(super) enum Target {
     /// A task box on line `line` whose symbol is the bytes `at..end`.
     Task {
         line: usize,
@@ -47,7 +47,138 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Options
     } else {
         covered(&sel)
     };
-    let setext = setext_text(&an);
+    let mut targets = targets(base, &an, sel, first, last);
+    let any_task = targets.iter().any(|t| matches!(t, Target::Task { .. }));
+    let mark_done = targets
+        .iter()
+        .any(|t| matches!(t, Target::Task { status, .. } if status.is_unfinished()));
+    // Later edits on a line go first, so earlier byte offsets stay valid.
+    targets.sort_by_key(|t| std::cmp::Reverse(t.place()));
+    for target in targets {
+        match target {
+            // A done task keeps its own `x` or `X` when the rest join it.
+            Target::Task {
+                line,
+                at,
+                end,
+                status,
+            } if !(mark_done && status == StatusType::Done) => {
+                let symbol = if mark_done {
+                    status::DONE
+                } else {
+                    status::OPEN
+                };
+                edit_line(
+                    &mut d,
+                    line,
+                    at..end,
+                    symbol.encode_utf8(&mut [0; 4]),
+                    &mut marks,
+                );
+            }
+            Target::Item { line, at, space } if !any_task => {
+                let with = if space { " [ ] " } else { "[ ] " };
+                edit_line(&mut d, line, at..at, with, &mut marks);
+            }
+            Target::Plain { line, at } if !any_task => {
+                edit_line(&mut d, line, at..at, "- [ ] ", &mut marks);
+            }
+            _ => {}
+        }
+    }
+    finish(base, &d, marks)
+}
+
+/// What toggling does to each of lines `first..=last` of `base`, in the
+/// order of the lines, each target once: `an` is the whole document's
+/// analysis, and `sel` the selection. The lines' innermost containers are
+/// read in one pass forwards, so a selection over a long item's lines
+/// costs one pass, not one walk back to the item's first line per line.
+pub(super) fn targets<L: Lines + ?Sized>(
+    base: &L,
+    an: &Analysis,
+    sel: Selection,
+    first: usize,
+    last: usize,
+) -> Vec<Target> {
+    let setext = setext_text(an);
+    let innermost = innermost(an, last);
+    let mut targets: Vec<Target> = Vec::new();
+    let mut seen = HashSet::new();
+    for (j, innermost) in innermost.iter().enumerate().skip(first) {
+        let info = &an.recs[j].info;
+        if info.kind.is_code_like() {
+            continue;
+        }
+        let blank = info.kind == Kind::Blank && info.item.is_none();
+        if blank && !sel.is_empty() {
+            continue;
+        }
+        let target = match *innermost {
+            Some((k, Container::Item(item))) if !blank => match item.task {
+                Some(task) => Target::Task {
+                    line: k,
+                    at: task.symbol_range().start,
+                    end: task.symbol_range().end,
+                    status: task.status,
+                },
+                None => Target::Item {
+                    line: k,
+                    at: item.text_start,
+                    space: item.text_start == item.marker_end,
+                },
+            },
+            _ if setext.get(j) == Some(&true)
+                || matches!(
+                    info.kind,
+                    Kind::Heading { .. } | Kind::ThematicBreak | Kind::SetextUnderline { .. }
+                ) =>
+            {
+                continue;
+            }
+            _ => Target::Plain {
+                line: j,
+                at: info.text_start.max(bom_len(j, base.line(j))),
+            },
+        };
+        if seen.insert(target) {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+/// Each of lines `0..=last`'s innermost open container and the line that
+/// opened it, as [`Analysis::opened`] finds it walking back, read in one
+/// pass forwards: the latest line to open a container at each slot.
+fn innermost(an: &Analysis, last: usize) -> Vec<Option<(usize, Container)>> {
+    let mut latest: Vec<Option<(usize, Container)>> = Vec::new();
+    let mut found = Vec::with_capacity(last + 1);
+    for (j, rec) in an.recs.iter().enumerate().take(last + 1) {
+        if latest.len() < rec.len {
+            latest.resize(rec.len, None);
+        }
+        let opened = &an.opened[rec.opened_at..][..rec.len - rec.opened_from];
+        for (slot, container) in latest[rec.opened_from..rec.len].iter_mut().zip(opened) {
+            *slot = Some((j, *container));
+        }
+        found.push(rec.len.checked_sub(1).and_then(|slot| latest[slot]));
+    }
+    found
+}
+
+/// The targets as the toggle found them before [`targets`] read forwards:
+/// walking back from each line to the line that opened its innermost
+/// container. Kept to prove the two agree.
+#[cfg(test)]
+pub(super) fn targets_walking_back<L: Lines + ?Sized>(
+    base: &L,
+    an: &Analysis,
+    sel: Selection,
+    first: usize,
+    last: usize,
+) -> Vec<Target> {
+    let setext = setext_text(an);
     let mut targets: Vec<Target> = Vec::new();
     let mut seen = HashSet::new();
     for j in first..=last {
@@ -97,45 +228,7 @@ pub(super) fn toggle<L: Lines + ?Sized>(base: &L, sel: Selection, opts: &Options
             targets.push(target);
         }
     }
-    let any_task = targets.iter().any(|t| matches!(t, Target::Task { .. }));
-    let mark_done = targets
-        .iter()
-        .any(|t| matches!(t, Target::Task { status, .. } if status.is_unfinished()));
-    // Later edits on a line go first, so earlier byte offsets stay valid.
-    targets.sort_by_key(|t| std::cmp::Reverse(t.place()));
-    for target in targets {
-        match target {
-            // A done task keeps its own `x` or `X` when the rest join it.
-            Target::Task {
-                line,
-                at,
-                end,
-                status,
-            } if !(mark_done && status == StatusType::Done) => {
-                let symbol = if mark_done {
-                    status::DONE
-                } else {
-                    status::OPEN
-                };
-                edit_line(
-                    &mut d,
-                    line,
-                    at..end,
-                    symbol.encode_utf8(&mut [0; 4]),
-                    &mut marks,
-                );
-            }
-            Target::Item { line, at, space } if !any_task => {
-                let with = if space { " [ ] " } else { "[ ] " };
-                edit_line(&mut d, line, at..at, with, &mut marks);
-            }
-            Target::Plain { line, at } if !any_task => {
-                edit_line(&mut d, line, at..at, "- [ ] ", &mut marks);
-            }
-            _ => {}
-        }
-    }
-    finish(base, &d, marks)
+    targets
 }
 
 /// The task line `l` belongs to: the line its box is on, and the box. A
@@ -150,12 +243,47 @@ pub(crate) fn task_item<L: Lines + ?Sized>(
     if l >= base.line_count() {
         return None;
     }
-    let an = Analysis::through(base, l, boxes);
+    task_in(&Analysis::through(base, l, boxes), l)
+}
+
+/// [`task_item`] for each of `wanted`, in order, from one scan of the
+/// lines up to the last of them: what a change to many tasks reads, so it
+/// costs one pass over the document however many lines it asks about.
+pub(crate) fn task_items<L: Lines + ?Sized>(
+    base: &L,
+    wanted: &[usize],
+    boxes: Boxes,
+) -> Vec<Option<(usize, block::Task)>> {
+    let count = base.line_count();
+    let Some(last) = wanted.iter().copied().filter(|&l| l < count).max() else {
+        return vec![None; wanted.len()];
+    };
+    let an = Analysis::through(base, last, boxes);
+    let innermost = innermost(&an, last);
+    let found: Vec<Option<(usize, block::Task)>> = (an.recs.iter().zip(&innermost))
+        .map(|(rec, innermost)| {
+            let info = &rec.info;
+            let skipped =
+                info.kind.is_code_like() || (info.kind == Kind::Blank && info.item.is_none());
+            match innermost {
+                Some((k, Container::Item(item))) if !skipped => item.task.map(|task| (*k, task)),
+                _ => None,
+            }
+        })
+        .collect();
+    wanted
+        .iter()
+        .map(|&l| found.get(l).copied().flatten())
+        .collect()
+}
+
+/// The task line `l` belongs to in `an`, which reaches at least line `l`.
+fn task_in(an: &Analysis, l: usize) -> Option<(usize, block::Task)> {
     let info = &an.recs[l].info;
     if info.kind.is_code_like() || (info.kind == Kind::Blank && info.item.is_none()) {
         return None;
     }
-    let slot = an.open_stack(l).len().checked_sub(1)?;
+    let slot = an.recs[l].len.checked_sub(1)?;
     match an.opened(l, slot) {
         (k, Container::Item(item)) => item.task.map(|task| (k, task)),
         (_, Container::Quote { .. }) => None,
@@ -186,6 +314,30 @@ mod tests {
     fn select_all(doc: &Document) -> Selection {
         let last = doc.line_count() - 1;
         Selection::new(Pos::new(0, 0), Pos::new(last, doc.line(last).len()))
+    }
+
+    /// Select all of one list item 50,000 lines long and toggle, with
+    /// tasks on and off: its lines are read in one pass forwards, so the
+    /// plan takes well under a second even in a debug build.
+    #[test]
+    fn toggle_task_over_a_long_item_reads_it_once() {
+        let text: String = std::iter::once("- item\n".to_owned())
+            .chain((1..50_000).map(|i| format!("  more {i}\n")))
+            .collect();
+        let doc = Document::new(&text);
+        for opts in [Options::default(), tasks_on()] {
+            let started = std::time::Instant::now();
+            let boxed = plan(&doc, select_all(&doc), Intent::ToggleTask, &opts);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(3),
+                "{elapsed:?} with {opts:?}"
+            );
+            assert_eq!(
+                apply(&doc, &boxed),
+                text.replacen("- item", "- [ ] item", 1)
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,11 @@ pub enum KeyRoute {
     /// [`SpellEvent::Request`]: the host's [`crate::MenuSource`] says what
     /// opens.
     Popover(u32),
+    /// A host command the host names with this number, which acts on the
+    /// editor's text: the editor captures the key and publishes
+    /// [`Message::Command`] in its order with the batch's other messages,
+    /// and does nothing else with it.
+    Command(u32),
     /// Not the host's: the editor handles the key itself.
     Pass,
 }
@@ -78,7 +83,7 @@ pub(crate) enum Target<'a> {
 
 impl<'a> Target<'a> {
     /// The target for a host's open `popover`.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn of(popover: &'a crate::Popover) -> Self {
         match popover.mode() {
             Mode::Menu if popover.is_spelling() => Self::SpellMenu,
@@ -406,6 +411,9 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         KeyRoute::Popover(id) => {
             return Some(Binding::Custom(Message::Spell(SpellEvent::Request(id))));
         }
+        // Nor does a host command act on the text under a preedit.
+        KeyRoute::Command(_) if context.composing => return None,
+        KeyRoute::Command(id) => return Some(Binding::Custom(Message::Command(id))),
         KeyRoute::Pass => {}
     }
 
@@ -1390,6 +1398,88 @@ mod tests {
         ));
         // A lone modifier leaves it alone.
         assert!(menu(Key::Named(Named::Shift), Modifiers::SHIFT, None).is_none());
+    }
+
+    /// A host that binds Cmd/Ctrl+Enter to a command of its own numbered
+    /// 7, and Alt+P to one numbered 8.
+    fn command_policy() -> KeyPolicy {
+        Arc::new(|key: &Key, _, modifiers: Modifiers| match key.as_ref() {
+            Key::Named(Named::Enter) if modifiers == Modifiers::COMMAND => KeyRoute::Command(7),
+            Key::Character("p") if modifiers == Modifiers::ALT => KeyRoute::Command(8),
+            _ => KeyRoute::Pass,
+        })
+    }
+
+    /// A host command's key is captured and published as the command, with
+    /// or without Markdown assist, never under a preedit, and closes an
+    /// open menu first, as any other key no row of it takes.
+    #[test]
+    fn a_host_commands_key_carries_its_number_to_the_host() {
+        let policy = command_policy();
+        for context in [ASSIST, PLAIN] {
+            let context = Context {
+                policy: Some(&policy),
+                ..context
+            };
+            assert!(matches!(
+                press(Key::Named(Named::Enter), Modifiers::COMMAND, None, context),
+                Some(Binding::Custom(Message::Command(7)))
+            ));
+            assert!(matches!(
+                press(Key::Character("p".into()), Modifiers::ALT, None, context),
+                Some(Binding::Custom(Message::Command(8)))
+            ));
+            // Without the modifier the keys are the text's.
+            assert!(matches!(
+                press(
+                    Key::Character("p".into()),
+                    Modifiers::empty(),
+                    Some("p"),
+                    context
+                ),
+                Some(Binding::Insert('p'))
+            ));
+        }
+        let composing = Context {
+            policy: Some(&policy),
+            ..COMPOSING
+        };
+        assert!(press(Key::Character("p".into()), Modifiers::ALT, None, composing).is_none());
+        let hosted = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        assert!(matches!(
+            to_popover(
+                MENU,
+                Key::Character("p".into()),
+                Modifiers::ALT,
+                None,
+                hosted
+            ),
+            Some(Routed::Close(Some(Binding::Custom(Message::Command(8)))))
+        ));
+        assert!(matches!(
+            to_popover(
+                Target::SpellMenu,
+                Key::Character("p".into()),
+                Modifiers::ALT,
+                None,
+                hosted
+            ),
+            Some(Routed::Close(Some(Binding::Custom(Message::Command(8)))))
+        ));
+        // Suggestions leave it to the text's routing, which publishes it.
+        assert!(matches!(
+            to_popover(
+                Target::Suggest,
+                Key::Character("p".into()),
+                Modifiers::ALT,
+                None,
+                hosted
+            ),
+            Some(Routed::Binding(Binding::Custom(Message::Command(8))))
+        ));
     }
 
     #[test]

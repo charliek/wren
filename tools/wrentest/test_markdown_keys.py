@@ -345,7 +345,11 @@ def test_markdown_commands_act_at_the_cursor_from_the_palette(keys_app) -> None:
 
         editor.load("- [ ] a", 0, 7)
         assert run(app, "markdown.toggle_task") == "completed"
-        assert (get()["text"], cursor(get())) == ("- [x] a", (0, 7))
+        # With tasks on (the lane's WRENTEST_TASKS), the toggle writes the
+        # done stamp, dated by the app's own today, after the caret.
+        state = app.client.call("tasks.get")
+        done = "- [x] a" + (f" ✅ {state['today']}" if state["tasks"] else "")
+        assert (get()["text"], cursor(get())) == (done, (0, 7))
         run(app, "markdown.toggle_task")
         assert get()["text"] == "- [ ] a"
         editor.load("plain", 0, 2)

@@ -500,7 +500,7 @@ impl App {
                 // the Markdown ones are not then (§5.1 rule 8).
                 let board = self.surface() == Surface::Board;
                 for group in GROUPS {
-                    if board && group == "Markdown" {
+                    if board && matches!(group, "Markdown" | "Tasks") {
                         continue;
                     }
                     for definition in definitions().filter(|definition| {

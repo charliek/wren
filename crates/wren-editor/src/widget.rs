@@ -495,6 +495,7 @@ impl<'a> TextEditor<'a> {
     pub(crate) fn providers(mut self, providers: &'a [Provider], edition: Edition) -> Self {
         self.providers = providers;
         self.edition = edition;
+        self.menu_now.count_from(edition.opened);
         self
     }
 
@@ -1002,11 +1003,18 @@ impl<'a> TextEditor<'a> {
     /// Publish `message`, keeping what is open as the host will leave it
     /// once it applies the message.
     fn publish(&self, shell: &mut Shell<'_, Message>, message: Message) {
-        // A row of a provider's menu is chosen from that menu or from
-        // none: the choice names the menu.
+        // A row of a provider's menu, or of a popover with a row that runs
+        // a command, is chosen from that popover or from none: the choice
+        // names it. So are such suggestions' Enter and Tab, which choose
+        // their selected row.
         let row = match message {
             Message::Spell(SpellEvent::Accept(row)) => Some(Some(row)),
             Message::Spell(SpellEvent::AcceptSelected) => Some(None),
+            Message::Spell(SpellEvent::Key(proof::MenuKey::Enter | proof::MenuKey::Tab))
+                if self.menu_now.binds_its_keys(self.popover) =>
+            {
+                Some(None)
+            }
             _ => None,
         };
         let message = match row.zip(self.menu_now.bound(self.popover)) {
@@ -4825,7 +4833,7 @@ mod tests {
                 Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
-                Message::Find => false,
+                Message::Find | Message::Command(_) => false,
             };
         }
         messages
@@ -5426,7 +5434,7 @@ mod tests {
             Message::Clip(clip) => ev.clip(clip),
             Message::Undo => ev.undo(),
             Message::Redo => ev.redo(),
-            Message::Find => false,
+            Message::Find | Message::Command(_) => false,
         };
         applied
     }
@@ -8960,5 +8968,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Enter on suggestions with rows that run commands names them, by the
+    /// number the editor gave them, or for those the batch's own letters
+    /// open, the number it will give them; queued while others replace
+    /// them, it chooses nothing.
+    #[test]
+    fn enter_on_command_suggestions_names_them() {
+        use keyboard::key::Named;
+        let commands = || {
+            let mut ev = editing(BackendKind::Owned, "", 0, 0);
+            ev.set_suggest_source(Some(Arc::new(fixtures::CommandSuggestions)));
+            ev
+        };
+        let named_menu = |messages: &[Message]| match messages.last() {
+            Some(Message::Spell(SpellEvent::AcceptOf { menu, row: None })) => Some(*menu),
+            _ => None,
+        };
+
+        // Opened by the batch's own letters: named by the number the editor
+        // gives them, so the host chooses from them.
+        for accept in [Named::Enter, Named::Tab] {
+            let mut ev = commands();
+            let (messages, captured) = widget_batch(
+                &ev,
+                &mut None,
+                vec![
+                    (typed("d"), None),
+                    (typed("u"), None),
+                    (named(accept), None),
+                ],
+            );
+            assert_eq!(captured, [true; 3], "{accept:?}");
+            let menu = named_menu(&messages).unwrap_or_else(|| panic!("{messages:?}"));
+            let mut chosen = None;
+            for message in messages {
+                if let Message::Spell(event) = message {
+                    ev.spell(event);
+                    chosen = chosen.or(ev.take_command());
+                } else {
+                    host_applies(&mut ev, message);
+                }
+            }
+            assert_eq!(
+                chosen.map(|choice| choice.id),
+                Some(7),
+                "{accept:?} of {menu}"
+            );
+        }
+
+        // Open when the batch starts: named by their own number. Queued,
+        // then replaced before the host applies it: nothing is chosen.
+        let mut ev = commands();
+        for c in ['d', 'u'] {
+            ev.perform(Action::Edit(Edit::Insert(c)));
+        }
+        let a = ev.popover().expect("suggestions").instance();
+        let (messages, _) = widget_batch(&ev, &mut None, vec![(named(Named::Enter), None)]);
+        assert_eq!(named_menu(&messages), Some(a), "{messages:?}");
+        assert!(ev.open_popover(
+            crate::Anchor::Caret,
+            Mode::Suggest,
+            vec![Row::command(9, "nine")]
+        ));
+        let b = ev.popover().unwrap().instance();
+        for message in messages {
+            let Message::Spell(event) = message else {
+                panic!("{message:?}");
+            };
+            assert!(!ev.spell(event));
+        }
+        assert_eq!(ev.take_command(), None);
+        assert_eq!(ev.popover().map(crate::Popover::instance), Some(b));
+        assert_eq!(ev.text(), "du");
     }
 }

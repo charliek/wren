@@ -19,6 +19,7 @@ mod highlighter;
 mod history;
 mod hit;
 mod keys;
+mod line_edit;
 mod plain;
 mod popover;
 mod proof;
@@ -47,7 +48,7 @@ pub use hit::Hit;
 pub use keys::{KeyPolicy, KeyRoute};
 pub use popover::{
     is_plain_escape, Accelerator, Anchor, Choice, Clicked, MenuProvider, MenuSource, Mode, Popover,
-    PopoverEvent, Provider, Requested, Row, Seen, Stroke, SuggestSource, Suggestion,
+    PopoverEvent, Provider, Requested, Row, RowKind, Seen, Stroke, SuggestSource, Suggestion,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
@@ -163,6 +164,11 @@ pub enum Message {
     Spell(SpellEvent),
     /// A copy, cut, or paste from the keyboard. See [`EditorView::clip`].
     Clip(Clip),
+    /// A key the host bound to a command of its own that acts on the text
+    /// ([`KeyRoute::Command`]), with the host's number for it. The editor
+    /// does nothing with it; the host runs the command, in the key's order
+    /// with the rest of the batch.
+    Command(u32),
 }
 
 /// What the clipboard keys did. With no selection, ⌘C and ⌘X take the
@@ -290,6 +296,8 @@ struct Chosen {
     /// The provider whose menu it was chosen from
     /// ([`Popover::provider`]).
     provider: Option<usize>,
+    /// What the row does ([`Row::kind`]).
+    kind: RowKind,
 }
 
 /// A right-click whose provider took the keyboard, until the host takes it.
@@ -1206,9 +1214,9 @@ impl EditorView {
                     popover.hover(row);
                 }
             }
-            SpellEvent::Accept(row) => return self.accept(row),
+            SpellEvent::Accept(row) => return self.accept(row, false),
             SpellEvent::AcceptSelected => match self.popover().and_then(Popover::selected) {
-                Some(row) => return self.accept(row),
+                Some(row) => return self.accept(row, false),
                 None => self.close_open(),
             },
             SpellEvent::AcceptOf { menu, row } => {
@@ -1218,7 +1226,7 @@ impl EditorView {
                     return false;
                 };
                 match row.or(open.selected()) {
-                    Some(row) => return self.accept(row),
+                    Some(row) => return self.accept(row, true),
                     None => self.close_open(),
                 }
             }
@@ -1243,8 +1251,9 @@ impl EditorView {
             Message::Clip(clip) => self.clip(clip),
             Message::Undo => self.undo(),
             Message::Redo => self.redo(),
-            // Only Ctrl or Cmd+F routes to Find, never a plain key.
-            Message::Find => false,
+            // Only Ctrl or Cmd+F routes to Find, never a plain key; a
+            // command is the host's.
+            Message::Find | Message::Command(_) => false,
         }
     }
 
@@ -1321,12 +1330,22 @@ impl EditorView {
     /// the caret after it; the host's popover leaves the row for
     /// [`EditorView::take_choice`]. A row the popover does not have, or an
     /// anchor whose text no longer reads as it did when the popover opened,
-    /// closes it and changes nothing.
-    fn accept(&mut self, row: usize) -> bool {
+    /// closes it and changes nothing. So does a row of suggestions that
+    /// runs a command, unless the choice named the suggestions (`named`,
+    /// [`SpellEvent::AcceptOf`]): a key that did not may have been meant
+    /// for suggestions that these replaced.
+    fn accept(&mut self, row: usize, named: bool) -> bool {
         let menu = self.menu.take();
         let Some(popover) = menu.as_deref().or(self.popover.as_ref()) else {
             return false;
         };
+        let unnamed_command = popover.mode() == Mode::Suggest
+            && popover.kind(row) == Some(RowKind::Command)
+            && !named;
+        if unnamed_command {
+            self.close_open();
+            return false;
+        }
         let (line, range) = (popover.line(), popover.range());
         let unchanged = self.content.with_lines(|lines| {
             lines
@@ -1335,13 +1354,14 @@ impl EditorView {
         });
         let chosen = popover
             .id(row)
+            .zip(popover.kind(row))
             .filter(|_| unchanged)
-            .map(|id| (id, popover.mode()));
+            .map(|(id, kind)| (id, popover.mode(), kind));
         let suggestion = popover.labels().get(row).filter(|_| unchanged).cloned();
         let provider = popover.provider();
         self.popover = None;
         if menu.is_none() {
-            self.choice = chosen.map(|(id, mode)| Chosen {
+            self.choice = chosen.map(|(id, mode, kind)| Chosen {
                 revision: self.revision,
                 choice: Choice {
                     id,
@@ -1350,6 +1370,7 @@ impl EditorView {
                     range,
                 },
                 provider,
+                kind,
             });
             return false;
         }
@@ -1446,7 +1467,8 @@ impl EditorView {
     /// a menu one of the host's providers opened is not given here; see
     /// [`EditorView::take_provided`].
     pub fn take_choice(&mut self) -> Option<Choice> {
-        let chosen = self.choice.take_if(|chosen| chosen.provider.is_none())?;
+        let chosen = (self.choice)
+            .take_if(|chosen| chosen.provider.is_none() && chosen.kind == RowKind::Own)?;
         (chosen.revision == self.revision).then_some(chosen.choice)
     }
 
@@ -1455,9 +1477,22 @@ impl EditorView {
     /// the host's list, for the host to hand the row back to it, and the
     /// row.
     pub fn take_provided(&mut self) -> Option<(usize, Choice)> {
-        let chosen = self.choice.take_if(|chosen| chosen.provider.is_some())?;
+        let chosen = (self.choice)
+            .take_if(|chosen| chosen.provider.is_some() && chosen.kind == RowKind::Own)?;
         let provider = chosen.provider?;
         (chosen.revision == self.revision).then_some((provider, chosen.choice))
+    }
+
+    /// As [`EditorView::take_choice`], for a row that runs a command of the
+    /// host's ([`RowKind::Command`]), whoever opened its menu: the row's id
+    /// names the command, and its anchor ([`Choice::line`] and
+    /// [`Choice::range`]) the place the menu was opened for, which the
+    /// command acts on.
+    pub fn take_command(&mut self) -> Option<Choice> {
+        let chosen = self
+            .choice
+            .take_if(|chosen| chosen.kind == RowKind::Command)?;
+        (chosen.revision == self.revision).then_some(chosen.choice)
     }
 
     /// The right-click that the last event given to [`EditorView::spell`]
@@ -1783,24 +1818,66 @@ impl EditorView {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Vec<Message> {
+        self.key_routing(key, modifiers).0
+    }
+
+    /// [`key_message`](Self::key_message), and whether the focused editor
+    /// captures the press, as the widget does: a press it handles through
+    /// a binding of its own, but not one it gives up the keyboard for,
+    /// nor one that only closes the open menu (a host's shortcut, which
+    /// then still reaches the host), nor one it sends on to the host.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn key_routing(
+        &self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> (Vec<Message>, bool) {
+        use iced::widget::text_editor::Binding;
         let popover = self.popover().map(keys::Target::of);
         let selected = self.has_selection();
         let line = || self.caret_line();
         let mut out = Vec::new();
-        match keys::route(key_press(key, modifiers), self.key_context(), popover) {
-            None => {}
-            Some(keys::Routed::Binding(binding)) => {
-                keys::messages(binding, selected, &line, &mut out)
-            }
+        let binding = match keys::route(key_press(key, modifiers), self.key_context(), popover) {
+            None => None,
+            Some(keys::Routed::Binding(binding)) => Some(binding),
             Some(keys::Routed::Close(binding)) => {
                 out.push(Message::Spell(SpellEvent::Close));
-                if let Some(binding) = binding {
-                    keys::messages(binding, selected, &line, &mut out);
+                binding
+            }
+            Some(keys::Routed::Pass(message)) => {
+                out.push(message);
+                None
+            }
+        };
+        let captured = binding
+            .as_ref()
+            .is_some_and(|binding| !matches!(binding, Binding::Unfocus));
+        if let Some(binding) = binding {
+            keys::messages(binding, selected, &line, &mut out);
+        }
+        // A popover with a row that runs a command is named by a choice
+        // from it, as the widget names it: its accelerators, and Enter and
+        // Tab on suggestions.
+        let open = self.popover().filter(|open| open.runs_commands());
+        if let Some(open) = open {
+            for message in &mut out {
+                let row = match message {
+                    Message::Spell(SpellEvent::Accept(row)) => Some(Some(*row)),
+                    Message::Spell(SpellEvent::AcceptSelected) => Some(None),
+                    Message::Spell(SpellEvent::Key(MenuKey::Enter | MenuKey::Tab))
+                        if open.mode() == Mode::Suggest =>
+                    {
+                        Some(None)
+                    }
+                    _ => None,
+                };
+                if let Some(row) = row {
+                    let menu = open.instance();
+                    *message = Message::Spell(SpellEvent::AcceptOf { menu, row });
                 }
             }
-            Some(keys::Routed::Pass(message)) => out.push(message),
         }
-        out
+        (out, captured)
     }
 
     /// Close the open menu for a pointer press in the editor, which does
@@ -2722,7 +2799,7 @@ mod tests {
                 Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
-                Message::Find => false,
+                Message::Find | Message::Command(_) => false,
             }
         }
 
@@ -7958,5 +8035,146 @@ mod tests {
             }
             assert_eq!(ev.clicked(iced::Point::new(10.0, 900.0)), None, "{kind:?}");
         }
+    }
+
+    /// A row that runs a command comes back only as one, with the anchor
+    /// its menu was opened for, from a menu of the host's or of a
+    /// provider; any other row never does, whatever its id.
+    #[test]
+    fn a_command_row_comes_back_as_a_command_and_no_other_row_does() {
+        for id in [0, 7, 0x8000_0000, u32::MAX] {
+            let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call sam\nnext");
+            ev.move_cursor(at(0, 8));
+            let rows = vec![Row::new(id, "plain"), Row::command(id, "command")];
+            assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows.clone()));
+            assert_eq!(
+                ev.popover().and_then(|open| open.kind(1)),
+                Some(RowKind::Command)
+            );
+            assert!(!ev.spell(SpellEvent::Accept(0)));
+            assert_eq!(ev.take_command(), None, "{id}");
+            assert_eq!(ev.take_choice().map(|choice| choice.id), Some(id));
+            assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows));
+            assert!(!ev.spell(SpellEvent::Accept(1)));
+            assert_eq!(ev.take_choice(), None, "{id}");
+            assert_eq!(ev.take_provided(), None, "{id}");
+            let command = Choice {
+                id,
+                mode: Mode::Menu,
+                line: 0,
+                range: 2..5,
+            };
+            assert_eq!(ev.take_command(), Some(command));
+            assert_eq!(ev.take_command(), None);
+        }
+
+        // A provider's: the command comes back with the clicked line, not
+        // the caret's, and its own row goes back to it.
+        let commands = provider(fixtures::commands_on_task_lines);
+        let mut ev = providing(BackendKind::Owned, Some(vec![Provider::Host(commands)]));
+        assert_eq!(ev.cursor().position.line, 1);
+        for (row, provided, command) in [(0, Some(11), None), (1, None, Some(7))] {
+            let event = right_click(&ev, 0, MAIL).expect("the provider takes the click");
+            assert!(!ev.spell(event));
+            assert_eq!(ev.popover().and_then(Popover::provider), Some(0));
+            assert!(!ev.spell(SpellEvent::Accept(row)));
+            assert_eq!(ev.take_choice(), None);
+            let anchored = |choice: Choice| (choice.id, choice.line, choice.range);
+            assert_eq!(
+                ev.take_provided().map(|(_, choice)| choice.id),
+                provided,
+                "row {row}"
+            );
+            assert_eq!(
+                ev.take_command().map(anchored),
+                command.map(|id| (id, 0, 0..1))
+            );
+        }
+    }
+
+    /// Enter and Tab on suggestions with rows that run commands name the
+    /// suggestions they were pressed on: queued while those are replaced
+    /// by others, they choose nothing; and a key that names none never
+    /// chooses such a row.
+    #[test]
+    fn a_queued_key_on_command_suggestions_chooses_only_from_them() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+
+        let suggesting = || {
+            let mut ev = EditorView::with_backend(BackendKind::Owned, "");
+            ev.set_suggest_source(Some(Arc::new(fixtures::CommandSuggestions)));
+            for c in ['d', 'u'] {
+                ev.perform(Action::Edit(Edit::Insert(c)));
+            }
+            let open = ev.popover().expect("suggestions for `du`");
+            assert_eq!((open.mode(), open.runs_commands()), (Mode::Suggest, true));
+            ev
+        };
+        for key in [Named::Enter, Named::Tab] {
+            // Chosen from the suggestions it was pressed on.
+            let mut ev = suggesting();
+            let a = ev.popover().unwrap().instance();
+            let (messages, captured) = ev.key_routing(Key::Named(key), Modifiers::empty());
+            assert!(captured);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Spell(SpellEvent::AcceptOf { menu, row: None })] if *menu == a
+                ),
+                "{key:?}: {messages:?}"
+            );
+            for message in messages {
+                ev.carry_out(message);
+            }
+            assert_eq!(
+                ev.take_command().map(|choice| choice.id),
+                Some(7),
+                "{key:?}"
+            );
+            assert_eq!(ev.text(), "du");
+
+            // Queued on A, applied once B has replaced A: nothing is
+            // chosen, from B either, and B stays open.
+            let mut ev = suggesting();
+            let (messages, _) = ev.key_routing(Key::Named(key), Modifiers::empty());
+            let rows = vec![Row::command(9, "nine")];
+            assert!(ev.open_popover(Anchor::Caret, Mode::Suggest, rows));
+            let b = ev.popover().unwrap().instance();
+            for message in messages {
+                assert!(!ev.carry_out(message));
+            }
+            assert_eq!(ev.take_command(), None, "{key:?}");
+            assert_eq!(ev.take_choice(), None, "{key:?}");
+            assert_eq!(ev.popover().map(Popover::instance), Some(b), "{key:?}");
+            assert_eq!(ev.text(), "du", "{key:?}");
+
+            // A key that names no suggestions chooses no row that runs a
+            // command: they close and nothing is chosen.
+            let mut ev = suggesting();
+            let menu_key = if key == Named::Enter {
+                MenuKey::Enter
+            } else {
+                MenuKey::Tab
+            };
+            assert!(!ev.spell(SpellEvent::Key(menu_key)));
+            assert_eq!(ev.take_command(), None, "{key:?}");
+            assert!(ev.popover().is_none(), "{key:?}");
+            assert_eq!(ev.text(), "du", "{key:?}");
+        }
+        // Plain suggestions' keys are unchanged: Enter is `Key`, not named.
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "");
+        ev.set_suggest_source(Some(Arc::new(fixtures::Completes::new(&["due"]))));
+        for c in ['d', 'u'] {
+            ev.perform(Action::Edit(Edit::Insert(c)));
+        }
+        let (messages, _) = ev.key_routing(Key::Named(Named::Enter), Modifiers::empty());
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::Spell(SpellEvent::Key(MenuKey::Enter))]
+            ),
+            "{messages:?}"
+        );
     }
 }

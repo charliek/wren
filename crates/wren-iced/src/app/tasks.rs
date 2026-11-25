@@ -66,6 +66,10 @@ impl Clock {
 #[derive(Debug, Default)]
 pub(super) struct TaskMemo {
     kept: RefCell<Option<Memo>>,
+    /// Whether the caret's line belongs to a task, as the line commands
+    /// last found it, with the editor's text revision, the caret's line
+    /// and the engine it was found for.
+    pub(super) on_task: std::cell::Cell<Option<(MemoKey, bool)>>,
     /// How many times a line was read for its box.
     #[cfg(test)]
     reads: std::cell::Cell<usize>,
@@ -90,9 +94,9 @@ type TaskBox = (String, block::Task);
 /// moves on a note switch and when tasks turn on or off), the caret's line
 /// and the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MemoKey {
+pub(super) struct MemoKey {
     revision: u64,
-    line: usize,
+    pub(super) line: usize,
     engine: wren_editor::BackendKind,
 }
 
@@ -184,11 +188,7 @@ impl App {
         if !self.preferences.tasks || !self.markdown_in_editor() {
             return None;
         }
-        let key = MemoKey {
-            revision: self.editor.revision(),
-            line: self.editor.cursor().position.line,
-            engine: self.editor.backend(),
-        };
+        let key = self.memo_key();
         let today = self.today();
         let mut kept = self.task_memo.kept.borrow_mut();
         let memo = match &mut *kept {
@@ -210,6 +210,16 @@ impl App {
             });
         }
         memo.summary.clone()
+    }
+
+    /// What is read from the caret's line is kept for: the text's
+    /// revision, the caret's line and the engine.
+    pub(super) fn memo_key(&self) -> MemoKey {
+        MemoKey {
+            revision: self.editor.revision(),
+            line: self.editor.cursor().position.line,
+            engine: self.editor.backend(),
+        }
     }
 
     /// Line `number`'s text and its task's box, when it holds one.
@@ -529,7 +539,7 @@ mod tests {
             );
             assert_eq!(
                 after(&mut app, 2, 0, "toggle"),
-                replaced(2, &["- [x] Doing teh draft"]),
+                replaced(2, &["- [x] Doing teh draft ✅ 2026-11-19"]),
                 "{engine}"
             );
             assert_eq!(

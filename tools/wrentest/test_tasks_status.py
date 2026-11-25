@@ -157,19 +157,20 @@ def test_enter_backspace_and_toggle_work_from_the_box_range(
             (empty, end[empty], "backspace", replaced(empty, "- ")),
             # Inside the box it takes one character.
             (wide, width("- [界"), "backspace", replaced(wide, "- [] Wide india")),
-            # The toggle: unfinished becomes done, finished becomes open,
-            # and all of the symbol's bytes are replaced.
-            (line_of("- [ ] Open"), 0, "toggle", replaced(2, "- [x] Open alpha")),
-            (doing, end[doing], "toggle", replaced(doing, "- [x] Doing bravo")),
+            # The toggle: unfinished becomes done, with today's stamp,
+            # finished becomes open, and all of the symbol's bytes are
+            # replaced.
+            (line_of("- [ ] Open"), 0, "toggle", replaced(2, "- [x] Open alpha ✅ 2026-11-19")),
+            (doing, end[doing], "toggle", replaced(doing, "- [x] Doing bravo ✅ 2026-11-19")),
             (line_of("- [x]"), 0, "toggle", replaced(4, "- [ ] Done charlie")),
             (line_of("- [X]"), 0, "toggle", replaced(5, "- [ ] Done delta")),
             (cancelled, end[cancelled], "toggle", replaced(cancelled, "- [ ] Cancelled echo")),
-            (line_of("- [a] Unknown"), 0, "toggle", replaced(7, "- [x] Unknown foxtrot")),
-            (line_of("- [1]"), 0, "toggle", replaced(8, "- [x] x")),
-            (line_of("- [[]"), 0, "toggle", replaced(9, "- [x] Bracket golf")),
-            (line_of("- [é]"), 0, "toggle", replaced(10, "- [x] Accent hotel")),
-            (wide, end[wide], "toggle", replaced(wide, "- [x] Wide india")),
-            (quoted, end[quoted], "toggle", replaced(quoted, "> 1. [x]\tQuoted kilo")),
+            (line_of("- [a] Unknown"), 0, "toggle", replaced(7, "- [x] Unknown foxtrot ✅ 2026-11-19")),
+            (line_of("- [1]"), 0, "toggle", replaced(8, "- [x] x ✅ 2026-11-19")),
+            (line_of("- [[]"), 0, "toggle", replaced(9, "- [x] Bracket golf ✅ 2026-11-19")),
+            (line_of("- [é]"), 0, "toggle", replaced(10, "- [x] Accent hotel ✅ 2026-11-19")),
+            (wide, end[wide], "toggle", replaced(wide, "- [x] Wide india ✅ 2026-11-19")),
+            (quoted, end[quoted], "toggle", replaced(quoted, "> 1. [x]\tQuoted kilo ✅ 2026-11-19")),
             # Not boxes: Enter continues a plain item, and the toggle gives
             # the item a box of its own.
             (line_of("- [✔"), end[line_of("- [✔")], "enter",
@@ -180,7 +181,7 @@ def test_enter_backspace_and_toggle_work_from_the_box_range(
             (line_of("- [a]:"), 0, "toggle", replaced(line_of("- [a]:"), "- [ ] [a]: http://u")),
         ])
         # The caret keeps its place in the text when the symbol shrinks.
-        assert act(app, wide, end[wide], "toggle") == replaced(wide, "- [x] Wide india")
+        assert act(app, wide, end[wide], "toggle") == replaced(wide, "- [x] Wide india ✅ 2026-11-19")
         assert app.client.call("editor.get")["cursor"] == {
             "line": wide, "column": width("- [x] Wide india")}
         assert app.client.call("tasks.get")["line"]["task"] == {
@@ -206,9 +207,12 @@ def test_the_toggle_over_a_selection_follows_the_statuses_in_it(
         first, last = line_of("- [ ] Open"), line_of("- [✓]")
         done = "\n".join(
             LINES[:first]
-            + ["- [x] Open alpha", "- [x] Doing bravo", "- [x] Done charlie", "- [X] Done delta",
-               "- [x] Cancelled echo", "- [x] Unknown foxtrot", "- [x] x", "- [x] Bracket golf",
-               "- [x] Accent hotel", "- [x] Wide india", "- [x] Check juliet"]
+            + ["- [x] Open alpha ✅ 2026-11-19", "- [x] Doing bravo ✅ 2026-11-19",
+               "- [x] Done charlie", "- [X] Done delta",
+               "- [x] Cancelled echo ✅ 2026-11-19", "- [x] Unknown foxtrot ✅ 2026-11-19",
+               "- [x] x ✅ 2026-11-19", "- [x] Bracket golf ✅ 2026-11-19",
+               "- [x] Accent hotel ✅ 2026-11-19", "- [x] Wide india ✅ 2026-11-19",
+               "- [x] Check juliet ✅ 2026-11-19"]
             + LINES[last + 1:])
         assert toggled(first, last) == done
         saved(app, path, done)

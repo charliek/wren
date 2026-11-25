@@ -75,6 +75,16 @@ pub enum CommandId {
     ExportSvg,
     ExportPng,
     ExportDrawio,
+    TaskCycleStatus,
+    TaskPriorityHigh,
+    TaskPriorityMedium,
+    TaskPriorityLow,
+    TaskPriorityHighest,
+    TaskPriorityLowest,
+    TaskPriorityNone,
+    TaskRaisePriority,
+    TaskLowerPriority,
+    TaskClearDue,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -125,10 +135,11 @@ const REVEAL_GROUP: &str = "Reveal group in Files";
 const REVEAL_SECTION: &str = "Reveal section in Files";
 
 /// Palette section order; `Hidden` commands are bindable but not listed.
-pub const GROUPS: [&str; 7] = [
+pub const GROUPS: [&str; 8] = [
     "This note",
     "Markdown",
     "Board",
+    "Tasks",
     "Go",
     "View",
     "Workspace",
@@ -221,6 +232,79 @@ definitions![
         "editor.spell_suggest",
         "Suggest spelling",
         "Markdown",
+        Editor
+    ),
+    // The task line commands (discovery/tasks.md §6), listed only while
+    // the `tasks` setting is on; the priorities in Q7's order, High,
+    // Medium and Low first.
+    (
+        TaskCycleStatus,
+        "task.cycle_status",
+        "Cycle task status",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityHigh,
+        "task.priority.high",
+        "Set task priority: High",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityMedium,
+        "task.priority.medium",
+        "Set task priority: Medium",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityLow,
+        "task.priority.low",
+        "Set task priority: Low",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityHighest,
+        "task.priority.highest",
+        "Set task priority: Highest",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityLowest,
+        "task.priority.lowest",
+        "Set task priority: Lowest",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskPriorityNone,
+        "task.priority.none",
+        "Remove task priority",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskRaisePriority,
+        "task.priority.raise",
+        "Raise task priority",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskLowerPriority,
+        "task.priority.lower",
+        "Lower task priority",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskClearDue,
+        "task.clear_due",
+        "Clear task due date",
+        "Tasks",
         Editor
     ),
     (NewGroup, "group.new", "New group…", "Workspace", App),
@@ -715,6 +799,9 @@ pub const BOARD_DEFINITIONS: [Definition; 94] = {
     ]
 };
 
+/// The bit that marks a [`CommandId::payload`].
+const PAYLOAD: u32 = 1 << 31;
+
 /// Every command row: the app's, then the board's.
 pub fn definitions() -> impl Iterator<Item = &'static Definition> {
     DEFINITIONS.iter().chain(&BOARD_DEFINITIONS)
@@ -801,12 +888,54 @@ impl CommandId {
         self.definition().scope
     }
 
-    /// Where the editor sends an Editor-scoped command's key.
+    /// Where the editor sends an Editor-scoped command's key: a task
+    /// command comes back to the app as itself ([`CommandId::payload`]).
     pub fn editor_route(self) -> Option<wren_editor::KeyRoute> {
         match self {
             Self::SpellSuggest => Some(wren_editor::KeyRoute::Suggest),
+            _ if self.task_change().is_some() => {
+                Some(wren_editor::KeyRoute::Command(self.payload()))
+            }
             _ => self.intent().map(wren_editor::KeyRoute::Intent),
         }
+    }
+
+    /// The number the editor carries this command to the app by, from a
+    /// key ([`wren_editor::KeyRoute::Command`]) or a popover's row: its
+    /// row's place in [`definitions`], tagged so that no plain row number
+    /// is taken for one.
+    pub fn payload(self) -> u32 {
+        let place = definitions()
+            .position(|definition| definition.id == self)
+            .expect("complete command table");
+        PAYLOAD | u32::try_from(place).expect("a short command table")
+    }
+
+    /// The command a [`CommandId::payload`] names.
+    pub fn from_payload(payload: u32) -> Option<Self> {
+        if payload & PAYLOAD == 0 {
+            return None;
+        }
+        let place = usize::try_from(payload & !PAYLOAD).ok()?;
+        definitions().nth(place).map(|definition| definition.id)
+    }
+
+    /// The change a task line command makes to the caret's task.
+    pub fn task_change(self) -> Option<wren_markdown::task::Change> {
+        use wren_markdown::task::{Change, Priority};
+        Some(match self {
+            Self::TaskCycleStatus => Change::Cycle,
+            Self::TaskPriorityHighest => Change::SetPriority(Some(Priority::Highest)),
+            Self::TaskPriorityHigh => Change::SetPriority(Some(Priority::High)),
+            Self::TaskPriorityMedium => Change::SetPriority(Some(Priority::Medium)),
+            Self::TaskPriorityLow => Change::SetPriority(Some(Priority::Low)),
+            Self::TaskPriorityLowest => Change::SetPriority(Some(Priority::Lowest)),
+            Self::TaskPriorityNone => Change::SetPriority(None),
+            Self::TaskRaisePriority => Change::RaisePriority,
+            Self::TaskLowerPriority => Change::LowerPriority,
+            Self::TaskClearDue => Change::SetDue(None),
+            _ => return None,
+        })
     }
 
     /// The editing intent of a Markdown command.
@@ -848,7 +977,7 @@ impl CommandId {
     /// with it off it is not listed anywhere, its key is unbound, and it
     /// does not run.
     pub fn tasks(self) -> bool {
-        false
+        self.task_change().is_some()
     }
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -1027,6 +1156,9 @@ impl App {
                     && self.ensure_editor_ready().is_ok()
                     && self.editor.markdown_assist()
             }
+            TaskCycleStatus | TaskPriorityHigh | TaskPriorityMedium | TaskPriorityLow
+            | TaskPriorityHighest | TaskPriorityLowest | TaskPriorityNone | TaskRaisePriority
+            | TaskLowerPriority | TaskClearDue => self.caret_on_task(),
             SpellSuggest => {
                 self.surface() == Surface::Text
                     && self.editor.backend() == wren_editor::BackendKind::Owned
@@ -1340,6 +1472,10 @@ impl App {
                     focus_editor(),
                 )
             }
+            ToggleTask if self.preferences.tasks => self.run_task_command(id),
+            TaskCycleStatus | TaskPriorityHigh | TaskPriorityMedium | TaskPriorityLow
+            | TaskPriorityHighest | TaskPriorityLowest | TaskPriorityNone | TaskRaisePriority
+            | TaskLowerPriority | TaskClearDue => self.run_task_command(id),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 // From the palette: act at the editor's cursor, as the
                 // shortcut does in the editor, then give it the keyboard.

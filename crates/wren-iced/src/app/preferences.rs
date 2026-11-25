@@ -82,12 +82,13 @@ pub(super) fn backend_kind(engine: EditorEngine) -> BackendKind {
 
 /// The editor's say over its keys, from the keymap and key reading the app's
 /// own shortcuts use: a host command's key is the app's, and an editor
-/// command's key is the editor's intent.
-fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
+/// command's key is the editor's intent, or with `tasks` on a task
+/// command's, the toggle's included, the command itself.
+fn key_policy(keymap: &Keymap, markdown_assist: bool, tasks: bool) -> KeyPolicy {
     let keymap = keymap.clone();
     std::sync::Arc::new(move |key, physical, modifiers| {
         crate::keys::shortcut(key, physical, modifiers).map_or(KeyRoute::Pass, |trigger| {
-            key_route(&keymap, &trigger, markdown_assist)
+            key_route(&keymap, &trigger, markdown_assist, tasks)
         })
     })
 }
@@ -95,13 +96,22 @@ fn key_policy(keymap: &Keymap, markdown_assist: bool) -> KeyPolicy {
 /// Where the editor sends a press of `trigger`. Without Markdown assist the
 /// Markdown commands are off, so their keys keep the editor's own meaning:
 /// Ctrl+Enter breaks the line and Alt+↑ moves up. The suggest key is the
-/// editor's either way.
-pub(super) fn key_route(keymap: &Keymap, trigger: &Accel, markdown_assist: bool) -> KeyRoute {
+/// editor's either way. With `tasks` on the toggle writes stamps, which
+/// the app does, so its key comes back to the app as the command.
+pub(super) fn key_route(
+    keymap: &Keymap,
+    trigger: &Accel,
+    markdown_assist: bool,
+    tasks: bool,
+) -> KeyRoute {
     match keymap.action(trigger).and_then(CommandId::parse) {
         None => KeyRoute::Pass,
         Some(id) => match id.editor_route() {
             None => KeyRoute::Host,
             Some(KeyRoute::Intent(_)) if !markdown_assist => KeyRoute::Pass,
+            Some(KeyRoute::Intent(wren_editor::Intent::ToggleTask)) if tasks => {
+                KeyRoute::Command(id.payload())
+            }
             Some(route) => route,
         },
     }
@@ -512,8 +522,11 @@ impl App {
         self.editor.set_line_numbers(settings.line_numbers);
         let assist = self.markdown_assist();
         self.editor.set_markdown_assist(assist);
-        self.editor
-            .set_key_policy(key_policy(&self.preferences.keymap, assist));
+        self.editor.set_key_policy(key_policy(
+            &self.preferences.keymap,
+            assist,
+            self.preferences.tasks,
+        ));
         self.sync_task_options();
         let covered = self.board_covered();
         if let Some(view) = &mut self.board {
@@ -536,8 +549,11 @@ impl App {
         let assist = self.markdown_assist();
         if assist != self.editor.markdown_assist() {
             self.editor.set_markdown_assist(assist);
-            self.editor
-                .set_key_policy(key_policy(&self.preferences.keymap, assist));
+            self.editor.set_key_policy(key_policy(
+                &self.preferences.keymap,
+                assist,
+                self.preferences.tasks,
+            ));
         }
         self.sync_proofreader();
     }
@@ -1658,7 +1674,7 @@ mod tests {
             layer_of,
         );
         assert!(warnings.is_empty());
-        let policy = key_policy(&keymap, true);
+        let policy = key_policy(&keymap, true, false);
         let (editing, app) = match Platform::current() {
             Platform::Mac => (Modifiers::LOGO, Modifiers::LOGO),
             Platform::Linux => (Modifiers::CTRL, Modifiers::ALT),
@@ -1718,7 +1734,7 @@ mod tests {
         );
         // Without assist the editor commands' keys are the editor's own
         // again, and the app's stay the app's.
-        let plain = key_policy(&keymap, false);
+        let plain = key_policy(&keymap, false, false);
         assert_eq!(
             plain(
                 &Key::Named(Named::Enter),
