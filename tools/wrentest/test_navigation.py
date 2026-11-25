@@ -57,6 +57,7 @@ BOARD_COMMANDS = {
 # tasks.md §6), the palette's Tasks group: each acts on the caret's task, so
 # none is enabled with the caret on a line of no task.
 TASK_COMMANDS = {
+    "task.set_status", "task.set_priority",
     "task.cycle_status", "task.priority.high", "task.priority.medium", "task.priority.low",
     "task.priority.highest", "task.priority.lowest", "task.priority.none",
     "task.priority.raise", "task.priority.lower", "task.clear_due",

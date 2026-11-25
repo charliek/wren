@@ -160,6 +160,7 @@ impl App {
     /// the settings are applied, and when the day changes.
     pub(super) fn sync_task_options(&mut self) {
         self.editor.set_tasks(self.task_options());
+        self.sync_task_menus();
     }
 
     /// Whether the editor holds Markdown a task line can be read from: a

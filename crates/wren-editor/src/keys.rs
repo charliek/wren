@@ -182,7 +182,8 @@ fn route_spell_menu(key_press: KeyPress, context: Context, opening: bool) -> Opt
 /// Route a key press with a menu of the host's open, whose rows have these
 /// `accelerators`. Up and Down with no modifier move its selection, Enter
 /// with no modifier accepts the selected row, and a row's accelerator
-/// accepts the row. Escape with no Ctrl, Alt or logo key goes to the host
+/// accepts the row, or for a row that cannot be chosen is taken and does
+/// nothing, the menu staying open. Escape with no Ctrl, Alt or logo key goes to the host
 /// in its order with the batch's other messages, uncaptured: the host
 /// closes the menu for it and drops its own handling of the press
 /// ([`crate::EditorView::take_claimed_escape`]). A modifier key alone does
@@ -205,13 +206,32 @@ fn route_menu(
         Key::Named(Named::ArrowDown) if modifiers.is_empty() => SpellEvent::Move(1),
         Key::Named(Named::Enter) if modifiers.is_empty() => SpellEvent::AcceptSelected,
         _ => {
-            let row = accelerators.iter().position(|accelerator| {
-                accelerator.is_some_and(|accelerator| {
+            let text = key_press.text.as_deref();
+            let pressed = |accelerator: &Accelerator, by_text: bool| {
+                if by_text {
+                    accelerator.matches_press(key, key_press.physical_key, modifiers, text)
+                } else {
                     accelerator.matches(key, key_press.physical_key, modifiers)
-                })
+                }
+            };
+            // The key itself first, then what it types, so a row's key is
+            // never another row's by its text.
+            let row = [false, true].into_iter().find_map(|by_text| {
+                accelerators
+                    .iter()
+                    .enumerate()
+                    .find_map(|(row, accelerator)| {
+                        accelerator
+                            .filter(|accelerator| pressed(accelerator, by_text))
+                            .map(|accelerator| (row, accelerator))
+                    })
             });
             match row {
-                Some(row) => SpellEvent::Accept(row),
+                // A key that chooses nothing: taken, so it does not type.
+                Some((_, accelerator)) if accelerator.is_inert() => {
+                    return Some(Routed::Binding(Binding::Sequence(Vec::new())));
+                }
+                Some((row, _)) => SpellEvent::Accept(row),
                 None => return Some(Routed::Close(key_binding(key_press, context))),
             }
         }

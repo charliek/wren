@@ -20,8 +20,10 @@ menu with no suggestions, and the menu above a word on the last visible row.
 (`tools/wrentest/fixtures/tasks/`) on the advanced engine, unless `--engine` or
 `--setting editor-engine=…` says otherwise, with `tasks = on` and today pinned
 to 19 November 2026, shoots its task lines, the task colours (with a caret,
-a selection, and two days later), and the emoji spike's note (with a caret
-and a selection on its glyphs), and writes to
+a selection, and two days later), the emoji spike's note (with a caret
+and a selection on its glyphs), the line commands, the status bar and, on
+the advanced engine, the task, status, priority and spelling menus, and
+writes to
 `<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
 scene depends on; `--fonts` names the font setup instead of the check for Noto
 Color Emoji.
@@ -380,6 +382,70 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
     emoji_scenes(client, shot_here)
     command_scenes(client, shot_here)
     footer_scenes(client, shot_here, resize)
+    if engine == "advanced":
+        menu_scenes(client, shot_here, resize)
+
+
+def menu_scenes(client, shot_here, resize) -> None:
+    """The task menus (discovery/tasks-build.md item 3.4), each with the
+    task's status or priority marked: the task menu for a right-click on a
+    doing task's description, the status menu on its box, and the priority
+    menu on its glyph; then a misspelled word on a task line, whose
+    right-click opens spelling's menu first. The window is first put back
+    to its own size, which the footer scenes changed on X11, and spell
+    check is turned on for the last scene alone."""
+    if display_server() == "x11":
+        resize("1280x800")
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+    line = 2
+    text = client.call("editor.get")["text"].split("\n")[line]
+    assert text == "- [/] Draft the cutover runbook @alice.chen ⏫ 📅 2026-11-23", text
+    client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
+    client.call("editor.focus")
+
+    def menu_at(token: str, rows: list[str], marked: str) -> None:
+        column = len(text[:text.index(token)].encode())
+        client.call("editor.right_click", {"line": line, "column": column})
+        popover = wait_for(lambda: (state := client.call("editor.get")["popover"])
+                           and state["bounds"] and state,
+                           timeout=10, description=f"the menu under {token!r} is drawn")
+        assert [row["label"] for row in popover["rows"]] == rows, popover
+        assert [row["label"] for row in popover["rows"] if row["checked"]] == [marked], popover
+
+    status = ["Open", "Doing", "Done", "Cancelled"]
+    menu_at("runbook", status + ["Change due date…", "Priority…", "Edit task…"], "Doing")
+    shot_here("task-menu")
+    client.call("editor.key", {"key": "escape"})
+    menu_at("[", status, "Doing")
+    shot_here("task-menu-status")
+    client.call("editor.key", {"key": "escape"})
+    menu_at("⏫", ["High", "Medium", "Low", "Highest", "Lowest", "None"], "High")
+    shot_here("task-menu-priority")
+    client.call("editor.key", {"key": "escape"})
+
+    client.call("command.run", {"id": "editor.toggle_spell_check"})
+    wait_for(lambda: client.call("editor.spell")["ready"], timeout=20,
+             description="the dictionary loads")
+    original = client.call("editor.get")["text"]
+    bank = 7
+    assert original.split("\n")[bank] == "- [ ] Call the bank 📅 2026-11-20"
+    client.call("editor.cursor", {"line": bank, "column": len("- [ ] Call the bank"),
+                                  "selection": None})
+    client.call("editor.insert", {"text": " acount"})
+    client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
+    wait_for(lambda: any(mark["word"] == "acount" for mark in client.call("editor.spell")["marks"]),
+             timeout=10, description="the misspelling is marked")
+    client.call("editor.right_click", {"line": bank, "column": len("- [ ] Call the bank a")})
+    wait_for(lambda: (menu := client.call("editor.spell")["menu"]) and menu["bounds"],
+             timeout=10, description="spelling's menu is drawn")
+    assert client.call("editor.get")["popover"]["spelling"] is True
+    shot_here("task-menu-spelling")
+    client.call("editor.spell_event", {"event": "close"})
+    client.call("editor.undo")
+    assert client.call("editor.get")["text"] == original
+    client.call("command.run", {"id": "editor.toggle_spell_check"})
 
 
 def command_scenes(client, shot_here) -> None:
@@ -401,7 +467,10 @@ def command_scenes(client, shot_here) -> None:
     client.call("palette.open", {"mode": "commands"})
     rows = client.call("palette.query", {"query": "task"})["navigation"]["modal"]["results"]
     tasks = [row for row in rows if row["group"] == "Tasks"]
-    assert len(tasks) == 10 and all(row["enabled"] for row in tasks), tasks
+    # The status and priority menus (item 3.4) are the advanced engine's.
+    menus = {"task.set_status", "task.set_priority"}
+    assert len(tasks) == 12 and all(row["enabled"] or row["key"]["command"] in menus
+                                    for row in tasks), tasks
     shot_here("task-commands-palette")
     client.call("palette.close")
     client.call("editor.focus")

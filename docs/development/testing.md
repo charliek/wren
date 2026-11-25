@@ -124,6 +124,8 @@ and press the real suggest key. These requests drive it:
 | `editor.spell_event` | `event`: `open_at_caret`, `move`, `hover`, `accept`, or `close`; `arg`: a row for `hover` and `accept`, a step for `move` | The `editor.get` snapshot, after the event went through the app as the widget would send it. |
 | `editor.key` | `key`: a name (`up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `shift`, `control`, `alt`, `super`, `caps_lock`) or one character; `mods`: a list of `shift`, `ctrl`, `alt`, `logo` | The `editor.get` snapshot, after the editor's own key routing and then the app's key handling, as a real press in the focused editor. |
 | `editor.right_click` | `line`, `column`: the byte offset in the line of the character to click on, or the line's length for the end of its text | The `editor.get` snapshot, after a right-click on that character went through the app as the editor would send it: on a misspelled word, the menu opens, and with a menu open the click only closes it. A click nothing answers changes nothing. |
+| `editor.click` | `line`, `column`, as for `editor.right_click` | The `editor.get` snapshot, after a left click, pressed and let go on that character, went through the app: on a task's box (tasks on, the advanced engine) it cycles the task's status, and anywhere else it places the caret. |
+| `editor.bounds` | `line`, `start`, `end`: a byte range of the line | Where the range is drawn, `x`, `y`, `width` and `height` in window coordinates, for a native click on it; an error while it is not drawn. |
 
 Each mark has its `line`, its `start` and `end` byte offsets in the line,
 its `word`, whether it is `shown` (the caret at its end hides it), and the
@@ -191,8 +193,11 @@ through `shortcut` once a `keybind` line gives one a key. `editor.get`
 reports the editor's open popover, whichever it is, as `popover`: its
 `mode` (`menu` or `suggest`), whether it is the `spelling` menu, the
 `line`, `start`, `end` and `text` it hangs under, its `rows` (each with its
-`id`, `label`, and the `command` key the id names, or `null`) and the
-`selected` row; `null` with none open. `editor.open_menu` `{"rows":
+`id`, `label`, the `command` key the id names or `null`, its `glyph`, the
+`key` named beside it, and whether it is `checked` and `enabled`), the
+`selected` row, the `provider` that opened it for a right-click, its
+`instance` number, and its `bounds` and `anchor` in window coordinates once
+a frame has drawn it; `null` with none open. `editor.open_menu` `{"rows":
 [{"command": "task.priority.high", "label": "High", "key": "h", "shift":
 false}]}` opens a menu at the caret whose rows run those commands, on the
 advanced engine only, so `editor.key` can press a row's key, Up, Down,

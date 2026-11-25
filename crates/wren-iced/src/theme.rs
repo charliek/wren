@@ -41,6 +41,7 @@ pub fn editor_colors(definition: theme::Theme) -> (wren_editor::Style, wren_edit
             selected: color(c.selected),
             text: color(c.text),
             muted: color(c.muted),
+            accent: color(c.accent),
             font: crate::fonts::UI,
             text_size: 13.0,
         },

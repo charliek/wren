@@ -76,11 +76,18 @@
 //! opens its menu only if all of it is still so: a click made over a note
 //! the host has since replaced opens nothing.
 //!
-//! A row of a provider's menu is chosen from that menu or from none. Each
-//! popover the editor opens has its own number ([`Popover::instance`]),
-//! and a row of a provider's menu is chosen by an event that names the
-//! menu ([`PopoverEvent::AcceptOf`]): the editor ignores it when another
-//! popover is open by then, one the host opened in between included.
+//! A row of a menu is chosen from that menu or from none. Each popover the
+//! editor opens has its own number ([`Popover::instance`]), and a row of
+//! any menu but the suggestions menu, a provider's, a request's or one the
+//! host opened, is chosen by an event that names the menu
+//! ([`PopoverEvent::AcceptOf`]): the editor ignores it when another popover
+//! is open by then, one the host opened in between included. So are rows
+//! of suggestions with a row that runs a command.
+//!
+//! A row may be checked, which marks what the menu's subject is now, and a
+//! menu opens with it selected; and a row may be one that cannot be chosen
+//! ([`Row::enabled`]), which is drawn muted, which Up, Down and the pointer
+//! pass over, and whose accelerator does nothing, the menu staying open.
 //!
 //! The widget asks about the text as it is laid out, which is the text
 //! the host has only while the batch's earlier messages left the text,
@@ -143,7 +150,9 @@ use wren_markdown::span::LineSpans;
 use crate::hit::Hit;
 use crate::Message;
 
-pub(crate) use menu::{fit, height, measure, place, Fit, InOrder, MenuOverlay};
+pub(crate) use menu::{
+    fit_with, height, hint_size, measure, place, Extras, Fit, InOrder, MenuOverlay,
+};
 
 /// Where a popover hangs: under the first row that holds its anchor, at the
 /// anchor's left edge.
@@ -173,17 +182,80 @@ pub enum Mode {
 pub struct Accelerator {
     key: char,
     shift: bool,
+    /// The key of a row that cannot be chosen: pressed, it does nothing,
+    /// and the menu stays open.
+    inert: bool,
 }
 
 impl Accelerator {
     /// `key` pressed alone; a space is the space bar.
     pub const fn plain(key: char) -> Self {
-        Self { key, shift: false }
+        Self {
+            key,
+            shift: false,
+            inert: false,
+        }
     }
 
     /// `key` pressed with Shift, named as the key reads without it.
     pub const fn shifted(key: char) -> Self {
-        Self { key, shift: true }
+        Self {
+            key,
+            shift: true,
+            inert: false,
+        }
+    }
+
+    /// The accelerator as a row that cannot be chosen has it.
+    pub(crate) const fn inert(self) -> Self {
+        Self {
+            inert: true,
+            ..self
+        }
+    }
+
+    /// Whether it is a row's that cannot be chosen, and so chooses nothing.
+    pub(crate) const fn is_inert(self) -> bool {
+        self.inert
+    }
+
+    /// How a menu names the key beside its row: `Space`, a letter in
+    /// capitals, `⇧` before a shifted one, and any other character as it
+    /// is.
+    pub fn label(self) -> String {
+        let key = match self.key {
+            ' ' => "Space".to_owned(),
+            key => key.to_uppercase().collect(),
+        };
+        if self.shift {
+            format!("\u{21e7}{key}")
+        } else {
+            key
+        }
+    }
+
+    /// [`Self::matches`], or for a key that is no letter, a press of any
+    /// key that types it (`text`) with no Ctrl, Alt or logo key held, with
+    /// or without Shift: on many keyboards `/` and `-` are shifted keys.
+    pub(crate) fn matches_press(
+        self,
+        key: &Key,
+        physical: Physical,
+        modifiers: Modifiers,
+        text: Option<&str>,
+    ) -> bool {
+        if self.matches(key, physical, modifiers) {
+            return true;
+        }
+        let typed = text.and_then(|text| {
+            let mut chars = text.chars();
+            chars.next().filter(|_| chars.next().is_none())
+        });
+        !self.key.is_alphabetic()
+            && self.key != ' '
+            && !self.shift
+            && !(modifiers.control() || modifiers.alt() || modifiers.logo())
+            && typed == Some(self.key)
     }
 
     /// Whether a press of `key` with `modifiers` is this accelerator.
@@ -220,9 +292,26 @@ pub struct Row {
     /// The host's name for the row, handed back when it is chosen.
     pub id: u32,
     pub label: String,
-    /// The key that chooses the row while a menu is open.
+    /// The key that chooses the row while a menu is open, named beside
+    /// the row ([`Accelerator::label`]).
     pub accelerator: Option<Accelerator>,
     pub kind: RowKind,
+    /// A short mark drawn before the label, in a column of its own: a
+    /// status's box, a priority's glyph.
+    pub glyph: Option<String>,
+    /// The row is what the menu's subject is now, a task's status say:
+    /// its label is drawn in the accent and heavier, and a menu opens
+    /// with it selected.
+    pub checked: bool,
+    /// Whether the row can be chosen. One that cannot is drawn muted, is
+    /// never selected, and its accelerator does nothing.
+    pub enabled: bool,
+    /// Choosing the row opens another menu of the host's, which the host
+    /// opens when it is handed the row. The keys after the choice in its
+    /// batch of events, typed before the user could see that menu, are
+    /// dropped, as after a handover of the keyboard (see the module's
+    /// description).
+    pub opens_menu: bool,
 }
 
 impl Row {
@@ -232,6 +321,10 @@ impl Row {
             label: label.into(),
             accelerator: None,
             kind: RowKind::Own,
+            glyph: None,
+            checked: false,
+            enabled: true,
+            opens_menu: false,
         }
     }
 
@@ -247,6 +340,41 @@ impl Row {
         self.accelerator = Some(accelerator);
         self
     }
+
+    pub fn glyph(mut self, glyph: impl Into<String>) -> Self {
+        self.glyph = Some(glyph.into());
+        self
+    }
+
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// A row whose choice opens another menu of the host's
+    /// ([`Row::opens_menu`]).
+    pub fn opens_menu(mut self) -> Self {
+        self.opens_menu = true;
+        self
+    }
+}
+
+/// A row as an open popover keeps it, but for its label and its key: its
+/// id and what choosing it does, its glyph, whether it is checked and
+/// whether it can be chosen.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Entry {
+    id: u32,
+    kind: RowKind,
+    glyph: Option<String>,
+    checked: bool,
+    enabled: bool,
+    opens_menu: bool,
 }
 
 /// An open popover: where it hangs and what it offers. The host opens one
@@ -260,9 +388,9 @@ pub struct Popover {
     /// The anchor's text as it was when the popover opened.
     text: String,
     labels: Vec<String>,
-    /// Each row's id and what choosing it does.
-    ids: Vec<(u32, RowKind)>,
     accelerators: Vec<Option<Accelerator>>,
+    /// The rest of each row.
+    entries: Vec<Entry>,
     selected: Option<usize>,
     /// The suggestions menu, whose word is tinted while it is open and
     /// which leaves Escape to the host's key handling.
@@ -277,7 +405,8 @@ pub struct Popover {
 
 impl Popover {
     /// A popover under `range` of `line`, which reads `text`, offering
-    /// `rows`, the first selected.
+    /// `rows`: the first checked row that can be chosen selected, or with
+    /// none the first that can be.
     pub(crate) fn new(
         mode: Mode,
         line: usize,
@@ -291,18 +420,33 @@ impl Popover {
             range,
             text,
             labels: Vec::with_capacity(rows.len()),
-            ids: Vec::with_capacity(rows.len()),
             accelerators: Vec::with_capacity(rows.len()),
-            selected: (!rows.is_empty()).then_some(0),
+            entries: Vec::with_capacity(rows.len()),
+            selected: None,
             spelling: false,
             provider: None,
             instance: 0,
         };
         for row in rows {
+            let enabled = row.enabled;
             popover.labels.push(row.label);
-            popover.ids.push((row.id, row.kind));
-            popover.accelerators.push(row.accelerator);
+            popover.accelerators.push(
+                row.accelerator
+                    .map(|key| if enabled { key } else { key.inert() }),
+            );
+            popover.entries.push(Entry {
+                id: row.id,
+                kind: row.kind,
+                glyph: row.glyph,
+                checked: row.checked,
+                enabled,
+                opens_menu: row.opens_menu,
+            });
         }
+        let entries = &popover.entries;
+        let live = |row: &usize| entries[*row].enabled;
+        let checked = (0..entries.len()).find(|row| live(row) && entries[*row].checked);
+        popover.selected = checked.or_else(|| (0..entries.len()).find(live));
         popover
     }
 
@@ -342,14 +486,15 @@ impl Popover {
         self.instance
     }
 
-    /// Move the selection `delta` rows, stopping at the ends.
+    /// Move the selection `delta` rows that can be chosen, stopping at the
+    /// ends.
     pub(crate) fn step(&mut self, delta: i32) {
-        self.selected = stepped(self.selected, self.labels.len(), delta);
+        self.selected = stepped(self.selected, self.labels.len(), &self.live(), delta);
     }
 
-    /// Select `row`, if the popover has it.
+    /// Select `row`, if the popover has it and it can be chosen.
     pub(crate) fn hover(&mut self, row: usize) {
-        self.selected = hovered(self.selected, self.labels.len(), row);
+        self.selected = hovered(self.selected, self.labels.len(), &self.live(), row);
     }
 
     pub fn mode(&self) -> Mode {
@@ -383,24 +528,71 @@ impl Popover {
 
     /// The host's name for `row`.
     pub fn id(&self, row: usize) -> Option<u32> {
-        self.ids.get(row).map(|(id, _)| *id)
+        self.entries.get(row).map(|entry| entry.id)
     }
 
     /// What choosing `row` does, if the popover has it.
     pub fn kind(&self, row: usize) -> Option<RowKind> {
-        self.ids.get(row).map(|(_, kind)| *kind)
+        self.entries.get(row).map(|entry| entry.kind)
     }
 
     /// Whether a row of it runs a command of the host's
     /// ([`RowKind::Command`]): a choice of one names the popover by its
     /// [`instance`](Self::instance), as a provider's menu's does.
     pub fn runs_commands(&self) -> bool {
-        self.ids.iter().any(|(_, kind)| *kind == RowKind::Command)
+        self.entries
+            .iter()
+            .any(|entry| entry.kind == RowKind::Command)
     }
 
-    /// Each row's accelerator.
+    /// Each row's accelerator, inert for a row that cannot be chosen.
     pub(crate) fn accelerators(&self) -> &[Option<Accelerator>] {
         &self.accelerators
+    }
+
+    /// The key named beside `row` ([`Accelerator::label`]), if it has one.
+    pub fn hint(&self, row: usize) -> Option<String> {
+        self.accelerators
+            .get(row)
+            .copied()
+            .flatten()
+            .map(Accelerator::label)
+    }
+
+    /// The glyph drawn before `row`'s label ([`Row::glyph`]).
+    pub fn glyph(&self, row: usize) -> Option<&str> {
+        self.entries
+            .get(row)
+            .and_then(|entry| entry.glyph.as_deref())
+    }
+
+    /// Whether `row` is checked ([`Row::checked`]).
+    pub fn is_checked(&self, row: usize) -> bool {
+        self.entries.get(row).is_some_and(|entry| entry.checked)
+    }
+
+    /// Whether `row` is one the popover has that can be chosen
+    /// ([`Row::enabled`]).
+    pub fn is_enabled(&self, row: usize) -> bool {
+        self.entries.get(row).is_some_and(|entry| entry.enabled)
+    }
+
+    /// Whether each row can be chosen, in order; empty when every row can,
+    /// which is what a row past the list's end is taken as.
+    pub(crate) fn live(&self) -> Vec<bool> {
+        if self.entries.iter().all(|entry| entry.enabled) {
+            return Vec::new();
+        }
+        self.entries.iter().map(|entry| entry.enabled).collect()
+    }
+
+    /// Whether a choice of one of its rows names it
+    /// ([`PopoverEvent::AcceptOf`]), so that a choice waiting to be applied
+    /// is never made from another popover: every menu but the suggestions
+    /// menu, and suggestions with a row that runs a command.
+    pub(crate) fn named_by_choice(&self) -> bool {
+        !self.spelling
+            && (self.mode == Mode::Menu || self.provider.is_some() || self.runs_commands())
     }
 
     /// The anchor, when its text is tinted: the suggestions menu's word
@@ -496,6 +688,27 @@ pub trait MenuProvider: Send + Sync {
     /// the next provider, as an answer that opens nothing does: a menu
     /// with no rows, or one whose range is off the line.
     fn menu(&self, clicked: &Clicked) -> Option<Requested>;
+
+    /// [`Self::menu`], for a click on a line of a task's text after the
+    /// line of its box, which `task` is, as the whole text reads it; with
+    /// the host's tasks off, on the box's own line and off every task,
+    /// `task` is `None`. The menu still hangs on the line clicked. Asks
+    /// [`Self::menu`] unless a provider answers for such lines.
+    fn menu_in_task(&self, clicked: &Clicked, task: Option<&TaskBox>) -> Option<Requested> {
+        let _ = task;
+        self.menu(clicked)
+    }
+}
+
+/// The line of a task's box, for a right-click on a line of the task's
+/// text after it ([`MenuProvider::menu_in_task`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBox {
+    pub line: usize,
+    /// The line's text, without its ending.
+    pub text: String,
+    /// The line's typed spans, its box among them.
+    pub spans: LineSpans,
 }
 
 /// One of the providers a right-click asks, in the order of the host's
@@ -599,7 +812,7 @@ pub(crate) fn fingerprint(provider: usize, clicked: &Clicked, answer: &Answer) -
         Answer::Keyboard => 1_u8.hash(&mut hasher),
         Answer::Menu(menu) => {
             (2_u8, menu.line, &menu.range, &menu.text).hash(&mut hasher);
-            (&menu.labels, &menu.ids, &menu.accelerators).hash(&mut hasher);
+            (&menu.labels, &menu.entries, &menu.accelerators).hash(&mut hasher);
             (menu.selected, menu.provider).hash(&mut hasher);
         }
     }
@@ -627,10 +840,23 @@ pub(crate) enum Taken {
 /// suggestions menu takes, and `clicked` what is there for the host's
 /// providers, each looked for only when a provider that reads it is asked.
 /// A provider after the one that takes the click is not asked.
+#[cfg(test)]
 pub(crate) fn taken(
     providers: &[Provider],
     misspelled: impl FnOnce() -> bool,
     clicked: impl FnOnce() -> Option<Clicked>,
+) -> Option<Taken> {
+    taken_in(providers, misspelled, || {
+        clicked().map(|clicked| (clicked, None))
+    })
+}
+
+/// [`taken`], with what `clicked` finds the task the clicked line belongs
+/// to after its box ([`MenuProvider::menu_in_task`]).
+pub(crate) fn taken_in(
+    providers: &[Provider],
+    misspelled: impl FnOnce() -> bool,
+    clicked: impl FnOnce() -> Option<(Clicked, Option<TaskBox>)>,
 ) -> Option<Taken> {
     let (mut misspelled, mut clicked) = (Some(misspelled), Some(clicked));
     let (mut word, mut place) = (false, None);
@@ -648,10 +874,10 @@ pub(crate) fn taken(
                 if let Some(clicked) = clicked.take() {
                     place = clicked();
                 }
-                let Some(place) = &place else {
+                let Some((place, task)) = &place else {
                     continue;
                 };
-                let answer = provided(&**provider, index, place);
+                let answer = provided_in(&**provider, index, place, task.as_ref());
                 if answer != Answer::Nothing {
                     return Some(Taken::Host {
                         provider: index,
@@ -720,8 +946,24 @@ pub(crate) fn requested(source: &dyn MenuSource, id: u32, line: &CaretLine) -> A
 /// What `provider`, the one at `index` of the host's list, opens for a
 /// right-click on `clicked`: a menu of its rows, checked as a request's
 /// are ([`requested`]). The widget and the editor both ask through here.
+#[cfg(test)]
 pub(crate) fn provided(provider: &dyn MenuProvider, index: usize, clicked: &Clicked) -> Answer {
-    match answered(provider.menu(clicked), clicked.line, &clicked.text) {
+    provided_in(provider, index, clicked, None)
+}
+
+/// [`provided`], for a click on a line of the text of the task `task`
+/// after its box ([`MenuProvider::menu_in_task`]).
+pub(crate) fn provided_in(
+    provider: &dyn MenuProvider,
+    index: usize,
+    clicked: &Clicked,
+    task: Option<&TaskBox>,
+) -> Answer {
+    match answered(
+        provider.menu_in_task(clicked, task),
+        clicked.line,
+        &clicked.text,
+    ) {
         Answer::Menu(menu) => Answer::Menu(menu.provided_by(index)),
         answer => answer,
     }
@@ -992,21 +1234,46 @@ pub fn is_plain_escape(modifiers: Modifiers) -> bool {
     !(modifiers.control() || modifiers.alt() || modifiers.logo())
 }
 
+/// Whether `row` can be chosen, of rows of which `live` says so in order
+/// ([`Popover::live`]): a row past its end can.
+fn is_live(live: &[bool], row: usize) -> bool {
+    live.get(row).copied().unwrap_or(true)
+}
+
 /// `selected` moved `delta` rows among `items`, stopping at the ends; a
-/// popover with nothing selected stays so.
-fn stepped(selected: Option<usize>, items: usize, delta: i32) -> Option<usize> {
+/// popover with nothing selected stays so. The rows that `live` says
+/// cannot be chosen are stepped over, and the selection stays where it is
+/// when only such rows lie the way it moves.
+fn stepped(selected: Option<usize>, items: usize, live: &[bool], delta: i32) -> Option<usize> {
     let selected = selected?;
     let last = items.saturating_sub(1);
     let moved = i64::try_from(selected)
         .unwrap_or(i64::MAX)
         .saturating_add(i64::from(delta));
-    Some(usize::try_from(moved.max(0)).map_or(last, |row| row.min(last)))
+    let target = usize::try_from(moved.max(0)).map_or(last, |row| row.min(last));
+    if is_live(live, target) {
+        return Some(target);
+    }
+    // The nearest row that can be chosen past the target, the way the
+    // selection moves, or else short of it.
+    let live = |row: &usize| is_live(live, *row);
+    let found = if target > selected {
+        (target..=last)
+            .find(live)
+            .or_else(|| (selected..target).rev().find(live))
+    } else {
+        (0..=target)
+            .rev()
+            .find(live)
+            .or_else(|| (target + 1..=selected).find(live))
+    };
+    Some(found.unwrap_or(selected))
 }
 
 /// The selection once the pointer is over `row`: that row, if it is one of
-/// `items`.
-fn hovered(selected: Option<usize>, items: usize, row: usize) -> Option<usize> {
-    if row < items {
+/// `items` that can be chosen.
+fn hovered(selected: Option<usize>, items: usize, live: &[bool], row: usize) -> Option<usize> {
+    if row < items && is_live(live, row) {
         Some(row)
     } else {
         selected
@@ -1058,6 +1325,38 @@ impl OpenMenu {
     }
 }
 
+/// [`after`], for a popover whose rows `live` says can be chosen or not
+/// ([`Popover::live`]): a move steps over those that cannot, and a hover
+/// does not select them.
+pub(crate) fn after_with(
+    open: Option<(Opened, OpenMenu)>,
+    message: &Message,
+    live: &[bool],
+) -> Option<(Opened, OpenMenu)> {
+    match message {
+        Message::Spell(PopoverEvent::Move(delta)) => open.map(|(opened, menu)| {
+            let selected = stepped(menu.selected, menu.items, live, *delta);
+            (opened, OpenMenu { selected, ..menu })
+        }),
+        Message::Spell(PopoverEvent::Hover(row)) => open.map(|(opened, menu)| {
+            let selected = hovered(menu.selected, menu.items, live, *row);
+            (opened, OpenMenu { selected, ..menu })
+        }),
+        Message::Spell(PopoverEvent::Key(key @ (MenuKey::Up | MenuKey::Down))) => match open?.0 {
+            Opened::Keyboard => None,
+            opened => {
+                let mode = if opened == Opened::Suggest {
+                    Mode::Suggest
+                } else {
+                    Mode::Menu
+                };
+                after_with(open, &Message::Spell(key.on(mode)?), live)
+            }
+        },
+        _ => after(open, message),
+    }
+}
+
 /// The popover `message` leaves `open` as, once the host applies it, and
 /// what it is, for every message whose effect the message alone decides.
 /// (A request for a popover of the host's and a character typed open what
@@ -1095,11 +1394,11 @@ pub(crate) fn after(
             after(open, &Message::Spell(key.on(mode)?))
         }
         Message::Spell(PopoverEvent::Move(delta)) => open.map(|(opened, menu)| {
-            let selected = stepped(menu.selected, menu.items, *delta);
+            let selected = stepped(menu.selected, menu.items, &[], *delta);
             (opened, OpenMenu { selected, ..menu })
         }),
         Message::Spell(PopoverEvent::Hover(row)) => open.map(|(opened, menu)| {
-            let selected = hovered(menu.selected, menu.items, *row);
+            let selected = hovered(menu.selected, menu.items, &[], *row);
             (opened, OpenMenu { selected, ..menu })
         }),
         _ => None,
@@ -1157,6 +1456,9 @@ pub(crate) struct Now {
     /// The instance the editor will give `own` when it opens it, when
     /// [`Self::count`] is known.
     own_instance: Cell<Option<u64>>,
+    /// Whether each row of what is open can be chosen
+    /// ([`Popover::live`]).
+    live: RefCell<Vec<bool>>,
 }
 
 impl Now {
@@ -1172,6 +1474,7 @@ impl Now {
             still: Cell::new(true),
             count: Cell::new(None),
             own_instance: Cell::new(None),
+            live: RefCell::new(Vec::new()),
         }
     }
 
@@ -1184,6 +1487,8 @@ impl Now {
     /// Start from `popover`, the one the host has open.
     pub(crate) fn start(&self, popover: Option<&Popover>) {
         self.handed.set(popover.is_some());
+        self.live
+            .replace(popover.map_or_else(Vec::new, Popover::live));
         self.set(popover.map(|popover| (popover.mode().into(), OpenMenu::of(popover))));
     }
 
@@ -1248,20 +1553,46 @@ impl Now {
         })
     }
 
+    /// Whether choosing `row` of what is open, of the popover the host
+    /// handed over (`handed`) or the one opened in this batch, or with no
+    /// row its selected row, opens another menu of the host's
+    /// ([`Row::opens_menu`]).
+    pub(crate) fn opens_menu(&self, handed: Option<&Popover>, row: Option<usize>) -> bool {
+        let Some(open) = self.open.get() else {
+            return false;
+        };
+        let own = self.own.borrow();
+        let row = row.or(open.selected);
+        (own.as_ref().or(handed))
+            .zip(row)
+            .is_some_and(|(popover, row)| {
+                popover.is_enabled(row) && popover.entries[row].opens_menu
+            })
+    }
+
+    /// The host will open a menu the widget cannot know of for a row
+    /// chosen in this batch: from here to the end of the batch, the input
+    /// is no one's, as after a handover of the keyboard.
+    pub(crate) fn hand_over(&self) {
+        self.set(Some((Opened::Keyboard, OpenMenu::OPENING)));
+        self.own.replace(None);
+    }
+
     /// The [`Popover::instance`] of what is open, of the popover the host
-    /// handed over (`handed`) or the one opened in this batch, when it is
-    /// a menu one of the host's providers opened: what a choice of one of
-    /// its rows names it by.
+    /// handed over (`handed`) or the one opened in this batch, when a
+    /// choice of one of its rows names it ([`Popover::named_by_choice`]):
+    /// what such a choice names it by.
     pub(crate) fn bound(&self, handed: Option<&Popover>) -> Option<u64> {
         let own = self.own.borrow();
         let open = self.open.get().and(own.as_ref().or(handed))?;
         if open.provider().is_some() {
             return Some(open.instance());
         }
-        // A popover with a row that runs a command, by the number the
-        // editor gave it or will give it; with that not known, none.
+        // Any other menu but the suggestions menu, and suggestions with a
+        // row that runs a command, by the number the editor gave it or
+        // will give it; with that not known, none.
         match &*own {
-            _ if !open.runs_commands() => None,
+            _ if !open.named_by_choice() => None,
             Some(_) => self.own_instance.get(),
             None => Some(open.instance()),
         }
@@ -1352,7 +1683,7 @@ impl Now {
         }
         let line = || self.line(start);
 
-        let mut next = after(was, &message);
+        let mut next = after_with(was, &message, &self.live.borrow());
         let mut own = None;
         // Whether the editor may open a popover for the message that the
         // widget does not open the same, which leaves the count unknown.
@@ -1428,6 +1759,8 @@ impl Now {
                 self.count.set(instance);
             }
             self.own_instance.set(instance.filter(|_| !unknown));
+            self.live
+                .replace(own.as_ref().map_or_else(Vec::new, Popover::live));
             self.own.replace(own);
         }
         if unknown {
@@ -2523,15 +2856,16 @@ mod tests {
             .spelling()
             .opened_as(7);
         assert_eq!((provided.instance(), provided.provider()), (7, Some(1)));
-        // Only a provider's menu binds the choice of its rows, whether the
-        // host has drawn it or the widget opened it in this batch.
+        // A provider's menu binds the choice of its rows, whether the host
+        // has drawn it or the widget opened it in this batch; so does the
+        // host's own menu (item 3.4), and the suggestions menu does not.
         let now = Now::new();
         assert_eq!(now.bound(Some(&provided)), None, "nothing is open");
         now.start(Some(&provided));
         assert_eq!(now.bound(Some(&provided)), Some(7));
-        for other in [&hosts, &spelling] {
+        for (other, bound) in [(&hosts, Some(7)), (&spelling, None)] {
             now.start(Some(other));
-            assert_eq!(now.bound(Some(other)), None);
+            assert_eq!(now.bound(Some(other)), bound);
         }
         let mut batch = Batch::over("- [ ] call", 8);
         let Answer::Menu(own) = answer("- [ ] call") else {
@@ -2557,5 +2891,112 @@ mod tests {
         assert!(!spelling_leads(&[host.clone(), Provider::Spelling]));
         assert!(!spelling_leads(&[host]));
         assert!(!spelling_leads(&[]));
+    }
+
+    #[test]
+    fn an_accelerator_names_its_key_and_a_symbol_matches_what_is_typed() {
+        use iced::keyboard::key::NativeCode;
+        let unidentified = Physical::Unidentified(NativeCode::Unidentified);
+        let labels: Vec<String> = [
+            Accelerator::plain(' '),
+            Accelerator::plain('/'),
+            Accelerator::plain('x'),
+            Accelerator::plain('-'),
+            Accelerator::shifted('h'),
+        ]
+        .into_iter()
+        .map(Accelerator::label)
+        .collect();
+        assert_eq!(labels, ["Space", "/", "X", "-", "\u{21e7}H"]);
+        // `/` typed with Shift on a keyboard where it is a shifted key.
+        let slash = Accelerator::plain('/');
+        let seven = Key::Character("7".into());
+        assert!(slash.matches_press(&seven, unidentified, Modifiers::SHIFT, Some("/")));
+        assert!(!slash.matches(&seven, unidentified, Modifiers::SHIFT));
+        assert!(!slash.matches_press(&seven, unidentified, Modifiers::CTRL, Some("/")));
+        // A letter is never matched by what it types: Shift+x is no `x`.
+        let x = Accelerator::plain('x');
+        let key = Key::Character("x".into());
+        assert!(!x.matches_press(&key, unidentified, Modifiers::SHIFT, Some("X")));
+        // Nor is the space bar by a space typed some other way.
+        let space = Accelerator::plain(' ');
+        assert!(!space.matches_press(&seven, unidentified, Modifiers::empty(), Some(" ")));
+    }
+
+    #[test]
+    fn a_row_that_cannot_be_chosen_is_stepped_over() {
+        let row = |id, enabled: bool| Row::new(id, "r").enabled(enabled);
+        let rows = vec![
+            row(0, true),
+            row(1, false),
+            row(2, false),
+            row(3, true),
+            row(4, false),
+        ];
+        let mut popover = Popover::new(Mode::Menu, 0, 0..1, "x".into(), rows);
+        assert_eq!(popover.selected(), Some(0));
+        popover.step(1);
+        assert_eq!(popover.selected(), Some(3));
+        popover.step(1);
+        assert_eq!(
+            popover.selected(),
+            Some(3),
+            "only rows that cannot be chosen after it"
+        );
+        popover.step(-1);
+        assert_eq!(popover.selected(), Some(0));
+        popover.step(5);
+        assert_eq!(popover.selected(), Some(3));
+        popover.hover(2);
+        assert_eq!(popover.selected(), Some(3));
+        popover.hover(0);
+        assert_eq!(popover.selected(), Some(0));
+        assert!(popover.accelerators().iter().all(Option::is_none));
+        let keyed = vec![Row::new(0, "a")
+            .accelerator(Accelerator::plain('a'))
+            .enabled(false)];
+        let popover = Popover::new(Mode::Menu, 0, 0..1, "x".into(), keyed);
+        assert!(popover.accelerators()[0].is_some_and(Accelerator::is_inert));
+        assert_eq!(popover.hint(0).as_deref(), Some("A"));
+        // The widget's copy steps over them the same way.
+        let open = Some((
+            Opened::Menu,
+            OpenMenu {
+                selected: Some(0),
+                items: 5,
+                opening: false,
+            },
+        ));
+        let live = [true, false, false, true, false];
+        let moved = after_with(open, &Message::Spell(PopoverEvent::Move(1)), &live);
+        assert_eq!(moved.map(|(_, menu)| menu.selected), Some(Some(3)));
+        let key = Message::Spell(PopoverEvent::Key(MenuKey::Down));
+        assert_eq!(
+            after_with(open, &key, &live).map(|(_, menu)| menu.selected),
+            Some(Some(3))
+        );
+    }
+
+    #[test]
+    fn a_row_past_the_64th_keeps_whether_it_can_be_chosen() {
+        let mut rows: Vec<Row> = (0..70).map(|id| Row::new(id, "r")).collect();
+        rows[66] = Row::new(66, "off")
+            .accelerator(Accelerator::plain('o'))
+            .enabled(false);
+        rows[68] = rows[68].clone().checked(true);
+        let mut popover = Popover::new(Mode::Menu, 0, 0..1, "x".into(), rows);
+        assert_eq!(
+            popover.selected(),
+            Some(68),
+            "the checked row, past the 64th"
+        );
+        assert!(!popover.is_enabled(66) && popover.is_enabled(65));
+        assert!(popover.accelerators()[66].is_some_and(Accelerator::is_inert));
+        popover.step(-2);
+        assert_eq!(popover.selected(), Some(65), "the 67th row is stepped over");
+        popover.hover(66);
+        assert_eq!(popover.selected(), Some(65));
+        assert_eq!(popover.live().len(), 70);
+        assert!(!popover.live()[66]);
     }
 }

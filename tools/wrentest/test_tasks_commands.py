@@ -44,9 +44,11 @@ LINES = [
 ORIGINAL = "\n".join(LINES)
 
 # The Tasks group's rows, in the palette's order (design Q7: High, Medium
-# and Low first).
+# and Low first), with the status and priority menus (item 3.4).
 TASK_COMMANDS = [
+    "task.set_status",
     "task.cycle_status",
+    "task.set_priority",
     "task.priority.high",
     "task.priority.medium",
     "task.priority.low",
@@ -57,6 +59,8 @@ TASK_COMMANDS = [
     "task.priority.lower",
     "task.clear_due",
 ]
+# The commands that open a menu, which the classic engine has not (item 3.4).
+MENU_COMMANDS = {"task.set_status", "task.set_priority"}
 
 
 def width(text: str) -> int:
@@ -182,7 +186,8 @@ def test_off_a_task_line_the_commands_are_listed_greyed_and_do_nothing(
     with commands_app(tmp_path, engine, "on") as (app, path):
         call = app.client.call
         call("editor.cursor", {"line": line_of("- [ ] Open"), "column": 0, "selection": None})
-        assert tasks_rows(app) == [(command, True) for command in TASK_COMMANDS]
+        assert tasks_rows(app) == [(command, engine == "advanced" or command not in MENU_COMMANDS)
+                                   for command in TASK_COMMANDS]
         for line in [line_of("# Commands"), 1, line_of("Plain hotel.")]:
             call("editor.cursor", {"line": line, "column": 0, "selection": None})
             assert tasks_rows(app) == [(command, False) for command in TASK_COMMANDS], line

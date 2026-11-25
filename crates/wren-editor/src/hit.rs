@@ -35,10 +35,10 @@
 use std::ops::Range;
 
 use iced::Point;
-use wren_markdown::span::{LineSpans, Span};
+use wren_markdown::span::{LineSpans, Span, SpanKind};
 use wren_markdown::TaskOptions;
 
-use crate::popover::Clicked;
+use crate::popover::{Clicked, TaskBox};
 use crate::proof::{self, Proofreader};
 use crate::widget::Content;
 
@@ -142,6 +142,54 @@ impl Reading<'_> {
 
 /// The hit at the character that starts at byte `column` of a line with
 /// these misspellings (`marks`) and `spans`.
+/// Whether the character that starts at byte `column` lies in a task's box,
+/// `[` to `]`, among a line's `spans`: what a click on the box is.
+pub(crate) fn on_box(spans: &LineSpans, column: usize) -> bool {
+    spans
+        .spans
+        .iter()
+        .any(|span| matches!(span.kind, SpanKind::Box(_)) && span.range.contains(&column))
+}
+
+impl Reading<'_> {
+    /// [`Self::clicked`], with the task the clicked line belongs to when
+    /// it is a line of the task's text after its box.
+    pub(crate) fn clicked_in(
+        self,
+        content: &Content,
+        point: Point,
+    ) -> Option<(Clicked, Option<TaskBox>)> {
+        let clicked = self.clicked(content, point)?;
+        let task = self.task_box(content, &clicked);
+        Some((clicked, task))
+    }
+
+    /// The box line of the task whose text `clicked`'s line continues, as
+    /// the whole text reads it: none on a line with a box of its own, off
+    /// every task, and with the host's tasks off.
+    pub(crate) fn task_box(self, content: &Content, clicked: &Clicked) -> Option<TaskBox> {
+        let tasks = self.tasks?;
+        if (clicked.spans.spans.iter()).any(|span| matches!(span.kind, SpanKind::Box(_))) {
+            return None;
+        }
+        let options = wren_markdown::Options {
+            indent_width: 4,
+            renumber: true,
+            tasks: Some(tasks),
+        };
+        let caret = wren_markdown::Selection::caret(wren_markdown::Pos::new(clicked.line, 0));
+        let nothing = wren_markdown::task::Change::Compound(Vec::new());
+        content.with_lines(|lines| {
+            let edit = wren_markdown::task::edit(&lines, clicked.line, caret, &nothing, &options)?;
+            let line = edit.line;
+            let text = lines.get(line)?.text.into_owned();
+            let spans =
+                crate::highlighter::spans_at(&lines, line, self.front_matter_end, self.tasks);
+            (line != clicked.line).then_some(TaskBox { line, text, spans })
+        })
+    }
+}
+
 pub(crate) fn at(column: usize, marks: &[Range<usize>], spans: &LineSpans) -> Option<Hit> {
     let mark = marks.iter().find(|mark| mark.contains(&column));
     resolve(mark.cloned(), || spans.at(column).cloned())

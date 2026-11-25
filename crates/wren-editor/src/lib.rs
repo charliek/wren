@@ -49,6 +49,7 @@ pub use keys::{KeyPolicy, KeyRoute};
 pub use popover::{
     is_plain_escape, Accelerator, Anchor, Choice, Clicked, MenuProvider, MenuSource, Mode, Popover,
     PopoverEvent, Provider, Requested, Row, RowKind, Seen, Stroke, SuggestSource, Suggestion,
+    TaskBox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
@@ -103,8 +104,11 @@ pub struct MenuStyle {
     /// The fill behind the selected row.
     pub selected: Color,
     pub text: Color,
-    /// The inactive "No suggestions" row.
+    /// The inactive "No suggestions" row, a row that cannot be chosen,
+    /// and the key named beside a row.
     pub muted: Color,
+    /// A checked row's label ([`Row::checked`]).
+    pub accent: Color,
     pub font: Font,
     pub text_size: f32,
 }
@@ -169,6 +173,48 @@ pub enum Message {
     /// does nothing with it; the host runs the command, in the key's order
     /// with the rest of the batch.
     Command(u32),
+    /// A click on a task's box; see [`BoxClick`]. The editor does nothing
+    /// with it; the host changes the task.
+    BoxClick(BoxClick),
+}
+
+/// A primary click on a task's box, `[` to `]`, with the host's tasks on
+/// ([`EditorView::set_tasks`]), on the advanced engine: a single click with
+/// no modifier held, pressed on the box and let go on the same box, the
+/// pointer never more than [`BoxClick::DRAG`] from where it was pressed,
+/// inside the editor or out. It leaves the caret and the selection where
+/// they were. The widget publishes it once the time in which a second
+/// press would make a double click (300 ms from the press, iced's) has
+/// passed, or at once before any other input; a second press that makes
+/// a double click on the same box takes its place, and selects as a
+/// double click does from where it was pressed.
+///
+/// A press that becomes a drag selects from where it was pressed, as any
+/// other; one let go off the box is a click in the text where it was
+/// pressed. A click with Shift, Ctrl, Alt or the logo key held is the
+/// text's, and a key, another button, a modifier or the editor losing the
+/// keyboard before it is let go makes it no click at all.
+///
+/// The host asks [`EditorView::box_clicked`] which task it was for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxClick {
+    line: usize,
+    /// [`EditorView::revision`] of the text the box was pressed on.
+    revision: u64,
+    /// Where the box was pressed, relative to the text origin, for a host
+    /// that takes the click as one in the text
+    /// ([`EditorView::click_in_text`]).
+    at: iced::Point,
+}
+
+impl BoxClick {
+    /// How far the pointer may move, in pixels, between pressing the box
+    /// and letting go, for the press to stay a click on it.
+    pub const DRAG: f32 = 4.0;
+
+    pub(crate) fn new(line: usize, revision: u64, at: iced::Point) -> Self {
+        Self { line, revision, at }
+    }
 }
 
 /// What the clipboard keys did. With no selection, ⌘C and ⌘X take the
@@ -1252,8 +1298,8 @@ impl EditorView {
             Message::Undo => self.undo(),
             Message::Redo => self.redo(),
             // Only Ctrl or Cmd+F routes to Find, never a plain key; a
-            // command is the host's.
-            Message::Find | Message::Command(_) => false,
+            // command and a click on a box are the host's.
+            Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
         }
     }
 
@@ -1294,8 +1340,8 @@ impl EditorView {
         let Some(Provider::Host(asked)) = self.providers().get(provider) else {
             return None;
         };
-        let clicked = self.clicked(at)?;
-        let answer = popover::provided(&**asked, provider, &clicked);
+        let (clicked, task) = self.reading().clicked_in(&self.content, at)?;
+        let answer = popover::provided_in(&**asked, provider, &clicked, task.as_ref());
         seen.answered(popover::fingerprint(provider, &clicked, &answer))
             .then_some((clicked, answer))
     }
@@ -1308,7 +1354,9 @@ impl EditorView {
             let place = self.speller().and_then(|_| self.place_under(at));
             place.is_some_and(|place| place.mark.is_some())
         };
-        popover::taken(self.providers(), misspelled, || self.clicked(at))
+        popover::taken_in(self.providers(), misspelled, || {
+            self.reading().clicked_in(&self.content, at)
+        })
     }
 
     /// The caret's line: what the host's sources are asked about.
@@ -1328,9 +1376,10 @@ impl EditorView {
     /// Choose `row` of the open popover and close it. The suggestions menu
     /// replaces its word with the row's suggestion, as one undo step with
     /// the caret after it; the host's popover leaves the row for
-    /// [`EditorView::take_choice`]. A row the popover does not have, or an
-    /// anchor whose text no longer reads as it did when the popover opened,
-    /// closes it and changes nothing. So does a row of suggestions that
+    /// [`EditorView::take_choice`]. A row the popover does not have, one
+    /// that cannot be chosen ([`Row::enabled`]), or an anchor whose text no
+    /// longer reads as it did when the popover opened, closes it and
+    /// changes nothing. So does a row of suggestions that
     /// runs a command, unless the choice named the suggestions (`named`,
     /// [`SpellEvent::AcceptOf`]): a key that did not may have been meant
     /// for suggestions that these replaced.
@@ -1347,11 +1396,13 @@ impl EditorView {
             return false;
         }
         let (line, range) = (popover.line(), popover.range());
-        let unchanged = self.content.with_lines(|lines| {
-            lines
-                .get(line)
-                .is_some_and(|text| text.text.get(range.clone()) == Some(popover.text()))
-        });
+        // A row that cannot be chosen chooses nothing, as a stale one.
+        let unchanged = popover.is_enabled(row)
+            && self.content.with_lines(|lines| {
+                lines
+                    .get(line)
+                    .is_some_and(|text| text.text.get(range.clone()) == Some(popover.text()))
+            });
         let chosen = popover
             .id(row)
             .zip(popover.kind(row))
@@ -1653,20 +1704,7 @@ impl EditorView {
     /// for a place that is not laid out.
     #[cfg(any(test, feature = "test-support"))]
     pub fn right_click_message(&self, line: usize, column: usize) -> Option<Message> {
-        let end = self.content.with_lines(|lines| {
-            let text = lines.get(line)?;
-            let rest = text.text.get(column..)?;
-            Some(column + rest.chars().next().map_or(0, char::len_utf8))
-        })?;
-        let row = self.content.anchor_row(line, column..end)?;
-        let mut at = row.bounds().center();
-        // A blank has no glyphs to be in the middle of: the middle of its
-        // cell, between the places on either side of it.
-        let after = (self.content.anchor_row(line, end..end))
-            .filter(|after| end > column && row.right <= row.left && after.top == row.top);
-        if let Some(after) = after {
-            at.x = (row.left + after.left) / 2.0;
-        }
+        let at = self.middle_of(line, column)?;
         if self.popover().map(Popover::mode) == Some(Mode::Menu) {
             return Some(Message::Spell(SpellEvent::Close));
         }
@@ -1683,6 +1721,89 @@ impl EditorView {
             },
         };
         Some(Message::Spell(event))
+    }
+
+    /// The line of the task whose box `click` was on, while the text reads
+    /// as it did when the box was pressed and the editor still reads task
+    /// lines on the advanced engine; `None` otherwise, when the click
+    /// changes nothing.
+    pub fn box_clicked(&self, click: BoxClick) -> Option<usize> {
+        let live = click.revision == self.revision
+            && self.content.kind() == BackendKind::Owned
+            && self.tasks.is_some();
+        live.then_some(click.line)
+    }
+
+    /// Carry a click on a box out as a click in the text, which places the
+    /// caret where the box was pressed: for a host that finds no task to
+    /// change there. Nothing happens once the text has changed since.
+    /// Returns whether the text changed, as [`EditorView::perform`] does.
+    pub fn click_in_text(&mut self, click: BoxClick) -> bool {
+        if click.revision != self.revision {
+            return false;
+        }
+        self.perform(Action::Click(click.at))
+    }
+
+    /// The message the widget publishes for a primary click, alone in its
+    /// batch of events, pressed and released on the middle of the character
+    /// that starts at byte `column` of `line`, or on the end of the line
+    /// when `column` is its length; without a window. On a task's box it is
+    /// a [`Message::BoxClick`], and anywhere else the click that places the
+    /// caret. `None` for a place that is not laid out.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn click_message(&self, line: usize, column: usize) -> Option<Message> {
+        let at = self.middle_of(line, column)?;
+        if self.popover().map(Popover::mode) == Some(Mode::Menu) {
+            return Some(Message::Spell(SpellEvent::Close));
+        }
+        let on_box = self.content.kind() == BackendKind::Owned
+            && self.tasks.is_some()
+            && self
+                .content
+                .place_under(at, |_, _| Vec::new())
+                .and_then(|place| Some((place.line, place.column?)))
+                .is_some_and(|(line, column)| hit::on_box(&self.spans_at(line), column));
+        Some(if on_box {
+            Message::BoxClick(BoxClick::new(line, self.revision, at))
+        } else {
+            Message::Action(Action::Click(at))
+        })
+    }
+
+    /// The middle of the character that starts at byte `column` of `line`,
+    /// or of the end of the line when `column` is its length, relative to
+    /// the text origin, as the last layout placed it.
+    #[cfg(any(test, feature = "test-support"))]
+    fn middle_of(&self, line: usize, column: usize) -> Option<iced::Point> {
+        let end = self.content.with_lines(|lines| {
+            let text = lines.get(line)?;
+            let rest = text.text.get(column..)?;
+            Some(column + rest.chars().next().map_or(0, char::len_utf8))
+        })?;
+        let row = self.content.anchor_row(line, column..end)?;
+        let mut at = row.bounds().center();
+        // A blank has no glyphs to be in the middle of: the middle of its
+        // cell, between the places on either side of it.
+        let after = (self.content.anchor_row(line, end..end))
+            .filter(|after| end > column && row.right <= row.left && after.top == row.top);
+        if let Some(after) = after {
+            at.x = (row.left + after.left) / 2.0;
+        }
+        Some(at)
+    }
+
+    /// Lay the text out for a text area `width` wide, as the widget does
+    /// for a frame, without a window: for a host's tests, which ask where
+    /// text is drawn ([`EditorView::right_click_message`],
+    /// [`EditorView::click_message`]) after an edit, which leaves the lines
+    /// it changed to be laid out by the next frame.
+    #[cfg(feature = "test-support")]
+    pub fn lay_out(&mut self, width: f32, palette: Palette) {
+        let settings = self.highlighter_settings(palette);
+        let height = self.metrics.line * self.line_count() as f32 + self.metrics.line;
+        self.content
+            .lay_out_as(iced::Size::new(width, height), &settings, self.metrics);
     }
 
     /// The line Escape hid suggestions for ([`EditorView::dismiss_popover`]):
@@ -1855,17 +1976,18 @@ impl EditorView {
         if let Some(binding) = binding {
             keys::messages(binding, selected, &line, &mut out);
         }
-        // A popover with a row that runs a command is named by a choice
-        // from it, as the widget names it: its accelerators, and Enter and
-        // Tab on suggestions.
-        let open = self.popover().filter(|open| open.runs_commands());
+        // A menu other than the suggestions menu, and suggestions with a
+        // row that runs a command, are named by a choice from them, as the
+        // widget names them: by an accelerator or Enter, and by Enter and
+        // Tab on such suggestions.
+        let open = self.popover().filter(|open| open.named_by_choice());
         if let Some(open) = open {
             for message in &mut out {
                 let row = match message {
                     Message::Spell(SpellEvent::Accept(row)) => Some(Some(*row)),
                     Message::Spell(SpellEvent::AcceptSelected) => Some(None),
                     Message::Spell(SpellEvent::Key(MenuKey::Enter | MenuKey::Tab))
-                        if open.mode() == Mode::Suggest =>
+                        if open.mode() == Mode::Suggest && open.runs_commands() =>
                     {
                         Some(None)
                     }
@@ -2799,7 +2921,7 @@ mod tests {
                 Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
-                Message::Find | Message::Command(_) => false,
+                Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
             }
         }
 
@@ -7125,12 +7247,15 @@ mod tests {
                 .collect()
         };
         let character = |c: &str| Key::Character(c.into());
-        assert_eq!(events(&ev, character("x"), none), [SpellEvent::Accept(1)]);
-        assert_eq!(events(&ev, character("/"), none), [SpellEvent::Accept(0)]);
-        assert_eq!(
-            events(&ev, character("h"), Modifiers::SHIFT),
-            [SpellEvent::Accept(2)]
-        );
+        // A choice names the menu (item 3.4).
+        let menu = ev.popover().unwrap().instance();
+        let chose = |row| SpellEvent::AcceptOf {
+            menu,
+            row: Some(row),
+        };
+        assert_eq!(events(&ev, character("x"), none), [chose(1)]);
+        assert_eq!(events(&ev, character("/"), none), [chose(0)]);
+        assert_eq!(events(&ev, character("h"), Modifiers::SHIFT), [chose(2)]);
         assert_eq!(
             events(&ev, Key::Named(Named::ArrowDown), none),
             [SpellEvent::Move(1)]

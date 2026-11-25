@@ -543,9 +543,10 @@ impl App {
         self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
     }
 
-    /// Bring the editor's Markdown keys, and its proofreader, in step with
-    /// the surface.
+    /// Bring the editor's Markdown keys, its task menus and its
+    /// proofreader in step with the surface.
     pub(super) fn apply_markdown_assist(&mut self) {
+        self.sync_task_menus();
         let assist = self.markdown_assist();
         if assist != self.editor.markdown_assist() {
             self.editor.set_markdown_assist(assist);

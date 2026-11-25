@@ -144,6 +144,36 @@ Markdown commands, the key belongs to the editor, and the palette lists
 the command under **Markdown**; unlike them, it works whether or not
 Markdown assist is on. See [Spell check](../reference/spell-check.md).
 
+### Task menus
+
+With `tasks = on`, on the `advanced` engine, a right-click on a task line,
+or on a line of its text after the box, opens a menu of what can be done to
+the task; on a misspelled word the
+corrections menu comes first, as before. A right-click on the box opens
+the status menu, and on the priority glyph the priority menu; anywhere else
+on the line, the due date included, it opens the task menu, which holds the
+status rows, **Set due date…**, **Priority…** (which opens the priority
+menu) and **Edit task…**. The due date and edit rows are shown greyed: the
+calendar and the task form are still to come.
+
+Each menu marks the task's current status or priority and opens on it. ↑
+and ↓ move, ↵ chooses, Esc closes it and writes nothing, and a single key
+chooses a row directly:
+
+| Menu | Keys |
+|---|---|
+| Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
+| Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
+| Task | the status keys, then `p` Priority… |
+
+A choice rewrites the task's line as one undo step, with the done or
+cancelled date the status asks for. A click on a task's box cycles its
+status, open → doing → done → open; a cancelled task reopens. The caret
+stays where it was. The status changes once a double click could no
+longer follow, a fraction of a second later. A double click, a click with
+a modifier held, a drag that starts on the box, and a press let go off the
+box select text or place the caret as they would anywhere else.
+
 ## Jumping to a heading
 
 **Jump to heading** (⇧⌘O / Alt+Shift+O) opens the open note's outline: its
@@ -355,10 +385,14 @@ With `tasks = on`, the task line commands can be bound too; they have no
 default key and act on the task at the caret:
 
 ```
-task.cycle_status  task.priority.high  task.priority.medium
-task.priority.low  task.priority.highest  task.priority.lowest
-task.priority.none  task.priority.raise  task.priority.lower  task.clear_due
+task.set_status  task.cycle_status  task.set_priority  task.priority.high
+task.priority.medium  task.priority.low  task.priority.highest
+task.priority.lowest  task.priority.none  task.priority.raise
+task.priority.lower  task.clear_due
 ```
+
+`task.set_status` and `task.set_priority` open the status and priority
+menus described under [Task menus](#task-menus), on the `advanced` engine.
 
 The board actions are listed under [On a board](#on-a-board).
 

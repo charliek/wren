@@ -268,6 +268,21 @@ impl Content {
         self.0.borrow().copy()
     }
 
+    /// Lays the text out for a text area of `size`, set as `settings` and
+    /// `metrics` say, as the widget does for a frame.
+    #[cfg(feature = "test-support")]
+    pub fn lay_out_as(&self, size: Size, settings: &HighlighterSettings, metrics: Metrics) {
+        let mut highlighter = MarkdownHighlighter::new(settings);
+        self.0.borrow_mut().update(
+            size,
+            settings.font,
+            Pixels(metrics.text),
+            metrics.line_height(),
+            Wrapping::WordOrGlyph,
+            &mut highlighter,
+        );
+    }
+
     /// Lays the text out in `size` the way the widget does, with the test font.
     #[cfg(test)]
     pub fn lay_out(&mut self, size: Size) {
@@ -684,6 +699,7 @@ impl<'a> TextEditor<'a> {
         ) {
             state.dropped.pressed();
         }
+        self.box_events(state, event, bounds, cursor, shell);
         // Whether the open popover closes (rule 4.4.8).
         let mut closing = false;
 
@@ -743,12 +759,56 @@ impl<'a> TextEditor<'a> {
             routes,
         ) {
             let update = match update {
-                Update::Click(click) if self.left_to_host.get() => {
-                    Update::Press(Pressed::Left(click))
+                // A second press that makes a double click on the box a
+                // click waits on: no click on the box, but the double
+                // click's selection. Any other press lets the click on the
+                // box go first.
+                Update::Click(click) if state.box_cycle.is_some() => {
+                    let cycle = state.box_cycle.take().expect("a click waits");
+                    let double = popover::click_kind(click.kind(), state.click_kind)
+                        == mouse::click::Kind::Double
+                        && !self.left_to_host.get()
+                        && self.box_under(state, click.position()) == Some(cycle.click.line);
+                    if double {
+                        Update::BoxDouble(click)
+                    } else {
+                        self.publish(shell, Message::BoxClick(cycle.click));
+                        self.click_update(state, click)
+                    }
                 }
+                Update::Click(click) => self.click_update(state, click),
                 update => update,
             };
             match update {
+                Update::BoxDouble(click) => {
+                    // As a double click, from the place pressed: the first
+                    // press of it left the caret where it was.
+                    state.focus = Some(Focus::now());
+                    state.last_click = Some(click);
+                    state.click_kind = Some(mouse::click::Kind::Double);
+                    state.drag_click = Some(mouse::click::Kind::Double);
+                    self.publish(shell, Message::Action(Action::Click(click.position())));
+                    self.publish(shell, Message::Action(Action::SelectWord));
+                    shell.capture_event();
+                }
+                Update::BoxPress(click, line) => {
+                    // A press on a task's box: a click on it once let go,
+                    // which leaves the caret where it is, or a drag from
+                    // where it was pressed once the pointer moves away.
+                    if self.menu_now.is_open() {
+                        self.publish(shell, Message::Spell(SpellEvent::Close));
+                    }
+                    state.focus = Some(Focus::now());
+                    state.last_click = Some(click);
+                    state.click_kind = Some(mouse::click::Kind::Single);
+                    state.drag_click = Some(mouse::click::Kind::Single);
+                    state.box_press = Some(BoxPress {
+                        origin: click.position(),
+                        at: Instant::now(),
+                        click: crate::BoxClick::new(line, self.edition.revision, click.position()),
+                    });
+                    shell.capture_event();
+                }
                 Update::Click(click) => {
                     let kind = popover::click_kind(click.kind(), state.click_kind);
                     let action = match kind {
@@ -847,8 +907,12 @@ impl<'a> TextEditor<'a> {
                     self.publish(shell, Message::Spell(SpellEvent::Press(event)));
                     shell.capture_event();
                 }
+                // While a press on the box is held within its reach, the
+                // pointer drags nothing ([`Self::box_events`]).
                 Update::Drag(position) => {
-                    self.publish(shell, Message::Action(Action::Drag(position)));
+                    if state.box_press.is_none() {
+                        self.publish(shell, Message::Action(Action::Drag(position)));
+                    }
                 }
                 Update::Release => {
                     state.drag_click = None;
@@ -1017,12 +1081,18 @@ impl<'a> TextEditor<'a> {
             }
             _ => None,
         };
+        // A row whose choice opens a menu of the host's, which the widget
+        // cannot open the same: the keys after it are dropped.
+        let opens = row.is_some_and(|row| self.menu_now.opens_menu(self.popover, row));
         let message = match row.zip(self.menu_now.bound(self.popover)) {
             Some((row, menu)) => Message::Spell(SpellEvent::AcceptOf { menu, row }),
             None => message,
         };
         self.menu_now
             .publish(shell, message, &|| self.caret_line(), self.sources);
+        if opens {
+            self.menu_now.hand_over();
+        }
     }
 
     /// The caret's line as the host has it.
@@ -1107,6 +1177,10 @@ impl<'a> TextEditor<'a> {
                         SpellEvent::Move(_)
                         | SpellEvent::Key(popover::MenuKey::Up | popover::MenuKey::Down),
                     )))) => false,
+                    // The key of a row that cannot be chosen does nothing.
+                    Some(Routed::Binding(Binding::Sequence(sequence))) if sequence.is_empty() => {
+                        false
+                    }
                     Some(_) => true,
                 }
             }
@@ -1145,14 +1219,17 @@ impl<'a> TextEditor<'a> {
         let row = anchor_row(&self.content.0.borrow(), menu.line(), menu.range())?;
         let style = self.style.menu;
         let (text_size, width) = (style.text_size.to_bits(), bounds.width.to_bits());
+        let hints = popover::hint_size(style.text_size);
+        let extras = popover::Extras::of(menu, |hint| popover::measure(hint, style.font, hints));
         // Compared against the rows as they are: a popover's labels are
         // copied only when they are fitted afresh.
         let fitted = state.menu_fit.as_ref().is_some_and(|(key, _)| {
             key.items == menu.labels()
                 && (key.font, key.text_size, key.width) == (style.font, text_size, width)
+                && key.extra == extras.width().to_bits()
         });
         if !fitted {
-            let fit = popover::fit(menu.labels(), bounds.width, |text| {
+            let fit = popover::fit_with(menu.labels(), extras.width(), bounds.width, |text| {
                 popover::measure(text, style.font, style.text_size)
             });
             let key = FitKey {
@@ -1160,6 +1237,7 @@ impl<'a> TextEditor<'a> {
                 font: style.font,
                 text_size,
                 width,
+                extra: extras.width().to_bits(),
             };
             state.menu_fit = Some((key, fit));
         }
@@ -1187,6 +1265,149 @@ impl<'a> TextEditor<'a> {
     fn speller(&self) -> Option<&'a dyn Proofreader> {
         self.proofreader
             .filter(|_| self.content.kind() == BackendKind::Owned)
+    }
+
+    /// What `event` does to a press on a task's box, held or let go, before
+    /// the event is handled as it is with none ([`crate::BoxClick`]).
+    ///
+    /// A held press ends as no click on the box with anything else
+    /// pressed, a key, a modifier held, or the window losing the keyboard;
+    /// and with the pointer moved more than [`crate::BoxClick::DRAG`] from
+    /// where it was pressed, inside the editor or out, when it is a click
+    /// in the text there, from which the drag selects. Let go within that
+    /// reach on the same box, it is a click on the box, which waits until
+    /// a second press could no longer make it a double click; let go
+    /// anywhere else, it is a click in the text where it was pressed.
+    ///
+    /// A click that waits is published once its time has passed, at the
+    /// redraw asked for then or the first event after it, and at once
+    /// before any event but a move, a redraw, a modifier, or a left press
+    /// or release, which the press's own handling decides on.
+    fn box_events(
+        &self,
+        state: &mut State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        let now = match event {
+            Event::Window(window::Event::RedrawRequested(now)) => *now,
+            _ => Instant::now(),
+        };
+        if let Some(cycle) = state.box_cycle {
+            let waits = now < cycle.due
+                && matches!(
+                    event,
+                    Event::Mouse(
+                        mouse::Event::CursorMoved { .. }
+                            | mouse::Event::ButtonPressed(mouse::Button::Left)
+                            | mouse::Event::ButtonReleased(mouse::Button::Left)
+                    ) | Event::Window(window::Event::RedrawRequested(_))
+                        | Event::Keyboard(keyboard::Event::ModifiersChanged(_))
+                );
+            if !waits {
+                state.box_cycle = None;
+                if now >= cycle.due {
+                    // No press now makes a double click with it.
+                    state.last_click = None;
+                }
+                self.publish(shell, Message::BoxClick(cycle.click));
+            }
+        }
+        let padding = self.padding(bounds.width, state.advance.width);
+        let in_text = |at: Point| at - Vector::new(bounds.x + padding.left, bounds.y + padding.top);
+        match event {
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+                if !modifiers.is_empty() {
+                    state.box_press = None;
+                }
+            }
+            Event::Keyboard(keyboard::Event::KeyPressed { .. })
+            | Event::Mouse(mouse::Event::ButtonPressed(_))
+            | Event::Window(window::Event::Unfocused) => state.box_press = None,
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                let away = state.box_press.filter(|press| {
+                    press.origin.distance(in_text(*position)) > crate::BoxClick::DRAG
+                });
+                if let Some(press) = away {
+                    // A drag from where the box was pressed.
+                    state.box_press = None;
+                    self.publish(shell, Message::Action(Action::Click(press.origin)));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let Some(press) = state.box_press.take() else {
+                    return;
+                };
+                let on_box = cursor.position().map(in_text).is_some_and(|at| {
+                    at.distance(press.origin) <= crate::BoxClick::DRAG
+                        && self.box_under(state, at) == Some(press.click.line)
+                });
+                if on_box {
+                    let due = press.at + DOUBLE_CLICK;
+                    state.box_cycle = Some(BoxCycle {
+                        click: press.click,
+                        due,
+                    });
+                    shell.request_redraw_at(due);
+                } else {
+                    self.publish(shell, Message::Action(Action::Click(press.origin)));
+                }
+                shell.capture_event();
+            }
+            _ => {}
+        }
+    }
+
+    /// What a left press in the editor is: a single click with no modifier
+    /// held on a task's box is a press on it, and any other the click it
+    /// is.
+    fn click_update(&self, state: &State, click: mouse::Click) -> Update {
+        if self.left_to_host.get() {
+            return Update::Press(Pressed::Left(click));
+        }
+        let single =
+            popover::click_kind(click.kind(), state.click_kind) == mouse::click::Kind::Single;
+        let line = (single && state.modifiers.is_empty())
+            .then(|| self.box_under(state, click.position()))
+            .flatten();
+        match line {
+            Some(line) => Update::BoxPress(click, line),
+            None => Update::Click(click),
+        }
+    }
+
+    /// The line of the task whose box, `[` to `]`, lies under `point`,
+    /// relative to the text origin, as the last layout placed it: only with
+    /// the host's tasks on, on the advanced engine, and while the widget
+    /// sees the text as the host will have it.
+    fn box_under(&self, state: &State, point: Point) -> Option<usize> {
+        if self.content.kind() != BackendKind::Owned
+            || self.highlighter_settings.tasks.is_none()
+            || !self.menu_now.sees_the_text()
+        {
+            return None;
+        }
+        let place = self.content.place_under(point, |_, _| Vec::new())?;
+        let column = place.column?;
+        // The spans its highlighter read for the line when it drew it, or
+        // read afresh when it has not since the text above changed.
+        let cached =
+            (state.highlighter.borrow().spans(place.line)).map(|spans| hit::on_box(spans, column));
+        let on_box = cached.unwrap_or_else(|| {
+            self.content.with_lines(|lines| {
+                let spans = crate::highlighter::spans_at(
+                    &lines,
+                    place.line,
+                    self.highlighter_settings.front_matter_end,
+                    self.highlighter_settings.tasks,
+                );
+                hit::on_box(&spans, column)
+            })
+        });
+        on_box.then_some(place.line)
     }
 
     /// The misspelled word under `point`, relative to the text origin; see
@@ -1219,10 +1440,10 @@ impl<'a> TextEditor<'a> {
             front_matter_end: self.highlighter_settings.front_matter_end,
             tasks: self.highlighter_settings.tasks,
         };
-        popover::taken(
+        popover::taken_in(
             self.providers,
             || self.misspelling_under(state, point).is_some(),
-            || reading.clicked(self.content, point),
+            || reading.clicked_in(self.content, point),
         )
     }
 
@@ -1279,6 +1500,13 @@ struct State {
     /// The host verdicts already taken into `click_kind`.
     resolved_seen: u64,
     drag_click: Option<mouse::click::Kind>,
+    /// A press on a task's box that is a click on it once it is let go,
+    /// unless the pointer first moves away; see [`crate::BoxClick`].
+    box_press: Option<BoxPress>,
+    /// A click on a box, let go, waiting to be sure it is no double click.
+    box_cycle: Option<BoxCycle>,
+    /// The keyboard modifiers held, as the window last said.
+    modifiers: keyboard::Modifiers,
     partial_scroll: f32,
     highlighter: RefCell<MarkdownHighlighter>,
     highlighter_settings: HighlighterSettings,
@@ -1293,6 +1521,29 @@ struct State {
     menu_look: Option<(Size, Look)>,
     zigzags: RefCell<Zigzags>,
 }
+
+/// A left press on a task's box, held: where it was pressed, relative to
+/// the text origin, when, and the click it makes once let go on the box.
+#[derive(Debug, Clone, Copy)]
+struct BoxPress {
+    origin: Point,
+    at: Instant,
+    click: crate::BoxClick,
+}
+
+/// A click on a task's box, let go, that waits for the time in which a
+/// second press would make it a double click to pass.
+#[derive(Debug, Clone, Copy)]
+struct BoxCycle {
+    click: crate::BoxClick,
+    /// When the time ends; at least as late as the window iced counts a
+    /// double click in, from the press.
+    due: Instant,
+}
+
+/// How long after a press a second press makes a double click: iced's
+/// window ([`mouse::Click`]), and so how long a click on a box waits.
+const DOUBLE_CLICK: Duration = Duration::from_millis(300);
 
 /// A composition of the input method that was under way, or began, in a
 /// batch of events in which the host took the keyboard: it was typed
@@ -1350,6 +1601,8 @@ struct FitKey {
     font: Font,
     text_size: u32,
     width: u32,
+    /// The room the rows take beside their labels ([`popover::Extras`]).
+    extra: u32,
 }
 
 /// What the widget is drawn with: colours, font, text size, gutter and
@@ -1404,6 +1657,9 @@ impl State {
             click_kind: None,
             resolved_seen: 0,
             drag_click: None,
+            box_press: None,
+            box_cycle: None,
+            modifiers: keyboard::Modifiers::empty(),
             partial_scroll: 0.0,
             highlighter: RefCell::new(MarkdownHighlighter::new(&highlighter_settings)),
             // Layout measures again when the text size differs.
@@ -1481,6 +1737,7 @@ impl operation::Focusable for State {
 
     fn unfocus(&mut self) {
         self.focus = None;
+        self.box_press = None;
         // Preedit events reach only a focused editor, so one that ends while
         // another field has the keyboard would leave the guard on.
         self.preedit = None;
@@ -1950,6 +2207,12 @@ struct Routes<'a> {
 
 enum Update {
     Click(mouse::Click),
+    /// A left press on the box of the task on this line; see
+    /// [`crate::BoxClick`].
+    BoxPress(mouse::Click, usize),
+    /// A second press on a box, a click on which waits, that makes a double
+    /// click.
+    BoxDouble(mouse::Click),
     /// A right-click, relative to the text origin.
     RightClick(Point),
     /// A press of this button in the editor while the menu is open.
@@ -4833,7 +5096,7 @@ mod tests {
                 Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
-                Message::Find | Message::Command(_) => false,
+                Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
             };
         }
         messages
@@ -5434,7 +5697,7 @@ mod tests {
             Message::Clip(clip) => ev.clip(clip),
             Message::Undo => ev.undo(),
             Message::Redo => ev.redo(),
-            Message::Find | Message::Command(_) => false,
+            Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
         };
         applied
     }
@@ -5559,6 +5822,8 @@ mod tests {
         for kind in BackendKind::ALL {
             // Keys of one batch see the menu as the earlier ones left it.
             let mut ev = on_task(kind, Mode::Menu, status_rows());
+            // A choice names the menu (item 3.4).
+            let menu = ev.popover().map(crate::Popover::instance).unwrap();
             let (messages, captured, choice) = keys_batch(
                 &mut ev,
                 vec![
@@ -5576,7 +5841,7 @@ mod tests {
                     SpellEvent::Move(1),
                     SpellEvent::Move(1),
                     SpellEvent::Move(-1),
-                    SpellEvent::AcceptSelected
+                    SpellEvent::AcceptOf { menu, row: None }
                 ],
                 "{kind:?}"
             );
@@ -5588,11 +5853,15 @@ mod tests {
             // An accelerator chooses its row whatever is selected.
             for (event, id) in [(space(), 20), (typed("/"), 21), (typed("x"), 22)] {
                 let mut ev = on_task(kind, Mode::Menu, status_rows());
+                let menu = ev.popover().map(crate::Popover::instance).unwrap();
                 let (messages, captured, choice) =
                     keys_batch(&mut ev, vec![named(Named::ArrowDown), event]);
                 assert_eq!(
                     spell_events(&messages)[1],
-                    SpellEvent::Accept(id as usize - 20),
+                    SpellEvent::AcceptOf {
+                        menu,
+                        row: Some(id as usize - 20)
+                    },
                     "{kind:?} {id}"
                 );
                 assert_eq!(captured, [true, true], "{kind:?} {id}");
@@ -5607,7 +5876,7 @@ mod tests {
                 matches!(
                     messages.as_slice(),
                     [
-                        Message::Spell(SpellEvent::Accept(2)),
+                        Message::Spell(SpellEvent::AcceptOf { row: Some(2), .. }),
                         Message::Action(Action::Edit(Edit::Insert('x')))
                     ]
                 ),
@@ -5692,6 +5961,7 @@ mod tests {
         let left = || press(mouse::Button::Left);
         for kind in BackendKind::ALL {
             let mut ev = on_task(kind, Mode::Menu, status_rows());
+            let menu = ev.popover().map(crate::Popover::instance).unwrap();
             let row = on_task_row(1);
             let (messages, captured, choice) = popover_batch(
                 &mut ev,
@@ -5700,7 +5970,10 @@ mod tests {
             );
             assert_eq!(
                 spell_events(&messages),
-                [SpellEvent::Hover(1), SpellEvent::Accept(1)],
+                [
+                    SpellEvent::Hover(1),
+                    SpellEvent::AcceptOf { menu, row: Some(1) }
+                ],
                 "{kind:?}"
             );
             assert_eq!(captured, [true, true], "{kind:?}");
@@ -6773,12 +7046,17 @@ mod tests {
             &mut ev,
             vec![request_key("s"), named(Named::ArrowDown), typed("x")],
         );
+        // The menu the editor will open next, which the choice names
+        // (item 3.4).
         assert_eq!(
             spell_events(&messages),
             [
                 SpellEvent::Request(STATUS),
                 SpellEvent::Move(1),
-                SpellEvent::Accept(2)
+                SpellEvent::AcceptOf {
+                    menu: 1,
+                    row: Some(2)
+                }
             ]
         );
         assert_eq!(captured, [true; 3]);
@@ -6794,7 +7072,13 @@ mod tests {
         );
         assert_eq!(
             spell_events(&messages),
-            [SpellEvent::Request(STATUS), SpellEvent::Accept(1)]
+            [
+                SpellEvent::Request(STATUS),
+                SpellEvent::AcceptOf {
+                    menu: 1,
+                    row: Some(1)
+                }
+            ]
         );
         assert_eq!(choice, chose(21, Mode::Menu));
         assert_eq!(ev.text(), "- [ ] ab");
@@ -7978,11 +8262,16 @@ mod tests {
                 Some((1, id))
             );
         }
-        // A menu that is no provider's is chosen from as it always was.
+        // A menu that is no provider's names itself the same way (item
+        // 3.4).
         let mut ev = providing(BackendKind::Owned, providers.clone());
         assert!(ev.open_popover(Anchor::Caret, Mode::Menu, status_rows()));
+        let menu = ev.popover().unwrap().instance();
         let (messages, _) = widget_batch(&ev, &mut None, vec![(typed("/"), None)]);
-        assert_eq!(spell_events(&messages), [SpellEvent::Accept(1)]);
+        assert_eq!(
+            spell_events(&messages),
+            [SpellEvent::AcceptOf { menu, row: Some(1) }]
+        );
 
         // The suggestions menu a right-click asks for is as it was built:
         // its keys go to the host, which resolves them against its menu.
@@ -8646,9 +8935,12 @@ mod tests {
         SpellMenuOpen,
         MenuOpen,
         SuggestionsOpen,
+        // A menu of the host's drawn, and in the press's batch the key of
+        // a row whose choice opens another menu of the host's (item 3.4).
+        MenuOpenThenARowThatOpensAMenu,
     }
 
-    const OPENERS: [Opener; 18] = [
+    const OPENERS: [Opener; 19] = [
         Opener::Nothing,
         Opener::SuggestKeyOnAWord,
         Opener::SuggestKeyOffAWord,
@@ -8667,6 +8959,7 @@ mod tests {
         Opener::SpellMenuOpen,
         Opener::MenuOpen,
         Opener::SuggestionsOpen,
+        Opener::MenuOpenThenARowThatOpensAMenu,
     ];
 
     /// The presses of the table, in the order of [`owners`]: Up, Down,
@@ -8733,7 +9026,12 @@ mod tests {
             // are dropped to the end of the batch. Escape and a shortcut
             // stay the host's, and a press in the editor is the click it
             // is.
-            Opener::RightClickForTheKeyboard | Opener::RequestForTheKeyboard => "DDDDAADDDT",
+            //
+            // So it is once a row was chosen that opens a menu of the
+            // host's the widget cannot know of (drop, don't forward).
+            Opener::RightClickForTheKeyboard
+            | Opener::RequestForTheKeyboard
+            | Opener::MenuOpenThenARowThatOpensAMenu => "DDDDAADDDT",
             // Suggestions leave every other key and the press to the text.
             Opener::TypingThatOffers | Opener::SuggestionsOpen => "PPPPPATTTT",
         }
@@ -8791,6 +9089,23 @@ mod tests {
                 ev.spell(SpellEvent::Request(STATUS));
             }
             Opener::MenuOpen => hang(&mut ev, Mode::Menu, 0, 2..5, status_rows()),
+            Opener::MenuOpenThenARowThatOpensAMenu => {
+                let mut rows = status_rows();
+                rows.push(
+                    Row::new(29, "Priority…")
+                        .accelerator(crate::Accelerator::plain('p'))
+                        .opens_menu(),
+                );
+                if owned {
+                    let anchor = crate::Anchor::Range {
+                        line: 0,
+                        range: 2..5,
+                    };
+                    assert!(ev.open_popover(anchor, Mode::Menu, rows));
+                } else {
+                    hang(&mut ev, Mode::Menu, 0, 2..5, rows);
+                }
+            }
             Opener::SuggestionsOpen if owned => {
                 popover_batch(
                     &mut ev,
@@ -8833,6 +9148,7 @@ mod tests {
             Opener::RequestForAMenu => vec![(request_key("s"), None)],
             Opener::RequestForNothing => vec![(request_key("n"), None)],
             Opener::RequestForTheKeyboard => vec![(request_key("k"), None)],
+            Opener::MenuOpenThenARowThatOpensAMenu => vec![(typed("p"), None)],
             Opener::TypingThatOffers => vec![(typed("d"), None), (typed("u"), None)],
             Opener::TypingThatOffersNothing => vec![(typed("d"), None)],
             Opener::Nothing
@@ -8909,7 +9225,12 @@ mod tests {
                 // The iced engine has no spelling and opens no popover:
                 // after any opener of the batch, nothing is open.
                 let owned = kind == BackendKind::Owned;
-                let drawn = matches!(opener, Opener::MenuOpen | Opener::SuggestionsOpen);
+                let drawn = matches!(
+                    opener,
+                    Opener::MenuOpen
+                        | Opener::SuggestionsOpen
+                        | Opener::MenuOpenThenARowThatOpensAMenu
+                );
                 if !owned && opener == Opener::SpellMenuOpen {
                     continue;
                 }
@@ -9042,5 +9363,489 @@ mod tests {
         assert_eq!(ev.take_command(), None);
         assert_eq!(ev.popover().map(crate::Popover::instance), Some(b));
         assert_eq!(ev.text(), "du");
+    }
+
+    // ── A click on a task's box ────────────────────────────────────────────
+
+    fn released() -> Event {
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+    }
+
+    fn held(modifiers: keyboard::Modifiers) -> Event {
+        Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers))
+    }
+
+    /// The redraw asked for once a double click's time has passed.
+    fn later() -> Event {
+        Event::Window(window::Event::RedrawRequested(
+            Instant::now() + DOUBLE_CLICK + Duration::from_millis(50),
+        ))
+    }
+
+    /// An editor on `kind` over `text`, the caret at the end of its last
+    /// line, with `tasks` on or off.
+    fn boxed(kind: BackendKind, text: &str, tasks: bool) -> crate::EditorView {
+        let last = text.lines().count().saturating_sub(1);
+        let end = text.lines().last().map_or(0, str::len);
+        let mut ev = editing(kind, text, last, end);
+        ev.set_tasks(tasks.then(|| wren_markdown::TaskOptions {
+            today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+        }));
+        // Laid out as the widget lays it out, for [`middle`].
+        widget_batch(&ev, &mut None, Vec::new());
+        ev
+    }
+
+    /// The window point over the middle of the character at byte `column`
+    /// of `line`, as `ev` lays it out in a widget at [`BOUNDS`].
+    fn middle(ev: &crate::EditorView, line: usize, column: usize) -> Point {
+        let at = ev.middle_of(line, column).expect("laid out");
+        Point::new(at.x + 60.0, at.y + 24.0)
+    }
+
+    /// A press, a release at `at`, and once the time for a double click
+    /// has passed, a redraw, each in a batch of its own on one widget
+    /// state: what each publishes and whether the first two were captured.
+    fn press_release(
+        ev: &crate::EditorView,
+        state: &mut Option<State>,
+        at: Point,
+    ) -> [(Vec<Message>, Vec<bool>); 3] {
+        [
+            widget_batch(ev, state, vec![(press(mouse::Button::Left), Some(at))]),
+            widget_batch(ev, state, vec![(released(), Some(at))]),
+            widget_batch(ev, state, vec![(later(), Some(at))]),
+        ]
+    }
+
+    /// Whether `messages` are one click on the box of `line` of `ev`.
+    fn is_box_click(ev: &crate::EditorView, messages: &[Message], line: usize) -> bool {
+        matches!(messages, [Message::BoxClick(click)] if ev.box_clicked(*click) == Some(line))
+    }
+
+    fn box_clicks(messages: &[Message]) -> usize {
+        (messages.iter())
+            .filter(|message| matches!(message, Message::BoxClick(_)))
+            .count()
+    }
+
+    #[test]
+    fn a_click_on_a_tasks_box_is_a_box_click_once_no_double_click_can_follow() {
+        let text = "intro\n- [ ] call sam";
+        let ev = boxed(BackendKind::Owned, text, true);
+        let caret_before = ev.cursor();
+        // `[`, the symbol and `]`: the whole box, and nothing else.
+        for column in [2, 3, 4] {
+            let mut state = None;
+            let at = middle(&ev, 1, column);
+            let [(pressed, captured), (released, let_go), (settled, _)] =
+                press_release(&ev, &mut state, at);
+            assert!(pressed.is_empty(), "{column}: {pressed:?}");
+            assert_eq!(captured, [true], "{column}");
+            assert!(released.is_empty(), "{column}: it waits: {released:?}");
+            assert_eq!(let_go, [true], "{column}");
+            assert!(is_box_click(&ev, &settled, 1), "{column}: {settled:?}");
+            assert!(state.unwrap().focus.is_some(), "{column}");
+            assert_eq!(ev.cursor(), caret_before, "{column}");
+        }
+        // Pressed and let go in one batch, with the pointer moved a little
+        // in between; a key after it lets the click go first.
+        let at = middle(&ev, 1, 3);
+        let nudged = Point::new(at.x + 2.0, at.y + 2.0);
+        let (messages, _) = widget_batch(
+            &ev,
+            &mut None,
+            vec![
+                (press(mouse::Button::Left), Some(at)),
+                (moved_to(nudged), Some(nudged)),
+                (released(), Some(nudged)),
+                (typed("a"), Some(nudged)),
+            ],
+        );
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::BoxClick(_),
+                    Message::Action(Action::Edit(Edit::Insert('a')))
+                ]
+            ),
+            "{messages:?}"
+        );
+        // The marker, the space after the box and the text are the text's.
+        for column in [0, 5, 7] {
+            let at = middle(&ev, 1, column);
+            let [(pressed, _), (released, _), (settled, _)] = press_release(&ev, &mut None, at);
+            assert!(
+                matches!(pressed.as_slice(), [Message::Action(Action::Click(_))]),
+                "{column}: {pressed:?}"
+            );
+            assert!(released.is_empty() && settled.is_empty(), "{column}");
+        }
+    }
+
+    #[test]
+    fn a_box_of_any_symbol_is_hit_on_each_of_its_glyphs() {
+        // A symbol of no status of its own, one of several bytes, and a
+        // priority glyph with U+FE0F after it next to the box.
+        let text = "- [?] a\n- [界] b\n- [x] ⏫\u{fe0f} c";
+        let ev = boxed(BackendKind::Owned, text, true);
+        for (line, columns, off) in [
+            (0, vec![2, 3, 4], 5),
+            (1, vec![2, 3, 6], 7),
+            (2, vec![2, 3, 4], 6),
+        ] {
+            for column in columns {
+                let [_, _, (settled, _)] = press_release(&ev, &mut None, middle(&ev, line, column));
+                assert!(
+                    is_box_click(&ev, &settled, line),
+                    "{line} {column}: {settled:?}"
+                );
+            }
+            let [(pressed, _), _, _] = press_release(&ev, &mut None, middle(&ev, line, off));
+            assert!(
+                matches!(pressed.as_slice(), [Message::Action(Action::Click(_))]),
+                "{line} {off}: {pressed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_off_the_box_or_out_of_reach_is_a_click_in_the_text() {
+        let ev = boxed(BackendKind::Owned, "- [界] task", true);
+        // Pressed at the far edge of `]` and let go 2 px on, on the blank
+        // after the box.
+        let row = ev.content.anchor_row(0, 6..7).expect("laid out");
+        let edge = Point::new(row.right - 1.0 + 60.0, (row.top + row.bottom) / 2.0 + 24.0);
+        let past = Point::new(edge.x + 2.0, edge.y);
+        let mut state = None;
+        let (pressed, _) = widget_batch(
+            &ev,
+            &mut state,
+            vec![(press(mouse::Button::Left), Some(edge))],
+        );
+        assert!(pressed.is_empty(), "the press is on the box: {pressed:?}");
+        let (let_go, _) = widget_batch(&ev, &mut state, vec![(released(), Some(past))]);
+        let origin = Point::new(edge.x - 60.0, edge.y - 24.0);
+        assert!(
+            matches!(let_go.as_slice(), [Message::Action(Action::Click(at))] if *at == origin),
+            "{let_go:?}"
+        );
+        let (settled, _) = widget_batch(&ev, &mut state, vec![(later(), None)]);
+        assert_eq!(box_clicks(&settled), 0);
+
+        // A drag that leaves the editor: the move out of it is a drag from
+        // where the box was pressed, and coming back is no click on it.
+        let at = middle(&ev, 0, 3);
+        let outside = Point::new(BOUNDS.x + BOUNDS.width + 40.0, at.y);
+        let mut state = None;
+        widget_batch(
+            &ev,
+            &mut state,
+            vec![(press(mouse::Button::Left), Some(at))],
+        );
+        let (left, _) = widget_batch(&ev, &mut state, vec![(moved_to(outside), Some(outside))]);
+        assert!(
+            matches!(left.as_slice(), [Message::Action(Action::Click(_))]),
+            "{left:?}"
+        );
+        let (back, _) = widget_batch(
+            &ev,
+            &mut state,
+            vec![
+                (moved_to(at), Some(at)),
+                (released(), Some(at)),
+                (later(), Some(at)),
+            ],
+        );
+        assert_eq!(box_clicks(&back), 0, "{back:?}");
+    }
+
+    #[test]
+    fn a_drag_from_the_box_selects_from_where_it_was_pressed() {
+        let ev = boxed(BackendKind::Owned, "- [ ] call sam", true);
+        let at = middle(&ev, 0, 3);
+        let away = middle(&ev, 0, 9);
+        let mut state = None;
+        let (pressed, _) = widget_batch(
+            &ev,
+            &mut state,
+            vec![(press(mouse::Button::Left), Some(at))],
+        );
+        assert!(pressed.is_empty(), "{pressed:?}");
+        let (moved, _) = widget_batch(&ev, &mut state, vec![(moved_to(away), Some(away))]);
+        let origin = Point::new(at.x - 60.0, at.y - 24.0);
+        assert!(
+            matches!(
+                moved.as_slice(),
+                [
+                    Message::Action(Action::Click(from)),
+                    Message::Action(Action::Drag(_))
+                ] if *from == origin
+            ),
+            "{moved:?}"
+        );
+        let (released, _) = widget_batch(
+            &ev,
+            &mut state,
+            vec![(released(), Some(away)), (later(), Some(away))],
+        );
+        assert!(released.is_empty(), "{released:?}");
+    }
+
+    #[test]
+    fn a_double_click_on_the_box_selects_and_two_slow_clicks_cycle_twice() {
+        let ev = boxed(BackendKind::Owned, "- [ ] call sam", true);
+        let at = middle(&ev, 0, 3);
+        // A double click: no click on the box, but the double click's
+        // selection, from the place pressed.
+        let mut state = None;
+        let (messages, _) = widget_batch(
+            &ev,
+            &mut state,
+            vec![
+                (press(mouse::Button::Left), Some(at)),
+                (released(), Some(at)),
+                (press(mouse::Button::Left), Some(at)),
+                (released(), Some(at)),
+            ],
+        );
+        let origin = Point::new(at.x - 60.0, at.y - 24.0);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Action(Action::Click(from)),
+                    Message::Action(Action::SelectWord)
+                ] if *from == origin
+            ),
+            "{messages:?}"
+        );
+        let (settled, _) = widget_batch(&ev, &mut state, vec![(later(), Some(at))]);
+        assert_eq!(box_clicks(&settled), 0, "{settled:?}");
+
+        // A single click cycles once; two slow clicks, twice.
+        let mut state = None;
+        let [_, _, (first, _)] = press_release(&ev, &mut state, at);
+        assert!(is_box_click(&ev, &first, 0), "{first:?}");
+        let [_, _, (second, _)] = press_release(&ev, &mut state, at);
+        assert!(is_box_click(&ev, &second, 0), "{second:?}");
+
+        // A click with a modifier held is the text's.
+        for modifiers in [
+            keyboard::Modifiers::SHIFT,
+            keyboard::Modifiers::CTRL,
+            keyboard::Modifiers::ALT,
+            keyboard::Modifiers::LOGO,
+        ] {
+            let mut state = None;
+            widget_batch(&ev, &mut state, vec![(held(modifiers), None)]);
+            let [(pressed, _), (released, _), (settled, _)] = press_release(&ev, &mut state, at);
+            assert!(
+                matches!(pressed.as_slice(), [Message::Action(Action::Click(_))]),
+                "{modifiers:?}: {pressed:?}"
+            );
+            assert!(released.is_empty() && settled.is_empty(), "{modifiers:?}");
+            // Let go of the modifier: the box is a box again.
+            widget_batch(
+                &ev,
+                &mut state,
+                vec![(held(keyboard::Modifiers::empty()), None)],
+            );
+            // A press elsewhere first, so the next is no double click.
+            press_release(&ev, &mut state, middle(&ev, 0, 9));
+            let [_, _, (settled, _)] = press_release(&ev, &mut state, at);
+            assert!(is_box_click(&ev, &settled, 0), "{modifiers:?}: {settled:?}");
+        }
+    }
+
+    #[test]
+    fn what_comes_between_pressing_the_box_and_letting_go_undoes_the_click() {
+        let ev = boxed(BackendKind::Owned, "- [ ] call sam", true);
+        let at = middle(&ev, 0, 3);
+        for between in [
+            typed("a"),
+            press(mouse::Button::Right),
+            Event::Window(window::Event::Unfocused),
+            held(keyboard::Modifiers::SHIFT),
+        ] {
+            let mut state = None;
+            widget_batch(
+                &ev,
+                &mut state,
+                vec![(press(mouse::Button::Left), Some(at))],
+            );
+            widget_batch(&ev, &mut state, vec![(between.clone(), Some(at))]);
+            let (released, _) = widget_batch(
+                &ev,
+                &mut state,
+                vec![(released(), Some(at)), (later(), Some(at))],
+            );
+            assert_eq!(box_clicks(&released), 0, "{between:?}: {released:?}");
+        }
+        // So does the editor losing the keyboard to a focus operation.
+        let mut state = None;
+        widget_batch(
+            &ev,
+            &mut state,
+            vec![(press(mouse::Button::Left), Some(at))],
+        );
+        operation::Focusable::unfocus(state.as_mut().unwrap());
+        let (released, _) = widget_batch(
+            &ev,
+            &mut state,
+            vec![(released(), Some(at)), (later(), Some(at))],
+        );
+        assert_eq!(box_clicks(&released), 0, "{released:?}");
+        // A click over a text that changed since is no one's.
+        let mut ev = boxed(BackendKind::Owned, "- [ ] call sam", true);
+        let [_, _, (settled, _)] = press_release(&ev, &mut None, at);
+        let [Message::BoxClick(click)] = settled.as_slice() else {
+            panic!("{settled:?}");
+        };
+        assert!(ev.perform(Action::Edit(Edit::Insert('!'))));
+        assert_eq!(ev.box_clicked(*click), None);
+    }
+
+    #[test]
+    fn the_box_is_the_texts_on_the_classic_engine_with_tasks_off_and_in_code() {
+        let text = "- [ ] call\n```\n- [ ] code\n```";
+        for (kind, tasks, line) in [
+            (BackendKind::Iced, true, 0),
+            (BackendKind::Owned, false, 0),
+            (BackendKind::Owned, true, 2),
+        ] {
+            let ev = boxed(kind, text, tasks);
+            let [(pressed, _), (released, _), (settled, _)] =
+                press_release(&ev, &mut None, middle(&ev, line, 3));
+            assert!(
+                matches!(pressed.as_slice(), [Message::Action(Action::Click(_))]),
+                "{kind:?} {tasks} {line}: {pressed:?}"
+            );
+            assert!(
+                released.is_empty() && settled.is_empty(),
+                "{kind:?} {tasks} {line}"
+            );
+            assert!(
+                matches!(
+                    ev.click_message(line, 3),
+                    Some(Message::Action(Action::Click(_)))
+                ),
+                "{kind:?} {tasks} {line}"
+            );
+        }
+        // The editor's own account of a click agrees with the widget's.
+        let ev = boxed(BackendKind::Owned, text, true);
+        assert!(matches!(
+            ev.click_message(0, 3),
+            Some(Message::BoxClick(click)) if ev.box_clicked(click) == Some(0)
+        ));
+        assert!(matches!(
+            ev.click_message(0, 7),
+            Some(Message::Action(Action::Click(_)))
+        ));
+    }
+
+    // ── Rows that cannot be chosen ─────────────────────────────────────────
+
+    /// The task menu's shape: two status rows, the first checked, a row
+    /// that cannot be chosen with its key, one that can, and another that
+    /// cannot at the end.
+    fn shaped_rows() -> Vec<Row> {
+        use crate::Accelerator;
+        vec![
+            Row::new(10, "Open").accelerator(Accelerator::plain(' ')),
+            Row::new(11, "Doing")
+                .accelerator(Accelerator::plain('/'))
+                .checked(true),
+            Row::new(12, "Set due date…")
+                .accelerator(Accelerator::plain('d'))
+                .enabled(false),
+            Row::new(13, "Priority…").accelerator(Accelerator::plain('p')),
+            Row::new(14, "Edit task…")
+                .accelerator(Accelerator::plain('e'))
+                .enabled(false),
+        ]
+    }
+
+    #[test]
+    fn a_menu_opens_on_its_checked_row_and_passes_over_rows_that_cannot_be_chosen() {
+        use keyboard::key::Named;
+        for kind in BackendKind::ALL {
+            let mut ev = on_task(kind, Mode::Menu, shaped_rows());
+            let popover = ev.popover().unwrap();
+            assert_eq!(popover.selected(), Some(1), "{kind:?}: the checked row");
+            assert!(popover.is_checked(1) && !popover.is_checked(0));
+            assert!(!popover.is_enabled(2) && popover.is_enabled(3));
+            assert_eq!(popover.hint(0).as_deref(), Some("Space"));
+            assert_eq!(popover.hint(2).as_deref(), Some("D"));
+            let menu = popover.instance();
+            // Down passes the row that cannot be chosen, and stops before
+            // the last, which cannot be chosen either; Up comes back.
+            let (messages, _, choice) = keys_batch(
+                &mut ev,
+                vec![
+                    named(Named::ArrowDown),
+                    named(Named::ArrowDown),
+                    named(Named::ArrowUp),
+                    named(Named::ArrowDown),
+                    named(Named::Enter),
+                ],
+            );
+            assert_eq!(
+                spell_events(&messages).last(),
+                Some(&SpellEvent::AcceptOf { menu, row: None }),
+                "{kind:?}"
+            );
+            assert_eq!(choice, chose(13, Mode::Menu), "{kind:?}");
+
+            // Its key is taken and does nothing: the menu stays open, and
+            // nothing is typed; a row's key after it still chooses.
+            let mut ev = on_task(kind, Mode::Menu, shaped_rows());
+            let (messages, captured, choice) = keys_batch(&mut ev, vec![typed("d"), typed("e")]);
+            assert!(messages.is_empty(), "{kind:?}: {messages:?}");
+            assert_eq!(captured, [true, true], "{kind:?}");
+            assert_eq!(choice, None, "{kind:?}");
+            assert!(ev.popover().is_some(), "{kind:?}");
+            assert_eq!(ev.text(), TASK, "{kind:?}");
+            let (_, _, choice) = keys_batch(&mut ev, vec![typed("p")]);
+            assert_eq!(choice, chose(13, Mode::Menu), "{kind:?}");
+
+            // The pointer neither selects nor chooses it.
+            let mut ev = on_task(kind, Mode::Menu, shaped_rows());
+            let row = on_task_row(2);
+            let (messages, captured, choice) = popover_batch(
+                &mut ev,
+                &mut None,
+                vec![
+                    (moved_to(row), Some(row)),
+                    (press(mouse::Button::Left), Some(row)),
+                ],
+            );
+            assert!(messages.is_empty(), "{kind:?}: {messages:?}");
+            assert_eq!(captured, [true, true], "{kind:?}");
+            assert_eq!(choice, None, "{kind:?}");
+            assert_eq!(ev.popover().and_then(crate::Popover::selected), Some(1));
+            // Nor does a choice of it from elsewhere: the menu closes and
+            // nothing is chosen.
+            assert!(!ev.spell(SpellEvent::AcceptOf {
+                menu: ev.popover().unwrap().instance(),
+                row: Some(2)
+            }));
+            assert!(ev.popover().is_none() && ev.take_choice().is_none());
+        }
+    }
+
+    #[test]
+    fn a_menu_with_no_row_that_can_be_chosen_selects_none() {
+        let rows = vec![
+            Row::new(1, "a").enabled(false),
+            Row::new(2, "b").enabled(false),
+        ];
+        let mut ev = on_task(BackendKind::Owned, Mode::Menu, rows);
+        assert_eq!(ev.popover().unwrap().selected(), None);
+        let (messages, _, choice) = keys_batch(&mut ev, vec![named(keyboard::key::Named::Enter)]);
+        assert_eq!(choice, None, "{messages:?}");
+        assert!(ev.popover().is_none());
     }
 }

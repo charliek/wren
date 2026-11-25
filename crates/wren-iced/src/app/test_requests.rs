@@ -331,6 +331,33 @@ impl App {
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task);
             }
+            "editor.click" => {
+                // A primary click, pressed and released on a character, as
+                // the editor widget publishes it: on a task's box a click
+                // on the box, anywhere else the click that places the
+                // caret.
+                self.ensure_editor_ready()?;
+                let at = position(params)?;
+                let message = self.editor.click_message(at.line, at.column);
+                let task = message
+                    .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
+                request.respond(Ok(self.editor_snapshot()));
+                return Ok(task);
+            }
+            "editor.bounds" => {
+                // Where bytes `start..end` of `line` are drawn, in window
+                // coordinates, for a native click on them.
+                self.ensure_editor_ready()?;
+                let line = usize_param(params, "line")?;
+                let range = usize_param(params, "start")?..usize_param(params, "end")?;
+                let bounds = self
+                    .editor
+                    .anchor_bounds(&wren_editor::Anchor::Range { line, range })
+                    .ok_or("Those bytes are not drawn")?;
+                request.respond(Ok(json!({
+                    "x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height,
+                })));
+            }
             "editor.cursor" => {
                 self.ensure_editor_ready()?;
                 let cursor_position = position(params)?;
@@ -814,17 +841,29 @@ impl App {
                 let command = (popover.kind(row) == Some(wren_editor::RowKind::Command))
                     .then(|| id.and_then(CommandId::from_payload).map(CommandId::key))
                     .flatten();
-                json!({"id":id,"label":label,"command":command})
+                json!({
+                    "id":id,"label":label,"command":command,"glyph":popover.glyph(row),
+                    "key":popover.hint(row),"checked":popover.is_checked(row),
+                    "enabled":popover.is_enabled(row),
+                })
             })
             .collect::<Vec<_>>();
+        let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
+        // Where the last frame drew it, once it has been drawn.
+        let bounds = (self.surface() != super::board::Surface::Board)
+            .then(|| self.editor.spell_frame().menu)
+            .flatten();
         json!({
             "mode":match popover.mode() {
                 wren_editor::Mode::Menu => "menu",
                 wren_editor::Mode::Suggest => "suggest",
             },
             "spelling":self.editor.spell_menu().is_some(),
+            "provider":popover.provider(),"instance":popover.instance(),
             "line":popover.line(),"start":popover.range().start,"end":popover.range().end,
             "text":popover.text(),"rows":rows,"selected":popover.selected(),
+            "bounds":bounds.map(rectangle),
+            "anchor":self.editor.popover_anchor().map(rectangle),
         })
     }
 
@@ -1348,17 +1387,18 @@ pub(super) fn string<'a>(params: &'a Value, name: &str) -> Result<&'a str, Strin
 }
 
 fn position(params: &Value) -> Result<Position, String> {
-    let index = |name| {
-        params
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| format!("{name} must be usize"))
-    };
     Ok(Position {
-        line: index("line")?,
-        column: index("column")?,
+        line: usize_param(params, "line")?,
+        column: usize_param(params, "column")?,
     })
+}
+
+fn usize_param(params: &Value, name: &str) -> Result<usize, String> {
+    params
+        .get(name)
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| format!("{name} must be usize"))
 }
 
 /// Text-entry widgets the `focus.get` op reports by name.

@@ -75,7 +75,9 @@ pub enum CommandId {
     ExportSvg,
     ExportPng,
     ExportDrawio,
+    TaskSetStatus,
     TaskCycleStatus,
+    TaskSetPriority,
     TaskPriorityHigh,
     TaskPriorityMedium,
     TaskPriorityLow,
@@ -237,10 +239,26 @@ definitions![
     // The task line commands (discovery/tasks.md §6), listed only while
     // the `tasks` setting is on; the priorities in Q7's order, High,
     // Medium and Low first.
+    // The status and priority menus open at the caret's task, on the
+    // advanced engine only, as every popover does.
+    (
+        TaskSetStatus,
+        "task.set_status",
+        "Set task status…",
+        "Tasks",
+        Editor
+    ),
     (
         TaskCycleStatus,
         "task.cycle_status",
         "Cycle task status",
+        "Tasks",
+        Editor
+    ),
+    (
+        TaskSetPriority,
+        "task.set_priority",
+        "Set task priority…",
         "Tasks",
         Editor
     ),
@@ -893,6 +911,12 @@ impl CommandId {
     pub fn editor_route(self) -> Option<wren_editor::KeyRoute> {
         match self {
             Self::SpellSuggest => Some(wren_editor::KeyRoute::Suggest),
+            // A request for a menu of the app's, which the editor asks the
+            // app's source of menus about, so that the keys after it in
+            // their batch reach the menu.
+            Self::TaskSetStatus | Self::TaskSetPriority => {
+                Some(wren_editor::KeyRoute::Popover(self.payload()))
+            }
             _ if self.task_change().is_some() => {
                 Some(wren_editor::KeyRoute::Command(self.payload()))
             }
@@ -977,7 +1001,17 @@ impl CommandId {
     /// with it off it is not listed anywhere, its key is unbound, and it
     /// does not run.
     pub fn tasks(self) -> bool {
-        self.task_change().is_some()
+        self.task_change().is_some() || self.task_menu().is_some()
+    }
+
+    /// The task menu a command opens at the caret's task.
+    pub(super) fn task_menu(self) -> Option<super::task_menus::MenuKind> {
+        use super::task_menus::MenuKind;
+        match self {
+            Self::TaskSetStatus => Some(MenuKind::Status),
+            Self::TaskSetPriority => Some(MenuKind::Priority),
+            _ => None,
+        }
     }
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -1159,6 +1193,9 @@ impl App {
             TaskCycleStatus | TaskPriorityHigh | TaskPriorityMedium | TaskPriorityLow
             | TaskPriorityHighest | TaskPriorityLowest | TaskPriorityNone | TaskRaisePriority
             | TaskLowerPriority | TaskClearDue => self.caret_on_task(),
+            TaskSetStatus | TaskSetPriority => {
+                self.editor.backend() == wren_editor::BackendKind::Owned && self.caret_on_task()
+            }
             SpellSuggest => {
                 self.surface() == Surface::Text
                     && self.editor.backend() == wren_editor::BackendKind::Owned
@@ -1476,6 +1513,10 @@ impl App {
             TaskCycleStatus | TaskPriorityHigh | TaskPriorityMedium | TaskPriorityLow
             | TaskPriorityHighest | TaskPriorityLowest | TaskPriorityNone | TaskRaisePriority
             | TaskLowerPriority | TaskClearDue => self.run_task_command(id),
+            TaskSetStatus | TaskSetPriority => {
+                let kind = id.task_menu().expect("a task menu command");
+                self.run_task_menu(kind)
+            }
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 // From the palette: act at the editor's cursor, as the
                 // shortcut does in the editor, then give it the keyboard.

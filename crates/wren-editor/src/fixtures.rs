@@ -37,6 +37,7 @@ pub const STYLE: Style = Style {
         selected: Color::from_rgb8(0x2a, 0x31, 0x40),
         text: Color::from_rgb8(0xe6, 0xe8, 0xec),
         muted: Color::from_rgb8(0xa3, 0xaa, 0xb5),
+        accent: Color::from_rgb8(0xf0, 0xb4, 0x5a),
         font: FONT,
         text_size: 13.0,
     },

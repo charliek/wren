@@ -49,13 +49,25 @@ pub(crate) struct Fit {
 /// enough for the longest row, between 160 and 320 px, and never more than
 /// the editor's width less 16 px. Text that still does not fit ends in an
 /// ellipsis.
+#[cfg(test)]
 pub(crate) fn fit(items: &[String], editor_width: f32, measure: impl Fn(&str) -> f32) -> Fit {
+    fit_with(items, 0.0, editor_width, measure)
+}
+
+/// [`fit`], for rows that also hold `extra` pixels beside their labels: a
+/// column of glyphs before them and the keys named after them ([`Extras`]).
+pub(crate) fn fit_with(
+    items: &[String],
+    extra: f32,
+    editor_width: f32,
+    measure: impl Fn(&str) -> f32,
+) -> Fit {
     let labels: Vec<&str> = if items.is_empty() {
         vec![NO_SUGGESTIONS]
     } else {
         items.iter().map(String::as_str).collect()
     };
-    let inset = 2.0 * (PADDING + TEXT_INSET);
+    let inset = 2.0 * (PADDING + TEXT_INSET) + extra;
     let widest = labels
         .iter()
         .map(|label| measure(label))
@@ -97,6 +109,56 @@ fn cut(label: &str, room: f32, measure: &impl Fn(&str) -> f32) -> String {
         }
     }
     with_ellipsis(if fits == 0 { 0 } else { ends[fits - 1] })
+}
+
+/// The width of the column of glyphs before a menu's labels, when a row has
+/// one.
+const GLYPH_COLUMN: f32 = 26.0;
+/// The least space between a label and the key named after it.
+const HINT_GAP: f32 = 16.0;
+/// How much smaller than a label the key named after it is set.
+const HINT_SHRINK: f32 = 1.5;
+
+/// What a menu's rows hold beside their labels: a column of glyphs before
+/// them, and the keys named after them, right-aligned.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Extras {
+    /// The glyph column's width, or nothing when no row has a glyph.
+    pub glyphs: f32,
+    /// The widest key's width and the gap before it, or nothing when no
+    /// row names a key.
+    pub hints: f32,
+}
+
+impl Extras {
+    /// What `menu`'s rows hold, measuring a key's name with `measure_hint`.
+    pub(crate) fn of(menu: &Popover, measure_hint: impl Fn(&str) -> f32) -> Self {
+        let rows = menu.labels().len();
+        let glyphs = if (0..rows).any(|row| menu.glyph(row).is_some()) {
+            GLYPH_COLUMN
+        } else {
+            0.0
+        };
+        let widest = (0..rows)
+            .filter_map(|row| menu.hint(row))
+            .map(|hint| measure_hint(&hint))
+            .fold(None, |widest: Option<f32>, width| {
+                Some(widest.map_or(width, |w| w.max(width)))
+            });
+        Self {
+            glyphs,
+            hints: widest.map_or(0.0, |width| (width + HINT_GAP).ceil()),
+        }
+    }
+
+    pub(crate) fn width(self) -> f32 {
+        self.glyphs + self.hints
+    }
+}
+
+/// The text size a key named beside a row is set at, for rows at `size`.
+pub(crate) fn hint_size(size: f32) -> f32 {
+    (size - HINT_SHRINK).max(1.0)
 }
 
 /// The menu's height for `rows` rows.
@@ -173,7 +235,8 @@ pub(crate) fn measure(content: &str, font: Font, size: f32) -> f32 {
 /// The open popover, drawn over the editor.
 pub(crate) struct MenuOverlay<'a> {
     pub menu: &'a Popover,
-    /// The rows' text, from [`fit`].
+    /// The rows' text, from [`fit_with`], which made room for what the
+    /// rows hold beside them ([`Extras`]).
     pub labels: &'a [String],
     /// Where the menu is, in window coordinates.
     pub bounds: Rectangle,
@@ -186,9 +249,11 @@ pub(crate) struct MenuOverlay<'a> {
 }
 
 impl MenuOverlay<'_> {
-    /// The row under `point` that can be selected, if any.
+    /// The row under `point` that can be selected, if any: not one that
+    /// cannot be chosen.
     fn active_row_at(&self, point: Point) -> Option<usize> {
         row_at(self.bounds, self.menu.labels().len(), point)
+            .filter(|&row| self.menu.is_enabled(row))
     }
 
     /// Handle `event` with the pointer at `cursor` (rule 4.4.5), unless an
@@ -220,14 +285,15 @@ impl MenuOverlay<'_> {
                 Some(point) if self.bounds.contains(point) => {
                     if *button == mouse::Button::Left {
                         if let Some(row) = self.active_row_at(point) {
-                            // A row of a provider's menu is chosen from
-                            // that menu or from none.
-                            tell(match self.menu.provider() {
-                                Some(_) => PopoverEvent::AcceptOf {
+                            // A row of any menu but the suggestions menu
+                            // is chosen from that menu or from none.
+                            tell(if self.menu.named_by_choice() {
+                                PopoverEvent::AcceptOf {
                                     menu: self.menu.instance(),
                                     row: Some(row),
-                                },
-                                None => PopoverEvent::Accept(row),
+                                }
+                            } else {
+                                PopoverEvent::Accept(row)
                             });
                         } else if self.menu.labels().is_empty()
                             && row_at(self.bounds, 1, point).is_some()
@@ -297,24 +363,79 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
         } else {
             style.text
         };
+        let hints = hint_size(style.text_size);
+        let extras = Extras::of(self.menu, |hint| measure(hint, style.font, hints));
+        let text = |content: String, size: f32, font: Font, width: f32, align_x| Text {
+            content,
+            bounds: Size::new(width.max(0.0), ROW_HEIGHT),
+            size: Pixels(size),
+            line_height: LineHeight::default(),
+            font,
+            align_x,
+            align_y: alignment::Vertical::Center,
+            shaping: text::Shaping::Advanced,
+            wrapping: Wrapping::None,
+        };
         for (row, label) in self.labels.iter().enumerate() {
             let bounds = row_bounds(self.bounds, row);
+            // A row that cannot be chosen is muted whole; a checked one
+            // has its label in the accent, and heavier.
+            let enabled = self.menu.labels().is_empty() || self.menu.is_enabled(row);
+            let checked = enabled && self.menu.is_checked(row);
+            let (color, font) = match (enabled, checked) {
+                (false, _) => (style.muted, style.font),
+                (true, true) => (
+                    style.accent,
+                    Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..style.font
+                    },
+                ),
+                (true, false) => (color, style.font),
+            };
+            if let Some(glyph) = self.menu.glyph(row) {
+                renderer.fill_text(
+                    text(
+                        glyph.to_owned(),
+                        style.text_size,
+                        style.font,
+                        extras.glyphs,
+                        text::Alignment::Center,
+                    ),
+                    Point::new(
+                        bounds.x + TEXT_INSET + extras.glyphs / 2.0,
+                        bounds.center_y(),
+                    ),
+                    if enabled { style.text } else { style.muted },
+                    self.bounds,
+                );
+            }
             renderer.fill_text(
-                Text {
-                    content: label.clone(),
-                    bounds: Size::new((bounds.width - 2.0 * TEXT_INSET).max(0.0), bounds.height),
-                    size: Pixels(style.text_size),
-                    line_height: LineHeight::default(),
-                    font: style.font,
-                    align_x: text::Alignment::Default,
-                    align_y: alignment::Vertical::Center,
-                    shaping: text::Shaping::Advanced,
-                    wrapping: Wrapping::None,
-                },
-                Point::new(bounds.x + TEXT_INSET, bounds.center_y()),
+                text(
+                    label.clone(),
+                    style.text_size,
+                    font,
+                    bounds.width - 2.0 * TEXT_INSET - extras.width(),
+                    text::Alignment::Default,
+                ),
+                Point::new(bounds.x + TEXT_INSET + extras.glyphs, bounds.center_y()),
                 color,
                 self.bounds,
             );
+            if let Some(hint) = self.menu.hint(row) {
+                renderer.fill_text(
+                    text(
+                        hint,
+                        hints,
+                        style.font,
+                        extras.hints,
+                        text::Alignment::Right,
+                    ),
+                    Point::new(bounds.x + bounds.width - TEXT_INSET, bounds.center_y()),
+                    style.muted,
+                    self.bounds,
+                );
+            }
         }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(frame) = self.frame {

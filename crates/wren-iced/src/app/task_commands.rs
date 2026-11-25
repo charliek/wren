@@ -40,7 +40,7 @@ impl App {
 
     /// Whether the editor holds task lines a command may change: tasks on,
     /// and a Markdown note in the editor on its text surface.
-    fn task_lines_editable(&self) -> bool {
+    pub(super) fn task_lines_editable(&self) -> bool {
         self.preferences.tasks && self.markdown_in_editor() && self.ensure_editor_ready().is_ok()
     }
 
@@ -67,10 +67,19 @@ impl App {
     /// the task a menu's row was chosen for, whatever line the caret is on.
     /// The toggle then toggles that one task.
     fn run_task_command_at(&mut self, id: CommandId, line: Option<usize>) -> Gateway {
+        self.run_task_change(id.task_change(), line)
+    }
+
+    /// [`App::run_task_command_at`] for `change`, or the toggle for none:
+    /// what a task menu's row and a click on a box make too.
+    pub(super) fn run_task_change(
+        &mut self,
+        change: Option<Change>,
+        line: Option<usize>,
+    ) -> Gateway {
         self.palette = None;
         let focus = self.return_to_editor();
         let started = Instant::now();
-        let change = id.task_change();
         let edits = self.editor.plan_markdown(|lines, sel, options| {
             let one = |at: usize, change: &Change| {
                 task::edit(lines, at, sel, change, options).map(|edit| Ok(vec![edit]))
@@ -160,6 +169,24 @@ mod tests {
     use super::super::tasks::Clock;
     use super::super::Options;
     use super::*;
+
+    /// The Tasks group in the palette's order: the line commands, with
+    /// the status and priority menus (item 3.4) before the commands of
+    /// their kind.
+    const TASKS_GROUP: [CommandId; 12] = [
+        CommandId::TaskSetStatus,
+        CommandId::TaskCycleStatus,
+        CommandId::TaskSetPriority,
+        CommandId::TaskPriorityHigh,
+        CommandId::TaskPriorityMedium,
+        CommandId::TaskPriorityLow,
+        CommandId::TaskPriorityHighest,
+        CommandId::TaskPriorityLowest,
+        CommandId::TaskPriorityNone,
+        CommandId::TaskRaisePriority,
+        CommandId::TaskLowerPriority,
+        CommandId::TaskClearDue,
+    ];
 
     /// The line commands, in the palette's order.
     const LINE_COMMANDS: [CommandId; 10] = [
@@ -468,7 +495,7 @@ mod tests {
             .collect();
         assert_eq!(
             tasks,
-            LINE_COMMANDS.map(|id| (id, true)).to_vec(),
+            TASKS_GROUP.map(|id| (id, true)).to_vec(),
             "every line command, enabled on a task line"
         );
         // The group follows Markdown's among the groups a note lists.
@@ -513,7 +540,7 @@ mod tests {
         let rows: Vec<_> = definitions().filter(|row| row.id.tasks()).collect();
         assert_eq!(
             rows.iter().map(|row| row.id).collect::<Vec<_>>(),
-            LINE_COMMANDS
+            TASKS_GROUP
         );
         for row in &rows {
             assert!(row.key.starts_with("task."), "{}", row.key);
@@ -521,13 +548,14 @@ mod tests {
             assert_eq!(row.group, "Tasks", "{}", row.key);
             assert_eq!(row.scope, Scope::Editor, "{}", row.key);
             assert_eq!(CommandId::parse(row.key), Some(row.id));
-            assert_eq!(
-                row.id.editor_route(),
-                Some(wren_editor::KeyRoute::Command(row.id.payload())),
-                "{}",
-                row.key
-            );
-            assert!(row.id.task_change().is_some());
+            // A menu's command is a request for the menu (item 3.4).
+            let route = if row.id.task_menu().is_some() {
+                wren_editor::KeyRoute::Popover(row.id.payload())
+            } else {
+                wren_editor::KeyRoute::Command(row.id.payload())
+            };
+            assert_eq!(row.id.editor_route(), Some(route), "{}", row.key);
+            assert!(row.id.task_change().is_some() != row.id.task_menu().is_some());
         }
         for platform in [
             wren_core::keybind::Platform::Mac,

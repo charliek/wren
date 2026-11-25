@@ -32,6 +32,7 @@ mod preferences;
 mod spelling;
 mod task_commands;
 mod task_footer;
+mod task_menus;
 mod tasks;
 mod workspaces;
 
@@ -875,20 +876,35 @@ impl App {
                 if matches!(event, SpellEvent::OpenAt(_) | SpellEvent::Context { .. }) {
                     task = focus_editor();
                 }
+                // A request for a task menu: the app opens it at the
+                // caret's task, as the command does.
+                if let SpellEvent::Request(id) = event {
+                    if let Some(opened) = self.request_task_menu(id) {
+                        return opened;
+                    }
+                }
                 let changed = self.editor.spell(event);
                 // A row that runs a command runs it, for the place its menu
-                // was opened on. Any other row is its menu's owner's
-                // (`take_choice`, `take_provided`): the app opens no menu
-                // of its own yet and names no provider, so none is taken.
-                if let Some(choice) = self.editor.take_command() {
+                // was opened on. Any other row is its menu's owner's: the
+                // provider's that opened it for a right-click, or the
+                // app's own.
+                let chosen = if let Some(choice) = self.editor.take_command() {
+                    Some(self.run_command_row(&choice))
+                } else if let Some((provider, choice)) = self.editor.take_provided() {
+                    Some(self.provided_row(provider, &choice))
+                } else {
+                    (self.editor.take_choice()).map(|choice| self.chosen_row(&choice))
+                };
+                if let Some(chosen) = chosen {
                     if changed {
                         self.text_changed(started);
                     }
-                    return Task::batch([task, self.run_command_row(&choice)]);
+                    return Task::batch([task, chosen]);
                 }
                 changed
             }
             wren_editor::Message::Command(payload) => return self.run_payload(payload),
+            wren_editor::Message::BoxClick(click) => return self.click_box(click),
             wren_editor::Message::Clip(clip) => {
                 self.column = columns::Column::Editor;
                 self.editor.clip(clip)
