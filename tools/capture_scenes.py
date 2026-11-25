@@ -415,6 +415,12 @@ def footer_scenes(client, shot_here, resize) -> None:
     assert footer["overdue"] and footer["text"] == \
         "Open · due Mon 16 Nov, 3 days overdue · 🔼 Medium · @sam @priya", footer
     shot_here("task-footer-overdue")
+    # Focus mode folds the browser columns away, so the footer is wide on
+    # any platform, macOS's small default window included.
+    client.call("command.run", {"id": "view.focus"})
+    footer_at(2)
+    shot_here("task-footer-wide")
+    client.call("command.run", {"id": "view.focus"})
     if display_server() != "x11":
         print(f"task-footer-narrow: skipped, resizing needs X11 ({display_server()})")
         return
