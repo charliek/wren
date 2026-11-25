@@ -5,6 +5,13 @@
 //! `tasks.set_today`, which pins the clock. With tasks off every request
 //! but `tasks.get` is refused, and `tasks.get` says only that they are off,
 //! so a lane with the setting off can assert the gate.
+//!
+//! The calendar (item 4.1): `tasks.calendar`, what it shows and where;
+//! `tasks.calendar_type`, the field's text set as a paste or an input
+//! method's commit sets it; and `tasks.calendar_click`, a click on a day,
+//! a quick pick, a month arrow, Clear, inside the card off its controls,
+//! or outside it. While it is open `editor.key` presses a key in its field
+//! ([`App::calendar_key`]).
 
 use std::sync::Arc;
 
@@ -14,6 +21,7 @@ use wren_markdown::date::Date;
 use wren_markdown::span::SpanKind;
 use wren_markdown::task::DateField;
 
+use super::calendar::Event as CalendarEvent;
 use super::test_requests::string;
 use super::{App, Message};
 use crate::test_ipc::Request;
@@ -35,9 +43,171 @@ impl App {
                 self.pin_today(date);
                 request.respond(Ok(self.tasks_snapshot()));
             }
+            "tasks.calendar" | "tasks.calendar_type" | "tasks.calendar_click"
+                if !self.preferences.tasks =>
+            {
+                return Err("Tasks are off".into());
+            }
+            "tasks.calendar" => request.respond(Ok(self.calendar_snapshot())),
+            "tasks.calendar_type" | "tasks.calendar_click" => {
+                if self.calendar.is_none() {
+                    return Err("The calendar is not open".into());
+                }
+                let event = if request.op == "tasks.calendar_type" {
+                    CalendarEvent::Field(crate::date_field::FieldEvent::Typed(
+                        string(&request.params, "text")?.to_owned(),
+                    ))
+                } else {
+                    self.calendar_click(&request.params)?
+                };
+                let task = self.update(Message::Calendar(event));
+                request.respond(Ok(self.calendar_snapshot()));
+                return Ok(task);
+            }
             _ => return Err(format!("unknown test operation: {}", request.op)),
         }
         Ok(Task::none())
+    }
+
+    /// What `tasks.calendar_click` names: `{"day": "YYYY-MM-DD"}`, a day
+    /// the grid shows; `{"chip": label}`; or `{"target": "previous" |
+    /// "next" | "clear" | "inside" | "outside"}`.
+    fn calendar_click(&self, params: &Value) -> Result<CalendarEvent, String> {
+        let open = self.calendar.as_ref().ok_or("The calendar is not open")?;
+        if let Some(day) = params.get("day").and_then(Value::as_str) {
+            let date = Date::parse_iso(day).ok_or_else(|| format!("{day:?} is no date"))?;
+            let shown = open
+                .model
+                .grid()
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|cell| cell.date == date);
+            return if shown {
+                Ok(CalendarEvent::Pick(date))
+            } else {
+                Err(format!("{day} is not in the grid"))
+            };
+        }
+        if let Some(label) = params.get("chip").and_then(Value::as_str) {
+            return super::calendar::chip_date(label, open.model.today())
+                .map(CalendarEvent::Pick)
+                .ok_or_else(|| format!("no quick pick {label:?}"));
+        }
+        Ok(match string(params, "target")? {
+            "previous" => CalendarEvent::Show(-1),
+            "next" => CalendarEvent::Show(1),
+            "clear" if open.has_due() => CalendarEvent::Clear,
+            "clear" => return Err("Clear is not shown for a task with no due date".into()),
+            "inside" => CalendarEvent::Refocus,
+            "outside" => CalendarEvent::Outside,
+            other => return Err(format!("unknown calendar target {other:?}")),
+        })
+    }
+
+    /// A key pressed in the calendar's field, as the field and then the
+    /// app's own key handling take it: the calendar's keys, a character
+    /// typed (with no Ctrl, Alt or logo key) or Backspace, as iced's text
+    /// input takes them at the end of the text, and Escape and shortcuts
+    /// heard by the app as a real press is.
+    pub(super) fn calendar_key(
+        &mut self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Message> {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::Key;
+        let Some(open) = &self.calendar else {
+            return Task::none();
+        };
+        let typed = open.model.typed().to_owned();
+        let mut tasks = Vec::new();
+        let plain = !(modifiers.control() || modifiers.alt() || modifiers.logo());
+        let captured = match crate::date_field::route(&key, modifiers, false, typed.is_empty()) {
+            Some(taken) => {
+                if let Some(event) = taken {
+                    tasks.push(self.update(Message::Calendar(CalendarEvent::Field(event))));
+                }
+                true
+            }
+            None => {
+                let text = match key.as_ref() {
+                    Key::Character(character) if plain => Some(format!("{typed}{character}")),
+                    Key::Named(Named::Space) if plain => Some(format!("{typed} ")),
+                    Key::Named(Named::Backspace) => {
+                        let mut text = typed.clone();
+                        text.pop();
+                        Some(text)
+                    }
+                    _ => None,
+                };
+                match text {
+                    Some(text) => {
+                        if text != typed {
+                            tasks.push(self.update(Message::Calendar(CalendarEvent::Field(
+                                crate::date_field::FieldEvent::Typed(text),
+                            ))));
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        let status = if captured {
+            iced::event::Status::Captured
+        } else {
+            iced::event::Status::Ignored
+        };
+        let event = iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        if let Some(input) =
+            crate::keys::input(&event).filter(|input| crate::keys::reaches_app(input, status))
+        {
+            tasks.push(self.update(Message::Key(crate::keys::with_status(input, status))));
+        }
+        Task::batch(tasks)
+    }
+
+    /// The calendar as it is drawn: `{"open": false}` while it is closed.
+    fn calendar_snapshot(&self) -> Value {
+        let Some(open) = &self.calendar else {
+            return json!({"open": false});
+        };
+        let model = &open.model;
+        let caption = model.caption();
+        let (anchor_line, anchor) = match open.anchor() {
+            wren_editor::Anchor::Range { line, range } => {
+                (Some(*line), Some([range.start, range.end]))
+            }
+            wren_editor::Anchor::Caret => (None, None),
+        };
+        let card = self.calendar_bounds();
+        json!({
+            "open": true,
+            "line": open.line(),
+            "typed": model.typed(),
+            "selected": model.selected().to_string(),
+            "today": model.today().to_string(),
+            "current": model.current().map(|date| date.to_string()),
+            "month": model.month().to_string(),
+            "caption": caption.to_string(),
+            "invalid": caption.is_invalid(),
+            "clear": open.has_due(),
+            "anchor": {"line": anchor_line, "range": anchor},
+            "bounds": card.map(|card| json!({
+                "x": card.x, "y": card.y, "width": card.width, "height": card.height,
+            })),
+        })
     }
 
     fn tasks_snapshot(&self) -> Value {

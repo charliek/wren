@@ -176,6 +176,10 @@ pub enum Message {
     /// A click on a task's box; see [`BoxClick`]. The editor does nothing
     /// with it; the host changes the task.
     BoxClick(BoxClick),
+    /// Input of the editor's own after the host gave back the keyboard
+    /// ([`EditorView::hand_back`]): an input method's preedit with text, or
+    /// a press in the text. See [`EditorView::handback_over`].
+    HandbackOver,
 }
 
 /// A primary click on a task's box, `[` to `]`, with the host's tasks on
@@ -319,6 +323,9 @@ pub struct EditorView {
     /// What the widget makes of the left presses it leaves here, which it
     /// counts from in the next batch.
     resolved_press: popover::ResolvedPress,
+    /// The host gave back the keyboard, and the editor has seen no input
+    /// of its own since; see [`EditorView::hand_back`].
+    handback: bool,
     /// What the last left press resolved here was taken as, while the
     /// widget's guess at it was wrong: the widget counts the presses after
     /// it in the same batch from that guess, so they are counted again.
@@ -399,6 +406,7 @@ impl EditorView {
             origin: std::cell::Cell::new(None),
             drop_drags: false,
             resolved_press: popover::ResolvedPress::default(),
+            handback: false,
             press_chain: None,
             line_clip: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -548,6 +556,7 @@ impl EditorView {
         .suggest_source(self.suggest_source(), self.suggest_suppressed())
         .origin(&self.origin)
         .resolved_press(self.resolved_press)
+        .handback(self.handback)
         .measure(measure);
         let editor = match &self.menu {
             Some(menu) => editor.spell_menu(Some(menu)),
@@ -611,6 +620,9 @@ impl EditorView {
     /// Returns `true` only when the text changes. Non-edit actions break typing
     /// coalescing without discarding history; no-op edits also preserve redo.
     pub fn perform(&mut self, action: Action) -> bool {
+        if !matches!(action, Action::Scroll { .. }) {
+            self.handback = false;
+        }
         let held = std::mem::take(&mut self.hold);
         let typed = !held && matches!(action, Action::Edit(Edit::Insert(_) | Edit::Backspace));
         let changed = self.perform_action(action);
@@ -715,6 +727,7 @@ impl EditorView {
     ///
     /// Returns whether the text changed.
     pub fn intent(&mut self, intent: Intent) -> bool {
+        self.handback = false;
         let held = std::mem::take(&mut self.hold);
         let changed = self.perform_intent(intent);
         if !held && matches!(intent, Intent::Backspace) {
@@ -783,6 +796,9 @@ impl EditorView {
     ///
     /// Returns whether the text changed.
     pub fn clip(&mut self, clip: Clip) -> bool {
+        if matches!(clip, Clip::CutLine(_) | Clip::Paste(_)) {
+            self.handback = false;
+        }
         self.close_open();
         match clip {
             Clip::CopyLine(text) => {
@@ -841,6 +857,7 @@ impl EditorView {
     /// Returns `true` if something was restored: the text, the cursor and
     /// selection, and on the owned engine the scroll position.
     pub fn undo(&mut self) -> bool {
+        self.handback = false;
         self.close_open();
         if !self.history.can_undo() {
             return false;
@@ -859,6 +876,7 @@ impl EditorView {
     ///
     /// Returns `true` if something was restored.
     pub fn redo(&mut self) -> bool {
+        self.handback = false;
         self.close_open();
         if !self.history.can_redo() {
             return false;
@@ -1199,6 +1217,18 @@ impl EditorView {
         self.choice = None;
         self.keyboard = None;
         self.hold = matches!(event, SpellEvent::Hold);
+        // A request, a right-click or a press in the text is input of the
+        // editor's own, or a new handover (`hand_back`).
+        if matches!(
+            event,
+            SpellEvent::Request(_)
+                | SpellEvent::Context { .. }
+                | SpellEvent::OpenAt(_)
+                | SpellEvent::OpenAtCaret
+                | SpellEvent::Press(MenuPress::Left(..))
+        ) {
+            self.handback = false;
+        }
         match event {
             SpellEvent::Key(key) => {
                 return match self.popover().map(|popover| key.on(popover.mode())) {
@@ -1297,6 +1327,10 @@ impl EditorView {
             Message::Clip(clip) => self.clip(clip),
             Message::Undo => self.undo(),
             Message::Redo => self.redo(),
+            Message::HandbackOver => {
+                self.handback_over();
+                false
+            }
             // Only Ctrl or Cmd+F routes to Find, never a plain key; a
             // command and a click on a box are the host's.
             Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
@@ -1560,6 +1594,43 @@ impl EditorView {
     pub fn take_keyboard(&mut self) -> Option<(usize, Clicked)> {
         let handed = self.keyboard.take()?;
         (handed.revision == self.revision).then_some((handed.provider, handed.clicked))
+    }
+
+    /// The host's own field had the keyboard and gives it back, closing:
+    /// an input method may still be composing for that field, and what it
+    /// commits is not the note's. Until the editor sees input of its own,
+    /// it drops what an input method commits and a preedit that empties.
+    /// That ends at the first of:
+    ///
+    /// - a preedit with text, the editor's own composition, which it takes
+    ///   from its first preedit to its commit;
+    /// - a key that types, edits or moves the caret (an action, an intent,
+    ///   a cut or a paste, undo or redo);
+    /// - a primary press in the text;
+    /// - a new handover, a request or a right-click the host takes the
+    ///   keyboard for.
+    ///
+    /// Nothing else ends it, and nothing but those inputs is dropped, so it
+    /// cannot outlast the editor's next input. The cost: text an input
+    /// method commits with no preedit before it (some pickers), as the very
+    /// first input after the handback, is dropped; the input after it is
+    /// the note's.
+    pub fn hand_back(&mut self) {
+        self.handback = true;
+    }
+
+    /// The editor saw input of its own after the host gave back the
+    /// keyboard ([`Message::HandbackOver`], or the messages of
+    /// [`EditorView::hand_back`]'s list, which end it as they are applied).
+    pub fn handback_over(&mut self) {
+        self.handback = false;
+    }
+
+    /// Whether the editor drops an input method's commits, as
+    /// [`EditorView::hand_back`] says.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handed_back(&self) -> bool {
+        self.handback
     }
 
     /// Whether a popover took a press of Escape that the host has yet to
@@ -2921,6 +2992,10 @@ mod tests {
                 Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
+                Message::HandbackOver => {
+                    ev.handback_over();
+                    false
+                }
                 Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
             }
         }

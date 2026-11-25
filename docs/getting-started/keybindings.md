@@ -150,11 +150,11 @@ With `tasks = on`, on the `advanced` engine, a right-click on a task line,
 or on a line of its text after the box, opens a menu of what can be done to
 the task; on a misspelled word the
 corrections menu comes first, as before. A right-click on the box opens
-the status menu, and on the priority glyph the priority menu; anywhere else
-on the line, the due date included, it opens the task menu, which holds the
-status rows, **Set due date…**, **Priority…** (which opens the priority
-menu) and **Edit task…**. The due date and edit rows are shown greyed: the
-calendar and the task form are still to come.
+the status menu, on the priority glyph the priority menu, and on the due
+date the calendar (below); anywhere else on the line it opens the task
+menu, which holds the status rows, **Set due date…** (which opens the
+calendar), **Priority…** (which opens the priority menu) and **Edit
+task…**. The edit row is shown greyed: the task form is still to come.
 
 Each menu marks the task's current status or priority and opens on it. ↑
 and ↓ move, ↵ chooses, Esc closes it and writes nothing, and a single key
@@ -164,7 +164,7 @@ chooses a row directly:
 |---|---|
 | Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
 | Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
-| Task | the status keys, then `p` Priority… |
+| Task | the status keys, then `d` Set due date…, `p` Priority… |
 
 A choice rewrites the task's line as one undo step, with the done or
 cancelled date the status asks for. A click on a task's box cycles its
@@ -173,6 +173,28 @@ stays where it was. The status changes once a double click could no
 longer follow, a fraction of a second later. A double click, a click with
 a modifier held, a drag that starts on the box, and a press let go off the
 box select text or place the caret as they would anywhere else.
+
+**Set task due date** (⌘D / Ctrl+D) opens the calendar at the caret's
+task, on the `advanced` engine: on the task's due date, or today, hung
+under the date or the caret. Its field has the keyboard:
+
+| Key | Does |
+|---|---|
+| Typing | a date: `today`, `tomorrow`, a weekday (`fri`, the next one), `next mon`, `+3d`, `+2w`, `+1m`, or `2026-12-01` |
+| ↑ ↓ | a week earlier or later |
+| ← → | a day earlier or later, while the field is empty |
+| PgUp PgDn | a month earlier or later |
+| ↵ | writes the date, or replaces the one there |
+| Esc | closes it and writes nothing |
+
+The line under the field says what ↵ would write, or that the field holds
+no date, in which case ↵ writes nothing. A click on a day or on a quick
+pick writes it, and **Clear** removes the due date. The date is written as
+`📅 2026-12-01` at the end of the line, before a `^block-id`, as one undo
+step; a `🗓` or `📆` already there keeps its glyph. A click outside the
+calendar, a scroll, or a change to the note closes it and writes nothing.
+Keys typed in the same instant as ⌘D / Ctrl+D, before the calendar shows,
+are dropped rather than typed into the note.
 
 ## Jumping to a heading
 
@@ -381,18 +403,20 @@ editor.toggle_spell_check  editor.spell_suggest  settings.open_words
 note.new_board  note.export_svg  note.export_png  note.export_drawio
 ```
 
-With `tasks = on`, the task line commands can be bound too; they have no
-default key and act on the task at the caret:
+With `tasks = on`, the task line commands can be bound too; they act on
+the task at the caret, and only `task.set_due` has a default key (⌘D /
+Ctrl+D):
 
 ```
 task.set_status  task.cycle_status  task.set_priority  task.priority.high
 task.priority.medium  task.priority.low  task.priority.highest
 task.priority.lowest  task.priority.none  task.priority.raise
-task.priority.lower  task.clear_due
+task.priority.lower  task.set_due  task.clear_due
 ```
 
 `task.set_status` and `task.set_priority` open the status and priority
-menus described under [Task menus](#task-menus), on the `advanced` engine.
+menus, and `task.set_due` the calendar, described under
+[Task menus](#task-menus), on the `advanced` engine.
 
 The board actions are listed under [On a board](#on-a-board).
 

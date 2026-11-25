@@ -143,19 +143,24 @@ def test_each_menu_opens_on_its_token_with_its_rows_and_the_current_one_marked(
         assert priority["text"] == "⏫"
         key(app, "escape")
 
-        # The description, an owner and the due date (until the calendar,
-        # item 4.1) open the task menu; Set due date and Edit task are
-        # shown and cannot be chosen yet.
+        # The description and an owner open the task menu; Edit task is
+        # shown and cannot be chosen yet. The due date opens the calendar
+        # (item 4.1).
         open_line = line_of("- [ ] Open")
-        for token in ["alpha", "@sam", "📅", "2026"]:
+        for token in ["alpha", "@sam"]:
             task = right_click(app, open_line, token)
             assert labels(task) == TASK, token
-            assert [row["enabled"] for row in task["rows"]] == [True] * 4 + [False, True, False]
+            assert [row["enabled"] for row in task["rows"]] == [True] * 4 + [True, True, False]
             assert [row["key"] for row in task["rows"]] == ["Space", "/", "X", "-", "D", "P", "E"]
             assert checked(task) == ["Open"], token
             key(app, "escape")
         assert labels(right_click(app, doing, "bravo"))[4] == "Set due date…"
         key(app, "escape")
+        for token in ["📅", "2026"]:
+            assert right_click(app, open_line, token) is None, token
+            assert app.client.call("tasks.calendar")["line"] == open_line, token
+            key(app, "escape")
+            assert app.client.call("tasks.calendar") == {"open": False}, token
         # A box of no status of its own marks none, and opens on Open.
         unknown = right_click(app, line_of("- [?] Unknown"), "?")
         assert checked(unknown) == [] and unknown["selected"] == 0
@@ -206,8 +211,8 @@ def test_priority_opens_the_priority_menu_and_escape_writes_nothing(tmp_path: Pa
     with menus_app(tmp_path, "advanced") as (app, path):
         line = line_of("- [ ] Open")
         right_click(app, line, "alpha")
-        # D and E name rows that cannot be chosen yet: nothing happens.
-        for name in ["d", "e"]:
+        # E names a row that cannot be chosen yet: nothing happens.
+        for name in ["e"]:
             state = key(app, name)
             assert labels(state["popover"]) == TASK and state["text"] == ORIGINAL, name
         state = key(app, "p")
@@ -403,7 +408,6 @@ def test_native_right_click_on_each_token_opens_its_menu(tmp_path: Path) -> None
         for line, token, length, rows in [
             (open_line, "[ ]", None, STATUS),
             (doing, "⏫", None, PRIORITY),
-            (open_line, "📅", None, TASK),
             (open_line, "@sam", None, TASK),
             (open_line, "alpha", None, TASK),
         ]:
@@ -414,6 +418,13 @@ def test_native_right_click_on_each_token_opens_its_menu(tmp_path: Path) -> None
             assert popover["line"] == line, token
             xdo("key", "--window", window, "Escape")
             wait_for(lambda: call("editor.get")["popover"] is None, description="Escape closes it")
+        # The due date opens the calendar.
+        gestures.move(window, drawn(app, open_line, "📅"))
+        xdo("click", "3")
+        wait_for(lambda: call("tasks.calendar")["open"], description="the calendar")
+        assert call("editor.get")["popover"] is None
+        xdo("key", "--window", window, "Escape")
+        wait_for(lambda: call("tasks.calendar") == {"open": False}, description="Escape closes it")
         assert call("editor.get")["text"] == ORIGINAL
         # A real key chooses from the status menu.
         gestures.move(window, drawn(app, doing, "[/]"))

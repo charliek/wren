@@ -2,6 +2,7 @@ mod app;
 mod board_export;
 mod chrome;
 mod cli;
+mod date_field;
 mod drag;
 mod drag_view;
 mod ellipsis;

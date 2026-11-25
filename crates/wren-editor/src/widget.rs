@@ -418,6 +418,12 @@ pub struct TextEditor<'a> {
     origin: Option<&'a Cell<Option<Point>>>,
     /// The host's verdict on the presses it resolved.
     resolved_press: ResolvedPress,
+    /// The host gave back the keyboard; see
+    /// [`crate::EditorView::hand_back`].
+    handback: bool,
+    /// Input of the editor's own came in this batch, which ends the
+    /// handback as the host applies its messages.
+    handback_over: Cell<bool>,
     /// A left press of this batch was left to the host, so the widget cannot
     /// tell what the left presses after it make until the next batch.
     left_to_host: Cell<bool>,
@@ -456,6 +462,8 @@ impl<'a> TextEditor<'a> {
             menu_now: Now::new(),
             origin: None,
             resolved_press: ResolvedPress::default(),
+            handback: false,
+            handback_over: Cell::new(false),
             left_to_host: Cell::new(false),
             #[cfg(any(test, feature = "test-support"))]
             spell_frame: None,
@@ -538,6 +546,29 @@ impl<'a> TextEditor<'a> {
     pub(crate) fn resolved_press(mut self, resolved: ResolvedPress) -> Self {
         self.resolved_press = resolved;
         self
+    }
+
+    /// Whether the host gave back the keyboard and the editor has seen no
+    /// input of its own since; see [`crate::EditorView::hand_back`].
+    pub(crate) fn handback(mut self, handback: bool) -> Self {
+        self.handback = handback;
+        self
+    }
+
+    /// Whether an input method's commits, and its preedits that empty, are
+    /// dropped: after the host gave back the keyboard, until the editor's
+    /// own input.
+    fn held_back(&self) -> bool {
+        self.handback && !self.handback_over.get()
+    }
+
+    /// Input of the editor's own that its messages do not show: the host is
+    /// told, in the input's order.
+    fn end_handback(&self, shell: &mut Shell<'_, Message>) {
+        if self.held_back() {
+            self.handback_over.set(true);
+            shell.publish(Message::HandbackOver);
+        }
     }
 
     /// Record each frame's marks in `frame`.
@@ -758,6 +789,22 @@ impl<'a> TextEditor<'a> {
             },
             routes,
         ) {
+            // After the host gave back the keyboard: what ends the handback
+            // (`EditorView::hand_back`).
+            if self.held_back() {
+                match &update {
+                    Update::InputMethod(Ime::Preedit { content, .. }) if !content.is_empty() => {
+                        self.end_handback(shell);
+                    }
+                    Update::Click(_) => self.end_handback(shell),
+                    Update::Key(Routed::Binding(binding) | Routed::Close(Some(binding)))
+                        if ends_handback(binding) =>
+                    {
+                        self.handback_over.set(true);
+                    }
+                    _ => {}
+                }
+            }
             let update = match update {
                 // A second press that makes a double click on the box a
                 // click waits on: no click on the box, but the double
@@ -947,6 +994,12 @@ impl<'a> TextEditor<'a> {
                 Update::InputMethod(Ime::Preedit { content, .. })
                     if state.dropped.preedit(content.is_empty(), held) => {}
                 Update::InputMethod(Ime::Commit(_)) if state.dropped.commit(held) => {}
+                // What an input method commits after the host gave back the
+                // keyboard, and a preedit that empties, before input of the
+                // editor's own: the host's field's, never the note's.
+                Update::InputMethod(Ime::Preedit { content, .. })
+                    if content.is_empty() && self.held_back() => {}
+                Update::InputMethod(Ime::Commit(_)) if self.held_back() => {}
                 Update::InputMethod(update) => match update {
                     Ime::Toggle(is_open) => {
                         state.dropped = Dropped::Nothing;
@@ -1008,6 +1061,7 @@ impl<'a> TextEditor<'a> {
         // to the end of the batch the input is dropped.
         if !held && matches!(self.menu_now.live(), Some((Opened::Keyboard, _))) {
             self.handed_over.set(true);
+            self.handback_over.set(true);
             if state.is_composing() {
                 state.preedit = Some(input_method::Preedit::new());
                 state.dropped = Dropped::Composing;
@@ -1591,6 +1645,25 @@ impl Dropped {
         if *self == Self::Ending {
             *self = Self::Nothing;
         }
+    }
+}
+
+/// Whether a key's binding is input of the editor's own that ends a
+/// handback ([`crate::EditorView::hand_back`]): one that types, edits or
+/// moves the caret, as the messages it publishes end it in the editor.
+fn ends_handback(binding: &Binding<Message>) -> bool {
+    match binding {
+        Binding::Unfocus | Binding::Copy => false,
+        Binding::Sequence(bindings) => bindings.iter().any(ends_handback),
+        Binding::Custom(message) => matches!(
+            message,
+            Message::Action(_)
+                | Message::Intent(_)
+                | Message::Undo
+                | Message::Redo
+                | Message::Clip(crate::Clip::CutLine(_) | crate::Clip::Paste(_))
+        ),
+        _ => true,
     }
 }
 
@@ -5077,7 +5150,8 @@ mod tests {
                 .key_policy(Some(&policy))
                 .proofreader(ev.proofreader.as_deref())
                 .spell_menu(ev.menu.as_ref())
-                .resolved_press(ev.resolved_press);
+                .resolved_press(ev.resolved_press)
+                .handback(ev.handback);
             let state = state.get_or_insert_with(|| {
                 let mut state = laid_out_state(&editor);
                 state.focus = Some(Focus::now());
@@ -5096,6 +5170,10 @@ mod tests {
                 Message::Clip(clip) => ev.clip(clip),
                 Message::Undo => ev.undo(),
                 Message::Redo => ev.redo(),
+                Message::HandbackOver => {
+                    ev.handback_over();
+                    false
+                }
                 Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
             };
         }
@@ -5697,6 +5775,10 @@ mod tests {
             Message::Clip(clip) => ev.clip(clip),
             Message::Undo => ev.undo(),
             Message::Redo => ev.redo(),
+            Message::HandbackOver => {
+                ev.handback_over();
+                false
+            }
             Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
         };
         applied
@@ -5723,7 +5805,8 @@ mod tests {
             .providers(ev.providers(), ev.edition())
             .suggest_source(ev.suggest_source(), ev.suggest_suppressed())
             .origin(&ev.origin)
-            .resolved_press(ev.resolved_press);
+            .resolved_press(ev.resolved_press)
+            .handback(ev.handback);
         // The host's tasks, as the editor's view hands them to the widget.
         editor.highlighter_settings.tasks = ev.tasks;
         let state = state.get_or_insert_with(|| {
@@ -8570,6 +8653,145 @@ mod tests {
         });
         assert!(state.is_composing());
         Some(state)
+    }
+
+    /// After the host gave back the keyboard: each batch of `batches` on a
+    /// widget built afresh for it (from `state`, or laid out anew for
+    /// `None`), its messages carried out by the host; what was pasted.
+    fn after_handback(
+        ev: &mut crate::EditorView,
+        fresh: bool,
+        batches: Vec<Vec<(Event, Option<Point>)>>,
+    ) -> Vec<Vec<String>> {
+        let mut state = None;
+        batches
+            .into_iter()
+            .map(|batch| {
+                if fresh {
+                    state = None;
+                }
+                let (messages, _) = widget_batch(ev, &mut state, batch);
+                for message in &messages {
+                    host_applies(ev, message.clone());
+                }
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::Action(Action::Edit(Edit::Paste(text))) => Some(text.to_string()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn after_a_handback_commits_are_dropped_until_the_editors_own_input() {
+        let handed = || {
+            let mut ev = providing(BackendKind::Owned, vec![Provider::Spelling]);
+            ev.hand_back();
+            ev
+        };
+        let none: Vec<String> = Vec::new();
+        // The field's composition goes on after it closed: its preedits
+        // that empty and its commit are dropped, however the widget is
+        // rebuilt between the close and the commit.
+        for fresh in [false, true] {
+            let mut ev = handed();
+            let pasted = after_handback(
+                &mut ev,
+                fresh,
+                vec![vec![composing("")], vec![committing("\u{91d1}")]],
+            );
+            assert_eq!(pasted, [none.clone(), none.clone()], "{fresh}");
+            assert!(ev.handed_back(), "{fresh}: nothing of the editor's own yet");
+            assert_eq!(ev.text(), PROVIDED);
+        }
+        // The reviewer's sequences: a commit after a close mid-composition;
+        // after a preedit that emptied; the same again after a second
+        // calendar; and an abandoned composition, then keys.
+        let mut ev = handed();
+        let pasted = after_handback(&mut ev, true, vec![vec![committing("fri")]]);
+        assert_eq!(pasted, std::slice::from_ref(&none));
+        let mut ev = handed();
+        let pasted = after_handback(&mut ev, false, vec![vec![composing(""), committing("fri")]]);
+        assert_eq!(pasted, std::slice::from_ref(&none));
+        // Ending (a): the editor's own preedit with text starts its own
+        // composition, which it takes to its commit, in the same batch or
+        // the next.
+        let mut ev = handed();
+        let pasted = after_handback(
+            &mut ev,
+            true,
+            vec![
+                vec![committing("x")],
+                vec![composing("\u{304d}"), committing("\u{91d1}")],
+            ],
+        );
+        assert_eq!(pasted, [none.clone(), vec!["\u{91d1}".to_owned()]]);
+        assert!(!ev.handed_back());
+        // A second handback, then the note's own composition over two
+        // batches: taken.
+        ev.hand_back();
+        let pasted = after_handback(
+            &mut ev,
+            false,
+            vec![vec![composing("\u{304d}")], vec![committing("\u{91d1}")]],
+        );
+        assert_eq!(pasted, [none.clone(), vec!["\u{91d1}".to_owned()]]);
+        // Ending (b): a key that types, after an abandoned composition sent
+        // nothing more: the commit after it is the note's.
+        let mut ev = handed();
+        let pasted = after_handback(
+            &mut ev,
+            false,
+            vec![
+                vec![(typed("y"), None), committing("x")],
+                vec![committing("z")],
+            ],
+        );
+        assert_eq!(pasted, [vec!["x".to_owned()], vec!["z".to_owned()]]);
+        assert!(!ev.handed_back());
+        // A key that only moves the caret ends it as well.
+        let mut ev = handed();
+        let pasted = after_handback(
+            &mut ev,
+            false,
+            vec![vec![
+                (named(keyboard::key::Named::ArrowLeft), None),
+                committing("x"),
+            ]],
+        );
+        assert_eq!(pasted, [vec!["x".to_owned()]]);
+        assert!(!ev.handed_back());
+        // Ending (c): a primary press in the text.
+        let mut ev = handed();
+        let pasted = after_handback(
+            &mut ev,
+            false,
+            vec![vec![
+                (press(mouse::Button::Left), Some(over(1.0, 0.0))),
+                committing("x"),
+            ]],
+        );
+        assert_eq!(pasted, [vec!["x".to_owned()]]);
+        assert!(!ev.handed_back());
+        // Ending (d): a new handover.
+        let (mut ev, opener) = keyboard_requested();
+        ev.hand_back();
+        let _ = after_handback(&mut ev, false, vec![vec![opener]]);
+        assert!(!ev.handed_back());
+        // The cost: a commit with no preedit as the very first input is
+        // dropped, and the input after it is the note's.
+        let mut ev = handed();
+        let pasted = after_handback(
+            &mut ev,
+            false,
+            vec![vec![committing("x")], vec![(typed("y"), None)]],
+        );
+        assert_eq!(pasted, [none.clone(), none]);
+        assert!(ev.text().starts_with('y') || ev.text().contains('y'));
+        assert!(!ev.handed_back());
     }
 
     #[test]

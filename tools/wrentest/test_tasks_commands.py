@@ -57,10 +57,12 @@ TASK_COMMANDS = [
     "task.priority.none",
     "task.priority.raise",
     "task.priority.lower",
+    "task.set_due",
     "task.clear_due",
 ]
-# The commands that open a menu, which the classic engine has not (item 3.4).
-MENU_COMMANDS = {"task.set_status", "task.set_priority"}
+# The commands that open a menu (item 3.4) or the calendar (item 4.1),
+# which the classic engine has not.
+MENU_COMMANDS = {"task.set_status", "task.set_priority", "task.set_due"}
 
 
 def width(text: str) -> int:

@@ -86,6 +86,7 @@ pub enum CommandId {
     TaskPriorityNone,
     TaskRaisePriority,
     TaskLowerPriority,
+    TaskSetDue,
     TaskClearDue,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
@@ -315,6 +316,15 @@ definitions![
         TaskLowerPriority,
         "task.priority.lower",
         "Lower task priority",
+        "Tasks",
+        Editor
+    ),
+    // The calendar (item 4.1) opens at the caret's task, on the advanced
+    // engine only, as every popover does.
+    (
+        TaskSetDue,
+        "task.set_due",
+        "Set task due date…",
         "Tasks",
         Editor
     ),
@@ -917,6 +927,10 @@ impl CommandId {
             Self::TaskSetStatus | Self::TaskSetPriority => {
                 Some(wren_editor::KeyRoute::Popover(self.payload()))
             }
+            // A request the app's source of menus answers by taking the
+            // keyboard for the calendar, so that the keys after it in
+            // their batch reach neither the note nor the calendar.
+            Self::TaskSetDue => Some(wren_editor::KeyRoute::Popover(self.payload())),
             _ if self.task_change().is_some() => {
                 Some(wren_editor::KeyRoute::Command(self.payload()))
             }
@@ -1001,7 +1015,7 @@ impl CommandId {
     /// with it off it is not listed anywhere, its key is unbound, and it
     /// does not run.
     pub fn tasks(self) -> bool {
-        self.task_change().is_some() || self.task_menu().is_some()
+        self.task_change().is_some() || self.task_menu().is_some() || self == Self::TaskSetDue
     }
 
     /// The task menu a command opens at the caret's task.
@@ -1196,6 +1210,7 @@ impl App {
             TaskSetStatus | TaskSetPriority => {
                 self.editor.backend() == wren_editor::BackendKind::Owned && self.caret_on_task()
             }
+            TaskSetDue => self.calendar_can_open(),
             SpellSuggest => {
                 self.surface() == Surface::Text
                     && self.editor.backend() == wren_editor::BackendKind::Owned
@@ -1517,6 +1532,7 @@ impl App {
                 let kind = id.task_menu().expect("a task menu command");
                 self.run_task_menu(kind)
             }
+            TaskSetDue => self.run_set_due(),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 // From the palette: act at the editor's cursor, as the
                 // shortcut does in the editor, then give it the keyboard.

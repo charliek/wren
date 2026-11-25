@@ -20,6 +20,7 @@ mod board_footer;
 mod board_keys;
 mod board_spike;
 mod board_style_bar;
+mod calendar;
 mod columns;
 mod workspace;
 mod workspace_view;
@@ -62,6 +63,15 @@ pub struct App {
     clock: tasks::Clock,
     /// What the status bar's task line last found; see `App::caret_task`.
     task_memo: tasks::TaskMemo,
+    /// The calendar, while it is open over the note.
+    calendar: Option<calendar::Open>,
+    /// Presses of Escape the calendar's field took that the app's key
+    /// handling has yet to hear of.
+    calendar_escapes: u32,
+    /// The editor's source of menus: the task menus' and the calendar's.
+    task_source: std::sync::Arc<calendar::TaskSource>,
+    /// What the calendar's source was last told the caret's line is for.
+    due_key: Option<calendar::DueKey>,
     /// The footers' measured label widths; see `task_footer::Widths`.
     label_widths: task_footer::Widths,
     editor: EditorView,
@@ -199,6 +209,8 @@ pub enum Message {
     BoardSpike(wren_canvas::Message),
     Core(Op),
     Command(Command),
+    /// Input from the calendar's card.
+    Calendar(calendar::Event),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
     /// The board's style bar opens one of its menus, or closes it.
@@ -386,6 +398,10 @@ impl App {
             #[cfg(not(feature = "smoke-test"))]
             clock: tasks::Clock::new(None),
             task_memo: tasks::TaskMemo::default(),
+            calendar: None,
+            calendar_escapes: 0,
+            task_source: std::sync::Arc::default(),
+            due_key: None,
             label_widths: task_footer::Widths::default(),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
@@ -516,6 +532,8 @@ impl App {
         if self.palette.is_some() || self.dialog.is_some() {
             self.editor.close_popover();
         }
+        let calendar = self.sync_calendar();
+        self.sync_due_target();
         // The note, the loading state and the setting can each change on any
         // message, and the editor must see the proofreader before it draws.
         self.sync_proofreader();
@@ -524,7 +542,7 @@ impl App {
         let preview = self.sync_preview();
         #[cfg(any(target_os = "macos", test))]
         self.sync_menu();
-        Task::batch([task, preview])
+        Task::batch([task, preview, calendar])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -597,6 +615,7 @@ impl App {
             Message::BoardSpike(message) => return self.board_spike_input(message),
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
+            Message::Calendar(event) => return self.calendar_event(event),
             // Opening a menu of a bar finishes an open label first, as a
             // click on one of its controls does: the keys typed next are
             // not the label's, and a style menu's rows preview on the
@@ -726,6 +745,10 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
+                // The calendar is above everything else it can be open with.
+                if self.calendar.is_some() {
+                    return self.cancel_calendar();
+                }
                 // An open suggestions menu, or any popover of the editor's,
                 // is the topmost thing Escape closes; the editor keeps the
                 // keyboard and the find bar stays.
@@ -790,7 +813,9 @@ impl App {
                     return self.request_quit().unwrap_or_else(|_| Task::none());
                 }
                 iced::window::Event::Unfocused => {
+                    let calendar = self.close_calendar_for_window();
                     let _ = self.window_unfocused();
+                    return calendar;
                 }
                 iced::window::Event::Focused => {
                     let _ = self.reload_settings(false);
@@ -837,6 +862,12 @@ impl App {
         if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
         }
+        // The calendar has the keyboard: what the editor publishes after
+        // the request that opened it, in that request's batch of events,
+        // was typed before it could be seen, and is no one's.
+        if self.calendar.is_some() {
+            return Task::none();
+        }
         let started = Instant::now();
         let mut task = Task::none();
         let changed = match message {
@@ -876,14 +907,29 @@ impl App {
                 if matches!(event, SpellEvent::OpenAt(_) | SpellEvent::Context { .. }) {
                     task = focus_editor();
                 }
-                // A request for a task menu: the app opens it at the
-                // caret's task, as the command does.
+                // A request for the calendar or a task menu: the app opens
+                // it at the caret's task, as the command does.
                 if let SpellEvent::Request(id) = event {
+                    if let Some(opened) = self.request_calendar(id) {
+                        return opened;
+                    }
                     if let Some(opened) = self.request_task_menu(id) {
                         return opened;
                     }
                 }
                 let changed = self.editor.spell(event);
+                // A provider that took a right-click by taking the keyboard:
+                // the calendar, on a due date.
+                // Its field alone takes the keyboard: no focus of the
+                // editor's competes with it.
+                if let Some((_, clicked)) = self.editor.take_keyboard() {
+                    let opened = self.calendar_for_click(&clicked);
+                    return if self.calendar.is_some() {
+                        opened
+                    } else {
+                        task
+                    };
+                }
                 // A row that runs a command runs it, for the place its menu
                 // was opened on. Any other row is its menu's owner's: the
                 // provider's that opened it for a right-click, or the
@@ -905,6 +951,10 @@ impl App {
             }
             wren_editor::Message::Command(payload) => return self.run_payload(payload),
             wren_editor::Message::BoxClick(click) => return self.click_box(click),
+            wren_editor::Message::HandbackOver => {
+                self.editor.handback_over();
+                false
+            }
             wren_editor::Message::Clip(clip) => {
                 self.column = columns::Column::Editor;
                 self.editor.clip(clip)
@@ -982,7 +1032,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         #[cfg(feature = "smoke-test")]
         let started = Instant::now();
-        let view = crate::keys::alt_filter(self.contents()).into();
+        let view = crate::keys::alt_filter(self.calendar_view(self.contents())).into();
         #[cfg(feature = "smoke-test")]
         {
             let mut times = self.view_micros.borrow_mut();

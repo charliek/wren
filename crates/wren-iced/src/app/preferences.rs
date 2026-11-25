@@ -961,6 +961,13 @@ impl App {
 
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
+        // A press of Escape the calendar's field took: it was the
+        // calendar's alone.
+        if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape))
+            && self.take_calendar_escape()
+        {
+            return Task::none();
+        }
         let accel = match input {
             // A press the editor's popover has already taken, in the key's
             // order with the typing around it, does nothing more here. The

@@ -417,8 +417,16 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
 /// Default `(trigger, action)` pairs of the task commands, which the keymap
 /// takes only while the `tasks` setting is on; with it off the keymap is the
 /// one without them, so their triggers do what they did before.
-pub fn default_task_bindings(_platform: Platform) -> Vec<(String, &'static str)> {
-    Vec::new()
+///
+/// `task.set_due` is ⌘D on macOS and Ctrl+D on Linux (discovery/tasks.md §2
+/// item 21): an Editor command, so the board layer's ⌘D / Ctrl+D, which only
+/// a focused board reads, keeps duplicating there.
+pub fn default_task_bindings(platform: Platform) -> Vec<(String, &'static str)> {
+    let m = match platform {
+        Platform::Mac => "super",
+        Platform::Linux => "ctrl",
+    };
+    vec![(format!("{m}+d"), "task.set_due")]
 }
 
 /// The resolved trigger → action tables, one per [`Layer`].
@@ -654,10 +662,25 @@ mod tests {
         bindings
     }
 
+    /// The task defaults, frozen as the board layer's are: ⌘D / Ctrl+D sets
+    /// the due date (item 4.1).
     #[test]
-    fn no_task_command_has_a_default_key_yet() {
-        for platform in [Platform::Mac, Platform::Linux] {
-            assert!(default_task_bindings(platform).is_empty(), "{platform:?}");
+    fn the_task_defaults_are_the_due_date_key() {
+        for (platform, trigger) in [(Platform::Mac, "super+d"), (Platform::Linux, "ctrl+d")] {
+            assert_eq!(
+                default_task_bindings(platform),
+                [(trigger.to_string(), "task.set_due")],
+                "{platform:?}"
+            );
+            // The base layer has no such trigger, and the board layer's is
+            // `board.duplicate`, read only by a focused board.
+            let (keymap, _) = Keymap::build(both_defaults(platform), &[], by_name);
+            assert_eq!(keymap.action(&accel(trigger)), None, "{platform:?}");
+            assert_eq!(
+                keymap.board_action(&accel(trigger)),
+                Some("board.duplicate"),
+                "{platform:?}"
+            );
         }
     }
 

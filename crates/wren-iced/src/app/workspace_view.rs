@@ -40,7 +40,7 @@ const RETRY: &str = "Retry save";
 const SMALL_BUTTON_PADDING: [f32; 2] = [5.0, 9.0];
 
 /// The footer's height under the editor or a board, its rule included.
-const FOOTER: f32 = 30.0;
+pub(super) const FOOTER: f32 = 30.0;
 
 impl App {
     /// The width of the browser columns left of the editor; 0 when hidden.

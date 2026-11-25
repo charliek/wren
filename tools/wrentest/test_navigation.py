@@ -60,7 +60,7 @@ TASK_COMMANDS = {
     "task.set_status", "task.set_priority",
     "task.cycle_status", "task.priority.high", "task.priority.medium", "task.priority.low",
     "task.priority.highest", "task.priority.lowest", "task.priority.none",
-    "task.priority.raise", "task.priority.lower", "task.clear_due",
+    "task.priority.raise", "task.priority.lower", "task.set_due", "task.clear_due",
 }
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"

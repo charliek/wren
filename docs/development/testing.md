@@ -203,6 +203,23 @@ false}]}` opens a menu at the caret whose rows run those commands, on the
 advanced engine only, so `editor.key` can press a row's key, Up, Down,
 Enter or Escape into a menu of the app's as into the spelling menu.
 
+The calendar (`task.set_due`, `tools/wrentest/test_tasks_calendar.py`)
+opens through `shortcut` or `command.run`, and from a right-click on a due
+date. While it is open, `editor.key` presses a key in its field instead of
+the editor: the calendar's keys (also `page_up` and `page_down`), a
+character typed or Backspace at the end of its text, and Escape and
+shortcuts heard by the app as a real press is. `tasks.calendar` returns
+`{"open": false}`, or its `line`, the field's `typed` text, the
+`selected`, `today` and `current` dates, the `month` shown, the `caption`
+under the field and whether it is `invalid`, whether Clear is shown
+(`clear`), its `anchor` (`line` and byte `range`) and the card's `bounds`
+in window coordinates. `tasks.calendar_type` `{"text": …}` sets the
+field's text as a paste or an input method's commit does, and
+`tasks.calendar_click` clicks `{"day": "YYYY-MM-DD"}`, a quick pick
+`{"chip": "Fri"}`, or `{"target": …}`, one of `previous`, `next`, `clear`,
+`inside` (the card off its controls) and `outside`. `focus.get` names the
+field `calendar-field`. With tasks off each of them is refused.
+
 `WRENTEST_PERF=release` makes `test_board_perf.py` assert the release
 budgets instead of the debug ceilings. Build the release binary in its own
 target directory so the smoke build is not replaced:

@@ -384,6 +384,82 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
     footer_scenes(client, shot_here, resize)
     if engine == "advanced":
         menu_scenes(client, shot_here, resize)
+        calendar_scenes(client, shot_here, resize)
+
+
+def calendar_scenes(client, shot_here, resize) -> None:
+    """The calendar (discovery/tasks-build.md item 4.1): opened by
+    `task.set_due` on a task with no due date, so on today; with `fri`
+    typed, the selection moved to Friday; with a word that names no date;
+    opened by a right-click on a due date, which it opens on, with Clear;
+    and on X11, in macOS's default 1024×640 window, flipped above a dated
+    task near the bottom, clear of the footer. Each is closed with Escape,
+    which writes nothing."""
+    if display_server() == "x11":
+        resize("1280x800")
+    open_note(client, "Task lines.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Task lines"),
+             timeout=10, description="the task lines note opens")
+    original = client.call("editor.get")["text"]
+    lines = original.split("\n")
+
+    def opened(description: str) -> dict:
+        wait_for(lambda: client.call("focus.get")["named"] == ["calendar-field"],
+                 timeout=10, description=f"the calendar's field has the keyboard ({description})")
+        return client.call("tasks.calendar")
+
+    def close() -> None:
+        client.call("editor.key", {"key": "escape"})
+        assert client.call("tasks.calendar") == {"open": False}
+        assert client.call("editor.get")["text"] == original
+
+    line = 2
+    assert lines[line] == "- [ ] Open alpha task", lines[line]
+    client.call("editor.cursor", {"line": line, "column": len(lines[line].encode()),
+                                  "selection": None})
+    client.call("editor.focus")
+    client.call("shortcut", {"id": "task.set_due"})
+    state = opened("empty")
+    assert (state["selected"], state["typed"], state["invalid"]) == (TASKS_TODAY, "", False), state
+    shot_here("task-calendar-empty")
+    for character in "fri":
+        client.call("editor.key", {"key": character})
+    state = client.call("tasks.calendar")
+    assert (state["selected"], state["invalid"]) == ("2026-11-20", False), state
+    shot_here("task-calendar-typed")
+    client.call("tasks.calendar_type", {"text": "blorp"})
+    assert client.call("tasks.calendar")["invalid"] is True
+    shot_here("task-calendar-invalid")
+    close()
+
+    due = 14
+    assert lines[due] == "- [ ] Due mike task 📅 2026-11-20", lines[due]
+    client.call("editor.cursor", {"line": 1, "column": 0, "selection": None})
+    client.call("editor.focus")
+    client.call("editor.right_click",
+                {"line": due, "column": len(lines[due][:lines[due].index("2026")].encode())})
+    state = opened("from the date")
+    assert (state["line"], state["selected"], state["clear"]) == (due, "2026-11-20", True), state
+    shot_here("task-calendar-date")
+    close()
+
+    if display_server() == "x11":
+        resize("1024x640")
+        low = 17
+        assert lines[low].startswith("- [ ] Every papa token"), lines[low]
+        client.call("editor.cursor", {"line": low, "column": 6, "selection": None})
+        client.call("editor.focus")
+        client.call("shortcut", {"id": "task.set_due"})
+        state = opened("flipped")
+        anchor = client.call("editor.bounds", {
+            "line": low, "start": state["anchor"]["range"][0],
+            "end": state["anchor"]["range"][1]})
+        card = state["bounds"]
+        assert card["y"] + card["height"] <= anchor["y"], ("flipped above", card, anchor)
+        assert card["y"] >= 0 and card["y"] + card["height"] <= 640 - 30, card
+        shot_here("task-calendar-flipped")
+        close()
+        resize("1280x800")
 
 
 def menu_scenes(client, shot_here, resize) -> None:
@@ -467,9 +543,10 @@ def command_scenes(client, shot_here) -> None:
     client.call("palette.open", {"mode": "commands"})
     rows = client.call("palette.query", {"query": "task"})["navigation"]["modal"]["results"]
     tasks = [row for row in rows if row["group"] == "Tasks"]
-    # The status and priority menus (item 3.4) are the advanced engine's.
-    menus = {"task.set_status", "task.set_priority"}
-    assert len(tasks) == 12 and all(row["enabled"] or row["key"]["command"] in menus
+    # The status and priority menus (item 3.4) and the calendar (item 4.1)
+    # are the advanced engine's.
+    menus = {"task.set_status", "task.set_priority", "task.set_due"}
+    assert len(tasks) == 13 and all(row["enabled"] or row["key"]["command"] in menus
                                     for row in tasks), tasks
     shot_here("task-commands-palette")
     client.call("palette.close")

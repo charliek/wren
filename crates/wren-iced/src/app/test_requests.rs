@@ -96,6 +96,7 @@ impl App {
                         route,
                         wren_editor::KeyRoute::Intent(_)
                             | wren_editor::KeyRoute::Suggest
+                            | wren_editor::KeyRoute::Popover(_)
                             | wren_editor::KeyRoute::Command(_)
                     ) {
                         return Err("The editor does not route this command's key".into());
@@ -195,8 +196,10 @@ impl App {
                 request.respond(Ok(Value::Null));
             }
             "window.blur" => {
+                let calendar = self.close_calendar_for_window();
                 self.window_unfocused()?;
                 request.respond(Ok(self.session_snapshot()));
+                return Ok(calendar);
             }
             "editor.get" => request.respond(Ok(self.editor_snapshot())),
             "perf.view" => {
@@ -399,7 +402,8 @@ impl App {
             | "board.pinch" => {
                 return self.board_request(request)
             }
-            "tasks.get" | "tasks.set_today" => return self.tasks_request(request),
+            "tasks.get" | "tasks.set_today" | "tasks.calendar" | "tasks.calendar_type"
+            | "tasks.calendar_click" => return self.tasks_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -964,6 +968,10 @@ impl App {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
+        // The calendar's field has the keyboard while it is open.
+        if self.calendar.is_some() {
+            return self.calendar_key(key, modifiers);
+        }
         let menu_open = self.editor.popover().is_some();
         let (messages, captured) = self.editor.key_routing(key.clone(), modifiers);
         let escape = key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
@@ -1044,6 +1052,8 @@ fn key_press(params: &Value) -> Result<(iced::keyboard::Key, iced::keyboard::Mod
         "delete" => Some(Named::Delete),
         "home" => Some(Named::Home),
         "end" => Some(Named::End),
+        "page_up" => Some(Named::PageUp),
+        "page_down" => Some(Named::PageDown),
         "shift" => Some(Named::Shift),
         "control" => Some(Named::Control),
         "alt" => Some(Named::Alt),
@@ -1410,6 +1420,7 @@ const FOCUS_NAMES: &[&str] = &[
     "find-query",
     "palette-query",
     "item-name",
+    "calendar-field",
 ];
 
 /// Every focused widget in the tree: the known ones by name, the rest (pane

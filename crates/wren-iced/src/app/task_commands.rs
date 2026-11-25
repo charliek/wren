@@ -171,9 +171,9 @@ mod tests {
     use super::*;
 
     /// The Tasks group in the palette's order: the line commands, with
-    /// the status and priority menus (item 3.4) before the commands of
-    /// their kind.
-    const TASKS_GROUP: [CommandId; 12] = [
+    /// the status and priority menus (item 3.4) and the calendar (item 4.1)
+    /// before the commands of their kind.
+    const TASKS_GROUP: [CommandId; 13] = [
         CommandId::TaskSetStatus,
         CommandId::TaskCycleStatus,
         CommandId::TaskSetPriority,
@@ -185,6 +185,7 @@ mod tests {
         CommandId::TaskPriorityNone,
         CommandId::TaskRaisePriority,
         CommandId::TaskLowerPriority,
+        CommandId::TaskSetDue,
         CommandId::TaskClearDue,
     ];
 
@@ -548,14 +549,16 @@ mod tests {
             assert_eq!(row.group, "Tasks", "{}", row.key);
             assert_eq!(row.scope, Scope::Editor, "{}", row.key);
             assert_eq!(CommandId::parse(row.key), Some(row.id));
-            // A menu's command is a request for the menu (item 3.4).
-            let route = if row.id.task_menu().is_some() {
+            // A menu's command is a request for the menu (item 3.4), and
+            // so is the calendar's (item 4.1).
+            let opens = row.id.task_menu().is_some() || row.id == CommandId::TaskSetDue;
+            let route = if opens {
                 wren_editor::KeyRoute::Popover(row.id.payload())
             } else {
                 wren_editor::KeyRoute::Command(row.id.payload())
             };
             assert_eq!(row.id.editor_route(), Some(route), "{}", row.key);
-            assert!(row.id.task_change().is_some() != row.id.task_menu().is_some());
+            assert!(row.id.task_change().is_some() != opens);
         }
         for platform in [
             wren_core::keybind::Platform::Mac,
@@ -565,8 +568,9 @@ mod tests {
                 .into_iter()
                 .chain(wren_core::keybind::default_task_bindings(platform));
             for (trigger, action) in defaults {
+                // ⌘D / Ctrl+D sets the due date (item 4.1, design §2 item 21).
                 assert!(
-                    !action.starts_with("task."),
+                    !action.starts_with("task.") || action == "task.set_due",
                     "{platform:?}: {trigger} → {action} (Q13: palette only)"
                 );
             }

@@ -2,7 +2,8 @@
 //! right-click on a task line opens the task menu, on its box the status
 //! menu, and on its priority glyph the priority menu; `task.set_status`
 //! and `task.set_priority` open the status and priority menus at the
-//! caret's task; and a click on the box cycles the status. They exist only
+//! caret's task; a right-click on a due date opens the calendar (item 4.1,
+//! `calendar.rs`); and a click on the box cycles the status. They exist only
 //! with the `tasks` setting on, and only on the advanced engine, which
 //! alone opens popovers. Every choice rewrites the task line through
 //! `wren_markdown::task::edit`, as one undo step, refused once the line no
@@ -14,10 +15,10 @@
 //!   characters that go in the box;
 //! - priority: High (H), Medium (M), Low (L), Highest (⇧H), Lowest (⇧L),
 //!   None (N), the common three first (Q7);
-//! - task: the status rows, then Set due date… (D), Priority… (P), which
-//!   opens the priority menu, and Edit task… (E). Set due date and Edit task
-//!   are shown and cannot be chosen until the calendar (item 4.1) and the
-//!   task form (item 6.1) exist.
+//! - task: the status rows, then Set due date… (D), which opens the
+//!   calendar, Priority… (P), which opens the priority menu, and Edit task…
+//!   (E). Edit task is shown and cannot be chosen until the task form (item
+//!   6.1) exists.
 //!
 //! The row of the task's status or priority is checked, and the menu opens
 //! with it selected. A box with a symbol of no status of its own (`[?]`)
@@ -76,7 +77,7 @@ pub(super) enum TaskRow {
     Status(char),
     /// Set the priority, or remove it.
     Priority(Option<Priority>),
-    /// Set the due date (the calendar, item 4.1): not yet chosen.
+    /// Set the due date: the calendar, for the task.
     Due,
     /// Open the priority menu for the task.
     PriorityMenu,
@@ -193,7 +194,7 @@ fn rows(kind: MenuKind, line: &TaskLine<'_>) -> Vec<Row> {
                 Row::new(TaskRow::Due.id(), due)
                     .glyph(DateField::Due.glyph().to_string())
                     .accelerator(Accelerator::plain('d'))
-                    .enabled(false),
+                    .opens_menu(),
             );
             rows.push(
                 Row::new(TaskRow::PriorityMenu.id(), "Priority…")
@@ -249,12 +250,25 @@ impl TaskMenus {
         Some(match span.map(|span| (&span.kind, span.range.clone())) {
             Some((SpanKind::Box(_), range)) => (MenuKind::Status, range),
             Some((SpanKind::Priority(_), range)) => (MenuKind::Priority, range),
-            // The due date opens the calendar once it exists (item 4.1);
-            // until then it, an owner and every other token open the task
-            // menu under themselves.
+            // An owner and every other token open the task menu under
+            // themselves; the due date is the calendar's
+            // ([`TaskMenus::due_date`]).
             Some((kind, range)) if kind.is_task() => (MenuKind::Task, range),
             _ => (MenuKind::Task, glyph()),
         })
+    }
+}
+
+impl TaskMenus {
+    /// Whether a right-click on `clicked` fell on a task's due date, which
+    /// opens the calendar: the app takes the keyboard for it.
+    fn due_date(clicked: &Clicked) -> bool {
+        task_of(&clicked.spans).is_some()
+            && matches!(
+                &clicked.hit,
+                Some(Hit::Span(span))
+                    if matches!(span.kind, SpanKind::Date { field: DateField::Due, .. })
+            )
     }
 }
 
@@ -274,6 +288,9 @@ impl MenuProvider for TaskMenus {
                 range: glyph_under(clicked),
                 rows: rows(MenuKind::Task, &line),
             });
+        }
+        if Self::due_date(clicked) {
+            return Some(Requested::Keyboard);
         }
         let (kind, range) = Self::answer(clicked)?;
         let task = task_of(&clicked.spans)?;
@@ -339,7 +356,10 @@ impl App {
                 Provider::Spelling,
                 Provider::Host(Arc::clone(&menus) as Arc<dyn MenuProvider>),
             ]);
-            self.editor.set_menu_source(Some(menus));
+            // The calendar's request reads the whole note, which the app
+            // keeps up for it; the menus' requests are the task menus'.
+            self.editor
+                .set_menu_source(Some(Arc::clone(&self.task_source) as Arc<dyn MenuSource>));
         } else {
             self.editor.set_menu_providers(vec![Provider::Spelling]);
             self.editor.set_menu_source(None);
@@ -485,7 +505,14 @@ impl App {
                 let _ = self.open_menu_on(MenuKind::Priority, line);
                 return Task::none();
             }
-            TaskRow::Due | TaskRow::Edit => return Task::none(),
+            TaskRow::Due => {
+                let at = Anchor::Range {
+                    line: choice.line,
+                    range: choice.range.clone(),
+                };
+                return self.open_calendar(line, at).unwrap_or_else(Task::none);
+            }
+            TaskRow::Edit => return Task::none(),
         };
         self.run_task_change(Some(change), Some(line)).task
     }
@@ -669,9 +696,6 @@ mod tests {
             (Some(4), MenuKind::Status, 2..5),
             // The priority glyph, with its U+FE0F.
             (Some(at("⏫")), MenuKind::Priority, at("⏫")..at("⏫") + 6),
-            // The due date, until the calendar: the task menu under it.
-            (Some(at("📅")), MenuKind::Task, at("📅")..at("📅") + 15),
-            (Some(at("2026-12")), MenuKind::Task, at("📅")..at("📅") + 15),
             // An owner, a stamp and a tag: the task menu under them.
             (
                 Some(at("@sam") + 1),
@@ -701,6 +725,14 @@ mod tests {
                 MenuKind::Task => (7, Some("Open")),
             };
             assert_eq!((rows.len(), first), expected, "{column:?}");
+        }
+        // The due date: the calendar, which takes the keyboard.
+        for column in [at("📅"), at("2026-12")] {
+            assert_eq!(
+                MenuProvider::menu(&TaskMenus, &clicked(text, Some(column))),
+                Some(Requested::Keyboard),
+                "{column}"
+            );
         }
         // No task line, no menu: the click passes on.
         for text in [
@@ -816,7 +848,7 @@ mod tests {
                 ("Doing", "/".into(), true, true),
                 ("Done", "X".into(), false, true),
                 ("Cancelled", "-".into(), false, true),
-                ("Set due date…", "D".into(), false, false),
+                ("Set due date…", "D".into(), false, true),
                 ("Priority…", "P".into(), false, true),
                 ("Edit task…", "E".into(), false, false),
             ]
@@ -1014,9 +1046,10 @@ mod tests {
                 none,
                 "- [/] Open task @sam 📅 2026-11-23",
             ),
+            // (The due date opens the calendar: see `calendar.rs`.)
             (
                 "- [ ] Open",
-                "📅",
+                "Open",
                 character("-"),
                 none,
                 "- [-] Open task @sam 📅 2026-11-23 ❌ 2026-11-19",
@@ -1062,8 +1095,9 @@ mod tests {
     }
 
     /// The task menu's Priority… opens the priority menu for the same
-    /// task, whose keys then write; Set due date… and Edit task… cannot be
-    /// chosen; Escape closes a menu and writes nothing.
+    /// task, whose keys then write; Change due date… opens the calendar;
+    /// Edit task… cannot be chosen; Escape closes a menu and writes
+    /// nothing.
     #[test]
     fn priority_opens_the_priority_menu_and_escape_writes_nothing() {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
@@ -1087,12 +1121,20 @@ mod tests {
             Some(0),
             "Open, checked"
         );
-        // `d` and `e` do nothing, and the menu stays.
-        for key in ["d", "e"] {
-            press(&mut app, character(key), Modifiers::empty());
-            assert!(app.editor.popover().is_some(), "{key}");
-            assert_eq!(app.editor.text(), NOTE, "{key}");
-        }
+        // `e` does nothing, and the menu stays.
+        press(&mut app, character("e"), Modifiers::empty());
+        assert!(app.editor.popover().is_some());
+        assert_eq!(app.editor.text(), NOTE);
+        // `d` opens the calendar for the task, and Escape closes it.
+        press(&mut app, character("d"), Modifiers::empty());
+        assert!(app.editor.popover().is_none());
+        assert_eq!(app.calendar.as_ref().map(|open| open.line()), Some(at));
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::Escape,
+        )));
+        assert!(app.calendar.is_none());
+        assert_eq!(app.editor.text(), NOTE);
+        right_click(&mut app, at, column);
         press(&mut app, character("p"), Modifiers::empty());
         assert_eq!(
             labels(&app),

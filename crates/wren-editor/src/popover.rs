@@ -642,6 +642,16 @@ pub trait MenuSource: Send + Sync {
     /// What request `id` opens with the caret at byte `caret` of `line`.
     /// `None` opens nothing.
     fn menu(&self, id: u32, line: &str, caret: usize) -> Option<Requested>;
+
+    /// [`MenuSource::menu`], told also the number of the caret's line in
+    /// the text as the host has it, for a source that knows more of that
+    /// text than the line: what the line is a part of, say. It must answer
+    /// the same for the same request, line number, line and caret. What
+    /// the editor asks; by default, [`MenuSource::menu`]'s answer.
+    fn menu_on(&self, id: u32, index: usize, line: &str, caret: usize) -> Option<Requested> {
+        let _ = index;
+        self.menu(id, line, caret)
+    }
 }
 
 /// A [`MenuSource`]'s answer, or a [`MenuProvider`]'s.
@@ -937,7 +947,7 @@ pub(crate) enum Answer {
 /// character. The widget and the editor both ask through here.
 pub(crate) fn requested(source: &dyn MenuSource, id: u32, line: &CaretLine) -> Answer {
     answered(
-        source.menu(id, &line.text, line.caret),
+        source.menu_on(id, line.index, &line.text, line.caret),
         line.index,
         &line.text,
     )
