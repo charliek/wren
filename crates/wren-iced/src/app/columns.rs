@@ -243,6 +243,10 @@ impl App {
     /// Tab unhandled too, so while one has the keyboard Tab stays put rather
     /// than leave the text being typed.
     pub(super) fn tab(&mut self, reverse: bool) -> Task<Message> {
+        // The task form's own keys walk its fields.
+        if self.task_form.is_some() {
+            return Task::none();
+        }
         if self.dialog.is_some() {
             self.step_note_kind(reverse);
             return Task::none();

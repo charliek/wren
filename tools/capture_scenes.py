@@ -382,6 +382,7 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
     emoji_scenes(client, shot_here)
     command_scenes(client, shot_here)
     footer_scenes(client, shot_here, resize)
+    form_scenes(client, shot_here, resize)
     if engine == "advanced":
         menu_scenes(client, shot_here, resize)
         calendar_scenes(client, shot_here, resize)
@@ -428,6 +429,71 @@ def suggestion_scenes(client, shot_here) -> None:
     offered("to", ["Today", "Tomorrow"], "task-suggest-dates", "task-suggest-dates-confirmed")
     offered("hi", ["High priority", "Highest priority"], "task-suggest-priority")
     offered("@", ["@alice.chen", "@bob"], "task-suggest-owners")
+
+
+def form_scenes(client, shot_here, resize) -> None:
+    """The task form (discovery/tasks-build.md item 6.1), on either engine:
+    a new task on a blank line with its description, due date and priority
+    filled in; a full task (doing, an owner, a priority, a due date) being
+    edited, its "Writes" line showing the change; and the calendar open
+    under the form's due field. Each is cancelled with Escape, which writes
+    nothing."""
+    if display_server() == "x11":
+        resize("1280x800")
+    open_note(client, "Status bar.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Status bar"),
+             timeout=10, description="the status bar note opens")
+    original = client.call("editor.get")["text"]
+    lines = original.split("\n")
+
+    def opened(line: int, description: str) -> dict:
+        client.call("editor.cursor", {"line": line, "column": 0, "selection": None})
+        client.call("editor.focus")
+        client.call("shortcut", {"id": "task.edit"})
+        wait_for(lambda: client.call("focus.get")["named"] == ["task-form-description"],
+                 timeout=10, description=f"the form's description has the keyboard ({description})")
+        return client.call("tasks.form")
+
+    def close() -> None:
+        while client.call("tasks.form")["open"]:
+            client.call("editor.key", {"key": "escape"})
+        assert client.call("editor.get")["text"] == original
+
+    blank = lines.index("", 3)
+    state = opened(blank, "new")
+    assert (state["kind"], state["title"]) == ("new", "New task"), state
+    for field, text in [("description", "Call the bank about the card"), ("due", "fri")]:
+        client.call("tasks.form_type", {"field": field, "text": text})
+    for _ in range(3):
+        client.call("editor.key", {"key": "tab"})
+    client.call("editor.key", {"key": "h"})
+    state = client.call("tasks.form")
+    assert state["writes"] == "- [ ] Call the bank about the card ⏫ 📅 2026-11-20", state
+    assert state["focus"] == "priority", state
+    shot_here("task-form-new")
+    close()
+
+    full = 2
+    assert lines[full].startswith("- [/] Draft the cutover runbook"), lines[full]
+    state = opened(full, "edit")
+    assert (state["kind"], state["owners"]) == ("edit", ["alice.chen"]), state
+    client.call("tasks.form_click", {"status": "Done"})
+    client.call("tasks.form_type", {"field": "due", "text": "+1w"})
+    client.call("tasks.form_type", {"field": "owners", "text": "sam"})
+    client.call("tasks.form_click", {"target": "calendar"})
+    client.call("editor.key", {"key": "escape"})
+    for _ in range(2):
+        client.call("editor.key", {"key": "tab"})
+    state = client.call("tasks.form")
+    assert state["focus"] == "owners", state
+    shot_here("task-form-edit")
+    client.call("tasks.form_type", {"field": "owners", "text": ""})
+    client.call("tasks.form_click", {"target": "calendar"})
+    wait_for(lambda: client.call("focus.get")["named"] == ["calendar-field"],
+             timeout=10, description="the calendar over the form has the keyboard")
+    assert client.call("tasks.form")["calendar"]["selected"] == "2026-11-26"
+    shot_here("task-form-calendar")
+    close()
 
 
 def calendar_scenes(client, shot_here, resize) -> None:
@@ -589,7 +655,7 @@ def command_scenes(client, shot_here) -> None:
     # The status and priority menus (item 3.4) and the calendar (item 4.1)
     # are the advanced engine's.
     menus = {"task.set_status", "task.set_priority", "task.set_due"}
-    assert len(tasks) == 13 and all(row["enabled"] or row["key"]["command"] in menus
+    assert len(tasks) == 14 and all(row["enabled"] or row["key"]["command"] in menus
                                     for row in tasks), tasks
     shot_here("task-commands-palette")
     client.call("palette.close")

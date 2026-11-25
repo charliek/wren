@@ -136,6 +136,12 @@ pub(super) struct TaskSource {
     /// The caret's line and its text, when its box opens a task in the note,
     /// as the app last found it ([`App::sync_due_target`]).
     due: std::sync::Mutex<Option<(usize, String)>>,
+    /// Whether the task form's request takes the keyboard: tasks on and a
+    /// Markdown note in the editor, as the app last found it.
+    form: std::sync::atomic::AtomicBool,
+    /// Whether the editor is on the engine that opens popovers: on the
+    /// other the form's request alone is answered.
+    advanced: std::sync::atomic::AtomicBool,
 }
 
 impl TaskSource {
@@ -148,10 +154,25 @@ impl TaskSource {
 
 impl MenuSource for TaskSource {
     fn menu(&self, id: u32, line: &str, caret: usize) -> Option<Requested> {
+        if !self.advanced.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         MenuSource::menu(&TaskMenus, id, line, caret)
     }
 
+    /// The form is a dialog, where it can open: the keys after its request
+    /// in their batch, an Escape included, are no one's.
+    fn holds_escape(&self, id: u32) -> bool {
+        id == CommandId::TaskEdit.payload() && self.form.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn menu_on(&self, id: u32, index: usize, line: &str, caret: usize) -> Option<Requested> {
+        // The task form opens on any line of a note, or says why not: the
+        // keys after its request in their batch are no one's either way.
+        if id == CommandId::TaskEdit.payload() {
+            let form = self.form.load(std::sync::atomic::Ordering::Relaxed);
+            return form.then_some(Requested::Keyboard);
+        }
         if id != CommandId::TaskSetDue.payload() {
             return self.menu(id, line, caret);
         }
@@ -169,7 +190,7 @@ pub(super) type DueKey = (u64, usize, bool);
 
 /// The card's width, and the heights its rows are given, which fix its
 /// height so that it can be placed before it is laid out.
-const WIDTH: f32 = 276.0;
+pub(super) const WIDTH: f32 = 276.0;
 const PADDING: f32 = 8.0;
 const SPACING: f32 = 7.0;
 const FIELD_HEIGHT: f32 = 30.0;
@@ -181,7 +202,7 @@ const DAY_HEIGHT: f32 = 29.0;
 const DAY_GAP: f32 = 2.0;
 const FOOT_HEIGHT: f32 = 22.0;
 /// The card's height.
-const HEIGHT: f32 = 2.0 * PADDING
+pub(super) const HEIGHT: f32 = 2.0 * PADDING
     + FIELD_HEIGHT
     + CAPTION_HEIGHT
     + CHIPS_HEIGHT
@@ -268,6 +289,14 @@ impl App {
     /// is the line of a task's box, as the whole note reads it; once for
     /// each text, caret line and setting. After every message.
     pub(super) fn sync_due_target(&mut self) {
+        let form = self.task_form_takes_keys();
+        self.task_source
+            .form
+            .store(form, std::sync::atomic::Ordering::Relaxed);
+        self.task_source.advanced.store(
+            self.editor.backend() == wren_editor::BackendKind::Owned,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let can = self.preferences.tasks
             && self.editor.backend() == wren_editor::BackendKind::Owned
             && self.markdown_in_editor()
@@ -359,7 +388,8 @@ impl App {
     /// date or today, hung under its due token or else `at`, and give its
     /// field the keyboard. `None` where there is no task to open it for.
     pub(super) fn open_calendar(&mut self, line: usize, at: Anchor) -> Option<Task<Message>> {
-        if self.editor.backend() != wren_editor::BackendKind::Owned
+        if self.task_form.is_some()
+            || self.editor.backend() != wren_editor::BackendKind::Owned
             || !self.preferences.tasks
             || !self.markdown_in_editor()
             || self.ensure_editor_ready().is_err()
@@ -616,6 +646,12 @@ impl App {
         if !self.preferences.tasks {
             return base;
         }
+        // The task form is a layer of these too, never open with the
+        // calendar over the note.
+        if let Some(form) = &self.task_form {
+            let (scrim, form) = self.task_form_layers(form);
+            return stack![base, scrim, form].into();
+        }
         let open = self.calendar.as_ref().zip(self.calendar_bounds());
         let Some((open, card)) = open else {
             return stack![base, iced::widget::Space::new(), iced::widget::Space::new()].into();
@@ -626,7 +662,7 @@ impl App {
             .on_right_press(Message::Calendar(Event::Outside))
             .on_middle_press(Message::Calendar(Event::Outside))
             .on_scroll(|_| Message::Calendar(Event::Outside));
-        let card = mouse_area(self.calendar_card(open))
+        let card = mouse_area(self.calendar_card(&open.model, open.has_due, Message::Calendar))
             .on_press(Message::Calendar(Event::Refocus))
             .on_scroll(|_| Message::Calendar(Event::Outside));
         stack![base, opaque(outside), pin(opaque(card)).x(at.x).y(at.y)].into()
@@ -651,11 +687,17 @@ impl App {
         ))
     }
 
-    fn calendar_card<'a>(&'a self, open: &'a Open) -> Element<'a, Message> {
+    /// The calendar's card for `model`, with Clear while `has_due`, its
+    /// input sent as `send` makes it a message: over the note, or over the
+    /// task form.
+    pub(super) fn calendar_card<'a>(
+        &'a self,
+        model: &'a Calendar,
+        has_due: bool,
+        send: fn(Event) -> Message,
+    ) -> Element<'a, Message> {
         let definition = self.definition;
         let colors = definition.colors;
-        let model = &open.model;
-        let send = |event| Message::Calendar(event);
         let field = date_field::date_field(
             "fri, tomorrow, +3d, 2026-12-01",
             model.typed(),
@@ -669,7 +711,7 @@ impl App {
                     .width(Fill)
                     .style(move |_, status| chrome::input(definition, status, true))
             },
-            |event| Message::Calendar(Event::Field(event)),
+            move |event| send(Event::Field(event)),
         );
         let caption = model.caption();
         let caption = container(chrome::label(
@@ -726,7 +768,7 @@ impl App {
             .into()
         });
         let grid = column(std::iter::once(heads.into()).chain(weeks)).spacing(DAY_GAP);
-        let clear: Element<'_, Message> = if open.has_due {
+        let clear: Element<'_, Message> = if has_due {
             chip(definition, "Clear", send(Event::Clear))
         } else {
             iced::widget::space().into()

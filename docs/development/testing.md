@@ -220,6 +220,30 @@ field's text as a paste or an input method's commit does, and
 `inside` (the card off its controls) and `outside`. `focus.get` names the
 field `calendar-field`. With tasks off each of them is refused.
 
+The task form (`task.edit`, `tools/wrentest/test_tasks_form.py`) opens
+through `shortcut` or `command.run`, on either engine. While it is open,
+`editor.key` presses a key in it: the form's own keys (Tab, the arrows,
+Enter, Escape, and on the status and priority rows their characters), a
+character typed or Backspace at the end of the focused field's text, and
+Escape and shortcuts heard by the app as a real press is; with the
+calendar open over it, the calendar's field takes the key. `tasks.form`
+returns `{"open": false}`, or its `kind` (`edit`, `new` or `make`),
+`title`, `line`, the slot with the keyboard (`focus`), the fields
+(`description`, `status`, `due`, `priority`, `owners`, and `owner_text`,
+what the owners field holds), the due field's `due_caption` and
+`due_invalid`, the owners `suggestions` and the chosen `suggestion`, the
+`writes` line, the last save's `error`, the `calendar` over it (`typed`,
+`selected`, `month`, `caption` and `bounds`) and the due field's
+`due_bounds`. `tasks.form_type` `{"field": "description" | "due" |
+"owners", "text": …}` sets a field's text, and `tasks.form_click` clicks
+`{"status": name}`, `{"priority": name}` (`"None"` for none),
+`{"suggestion": name}`, `{"remove": name}` (an owner's remove button),
+`{"target": …}` (`save`, `cancel`, `outside` or `calendar`), or on the
+calendar over the form `{"day": …}`, `{"chip": …}` or `{"calendar": …}`
+(`previous`, `next`, `clear`, `inside` or `outside`). `focus.get` names
+the fields `task-form-description`, `task-form-due` and
+`task-form-owners`.
+
 `WRENTEST_PERF=release` makes `test_board_perf.py` assert the release
 budgets instead of the debug ceilings. Build the release binary in its own
 target directory so the smoke build is not replaced:

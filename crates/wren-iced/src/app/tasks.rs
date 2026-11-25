@@ -70,6 +70,9 @@ pub(super) struct TaskMemo {
     /// last found it, with the editor's text revision, the caret's line
     /// and the engine it was found for.
     pub(super) on_task: std::cell::Cell<Option<(MemoKey, bool)>>,
+    /// Whether the task form can open at the caret's line, as `task.edit`
+    /// last found it, with what it was found for.
+    pub(super) form_at: std::cell::Cell<Option<(MemoKey, bool)>>,
     /// How many times a line was read for its box.
     #[cfg(test)]
     reads: std::cell::Cell<usize>,

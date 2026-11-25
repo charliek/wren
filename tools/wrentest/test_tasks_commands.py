@@ -59,6 +59,7 @@ TASK_COMMANDS = [
     "task.priority.lower",
     "task.set_due",
     "task.clear_due",
+    "task.edit",
 ]
 # The commands that open a menu (item 3.4) or the calendar (item 4.1),
 # which the classic engine has not.
@@ -192,8 +193,17 @@ def test_off_a_task_line_the_commands_are_listed_greyed_and_do_nothing(
                                    for command in TASK_COMMANDS]
         for line in [line_of("# Commands"), 1, line_of("Plain hotel.")]:
             call("editor.cursor", {"line": line, "column": 0, "selection": None})
-            assert tasks_rows(app) == [(command, False) for command in TASK_COMMANDS], line
+            # The task form makes a task of a blank or plain line (item 6.1).
+            form = line != line_of("# Commands")
+            assert tasks_rows(app) == [(command, form and command == "task.edit")
+                                       for command in TASK_COMMANDS], line
             for command in TASK_COMMANDS:
+                if form and command == "task.edit":
+                    assert run(app, command)["disposition"] == "completed", line
+                    assert call("tasks.form")["open"] is True
+                    call("editor.key", {"key": "escape"})
+                    assert call("tasks.form") == {"open": False}
+                    continue
                 assert run(app, command)["disposition"] == "blocked", (command, line)
             assert call("editor.get")["text"] == ORIGINAL
         saved(app, path, ORIGINAL)

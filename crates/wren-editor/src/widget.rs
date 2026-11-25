@@ -410,8 +410,9 @@ pub struct TextEditor<'a> {
     /// The host took the keyboard earlier in this batch: the input after
     /// the handover is dropped; see [`popover`].
     handed_over: Cell<bool>,
-    /// It took it for a row of suggestions chosen in this batch: Escape
-    /// after it is dropped too ([`Target::Handed`]).
+    /// It took it for a row of suggestions chosen in this batch, or for a
+    /// request whose source holds Escape ([`crate::MenuSource::holds_escape`]):
+    /// Escape after it is dropped too ([`Target::Handed`]).
     handed_by_suggestion: Cell<bool>,
     /// The open popover as the events this widget has handled leave it; see
     /// [`popover::OpenMenu`]. The host builds a new widget once it has
@@ -1158,17 +1159,31 @@ impl<'a> TextEditor<'a> {
             .is_some_and(|(opened, _)| opened == Opened::Suggest);
         // A row whose choice opens a menu of the host's, which the widget
         // cannot open the same: the keys after it are dropped.
-        let opens = (row.or(suggestion.then_some(None)))
-            .is_some_and(|row| self.menu_now.opens_menu(self.popover, row));
+        let chosen = row.or(suggestion.then_some(None));
+        let opens = chosen.is_some_and(|row| self.menu_now.opens_menu(self.popover, row));
+        let dialog = chosen.is_some_and(|row| self.menu_now.opens_dialog(self.popover, row));
         let message = match row.zip(self.menu_now.bound(self.popover)) {
             Some((row, menu)) => Message::Spell(SpellEvent::AcceptOf { menu, row }),
             None => message,
         };
+        let request = match message {
+            Message::Spell(SpellEvent::Request(id)) => Some(id),
+            _ => None,
+        };
         self.menu_now
             .publish(shell, message, &|| self.caret_line(), self.sources);
+        // A dialog's request: the host takes the keyboard for it whatever
+        // the widget knows of the caret's line, and the batch's Escape
+        // after it is no one's either.
+        if let Some((id, source)) = request.zip(self.sources.menus) {
+            if source.holds_escape(id) {
+                self.menu_now.hand_over();
+                self.handed_by_suggestion.set(true);
+            }
+        }
         if opens {
             self.menu_now.hand_over();
-            self.handed_by_suggestion.set(suggestion);
+            self.handed_by_suggestion.set(suggestion || dialog);
         }
     }
 
@@ -5675,7 +5690,7 @@ mod tests {
 
     // ── The popover ────────────────────────────────────────────────────────
 
-    use crate::fixtures::{status_rows, KEYBOARD, STATUS};
+    use crate::fixtures::{status_rows, DIALOG, KEYBOARD, STATUS};
     use crate::{Anchor, Choice, Intent, MenuKey, Mode, Row, Stroke};
 
     const TASK: &str = "- [ ] call sam";
@@ -5745,6 +5760,7 @@ mod tests {
                 keyboard::Key::Character("s") => crate::KeyRoute::Popover(STATUS),
                 keyboard::Key::Character("n") => crate::KeyRoute::Popover(NOTHING),
                 keyboard::Key::Character("k") => crate::KeyRoute::Popover(KEYBOARD),
+                keyboard::Key::Character("d") => crate::KeyRoute::Popover(DIALOG),
                 _ => crate::KeyRoute::Pass,
             },
         )
@@ -5825,7 +5841,7 @@ mod tests {
             .key_policy(ev.key_policy.as_ref())
             .proofreader(ev.proofreader.as_deref())
             .popover(ev.popover())
-            .menu_source(ev.menu_source())
+            .menu_source(ev.widget_menu_source())
             .providers(ev.providers(), ev.edition())
             .suggest_source(ev.suggest_source(), ev.suggest_suppressed())
             .origin(&ev.origin)
@@ -8966,6 +8982,104 @@ mod tests {
         popover_batch(&mut ev, &mut state, vec![click, (typed("f"), None)]);
         popover_batch(&mut ev, &mut state, vec![(typed("g"), None)]);
         assert_eq!(ev.line_text(1).unwrap(), "plaing teh text");
+    }
+
+    #[test]
+    fn a_dialogs_request_drops_its_batch_escape_included_on_both_engines() {
+        for kind in BackendKind::ALL {
+            let ev = requesting(kind, TASK, 0, 8);
+            let events = [
+                request_key("d"),
+                typed("x"),
+                named(keyboard::key::Named::Escape),
+            ]
+            .into_iter()
+            .map(|event| (event, None))
+            .collect();
+            let (messages, captured) = widget_batch(&ev, &mut None, events);
+            // The Escape is published, so the host's key handling drops its
+            // copy, and taken: it closes nothing.
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [
+                        Message::Spell(SpellEvent::Request(DIALOG)),
+                        Message::Spell(SpellEvent::Stroke(stroke)),
+                    ] if stroke.named() == Some(keyboard::key::Named::Escape)
+                ),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(captured, [true; 3], "{kind:?}");
+        }
+        // After an edit, when the widget no longer knows the caret's line, a
+        // dialog's request takes the keyboard all the same.
+        for kind in BackendKind::ALL {
+            let ev = requesting(kind, TASK, 0, 8);
+            let events = [
+                named(keyboard::key::Named::Backspace),
+                request_key("d"),
+                named(keyboard::key::Named::Escape),
+            ]
+            .into_iter()
+            .map(|event| (event, None))
+            .collect();
+            let (messages, captured) = widget_batch(&ev, &mut None, events);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [
+                        _,
+                        Message::Spell(SpellEvent::Request(DIALOG)),
+                        Message::Spell(SpellEvent::Stroke(stroke)),
+                    ] if stroke.named() == Some(keyboard::key::Named::Escape)
+                ),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(captured, [true; 3], "{kind:?}");
+        }
+        // A menu's row that opens a dialog: the Escape after its key in the
+        // batch is the dialog's too, not the host's to close it with.
+        for kind in BackendKind::ALL {
+            let mut ev = editing(kind, TASK, 0, 8);
+            let rows = vec![Row::new(14, "Edit task…")
+                .accelerator(crate::Accelerator::plain('e'))
+                .opens_dialog()];
+            hang(&mut ev, Mode::Menu, 0, 2..5, rows);
+            let events = [typed("e"), typed("z"), named(keyboard::key::Named::Escape)]
+                .into_iter()
+                .map(|event| (event, None))
+                .collect();
+            let (messages, captured) = widget_batch(&ev, &mut None, events);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [
+                        Message::Spell(SpellEvent::AcceptOf { .. } | SpellEvent::Accept(_)),
+                        Message::Spell(SpellEvent::Stroke(stroke)),
+                    ] if stroke.named() == Some(keyboard::key::Named::Escape)
+                ),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(captured, [true; 3], "{kind:?}");
+        }
+        // On the engine that opens no popovers, a request for a menu opens
+        // nothing, and the keys after it are the note's as before.
+        let ev = requesting(BackendKind::Iced, TASK, 0, 8);
+        let events = [request_key("s"), typed("x")]
+            .into_iter()
+            .map(|event| (event, None))
+            .collect();
+        let (messages, _) = widget_batch(&ev, &mut None, events);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Spell(SpellEvent::Request(STATUS)),
+                    Message::Action(Action::Edit(Edit::Insert('x'))),
+                ]
+            ),
+            "{messages:?}"
+        );
     }
 
     /// A preedit of the note's own, under way in the widget's state.

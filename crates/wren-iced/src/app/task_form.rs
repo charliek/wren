@@ -1,0 +1,2054 @@
+//! The "Create or edit task" form (discovery/tasks.md §6, item 3; item
+//! 6.1): a dialog over the note with the caret's task in fields (the
+//! description, the status, the due date with the calendar, the priority
+//! and the owners) and a "Writes" line that shows, as the fields change,
+//! the Markdown that saving writes.
+//!
+//! It opens from `task.edit` (⇧⌘↵ / Ctrl+Shift+Enter, the palette) at the
+//! caret's line, and from the task menu's Edit task… row, with tasks on,
+//! on both engines: it is the app's own dialog, not a popover of the
+//! editor's. On a task it edits the task; on a blank line, or a line the
+//! plain toggle would give a box, it makes one there
+//! (`wren_markdown::task::Form`). Opening gives the description field the
+//! keyboard. The keys after the request in its batch of events were typed
+//! before the form could be seen, and reach neither the note nor the form:
+//! the editor's widget drops them for a request the app's source of menus
+//! answers by taking the keyboard (`calendar::TaskSource`), and while the
+//! form is open the app applies no message of the editor's at all.
+//!
+//! **Saving** writes the fields the user changed as one compound line
+//! edit, through the editor as one undo step: on a task with
+//! `wren_markdown::task::edit` and [`wren_editor::EditorView::apply_line_edits`],
+//! and on a line that is no task yet as one replacement of the line
+//! ([`wren_editor::EditorView::apply`]). It is refused, and the form stays
+//! open with a message, once the line no longer reads as it did when the
+//! form opened (an edit, a reload of the note from disk), and while the due
+//! field names no date. A form nobody changed closes and writes nothing.
+//!
+//! **Keys** (`form_keys.rs`): Tab and Shift+Tab walk the description, the
+//! status, the due date, the priority, the owners, Save and Cancel; Enter
+//! saves; Escape cancels. The owners field takes Enter, and Escape, for
+//! the name typed in it first; the due field's Down, or its button, opens
+//! the calendar (`calendar.rs`) under it, whose field then has the
+//! keyboard, and which gives it back to the due field however it closes.
+//!
+//! It closes, writing nothing, on Escape, Cancel and a press outside it,
+//! and when what it was opened for goes: another note, a workspace
+//! loading, the palette or a dialog opening. Closing gives the editor back
+//! the keyboard with its caret and selection as they were (after a save,
+//! where the line edit moved them), and the editor then drops what an
+//! input method commits until it sees input of its own
+//! ([`wren_editor::EditorView::hand_back`]): a composition begun in the
+//! form is never the note's.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use iced::widget::{
+    button, column, container, mouse_area, opaque, pin, row, stack, text, text_input,
+};
+use iced::{Element, Fill, Point, Rectangle, Size, Task};
+use wren_core::model::NoteId;
+use wren_markdown::calendar::{self, Calendar, Caption, Outcome};
+use wren_markdown::date::Parsed;
+use wren_markdown::status::{StatusType, STATUSES};
+use wren_markdown::task::{self, DateField, Form, FormKind, Priority};
+
+use super::calendar::{place, Event as CalendarEvent, FIELD as CALENDAR_FIELD};
+use super::commands::{CommandId, Disposition, Gateway};
+use super::{App, Message};
+use crate::date_field::FieldEvent;
+use crate::form_keys::{self, FormKey, Slot as KeySlot, SlotKind};
+use crate::{chrome, fonts, theme};
+
+/// The fields' widget ids.
+pub(super) const DESCRIPTION: &str = "task-form-description";
+pub(super) const DUE: &str = "task-form-due";
+pub(super) const OWNERS: &str = "task-form-owners";
+
+/// The form's slots, in the order Tab walks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Slot {
+    Description,
+    Status,
+    Due,
+    Priority,
+    Owners,
+    Save,
+    Cancel,
+}
+
+impl Slot {
+    pub(super) const ALL: [Self; 7] = [
+        Self::Description,
+        Self::Status,
+        Self::Due,
+        Self::Priority,
+        Self::Owners,
+        Self::Save,
+        Self::Cancel,
+    ];
+
+    pub(super) fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|slot| *slot == self)
+            .expect("every slot is listed")
+    }
+
+    pub(super) fn kind(self) -> SlotKind {
+        match self {
+            Self::Description => SlotKind::Text,
+            Self::Due => SlotKind::Due,
+            Self::Owners => SlotKind::Owners,
+            Self::Status | Self::Priority => SlotKind::Choice,
+            Self::Save | Self::Cancel => SlotKind::Button,
+        }
+    }
+
+    pub(super) fn id(self) -> Option<&'static str> {
+        match self {
+            Self::Description => Some(DESCRIPTION),
+            Self::Due => Some(DUE),
+            Self::Owners => Some(OWNERS),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(not(feature = "smoke-test"), allow(dead_code))]
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Description => "description",
+            Self::Status => "status",
+            Self::Due => "due",
+            Self::Priority => "priority",
+            Self::Owners => "owners",
+            Self::Save => "save",
+            Self::Cancel => "cancel",
+        }
+    }
+
+    /// Give the slot the keyboard: its field's focus, or for a choice or
+    /// a button no field's.
+    pub(super) fn focus(self) -> Task<Message> {
+        match self.id() {
+            Some(id) => iced::widget::operation::focus(id),
+            None => iced::advanced::widget::operate(
+                iced::advanced::widget::operation::focusable::unfocus(),
+            ),
+        }
+    }
+}
+
+/// The priorities in the form's order (Q7): High, Medium, Low, Highest,
+/// Lowest, then none.
+pub(super) const PRIORITIES: [Option<Priority>; 6] = [
+    Some(Priority::High),
+    Some(Priority::Medium),
+    Some(Priority::Low),
+    Some(Priority::Highest),
+    Some(Priority::Lowest),
+    None,
+];
+
+/// The most owners suggested at once.
+const SUGGESTIONS: usize = 6;
+
+/// What the form hands the app.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// A key the form's keys took, or the keyboard moved.
+    Key(FormKey),
+    /// The description field's text is now this.
+    Description(String),
+    /// The due field's text is now this.
+    Due(String),
+    /// The owners field's text is now this.
+    Owner(String),
+    /// A status was clicked.
+    Status(StatusType),
+    /// A priority was clicked.
+    Priority(Option<Priority>),
+    /// A suggested owner was clicked.
+    AddOwner(String),
+    /// An owner's remove button was clicked.
+    RemoveOwner(String),
+    /// The due field's calendar button was clicked.
+    OpenCalendar,
+    /// Input from the calendar over the form.
+    Calendar(CalendarEvent),
+    Save,
+    /// Cancel, or a press outside the form.
+    Cancel,
+}
+
+/// The open form.
+#[derive(Debug, Clone)]
+pub(super) struct Open {
+    pub(super) form: Form,
+    /// The note it was opened over.
+    note: Option<NoteId>,
+    /// Where the task is, as the header says it.
+    place: String,
+    pub(super) focus: Slot,
+    /// The engine the note was in.
+    engine: wren_editor::BackendKind,
+    /// The calendar gave the due field back the keyboard, and the field
+    /// has seen no input of its own since: see `FormKeys::handback`.
+    pub(super) due_handback: bool,
+    /// The suggested owner chosen with Up and Down, if any.
+    pub(super) suggestion: Option<usize>,
+    /// The calendar, while it is open under the due field.
+    pub(super) calendar: Option<Calendar>,
+    /// Why the last save wrote nothing.
+    pub(super) error: Option<String>,
+}
+
+impl Open {
+    pub(super) fn title(&self) -> &'static str {
+        match self.form.kind() {
+            FormKind::Edit => "Edit task",
+            FormKind::New => "New task",
+            FormKind::Make => "Make a task",
+        }
+    }
+}
+
+/// The form's width, its insets and the heights its rows above the due
+/// field are given, which place the calendar under that field before the
+/// form is laid out.
+const WIDTH: f32 = 540.0;
+const PAD_Y: f32 = 16.0;
+const PAD_X: f32 = 18.0;
+const GAP: f32 = 11.0;
+const HEADER: f32 = 22.0;
+const FIELD: f32 = 30.0;
+const CHOICES: f32 = 28.0;
+const CAPTION: f32 = 16.0;
+const LABEL: f32 = 84.0;
+const LABEL_GAP: f32 = 10.0;
+/// The due field's calendar button.
+const BUTTON: f32 = 30.0;
+const BUTTON_GAP: f32 = 6.0;
+
+/// The status's name as its button says it.
+#[cfg_attr(not(feature = "smoke-test"), allow(dead_code))]
+pub(super) fn status_name(status: StatusType) -> &'static str {
+    STATUSES
+        .iter()
+        .find(|row| row.kind == status)
+        .map_or("Open", |row| row.name)
+}
+
+/// The status a character typed on the status row chooses: the box's
+/// characters, as in the status menu.
+fn status_key(key: &str) -> Option<StatusType> {
+    Some(match key {
+        " " => StatusType::Open,
+        "/" => StatusType::Doing,
+        "x" | "X" => StatusType::Done,
+        "-" => StatusType::Cancelled,
+        _ => return None,
+    })
+}
+
+/// The priority a character typed on the priority row chooses: the
+/// priority menu's letters, Shift for Highest and Lowest.
+fn priority_key(key: &str) -> Option<Option<Priority>> {
+    Some(match key {
+        "h" => Some(Priority::High),
+        "m" | "M" => Some(Priority::Medium),
+        "l" => Some(Priority::Low),
+        "H" => Some(Priority::Highest),
+        "L" => Some(Priority::Lowest),
+        "n" | "N" => None,
+        _ => return None,
+    })
+}
+
+/// What the due field's line under it says: what the field names, or that
+/// there is no due date.
+pub(super) fn due_caption(form: &Form) -> (String, bool) {
+    if form.due().trim().is_empty() {
+        return ("No due date".to_owned(), false);
+    }
+    let mut model = Calendar::new(form.today(), None);
+    model.set_typed(form.due());
+    let caption = model.caption();
+    let invalid = caption.is_invalid();
+    let text = match caption {
+        Caption::Date { date, .. } => format!(
+            "{} · {}",
+            calendar::long(date),
+            calendar::relative(form.today(), date)
+        ),
+        caption => caption.to_string(),
+    };
+    (text, invalid)
+}
+
+impl App {
+    /// Whether the form can open at the caret: tasks on, a Markdown note
+    /// in the editor, and the caret on a task, or on a line a task can go
+    /// on. What it finds is kept until the text, the caret's line or the
+    /// engine changes, as the line commands keep theirs.
+    pub(super) fn task_form_can_open(&self) -> bool {
+        if !self.task_lines_editable() {
+            return false;
+        }
+        let key = self.memo_key();
+        if let Some((kept, found)) = self.task_memo.form_at.get() {
+            if kept == key {
+                return found;
+            }
+        }
+        let found = self.task_form_at(key.line).is_some();
+        self.task_memo.form_at.set(Some((key, found)));
+        found
+    }
+
+    /// The form for line `line` of the editor's text.
+    fn task_form_at(&self, line: usize) -> Option<Form> {
+        self.editor
+            .read_markdown(|lines, options| Form::open(lines, line, options))
+    }
+
+    /// Whether the editor's request of a form may take the keyboard: tasks
+    /// on, and a Markdown note in the editor.
+    pub(super) fn task_form_takes_keys(&self) -> bool {
+        self.preferences.tasks && self.markdown_in_editor() && self.ensure_editor_ready().is_ok()
+    }
+
+    /// `task.edit` from the palette or the harness: open the form at the
+    /// caret's line.
+    pub(super) fn run_task_form(&mut self) -> Gateway {
+        self.palette = None;
+        let line = self.editor.cursor().position.line;
+        match self.open_task_form(line) {
+            Some(task) => self.finish_action(Disposition::Completed, None, task),
+            None => self.blocked("A task cannot go on this line"),
+        }
+    }
+
+    /// A request from the editor for the form, `task.edit`'s key
+    /// ([`wren_editor::KeyRoute::Popover`]): open it at the caret's line.
+    /// `None` for a request of something else.
+    pub(super) fn request_task_form(&mut self, id: u32) -> Option<Task<Message>> {
+        if id != CommandId::TaskEdit.payload() {
+            return None;
+        }
+        self.column = super::columns::Column::Editor;
+        self.editor.close_popover();
+        let line = self.editor.cursor().position.line;
+        Some(
+            self.open_task_form(line)
+                .unwrap_or_else(|| self.blocked("A task cannot go on this line").task),
+        )
+    }
+
+    /// Open the form for line `line` and give its description field the
+    /// keyboard. `None` where no task is or can go.
+    pub(super) fn open_task_form(&mut self, line: usize) -> Option<Task<Message>> {
+        if !self.task_form_takes_keys() || self.dialog.is_some() {
+            return None;
+        }
+        let form = self.task_form_at(line)?;
+        self.editor.close_popover();
+        self.palette = None;
+        // The calendar over the note closes for it, writing nothing.
+        if self.calendar.take().is_some() {
+            self.editor.hand_back();
+        }
+        self.column = super::columns::Column::Editor;
+        let place = format!("{} · line {}", self.task_form_note(), form.line() + 1);
+        self.task_form = Some(Open {
+            form,
+            note: self.selected_note,
+            place,
+            focus: Slot::Description,
+            engine: self.editor.backend(),
+            due_handback: false,
+            suggestion: None,
+            calendar: None,
+            error: None,
+        });
+        Some(iced::widget::operation::focus(DESCRIPTION))
+    }
+
+    /// The note the form is over, as its header names it.
+    fn task_form_note(&self) -> String {
+        let note = self.selected_note.and_then(|note| {
+            self.model()?
+                .notes
+                .iter()
+                .find(|each| each.id == note)
+                .cloned()
+        });
+        let Some(note) = note else {
+            return "Editor".to_owned();
+        };
+        let mut parts: Vec<String> = note
+            .path
+            .as_path()
+            .parent()
+            .into_iter()
+            .flat_map(|parent| parent.components())
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        parts.push(note.title);
+        parts.join(" › ")
+    }
+
+    /// Close the form, whatever the reason. An input method may still be
+    /// composing for one of its fields: the editor drops what that commits
+    /// until it sees input of its own.
+    fn take_task_form(&mut self) -> Option<Open> {
+        let open = self.task_form.take()?;
+        self.editor.hand_back();
+        Some(open)
+    }
+
+    /// Close the form, writing nothing, and give the editor back the
+    /// keyboard.
+    pub(super) fn cancel_task_form(&mut self) -> Task<Message> {
+        if self.take_task_form().is_none() {
+            return Task::none();
+        }
+        self.return_to_editor()
+    }
+
+    /// Whether a press of Escape the app's key handling hears was the
+    /// form's, once for each: the form, its calendar, or an input method
+    /// composing in one of its fields, took it.
+    /// Whether a shortcut the app's key handling hears was pressed after
+    /// the form closed in its batch, once for each.
+    pub(super) fn take_form_shortcut(&mut self) -> bool {
+        let claimed = self.form_shortcuts > 0;
+        self.form_shortcuts = self.form_shortcuts.saturating_sub(1);
+        claimed
+    }
+
+    pub(super) fn take_form_escape(&mut self) -> bool {
+        let claimed = self.form_escapes > 0;
+        self.form_escapes = self.form_escapes.saturating_sub(1);
+        claimed
+    }
+
+    /// Escape that reached the app with no field of the form's taking it:
+    /// the calendar over the form closes, or else the form.
+    pub(super) fn escape_task_form(&mut self) -> Task<Message> {
+        match &mut self.task_form {
+            Some(open) if open.calendar.is_some() => {
+                open.calendar = None;
+                open.due_handback = true;
+                Slot::Due.focus()
+            }
+            Some(_) => self.cancel_task_form(),
+            None => Task::none(),
+        }
+    }
+
+    pub(super) fn task_form_event(&mut self, event: Event) -> Task<Message> {
+        // A plain Escape the form or its calendar took is claimed whether
+        // or not the form is still open: the app's key handling hears of
+        // the same press.
+        if matches!(
+            event,
+            Event::Key(FormKey::Escape | FormKey::Clear | FormKey::HeldEscape)
+                | Event::Calendar(CalendarEvent::Field(
+                    FieldEvent::Escape | FieldEvent::HeldEscape
+                ))
+        ) {
+            self.form_escapes += 1;
+        }
+        if event == Event::Key(FormKey::HeldShortcut) {
+            self.form_shortcuts += 1;
+            return Task::none();
+        }
+        if self.task_form.is_none() {
+            return Task::none();
+        }
+        match event {
+            Event::Key(key) => self.task_form_key(key),
+            Event::Save => self.save_task_form(),
+            Event::Cancel => self.cancel_task_form(),
+            Event::Calendar(event) => self.task_form_calendar(event),
+            Event::OpenCalendar => self.open_form_calendar(),
+            event => {
+                let open = self.task_form.as_mut().expect("open");
+                open.error = None;
+                match event {
+                    Event::Description(text) => open.form.set_description(&text),
+                    Event::Due(text) => open.form.set_due(&text),
+                    Event::Owner(text) => {
+                        open.form.set_pending_owner(&text);
+                        open.suggestion = None;
+                    }
+                    Event::Status(status) => {
+                        open.form.set_status(status);
+                        open.focus = Slot::Status;
+                    }
+                    Event::Priority(priority) => {
+                        open.form.set_priority(priority);
+                        open.focus = Slot::Priority;
+                    }
+                    Event::AddOwner(name) => {
+                        open.form.add_owner(&name);
+                        open.form.set_pending_owner("");
+                        open.suggestion = None;
+                        open.focus = Slot::Owners;
+                        return Slot::Owners.focus();
+                    }
+                    Event::RemoveOwner(name) => open.form.remove_owner(&name),
+                    _ => {}
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn task_form_key(&mut self, key: FormKey) -> Task<Message> {
+        let suggestions = self.owner_suggestions();
+        let open = self.task_form.as_mut().expect("open");
+        match key {
+            FormKey::Focus(index) => {
+                if let Some(slot) = Slot::ALL.get(index) {
+                    if open.focus == Slot::Owners && *slot != Slot::Owners {
+                        open.suggestion = None;
+                    }
+                    open.focus = *slot;
+                }
+            }
+            FormKey::Save => return self.save_task_form(),
+            FormKey::Escape => return self.cancel_task_form(),
+            FormKey::Clear => {
+                open.form.set_pending_owner("");
+                open.suggestion = None;
+            }
+            FormKey::HeldEscape | FormKey::HeldShortcut => {}
+            FormKey::Press(index) => {
+                return match Slot::ALL.get(index) {
+                    Some(Slot::Save) => self.save_task_form(),
+                    Some(Slot::Cancel) => self.cancel_task_form(),
+                    _ => Task::none(),
+                };
+            }
+            FormKey::Accept | FormKey::Complete => {
+                // Enter adds the name as typed, or the owner chosen with Up
+                // and Down; Tab the owner chosen, or else the one offered
+                // first, as Tab takes a suggestion in the note.
+                let chosen = match key {
+                    FormKey::Complete => open.suggestion.or(Some(0)),
+                    _ => open.suggestion,
+                };
+                let name = match chosen.and_then(|at| suggestions.get(at)) {
+                    Some(name) => name.clone(),
+                    None => open.form.pending_owner().trim().to_owned(),
+                };
+                open.form.add_owner(&name);
+                // The field empties as the form's keys empty it.
+                open.form.set_pending_owner("");
+                open.suggestion = None;
+                open.error = None;
+            }
+            FormKey::HandbackOver => open.due_handback = false,
+            FormKey::Step(by) => match open.focus {
+                Slot::Status => {
+                    let at = STATUSES
+                        .iter()
+                        .position(|row| row.kind == open.form.status())
+                        .unwrap_or(0);
+                    let next = stepped(at, STATUSES.len(), by);
+                    open.form.set_status(STATUSES[next].kind);
+                }
+                Slot::Priority => {
+                    let at = PRIORITIES
+                        .iter()
+                        .position(|level| *level == open.form.priority())
+                        .unwrap_or(PRIORITIES.len() - 1);
+                    let next = stepped(at, PRIORITIES.len(), by);
+                    open.form.set_priority(PRIORITIES[next]);
+                }
+                _ => {}
+            },
+            FormKey::Pick(key) => match open.focus {
+                Slot::Status => {
+                    if let Some(status) = status_key(&key) {
+                        open.form.set_status(status);
+                    }
+                }
+                Slot::Priority => {
+                    if let Some(priority) = priority_key(&key) {
+                        open.form.set_priority(priority);
+                    }
+                }
+                _ => {}
+            },
+            FormKey::Suggest(by) => {
+                let count = suggestions.len();
+                open.suggestion = match (open.suggestion, count) {
+                    (_, 0) => None,
+                    (None, _) if by > 0 => Some(0),
+                    (None, _) => Some(count - 1),
+                    (Some(at), _) => Some(stepped(at.min(count - 1), count, by)),
+                };
+            }
+            FormKey::Calendar => return self.open_form_calendar(),
+            FormKey::RemoveLast => {
+                if let Some(last) = open.form.owners().pop() {
+                    open.form.remove_owner(&last);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// The owners the form suggests for what the owners field holds: the
+    /// workspace's owners whose names start with it, those the task has
+    /// left out, the one it names exactly first.
+    pub(super) fn owner_suggestions(&self) -> Vec<String> {
+        let Some(open) = &self.task_form else {
+            return Vec::new();
+        };
+        if open.focus != Slot::Owners {
+            return Vec::new();
+        }
+        let typed = open.form.pending_owner().trim();
+        let typed = task::fold_name(typed.strip_prefix('@').unwrap_or(typed));
+        let have: Vec<String> = open
+            .form
+            .owners()
+            .iter()
+            .map(|name| task::fold_name(name))
+            .collect();
+        let mut found: Vec<String> = self
+            .known_owners()
+            .into_iter()
+            .filter(|name| {
+                let key = task::fold_name(name);
+                !have.contains(&key) && key.starts_with(&typed)
+            })
+            .collect();
+        if let Some(exact) = found.iter().position(|name| task::fold_name(name) == typed) {
+            let name = found.remove(exact);
+            found.insert(0, name);
+        }
+        found.truncate(SUGGESTIONS);
+        found
+    }
+
+    /// The workspace's owners, the most used first, as the suggestions in
+    /// the note offer them (`task_suggest.rs`).
+    fn known_owners(&self) -> Vec<String> {
+        self.owners
+            .ranked()
+            .iter()
+            .map(|owner| owner.name.clone())
+            .collect()
+    }
+
+    /// Open the calendar under the due field, on the date the field
+    /// names, and give its field the keyboard.
+    fn open_form_calendar(&mut self) -> Task<Message> {
+        let today = self.today();
+        let Some(open) = &mut self.task_form else {
+            return Task::none();
+        };
+        open.calendar = Some(Calendar::new(today, open.form.due_date()));
+        open.focus = Slot::Due;
+        iced::widget::operation::focus(CALENDAR_FIELD)
+    }
+
+    /// Input from the calendar over the form. Whatever closes it gives the
+    /// due field back the keyboard.
+    fn task_form_calendar(&mut self, event: CalendarEvent) -> Task<Message> {
+        let Some(open) = &mut self.task_form else {
+            return Task::none();
+        };
+        let Some(model) = &mut open.calendar else {
+            return Task::none();
+        };
+        let picked = match event {
+            CalendarEvent::Field(FieldEvent::Typed(text)) => {
+                model.set_typed(&text);
+                return Task::none();
+            }
+            CalendarEvent::Field(FieldEvent::Key(key)) => {
+                model.key(key);
+                return Task::none();
+            }
+            CalendarEvent::Field(FieldEvent::Enter) => match model.enter() {
+                Outcome::Write(date) => Some(Some(date)),
+                Outcome::Clear => Some(None),
+                Outcome::Invalid(_) => return Task::none(),
+            },
+            CalendarEvent::Pick(date) => Some(Some(date)),
+            CalendarEvent::Clear => Some(None),
+            CalendarEvent::Show(months) => {
+                model.show(months);
+                return iced::widget::operation::focus(CALENDAR_FIELD);
+            }
+            CalendarEvent::Refocus => return iced::widget::operation::focus(CALENDAR_FIELD),
+            CalendarEvent::Field(FieldEvent::HeldEscape) | CalendarEvent::FocusChecked(_) => {
+                return Task::none();
+            }
+            CalendarEvent::Field(
+                FieldEvent::Escape | FieldEvent::WindowLost | FieldEvent::Blur,
+            )
+            | CalendarEvent::Outside => None,
+        };
+        if let Some(due) = picked {
+            open.form.pick_due(due);
+            open.error = None;
+        }
+        open.calendar = None;
+        open.due_handback = true;
+        open.focus = Slot::Due;
+        Slot::Due.focus()
+    }
+
+    /// Save: write the fields the user changed as one undo step, close the
+    /// form and give the editor back the keyboard. Refused, the form open
+    /// with why, once its line no longer reads as it did, and while the due
+    /// field names no date.
+    fn save_task_form(&mut self) -> Task<Message> {
+        // A name left in the owners field is written as typed, as the
+        // Writes line shows it.
+        let Some(open) = &mut self.task_form else {
+            return Task::none();
+        };
+        if let Err(problem) = open.form.change() {
+            let warning = problem.to_string();
+            open.error = Some(warning.clone());
+            open.focus = Slot::Due;
+            let focus = Slot::Due.focus();
+            return Task::batch([focus, self.blocked(warning).task]);
+        }
+        if self.task_form_stale() {
+            let warning = "The task changed since the form opened; nothing was written".to_owned();
+            if let Some(open) = &mut self.task_form {
+                open.error = Some(warning.clone());
+            }
+            return self.blocked(warning).task;
+        }
+        let open = self.take_task_form().expect("open");
+        let focus = self.return_to_editor();
+        let started = std::time::Instant::now();
+        let written = match open.form.kind() {
+            FormKind::Edit => self.write_task_edit(&open.form),
+            FormKind::New | FormKind::Make => self.write_new_task(&open.form),
+        };
+        match written {
+            Ok(changed) => {
+                if changed {
+                    self.text_changed(started);
+                }
+                let _ = self.finish_action(Disposition::Completed, None, Task::none());
+                focus
+            }
+            Err(warning) => Task::batch([focus, self.blocked(warning).task]),
+        }
+    }
+
+    /// Whether what the form was opened for has gone, or its line no
+    /// longer reads as it did.
+    fn task_form_stale(&self) -> bool {
+        let Some(open) = &self.task_form else {
+            return true;
+        };
+        !self.task_form_takes_keys()
+            || self.selected_note != open.note
+            || self.editor.backend() != open.engine
+            || !self
+                .editor
+                .read_markdown(|lines, options| open.form.holds(lines, options))
+    }
+
+    /// Write the form's change to its task as one line edit.
+    fn write_task_edit(&mut self, form: &Form) -> Result<bool, String> {
+        let change = form.change().map_err(|problem| problem.to_string())?;
+        let edit = self.editor.plan_markdown(|lines, selection, options| {
+            task::edit(lines, form.line(), selection, &change, options)
+        });
+        let Some(edit) =
+            edit.filter(|edit| edit.line == form.line() && edit.expect == form.expect())
+        else {
+            return Err("The task changed since the form opened; nothing was written".into());
+        };
+        self.editor
+            .apply_line_edits(&[edit])
+            .map_err(|refused| refused.to_string())
+    }
+
+    /// Write the form's line in place of the line that is no task yet, as
+    /// one replacement, the caret at its end.
+    fn write_new_task(&mut self, form: &Form) -> Result<bool, String> {
+        let written = form.written().map_err(|problem| problem.to_string())?;
+        let line = form.line();
+        let end = form.expect().len();
+        let replace = wren_editor::Replace {
+            start: iced::widget::text_editor::Position { line, column: 0 },
+            end: iced::widget::text_editor::Position { line, column: end },
+            text: written.clone(),
+        };
+        let caret = iced::widget::text_editor::Cursor {
+            position: iced::widget::text_editor::Position {
+                line,
+                column: written.len(),
+            },
+            selection: None,
+        };
+        Ok(self.editor.apply(&[replace], caret))
+    }
+
+    /// Close the form once what it was opened for has gone (another note,
+    /// a workspace loading, the note no longer in the editor), or the
+    /// palette or a dialog took the keyboard; and read its dates on a new
+    /// day. After every message. A change to the task's line leaves it
+    /// open: saving says so.
+    pub(super) fn sync_task_form(&mut self) -> Task<Message> {
+        let today = self.today();
+        let takes_keys = self.task_form_takes_keys();
+        let note = self.selected_note;
+        let taken = self.palette.is_some() || self.dialog.is_some();
+        let engine = self.editor.backend();
+        let Some(open) = &mut self.task_form else {
+            return Task::none();
+        };
+        open.form.set_today(today);
+        if let Some(model) = &mut open.calendar {
+            model.set_today(today);
+        }
+        // Another engine is another editor: what the form read is gone.
+        if takes_keys && open.note == note && open.engine == engine && !taken {
+            return Task::none();
+        }
+        self.take_task_form();
+        if taken {
+            Task::none()
+        } else {
+            self.column_focus()
+        }
+    }
+
+    /// The form's slots for its keys, in Tab's order.
+    fn key_slots() -> Vec<KeySlot> {
+        Slot::ALL
+            .iter()
+            .map(|slot| KeySlot {
+                kind: slot.kind(),
+                id: slot.id().map(iced::advanced::widget::Id::new),
+            })
+            .collect()
+    }
+
+    /// Where the form's card is in the window.
+    pub(super) fn task_form_bounds(&self) -> Option<Rectangle> {
+        self.task_form.as_ref()?;
+        let width = WIDTH.min((self.viewport.width - 32.0).max(120.0));
+        let x = ((self.viewport.width - width) / 2.0).max(0.0);
+        let top = super::palette::palette_top(self.viewport.height);
+        Some(Rectangle::new(Point::new(x, top), Size::new(width, 0.0)))
+    }
+
+    /// Where the due field is in the window: what the calendar hangs
+    /// under.
+    pub(super) fn task_form_due_bounds(&self) -> Option<Rectangle> {
+        let card = self.task_form_bounds()?;
+        let x = card.x + PAD_X + LABEL + LABEL_GAP;
+        let y = card.y + PAD_Y + HEADER + GAP + FIELD + GAP + CHOICES + GAP;
+        let width = card.width - 2.0 * PAD_X - LABEL - LABEL_GAP - BUTTON_GAP - BUTTON;
+        Some(Rectangle::new(Point::new(x, y), Size::new(width, FIELD)))
+    }
+
+    /// Where the calendar over the form is in the window.
+    pub(super) fn task_form_calendar_bounds(&self) -> Option<Rectangle> {
+        let open = self.task_form.as_ref()?;
+        open.calendar.as_ref()?;
+        let anchor = self.task_form_due_bounds()?;
+        Some(Rectangle::new(
+            place(anchor, self.viewport),
+            Size::new(super::calendar::WIDTH, super::calendar::HEIGHT),
+        ))
+    }
+
+    /// The layers over the window while the form is open: a scrim that
+    /// cancels it on a press, and the form, with the calendar over it while
+    /// that is open. The same layers either way, so the form's fields keep
+    /// their state as the calendar opens and closes.
+    pub(super) fn task_form_layers<'a>(
+        &'a self,
+        open: &'a Open,
+    ) -> (Element<'a, Message>, Element<'a, Message>) {
+        let definition = self.definition;
+        let scrim = mouse_area(
+            container(iced::widget::space())
+                .width(Fill)
+                .height(Fill)
+                .style(move |_| chrome::scrim(definition)),
+        )
+        .on_press(Message::TaskForm(Event::Cancel));
+        let top = super::palette::palette_top(self.viewport.height);
+        let card = container(opaque(self.task_form_card(open)))
+            .padding(iced::Padding {
+                top,
+                right: 16.0,
+                bottom: 8.0,
+                left: 16.0,
+            })
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Center);
+        let calendar = open.calendar.as_ref().zip(self.task_form_calendar_bounds());
+        let (outside, over): (Element<'a, Message>, Element<'a, Message>) = match calendar {
+            Some((model, bounds)) => {
+                let send = |event| Message::TaskForm(Event::Calendar(event));
+                let outside = mouse_area(container(iced::widget::space()).width(Fill).height(Fill))
+                    .on_press(send(CalendarEvent::Outside))
+                    .on_right_press(send(CalendarEvent::Outside))
+                    .on_middle_press(send(CalendarEvent::Outside))
+                    .on_scroll(move |_| send(CalendarEvent::Outside));
+                let has_due = !open.form.due().trim().is_empty();
+                let card = mouse_area(self.calendar_card(model, has_due, |event| {
+                    Message::TaskForm(Event::Calendar(event))
+                }))
+                .on_press(send(CalendarEvent::Refocus))
+                .on_scroll(move |_| send(CalendarEvent::Outside));
+                (
+                    opaque(outside),
+                    pin(opaque(card)).x(bounds.x).y(bounds.y).into(),
+                )
+            }
+            None => (
+                iced::widget::Space::new().into(),
+                iced::widget::Space::new().into(),
+            ),
+        };
+        (opaque(scrim), stack![card, outside, over].into())
+    }
+
+    fn task_form_card<'a>(&'a self, open: &'a Open) -> Element<'a, Message> {
+        let definition = self.definition;
+        let colors = definition.colors;
+        let form = &open.form;
+        let send = |event| Message::TaskForm(event);
+        let focused = |slot: Slot| open.focus == slot && open.calendar.is_none();
+        let label = |name: &'static str, height: f32| {
+            container(chrome::label(name, 13, colors.muted))
+                .width(LABEL)
+                .height(height)
+                .align_y(iced::alignment::Vertical::Center)
+        };
+        let input = |placeholder: &'a str, value: &'a str, id: &'static str| {
+            text_input(placeholder, value)
+                .id(id)
+                .font(fonts::UI)
+                .size(13)
+                .padding([6, 8])
+                .width(Fill)
+                .style(move |_, status| chrome::input(definition, status, true))
+        };
+        let header = row![
+            text(open.title())
+                .size(15)
+                .font(fonts::SEMIBOLD)
+                .color(theme::color(colors.text)),
+            crate::ellipsis::ellipsis(open.place.as_str(), 12.0, theme::color(colors.faint)),
+        ]
+        .spacing(10)
+        .height(HEADER)
+        .align_y(iced::Center)
+        .clip(true);
+        let description = row![
+            label("Description", FIELD),
+            container(
+                input("What needs doing", form.description(), DESCRIPTION)
+                    .on_input(move |text| send(Event::Description(text)))
+            )
+            .height(FIELD)
+        ]
+        .spacing(LABEL_GAP)
+        .height(FIELD);
+        let statuses = row(STATUSES.iter().map(|row| {
+            let chosen = row.kind == form.status();
+            choice(
+                definition,
+                row![
+                    chrome::label(format!("[{}]", row.symbol), 11, colors.faint)
+                        .font(fonts::EDITOR),
+                    chrome::label(
+                        row.name,
+                        12,
+                        if chosen { colors.accent } else { colors.body }
+                    ),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
+                .into(),
+                chosen,
+                chosen && focused(Slot::Status),
+                send(Event::Status(row.kind)),
+            )
+        }))
+        .spacing(4);
+        let stamp: Element<'_, Message> = match form.stamp() {
+            Some((field, date)) => {
+                let short = date.short().to_string();
+                let day = short.split_once(' ').map_or(short.as_str(), |(_, day)| day);
+                let name = if field == DateField::Done {
+                    "Done"
+                } else {
+                    "Cancelled"
+                };
+                chrome::label(format!("{name} {day}"), 12, colors.muted).into()
+            }
+            None => iced::widget::space().into(),
+        };
+        let status = row![
+            label("Status", CHOICES),
+            statuses,
+            iced::widget::space::horizontal(),
+            stamp
+        ]
+        .spacing(LABEL_GAP)
+        .height(CHOICES)
+        .align_y(iced::Center);
+        let (caption, invalid) = due_caption(form);
+        let calendar_button = button(
+            container(chrome::label("📅", 14, colors.muted))
+                .center_x(BUTTON)
+                .center_y(BUTTON),
+        )
+        .padding(0)
+        .width(BUTTON)
+        .height(BUTTON)
+        .on_press(send(Event::OpenCalendar))
+        .style(move |_, status| chrome::control(definition, status, false, false));
+        let due = row![
+            label("Due", FIELD),
+            column![
+                row![
+                    container(
+                        input("fri, +3d, 2026-12-01", form.due(), DUE)
+                            .on_input(move |text| send(Event::Due(text)))
+                    )
+                    .height(FIELD)
+                    .width(Fill),
+                    calendar_button
+                ]
+                .spacing(BUTTON_GAP)
+                .height(FIELD),
+                container(chrome::label(
+                    caption,
+                    12,
+                    if invalid { colors.danger } else { colors.muted }
+                ))
+                .height(CAPTION)
+                .padding([0, 2]),
+            ]
+            .spacing(4)
+        ]
+        .spacing(LABEL_GAP);
+        let priorities = row(PRIORITIES.iter().map(|level| {
+            let chosen = *level == form.priority();
+            let name = level.map_or("None", Priority::name);
+            let mut content = row![].spacing(4).align_y(iced::Center);
+            if let Some(level) = level {
+                content = content.push(chrome::label(level.glyph().to_string(), 11, colors.body));
+            }
+            content = content.push(chrome::label(
+                name,
+                12,
+                if chosen { colors.accent } else { colors.body },
+            ));
+            choice(
+                definition,
+                content.into(),
+                chosen,
+                chosen && focused(Slot::Priority),
+                send(Event::Priority(*level)),
+            )
+        }))
+        .spacing(4)
+        .wrap()
+        .vertical_spacing(4);
+        let priority = row![label("Priority", CHOICES), priorities].spacing(LABEL_GAP);
+        let live = Rc::new(RefCell::new(open.form.pending_owner().to_owned()));
+        let owners = self.owners_field(open, Rc::clone(&live));
+        let preview = form.preview();
+        let writes = column![
+            container(iced::widget::space())
+                .width(Fill)
+                .height(1)
+                .style(move |_| chrome::surface(definition, colors.divider, 0.0, false)),
+            chrome::label("Writes", 13, colors.muted),
+            container(
+                text(preview)
+                    .font(fonts::EDITOR)
+                    .size(12)
+                    .color(theme::color(colors.text))
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            )
+            .padding([6, 8])
+            .width(Fill)
+            .style(move |_| chrome::surface(definition, colors.code_block, 6.0, false)),
+        ]
+        .spacing(6);
+        let mut content =
+            column![header, description, status, due, priority, owners, writes].spacing(GAP);
+        if let Some(error) = &open.error {
+            content = content.push(chrome::label(error.as_str(), 12, colors.danger));
+        }
+        let foot = row![
+            chrome::label("Tab moves · ↵ saves · Esc cancels", 12, colors.faint),
+            iced::widget::space::horizontal(),
+            form_button(
+                definition,
+                "Cancel",
+                false,
+                focused(Slot::Cancel),
+                send(Event::Cancel)
+            ),
+            form_button(
+                definition,
+                "Save",
+                true,
+                focused(Slot::Save),
+                send(Event::Save)
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+        content = content.push(foot);
+        let card = container(content)
+            .padding([PAD_Y, PAD_X])
+            .width(WIDTH)
+            .max_width((self.viewport.width - 32.0).max(120.0))
+            .style(move |_| chrome::dialog(definition));
+        // The form's own key and the done toggle's save it, taken by its
+        // keys so that they wait for the form to show, and for an input
+        // method's composition and the calendar to end.
+        let keymap = self.preferences.keymap.clone();
+        let save: form_keys::SaveKeys = Rc::new(move |key, physical, modifiers| {
+            crate::keys::shortcut(key, physical, modifiers)
+                .and_then(|accel| keymap.action(&accel).and_then(CommandId::parse))
+                .is_some_and(|id| matches!(id, CommandId::TaskEdit | CommandId::ToggleTask))
+        });
+        form_keys::form_keys(card, Self::key_slots(), open.focus.index(), live, |key| {
+            Message::TaskForm(Event::Key(key))
+        })
+        .save_keys(save)
+        .owner_choice(self.owner_suggestions().len(), open.suggestion.is_some())
+        .handback(open.due_handback)
+        .passive(open.calendar.is_some())
+        .into()
+    }
+
+    /// The owners row: each owner as a chip with its remove button, the
+    /// field for another, and under it the suggestions.
+    fn owners_field<'a>(
+        &'a self,
+        open: &'a Open,
+        live: Rc<RefCell<String>>,
+    ) -> Element<'a, Message> {
+        let definition = self.definition;
+        let colors = definition.colors;
+        let send = |event| Message::TaskForm(event);
+        let mut chips = row![].spacing(4).align_y(iced::Center);
+        for name in open.form.owners() {
+            let remove = button(chrome::label("×", 14, colors.faint))
+                .padding([0, 5])
+                .on_press(send(Event::RemoveOwner(name.clone())))
+                .style(move |_, status| chrome::control(definition, status, false, true));
+            chips = chips.push(
+                container(
+                    row![chrome::label(format!("@{name}"), 13, colors.owner), remove]
+                        .spacing(2)
+                        .align_y(iced::Center),
+                )
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 2.0,
+                    bottom: 0.0,
+                    left: 8.0,
+                })
+                .style(move |_| chrome::surface(definition, colors.raised, 11.0, true)),
+            );
+        }
+        let field = text_input("@name", open.form.pending_owner())
+            .id(OWNERS)
+            .font(fonts::UI)
+            .size(13)
+            .padding([4, 3])
+            .width(Fill)
+            .on_input(move |text: String| {
+                live.borrow_mut().clone_from(&text);
+                Message::TaskForm(Event::Owner(text))
+            })
+            .style(move |_, status| chrome::input(definition, status, false));
+        let focused = open.focus == Slot::Owners && open.calendar.is_none();
+        let boxed = container(chips.push(field))
+            .padding([2, 5])
+            .height(FIELD)
+            .width(Fill)
+            .align_y(iced::alignment::Vertical::Center)
+            .style(move |_| container::Style {
+                border: iced::Border {
+                    color: theme::color(if focused {
+                        colors.accent
+                    } else {
+                        colors.control_border
+                    }),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..chrome::surface(definition, colors.input, 6.0, false)
+            })
+            .clip(true);
+        let suggestions = self.owner_suggestions();
+        let mut offered = row![].spacing(4).align_y(iced::Center);
+        for (at, name) in suggestions.iter().enumerate() {
+            let chosen = open.suggestion == Some(at);
+            // The one Tab takes, drawn in the accent with no fill.
+            let tentative = open.suggestion.is_none()
+                && at == 0
+                && !open.form.pending_owner().trim().is_empty();
+            offered = offered.push(
+                button(chrome::label(
+                    format!("@{name}"),
+                    12,
+                    if chosen || tentative {
+                        colors.accent
+                    } else {
+                        colors.owner
+                    },
+                ))
+                .padding([2, 8])
+                .on_press(send(Event::AddOwner(name.clone())))
+                .style(move |_, status| {
+                    let mut style = chrome::control(definition, status, chosen, false);
+                    style.border.radius = 11.0.into();
+                    style
+                }),
+            );
+        }
+        if !suggestions.is_empty() {
+            offered = offered.push(iced::widget::space::horizontal());
+            offered = offered.push(chrome::label(
+                "↑↓ choose · ⇥ takes the highlighted · ↵ adds as typed",
+                11,
+                colors.faint,
+            ));
+        }
+        row![
+            container(chrome::label("Owners", 13, colors.muted))
+                .width(LABEL)
+                .height(FIELD)
+                .align_y(iced::alignment::Vertical::Center),
+            if suggestions.is_empty() {
+                column![boxed]
+            } else {
+                column![boxed, container(offered).height(22).clip(true)].spacing(4)
+            }
+        ]
+        .spacing(LABEL_GAP)
+        .into()
+    }
+}
+
+/// `at` moved `by` among `count`, round the ends.
+fn stepped(at: usize, count: usize, by: i32) -> usize {
+    let count = i64::try_from(count).unwrap_or(1).max(1);
+    let at = i64::try_from(at).unwrap_or(0);
+    usize::try_from((at + i64::from(by)).rem_euclid(count)).unwrap_or(0)
+}
+
+/// A choice of a row of choices: the chosen one filled with the accent's
+/// tint and edged in it, ringed while its row has the keyboard.
+fn choice<'a>(
+    definition: wren_core::theme::Theme,
+    content: Element<'a, Message>,
+    chosen: bool,
+    ringed: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    let colors = definition.colors;
+    button(container(content).center_y(CHOICES - 2.0))
+        .padding([0, 7])
+        .height(CHOICES)
+        .on_press(message)
+        .style(move |_, status| {
+            let mut style = chrome::control(definition, status, chosen, false);
+            if chosen {
+                style.border.color = theme::color(colors.accent);
+                style.border.width = if ringed { 2.0 } else { 1.0 };
+            }
+            style
+        })
+        .into()
+}
+
+/// Save, the accent's, or Cancel, ringed while it has the keyboard.
+fn form_button<'a>(
+    definition: wren_core::theme::Theme,
+    name: &'a str,
+    primary: bool,
+    ringed: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    let colors = definition.colors;
+    let label = chrome::label(name, 13, if primary { colors.editor } else { colors.body })
+        .font(fonts::MEDIUM);
+    button(label)
+        .padding([6, 14])
+        .on_press(message)
+        .style(move |_, status| {
+            let mut style = chrome::control(definition, status, false, false);
+            if primary {
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                let mut fill = theme::color(colors.accent);
+                if hovered {
+                    fill.a = 0.88;
+                }
+                style.background = Some(fill.into());
+                style.text_color = theme::color(colors.editor);
+                style.border.color = theme::color(colors.accent);
+            }
+            if ringed {
+                style.border.color =
+                    theme::color(if primary { colors.text } else { colors.accent });
+                style.border.width = 2.0;
+            }
+            style
+        })
+        .into()
+}
+
+/// What the due field says, for the harness.
+#[cfg_attr(not(feature = "smoke-test"), allow(dead_code))]
+pub(super) fn due_value_name(form: &Form) -> Option<String> {
+    match form.due_value() {
+        Ok(Some(Parsed::Date(date))) => Some(date.to_string()),
+        Ok(Some(Parsed::Invalid)) => Some("invalid".into()),
+        Ok(None) => None,
+        Err(problem) => Some(problem.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced::keyboard::key::Named;
+    use iced::keyboard::{Key, Modifiers};
+    use iced::widget::text_editor::{Cursor, Position};
+    use wren_core::ops::{Op, Session};
+    use wren_markdown::date::Date;
+
+    use super::super::commands::{Command, CommandId, Disposition};
+    use super::super::tasks::Clock;
+    use super::super::Options;
+    use super::*;
+
+    const NOTE: &str = "# Tasks\n\
+        \n\
+        - [/] Draft the runbook @alice ⏫ 📅 2026-11-23\n\
+        - [ ] Two priorities ⏫ 🔼\n\
+        \n\
+        Plain line\n\
+        > \n\
+        ```\n\
+        - [ ] fenced\n\
+        ```\n";
+
+    /// An app on `engine` with `tasks`, today pinned to Thursday 19
+    /// November 2026, and `text` open as a note.
+    fn note_app(engine: &str, tasks: &str, text: &str) -> (tempfile::TempDir, App) {
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join("workspace/Work/Tasks");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("List.md"), text).unwrap();
+        let config = directory.path().join("config/config.conf");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            format!("editor-engine = {engine}\ntasks = {tasks}\n"),
+        )
+        .unwrap();
+        let options = Options {
+            editor: true,
+            ..Options::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(config));
+        app.clock = Clock::new(Some(Date::parse_iso("2026-11-19").unwrap()));
+        app.apply_preferences();
+        app.workspace_mode = true;
+        let workspace = directory.path().join("workspace");
+        app.session = Some(Session::open_with(&workspace, app.session_options()).unwrap());
+        app.sync_editor(true);
+        let note = app.model().unwrap().notes[0].id;
+        let _ = app.process_core(Op::OpenNote { note: Some(note) });
+        assert_eq!(app.editor.text(), text, "{engine}");
+        (directory, app)
+    }
+
+    fn line_of(text: &str, prefix: &str) -> usize {
+        text.split('\n')
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix:?}"))
+    }
+
+    fn caret(line: usize, column: usize) -> Cursor {
+        Cursor {
+            position: Position { line, column },
+            selection: None,
+        }
+    }
+
+    fn send(app: &mut App, event: Event) {
+        let _ = app.update(Message::TaskForm(event));
+    }
+
+    fn key(app: &mut App, key: FormKey) {
+        send(app, Event::Key(key));
+    }
+
+    fn open(app: &App) -> &Open {
+        app.task_form.as_ref().expect("the form is open")
+    }
+
+    /// The form's own key, as the focused editor routes it, carried out as
+    /// the app carries out what the editor publishes.
+    fn form_key(app: &mut App) -> Vec<wren_editor::Message> {
+        let modifiers = if cfg!(target_os = "macos") {
+            Modifiers::LOGO | Modifiers::SHIFT
+        } else {
+            Modifiers::CTRL | Modifiers::SHIFT
+        };
+        let messages = app.editor.key_message(Key::Named(Named::Enter), modifiers);
+        for message in messages.clone() {
+            let _ = app.update(Message::Editor(message));
+        }
+        // The app's key handling hears of the same press afterwards.
+        let accel = app.preferences.keymap.accel("task.edit").cloned();
+        if let Some(accel) = accel.filter(|_| app.preferences.tasks) {
+            let _ = app.update(Message::Key(crate::keys::Input::Accel(accel)));
+        }
+        messages
+    }
+
+    /// The note's text in the editor and in the session's draft.
+    fn text(app: &App) -> String {
+        let text = app.editor.text();
+        let draft = &app.session.as_ref().unwrap().document().unwrap().text;
+        assert_eq!(&text, draft, "the editor's text is the draft");
+        text
+    }
+
+    fn replaced(line: usize, new: &str) -> String {
+        let mut lines: Vec<&str> = NOTE.split('\n').collect();
+        lines[line] = new;
+        lines.join("\n")
+    }
+
+    #[test]
+    fn the_key_opens_the_form_and_saving_writes_one_undo_step_on_both_engines() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", NOTE);
+            let at = line_of(NOTE, "- [/] Draft");
+            let column = "- [/] Draft".len();
+            app.editor.move_cursor(caret(at, column));
+            let messages = form_key(&mut app);
+            let id = CommandId::TaskEdit.payload();
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [wren_editor::Message::Spell(wren_editor::SpellEvent::Request(request))]
+                        if *request == id
+                ),
+                "{engine}: {messages:?}"
+            );
+            let form = &open(&app).form;
+            assert_eq!(form.kind(), FormKind::Edit, "{engine}");
+            assert_eq!(form.description(), "Draft the runbook @alice");
+            assert_eq!(form.due(), "2026-11-23");
+            assert_eq!(open(&app).focus, Slot::Description);
+            // Every field, then Save.
+            send(&mut app, Event::Description("Draft the plan @alice".into()));
+            send(&mut app, Event::Status(StatusType::Done));
+            send(&mut app, Event::Priority(Some(Priority::Low)));
+            send(&mut app, Event::Due("fri".into()));
+            send(&mut app, Event::Owner("sam".into()));
+            key(&mut app, FormKey::Accept);
+            let written = "- [x] Draft the plan @alice @sam 🔽 📅 2026-11-20 ✅ 2026-11-19";
+            assert_eq!(open(&app).form.preview(), written, "{engine}");
+            assert_eq!(text(&app), NOTE, "{engine}: nothing is written before Save");
+            key(&mut app, FormKey::Save);
+            assert!(app.task_form.is_none(), "{engine}");
+            assert_eq!(text(&app), replaced(at, written), "{engine}");
+            // The caret was in the description: it ends the new one.
+            assert_eq!(
+                app.editor.cursor(),
+                caret(at, "- [x] Draft the plan @alice".len()),
+                "{engine}"
+            );
+            assert!(app.editor.handed_back(), "{engine}");
+            let _ = app.update(Message::Editor(wren_editor::Message::Undo));
+            assert_eq!(text(&app), NOTE, "{engine}: one undo step");
+            assert!(!app.editor.can_undo(), "{engine}");
+        }
+    }
+
+    #[test]
+    fn a_form_nobody_changed_writes_nothing_and_escape_cancels() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "- [ ] Two");
+        app.editor.move_cursor(caret(at, 3));
+        let outcome = app.dispatch(Command::Run(CommandId::TaskEdit));
+        assert_eq!(outcome.processed.disposition, Disposition::Completed);
+        // A priority set back to the one the line reads is no change, so
+        // the line's two glyphs are not tidied into one.
+        send(&mut app, Event::Priority(None));
+        send(&mut app, Event::Priority(Some(Priority::Medium)));
+        send(&mut app, Event::Status(StatusType::Doing));
+        send(&mut app, Event::Status(StatusType::Open));
+        key(&mut app, FormKey::Save);
+        assert!(app.task_form.is_none());
+        assert_eq!(text(&app), NOTE);
+        assert!(!app.editor.can_undo());
+        assert_eq!(app.editor.cursor(), caret(at, 3));
+
+        // Escape cancels, writing nothing, whatever was typed; the app's key
+        // handling then hears the same press and drops it.
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::Description("Something else".into()));
+        key(&mut app, FormKey::Escape);
+        assert!(app.task_form.is_none());
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::FieldEscape,
+        )));
+        assert_eq!(app.form_escapes, 0, "the press is claimed once");
+        assert_eq!(text(&app), NOTE);
+        assert_eq!(app.editor.cursor(), caret(at, 3));
+        // So does Cancel, which a press outside it sends too.
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::Status(StatusType::Done));
+        send(&mut app, Event::Cancel);
+        assert!(app.task_form.is_none());
+        assert_eq!(text(&app), NOTE);
+    }
+
+    #[test]
+    fn a_blank_or_plain_line_becomes_a_task_on_both_engines() {
+        for engine in ["classic", "advanced"] {
+            let cases = [
+                ("", FormKind::New, "- [ ] Call the bank ⏫"),
+                ("Plain line", FormKind::Make, "- [ ] Plain line ⏫"),
+                ("> ", FormKind::New, "> - [ ] Call the bank ⏫"),
+            ];
+            for (prefix, kind, written) in cases {
+                let (_directory, mut app) = note_app(engine, "on", NOTE);
+                // The blank line after the tasks.
+                let at = if prefix.is_empty() {
+                    line_of(NOTE, "- [ ] Two") + 1
+                } else {
+                    line_of(NOTE, prefix)
+                };
+                app.editor.move_cursor(caret(at, 0));
+                let _ = form_key(&mut app);
+                assert_eq!(open(&app).form.kind(), kind, "{engine} {prefix:?}");
+                assert_eq!(
+                    open(&app).title(),
+                    if kind == FormKind::New {
+                        "New task"
+                    } else {
+                        "Make a task"
+                    }
+                );
+                if kind == FormKind::New {
+                    send(&mut app, Event::Description("Call the bank".into()));
+                }
+                key(&mut app, FormKey::Pick("h".into()));
+                assert_eq!(open(&app).form.priority(), None, "not on the description");
+                key(&mut app, FormKey::Focus(Slot::Priority.index()));
+                key(&mut app, FormKey::Pick("h".into()));
+                assert_eq!(open(&app).form.preview(), written);
+                key(&mut app, FormKey::Save);
+                assert!(app.task_form.is_none());
+                assert_eq!(text(&app), replaced(at, written), "{engine} {prefix:?}");
+                assert_eq!(app.editor.cursor(), caret(at, written.len()));
+                let _ = app.update(Message::Editor(wren_editor::Message::Undo));
+                assert_eq!(text(&app), NOTE, "{engine}: one undo step");
+            }
+        }
+    }
+
+    #[test]
+    fn no_form_where_no_task_can_go_nor_with_tasks_off() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        for prefix in ["# Tasks", "- [ ] fenced", "```"] {
+            app.editor.move_cursor(caret(line_of(NOTE, prefix), 0));
+            assert!(!app.command_enabled(CommandId::TaskEdit), "{prefix}");
+            let outcome = app.dispatch(Command::Run(CommandId::TaskEdit));
+            assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+            let _ = form_key(&mut app);
+            assert!(app.task_form.is_none(), "{prefix}");
+            assert_eq!(text(&app), NOTE);
+        }
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "off", NOTE);
+            app.editor
+                .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+            assert!(!app.command_enabled(CommandId::TaskEdit));
+            let outcome = app.dispatch(Command::Run(CommandId::TaskEdit));
+            assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+            // Its key is no command's: it does what it did before tasks.
+            let messages = form_key(&mut app);
+            assert!(
+                !messages.iter().any(|message| matches!(
+                    message,
+                    wren_editor::Message::Spell(wren_editor::SpellEvent::Request(_))
+                )),
+                "{engine}: {messages:?}"
+            );
+            assert!(app.task_form.is_none());
+        }
+    }
+
+    #[test]
+    fn saving_is_refused_once_the_line_changed_and_the_form_stays() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", NOTE);
+            let at = line_of(NOTE, "- [/] Draft");
+            app.editor.move_cursor(caret(at, 3));
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            send(&mut app, Event::Status(StatusType::Done));
+            // The line changes underneath, as a reload from disk changes it.
+            let changed = replaced(at, "- [/] Draft the runbook @alice ⏫");
+            app.editor.replace_text(&changed, true);
+            key(&mut app, FormKey::Save);
+            let form = open(&app);
+            assert_eq!(
+                form.error.as_deref(),
+                Some("The task changed since the form opened; nothing was written"),
+                "{engine}"
+            );
+            assert_eq!(app.editor.text(), changed);
+            assert_eq!(
+                app.last_processed.as_ref().map(|done| done.disposition),
+                Some(Disposition::Blocked)
+            );
+            // A line moved by a line above it is refused too.
+            app.editor.replace_text(&format!("\n{NOTE}"), true);
+            key(&mut app, FormKey::Save);
+            assert!(app.task_form.is_some(), "{engine}");
+            assert_eq!(app.editor.text(), format!("\n{NOTE}"));
+            key(&mut app, FormKey::Escape);
+            assert!(app.task_form.is_none());
+        }
+        // A new task's line too.
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "Plain line");
+        app.editor.move_cursor(caret(at, 0));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        let changed = replaced(at, "# Plain line");
+        app.editor.replace_text(&changed, true);
+        key(&mut app, FormKey::Save);
+        assert!(open(&app).error.is_some());
+        assert_eq!(app.editor.text(), changed);
+    }
+
+    #[test]
+    fn a_due_field_that_names_no_date_keeps_the_form_open() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "- [/] Draft");
+        app.editor.move_cursor(caret(at, 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::Due("someday".into()));
+        assert_eq!(
+            due_caption(&open(&app).form),
+            ("Not a date. Try fri, +3d or 2026-12-01.".to_owned(), true)
+        );
+        key(&mut app, FormKey::Save);
+        assert_eq!(open(&app).focus, Slot::Due);
+        assert_eq!(
+            open(&app).error.as_deref(),
+            Some("Not a date. Try fri, +3d or 2026-12-01.")
+        );
+        assert_eq!(text(&app), NOTE);
+        send(&mut app, Event::Due("+2w".into()));
+        assert_eq!(
+            due_caption(&open(&app).form).0,
+            "Thursday 3 December 2026 · in 2 weeks"
+        );
+        assert_eq!(open(&app).error, None, "a change clears it");
+        send(&mut app, Event::Due(String::new()));
+        assert_eq!(due_caption(&open(&app).form), ("No due date".into(), false));
+        key(&mut app, FormKey::Save);
+        assert_eq!(
+            text(&app),
+            replaced(at, "- [/] Draft the runbook @alice ⏫")
+        );
+    }
+
+    #[test]
+    fn the_calendar_in_the_form_gives_the_due_field_back_the_keyboard() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", NOTE);
+            let at = line_of(NOTE, "- [/] Draft");
+            app.editor.move_cursor(caret(at, 3));
+            let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+            key(&mut app, FormKey::Focus(Slot::Due.index()));
+            key(&mut app, FormKey::Calendar);
+            let model = open(&app).calendar.as_ref().expect("the calendar is open");
+            assert_eq!(model.selected().to_string(), "2026-11-23", "{engine}");
+            assert!(app.task_form_calendar_bounds().is_some());
+            // Typing in its field and Enter set the due field, not the note.
+            let field = |app: &mut App, event| {
+                send(app, Event::Calendar(CalendarEvent::Field(event)));
+            };
+            field(&mut app, FieldEvent::Typed("fri".into()));
+            field(&mut app, FieldEvent::Enter);
+            assert!(open(&app).calendar.is_none(), "{engine}");
+            assert_eq!(open(&app).focus, Slot::Due);
+            assert_eq!(open(&app).form.due(), "2026-11-20");
+            assert_eq!(text(&app), NOTE);
+            // Escape in the calendar closes it alone, and the app's key
+            // handling drops its copy of the press.
+            send(&mut app, Event::OpenCalendar);
+            field(&mut app, FieldEvent::Typed("+1w".into()));
+            field(&mut app, FieldEvent::Escape);
+            let _ = app.update(Message::Key(crate::keys::Input::Nav(
+                crate::keys::Nav::FieldEscape,
+            )));
+            assert!(open(&app).calendar.is_none());
+            assert_eq!(open(&app).form.due(), "2026-11-20", "Escape writes nothing");
+            assert_eq!(open(&app).focus, Slot::Due);
+            // A click on a day, Clear, and a press outside the calendar.
+            send(&mut app, Event::OpenCalendar);
+            send(
+                &mut app,
+                Event::Calendar(CalendarEvent::Pick(Date::parse_iso("2026-11-25").unwrap())),
+            );
+            assert_eq!(open(&app).form.due(), "2026-11-25");
+            send(&mut app, Event::OpenCalendar);
+            send(&mut app, Event::Calendar(CalendarEvent::Clear));
+            assert_eq!(open(&app).form.due(), "");
+            send(&mut app, Event::OpenCalendar);
+            send(&mut app, Event::Calendar(CalendarEvent::Outside));
+            assert!(open(&app).calendar.is_none());
+            assert!(app.task_form.is_some(), "the form stays");
+            key(&mut app, FormKey::Save);
+            assert_eq!(
+                text(&app),
+                replaced(at, "- [/] Draft the runbook @alice ⏫"),
+                "{engine}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_status_and_priority_rows_take_their_keys() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Focus(Slot::Status.index()));
+        for (pick, status) in [
+            ("x", StatusType::Done),
+            ("-", StatusType::Cancelled),
+            (" ", StatusType::Open),
+            ("/", StatusType::Doing),
+            ("q", StatusType::Doing),
+        ] {
+            key(&mut app, FormKey::Pick(pick.into()));
+            assert_eq!(open(&app).form.status(), status, "{pick:?}");
+        }
+        key(&mut app, FormKey::Step(1));
+        assert_eq!(open(&app).form.status(), StatusType::Done);
+        key(&mut app, FormKey::Step(-1));
+        key(&mut app, FormKey::Step(-1));
+        key(&mut app, FormKey::Step(-1));
+        assert_eq!(
+            open(&app).form.status(),
+            StatusType::Cancelled,
+            "round the ends"
+        );
+        key(&mut app, FormKey::Focus(Slot::Priority.index()));
+        for (pick, priority) in [
+            ("H", Some(Priority::Highest)),
+            ("L", Some(Priority::Lowest)),
+            ("m", Some(Priority::Medium)),
+            ("l", Some(Priority::Low)),
+            ("n", None),
+            ("h", Some(Priority::High)),
+        ] {
+            key(&mut app, FormKey::Pick(pick.into()));
+            assert_eq!(open(&app).form.priority(), priority, "{pick:?}");
+        }
+        key(&mut app, FormKey::Step(1));
+        assert_eq!(open(&app).form.priority(), Some(Priority::Medium));
+        key(&mut app, FormKey::Step(-2));
+        assert_eq!(open(&app).form.priority(), None, "round the ends: None");
+        // The buttons are pressed by their slot.
+        key(&mut app, FormKey::Press(Slot::Cancel.index()));
+        assert!(app.task_form.is_none());
+        assert_eq!(text(&app), NOTE);
+    }
+
+    #[test]
+    fn owners_are_added_and_removed_from_their_field() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "- [/] Draft");
+        app.editor.move_cursor(caret(at, 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Focus(Slot::Owners.index()));
+        send(&mut app, Event::Owner("@priya".into()));
+        key(&mut app, FormKey::Accept);
+        assert_eq!(open(&app).form.pending_owner(), "");
+        assert_eq!(open(&app).form.owners(), ["alice", "priya"]);
+        // Backspace with nothing typed removes the last; the remove button
+        // removes any, from the description's text too.
+        key(&mut app, FormKey::RemoveLast);
+        assert_eq!(open(&app).form.owners(), ["alice"]);
+        send(&mut app, Event::RemoveOwner("alice".into()));
+        assert_eq!(open(&app).form.description(), "Draft the runbook");
+        // Escape with a name typed empties the field and the form stays.
+        send(&mut app, Event::Owner("bo".into()));
+        key(&mut app, FormKey::Clear);
+        assert_eq!(open(&app).form.pending_owner(), "");
+        assert!(app.task_form.is_some());
+        // A name left in the field is added on Save.
+        send(&mut app, Event::Owner("sam".into()));
+        key(&mut app, FormKey::Save);
+        assert_eq!(
+            text(&app),
+            replaced(at, "- [/] Draft the runbook @sam ⏫ 📅 2026-11-23")
+        );
+    }
+
+    #[test]
+    fn owners_are_offered_from_the_workspace_tab_takes_one_and_enter_adds_as_typed() {
+        // On the classic engine, with suggestions in the note off: the
+        // form offers the workspace's owners all the same.
+        let directory = crate::test_support::tempdir();
+        let group = directory.path().join("workspace/Work/Tasks");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("List.md"), NOTE).unwrap();
+        std::fs::write(
+            group.join("Other.md"),
+            "- [ ] Plan @samantha\n- [ ] Call @Sam\n- [ ] Ask @sam\n- [ ] Ask @sam\n",
+        )
+        .unwrap();
+        // Both notes changed at one time, so the owners rank by name.
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for name in ["List.md", "Other.md"] {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(group.join(name))
+                .unwrap();
+            file.set_modified(at).unwrap();
+        }
+        let config = directory.path().join("config/config.conf");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "editor-engine = classic\ntasks = on\ntasks-suggest = off\n",
+        )
+        .unwrap();
+        let options = Options {
+            editor: true,
+            ..Options::default()
+        };
+        let (mut app, _) = App::with_config(options, None, Some(config));
+        app.clock = Clock::new(Some(Date::parse_iso("2026-11-19").unwrap()));
+        app.apply_preferences();
+        app.workspace_mode = true;
+        let workspace = directory.path().join("workspace");
+        app.session = Some(Session::open_with(&workspace, app.session_options()).unwrap());
+        app.sync_editor(true);
+        let note = (app.model().unwrap().notes.iter())
+            .find(|note| note.title == "List")
+            .unwrap()
+            .id;
+        let _ = app.process_core(Op::OpenNote { note: Some(note) });
+        let at = line_of(NOTE, "- [ ] Two");
+        app.editor.move_cursor(caret(at, 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        key(&mut app, FormKey::Focus(Slot::Owners.index()));
+        // The list the note's suggestions read, in the spelling written
+        // most, and none the task has.
+        assert_eq!(app.owner_suggestions(), ["alice", "sam", "samantha"]);
+        send(&mut app, Event::Owner("SA".into()));
+        assert_eq!(app.owner_suggestions(), ["sam", "samantha"]);
+        // Enter adds the name as typed and never completes it.
+        send(&mut app, Event::Owner("sama".into()));
+        key(&mut app, FormKey::Accept);
+        assert_eq!(open(&app).form.owners(), ["sama"]);
+        // Nor changes its spelling for one the workspace has.
+        send(&mut app, Event::Owner("SAM".into()));
+        key(&mut app, FormKey::Accept);
+        assert_eq!(open(&app).form.owners(), ["sama", "SAM"]);
+        // Tab takes the owner offered first.
+        send(&mut app, Event::Owner("s".into()));
+        assert_eq!(app.owner_suggestions(), ["samantha"]);
+        key(&mut app, FormKey::Complete);
+        assert_eq!(open(&app).form.owners(), ["sama", "SAM", "samantha"]);
+        // Up and Down choose, and Enter takes the one chosen.
+        key(&mut app, FormKey::RemoveLast);
+        key(&mut app, FormKey::RemoveLast);
+        assert_eq!(app.owner_suggestions(), ["alice", "sam", "samantha"]);
+        key(&mut app, FormKey::Suggest(1));
+        key(&mut app, FormKey::Suggest(1));
+        key(&mut app, FormKey::Suggest(1));
+        key(&mut app, FormKey::Suggest(1));
+        assert_eq!(open(&app).suggestion, Some(0), "round the ends");
+        key(&mut app, FormKey::Suggest(-1));
+        key(&mut app, FormKey::Accept);
+        assert_eq!(open(&app).form.owners(), ["sama", "samantha"]);
+    }
+
+    #[test]
+    fn the_task_menus_edit_row_opens_the_form_for_its_task() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        let at = line_of(NOTE, "- [ ] Two");
+        app.editor.move_cursor(caret(0, 0));
+        let palette = crate::theme::editor_colors(app.definition).1;
+        app.editor.lay_out(800.0, palette);
+        let column = NOTE.split('\n').nth(at).unwrap().find("Two").unwrap();
+        let message = app.editor.right_click_message(at, column).expect("a menu");
+        let _ = app.update(Message::Editor(message));
+        let labels = app
+            .editor
+            .popover()
+            .expect("the task menu")
+            .labels()
+            .to_vec();
+        assert_eq!(labels.last().map(String::as_str), Some("Edit task…"));
+        for message in app
+            .editor
+            .key_message(Key::Character("e".into()), Modifiers::empty())
+        {
+            let _ = app.update(Message::Editor(message));
+        }
+        assert!(app.editor.popover().is_none());
+        assert_eq!(open(&app).form.line(), at);
+        assert_eq!(open(&app).form.kind(), FormKind::Edit);
+        key(&mut app, FormKey::Escape);
+        assert_eq!(text(&app), NOTE);
+        assert_eq!(app.editor.cursor(), caret(0, 0));
+    }
+
+    #[test]
+    fn the_form_owns_the_keyboard_while_open() {
+        let (_directory, mut app) = note_app("classic", "on", NOTE);
+        let at = line_of(NOTE, "- [/] Draft");
+        app.editor.move_cursor(caret(at, 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        // The editor's messages are dropped: nothing typed reaches the note.
+        let typed = wren_editor::Message::Action(iced::widget::text_editor::Action::Edit(
+            iced::widget::text_editor::Edit::Insert('z'),
+        ));
+        let _ = app.update(Message::Editor(typed));
+        assert_eq!(text(&app), NOTE);
+        // The app's shortcuts do nothing; the palette's does not open it.
+        let _ = app.update(super::super::preferences::shortcut(
+            CommandId::CommandPalette,
+        ));
+        assert!(app.palette.is_none());
+        assert!(app.task_form.is_some());
+        // Nor do its save keys, as the app's key handling hears them: the
+        // form's own keys take them once it shows (`form_keys.rs`), so a
+        // press in the batch that opened it, or one an input method or the
+        // calendar had, saves nothing.
+        send(&mut app, Event::Status(StatusType::Done));
+        for action in ["task.edit", "markdown.toggle_task"] {
+            let accel = app.preferences.keymap.accel(action).unwrap().clone();
+            let _ = app.update(Message::Key(crate::keys::Input::Accel(accel)));
+            assert!(app.task_form.is_some(), "{action}");
+        }
+        send(&mut app, Event::OpenCalendar);
+        let accel = app.preferences.keymap.accel("task.edit").unwrap().clone();
+        let _ = app.update(Message::Key(crate::keys::Input::Accel(accel)));
+        assert!(app.task_form.is_some());
+        assert_eq!(text(&app), NOTE);
+        // What its keys hand it for one saves.
+        send(&mut app, Event::Calendar(CalendarEvent::Outside));
+        key(&mut app, FormKey::Save);
+        assert!(app.task_form.is_none());
+        assert_eq!(
+            text(&app),
+            replaced(
+                at,
+                "- [x] Draft the runbook @alice ⏫ 📅 2026-11-23 ✅ 2026-11-19"
+            )
+        );
+    }
+
+    #[test]
+    fn the_batch_that_opens_it_neither_saves_nor_closes_it_on_both_engines() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", NOTE);
+            let blank = line_of(NOTE, "- [ ] Two") + 1;
+            app.editor.move_cursor(caret(blank, 0));
+            // The opening key, then the done toggle's in the same batch: the
+            // editor drops it, and the app's key handling, which hears it
+            // too, takes it for nothing.
+            let _ = form_key(&mut app);
+            let toggle = app
+                .preferences
+                .keymap
+                .accel("markdown.toggle_task")
+                .unwrap()
+                .clone();
+            let _ = app.update(Message::Key(crate::keys::Input::Accel(toggle)));
+            assert!(app.task_form.is_some(), "{engine}");
+            assert_eq!(text(&app), NOTE, "{engine}: no empty task");
+        }
+    }
+
+    #[test]
+    fn a_shortcut_the_closing_form_dropped_runs_nothing_but_quit() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        // Enter saved, and the form's keys dropped the shortcut after it.
+        key(&mut app, FormKey::Save);
+        key(&mut app, FormKey::HeldShortcut);
+        assert!(app.task_form.is_none());
+        let _ = app.update(super::super::preferences::shortcut(CommandId::Jump));
+        assert!(app.palette.is_none(), "the app drops its copy");
+        // The next press of it is the app's again.
+        let _ = app.update(super::super::preferences::shortcut(CommandId::Jump));
+        assert!(app.palette.is_some());
+    }
+
+    #[test]
+    fn another_engine_closes_it_writing_nothing() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::Status(StatusType::Done));
+        let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
+        assert_ne!(app.editor.backend(), wren_editor::BackendKind::Owned);
+        assert!(app.task_form.is_none());
+        assert_eq!(text(&app), NOTE);
+    }
+
+    #[test]
+    fn another_note_or_the_palette_closes_it_writing_nothing() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::Status(StatusType::Done));
+        let _ = app.update(Message::PaletteOpen(super::super::palette::Mode::Commands));
+        assert!(app.task_form.is_none());
+        assert_eq!(text(&app), NOTE);
+        let _ = app.close_palette();
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        let _ = app.process_core(Op::OpenNote { note: None });
+        let _ = app.update(Message::Tick);
+        assert!(app.task_form.is_none());
+    }
+}

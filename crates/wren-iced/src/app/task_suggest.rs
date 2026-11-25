@@ -297,12 +297,19 @@ impl App {
             self.owners.clear();
             self.offer_owners();
         }
-        let (Some(line), Some(session)) = (line.filter(|_| on), self.session.as_ref()) else {
+        // The task form offers the same owners, on either engine and with
+        // suggestions off; the line it writes is a whole one.
+        let target = if self.task_form.is_some() {
+            Some(None)
+        } else {
+            line.filter(|_| on).map(Some)
+        };
+        let (Some(line), Some(session)) = (target, self.session.as_ref()) else {
             return;
         };
         let index = session.index();
         // The line typed on names no one yet.
-        let skip = session.document().map(|document| (document.note, line));
+        let skip = line.and_then(|line| session.document().map(|document| (document.note, line)));
         if self.owners.is_current(identity, index.revision(), skip) {
             return;
         }

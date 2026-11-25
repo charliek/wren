@@ -403,7 +403,8 @@ impl App {
                 return self.board_request(request)
             }
             "tasks.get" | "tasks.set_today" | "tasks.calendar" | "tasks.calendar_type"
-            | "tasks.calendar_click" | "tasks.owners" => return self.tasks_request(request),
+            | "tasks.calendar_click" | "tasks.owners" | "tasks.form" | "tasks.form_type"
+            | "tasks.form_click" => return self.tasks_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -969,9 +970,13 @@ impl App {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
-        // The calendar's field has the keyboard while it is open.
+        // The calendar's field has the keyboard while it is open, and the
+        // task form while it is.
         if self.calendar.is_some() {
             return self.calendar_key(key, modifiers);
+        }
+        if self.task_form.is_some() {
+            return self.form_key(key, modifiers);
         }
         let menu_open = self.editor.popover().is_some();
         let (messages, captured) = self.editor.key_routing(key.clone(), modifiers);
@@ -1422,6 +1427,9 @@ const FOCUS_NAMES: &[&str] = &[
     "palette-query",
     "item-name",
     "calendar-field",
+    "task-form-description",
+    "task-form-due",
+    "task-form-owners",
 ];
 
 /// Every focused widget in the tree: the known ones by name, the rest (pane

@@ -88,6 +88,7 @@ pub enum CommandId {
     TaskLowerPriority,
     TaskSetDue,
     TaskClearDue,
+    TaskEdit,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -332,6 +333,14 @@ definitions![
         TaskClearDue,
         "task.clear_due",
         "Clear task due date",
+        "Tasks",
+        Editor
+    ),
+    // The task form (item 6.1), on both engines: it is the app's dialog.
+    (
+        TaskEdit,
+        "task.edit",
+        "Create or edit task…",
         "Tasks",
         Editor
     ),
@@ -931,6 +940,8 @@ impl CommandId {
             // keyboard for the calendar, so that the keys after it in
             // their batch reach neither the note nor the calendar.
             Self::TaskSetDue => Some(wren_editor::KeyRoute::Popover(self.payload())),
+            // So does the task form's, on either engine.
+            Self::TaskEdit => Some(wren_editor::KeyRoute::Popover(self.payload())),
             _ if self.task_change().is_some() => {
                 Some(wren_editor::KeyRoute::Command(self.payload()))
             }
@@ -1015,7 +1026,9 @@ impl CommandId {
     /// with it off it is not listed anywhere, its key is unbound, and it
     /// does not run.
     pub fn tasks(self) -> bool {
-        self.task_change().is_some() || self.task_menu().is_some() || self == Self::TaskSetDue
+        self.task_change().is_some()
+            || self.task_menu().is_some()
+            || matches!(self, Self::TaskSetDue | Self::TaskEdit)
     }
 
     /// The task menu a command opens at the caret's task.
@@ -1211,6 +1224,7 @@ impl App {
                 self.editor.backend() == wren_editor::BackendKind::Owned && self.caret_on_task()
             }
             TaskSetDue => self.calendar_can_open(),
+            TaskEdit => self.task_form_can_open(),
             SpellSuggest => {
                 self.surface() == Surface::Text
                     && self.editor.backend() == wren_editor::BackendKind::Owned
@@ -1533,6 +1547,7 @@ impl App {
                 self.run_task_menu(kind)
             }
             TaskSetDue => self.run_set_due(),
+            TaskEdit => self.run_task_form(),
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 // From the palette: act at the editor's cursor, as the
                 // shortcut does in the editor, then give it the keyboard.

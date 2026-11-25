@@ -143,14 +143,14 @@ def test_each_menu_opens_on_its_token_with_its_rows_and_the_current_one_marked(
         assert priority["text"] == "⏫"
         key(app, "escape")
 
-        # The description and an owner open the task menu; Edit task is
-        # shown and cannot be chosen yet. The due date opens the calendar
+        # The description and an owner open the task menu, whose Edit task
+        # opens the task form (item 6.1). The due date opens the calendar
         # (item 4.1).
         open_line = line_of("- [ ] Open")
         for token in ["alpha", "@sam"]:
             task = right_click(app, open_line, token)
             assert labels(task) == TASK, token
-            assert [row["enabled"] for row in task["rows"]] == [True] * 4 + [True, True, False]
+            assert [row["enabled"] for row in task["rows"]] == [True] * 7
             assert [row["key"] for row in task["rows"]] == ["Space", "/", "X", "-", "D", "P", "E"]
             assert checked(task) == ["Open"], token
             key(app, "escape")
@@ -211,10 +211,16 @@ def test_priority_opens_the_priority_menu_and_escape_writes_nothing(tmp_path: Pa
     with menus_app(tmp_path, "advanced") as (app, path):
         line = line_of("- [ ] Open")
         right_click(app, line, "alpha")
-        # E names a row that cannot be chosen yet: nothing happens.
-        for name in ["e"]:
-            state = key(app, name)
-            assert labels(state["popover"]) == TASK and state["text"] == ORIGINAL, name
+        # E opens the task form for the task (item 6.1); Escape closes it
+        # and writes nothing.
+        state = key(app, "e")
+        assert state["popover"] is None and state["text"] == ORIGINAL
+        form = app.client.call("tasks.form")
+        assert (form["open"], form["line"]) == (True, line), form
+        state = key(app, "escape")
+        assert app.client.call("tasks.form") == {"open": False}
+        assert state["text"] == ORIGINAL
+        right_click(app, line, "alpha")
         state = key(app, "p")
         assert labels(state["popover"]) == PRIORITY
         assert state["popover"]["line"] == line and checked(state["popover"]) == ["None"]

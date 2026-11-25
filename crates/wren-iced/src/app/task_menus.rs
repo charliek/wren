@@ -17,8 +17,7 @@
 //!   None (N), the common three first (Q7);
 //! - task: the status rows, then Set due date… (D), which opens the
 //!   calendar, Priority… (P), which opens the priority menu, and Edit task…
-//!   (E). Edit task is shown and cannot be chosen until the task form (item
-//!   6.1) exists.
+//!   (E), which opens the task form (item 6.1, `task_form.rs`).
 //!
 //! The row of the task's status or priority is checked, and the menu opens
 //! with it selected. A box with a symbol of no status of its own (`[?]`)
@@ -81,7 +80,7 @@ pub(super) enum TaskRow {
     Due,
     /// Open the priority menu for the task.
     PriorityMenu,
-    /// Edit the task (the task form, item 6.1): not yet chosen.
+    /// Edit the task: the task form, for the task.
     Edit,
 }
 
@@ -205,7 +204,7 @@ fn rows(kind: MenuKind, line: &TaskLine<'_>) -> Vec<Row> {
             rows.push(
                 Row::new(TaskRow::Edit.id(), "Edit task…")
                     .accelerator(Accelerator::plain('e'))
-                    .enabled(false),
+                    .opens_dialog(),
             );
             rows
         }
@@ -516,7 +515,11 @@ impl App {
                 };
                 return self.open_calendar(line, at).unwrap_or_else(Task::none);
             }
-            TaskRow::Edit => return Task::none(),
+            TaskRow::Edit => {
+                return self
+                    .open_task_form(line)
+                    .unwrap_or_else(|| self.blocked("A task cannot go on this line").task);
+            }
         };
         self.run_task_change(Some(change), Some(line)).task
     }
@@ -854,7 +857,7 @@ mod tests {
                 ("Cancelled", "-".into(), false, true),
                 ("Set due date…", "D".into(), false, true),
                 ("Priority…", "P".into(), false, true),
-                ("Edit task…", "E".into(), false, false),
+                ("Edit task…", "E".into(), false, true),
             ]
         );
         assert_eq!(task[5].glyph.as_deref(), Some("⏬"), "the task's priority");
@@ -1100,7 +1103,7 @@ mod tests {
 
     /// The task menu's Priority… opens the priority menu for the same
     /// task, whose keys then write; Change due date… opens the calendar;
-    /// Edit task… cannot be chosen; Escape closes a menu and writes
+    /// Edit task… opens the task form; Escape closes a menu and writes
     /// nothing.
     #[test]
     fn priority_opens_the_priority_menu_and_escape_writes_nothing() {
@@ -1125,10 +1128,19 @@ mod tests {
             Some(0),
             "Open, checked"
         );
-        // `e` does nothing, and the menu stays.
+        // `e` opens the task form for the task, and Escape closes it.
         press(&mut app, character("e"), Modifiers::empty());
-        assert!(app.editor.popover().is_some());
+        assert!(app.editor.popover().is_none());
+        assert_eq!(
+            app.task_form.as_ref().map(|open| open.form.line()),
+            Some(at)
+        );
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::Escape,
+        )));
+        assert!(app.task_form.is_none());
         assert_eq!(app.editor.text(), NOTE);
+        right_click(&mut app, at, column);
         // `d` opens the calendar for the task, and Escape closes it.
         press(&mut app, character("d"), Modifiers::empty());
         assert!(app.editor.popover().is_none());

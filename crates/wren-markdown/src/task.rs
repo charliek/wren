@@ -92,11 +92,13 @@ use crate::block::{self, Boxes};
 use crate::date::{Date, Parsed};
 
 mod change;
+mod form;
 mod selection;
 pub mod suggest;
 mod summary;
 
-pub use change::{edit, Change, LineEdit, Stale};
+pub use change::{edit, rewrite, Change, LineEdit, Stale};
+pub use form::{Form, FormKind, Problem};
 pub use selection::{join, toggle, Refused};
 pub use summary::{summary, Look, Piece, Summary, SEPARATOR};
 

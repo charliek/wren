@@ -55,12 +55,14 @@ BOARD_COMMANDS = {
 }
 # The commands that exist only with the `tasks` setting on (discovery/
 # tasks.md §6), the palette's Tasks group: each acts on the caret's task, so
-# none is enabled with the caret on a line of no task.
+# none is enabled with the caret on a line of no task but the task form,
+# which makes a task of a plain line.
 TASK_COMMANDS = {
     "task.set_status", "task.set_priority",
     "task.cycle_status", "task.priority.high", "task.priority.medium", "task.priority.low",
     "task.priority.highest", "task.priority.lowest", "task.priority.none",
     "task.priority.raise", "task.priority.lower", "task.set_due", "task.clear_due",
+    "task.edit",
 }
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
@@ -300,9 +302,10 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is True, key
         assert by_id["navigation.forward"]["enabled"] is False
         assert by_id["note.open_conflict"]["enabled"] is False
-        # The caret is on the note's first line, which is no task's.
+        # The caret is on the note's first line, a plain line, which is no
+        # task's: only the form, which can make it one, is enabled.
         for key in TASK_COMMANDS if tasks else ():
-            assert by_id[key]["enabled"] is False, key
+            assert by_id[key]["enabled"] is (key == "task.edit"), key
         # A Markdown note is open in a group: a new board can be made here,
         # and nothing is exported.
         for key, where in BOARD_COMMANDS.items():

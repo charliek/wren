@@ -964,9 +964,47 @@ impl App {
         // A press of Escape the calendar's field took: it was the
         // calendar's alone.
         if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape))
-            && self.take_calendar_escape()
+            && (self.take_calendar_escape() || self.take_form_escape())
         {
             return Task::none();
+        }
+        // A shortcut typed after the form closed in its batch was the form's
+        // to drop; quitting stays everyone's.
+        if let Input::Accel(accel) = &input {
+            if self.take_form_shortcut() {
+                let id = self
+                    .preferences
+                    .keymap
+                    .action(accel)
+                    .and_then(CommandId::parse);
+                return if id == Some(CommandId::Quit) {
+                    self.run_shortcut(CommandId::Quit)
+                } else {
+                    Task::none()
+                };
+            }
+        }
+        // The task form owns the keyboard: its own keys took what it gives
+        // a meaning, Escape and its save keys included (`form_keys.rs`), so
+        // they are taken only once the form is shown, never while an input
+        // method composes or its calendar is open; of the app's shortcuts
+        // only quitting runs.
+        if self.task_form.is_some() {
+            return match input {
+                Input::Nav(Nav::Escape | Nav::FieldEscape) => self.update(Message::Escape),
+                Input::Nav(_) => Task::none(),
+                Input::Accel(accel) => {
+                    match self
+                        .preferences
+                        .keymap
+                        .action(&accel)
+                        .and_then(CommandId::parse)
+                    {
+                        Some(CommandId::Quit) => self.run_shortcut(CommandId::Quit),
+                        _ => Task::none(),
+                    }
+                }
+            };
         }
         let accel = match input {
             // A press the editor's popover has already taken, in the key's
@@ -1061,7 +1099,7 @@ impl App {
         // palette owns the keyboard: only the palette shortcut (to close it)
         // gets through.
         if id != CommandId::Quit {
-            if self.dialog.is_some() {
+            if self.dialog.is_some() || self.task_form.is_some() {
                 return Task::none();
             }
             if let Some(palette) = &self.palette {

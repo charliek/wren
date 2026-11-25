@@ -33,6 +33,7 @@ mod preferences;
 mod spelling;
 mod task_commands;
 mod task_footer;
+mod task_form;
 mod task_menus;
 mod task_suggest;
 mod tasks;
@@ -69,6 +70,14 @@ pub struct App {
     /// Presses of Escape the calendar's field took that the app's key
     /// handling has yet to hear of.
     calendar_escapes: u32,
+    /// The task form, while it is open over the note.
+    task_form: Option<task_form::Open>,
+    /// Presses of Escape the task form, its calendar or its fields took
+    /// that the app's key handling has yet to hear of.
+    form_escapes: u32,
+    /// Shortcuts pressed after the form closed in their batch, which the
+    /// app's key handling has yet to hear of.
+    form_shortcuts: u32,
     /// The editor's source of menus: the task menus' and the calendar's.
     task_source: std::sync::Arc<calendar::TaskSource>,
     /// What the calendar's source was last told the caret's line is for.
@@ -218,6 +227,8 @@ pub enum Message {
     Command(Command),
     /// Input from the calendar's card.
     Calendar(calendar::Event),
+    /// Input from the task form.
+    TaskForm(task_form::Event),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
     /// The board's style bar opens one of its menus, or closes it.
@@ -407,6 +418,9 @@ impl App {
             task_memo: tasks::TaskMemo::default(),
             calendar: None,
             calendar_escapes: 0,
+            task_form: None,
+            form_escapes: 0,
+            form_shortcuts: 0,
             task_source: std::sync::Arc::default(),
             due_key: None,
             suggestions: std::sync::Arc::default(),
@@ -543,6 +557,7 @@ impl App {
             self.editor.close_popover();
         }
         let calendar = self.sync_calendar();
+        let form = self.sync_task_form();
         self.sync_due_target();
         self.sync_suggestions();
         // The note, the loading state and the setting can each change on any
@@ -553,7 +568,7 @@ impl App {
         let preview = self.sync_preview();
         #[cfg(any(target_os = "macos", test))]
         self.sync_menu();
-        Task::batch([task, preview, calendar])
+        Task::batch([task, preview, calendar, form])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -627,6 +642,7 @@ impl App {
             Message::Core(op) => return self.process_core(op).task,
             Message::Command(command) => return self.dispatch(command).task,
             Message::Calendar(event) => return self.calendar_event(event),
+            Message::TaskForm(event) => return self.task_form_event(event),
             // Opening a menu of a bar finishes an open label first, as a
             // click on one of its controls does: the keys typed next are
             // not the label's, and a style menu's rows preview on the
@@ -756,9 +772,13 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
-                // The calendar is above everything else it can be open with.
+                // The calendar and the task form are above everything else
+                // either can be open with.
                 if self.calendar.is_some() {
                     return self.cancel_calendar();
+                }
+                if self.task_form.is_some() {
+                    return self.escape_task_form();
                 }
                 // An open suggestions menu, or any popover of the editor's,
                 // is the topmost thing Escape closes; the editor keeps the
@@ -873,16 +893,22 @@ impl App {
         if self.ensure_editor_ready().is_err() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
         }
-        // The calendar has the keyboard: what the editor publishes after
-        // the request that opened it, in that request's batch of events,
-        // was typed before it could be seen, and is no one's.
-        if self.calendar.is_some() {
+        // The calendar or the task form has the keyboard: what the editor
+        // publishes after the request that opened it, in that request's
+        // batch of events, was typed before it could be seen, and is no
+        // one's.
+        if self.calendar.is_some() || self.task_form.is_some() {
             // An Escape in that batch, after "Due date…" chosen from the
             // suggestions, which the app's key handling hears of too: it
             // is dropped there, and does not close what it could not see.
+            // So is one after the request that opened the form.
             if let wren_editor::Message::Spell(wren_editor::SpellEvent::Stroke(stroke)) = message {
                 if stroke.named() == Some(iced::keyboard::key::Named::Escape) {
-                    self.calendar_escapes += 1;
+                    if self.calendar.is_some() {
+                        self.calendar_escapes += 1;
+                    } else {
+                        self.form_escapes += 1;
+                    }
                 }
             }
             return Task::none();
@@ -926,9 +952,12 @@ impl App {
                 if matches!(event, SpellEvent::OpenAt(_) | SpellEvent::Context { .. }) {
                     task = focus_editor();
                 }
-                // A request for the calendar or a task menu: the app opens
-                // it at the caret's task, as the command does.
+                // A request for the task form, the calendar or a task menu:
+                // the app opens it at the caret's task, as the command does.
                 if let SpellEvent::Request(id) = event {
+                    if let Some(opened) = self.request_task_form(id) {
+                        return opened;
+                    }
                     if let Some(opened) = self.request_calendar(id) {
                         return opened;
                     }

@@ -418,15 +418,19 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
 /// takes only while the `tasks` setting is on; with it off the keymap is the
 /// one without them, so their triggers do what they did before.
 ///
-/// `task.set_due` is ⌘D on macOS and Ctrl+D on Linux (discovery/tasks.md §2
-/// item 21): an Editor command, so the board layer's ⌘D / Ctrl+D, which only
-/// a focused board reads, keeps duplicating there.
+/// `task.set_due` is ⌘D on macOS and Ctrl+D on Linux, and `task.edit`, the
+/// task form, ⇧⌘↵ and Ctrl+Shift+Enter (discovery/tasks.md §2 item 21):
+/// Editor commands, so the board layer's ⌘D / Ctrl+D, which only a focused
+/// board reads, keeps duplicating there.
 pub fn default_task_bindings(platform: Platform) -> Vec<(String, &'static str)> {
     let m = match platform {
         Platform::Mac => "super",
         Platform::Linux => "ctrl",
     };
-    vec![(format!("{m}+d"), "task.set_due")]
+    vec![
+        (format!("{m}+d"), "task.set_due"),
+        (format!("{m}+shift+enter"), "task.edit"),
+    ]
 }
 
 /// The resolved trigger → action tables, one per [`Layer`].
@@ -663,18 +667,28 @@ mod tests {
     }
 
     /// The task defaults, frozen as the board layer's are: ⌘D / Ctrl+D sets
-    /// the due date (item 4.1).
+    /// the due date (item 4.1), and ⇧⌘↵ / Ctrl+Shift+Enter opens the task
+    /// form (item 6.1).
     #[test]
-    fn the_task_defaults_are_the_due_date_key() {
-        for (platform, trigger) in [(Platform::Mac, "super+d"), (Platform::Linux, "ctrl+d")] {
+    fn the_task_defaults_are_the_due_date_and_form_keys() {
+        for (platform, trigger, form) in [
+            (Platform::Mac, "super+d", "super+shift+enter"),
+            (Platform::Linux, "ctrl+d", "ctrl+shift+enter"),
+        ] {
             assert_eq!(
                 default_task_bindings(platform),
-                [(trigger.to_string(), "task.set_due")],
+                [
+                    (trigger.to_string(), "task.set_due"),
+                    (form.to_string(), "task.edit")
+                ],
                 "{platform:?}"
             );
-            // The base layer has no such trigger, and the board layer's is
-            // `board.duplicate`, read only by a focused board.
+            // Neither layer binds the form's key.
             let (keymap, _) = Keymap::build(both_defaults(platform), &[], by_name);
+            assert_eq!(keymap.action(&accel(form)), None, "{platform:?}");
+            assert_eq!(keymap.board_action(&accel(form)), None, "{platform:?}");
+            // The base layer has no due date trigger, and the board layer's
+            // is `board.duplicate`, read only by a focused board.
             assert_eq!(keymap.action(&accel(trigger)), None, "{platform:?}");
             assert_eq!(
                 keymap.board_action(&accel(trigger)),

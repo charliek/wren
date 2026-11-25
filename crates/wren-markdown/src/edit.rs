@@ -21,7 +21,7 @@ mod tab;
 mod task;
 mod wrap;
 
-pub(crate) use task::{task_item, task_items};
+pub(crate) use task::{heading_or_break, task_item, task_items};
 
 /// The box a new item's task starts with.
 const OPEN_BOX: &str = "[ ]";

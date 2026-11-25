@@ -314,6 +314,11 @@ pub struct Row {
     /// dropped, as after a handover of the keyboard (see the module's
     /// description).
     pub opens_menu: bool,
+    /// What choosing the row opens is a dialog of the host's
+    /// ([`Row::opens_dialog`]): an Escape after the choice in its batch is
+    /// dropped too, as after a dialog's request
+    /// ([`MenuSource::holds_escape`]).
+    pub opens_dialog: bool,
     /// Among suggestions, a row Enter does not choose as it is offered:
     /// while it is selected and the selection has not been moved with Up
     /// or Down, Enter closes the suggestions and is the text's, as with
@@ -338,6 +343,7 @@ impl Row {
             checked: false,
             enabled: true,
             opens_menu: false,
+            opens_dialog: false,
             tentative: false,
             detail: None,
         }
@@ -378,6 +384,14 @@ impl Row {
         self
     }
 
+    /// A row whose choice opens a dialog of the host's ([`Row::opens_dialog`]),
+    /// which takes the keyboard as another menu does ([`Row::opens_menu`]).
+    pub fn opens_dialog(mut self) -> Self {
+        self.opens_menu = true;
+        self.opens_dialog = true;
+        self
+    }
+
     /// A suggestion Enter does not choose as it is offered
     /// ([`Row::tentative`]).
     pub fn tentative(mut self, tentative: bool) -> Self {
@@ -403,6 +417,7 @@ struct Entry {
     checked: bool,
     enabled: bool,
     opens_menu: bool,
+    opens_dialog: bool,
     tentative: bool,
     detail: Option<String>,
 }
@@ -475,6 +490,7 @@ impl Popover {
                 checked: row.checked,
                 enabled,
                 opens_menu: row.opens_menu,
+                opens_dialog: row.opens_dialog,
                 tentative: row.tentative,
                 detail: row.detail,
             });
@@ -750,6 +766,32 @@ pub trait MenuSource: Send + Sync {
     fn menu_on(&self, id: u32, index: usize, line: &str, caret: usize) -> Option<Requested> {
         let _ = index;
         self.menu(id, line, caret)
+    }
+
+    /// Whether request `id` is a dialog's, for which the host takes the
+    /// keyboard whatever the line says, on either engine: the rest of its
+    /// batch is dropped as after [`Requested::Keyboard`], and so is an
+    /// Escape in it, which a dialog must not close before it shows,
+    /// published as [`PopoverEvent::Stroke`] so the host's key handling
+    /// drops its copy. By default no request is.
+    fn holds_escape(&self, id: u32) -> bool {
+        let _ = id;
+        false
+    }
+}
+
+/// A host's source of menus on the engine that opens no popovers: it opens
+/// nothing, but a dialog's request ([`MenuSource::holds_escape`]) takes the
+/// keyboard as on the other engine.
+pub(crate) struct KeyboardOnly(pub(crate) Arc<dyn MenuSource>);
+
+impl MenuSource for KeyboardOnly {
+    fn menu(&self, _id: u32, _line: &str, _caret: usize) -> Option<Requested> {
+        None
+    }
+
+    fn holds_escape(&self, id: u32) -> bool {
+        self.0.holds_escape(id)
     }
 }
 
@@ -1682,6 +1724,21 @@ impl Now {
             .zip(row)
             .is_some_and(|(popover, row)| {
                 popover.is_enabled(row) && popover.entries[row].opens_menu
+            })
+    }
+
+    /// Whether choosing `row` (as for [`Now::opens_menu`]) opens a dialog
+    /// of the host's ([`Row::opens_dialog`]).
+    pub(crate) fn opens_dialog(&self, handed: Option<&Popover>, row: Option<usize>) -> bool {
+        let Some(open) = self.open.get() else {
+            return false;
+        };
+        let own = self.own.borrow();
+        let row = row.or(open.selected);
+        (own.as_ref().or(handed))
+            .zip(row)
+            .is_some_and(|(popover, row)| {
+                popover.is_enabled(row) && popover.entries[row].opens_dialog
             })
     }
 

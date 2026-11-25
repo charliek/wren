@@ -172,8 +172,8 @@ mod tests {
 
     /// The Tasks group in the palette's order: the line commands, with
     /// the status and priority menus (item 3.4) and the calendar (item 4.1)
-    /// before the commands of their kind.
-    const TASKS_GROUP: [CommandId; 13] = [
+    /// before the commands of their kind, then the task form (item 6.1).
+    const TASKS_GROUP: [CommandId; 14] = [
         CommandId::TaskSetStatus,
         CommandId::TaskCycleStatus,
         CommandId::TaskSetPriority,
@@ -187,6 +187,7 @@ mod tests {
         CommandId::TaskLowerPriority,
         CommandId::TaskSetDue,
         CommandId::TaskClearDue,
+        CommandId::TaskEdit,
     ];
 
     /// The line commands, in the palette's order.
@@ -508,11 +509,12 @@ mod tests {
         assert_eq!(groups[markdown + 1], "Tasks");
         app.editor
             .move_cursor(caret(line_of(NOTE, "Plain text."), 0));
+        // Off a task line only the form is enabled: it makes the line one.
         let disabled = listed(&mut app);
         assert!(disabled
             .iter()
             .filter(|(_, group, _)| *group == "Tasks")
-            .all(|(_, _, enabled)| !enabled));
+            .all(|(id, _, enabled)| *enabled == (*id == CommandId::TaskEdit)));
 
         let (_directory, mut app) = note_app("advanced", "off", NOTE);
         app.editor
@@ -550,8 +552,9 @@ mod tests {
             assert_eq!(row.scope, Scope::Editor, "{}", row.key);
             assert_eq!(CommandId::parse(row.key), Some(row.id));
             // A menu's command is a request for the menu (item 3.4), and
-            // so is the calendar's (item 4.1).
-            let opens = row.id.task_menu().is_some() || row.id == CommandId::TaskSetDue;
+            // so are the calendar's (item 4.1) and the form's (item 6.1).
+            let opens = row.id.task_menu().is_some()
+                || matches!(row.id, CommandId::TaskSetDue | CommandId::TaskEdit);
             let route = if opens {
                 wren_editor::KeyRoute::Popover(row.id.payload())
             } else {
@@ -568,9 +571,11 @@ mod tests {
                 .into_iter()
                 .chain(wren_core::keybind::default_task_bindings(platform));
             for (trigger, action) in defaults {
-                // ⌘D / Ctrl+D sets the due date (item 4.1, design §2 item 21).
+                // ⌘D / Ctrl+D sets the due date (item 4.1) and ⇧⌘↵ /
+                // Ctrl+Shift+Enter opens the form (item 6.1; design §2 item
+                // 21).
                 assert!(
-                    !action.starts_with("task.") || action == "task.set_due",
+                    !action.starts_with("task.") || matches!(action, "task.set_due" | "task.edit"),
                     "{platform:?}: {trigger} → {action} (Q13: palette only)"
                 );
             }

@@ -64,6 +64,11 @@ pub enum Change {
     AddOwner(String),
     /// Every `@name` on the line, with the white space before it.
     RemoveOwner(String),
+    /// The owner at this place among those the line is read as having, in
+    /// line order ([`TaskLine::owners`]), with the white space before it:
+    /// one mention, wherever else the name is written. A place past them
+    /// changes nothing.
+    RemoveOwnerAt(usize),
     /// The description, keeping every token after it.
     SetDescription(String),
     /// Bytes `range` of the line, as this step reads it, replaced with
@@ -229,6 +234,22 @@ pub(super) fn edit_task<L: Lines + ?Sized>(
     })
 }
 
+/// `line`, whose task's box `task` is, with `change` written as [`edit`]
+/// writes it, with today `today`: the line a form shows it will write
+/// before anything is planned on a document. `None` for a `task` that is
+/// no box of `line`, and for a change that is refused.
+pub fn rewrite(line: &str, task: block::Task, change: &Change, today: Date) -> Option<String> {
+    parse(line, task)?;
+    let mut writer = Writer {
+        line: line.to_owned(),
+        task,
+        carets: &mut [],
+        today,
+    };
+    writer.change(change)?;
+    Some(writer.line)
+}
+
 /// A task line being rewritten one writer at a time. Each step reads the
 /// line again, so a step sees what the one before it wrote.
 struct Writer<'c> {
@@ -265,6 +286,11 @@ impl Writer<'_> {
             Change::LowerPriority => self.shift_priority(-1),
             Change::AddOwner(name) => self.step(|r| r.owner_addition(name)),
             Change::RemoveOwner(name) => self.step(|r| Some(r.owner_removals(name))),
+            Change::RemoveOwnerAt(place) => self.step(|r| {
+                Some(r.owners().get(*place).map_or_else(Vec::new, |owner| {
+                    r.removals(std::iter::once(owner.range.clone()))
+                }))
+            }),
             Change::SetDescription(text) => self.step(|r| Some(r.description_edits(text))),
             Change::ReplaceWord(range, text) => self.step(|r| r.word_edits(range, text)),
             Change::Compound(_) => self.change(change),

@@ -274,6 +274,9 @@ impl SuggestSource for CommandSuggestions {
 pub const STATUS: u32 = 1;
 /// The request [`Menus`] answers by taking the keyboard.
 pub const KEYBOARD: u32 = 3;
+/// The request [`Menus`] answers by taking the keyboard for a dialog,
+/// whose request holds Escape too ([`MenuSource::holds_escape`]).
+pub const DIALOG: u32 = 4;
 
 /// The status menu: three rows, numbered from 20, each with its key.
 pub fn status_rows() -> Vec<Row> {
@@ -311,9 +314,13 @@ impl MenuSource for Menus {
                 range: 2..5,
                 rows: status_rows(),
             }),
-            KEYBOARD => Some(Requested::Keyboard),
+            KEYBOARD | DIALOG => Some(Requested::Keyboard),
             _ => None,
         }
+    }
+
+    fn holds_escape(&self, id: u32) -> bool {
+        id == DIALOG
     }
 }
 

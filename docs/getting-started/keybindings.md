@@ -154,7 +154,7 @@ the status menu, on the priority glyph the priority menu, and on the due
 date the calendar (below); anywhere else on the line it opens the task
 menu, which holds the status rows, **Set due date…** (which opens the
 calendar), **Priority…** (which opens the priority menu) and **Edit
-task…**. The edit row is shown greyed: the task form is still to come.
+task…** (which opens the task form, below).
 
 Each menu marks the task's current status or priority and opens on it. ↑
 and ↓ move, ↵ chooses, Esc closes it and writes nothing, and a single key
@@ -164,7 +164,7 @@ chooses a row directly:
 |---|---|
 | Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
 | Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
-| Task | the status keys, then `d` Set due date…, `p` Priority… |
+| Task | the status keys, then `d` Set due date…, `p` Priority…, `e` Edit task… |
 
 A choice rewrites the task's line as one undo step, with the done or
 cancelled date the status asks for. A click on a task's box cycles its
@@ -195,6 +195,38 @@ step; a `🗓` or `📆` already there keeps its glyph. A click outside the
 calendar, a scroll, or a change to the note closes it and writes nothing.
 Keys typed in the same instant as ⌘D / Ctrl+D, before the calendar shows,
 are dropped rather than typed into the note.
+
+**Create or edit task** (⇧⌘↵ / Ctrl+Shift+Enter) opens the task form at
+the caret's line, on either engine: the description, the status, the due
+date, the priority and the owners, with a **Writes** line that shows the
+Markdown saving will write as you change them. On a task it edits the
+task. On a blank line it makes a new one (`- [ ] `, inside a quote when
+the line is in one); on a list item or a line of text it makes that text a
+task, as **Toggle task** would. A heading, a code block or front matter
+has no form.
+
+| Key | Does |
+|---|---|
+| Tab, ⇧Tab | the next or the previous field: description, status, due, priority, owners, Save, Cancel |
+| ← → | on the status or the priority, the previous or the next choice |
+| Space `/` `x` `-` | on the status, Open, Doing, Done or Cancelled |
+| `h` `m` `l` ⇧H ⇧L `n` | on the priority, High, Medium, Low, Highest, Lowest or None |
+| ↓ | in the due field, opens the calendar under it; whatever closes it gives the due field the keyboard back |
+| ↵ | saves; in the owners field with a name typed, adds that name as typed (never completed), or the owner chosen with ↑ ↓, first |
+| ↑ ↓ | in the owners field, chooses among the owners already used in the workspace |
+| Tab | in the owners field with a name typed, adds the owner chosen with ↑ ↓, or else the first offered, then moves on |
+| ⌫ | in an empty owners field, removes the last owner |
+| Esc | in the owners field with a name typed, empties it; otherwise closes the form and writes nothing |
+
+The due field takes the same words as the calendar; the line under it
+says what it names. A name left typed in the owners field is in the
+**Writes** line, and saved, as typed. ⇧⌘↵ / Ctrl+Shift+Enter, or ⌘↵ / Ctrl+Enter, saves
+from any field too. Saving writes only the fields you changed, as one
+undo step, so a line you wrote in your own order keeps it, and saving a
+form you did not change writes nothing. If the line changed while the form
+was open (the note was reloaded from disk, say), saving says so and writes
+nothing; Cancel and open the form again. Closing the form gives the editor
+back the keyboard with its caret where it was.
 
 ## Jumping to a heading
 
@@ -404,19 +436,20 @@ note.new_board  note.export_svg  note.export_png  note.export_drawio
 ```
 
 With `tasks = on`, the task line commands can be bound too; they act on
-the task at the caret, and only `task.set_due` has a default key (⌘D /
-Ctrl+D):
+the task at the caret, and only `task.set_due` (⌘D / Ctrl+D) and
+`task.edit` (⇧⌘↵ / Ctrl+Shift+Enter) have default keys:
 
 ```
 task.set_status  task.cycle_status  task.set_priority  task.priority.high
 task.priority.medium  task.priority.low  task.priority.highest
 task.priority.lowest  task.priority.none  task.priority.raise
-task.priority.lower  task.set_due  task.clear_due
+task.priority.lower  task.set_due  task.clear_due  task.edit
 ```
 
 `task.set_status` and `task.set_priority` open the status and priority
 menus, and `task.set_due` the calendar, described under
-[Task menus](#task-menus), on the `advanced` engine.
+[Task menus](#task-menus), on the `advanced` engine. `task.edit` opens the
+task form, on either engine.
 
 The board actions are listed under [On a board](#on-a-board).
 

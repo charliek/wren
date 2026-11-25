@@ -292,6 +292,9 @@ pub struct EditorView {
     choice: Option<Chosen>,
     suggester: Option<Arc<dyn SuggestSource>>,
     menus: Option<Arc<dyn MenuSource>>,
+    /// `menus` as the engine that opens no popovers asks it: for the
+    /// keyboard alone ([`popover::KeyboardOnly`]).
+    keyboard_menus: Option<popover::KeyboardOnly>,
     /// Who a right-click asks, in order; see
     /// [`EditorView::set_menu_providers`].
     providers: Vec<Provider>,
@@ -396,6 +399,7 @@ impl EditorView {
             choice: None,
             suggester: None,
             menus: None,
+            keyboard_menus: None,
             providers: popover::SPELLING_ALONE.to_vec(),
             provider_list: 0,
             keyboard: None,
@@ -551,7 +555,7 @@ impl EditorView {
         )
         .key_policy(self.key_policy.as_ref())
         .proofreader(self.proofreader.as_deref())
-        .menu_source(self.menu_source())
+        .menu_source(self.widget_menu_source())
         .providers(self.providers(), self.edition())
         .suggest_source(self.suggest_source(), self.suggest_suppressed())
         .origin(&self.origin)
@@ -1722,6 +1726,7 @@ impl EditorView {
     /// [`SpellEvent::Request`], open what it answers for the caret. Only
     /// the owned engine asks it.
     pub fn set_menu_source(&mut self, source: Option<Arc<dyn MenuSource>>) {
+        self.keyboard_menus = source.clone().map(popover::KeyboardOnly);
         self.menus = source;
     }
 
@@ -1930,6 +1935,20 @@ impl EditorView {
         self.menus
             .as_deref()
             .filter(|_| self.content.kind() == BackendKind::Owned)
+    }
+
+    /// The host's source of menus as the widget asks it: on the engine that
+    /// opens no popovers, for the keyboard alone, so a request the host
+    /// takes the keyboard for (a dialog's, say) drops the rest of its batch
+    /// on either engine.
+    fn widget_menu_source(&self) -> Option<&dyn MenuSource> {
+        match self.content.kind() {
+            BackendKind::Owned => self.menus.as_deref(),
+            BackendKind::Iced => self
+                .keyboard_menus
+                .as_ref()
+                .map(|source| source as &dyn MenuSource),
+        }
     }
 
     /// The line and byte range `anchor` names, the caret's being where it

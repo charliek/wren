@@ -292,6 +292,20 @@ fn task_in(an: &Analysis, l: usize) -> Option<(usize, block::Task)> {
 
 /// Which lines are the text of a setext heading: the lines from each
 /// underline's `start` up to the underline.
+/// Whether line `l` of `base` is a heading's or a thematic break: an ATX
+/// heading or a break, inside a list item too, or a Setext heading's text
+/// or underline.
+pub(crate) fn heading_or_break<L: Lines + ?Sized>(base: &L, l: usize, boxes: Boxes) -> bool {
+    if l >= base.line_count() {
+        return false;
+    }
+    let an = Analysis::new(base, None, boxes);
+    matches!(
+        an.recs[l].info.kind,
+        Kind::Heading { .. } | Kind::SetextUnderline { .. } | Kind::ThematicBreak
+    ) || setext_text(&an)[l]
+}
+
 fn setext_text(an: &Analysis) -> Vec<bool> {
     let mut text = vec![false; an.recs.len()];
     for (u, rec) in an.recs.iter().enumerate() {

@@ -16,6 +16,13 @@
 //! Suggestions (item 5.1): `tasks.owners`, the owners they offer after an
 //! `@`, best first, and whether those have been read from the index as it
 //! is now; the suggestions themselves are `editor.get`'s `popover`.
+//!
+//! The task form (item 6.1): `tasks.form`, what it shows; `tasks.form_type`,
+//! a field's text set as typing or a paste sets it; and `tasks.form_click`,
+//! a click on a status, a priority, an owner's suggestion or remove button,
+//! the calendar button, Save, Cancel or outside, or on the calendar over
+//! the form. While it is open `editor.key` presses a key in it
+//! ([`App::form_key`]).
 
 use std::sync::Arc;
 
@@ -26,6 +33,7 @@ use wren_markdown::span::SpanKind;
 use wren_markdown::task::DateField;
 
 use super::calendar::Event as CalendarEvent;
+use super::task_form::{Event as FormEvent, Slot, PRIORITIES};
 use super::test_requests::string;
 use super::{App, Message};
 use crate::test_ipc::Request;
@@ -47,10 +55,36 @@ impl App {
                 self.pin_today(date);
                 request.respond(Ok(self.tasks_snapshot()));
             }
-            "tasks.calendar" | "tasks.calendar_type" | "tasks.calendar_click" | "tasks.owners"
+            "tasks.calendar"
+            | "tasks.calendar_type"
+            | "tasks.calendar_click"
+            | "tasks.owners"
+            | "tasks.form"
+            | "tasks.form_type"
+            | "tasks.form_click"
                 if !self.preferences.tasks =>
             {
                 return Err("Tasks are off".into());
+            }
+            "tasks.form" => request.respond(Ok(self.form_snapshot())),
+            "tasks.form_type" | "tasks.form_click" => {
+                if self.task_form.is_none() {
+                    return Err("The task form is not open".into());
+                }
+                let event = if request.op == "tasks.form_type" {
+                    let text = string(&request.params, "text")?.to_owned();
+                    match string(&request.params, "field")? {
+                        "description" => FormEvent::Description(text),
+                        "due" => FormEvent::Due(text),
+                        "owners" => FormEvent::Owner(text),
+                        other => return Err(format!("unknown form field {other:?}")),
+                    }
+                } else {
+                    self.form_click(&request.params)?
+                };
+                let task = self.update(Message::TaskForm(event));
+                request.respond(Ok(self.form_snapshot()));
+                return Ok(task);
             }
             "tasks.calendar" => request.respond(Ok(self.calendar_snapshot())),
             "tasks.owners" => request.respond(Ok(self.owners_snapshot())),
@@ -120,18 +154,31 @@ impl App {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
-        use iced::keyboard::key::Named;
-        use iced::keyboard::Key;
         let Some(open) = &self.calendar else {
             return Task::none();
         };
         let typed = open.model.typed().to_owned();
+        self.calendar_field_key(&typed, key, modifiers, Message::Calendar)
+    }
+
+    /// [`App::calendar_key`] for a calendar whose field holds `typed`, its
+    /// input sent as `send` makes it a message.
+    fn calendar_field_key(
+        &mut self,
+        typed: &str,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+        send: fn(CalendarEvent) -> Message,
+    ) -> Task<Message> {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::Key;
+        let typed = typed.to_owned();
         let mut tasks = Vec::new();
         let plain = !(modifiers.control() || modifiers.alt() || modifiers.logo());
         let captured = match crate::date_field::route(&key, modifiers, false, typed.is_empty()) {
             Some(taken) => {
                 if let Some(event) = taken {
-                    tasks.push(self.update(Message::Calendar(CalendarEvent::Field(event))));
+                    tasks.push(self.update(send(CalendarEvent::Field(event))));
                 }
                 true
             }
@@ -149,7 +196,7 @@ impl App {
                 match text {
                     Some(text) => {
                         if text != typed {
-                            tasks.push(self.update(Message::Calendar(CalendarEvent::Field(
+                            tasks.push(self.update(send(CalendarEvent::Field(
                                 crate::date_field::FieldEvent::Typed(text),
                             ))));
                         }
@@ -181,6 +228,245 @@ impl App {
             tasks.push(self.update(Message::Key(crate::keys::with_status(input, status))));
         }
         Task::batch(tasks)
+    }
+
+    /// What `tasks.form_click` names: `{"target": "save" | "cancel" |
+    /// "outside" | "calendar"}`, `{"status": name}`, `{"priority": name}`
+    /// (`"None"` for none), `{"suggestion": name}`, `{"remove": name}`, an
+    /// owner's remove button; and on the calendar over the form, `{"day":
+    /// "YYYY-MM-DD"}`, `{"chip": label}` or `{"calendar": "previous" |
+    /// "next" | "clear" | "inside" | "outside"}`.
+    fn form_click(&self, params: &Value) -> Result<FormEvent, String> {
+        let open = self.task_form.as_ref().ok_or("The task form is not open")?;
+        let text = |key: &str| params.get(key).and_then(Value::as_str);
+        if let Some(model) = &open.calendar {
+            let calendar = if let Some(day) = text("day") {
+                let date = Date::parse_iso(day).ok_or_else(|| format!("{day:?} is no date"))?;
+                let shown = model
+                    .grid()
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .any(|cell| cell.date == date);
+                if !shown {
+                    return Err(format!("{day} is not in the grid"));
+                }
+                CalendarEvent::Pick(date)
+            } else if let Some(label) = text("chip") {
+                super::calendar::chip_date(label, model.today())
+                    .map(CalendarEvent::Pick)
+                    .ok_or_else(|| format!("no quick pick {label:?}"))?
+            } else {
+                match text("calendar").ok_or("the calendar over the form takes the clicks")? {
+                    "previous" => CalendarEvent::Show(-1),
+                    "next" => CalendarEvent::Show(1),
+                    "clear" if !open.form.due().trim().is_empty() => CalendarEvent::Clear,
+                    "clear" => return Err("Clear is not shown with no due date".into()),
+                    "inside" => CalendarEvent::Refocus,
+                    "outside" => CalendarEvent::Outside,
+                    other => return Err(format!("unknown calendar target {other:?}")),
+                }
+            };
+            return Ok(FormEvent::Calendar(calendar));
+        }
+        if let Some(name) = text("status") {
+            return wren_markdown::status::STATUSES
+                .iter()
+                .find(|row| row.name == name)
+                .map(|row| FormEvent::Status(row.kind))
+                .ok_or_else(|| format!("no status {name:?}"));
+        }
+        if let Some(name) = text("priority") {
+            return PRIORITIES
+                .iter()
+                .find(|level| level.map_or("None", |level| level.name()) == name)
+                .map(|level| FormEvent::Priority(*level))
+                .ok_or_else(|| format!("no priority {name:?}"));
+        }
+        if let Some(name) = text("suggestion") {
+            return if self.owner_suggestions().iter().any(|each| each == name) {
+                Ok(FormEvent::AddOwner(name.to_owned()))
+            } else {
+                Err(format!("@{name} is not suggested"))
+            };
+        }
+        if let Some(name) = text("remove") {
+            return if open.form.owners().iter().any(|each| each == name) {
+                Ok(FormEvent::RemoveOwner(name.to_owned()))
+            } else {
+                Err(format!("@{name} is no owner of the task"))
+            };
+        }
+        Ok(match string(params, "target")? {
+            "save" => FormEvent::Save,
+            "cancel" | "outside" => FormEvent::Cancel,
+            "calendar" => FormEvent::OpenCalendar,
+            other => return Err(format!("unknown form target {other:?}")),
+        })
+    }
+
+    /// A key pressed in the task form, as its keys and then the app's own
+    /// key handling take it: the form's keys ([`crate::form_keys::route`]),
+    /// a character typed (with no Ctrl, Alt or logo key) or Backspace, at
+    /// the end of the focused field's text, and Escape and shortcuts heard
+    /// by the app as a real press is. With the calendar open over the form,
+    /// its field takes the key.
+    pub(super) fn form_key(
+        &mut self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Message> {
+        use crate::form_keys::{next_slot, route, FormKey, Routed};
+        use iced::keyboard::key::Named;
+        use iced::keyboard::Key;
+        let Some(open) = &self.task_form else {
+            return Task::none();
+        };
+        if let Some(model) = &open.calendar {
+            let typed = model.typed().to_owned();
+            return self.calendar_field_key(&typed, key, modifiers, |event| {
+                Message::TaskForm(FormEvent::Calendar(event))
+            });
+        }
+        let focus = open.focus;
+        let typed = !open.form.pending_owner().trim().is_empty() || open.suggestion.is_some();
+        let text = match focus {
+            Slot::Description => Some(open.form.description().to_owned()),
+            Slot::Due => Some(open.form.due().to_owned()),
+            Slot::Owners => Some(open.form.pending_owner().to_owned()),
+            _ => None,
+        };
+        let plain = !(modifiers.control() || modifiers.alt() || modifiers.logo());
+        let mut tasks = Vec::new();
+        let mut send = |app: &mut Self, event| tasks.push(app.update(Message::TaskForm(event)));
+        // The form's save keys, as its keys read the keymap.
+        let save = crate::keys::shortcut(
+            &key,
+            iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            modifiers,
+        )
+        .and_then(|accel| {
+            self.preferences
+                .keymap
+                .action(&accel)
+                .and_then(super::commands::CommandId::parse)
+        })
+        .is_some_and(|id| {
+            matches!(
+                id,
+                super::commands::CommandId::TaskEdit | super::commands::CommandId::ToggleTask
+            )
+        });
+        let captured = match route(focus.kind(), &key, modifiers, false, typed, save) {
+            Routed::Drop => true,
+            Routed::Tab(back) => {
+                if focus == Slot::Owners && typed {
+                    send(self, FormEvent::Key(FormKey::Complete));
+                }
+                let next = next_slot(focus.index(), Slot::ALL.len(), back);
+                send(self, FormEvent::Key(FormKey::Focus(next)));
+                tasks.push(Slot::ALL[next].focus());
+                true
+            }
+            Routed::Key(form_key) => {
+                let form_key = match form_key {
+                    FormKey::Press(_) => FormKey::Press(focus.index()),
+                    other => other,
+                };
+                send(self, FormEvent::Key(form_key));
+                true
+            }
+            Routed::Pass => {
+                let changed = text.and_then(|text| match key.as_ref() {
+                    Key::Character(character) if plain => Some(format!("{text}{character}")),
+                    Key::Named(Named::Space) if plain => Some(format!("{text} ")),
+                    Key::Named(Named::Backspace) => {
+                        let mut text = text;
+                        text.pop();
+                        Some(text)
+                    }
+                    _ => None,
+                });
+                match changed {
+                    Some(changed) => {
+                        let event = match focus {
+                            Slot::Description => FormEvent::Description(changed),
+                            Slot::Due => FormEvent::Due(changed),
+                            _ => FormEvent::Owner(changed),
+                        };
+                        send(self, event);
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        let status = if captured {
+            iced::event::Status::Captured
+        } else {
+            iced::event::Status::Ignored
+        };
+        let event = iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        if let Some(input) =
+            crate::keys::input(&event).filter(|input| crate::keys::reaches_app(input, status))
+        {
+            tasks.push(self.update(Message::Key(crate::keys::with_status(input, status))));
+        }
+        Task::batch(tasks)
+    }
+
+    /// The task form as it is drawn: `{"open": false}` while it is closed.
+    fn form_snapshot(&self) -> Value {
+        let Some(open) = &self.task_form else {
+            return json!({"open": false});
+        };
+        let form = &open.form;
+        let (caption, invalid) = super::task_form::due_caption(form);
+        let rectangle = |bounds: iced::Rectangle| json!({"x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height});
+        json!({
+            "open": true,
+            "kind": match form.kind() {
+                wren_markdown::task::FormKind::Edit => "edit",
+                wren_markdown::task::FormKind::New => "new",
+                wren_markdown::task::FormKind::Make => "make",
+            },
+            "title": open.title(),
+            "line": form.line(),
+            "focus": open.focus.name(),
+            "description": form.description(),
+            "status": super::task_form::status_name(form.status()),
+            "due": form.due(),
+            "due_value": super::task_form::due_value_name(form),
+            "due_caption": caption,
+            "due_invalid": invalid,
+            "priority": form.priority().map(|level| level.name()),
+            "owners": form.owners(),
+            "owner_text": open.form.pending_owner(),
+            "suggestions": self.owner_suggestions(),
+            "suggestion": open.suggestion,
+            "writes": form.preview(),
+            "error": open.error,
+            "calendar": open.calendar.as_ref().map(|model| json!({
+                "typed": model.typed(),
+                "selected": model.selected().to_string(),
+                "month": model.month().to_string(),
+                "caption": model.caption().to_string(),
+                "bounds": self.task_form_calendar_bounds().map(rectangle),
+            })),
+            "due_bounds": self.task_form_due_bounds().map(rectangle),
+        })
     }
 
     /// The calendar as it is drawn: `{"open": false}` while it is closed.
