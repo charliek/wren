@@ -509,9 +509,10 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         // The palette and the dialogs take the keyboard, so the suggestions
-        // menu never stays open under one (rule 4.4.8).
+        // menu, or any popover of the editor's, never stays open under one
+        // (rule 4.4.8).
         if self.palette.is_some() || self.dialog.is_some() {
-            self.editor.close_spell_menu();
+            self.editor.close_popover();
         }
         // The note, the loading state and the setting can each change on any
         // message, and the editor must see the proofreader before it draws.
@@ -554,6 +555,9 @@ impl App {
                     }
                     Some(wren_editor::KeyRoute::Suggest) => Some(wren_editor::Message::Spell(
                         wren_editor::SpellEvent::OpenAtCaret,
+                    )),
+                    Some(wren_editor::KeyRoute::Popover(id)) => Some(wren_editor::Message::Spell(
+                        wren_editor::SpellEvent::Request(id),
                     )),
                     Some(wren_editor::KeyRoute::Host | wren_editor::KeyRoute::Pass) | None => None,
                 };
@@ -717,9 +721,10 @@ impl App {
                 return focus_editor();
             }
             Message::Escape => {
-                // An open suggestions menu is the topmost thing Escape
-                // closes; the editor keeps the keyboard and the find bar stays.
-                if self.editor.close_spell_menu() {
+                // An open suggestions menu, or any popover of the editor's,
+                // is the topmost thing Escape closes; the editor keeps the
+                // keyboard and the find bar stays.
+                if self.editor.dismiss_popover() {
                     return Task::none();
                 }
                 // So is a menu of the board's bars, and the board keeps it.
@@ -853,6 +858,8 @@ impl App {
                         | SpellEvent::Accept(_)
                         | SpellEvent::AcceptSelected
                         | SpellEvent::Key(_)
+                        | SpellEvent::Stroke(_)
+                        | SpellEvent::Request(_)
                         | SpellEvent::Press(_)
                 ) {
                     self.column = columns::Column::Editor;

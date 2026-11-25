@@ -181,6 +181,64 @@ impl Backend {
         Some(clamp_ime_anchor(anchor, self.bounds(), line_height))
     }
 
+    /// Where a caret at `position` would stand, relative to the text
+    /// origin: its x and the top of its row, and the row's height. Between
+    /// two rows of a wrapped line it stands at the start of the second. Its
+    /// x is the engine's own: the owned engine follows the direction of
+    /// the glyph it stands at and splits a ligature between its
+    /// characters, and iced's adds up the glyphs that start before it.
+    /// `None` for a row that is not laid out or is out of view.
+    pub fn caret_at(&self, position: Position) -> Option<(Point, f32)> {
+        let buffer = self.buffer();
+        let cursor = cosmic_text::Cursor::new_with_affinity(
+            position.line,
+            position.column,
+            cosmic_text::Affinity::After,
+        );
+        let layout = buffer.lines.get(cursor.line)?.layout_opt()?;
+        let (row, owned) = owned::caret_row(layout, cursor)?;
+        let target = layout.get(row)?;
+        let x = match self {
+            Self::Owned(_) => owned,
+            // As `iced_graphics` places its caret: at a row's end when the
+            // caret is past its glyphs, as the owned engine has it too.
+            Self::Iced(_)
+                if target
+                    .glyphs
+                    .last()
+                    .is_none_or(|glyph| cursor.index >= glyph.end) =>
+            {
+                owned
+            }
+            Self::Iced(_) => (target.glyphs.iter())
+                .take_while(|glyph| cursor.index > glyph.start)
+                .map(|glyph| glyph.w)
+                .sum(),
+        };
+        let run = buffer
+            .layout_runs()
+            .skip_while(|run| run.line_i < cursor.line)
+            .take_while(|run| run.line_i == cursor.line)
+            .find(|run| {
+                std::ptr::eq(run.glyphs, target.glyphs.as_slice()) && run.line_w == target.w
+            })?;
+        Some((Point::new(x, run.line_top), run.line_height))
+    }
+
+    /// Where the engine draws its caret, with nothing selected, and the
+    /// height of the caret's row: the live caret, with the side of a wrap
+    /// it is on. `None` with a selection, and when the engine cannot place
+    /// it.
+    pub fn caret(&self) -> Option<(Point, f32)> {
+        let Selection::Caret(caret) = self.selection()? else {
+            return None;
+        };
+        let height = (self.buffer().layout_runs())
+            .find(|run| caret.y + 0.5 >= run.line_top && caret.y < run.line_top + run.line_height)
+            .map(|run| run.line_height)?;
+        Some((caret, height))
+    }
+
     /// Scroll as little as needed to show the cursor, keeping the cursor
     /// and the selection. Owned scrolls now; iced on its next update.
     pub fn reveal_cursor(&mut self) {
@@ -191,8 +249,8 @@ impl Backend {
     }
 
     /// Scroll as little as needed to show the whole row holding `position`,
-    /// without moving the cursor. Only the owned engine scrolls; the
-    /// suggestions menu, which needs it, never opens on iced's.
+    /// without moving the cursor. Only the owned engine scrolls; a popover,
+    /// which needs it, never opens on iced's.
     pub fn reveal(&mut self, position: Position) {
         match self {
             Self::Iced(_) => {}

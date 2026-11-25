@@ -11,7 +11,10 @@ use iced::{Color, Font};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::highlighter::Settings;
-use crate::{MenuStyle, Palette, Proofreader, Style};
+use crate::{
+    Accelerator, MenuSource, MenuStyle, Palette, Proofreader, Requested, Row, Style, SuggestSource,
+    Suggestion,
+};
 
 pub const FONT: Font = Font::with_name("JetBrains Mono");
 
@@ -161,5 +164,103 @@ impl Proofreader for Rejects {
             .find(|(wrong, _)| *wrong == word)
             .map(|(_, right)| right.iter().map(|&right| right.to_owned()).collect())
             .unwrap_or_default()
+    }
+}
+
+/// A source of suggestions that completes the word before the caret from a
+/// fixed list, once two of its characters are typed, and keeps what it was
+/// asked.
+pub struct Completes {
+    words: &'static [&'static str],
+    /// The `(line, caret)` of each request.
+    asked: Mutex<Vec<(String, usize)>>,
+}
+
+impl Completes {
+    pub fn new(words: &'static [&'static str]) -> Self {
+        Self {
+            words,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The `(line, caret)` of each request so far.
+    pub fn asked(&self) -> Vec<(String, usize)> {
+        self.asked.lock().expect("asked").clone()
+    }
+}
+
+impl SuggestSource for Completes {
+    /// The words that start with the letters before the caret, each named
+    /// by its place in the list, under those letters.
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        self.asked
+            .lock()
+            .expect("asked")
+            .push((line.to_owned(), caret));
+        let before = line.get(..caret)?;
+        let start = before
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_alphanumeric())
+            .last()
+            .map_or(caret, |(at, _)| at);
+        let typed = &before[start..];
+        let rows: Vec<Row> = (0..)
+            .zip(self.words)
+            .filter(|(_, word)| typed.chars().count() >= 2 && word.starts_with(typed))
+            .map(|(id, word)| Row::new(id, *word))
+            .collect();
+        (!rows.is_empty()).then_some(Suggestion {
+            range: start..caret,
+            rows,
+        })
+    }
+}
+
+/// The request [`Menus`] answers with the status menu.
+pub const STATUS: u32 = 1;
+/// The request [`Menus`] answers by taking the keyboard.
+pub const KEYBOARD: u32 = 3;
+
+/// The status menu: three rows, numbered from 20, each with its key.
+pub fn status_rows() -> Vec<Row> {
+    vec![
+        Row::new(20, "Open").accelerator(Accelerator::plain(' ')),
+        Row::new(21, "Doing").accelerator(Accelerator::plain('/')),
+        Row::new(22, "Done").accelerator(Accelerator::plain('x')),
+    ]
+}
+
+/// A source of menus: [`STATUS`] opens the status menu on the box of a
+/// line that starts a task, [`KEYBOARD`] has the host take the keyboard,
+/// and any other request opens nothing. It keeps what it was asked.
+#[derive(Default)]
+pub struct Menus {
+    /// The `(request, line, caret)` of each request.
+    asked: Mutex<Vec<(u32, String, usize)>>,
+}
+
+impl Menus {
+    /// The `(request, line, caret)` of each request so far.
+    pub fn asked(&self) -> Vec<(u32, String, usize)> {
+        self.asked.lock().expect("asked").clone()
+    }
+}
+
+impl MenuSource for Menus {
+    fn menu(&self, id: u32, line: &str, caret: usize) -> Option<Requested> {
+        self.asked
+            .lock()
+            .expect("asked")
+            .push((id, line.to_owned(), caret));
+        match id {
+            STATUS if line.starts_with("- [") => Some(Requested::Rows {
+                range: 2..5,
+                rows: status_rows(),
+            }),
+            KEYBOARD => Some(Requested::Keyboard),
+            _ => None,
+        }
     }
 }

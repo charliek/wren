@@ -20,6 +20,7 @@ mod history;
 mod hit;
 mod keys;
 mod plain;
+mod popover;
 mod proof;
 mod widget;
 
@@ -44,6 +45,10 @@ pub use highlighter::HighlightedLine;
 pub use highlighter::{highlight_lines, Highlight, Highlights, LineDecor, Scale};
 pub use hit::Hit;
 pub use keys::{KeyPolicy, KeyRoute};
+pub use popover::{
+    is_plain_escape, Accelerator, Anchor, Choice, MenuSource, Mode, Popover, PopoverEvent,
+    Requested, Row, Stroke, SuggestSource, Suggestion,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use proof::{DrawnMark, SpellFrame};
 pub use proof::{MenuKey, MenuPress, Proofreader, SpellEvent, SpellMenu};
@@ -84,11 +89,11 @@ pub struct Style {
     pub strike: Color,
     /// The zigzag under a misspelled word.
     pub misspelling: Color,
-    /// The suggestions menu.
+    /// The suggestions menu, and every other popover.
     pub menu: MenuStyle,
 }
 
-/// Colours and type of the suggestions menu. The editor knows no UI font of
+/// Colours and type of a popover's rows. The editor knows no UI font of
 /// its own, so the host supplies it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MenuStyle {
@@ -152,7 +157,9 @@ pub enum Message {
     /// An editing key that depends on the text around the cursor: Enter,
     /// Tab, Backspace, Home, and the like. See [`EditorView::intent`].
     Intent(Intent),
-    /// The suggestions menu. See [`EditorView::spell`].
+    /// The open popover's events, and the requests that open the
+    /// suggestions menu, its first user, which named them. See
+    /// [`EditorView::spell`].
     Spell(SpellEvent),
     /// A copy, cut, or paste from the keyboard. See [`EditorView::clip`].
     Clip(Clip),
@@ -222,13 +229,32 @@ pub struct EditorView {
     proofreader: Option<Arc<dyn Proofreader>>,
     /// The open suggestions menu.
     menu: Option<SpellMenu>,
+    /// The host's open popover; see [`EditorView::open_popover`]. At most
+    /// one of it and `menu` is open.
+    popover: Option<Popover>,
+    /// The row the last popover event chose from the host's popover, and
+    /// the revision of the text it was chosen over.
+    choice: Option<(u64, Choice)>,
+    suggester: Option<Arc<dyn SuggestSource>>,
+    menus: Option<Arc<dyn MenuSource>>,
+    /// The line Escape hid suggestions for, until the caret leaves it.
+    suppressed: Option<usize>,
+    /// The next edit asks the source of suggestions nothing; see
+    /// [`PopoverEvent::Hold`].
+    hold: bool,
+    /// How many presses of Escape a popover took that the host has yet to
+    /// hear of from its own key handling; see
+    /// [`EditorView::take_claimed_escape`].
+    escapes: u32,
+    /// Where the text starts in the window, as the widget last placed it.
+    origin: std::cell::Cell<Option<iced::Point>>,
     /// The left press being held was resolved here as no single click: it
     /// only closed the menu, so its drag selects nothing either (rule
     /// 4.4.5), or it was a double or triple click, which drags nothing.
     drop_drags: bool,
     /// What the widget makes of the left presses it leaves here, which it
     /// counts from in the next batch.
-    resolved_press: proof::ResolvedPress,
+    resolved_press: popover::ResolvedPress,
     /// What the last left press resolved here was taken as, while the
     /// widget's guess at it was wrong: the widget counts the presses after
     /// it in the same batch from that guess, so they are counted again.
@@ -275,8 +301,16 @@ impl EditorView {
             key_policy: None,
             proofreader: None,
             menu: None,
+            popover: None,
+            choice: None,
+            suggester: None,
+            menus: None,
+            suppressed: None,
+            hold: false,
+            escapes: 0,
+            origin: std::cell::Cell::new(None),
             drop_drags: false,
-            resolved_press: proof::ResolvedPress::default(),
+            resolved_press: popover::ResolvedPress::default(),
             press_chain: None,
             line_clip: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -298,7 +332,7 @@ impl EditorView {
     /// text; see [`EditorView::intent`].
     pub fn set_markdown_assist(&mut self, on: bool) {
         if on != self.markdown_assist {
-            self.menu = None;
+            self.close_open();
         }
         self.markdown_assist = on;
     }
@@ -314,7 +348,7 @@ impl EditorView {
     /// any status is a task; off, only `[ ]`, `[x]` and `[X]` are.
     pub fn set_tasks(&mut self, tasks: Option<wren_markdown::TaskOptions>) {
         if tasks != self.tasks {
-            self.menu = None;
+            self.close_open();
         }
         if tasks.is_some() != self.tasks.is_some() {
             // The boxes read change, and with them what a line is.
@@ -359,7 +393,7 @@ impl EditorView {
 
     fn set_metrics(&mut self, metrics: widget::Metrics) {
         if metrics != self.metrics {
-            self.menu = None;
+            self.close_open();
         }
         self.metrics = metrics;
     }
@@ -368,7 +402,7 @@ impl EditorView {
     /// [`Font::MONOSPACE`].
     pub fn set_font(&mut self, font: Font) {
         if font != self.font {
-            self.menu = None;
+            self.close_open();
         }
         self.font = font;
     }
@@ -392,7 +426,7 @@ impl EditorView {
     /// Show or hide the line-number gutter (shown by default).
     pub fn set_line_numbers(&mut self, line_numbers: bool) {
         if line_numbers != self.line_numbers {
-            self.menu = None;
+            self.close_open();
         }
         self.line_numbers = line_numbers;
     }
@@ -421,9 +455,15 @@ impl EditorView {
         )
         .key_policy(self.key_policy.as_ref())
         .proofreader(self.proofreader.as_deref())
-        .spell_menu(self.menu.as_ref())
+        .menu_source(self.menu_source())
+        .suggest_source(self.suggest_source(), self.suggest_suppressed())
+        .origin(&self.origin)
         .resolved_press(self.resolved_press)
         .measure(measure);
+        let editor = match &self.menu {
+            Some(menu) => editor.spell_menu(Some(menu)),
+            None => editor.popover(self.popover.as_ref()),
+        };
         #[cfg(any(test, feature = "test-support"))]
         let editor = editor.spell_frame(&self.spell_frame);
         editor.into()
@@ -482,7 +522,18 @@ impl EditorView {
     /// Returns `true` only when the text changes. Non-edit actions break typing
     /// coalescing without discarding history; no-op edits also preserve redo.
     pub fn perform(&mut self, action: Action) -> bool {
-        self.menu = None;
+        let held = std::mem::take(&mut self.hold);
+        let typed = !held && matches!(action, Action::Edit(Edit::Insert(_) | Edit::Backspace));
+        let changed = self.perform_action(action);
+        if typed {
+            self.suggest();
+        }
+        changed
+    }
+
+    /// [`Self::perform`], without the suggestions that follow typing.
+    fn perform_action(&mut self, action: Action) -> bool {
+        self.close_open();
         if matches!(action, Action::Drag(_)) {
             if self.drop_drags {
                 return false;
@@ -534,7 +585,7 @@ impl EditorView {
     /// Returns whether the text changed. A plan with an edit off the text,
     /// inside a character, backwards, or overlapping another changes nothing.
     pub fn apply(&mut self, edits: &[Replace], selection: Cursor) -> bool {
-        self.menu = None;
+        self.close_open();
         let Some(order) = self.content.with_lines(|lines| edit::ordered(edits, lines)) else {
             return false;
         };
@@ -575,7 +626,17 @@ impl EditorView {
     ///
     /// Returns whether the text changed.
     pub fn intent(&mut self, intent: Intent) -> bool {
-        self.menu = None;
+        let held = std::mem::take(&mut self.hold);
+        let changed = self.perform_intent(intent);
+        if !held && matches!(intent, Intent::Backspace) {
+            self.suggest();
+        }
+        changed
+    }
+
+    /// [`Self::intent`], without the suggestions that follow a deletion.
+    fn perform_intent(&mut self, intent: Intent) -> bool {
+        self.close_open();
         // A double- or triple-click selection reports its click point, not
         // its bounds, until it is normalized.
         let cursor = self.snapshot_cursor();
@@ -633,7 +694,7 @@ impl EditorView {
     ///
     /// Returns whether the text changed.
     pub fn clip(&mut self, clip: Clip) -> bool {
-        self.menu = None;
+        self.close_open();
         match clip {
             Clip::CopyLine(text) => {
                 self.line_clip = Some(text);
@@ -691,7 +752,7 @@ impl EditorView {
     /// Returns `true` if something was restored: the text, the cursor and
     /// selection, and on the owned engine the scroll position.
     pub fn undo(&mut self) -> bool {
-        self.menu = None;
+        self.close_open();
         if !self.history.can_undo() {
             return false;
         }
@@ -709,7 +770,7 @@ impl EditorView {
     ///
     /// Returns `true` if something was restored.
     pub fn redo(&mut self) -> bool {
-        self.menu = None;
+        self.close_open();
         if !self.history.can_redo() {
             return false;
         }
@@ -758,7 +819,7 @@ impl EditorView {
     ///
     /// Ends the current typing group without discarding history.
     pub fn move_cursor(&mut self, cursor: Cursor) {
-        self.menu = None;
+        self.close_open();
         self.history.break_group();
         self.select(cursor);
     }
@@ -808,7 +869,7 @@ impl EditorView {
     /// as one row, so a wrapped line between the view and the target leaves
     /// the target off by that line's extra rows.
     pub fn scroll_to_line(&mut self, line: usize, placement: Placement) {
-        self.menu = None;
+        self.close_open();
         self.history.break_group();
         self.content.scroll_to_line(line, placement);
     }
@@ -842,7 +903,7 @@ impl EditorView {
     /// once the cursor has moved its next update scrolls to it, so a view
     /// that has to move up past the cursor puts the cursor's line on top.
     pub fn restore_viewport(&mut self, viewport: Viewport) {
-        self.menu = None;
+        self.close_open();
         self.history.break_group();
         let cursor = self.clamped(viewport.cursor);
         if cursor.selection.is_none() && self.content.cursor().selection.is_some() {
@@ -876,6 +937,7 @@ impl EditorView {
         }
         self.history.clear();
         self.find_current = None;
+        self.suppressed = None;
         self.text_changed();
     }
 
@@ -898,6 +960,7 @@ impl EditorView {
         self.content.move_to(clamped);
         self.history.clear();
         self.find_current = None;
+        self.suppressed = None;
         self.text_changed();
         true
     }
@@ -920,7 +983,7 @@ impl EditorView {
     ///
     /// Returns `true` if at least one match exists.
     pub fn find_next(&mut self) -> bool {
-        self.menu = None;
+        self.close_open();
         self.history.break_group();
         if self.find_matches.is_empty() {
             return false;
@@ -938,7 +1001,7 @@ impl EditorView {
     ///
     /// Returns `true` if at least one match exists.
     pub fn find_previous(&mut self) -> bool {
-        self.menu = None;
+        self.close_open();
         self.history.break_group();
         if self.find_matches.is_empty() {
             return false;
@@ -1003,25 +1066,56 @@ impl EditorView {
         self.proofreader = proofreader;
     }
 
-    /// Carry out a suggestions-menu event. Returns whether the text changed,
-    /// as [`EditorView::perform`] does.
+    /// Carry out a popover event: the suggestions menu's, or the host's
+    /// popover's. Returns whether the text changed, as
+    /// [`EditorView::perform`] does.
     ///
-    /// Opening finds the misspelled word that contains or touches the caret
-    /// ([`SpellEvent::OpenAtCaret`]) or lies under a point relative to the
-    /// text origin ([`SpellEvent::OpenAt`]), asks the proofreader for its
-    /// suggestions, and scrolls the word's first row into view if it is
-    /// not; the caret and the selection stay where they are. With no such
-    /// word, on the iced engine, or with no proofreader, nothing opens.
-    /// Accepting replaces the word through [`EditorView::apply`], so it is
-    /// one undo step. A menu key ([`SpellEvent::Key`]) acts on the open menu,
-    /// or with none open is handled as the editor handles that press, which
-    /// may edit the text too; these two are the events that can return
-    /// true. A pointer press ([`SpellEvent::Press`]) closes the open menu,
-    /// or with none open clicks or opens one as that press would.
+    /// Opening the suggestions menu finds the misspelled word that contains
+    /// or touches the caret ([`SpellEvent::OpenAtCaret`]) or lies under a
+    /// point relative to the text origin ([`SpellEvent::OpenAt`]), asks the
+    /// proofreader for its suggestions, and scrolls the word's first row
+    /// into view if it is not; the caret and the selection stay where they
+    /// are. With no such word, on the iced engine, or with no proofreader,
+    /// nothing opens. A request for a popover of the host's
+    /// ([`SpellEvent::Request`]) closes what is open and then opens what
+    /// the host's [`MenuSource`] answers for the caret, so a host that acts
+    /// on the request itself may do so before or after it hands the event
+    /// here. Accepting a suggestion replaces the word through
+    /// [`EditorView::apply`], so it is one undo step; accepting a row of
+    /// the host's popover closes it and leaves the row for
+    /// [`EditorView::take_choice`].
+    ///
+    /// A popover's key ([`SpellEvent::Key`]) acts on the open popover as
+    /// its mode has it, or with none open is handled as the editor handles
+    /// that press, which may edit the text too; it and accepting a
+    /// suggestion are the events that can return true. Escape so sent
+    /// dismisses the open popover and is claimed
+    /// ([`EditorView::take_claimed_escape`]); with none open it does
+    /// nothing, and stays the host's. A pointer press
+    /// ([`SpellEvent::Press`]) only closes an open menu; over suggestions,
+    /// or with nothing open, it clicks or opens the suggestions menu as
+    /// that press would. A stroke ([`SpellEvent::Stroke`]) is the host's to
+    /// take, and does nothing here.
     pub fn spell(&mut self, event: SpellEvent) -> bool {
+        self.choice = None;
+        self.hold = matches!(event, SpellEvent::Hold);
         match event {
-            SpellEvent::Key(key) if self.menu.is_some() => return self.spell(key.event()),
-            SpellEvent::Key(key) => return self.press_without_menu(key),
+            SpellEvent::Key(key) => {
+                return match self.popover().map(|popover| key.on(popover.mode())) {
+                    Some(Some(event)) => {
+                        if key == MenuKey::Escape {
+                            self.escapes += 1;
+                        }
+                        self.spell(event)
+                    }
+                    // Not that popover's key, so any other key to it.
+                    Some(None) => {
+                        self.close_open();
+                        self.press_without_popover(key)
+                    }
+                    None => self.press_without_popover(key),
+                };
+            }
             SpellEvent::Press(press) => return self.press(press),
             SpellEvent::OpenAtCaret => {
                 let caret = self.content.cursor().position;
@@ -1034,57 +1128,119 @@ impl EditorView {
                     .and_then(|place| Some((place.line, place.mark?)));
                 self.open_menu(target);
             }
+            SpellEvent::Request(id) => {
+                self.close_open();
+                let answer = (self.menu_source().zip(self.asked_line()))
+                    .map(|(source, line)| popover::requested(source, id, &line));
+                if let Some(popover::Answer::Menu(menu)) = answer {
+                    self.content.reveal(Position {
+                        line: menu.line(),
+                        column: menu.range().start,
+                    });
+                    self.popover = Some(menu);
+                }
+            }
             SpellEvent::Move(delta) => {
-                if let Some(menu) = &mut self.menu {
-                    menu.step(delta);
+                if let Some(popover) = self.popover_mut() {
+                    popover.step(delta);
                 }
             }
             SpellEvent::Hover(row) => {
-                if let Some(menu) = &mut self.menu {
-                    menu.hover(row);
+                if let Some(popover) = self.popover_mut() {
+                    popover.hover(row);
                 }
             }
             SpellEvent::Accept(row) => return self.accept(row),
-            SpellEvent::AcceptSelected => match self.menu.as_ref().and_then(SpellMenu::selected) {
+            SpellEvent::AcceptSelected => match self.popover().and_then(Popover::selected) {
                 Some(row) => return self.accept(row),
-                None => self.menu = None,
+                None => self.close_open(),
             },
-            SpellEvent::Close => {
-                self.menu = None;
+            SpellEvent::Dismiss => {
+                self.dismiss_popover();
             }
+            SpellEvent::Close => {
+                self.close_open();
+            }
+            SpellEvent::Stroke(_) | SpellEvent::Hold => {}
         }
         false
     }
 
-    /// Replace the menu's word with its suggestion in `row`, as one undo
-    /// step with the caret after it, and close the menu. A row with no
-    /// suggestion, or a word no longer at its mark, closes it and changes
-    /// nothing.
+    /// Carry out a message the widget would publish for a key press.
+    /// Returns whether the text changed.
+    fn carry_out(&mut self, message: Message) -> bool {
+        match message {
+            Message::Action(action) => self.perform(action),
+            Message::Intent(intent) => self.intent(intent),
+            Message::Spell(event) => self.spell(event),
+            Message::Clip(clip) => self.clip(clip),
+            Message::Undo => self.undo(),
+            Message::Redo => self.redo(),
+            // Only Ctrl or Cmd+F routes to Find, never a plain key.
+            Message::Find => false,
+        }
+    }
+
+    /// The caret's line: what the host's sources are asked about.
+    fn asked_line(&self) -> Option<popover::CaretLine> {
+        let cursor = self.content.cursor();
+        let caret = cursor.position;
+        self.content.with_lines(|lines| {
+            Some(popover::CaretLine {
+                index: caret.line,
+                text: lines.get(caret.line)?.text.into_owned(),
+                caret: caret.column,
+                selected: cursor.selection.is_some_and(|anchor| anchor != caret),
+            })
+        })
+    }
+
+    /// Choose `row` of the open popover and close it. The suggestions menu
+    /// replaces its word with the row's suggestion, as one undo step with
+    /// the caret after it; the host's popover leaves the row for
+    /// [`EditorView::take_choice`]. A row the popover does not have, or an
+    /// anchor whose text no longer reads as it did when the popover opened,
+    /// closes it and changes nothing.
     fn accept(&mut self, row: usize) -> bool {
-        let Some(menu) = self.menu.take() else {
+        let menu = self.menu.take();
+        let Some(popover) = menu.as_deref().or(self.popover.as_ref()) else {
             return false;
         };
-        let Some(suggestion) = menu.items().get(row) else {
-            return false;
-        };
-        let line = menu.line();
-        let mark = menu.mark();
+        let (line, range) = (popover.line(), popover.range());
         let unchanged = self.content.with_lines(|lines| {
             lines
                 .get(line)
-                .is_some_and(|text| text.text.get(mark.clone()) == Some(menu.word()))
+                .is_some_and(|text| text.text.get(range.clone()) == Some(popover.text()))
         });
-        if !unchanged {
+        let chosen = popover
+            .id(row)
+            .filter(|_| unchanged)
+            .map(|id| (id, popover.mode()));
+        let suggestion = popover.labels().get(row).filter(|_| unchanged).cloned();
+        self.popover = None;
+        if menu.is_none() {
+            self.choice = chosen.map(|(id, mode)| {
+                let choice = Choice {
+                    id,
+                    mode,
+                    line,
+                    range,
+                };
+                (self.revision, choice)
+            });
             return false;
         }
+        let Some(suggestion) = suggestion else {
+            return false;
+        };
         let at = |column| Position { line, column };
         let edit = Replace {
-            start: at(mark.start),
-            end: at(mark.end),
+            start: at(range.start),
+            end: at(range.end),
             text: suggestion.clone(),
         };
         let caret = Cursor {
-            position: at(mark.start + suggestion.len()),
+            position: at(range.start + suggestion.len()),
             selection: None,
         };
         self.apply(&[edit], caret)
@@ -1100,11 +1256,213 @@ impl EditorView {
         self.menu.take().is_some()
     }
 
+    // -----------------------------------------------------------------------
+    // Popover
+    // -----------------------------------------------------------------------
+
+    /// Open the host's popover of `rows` at `anchor`, in `mode`, with the
+    /// first row selected, and scroll the anchor's row into view if it is
+    /// not; the caret and the selection stay where they are. Whatever
+    /// popover was open closes. Returns whether it opened: not with no
+    /// rows, nor at an anchor off the text or inside a character, nor on
+    /// the iced engine, which cannot scroll to an anchor.
+    ///
+    /// The widget draws it and routes its keys ([`Mode`]), and the row the
+    /// user chooses comes back through [`EditorView::take_choice`].
+    pub fn open_popover(&mut self, anchor: Anchor, mode: Mode, rows: Vec<Row>) -> bool {
+        self.close_open();
+        if rows.is_empty() || self.content.kind() != BackendKind::Owned {
+            return false;
+        }
+        let Some((line, range, text)) = self.anchored(&anchor) else {
+            return false;
+        };
+        self.content.reveal(Position {
+            line,
+            column: range.start,
+        });
+        self.popover = Some(Popover::new(mode, line, range, text, rows));
+        true
+    }
+
+    /// The open popover, if any: the suggestions menu's, or the host's.
+    pub fn popover(&self) -> Option<&Popover> {
+        self.menu.as_deref().or(self.popover.as_ref())
+    }
+
+    fn popover_mut(&mut self) -> Option<&mut Popover> {
+        self.menu.as_deref_mut().or(self.popover.as_mut())
+    }
+
+    /// Close the open popover, the suggestions menu included. Returns
+    /// whether one was open.
+    pub fn close_popover(&mut self) -> bool {
+        let open = self.popover().is_some();
+        self.close_open();
+        open
+    }
+
+    /// Close the open popover for Escape. The editor leaves Escape on the
+    /// suggestions menu to the host, which calls this from its own key
+    /// handling; Escape on a menu of the host's or on suggestions it sends
+    /// on in its order ([`SpellEvent::Key`]), which does this and claims
+    /// the press ([`EditorView::take_claimed_escape`]). Suggestions then
+    /// stay hidden for the caret's line; see
+    /// [`EditorView::suggest_suppressed`]. Returns whether one was open.
+    pub fn dismiss_popover(&mut self) -> bool {
+        if self.popover().map(Popover::mode) == Some(Mode::Suggest) {
+            self.suppressed = Some(self.content.cursor().position.line);
+        }
+        self.close_popover()
+    }
+
+    /// The row the last event given to [`EditorView::spell`] chose from the
+    /// host's popover, once: taking it leaves none. A choice made over a
+    /// text that has changed since, or been replaced, is dropped.
+    pub fn take_choice(&mut self) -> Option<Choice> {
+        let (revision, choice) = self.choice.take()?;
+        (revision == self.revision).then_some(choice)
+    }
+
+    /// Whether a popover took a press of Escape that the host has yet to
+    /// hear of from its own key handling, once for each such press: the
+    /// host calls this when its key handling hears of an Escape with no
+    /// Ctrl, Alt or logo key ([`is_plain_escape`]), and does nothing more
+    /// with a press it returns true for.
+    ///
+    /// The editor publishes Escape on a menu of the host's or on
+    /// suggestions as [`SpellEvent::Key`], so that the host closes them in
+    /// the key's order with the typing around it, and leaves the press
+    /// uncaptured. A press is claimed only when that event closed a
+    /// popover, so each press has one owner: the popover, or the host.
+    pub fn take_claimed_escape(&mut self) -> bool {
+        let claimed = self.escapes > 0;
+        self.escapes = self.escapes.saturating_sub(1);
+        claimed
+    }
+
+    /// Where `anchor` is in the window: the extent of its glyphs on the
+    /// first row that holds any, or for a place between two characters a
+    /// rectangle of no width where a caret there stands, as tall as its
+    /// row. The caret's place is where the engine draws it, on the side of
+    /// a wrap it is on; any other place between two rows of a wrapped line
+    /// is the start of the second. In window coordinates, as the widget
+    /// last placed and laid out the text; `None` before it has, for an
+    /// anchor off the text, and while the anchor's row is out of view.
+    pub fn anchor_bounds(&self, anchor: &Anchor) -> Option<iced::Rectangle> {
+        let (line, range, _) = self.anchored(anchor)?;
+        let row = self.content.anchor_row(line, range)?;
+        Some(row.bounds() + (self.origin.get()? - iced::Point::ORIGIN))
+    }
+
+    /// [`EditorView::anchor_bounds`] of the open popover's anchor, which
+    /// the popover hangs under.
+    pub fn popover_anchor(&self) -> Option<iced::Rectangle> {
+        let popover = self.popover()?;
+        self.anchor_bounds(&Anchor::Range {
+            line: popover.line(),
+            range: popover.range(),
+        })
+    }
+
+    /// The host's source of suggestions, or `None` to offer none. With one,
+    /// each character typed or deleted asks it what to offer at the caret,
+    /// and its answer opens in [`Mode::Suggest`], replaces the open
+    /// suggestions, or closes them. Only the owned engine asks it, as only
+    /// it opens popovers. The widget asks it too, for the keys that follow
+    /// a typed character before the editor has applied it, so it must
+    /// answer the same for the same line and caret.
+    pub fn set_suggest_source(&mut self, source: Option<Arc<dyn SuggestSource>>) {
+        if self.popover.as_ref().map(Popover::mode) == Some(Mode::Suggest) {
+            self.popover = None;
+        }
+        self.suppressed = None;
+        self.suggester = source;
+    }
+
+    /// The host's source of the popovers it names by number, or `None`. A
+    /// key the host's policy routes as [`KeyRoute::Popover`], and
+    /// [`SpellEvent::Request`], open what it answers for the caret. Only
+    /// the owned engine asks it.
+    pub fn set_menu_source(&mut self, source: Option<Arc<dyn MenuSource>>) {
+        self.menus = source;
+    }
+
+    /// The line Escape hid suggestions for ([`EditorView::dismiss_popover`]):
+    /// typing there asks the source nothing until the caret has left the
+    /// line, the text is replaced, or the host clears it.
+    pub fn suggest_suppressed(&self) -> Option<usize> {
+        self.suppressed
+            .filter(|line| *line == self.content.cursor().position.line)
+    }
+
+    /// Offer suggestions on the caret's line again.
+    pub fn clear_suggest_suppression(&mut self) {
+        self.suppressed = None;
+    }
+
+    /// The host's source of suggestions, on the engine that opens popovers.
+    fn suggest_source(&self) -> Option<&dyn SuggestSource> {
+        self.suggester
+            .as_deref()
+            .filter(|_| self.content.kind() == BackendKind::Owned)
+    }
+
+    /// The host's source of menus, on the engine that opens popovers.
+    fn menu_source(&self) -> Option<&dyn MenuSource> {
+        self.menus
+            .as_deref()
+            .filter(|_| self.content.kind() == BackendKind::Owned)
+    }
+
+    /// The line and byte range `anchor` names, the caret's being where it
+    /// is now, and the text there. `None` for a range off the text or
+    /// inside a character.
+    fn anchored(&self, anchor: &Anchor) -> Option<(usize, Range<usize>, String)> {
+        let (line, range) = match anchor {
+            Anchor::Range { line, range } => (*line, range.clone()),
+            Anchor::Caret => {
+                let caret = self.content.cursor().position;
+                (caret.line, caret.column..caret.column)
+            }
+        };
+        let text = self.content.with_lines(|lines| {
+            let text = lines.get(line)?;
+            text.text.get(range.clone()).map(str::to_owned)
+        })?;
+        Some((line, range, text))
+    }
+
+    /// Close whatever popover is open, as every action, intent, undo and
+    /// redo does (rule 4.4.8), and stop hiding suggestions for a line the
+    /// caret has left.
+    fn close_open(&mut self) {
+        self.menu = None;
+        self.popover = None;
+        self.suppressed = self.suggest_suppressed();
+    }
+
+    /// Ask the host's source what to offer at the caret, after a character
+    /// was typed or deleted: its rows open as suggestions under the range
+    /// it names, in place of any that were open. Nothing is offered with a
+    /// selection, on a line Escape hid suggestions for, or for an answer
+    /// with no rows or a range off the line ([`popover::suggested`]).
+    fn suggest(&mut self) {
+        if self.suggest_source().is_none() {
+            return;
+        }
+        self.close_open();
+        self.popover = self
+            .asked_line()
+            .filter(|line| self.suppressed != Some(line.index))
+            .and_then(|line| popover::suggested(self.suggest_source()?, &line));
+    }
+
     /// Open the menu for the misspelled word at `target`, a line and a byte
     /// range of it; with no target, or none the proofreader can still be
     /// asked about, whatever menu was open closes.
     fn open_menu(&mut self, target: Option<(usize, Range<usize>)>) {
-        self.menu = None;
+        self.close_open();
         let Some((line, mark)) = target else {
             return;
         };
@@ -1160,11 +1518,11 @@ impl EditorView {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Vec<Message> {
-        let menu = self.menu.as_ref().map(proof::OpenMenu::of);
+        let popover = self.popover().map(keys::Target::of);
         let selected = self.has_selection();
         let line = || self.caret_line();
         let mut out = Vec::new();
-        match keys::route(key_press(key, modifiers), self.key_context(), menu) {
+        match keys::route(key_press(key, modifiers), self.key_context(), popover) {
             None => {}
             Some(keys::Routed::Binding(binding)) => {
                 keys::messages(binding, selected, &line, &mut out)
@@ -1175,6 +1533,7 @@ impl EditorView {
                     keys::messages(binding, selected, &line, &mut out);
                 }
             }
+            Some(keys::Routed::Pass(message)) => out.push(message),
         }
         out
     }
@@ -1190,18 +1549,18 @@ impl EditorView {
         let (point, guess) = match press {
             MenuPress::Left(point, kind) => (point, kind),
             MenuPress::Right(point) => {
-                if self.menu.take().is_some() {
+                if self.close_menu() {
                     self.drop_drags = false;
                     return false;
                 }
                 return self.spell(SpellEvent::OpenAt(point));
             }
         };
-        let kind = if self.menu.take().is_some() {
+        let kind = if self.close_menu() {
             None
         } else {
             Some(match self.press_chain {
-                Some(previous) => proof::click_kind(guess, previous),
+                Some(previous) => popover::click_kind(guess, previous),
                 None => guess,
             })
         };
@@ -1213,26 +1572,28 @@ impl EditorView {
         };
         self.drop_drags = kind != Some(Kind::Single);
         self.press_chain = (kind != Some(guess)).then_some(kind);
-        self.resolved_press = proof::ResolvedPress {
+        self.resolved_press = popover::ResolvedPress {
             count: self.resolved_press.count.wrapping_add(1),
             kind,
         };
         changed
     }
 
-    /// Handle a press of `key` as the focused editor does with no menu
+    /// Close the open popover for a press in the editor. Returns whether
+    /// the press does nothing more: a menu takes it, and suggestions leave
+    /// it to the text.
+    fn close_menu(&mut self) -> bool {
+        let menu = self.popover().map(Popover::mode) == Some(Mode::Menu);
+        self.close_open();
+        menu
+    }
+
+    /// Handle a press of `key` as the focused editor does with no popover
     /// open, carrying out what it publishes. Returns whether the text
     /// changed.
-    fn press_without_menu(&mut self, key: MenuKey) -> bool {
-        use iced::keyboard::key::Named;
-
-        let named = match key {
-            MenuKey::Up => Named::ArrowUp,
-            MenuKey::Down => Named::ArrowDown,
-            MenuKey::Enter => Named::Enter,
-        };
+    fn press_without_popover(&mut self, key: MenuKey) -> bool {
         let press = key_press(
-            iced::keyboard::Key::Named(named),
+            iced::keyboard::Key::Named(key.named()),
             iced::keyboard::Modifiers::empty(),
         );
         let Some(binding) = keys::key_binding(press, self.key_context()) else {
@@ -1247,16 +1608,7 @@ impl EditorView {
         );
         let mut changed = false;
         for message in messages {
-            changed |= match message {
-                Message::Action(action) => self.perform(action),
-                Message::Intent(intent) => self.intent(intent),
-                Message::Spell(event) => self.spell(event),
-                Message::Clip(clip) => self.clip(clip),
-                Message::Undo => self.undo(),
-                Message::Redo => self.redo(),
-                // Only Ctrl or Cmd+F routes to Find, never a plain key.
-                Message::Find => false,
-            };
+            changed |= self.carry_out(message);
         }
         changed
     }
@@ -1519,7 +1871,7 @@ impl EditorView {
     /// Refresh what derives from the text after it changed.
     fn text_changed(&mut self) {
         self.revision = next_revision();
-        self.menu = None;
+        self.close_open();
         self.refresh_front_matter();
         self.recompute_find();
     }
@@ -5719,5 +6071,992 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── The popover ─────────────────────────────────────────────────────────
+
+    fn rows(labels: &[&str]) -> Vec<Row> {
+        (10..)
+            .zip(labels)
+            .map(|(id, label)| Row::new(id, *label))
+            .collect()
+    }
+
+    fn range(line: usize, range: Range<usize>) -> Anchor {
+        Anchor::Range { line, range }
+    }
+
+    /// `(mode, line, range, text, labels, selected)` of the open popover.
+    type PopoverState = (
+        Mode,
+        usize,
+        Range<usize>,
+        String,
+        Vec<String>,
+        Option<usize>,
+    );
+
+    fn popover_of(ev: &EditorView) -> Option<PopoverState> {
+        ev.popover().map(|popover| {
+            (
+                popover.mode(),
+                popover.line(),
+                popover.range(),
+                popover.text().to_owned(),
+                popover.labels().to_vec(),
+                popover.selected(),
+            )
+        })
+    }
+
+    /// An owned-engine editor over "- [ ] call sam" with a menu of three
+    /// rows open on the box.
+    fn with_menu() -> EditorView {
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call sam\nnext");
+        ev.move_cursor(at(0, 8));
+        assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows(&["Open", "Doing", "Done"])));
+        ev
+    }
+
+    #[test]
+    fn a_popover_opens_at_a_range_or_the_caret_with_its_first_row_selected() {
+        let ev = with_menu();
+        let labels = vec!["Open".to_owned(), "Doing".to_owned(), "Done".to_owned()];
+        assert_eq!(
+            popover_of(&ev),
+            Some((Mode::Menu, 0, 2..5, "[ ]".into(), labels, Some(0)))
+        );
+        assert_eq!(ev.popover().and_then(|popover| popover.id(2)), Some(12));
+        // It is no suggestions menu.
+        assert!(ev.spell_menu().is_none());
+
+        // The caret is the moving end of a selection, as it is when the
+        // popover opens.
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "one\nné two");
+        ev.move_cursor(select((0, 1), (1, 3)));
+        assert!(ev.open_popover(Anchor::Caret, Mode::Suggest, rows(&["a"])));
+        assert_eq!(
+            popover_of(&ev),
+            Some((
+                Mode::Suggest,
+                1,
+                3..3,
+                String::new(),
+                vec!["a".into()],
+                Some(0)
+            ))
+        );
+        ev.move_cursor(at(0, 0));
+        assert!(ev.popover().is_none());
+
+        // Opening again replaces what was open.
+        assert!(ev.open_popover(range(0, 0..3), Mode::Menu, rows(&["a", "b"])));
+        ev.spell(SpellEvent::Move(1));
+        assert!(ev.open_popover(range(1, 0..3), Mode::Menu, rows(&["c"])));
+        assert_eq!(
+            popover_of(&ev),
+            Some((Mode::Menu, 1, 0..3, "né".into(), vec!["c".into()], Some(0)))
+        );
+    }
+
+    #[test]
+    fn a_popover_does_not_open_off_the_text_without_rows_or_on_the_iced_engine() {
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "one\nné two");
+        for (name, anchor) in [
+            ("past the lines", range(2, 0..0)),
+            ("past the line", range(0, 2..4)),
+            ("inside a character", range(1, 0..2)),
+            #[allow(clippy::reversed_empty_ranges)]
+            ("backwards", range(0, 2..1)),
+        ] {
+            assert!(ev.open_popover(range(0, 0..3), Mode::Menu, rows(&["a"])));
+            assert!(!ev.open_popover(anchor, Mode::Menu, rows(&["a"])), "{name}");
+            // And what was open has closed.
+            assert!(ev.popover().is_none(), "{name}");
+        }
+        assert!(!ev.open_popover(range(0, 0..3), Mode::Menu, Vec::new()));
+        assert!(
+            ev.open_popover(range(0, 3..3), Mode::Menu, rows(&["a"])),
+            "the line's end"
+        );
+
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "one");
+        assert!(!ev.open_popover(range(0, 0..3), Mode::Menu, rows(&["a"])));
+        assert!(!ev.open_popover(Anchor::Caret, Mode::Suggest, rows(&["a"])));
+        assert!(ev.popover().is_none());
+    }
+
+    #[test]
+    fn the_suggestions_menu_and_the_hosts_popover_are_never_both_open() {
+        let (mut ev, _) = checked("teh cat");
+        ev.move_cursor(at(0, 1));
+        assert!(ev.open_popover(range(0, 4..7), Mode::Menu, rows(&["a"])));
+        ev.spell(SpellEvent::OpenAtCaret);
+        // The popover that is open is the menu's.
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        assert_eq!(ev.popover().map(Popover::text), Some("teh"));
+        assert!(ev.popover.is_none());
+        assert!(ev.open_popover(range(0, 4..7), Mode::Menu, rows(&["a"])));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!(ev.popover().map(Popover::text), Some("cat"));
+        // A request that finds no word closes the host's popover too.
+        ev.move_cursor(at(0, 5));
+        assert!(ev.open_popover(range(0, 4..7), Mode::Menu, rows(&["a"])));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.popover().is_none());
+        // Closing the suggestions menu alone leaves the host's popover.
+        assert!(ev.open_popover(range(0, 4..7), Mode::Menu, rows(&["a"])));
+        assert!(!ev.close_spell_menu());
+        assert!(ev.popover().is_some());
+        assert!(ev.close_popover());
+        assert!(!ev.close_popover());
+        // And closing any popover closes the suggestions menu.
+        ev.move_cursor(at(0, 1));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.close_popover());
+        assert!(ev.spell_menu().is_none());
+    }
+
+    #[test]
+    fn opening_a_popover_scrolls_its_anchors_row_into_view_and_leaves_the_caret() {
+        let mut text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        text.push_str("the end");
+        let mut ev = EditorView::with_backend(BackendKind::Owned, &text);
+        let size = iced::Size::new(400.0, 240.0);
+        ev.content.lay_out(size);
+        let selection = select((0, 0), (1, 2));
+        ev.move_cursor(selection);
+        ev.content.lay_out(size);
+        assert_eq!(ev.first_visible_line(), 0);
+        assert!(ev.open_popover(range(60, 4..7), Mode::Menu, rows(&["a"])));
+        ev.content.lay_out(size);
+        // Ten rows in view, the last of them the anchor's.
+        assert_eq!(ev.content.scroll().line, 51, "{:?}", ev.content.scroll());
+        assert_eq!(ev.cursor(), selection);
+        assert!(!ev.can_undo());
+    }
+
+    #[test]
+    fn the_selection_of_a_popover_moves_and_stops_at_its_ends() {
+        let mut ev = with_menu();
+        let selected = |ev: &EditorView| ev.popover().and_then(Popover::selected);
+        ev.spell(SpellEvent::Move(-1));
+        assert_eq!(selected(&ev), Some(0));
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Move(1));
+        ev.spell(SpellEvent::Move(1));
+        assert_eq!(selected(&ev), Some(2));
+        ev.spell(SpellEvent::Hover(1));
+        assert_eq!(selected(&ev), Some(1));
+        ev.spell(SpellEvent::Hover(3));
+        assert_eq!(selected(&ev), Some(1));
+    }
+
+    #[test]
+    fn a_chosen_row_comes_back_once_with_its_anchor_and_the_text_stays() {
+        let chosen = |id| Choice {
+            id,
+            mode: Mode::Menu,
+            line: 0,
+            range: 2..5,
+        };
+        let mut ev = with_menu();
+        let cursor = ev.cursor();
+        assert!(!ev.spell(SpellEvent::Accept(2)));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.take_choice(), Some(chosen(12)));
+        assert_eq!(ev.take_choice(), None);
+        assert_eq!(
+            (ev.text().as_str(), ev.cursor()),
+            ("- [ ] call sam\nnext", cursor)
+        );
+        assert!(!ev.can_undo());
+
+        // Enter chooses the selected row.
+        let mut ev = with_menu();
+        ev.spell(SpellEvent::Move(1));
+        assert!(!ev.spell(SpellEvent::AcceptSelected));
+        assert_eq!(ev.take_choice(), Some(chosen(11)));
+
+        // A choice not taken does not outlive the next event.
+        let mut ev = with_menu();
+        ev.spell(SpellEvent::Accept(0));
+        ev.spell(SpellEvent::Close);
+        assert_eq!(ev.take_choice(), None);
+
+        // A row the popover does not have closes it and chooses nothing,
+        // as closing does.
+        for event in [SpellEvent::Accept(3), SpellEvent::Close] {
+            let mut ev = with_menu();
+            ev.spell(event);
+            assert!(ev.popover().is_none(), "{event:?}");
+            assert_eq!(ev.take_choice(), None, "{event:?}");
+        }
+        // Nor does an event with nothing open choose.
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "one");
+        ev.spell(SpellEvent::Accept(0));
+        ev.spell(SpellEvent::AcceptSelected);
+        assert_eq!(ev.take_choice(), None);
+    }
+
+    #[test]
+    fn a_row_chosen_over_a_changed_anchor_chooses_nothing() {
+        let mut ev = with_menu();
+        // Under the popover, where no edit of the editor's own goes.
+        ev.content.perform(Action::Move(Motion::DocumentStart));
+        ev.content.perform(Action::Edit(Edit::Delete));
+        assert_eq!(ev.content.text(), " [ ] call sam\nnext");
+        assert!(ev.popover().is_some());
+        assert!(!ev.spell(SpellEvent::Accept(1)));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.take_choice(), None);
+    }
+
+    /// Each way a popover closes without a choice.
+    const CLOSES: [(&str, Step); 5] = [
+        ("a close", |ev| {
+            ev.spell(SpellEvent::Close);
+        }),
+        ("the host's close", |ev| {
+            ev.close_popover();
+        }),
+        ("escape", |ev| {
+            ev.dismiss_popover();
+        }),
+        ("a row it does not have", |ev| {
+            ev.spell(SpellEvent::Accept(9));
+        }),
+        ("a right press in the editor", |ev| {
+            ev.spell(SpellEvent::Press(MenuPress::Right(iced::Point::new(
+                200.0, 12.0,
+            ))));
+        }),
+    ];
+
+    #[test]
+    fn closing_a_popover_leaves_the_text_the_caret_and_the_selection() {
+        for mode in [Mode::Menu, Mode::Suggest] {
+            for (name, close) in CLOSES {
+                let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call sam");
+                let selection = select((0, 12), (0, 6));
+                ev.move_cursor(selection);
+                assert!(ev.open_popover(range(0, 2..5), mode, rows(&["a", "b"])));
+                ev.spell(SpellEvent::Move(1));
+                close(&mut ev);
+                assert!(ev.popover().is_none(), "{mode:?} {name}");
+                assert_eq!(ev.cursor(), selection, "{mode:?} {name}");
+                assert_eq!(ev.text(), "- [ ] call sam", "{mode:?} {name}");
+                assert!(!ev.can_undo(), "{mode:?} {name}");
+            }
+            // Choosing a row leaves them to the host as well.
+            let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call sam");
+            let selection = select((0, 12), (0, 6));
+            ev.move_cursor(selection);
+            assert!(ev.open_popover(Anchor::Caret, mode, rows(&["a", "b"])));
+            ev.spell(SpellEvent::AcceptSelected);
+            assert_eq!(ev.cursor(), selection, "{mode:?}");
+            assert_eq!(
+                ev.take_choice(),
+                Some(Choice {
+                    id: 10,
+                    mode,
+                    line: 0,
+                    range: 6..6
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_left_press_in_the_editor_only_closes_a_popover() {
+        use iced::advanced::mouse::click::Kind;
+        let mut ev = with_menu();
+        let cursor = ev.cursor();
+        let press = SpellEvent::Press(MenuPress::Left(iced::Point::new(1.0, 12.0), Kind::Single));
+        assert!(!ev.spell(press));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.cursor(), cursor);
+        // With none open, the same press is the click it would have been.
+        ev.content.lay_out(iced::Size::new(400.0, 240.0));
+        ev.spell(press);
+        assert_eq!(ev.cursor(), at(0, 0));
+    }
+
+    #[test]
+    fn a_press_the_host_resolves_over_suggestions_is_the_ordinary_press() {
+        use iced::advanced::mouse::click::Kind;
+        // Suggestions leave presses to the text: the press closes them and
+        // moves the caret, as it does with nothing open.
+        let (mut ev, _) = checked("cat teh");
+        ev.content.lay_out(iced::Size::new(400.0, 240.0));
+        ev.move_cursor(at(0, 2));
+        assert!(ev.open_popover(range(0, 0..2), Mode::Suggest, rows(&["a"])));
+        let on_c = iced::Point::new(1.0, 12.0);
+        ev.spell(SpellEvent::Press(MenuPress::Left(on_c, Kind::Single)));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.cursor(), at(0, 0));
+        // A right press on a misspelled word opens the suggestions menu.
+        ev.move_cursor(at(0, 2));
+        assert!(ev.open_popover(range(0, 0..2), Mode::Suggest, rows(&["a"])));
+        let on_teh = iced::Point::new(5.5 * CELL, 12.0);
+        ev.spell(SpellEvent::Press(MenuPress::Right(on_teh)));
+        assert_eq!(ev.spell_menu().map(SpellMenu::word), Some("teh"));
+        assert_eq!(ev.cursor(), at(0, 2));
+        // A menu takes either press and does nothing more.
+        assert!(ev.open_popover(range(0, 0..2), Mode::Menu, rows(&["a"])));
+        ev.spell(SpellEvent::Press(MenuPress::Right(on_teh)));
+        assert!(ev.popover().is_none());
+    }
+
+    #[test]
+    fn whatever_moves_or_changes_the_text_closes_a_popover() {
+        let steps: [(&str, Step); 16] = [
+            ("typing", |ev| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            }),
+            ("a deletion", |ev| {
+                ev.intent(Intent::Backspace);
+            }),
+            ("a motion", |ev| {
+                ev.perform(Action::Move(Motion::Right));
+            }),
+            ("a scroll", |ev| {
+                ev.perform(Action::Scroll { lines: 1 });
+            }),
+            ("an intent", |ev| {
+                ev.intent(Intent::Home { extend: false });
+            }),
+            ("an applied edit", |ev| {
+                ev.apply(&[], at(0, 0));
+            }),
+            ("a clipboard key", |ev| {
+                ev.clip(Clip::Selection);
+            }),
+            ("undo", |ev| {
+                ev.undo();
+            }),
+            ("redo", |ev| {
+                ev.redo();
+            }),
+            ("a moved cursor", |ev| ev.move_cursor(at(0, 2))),
+            ("a scrolled line", |ev| ev.scroll_to_line(0, Placement::Top)),
+            ("a restored viewport", |ev| {
+                let viewport = ev.viewport();
+                ev.restore_viewport(viewport);
+            }),
+            ("find", |ev| {
+                ev.set_find_query("call");
+                ev.find_next();
+            }),
+            ("replaced text", |ev| {
+                ev.replace_text("- [ ] call sam", true)
+            }),
+            ("a new note", |ev| ev.replace_text("- [ ] call kim", false)),
+            ("a new engine", |ev| {
+                ev.set_backend(BackendKind::Iced, "- [ ] call sam");
+            }),
+        ];
+        for mode in [Mode::Menu, Mode::Suggest] {
+            for (name, step) in steps {
+                let mut ev = with_menu();
+                assert!(ev.open_popover(range(0, 2..5), mode, rows(&["a"])));
+                step(&mut ev);
+                assert!(ev.popover().is_none(), "{mode:?} {name}");
+            }
+        }
+        let changed: [Step; 5] = [
+            |ev| ev.set_font_size(16.0),
+            |ev| ev.set_line_height(2.0),
+            |ev| ev.set_font(Font::with_name("JetBrains Mono")),
+            |ev| ev.set_line_numbers(false),
+            |ev| ev.set_markdown_assist(false),
+        ];
+        for (i, step) in changed.into_iter().enumerate() {
+            let mut ev = with_menu();
+            step(&mut ev);
+            assert!(ev.popover().is_none(), "{i}");
+        }
+        // A new proofreader closes the suggestions menu alone, and the same
+        // setting nothing.
+        let unchanged: [Step; 3] = [
+            |ev| ev.set_proofreader(Some(Arc::new(fixtures::Rejects::new(&["teh"])))),
+            |ev| ev.set_font_size(14.0),
+            |ev| ev.set_line_numbers(true),
+        ];
+        for (i, step) in unchanged.into_iter().enumerate() {
+            let mut ev = with_menu();
+            step(&mut ev);
+            assert!(ev.popover().is_some(), "{i}");
+        }
+    }
+
+    // ── Suggestions ─────────────────────────────────────────────────────────
+
+    /// An owned-engine editor over `text`, with a source that completes
+    /// `due`, `duplicate` and `today`, and the caret at `(line, column)`.
+    fn suggesting(
+        text: &str,
+        line: usize,
+        column: usize,
+    ) -> (EditorView, Arc<fixtures::Completes>) {
+        let source = Arc::new(fixtures::Completes::new(&["due", "duplicate", "today"]));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, text);
+        ev.set_suggest_source(Some(source.clone()));
+        ev.move_cursor(at(line, column));
+        (ev, source)
+    }
+
+    fn type_text(ev: &mut EditorView, text: &str) {
+        for c in text.chars() {
+            ev.perform(Action::Edit(Edit::Insert(c)));
+        }
+    }
+
+    /// The `(range, labels)` of the open suggestions.
+    fn suggested(ev: &EditorView) -> Option<(Range<usize>, Vec<String>)> {
+        let popover = ev.popover()?;
+        assert_eq!(popover.mode(), Mode::Suggest);
+        assert_eq!(popover.selected(), Some(0));
+        Some((popover.range(), popover.labels().to_vec()))
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|&item| item.to_owned()).collect()
+    }
+
+    #[test]
+    fn suggestions_follow_what_is_typed_and_deleted() {
+        let (mut ev, source) = suggesting("- [ ] pay ", 0, 10);
+        type_text(&mut ev, "d");
+        assert_eq!(suggested(&ev), None);
+        assert_eq!(source.asked(), [("- [ ] pay d".to_owned(), 11)]);
+        type_text(&mut ev, "u");
+        assert_eq!(
+            suggested(&ev),
+            Some((10..12, strings(&["due", "duplicate"])))
+        );
+        assert_eq!(ev.popover().map(Popover::text), Some("du"));
+        // The selection starts over with each answer.
+        ev.spell(SpellEvent::Move(1));
+        type_text(&mut ev, "e");
+        assert_eq!(suggested(&ev), Some((10..13, strings(&["due"]))));
+        type_text(&mut ev, "x");
+        assert_eq!(suggested(&ev), None);
+        // Deleting asks again, as a key of the editor's or an action.
+        assert!(ev.intent(Intent::Backspace));
+        assert_eq!(suggested(&ev), Some((10..13, strings(&["due"]))));
+        assert!(ev.perform(Action::Edit(Edit::Backspace)));
+        assert_eq!(
+            suggested(&ev),
+            Some((10..12, strings(&["due", "duplicate"])))
+        );
+        assert_eq!(source.asked().len(), 6);
+        assert_eq!(ev.text(), "- [ ] pay du");
+        // Typing over a selection asks once it is gone.
+        ev.move_cursor(select((0, 6), (0, 12)));
+        type_text(&mut ev, "t");
+        assert_eq!(suggested(&ev), None);
+        type_text(&mut ev, "o");
+        assert_eq!(suggested(&ev), Some((6..8, strings(&["today"]))));
+    }
+
+    #[test]
+    fn only_typing_and_deleting_ask_the_source() {
+        let steps: [(&str, Step); 9] = [
+            ("a motion", |ev| {
+                ev.perform(Action::Move(Motion::Left));
+            }),
+            ("a new line", |ev| {
+                ev.intent(Intent::Enter);
+            }),
+            ("a forward delete", |ev| {
+                ev.intent(Intent::Delete);
+            }),
+            ("a word delete", |ev| {
+                ev.intent(Intent::DeleteWordBackward);
+            }),
+            ("a paste, as an input method commits", |ev| {
+                ev.perform(Action::Edit(Edit::Paste(Arc::new("e".into()))));
+            }),
+            ("a clipboard paste", |ev| {
+                ev.clip(Clip::Paste(Arc::new("e".into())));
+            }),
+            ("an applied edit", |ev| {
+                let end = Position { line: 0, column: 2 };
+                let edit = Replace {
+                    start: end,
+                    end,
+                    text: "e".into(),
+                };
+                ev.apply(&[edit], at(0, 3));
+            }),
+            ("undo", |ev| {
+                ev.undo();
+            }),
+            ("a moved cursor", |ev| ev.move_cursor(at(0, 2))),
+        ];
+        for (name, step) in steps {
+            let (mut ev, source) = suggesting("", 0, 0);
+            type_text(&mut ev, "du");
+            assert!(suggested(&ev).is_some(), "{name}");
+            step(&mut ev);
+            assert!(ev.popover().is_none(), "{name}");
+            assert_eq!(source.asked().len(), 2, "{name}");
+        }
+        // With a selection left after the key, nothing is asked.
+        let (mut ev, source) = suggesting("du", 0, 2);
+        ev.content.perform(Action::Select(Motion::Left));
+        ev.suggest();
+        assert!(ev.popover().is_none());
+        assert!(source.asked().is_empty());
+    }
+
+    #[test]
+    fn an_answer_off_the_line_or_with_no_rows_offers_nothing() {
+        /// Answers every request with one range and one list of rows.
+        struct Fixed(Range<usize>, Vec<Row>);
+
+        impl SuggestSource for Fixed {
+            fn suggest(&self, _line: &str, _caret: usize) -> Option<Suggestion> {
+                Some(Suggestion {
+                    range: self.0.clone(),
+                    rows: self.1.clone(),
+                })
+            }
+        }
+
+        for (name, range, labels, opens) in [
+            ("no rows", 0..2, &[][..], false),
+            ("past the line", 2..9, &["a"][..], false),
+            ("inside a character", 0..1, &["a"][..], false),
+            ("a place", 3..3, &["a"][..], true),
+            ("a range", 0..2, &["a"][..], true),
+        ] {
+            let mut ev = EditorView::with_backend(BackendKind::Owned, "é ");
+            ev.set_suggest_source(Some(Arc::new(Fixed(range, rows(labels)))));
+            ev.move_cursor(at(0, 3));
+            type_text(&mut ev, "x");
+            assert_eq!(ev.popover().is_some(), opens, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_iced_engine_and_an_editor_with_no_source_suggest_nothing() {
+        let source = Arc::new(fixtures::Completes::new(&["due"]));
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "");
+        ev.set_suggest_source(Some(source.clone()));
+        type_text(&mut ev, "du");
+        assert!(ev.popover().is_none());
+        assert!(source.asked().is_empty());
+
+        // Taking the source away closes its suggestions, and no others.
+        let (mut ev, source) = suggesting("", 0, 0);
+        type_text(&mut ev, "du");
+        assert!(ev.popover().is_some());
+        ev.set_suggest_source(None);
+        assert!(ev.popover().is_none());
+        type_text(&mut ev, "e");
+        assert!(ev.popover().is_none());
+        assert_eq!(source.asked().len(), 2);
+        assert!(ev.open_popover(range(0, 0..3), Mode::Menu, rows(&["a"])));
+        ev.set_suggest_source(Some(source));
+        assert!(ev.popover().is_some());
+    }
+
+    #[test]
+    fn escape_hides_suggestions_for_the_line_until_the_caret_leaves_it() {
+        let (mut ev, source) = suggesting("one\n", 1, 0);
+        type_text(&mut ev, "du");
+        assert_eq!(ev.suggest_suppressed(), None);
+        assert!(ev.dismiss_popover());
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.suggest_suppressed(), Some(1));
+        // Nothing more is offered on the line, nor asked.
+        type_text(&mut ev, "e");
+        ev.intent(Intent::Backspace);
+        assert!(ev.popover().is_none());
+        assert_eq!(source.asked().len(), 2);
+        assert_eq!(ev.suggest_suppressed(), Some(1));
+        // A second Escape finds nothing to close and hides nothing new.
+        assert!(!ev.dismiss_popover());
+
+        // Leaving the line and coming back offers again.
+        ev.perform(Action::Move(Motion::Up));
+        assert_eq!(ev.suggest_suppressed(), None);
+        ev.perform(Action::Move(Motion::Down));
+        ev.perform(Action::Move(Motion::End));
+        type_text(&mut ev, "e");
+        assert_eq!(suggested(&ev), Some((0..3, strings(&["due"]))));
+        assert_eq!(ev.suggest_suppressed(), None);
+
+        // The host clears it, and so does a new text.
+        assert!(ev.dismiss_popover());
+        ev.clear_suggest_suppression();
+        assert_eq!(ev.suggest_suppressed(), None);
+        ev.intent(Intent::Backspace);
+        assert_eq!(suggested(&ev), Some((0..2, strings(&["due", "duplicate"]))));
+        assert!(ev.dismiss_popover());
+        ev.replace_text("one\ndu", true);
+        assert_eq!(ev.suggest_suppressed(), None);
+        type_text(&mut ev, "e");
+        assert!(suggested(&ev).is_some());
+
+        // Escape on a menu hides no suggestions.
+        let (mut ev, _) = suggesting("du", 0, 2);
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, rows(&["a"])));
+        assert!(ev.dismiss_popover());
+        assert_eq!(ev.suggest_suppressed(), None);
+        type_text(&mut ev, "e");
+        assert!(suggested(&ev).is_some());
+    }
+
+    #[test]
+    fn a_popovers_key_acts_on_what_is_open_and_is_the_texts_with_nothing_open() {
+        let chosen = |ev: &mut EditorView| ev.take_choice().map(|choice| (choice.id, choice.mode));
+        // Among suggestions, Up and Down move and Enter and Tab choose.
+        for key in [MenuKey::Enter, MenuKey::Tab] {
+            let (mut ev, _) = suggesting("", 0, 0);
+            type_text(&mut ev, "du");
+            ev.spell(SpellEvent::Key(MenuKey::Down));
+            ev.spell(SpellEvent::Key(MenuKey::Down));
+            ev.spell(SpellEvent::Key(MenuKey::Up));
+            ev.spell(SpellEvent::Key(MenuKey::Down));
+            assert_eq!(ev.popover().and_then(Popover::selected), Some(1), "{key:?}");
+            assert!(!ev.spell(SpellEvent::Key(key)), "{key:?}");
+            assert_eq!(chosen(&mut ev), Some((1, Mode::Suggest)), "{key:?}");
+            assert_eq!(
+                (ev.text().as_str(), ev.cursor()),
+                ("du", at(0, 2)),
+                "{key:?}"
+            );
+        }
+        // With nothing open they are the text's keys.
+        let (mut ev, _) = suggesting("- a\n- b", 1, 3);
+        assert!(!ev.spell(SpellEvent::Key(MenuKey::Up)));
+        assert_eq!(ev.cursor(), at(0, 3));
+        assert!(!ev.spell(SpellEvent::Key(MenuKey::Down)));
+        assert_eq!(ev.cursor(), at(1, 3));
+        assert!(ev.spell(SpellEvent::Key(MenuKey::Tab)));
+        assert_eq!(ev.text(), "- a\n  - b");
+        assert!(ev.spell(SpellEvent::Key(MenuKey::Enter)));
+        assert_eq!(ev.text(), "- a\n  - b\n  - ");
+        assert_eq!(chosen(&mut ev), None);
+        // A menu takes Up, Down and Enter; Tab is any other key to it,
+        // which closes it and indents.
+        let mut ev = with_menu();
+        ev.spell(SpellEvent::Key(MenuKey::Down));
+        assert!(!ev.spell(SpellEvent::Key(MenuKey::Enter)));
+        assert_eq!(chosen(&mut ev), Some((11, Mode::Menu)));
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "- a\n- [ ] b");
+        ev.move_cursor(at(1, 7));
+        assert!(ev.open_popover(range(1, 2..5), Mode::Menu, rows(&["Open", "Done"])));
+        assert!(ev.spell(SpellEvent::Key(MenuKey::Tab)));
+        assert!(ev.popover().is_none());
+        assert_eq!(chosen(&mut ev), None);
+        assert_eq!(ev.text(), "- a\n  - [ ] b");
+    }
+
+    #[test]
+    fn an_anchor_has_no_place_in_the_window_before_the_text_is_laid_out() {
+        let ev = with_menu();
+        assert_eq!(ev.popover_anchor(), None);
+        assert_eq!(ev.anchor_bounds(&Anchor::Caret), None);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn key_routing_without_a_window_reads_the_open_popover() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+
+        let none = Modifiers::empty();
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call sam");
+        let status = vec![
+            Row::new(1, "Doing").accelerator(Accelerator::plain('/')),
+            Row::new(2, "Done").accelerator(Accelerator::plain('x')),
+            Row::new(3, "Highest").accelerator(Accelerator::shifted('h')),
+        ];
+        assert!(ev.open_popover(range(0, 2..5), Mode::Menu, status));
+        let events = |ev: &EditorView, key: Key, modifiers| -> Vec<SpellEvent> {
+            ev.key_message(key, modifiers)
+                .into_iter()
+                .map(|message| match message {
+                    Message::Spell(event) => event,
+                    message => panic!("{message:?}"),
+                })
+                .collect()
+        };
+        let character = |c: &str| Key::Character(c.into());
+        assert_eq!(events(&ev, character("x"), none), [SpellEvent::Accept(1)]);
+        assert_eq!(events(&ev, character("/"), none), [SpellEvent::Accept(0)]);
+        assert_eq!(
+            events(&ev, character("h"), Modifiers::SHIFT),
+            [SpellEvent::Accept(2)]
+        );
+        assert_eq!(
+            events(&ev, Key::Named(Named::ArrowDown), none),
+            [SpellEvent::Move(1)]
+        );
+        // Escape on a menu of the host's is sent on in its order; with a
+        // shortcut's modifier it is any other key.
+        assert_eq!(
+            events(&ev, Key::Named(Named::Escape), none),
+            [SpellEvent::Key(MenuKey::Escape)]
+        );
+        assert_eq!(
+            events(&ev, Key::Named(Named::Escape), Modifiers::CTRL),
+            [SpellEvent::Close]
+        );
+        // Any other key closes the menu and types.
+        let messages = ev.key_message(character("h"), none);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Spell(SpellEvent::Close),
+                    Message::Action(Action::Edit(Edit::Insert('h')))
+                ]
+            ),
+            "{messages:?}"
+        );
+
+        // Suggestions leave typing to the text and send their keys on.
+        let (ev, _) = {
+            let (mut ev, source) = suggesting("", 0, 0);
+            type_text(&mut ev, "du");
+            (ev, source)
+        };
+        for (named, key) in [
+            (Named::ArrowUp, MenuKey::Up),
+            (Named::ArrowDown, MenuKey::Down),
+            (Named::Enter, MenuKey::Enter),
+            (Named::Tab, MenuKey::Tab),
+            (Named::Escape, MenuKey::Escape),
+        ] {
+            assert_eq!(
+                events(&ev, Key::Named(named), none),
+                [SpellEvent::Key(key)],
+                "{named:?}"
+            );
+        }
+        let messages = ev.key_message(character("e"), none);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::Action(Action::Edit(Edit::Insert('e')))]
+            ),
+            "{messages:?}"
+        );
+        // The suggestions menu leaves Escape to the host with no word.
+        let (ev, _) = opened();
+        assert!(events(&ev, Key::Named(Named::Escape), none).is_empty());
+    }
+
+    // ── What the host's sources open, and Escape ────────────────────────────
+
+    /// An owned-engine editor over a task line, the caret after `ca`, with
+    /// the test source of menus.
+    fn with_menus() -> (EditorView, Arc<fixtures::Menus>) {
+        let menus = Arc::new(fixtures::Menus::default());
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call sam\nnext");
+        ev.set_menu_source(Some(menus.clone()));
+        ev.move_cursor(at(0, 8));
+        (ev, menus)
+    }
+
+    #[test]
+    fn a_request_opens_what_the_hosts_source_answers_for_the_caret() {
+        let (mut ev, menus) = with_menus();
+        let selection = select((0, 12), (0, 8));
+        ev.move_cursor(selection);
+        assert!(!ev.spell(SpellEvent::Request(fixtures::STATUS)));
+        assert_eq!(
+            menus.asked(),
+            [(fixtures::STATUS, "- [ ] call sam".to_owned(), 8)]
+        );
+        let labels = strings(&["Open", "Doing", "Done"]);
+        assert_eq!(
+            popover_of(&ev),
+            Some((Mode::Menu, 0, 2..5, "[ ]".into(), labels, Some(0)))
+        );
+        assert_eq!(ev.cursor(), selection);
+        // A row chosen comes back as from any popover of the host's.
+        ev.spell(SpellEvent::Accept(2));
+        assert_eq!(ev.take_choice().map(|choice| choice.id), Some(22));
+
+        // Whatever was open closes first, whichever order the host acts
+        // in: a popover it opened itself before handing the request on is
+        // replaced by what the source answers, or closed when that is
+        // nothing.
+        let (mut ev, _) = with_menus();
+        assert!(ev.open_popover(Anchor::Caret, Mode::Menu, rows(&["mine"])));
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        assert_eq!(ev.popover().map(|popover| popover.labels().len()), Some(3));
+        for nothing in [9, fixtures::KEYBOARD] {
+            ev.spell(SpellEvent::Request(nothing));
+            assert!(ev.popover().is_none(), "{nothing}");
+            assert!(ev.open_popover(Anchor::Caret, Mode::Menu, rows(&["mine"])));
+        }
+        let (mut ev, _) = opened();
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        assert!(ev.spell_menu().is_none());
+        assert_eq!((ev.text().as_str(), ev.cursor()), ("teh cat", at(0, 1)));
+
+        // On a line that is no task the source opens nothing.
+        let (mut ev, _) = with_menus();
+        ev.move_cursor(at(1, 2));
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        assert!(ev.popover().is_none());
+        // Nor is it asked on the iced engine, or once it is taken away.
+        let menus = Arc::new(fixtures::Menus::default());
+        let mut ev = EditorView::with_backend(BackendKind::Iced, "- [ ] call");
+        ev.set_menu_source(Some(menus.clone()));
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        assert!(ev.popover().is_none() && menus.asked().is_empty());
+        let (mut ev, menus) = with_menus();
+        ev.set_menu_source(None);
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        assert!(ev.popover().is_none() && menus.asked().is_empty());
+    }
+
+    #[test]
+    fn a_requested_menu_scrolls_its_anchors_row_into_view() {
+        let mut text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        text.push_str("- [ ] the end");
+        let mut ev = EditorView::with_backend(BackendKind::Owned, &text);
+        ev.set_menu_source(Some(Arc::new(fixtures::Menus::default())));
+        let size = iced::Size::new(400.0, 240.0);
+        ev.content.lay_out(size);
+        let top = ev.content.scroll();
+        ev.content.return_to(at(60, 8), top);
+        ev.content.lay_out(size);
+        assert_eq!(ev.first_visible_line(), 0);
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        assert!(ev.popover().is_some());
+        ev.content.lay_out(size);
+        assert_eq!(ev.content.scroll().line, 51, "{:?}", ev.content.scroll());
+        assert_eq!(ev.cursor(), at(60, 8));
+    }
+
+    #[test]
+    fn a_stroke_is_the_hosts_and_nothing_to_the_editor() {
+        let press = key_press(
+            iced::keyboard::Key::Character("x".into()),
+            iced::keyboard::Modifiers::empty(),
+        );
+        let stroke = Stroke::of(&press).unwrap();
+        let (mut ev, _) = with_menus();
+        assert!(!ev.spell(SpellEvent::Stroke(stroke)));
+        assert_eq!(
+            (ev.text().as_str(), ev.cursor()),
+            ("- [ ] call sam\nnext", at(0, 8))
+        );
+        // Nor does it close a popover.
+        ev.spell(SpellEvent::Request(fixtures::STATUS));
+        ev.spell(SpellEvent::Stroke(stroke));
+        assert!(ev.popover().is_some());
+        assert_eq!(ev.take_choice(), None);
+    }
+
+    #[test]
+    fn escape_sent_to_a_popover_dismisses_it_and_is_claimed_once() {
+        // Suggestions: hidden for the line, before what is typed next.
+        let (mut ev, source) = suggesting("", 0, 0);
+        type_text(&mut ev, "du");
+        assert!(!ev.take_claimed_escape());
+        assert!(!ev.spell(SpellEvent::Key(MenuKey::Escape)));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.suggest_suppressed(), Some(0));
+        // The host's own handling of that press is dropped, once.
+        assert!(ev.take_claimed_escape());
+        assert!(!ev.take_claimed_escape());
+        type_text(&mut ev, "e");
+        assert!(ev.popover().is_none());
+        assert_eq!(source.asked().len(), 2);
+
+        // A menu of the host's: closed, and nothing hidden.
+        let mut ev = with_menu();
+        ev.spell(SpellEvent::Key(MenuKey::Escape));
+        assert!(ev.popover().is_none());
+        assert_eq!(ev.suggest_suppressed(), None);
+        assert!(ev.take_claimed_escape());
+        assert!(!ev.take_claimed_escape());
+
+        // With nothing open the press is the host's Escape: nothing is
+        // claimed, hidden or changed.
+        let (mut ev, _) = suggesting("du", 0, 2);
+        assert!(!ev.spell(SpellEvent::Key(MenuKey::Escape)));
+        assert!(!ev.take_claimed_escape());
+        assert_eq!(ev.suggest_suppressed(), None);
+        assert_eq!((ev.text().as_str(), ev.cursor()), ("du", at(0, 2)));
+
+        // Each press a popover took is dropped in turn; no other key is
+        // ever claimed.
+        let (mut ev, _) = suggesting("", 0, 0);
+        for _ in 0..2 {
+            ev.clear_suggest_suppression();
+            type_text(&mut ev, "du");
+            ev.spell(SpellEvent::Key(MenuKey::Escape));
+            ev.intent(Intent::DeleteWordBackward);
+        }
+        type_text(&mut ev, "du");
+        ev.spell(SpellEvent::Key(MenuKey::Tab));
+        assert!(ev.take_claimed_escape());
+        assert!(ev.take_claimed_escape());
+        assert!(!ev.take_claimed_escape());
+    }
+
+    #[test]
+    fn a_held_edit_asks_the_source_nothing() {
+        let (mut ev, source) = suggesting("d", 0, 1);
+        assert!(!ev.spell(SpellEvent::Hold));
+        type_text(&mut ev, "u");
+        assert!(ev.popover().is_none());
+        assert!(source.asked().is_empty());
+        // Only the one edit.
+        type_text(&mut ev, "e");
+        assert_eq!(suggested(&ev), Some((0..3, strings(&["due"]))));
+        // A deletion is held the same way, and closes what was open.
+        ev.spell(SpellEvent::Hold);
+        ev.intent(Intent::Backspace);
+        assert!(ev.popover().is_none());
+        assert_eq!(source.asked().len(), 1);
+        // Any other popover event lets go of it.
+        ev.spell(SpellEvent::Hold);
+        ev.spell(SpellEvent::Close);
+        type_text(&mut ev, "e");
+        assert!(ev.popover().is_some());
+    }
+
+    #[test]
+    fn a_choice_does_not_outlive_the_text_it_was_made_over() {
+        let steps: [(&str, Step); 5] = [
+            ("a new note", |ev| ev.replace_text("- [x] another", false)),
+            ("the same text loaded again", |ev| {
+                ev.replace_text("- [ ] call sam\nnext", true)
+            }),
+            ("an edit", |ev| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+            }),
+            ("undo", |ev| {
+                ev.perform(Action::Edit(Edit::Insert('x')));
+                ev.undo();
+            }),
+            ("another engine", |ev| {
+                ev.set_backend(BackendKind::Iced, "- [ ] call sam\nnext");
+            }),
+        ];
+        for (name, step) in steps {
+            let mut ev = with_menu();
+            ev.spell(SpellEvent::Accept(1));
+            step(&mut ev);
+            assert_eq!(ev.take_choice(), None, "{name}");
+        }
+        // What leaves the text alone leaves the choice.
+        let mut ev = with_menu();
+        ev.spell(SpellEvent::Accept(1));
+        ev.perform(Action::Move(Motion::Right));
+        ev.set_find_query("call");
+        assert_eq!(ev.take_choice().map(|choice| choice.id), Some(11));
     }
 }

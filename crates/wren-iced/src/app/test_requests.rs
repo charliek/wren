@@ -799,6 +799,7 @@ impl App {
                 "line":menu.line(),"start":menu.mark().start,"end":menu.mark().end,
                 "word":menu.word(),"items":menu.items(),"selected":menu.selected(),
                 "bounds":frame.menu.map(rectangle),
+                "anchor":self.editor.popover_anchor().map(rectangle),
             })
         });
         json!({
@@ -811,17 +812,19 @@ impl App {
     /// One key press as the focused editor and then the app would see it:
     /// the editor's own routing, each message it publishes applied in order,
     /// then the app's key handling for a key that reaches it. The editor
-    /// captures every key it publishes for, and Escape unless its menu is
-    /// open (it then drops focus, which this cannot show).
+    /// captures every key it publishes for, and Escape unless a popover of
+    /// its own is open (it then drops focus, which this cannot show).
     fn editor_key(
         &mut self,
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
-        let menu_open = self.editor.spell_menu().is_some();
+        let menu_open = self.editor.popover().is_some();
         let messages = self.editor.key_message(key.clone(), modifiers);
         let escape = key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
-        let status = if messages.is_empty() && (!escape || menu_open) {
+        // Escape on a popover is never captured, whether or not the editor
+        // publishes for it.
+        let status = if (escape && menu_open) || (!escape && messages.is_empty()) {
             iced::event::Status::Ignored
         } else {
             iced::event::Status::Captured
@@ -2068,6 +2071,139 @@ mod tests {
         assert_eq!(snapshot["enabled"], true);
         assert_eq!(snapshot["ready"], true);
         assert!(snapshot["menu"].is_null());
+    }
+
+    /// A menu of the editor's own that is not the suggestions menu, hung
+    /// at the caret.
+    fn open_popover(app: &mut App) {
+        use wren_editor::{Accelerator, Anchor, Mode, Row};
+        let rows = vec![
+            Row::new(1, "Open"),
+            Row::new(2, "Done").accelerator(Accelerator::plain('x')),
+        ];
+        assert!(app.editor.open_popover(Anchor::Caret, Mode::Menu, rows));
+    }
+
+    #[test]
+    fn escape_and_the_apps_close_rules_reach_any_popover_of_the_editors() {
+        let (_directory, mut app) = spell_fixture();
+        open_popover(&mut app);
+        app.find_open = true;
+        press(&mut app, "down");
+        assert_eq!(app.editor.popover().unwrap().selected(), Some(1));
+        // The first Escape is the popover's alone; the next one is the find
+        // bar's.
+        press(&mut app, "escape");
+        assert!(app.editor.popover().is_none());
+        assert!(app.find_open);
+        press(&mut app, "escape");
+        assert!(!app.find_open);
+        // Each press had one owner: none is left claimed for a later one.
+        assert!(!app.editor.take_claimed_escape());
+
+        // The app's own Escape closes it first too.
+        open_popover(&mut app);
+        app.find_open = true;
+        let _ = app.update(Message::Escape);
+        assert!(app.editor.popover().is_none());
+        assert!(app.find_open);
+
+        // An accelerator chooses its row and the text stays; another key
+        // closes the popover and types.
+        open_popover(&mut app);
+        press(&mut app, "x");
+        assert!(app.editor.popover().is_none());
+        assert_eq!(app.editor.text(), "A mispelled word\n");
+        open_popover(&mut app);
+        press(&mut app, "y");
+        assert!(app.editor.popover().is_none());
+        assert_eq!(app.editor.text(), "A miyspelled word\n");
+
+        // It never stays open under a changed setting, an unfocused window
+        // or the palette.
+        open_popover(&mut app);
+        app.apply_preferences();
+        assert!(app.editor.popover().is_none());
+        open_popover(&mut app);
+        app.window_unfocused().unwrap();
+        assert!(app.editor.popover().is_none());
+        open_popover(&mut app);
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        assert!(app.palette.is_some());
+        assert!(app.editor.popover().is_none());
+    }
+
+    /// Offers one row for whatever is before the caret.
+    struct Offers;
+
+    impl wren_editor::SuggestSource for Offers {
+        fn suggest(&self, _line: &str, caret: usize) -> Option<wren_editor::Suggestion> {
+            Some(wren_editor::Suggestion {
+                range: 0..caret,
+                rows: vec![wren_editor::Row::new(1, "row")],
+            })
+        }
+    }
+
+    #[test]
+    fn escape_on_suggestions_is_handled_once_and_before_what_is_typed_next() {
+        use wren_editor::Mode;
+        let (_directory, mut app) = spell_fixture();
+        app.editor
+            .set_suggest_source(Some(std::sync::Arc::new(Offers)));
+        press(&mut app, "x");
+        assert_eq!(
+            app.editor.popover().map(|popover| popover.mode()),
+            Some(Mode::Suggest)
+        );
+        app.find_open = true;
+        // The editor sends Escape on in its order and the app hears of the
+        // same press from its own key handling: the suggestions close, and
+        // that is all the press does.
+        press(&mut app, "escape");
+        assert!(app.editor.popover().is_none());
+        assert!(app.find_open);
+        let line = app.editor.cursor().position.line;
+        assert_eq!(app.editor.suggest_suppressed(), Some(line));
+        // Hidden for the line, so the next letter is offered nothing.
+        press(&mut app, "y");
+        assert!(app.editor.popover().is_none());
+        // The next Escape is the find bar's.
+        press(&mut app, "escape");
+        assert!(!app.find_open);
+    }
+
+    #[test]
+    fn control_escape_is_no_popovers_escape_and_claims_nothing() {
+        let (_directory, mut app) = spell_fixture();
+        app.editor
+            .set_suggest_source(Some(std::sync::Arc::new(Offers)));
+        let control_escape = |app: &mut App| {
+            let (key, modifiers) = key_press(&json!({"key":"escape","mods":["ctrl"]})).unwrap();
+            let _ = app.editor_key(key, modifiers);
+        };
+        for open in [false, true] {
+            if open {
+                press(&mut app, "x");
+                assert!(app.editor.popover().is_some());
+            }
+            app.find_open = true;
+            // A shortcut, with or without suggestions open: the editor
+            // sends it to no popover, and the app's Escape handling never
+            // hears of it.
+            control_escape(&mut app);
+            assert!(app.find_open, "{open}");
+            assert!(!app.editor.take_claimed_escape(), "{open}");
+            assert_eq!(app.editor.suggest_suppressed(), None, "{open}");
+            // So the plain Escape after it is owned as any other: by the
+            // popover while one is open, and by the find bar after.
+            if app.editor.popover().is_some() {
+                press(&mut app, "escape");
+                assert!(app.editor.popover().is_none() && app.find_open);
+            }
+            press(&mut app, "escape");
+            assert!(!app.find_open, "{open}");
+        }
     }
 
     #[test]

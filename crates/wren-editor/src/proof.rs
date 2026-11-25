@@ -1,14 +1,20 @@
-//! Spell check's seam: the host's [`Proofreader`], the suggestions menu
-//! ([`SpellMenu`]) and the events that drive it ([`SpellEvent`]).
+//! Spell check's seam: the host's [`Proofreader`], and the suggestions menu
+//! ([`SpellMenu`]), which is a [`Popover`] driven by the popover's events
+//! ([`SpellEvent`]).
 
-mod menu;
+use std::ops::{Deref, DerefMut, Range};
 
-use std::ops::Range;
-
+#[cfg(test)]
 use iced::advanced::mouse::click::Kind;
+#[cfg(test)]
 use iced::Point;
 #[cfg(any(test, feature = "test-support"))]
 use iced::Rectangle;
+
+#[cfg(test)]
+use crate::popover::{click_kind, OpenMenu};
+pub use crate::popover::{MenuKey, MenuPress};
+use crate::popover::{Mode, Popover, Row};
 
 /// What the host gives the editor to find and correct mistakes. Line by line,
 /// so the editor asks only about rows it draws.
@@ -22,109 +28,14 @@ pub trait Proofreader: Send + Sync {
     fn suggestions(&self, line: &str, mark: Range<usize>, limit: usize) -> Vec<String>;
 }
 
-/// An input to the suggestions menu; see [`crate::EditorView::spell`].
-/// `OpenAt` is relative to the text origin, as a click action's position is.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SpellEvent {
-    /// Open the menu for the misspelled word at the caret.
-    OpenAtCaret,
-    /// Open the menu for the misspelled word under a right-click.
-    OpenAt(Point),
-    /// Move the selection by this many rows.
-    Move(i32),
-    /// The pointer is over this row.
-    Hover(usize),
-    /// Replace the word with this row's suggestion.
-    Accept(usize),
-    /// Replace the word with the selected row's suggestion, or close a menu
-    /// with nothing selected. Enter sends it, so it accepts the row the
-    /// host's menu holds even when keys of one batch were routed before the
-    /// host had opened it.
-    AcceptSelected,
-    /// A press of Up, Down or Enter with no modifier, made after an opening
-    /// earlier in the same batch of events, when the widget cannot know
-    /// whether the host's opening found a word. An open menu takes it as
-    /// [`MenuKey::event`]; with none open the editor handles the press as it
-    /// would any other.
-    Key(MenuKey),
-    /// A press of the left or right button inside the editor, made after an
-    /// opening earlier in the same batch, for the same reason as
-    /// [`SpellEvent::Key`], or a left press after such a press in the same
-    /// batch, which may have only closed a menu. An open menu only closes
-    /// (rule 4.4.5); with none open the editor handles the press as it
-    /// would any other.
-    Press(MenuPress),
-    Close,
-}
+/// The popover's events, by the name of its first user, the suggestions
+/// menu.
+pub type SpellEvent = crate::popover::PopoverEvent;
 
-/// A pointer press the host resolves against its menu; see
-/// [`SpellEvent::Press`]. Positions are relative to the text origin.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MenuPress {
-    /// A left press, with the kind of click it makes if each press before
-    /// it in its batch that the host resolves is a click. The host takes it
-    /// as a single click when the press it follows only closed the menu.
-    Left(Point, Kind),
-    /// A right press, which opens the menu on a misspelled word.
-    Right(Point),
-}
-
-/// How the host resolved the left presses the widget left to it
-/// ([`SpellEvent::Press`]), which the widget learns only in a later batch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ResolvedPress {
-    /// How many such presses the host has resolved, so the widget takes
-    /// each verdict once.
-    pub count: u64,
-    /// What the last one was taken as: a click of this kind, or `None` when
-    /// it only closed a menu.
-    pub kind: Option<Kind>,
-}
-
-/// The click a left press makes that iced counts as a click of kind `raw`,
-/// after a press taken as `previous`. A press that only closed a menu
-/// (`previous` is `None`) is never the first half of a double or triple
-/// click, so the press after it is a single click.
-pub(crate) fn click_kind(raw: Kind, previous: Option<Kind>) -> Kind {
-    match (raw, previous) {
-        (Kind::Single, _) | (_, None) => Kind::Single,
-        (_, Some(Kind::Single)) => Kind::Double,
-        (_, Some(Kind::Double)) => Kind::Triple,
-        (_, Some(Kind::Triple)) => Kind::Double,
-    }
-}
-
-/// A key the open menu takes for itself (rule 4.4.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuKey {
-    Up,
-    Down,
-    Enter,
-}
-
-impl MenuKey {
-    /// What the key does to an open menu: Up and Down move its selection,
-    /// and Enter accepts the selected row.
-    pub fn event(self) -> SpellEvent {
-        match self {
-            Self::Up => SpellEvent::Move(-1),
-            Self::Down => SpellEvent::Move(1),
-            Self::Enter => SpellEvent::AcceptSelected,
-        }
-    }
-}
-
-/// The open suggestions menu: the word it was opened for and what it offers.
+/// The open suggestions menu: a menu-mode [`Popover`] anchored to the word
+/// it was opened for, which stays tinted, offering the word's suggestions.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpellMenu {
-    line: usize,
-    mark: Range<usize>,
-    word: String,
-    items: Vec<String>,
-    selected: Option<usize>,
-}
-
-pub(crate) use menu::{fit, height, measure, place, Fit, MenuOverlay};
+pub struct SpellMenu(Popover);
 
 /// The most suggestions the menu shows (rule 4.4.2).
 pub(crate) const SUGGESTIONS: usize = 5;
@@ -133,149 +44,48 @@ impl SpellMenu {
     /// A menu for `word`, at `mark` of `line`, offering `items`, the first
     /// selected.
     pub(crate) fn new(line: usize, mark: Range<usize>, word: String, items: Vec<String>) -> Self {
-        Self {
-            line,
-            mark,
-            word,
-            selected: (!items.is_empty()).then_some(0),
-            items,
-        }
-    }
-
-    /// Move the selection `delta` rows, stopping at the ends.
-    pub(crate) fn step(&mut self, delta: i32) {
-        self.selected = stepped(self.selected, self.items.len(), delta);
-    }
-
-    /// Select `row`, if it holds a suggestion.
-    pub(crate) fn hover(&mut self, row: usize) {
-        self.selected = hovered(self.selected, self.items.len(), row);
+        let rows = (0..).zip(items).map(|(id, item)| Row::new(id, item));
+        Self(Popover::new(Mode::Menu, line, mark, word, rows.collect()).spelling())
     }
 
     /// The line that holds the word.
     pub fn line(&self) -> usize {
-        self.line
+        self.0.line()
     }
 
     /// The word's byte range in its line.
     pub fn mark(&self) -> Range<usize> {
-        self.mark.clone()
+        self.0.range()
     }
 
     /// The word as it was when the menu opened.
     pub fn word(&self) -> &str {
-        &self.word
+        self.0.text()
     }
 
     /// The suggestions, best first; empty when there are none.
     pub fn items(&self) -> &[String] {
-        &self.items
+        self.0.labels()
     }
 
     /// The selected row, if any row can be selected.
     pub fn selected(&self) -> Option<usize> {
-        self.selected
+        self.0.selected()
     }
 }
 
-/// `selected` moved `delta` rows among `items`, stopping at the ends; a menu
-/// with nothing selected stays so.
-fn stepped(selected: Option<usize>, items: usize, delta: i32) -> Option<usize> {
-    let selected = selected?;
-    let last = items.saturating_sub(1);
-    let moved = i64::try_from(selected)
-        .unwrap_or(i64::MAX)
-        .saturating_add(i64::from(delta));
-    Some(usize::try_from(moved.max(0)).map_or(last, |row| row.min(last)))
-}
+impl Deref for SpellMenu {
+    type Target = Popover;
 
-/// The selection once the pointer is over `row`: that row, if it is one of
-/// `items`.
-fn hovered(selected: Option<usize>, items: usize, row: usize) -> Option<usize> {
-    if row < items {
-        Some(row)
-    } else {
-        selected
+    fn deref(&self) -> &Popover {
+        &self.0
     }
 }
 
-/// The open suggestions menu as the editor widget sees it while it handles
-/// a batch of events.
-///
-/// iced hands every event queued since the last frame to the same widget,
-/// the menu's overlay first, before the host applies any message the widget
-/// published. So the widget keeps its own copy, starting from the menu the
-/// host handed it and changed by each message it publishes as the host will
-/// change its menu, and routes keys and presses against that.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OpenMenu {
-    /// The selected row; `None` when the menu has nothing to offer.
-    pub selected: Option<usize>,
-    /// How many suggestions it has.
-    pub items: usize,
-    /// Opened by a message of this batch. The host opens it against the
-    /// caret and the text as the batch's earlier messages leave them, which
-    /// the widget does not have, so whether it opens and what it offers are
-    /// unknown until the next batch: the menu's keys go to the host as
-    /// [`SpellEvent::Key`], which it resolves against its real menu.
-    pub opening: bool,
-}
-
-impl OpenMenu {
-    /// A menu opened in this batch; see [`Self::opening`].
-    const OPENING: Self = Self {
-        selected: None,
-        items: 0,
-        opening: true,
-    };
-
-    pub(crate) fn of(menu: &SpellMenu) -> Self {
-        Self {
-            selected: menu.selected(),
-            items: menu.items().len(),
-            opening: false,
-        }
+impl DerefMut for SpellMenu {
+    fn deref_mut(&mut self) -> &mut Popover {
+        &mut self.0
     }
-
-    /// The menu `message` leaves `menu` as, once the host applies it. An
-    /// opening may or may not open a menu ([`Self::opening`]), and so may a
-    /// right press the host resolves: with no menu open, it opens one on a
-    /// misspelled word. A move or a hover moves the selection, and a menu
-    /// key acts as it does on an open menu. Every other message closes the
-    /// menu: the host closes it on any action, intent, undo or redo (rule
-    /// 4.4.8), and with no menu open a menu key leaves none.
-    pub(crate) fn after(menu: Option<Self>, message: &crate::Message) -> Option<Self> {
-        match message {
-            crate::Message::Spell(
-                SpellEvent::OpenAtCaret
-                | SpellEvent::OpenAt(_)
-                | SpellEvent::Press(MenuPress::Right(_)),
-            ) => Some(Self::OPENING),
-            crate::Message::Spell(SpellEvent::Key(key)) => {
-                Self::after(menu, &crate::Message::Spell(key.event()))
-            }
-            crate::Message::Spell(SpellEvent::Move(delta)) => menu.map(|menu| Self {
-                selected: stepped(menu.selected, menu.items, *delta),
-                ..menu
-            }),
-            crate::Message::Spell(SpellEvent::Hover(row)) => menu.map(|menu| Self {
-                selected: hovered(menu.selected, menu.items, *row),
-                ..menu
-            }),
-            _ => None,
-        }
-    }
-}
-
-/// Publish `message`, keeping `menu`, the widget's copy, as the host will
-/// leave its own once it applies it.
-pub(crate) fn publish(
-    shell: &mut iced::advanced::Shell<'_, crate::Message>,
-    menu: &std::cell::Cell<Option<OpenMenu>>,
-    message: crate::Message,
-) {
-    menu.set(OpenMenu::after(menu.get(), &message));
-    shell.publish(message);
 }
 
 /// The marks and the menu as the last frame drew them, for the host's

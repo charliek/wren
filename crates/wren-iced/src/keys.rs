@@ -543,4 +543,28 @@ mod tests {
         ));
         assert!(strip_alt_text(&altgr_like).is_none());
     }
+
+    #[test]
+    fn the_escape_the_app_navigates_with_is_the_one_an_editor_popover_takes() {
+        // A popover of the editor's takes Escape and claims the press, for
+        // the app to drop when it hears of it as navigation. So the two
+        // must read the modifiers alike: a press one takes for a shortcut
+        // is no Escape of the other's.
+        for modifiers in [
+            Modifiers::empty(),
+            Modifiers::SHIFT,
+            Modifiers::CTRL,
+            Modifiers::ALT,
+            Modifiers::LOGO,
+            Modifiers::CTRL | Modifiers::SHIFT,
+            Modifiers::ALT | Modifiers::SHIFT,
+        ] {
+            let escape = press(Key::Named(Named::Escape), Code::Escape, modifiers, None);
+            assert_eq!(
+                input(&escape) == Some(Input::Nav(Nav::Escape)),
+                wren_editor::is_plain_escape(modifiers),
+                "{modifiers:?}"
+            );
+        }
+    }
 }

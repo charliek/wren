@@ -6,7 +6,7 @@ use iced::keyboard::key::{self, Named};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::text_editor::{self, Binding, KeyPress, Motion};
 
-use crate::proof::{MenuKey, OpenMenu};
+use crate::popover::{is_plain_escape, Accelerator, MenuKey, Mode, OpenMenu, Stroke};
 use crate::{Intent, Message, SpellEvent};
 
 /// Where the host sends a key press that reaches the focused editor.
@@ -20,6 +20,11 @@ pub enum KeyRoute {
     /// A host-bound request for corrections at the caret, carried out as
     /// [`Message::Spell`] with [`SpellEvent::OpenAtCaret`].
     Suggest,
+    /// A host-bound request for the popover the host names with this
+    /// number, carried out as [`Message::Spell`] with
+    /// [`SpellEvent::Request`]: the host's [`crate::MenuSource`] says what
+    /// opens.
+    Popover(u32),
     /// Not the host's: the editor handles the key itself.
     Pass,
 }
@@ -49,29 +54,101 @@ pub(crate) enum Routed {
     /// open: through this binding, or, with none, not at all and without
     /// capturing it, so it still reaches the host.
     Close(Option<Binding<Message>>),
+    /// Publish this message and leave the press uncaptured, so the host
+    /// hears of it from its own key handling too.
+    Pass(Message),
 }
 
-/// Route a key press, with `menu` open (rule 4.4.4). Up and Down with no
-/// modifier move its selection and Enter with no modifier accepts the row
-/// the host's menu has selected, or closes a menu with nothing to offer; on
-/// a menu opened earlier in the batch, which may not have opened, the three
-/// go to the host as [`SpellEvent::Key`], except that one the policy gives
-/// the host closes the menu and goes to the host uncaptured. Escape is the host's: the editor
-/// gives it no binding, so it neither drops focus nor captures the press,
-/// and the host closes the menu (rule 4.4.8). A modifier key alone does
-/// nothing. Any other press closes the menu and is then routed by
-/// [`key_binding`]. With no menu, routing is [`key_binding`]'s alone.
-pub(crate) fn route(
+/// What is open, as key routing needs it; see [`crate::popover`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Target<'a> {
+    /// The suggestions menu.
+    SpellMenu,
+    /// The suggestions menu, asked for earlier in the batch, which may not
+    /// have opened.
+    SpellOpening,
+    /// A menu of the host's, with its rows' accelerators.
+    Menu(&'a [Option<Accelerator>]),
+    /// Suggestions.
+    Suggest,
+    /// Nothing of the editor's: the host took the keyboard for a request
+    /// of this batch.
+    Keyboard,
+}
+
+impl<'a> Target<'a> {
+    /// The target for a host's open `popover`.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn of(popover: &'a crate::Popover) -> Self {
+        match popover.mode() {
+            Mode::Menu if popover.is_spelling() => Self::SpellMenu,
+            Mode::Menu => Self::Menu(popover.accelerators()),
+            Mode::Suggest => Self::Suggest,
+        }
+    }
+
+    /// Whether the target takes the presses made in the editor, as a menu
+    /// does: `Some(true)` when the host has yet to say whether one opened.
+    pub(crate) fn modal(self) -> Option<bool> {
+        match self {
+            Self::SpellMenu | Self::Menu(_) => Some(false),
+            Self::SpellOpening => Some(true),
+            Self::Suggest | Self::Keyboard => None,
+        }
+    }
+
+    /// Whether the host closes the target for Escape from its own key
+    /// handling, with no word from the editor: the suggestions menu.
+    pub(crate) fn leaves_escape(self) -> bool {
+        matches!(self, Self::SpellMenu | Self::SpellOpening)
+    }
+}
+
+/// The suggestions menu.
+impl From<OpenMenu> for Target<'_> {
+    fn from(menu: OpenMenu) -> Self {
+        if menu.opening {
+            Self::SpellOpening
+        } else {
+            Self::SpellMenu
+        }
+    }
+}
+
+/// Route a key press, with `popover` open (rule 4.4.4). With no popover,
+/// and for every press while an input method composes, routing is
+/// [`key_binding`]'s alone: a popover takes no key from a composition.
+pub(crate) fn route<'a>(
     key_press: KeyPress,
     context: Context,
-    menu: Option<OpenMenu>,
+    popover: Option<impl Into<Target<'a>>>,
 ) -> Option<Routed> {
     if !matches!(key_press.status, text_editor::Status::Focused { .. }) {
         return None;
     }
-    let Some(menu) = menu else {
-        return key_binding(key_press, context).map(Routed::Binding);
-    };
+    match popover.map(Into::into) {
+        None => key_binding(key_press, context).map(Routed::Binding),
+        Some(_) if context.composing => key_binding(key_press, context).map(Routed::Binding),
+        Some(Target::SpellMenu) => route_spell_menu(key_press, context, false),
+        Some(Target::SpellOpening) => route_spell_menu(key_press, context, true),
+        Some(Target::Menu(accelerators)) => route_menu(key_press, context, accelerators),
+        Some(Target::Suggest) => route_suggest(key_press, context),
+        Some(Target::Keyboard) => route_keyboard(key_press, context),
+    }
+}
+
+/// Route a key press with the suggestions menu open, or, `opening`, after
+/// a request for it earlier in the batch, which may not have opened it.
+/// Up and Down with no modifier move its selection and Enter with no
+/// modifier accepts the row the host's menu has selected, or closes a menu
+/// with nothing to offer; after a request the three go to the host as
+/// [`SpellEvent::Key`], except that one the policy gives the host closes
+/// the menu and goes to the host uncaptured. Escape is the host's: the
+/// editor gives it no binding, so it neither drops focus nor captures the
+/// press, and the host closes the menu (rule 4.4.8). A modifier key alone
+/// does nothing. Any other press closes the menu and is then routed by
+/// [`key_binding`].
+fn route_spell_menu(key_press: KeyPress, context: Context, opening: bool) -> Option<Routed> {
     let plain = key_press.modifiers.is_empty();
     let key = match key_press.key.as_ref() {
         Key::Named(Named::Escape) => return None,
@@ -81,7 +158,7 @@ pub(crate) fn route(
         Key::Named(Named::Enter) if plain => MenuKey::Enter,
         _ => return Some(Routed::Close(key_binding(key_press, context))),
     };
-    let event = if menu.opening {
+    let event = if opening {
         // With no menu open the host would take the key, so it must not
         // be captured for a menu the host may not have opened.
         let host = context.policy.is_some_and(|policy| {
@@ -92,14 +169,104 @@ pub(crate) fn route(
         }
         SpellEvent::Key(key)
     } else {
-        key.event()
+        key.on(Mode::Menu)?
     };
-    Some(Routed::Binding(Binding::Custom(Message::Spell(event))))
+    Some(popover_event(event))
+}
+
+/// Route a key press with a menu of the host's open, whose rows have these
+/// `accelerators`. Up and Down with no modifier move its selection, Enter
+/// with no modifier accepts the selected row, and a row's accelerator
+/// accepts the row. Escape with no Ctrl, Alt or logo key goes to the host
+/// in its order with the batch's other messages, uncaptured: the host
+/// closes the menu for it and drops its own handling of the press
+/// ([`crate::EditorView::take_claimed_escape`]). A modifier key alone does
+/// nothing. Any other press closes the menu and is then routed by
+/// [`key_binding`].
+fn route_menu(
+    key_press: KeyPress,
+    context: Context,
+    accelerators: &[Option<Accelerator>],
+) -> Option<Routed> {
+    let (key, modifiers) = (&key_press.key, key_press.modifiers);
+    let event = match key.as_ref() {
+        Key::Named(Named::Escape) if is_plain_escape(modifiers) => {
+            return Some(Routed::Pass(Message::Spell(SpellEvent::Key(
+                MenuKey::Escape,
+            ))));
+        }
+        Key::Named(named) if is_modifier(named) => return None,
+        Key::Named(Named::ArrowUp) if modifiers.is_empty() => SpellEvent::Move(-1),
+        Key::Named(Named::ArrowDown) if modifiers.is_empty() => SpellEvent::Move(1),
+        Key::Named(Named::Enter) if modifiers.is_empty() => SpellEvent::AcceptSelected,
+        _ => {
+            let row = accelerators.iter().position(|accelerator| {
+                accelerator.is_some_and(|accelerator| {
+                    accelerator.matches(key, key_press.physical_key, modifiers)
+                })
+            });
+            match row {
+                Some(row) => SpellEvent::Accept(row),
+                None => return Some(Routed::Close(key_binding(key_press, context))),
+            }
+        }
+    };
+    Some(popover_event(event))
+}
+
+/// Route a key press with suggestions open. Up, Down, Enter and Tab with
+/// no modifier are theirs, whatever the host has bound them to: they go to
+/// the host as [`SpellEvent::Key`], captured. Escape with no Ctrl, Alt or
+/// logo key goes the same way but uncaptured, as on a menu of the host's.
+/// Every other press is routed by [`key_binding`] as with nothing open,
+/// and what it does to the text decides whether the suggestions stay.
+fn route_suggest(key_press: KeyPress, context: Context) -> Option<Routed> {
+    let plain = key_press.modifiers.is_empty();
+    let key = match key_press.key.as_ref() {
+        Key::Named(Named::Escape) if is_plain_escape(key_press.modifiers) => {
+            return Some(Routed::Pass(Message::Spell(SpellEvent::Key(
+                MenuKey::Escape,
+            ))));
+        }
+        Key::Named(Named::ArrowUp) if plain => MenuKey::Up,
+        Key::Named(Named::ArrowDown) if plain => MenuKey::Down,
+        Key::Named(Named::Enter) if plain => MenuKey::Enter,
+        Key::Named(Named::Tab) if plain => MenuKey::Tab,
+        _ => return key_binding(key_press, context).map(Routed::Binding),
+    };
+    Some(popover_event(SpellEvent::Key(key)))
+}
+
+/// Route a key press made after a request, earlier in the batch, that the
+/// host answered by taking the keyboard. Nothing of the editor's is open,
+/// so Escape and a key the policy gives the host are the host's, as with
+/// nothing open, and a modifier alone does nothing. Every other press is
+/// the host's too, for what it opened: it goes to the host as a
+/// [`SpellEvent::Stroke`], captured, and the editor does nothing with it.
+/// A key that is neither named nor one character cannot be carried, and
+/// is dropped.
+fn route_keyboard(key_press: KeyPress, context: Context) -> Option<Routed> {
+    match key_press.key.as_ref() {
+        Key::Named(Named::Escape) => return key_binding(key_press, context).map(Routed::Binding),
+        Key::Named(named) if is_modifier(named) => return None,
+        _ => {}
+    }
+    let hosts = context.policy.is_some_and(|policy| {
+        policy(&key_press.key, key_press.physical_key, key_press.modifiers) == KeyRoute::Host
+    });
+    if hosts {
+        return None;
+    }
+    Stroke::of(&key_press).map(|stroke| popover_event(SpellEvent::Stroke(stroke)))
+}
+
+fn popover_event(event: SpellEvent) -> Routed {
+    Routed::Binding(Binding::Custom(Message::Spell(event)))
 }
 
 /// Whether `named` is a modifier key, which pressed alone leaves an open
 /// menu alone.
-fn is_modifier(named: Named) -> bool {
+pub(crate) fn is_modifier(named: Named) -> bool {
     matches!(
         named,
         Named::Alt
@@ -233,6 +400,11 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         KeyRoute::Suggest if context.composing => return None,
         KeyRoute::Suggest => {
             return Some(Binding::Custom(Message::Spell(SpellEvent::OpenAtCaret)));
+        }
+        // Nor is a popover asked for while an input method composes.
+        KeyRoute::Popover(_) if context.composing => return None,
+        KeyRoute::Popover(id) => {
+            return Some(Binding::Custom(Message::Spell(SpellEvent::Request(id))));
         }
         KeyRoute::Pass => {}
     }
@@ -1075,6 +1247,524 @@ mod tests {
                 ASSIST,
             );
             assert!(matches!(binding, Some(Binding::Custom(_))));
+        }
+    }
+
+    // ── Popovers ────────────────────────────────────────────────────────────
+
+    /// The status menu's keys: Space, `/`, `x`, and Shift+H.
+    const ACCELERATORS: [Option<Accelerator>; 5] = [
+        Some(Accelerator::plain(' ')),
+        Some(Accelerator::plain('/')),
+        Some(Accelerator::plain('x')),
+        None,
+        Some(Accelerator::shifted('h')),
+    ];
+
+    /// The status menu, a menu of the host's.
+    const MENU: Target<'static> = Target::Menu(&ACCELERATORS);
+
+    const EVERY_TARGET: [Target<'static>; 5] = [
+        Target::SpellMenu,
+        Target::SpellOpening,
+        MENU,
+        Target::Suggest,
+        Target::Keyboard,
+    ];
+
+    fn focused(key: Key, modifiers: Modifiers, text: Option<&str>) -> KeyPress {
+        KeyPress {
+            modified_key: key.clone(),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            key,
+            modifiers,
+            text: text.map(Into::into),
+            status: text_editor::Status::Focused { is_hovered: false },
+        }
+    }
+
+    /// How a focused press routes to `target`.
+    fn to_popover(
+        target: Target<'_>,
+        key: Key,
+        modifiers: Modifiers,
+        text: Option<&str>,
+        context: Context,
+    ) -> Option<Routed> {
+        route(focused(key, modifiers, text), context, Some(target))
+    }
+
+    /// Whether a press is published as the popover's Escape and left
+    /// uncaptured.
+    fn is_ordered_escape(routed: Option<Routed>) -> bool {
+        matches!(
+            routed,
+            Some(Routed::Pass(Message::Spell(SpellEvent::Key(
+                MenuKey::Escape
+            ))))
+        )
+    }
+
+    #[test]
+    fn a_menu_of_the_hosts_takes_its_keys_and_its_accelerators() {
+        let menu = |key: Key, modifiers, text: Option<&str>| {
+            to_popover(MENU, key, modifiers, text, ASSIST)
+        };
+        let accepted =
+            |key: Key, modifiers, text: Option<&str>| menu_event(menu(key, modifiers, text));
+        let none = Modifiers::empty();
+        assert_eq!(
+            accepted(Key::Named(Named::Space), none, Some(" ")),
+            Some(SpellEvent::Accept(0))
+        );
+        assert_eq!(
+            accepted(Key::Character("/".into()), none, Some("/")),
+            Some(SpellEvent::Accept(1))
+        );
+        assert_eq!(
+            accepted(Key::Character("x".into()), none, Some("x")),
+            Some(SpellEvent::Accept(2))
+        );
+        assert_eq!(
+            accepted(Key::Character("h".into()), Modifiers::SHIFT, Some("H")),
+            Some(SpellEvent::Accept(4))
+        );
+        assert_eq!(
+            accepted(Key::Named(Named::ArrowUp), none, None),
+            Some(SpellEvent::Move(-1))
+        );
+        assert_eq!(
+            accepted(Key::Named(Named::ArrowDown), none, None),
+            Some(SpellEvent::Move(1))
+        );
+        assert_eq!(
+            accepted(Key::Named(Named::Enter), none, Some("\r")),
+            Some(SpellEvent::AcceptSelected)
+        );
+        // A key that is no row's closes the menu and types, as does an
+        // accelerator's letter without its Shift or with one it lacks.
+        for (key, modifiers, text, typed) in [
+            ("h", none, "h", 'h'),
+            ("y", none, "y", 'y'),
+            ("x", Modifiers::SHIFT, "X", 'X'),
+        ] {
+            assert!(
+                matches!(
+                    menu(Key::Character(key.into()), modifiers, Some(text)),
+                    Some(Routed::Close(Some(Binding::Insert(c)))) if c == typed
+                ),
+                "{key} {modifiers:?}"
+            );
+        }
+        // Tab and a modified arrow are other keys too, and a shortcut is
+        // the shortcut.
+        assert!(matches!(
+            menu(Key::Named(Named::Tab), none, Some("\t")),
+            Some(Routed::Close(Some(Binding::Custom(Message::Intent(
+                Intent::Tab
+            )))))
+        ));
+        assert!(matches!(
+            menu(Key::Named(Named::ArrowDown), Modifiers::SHIFT, None),
+            Some(Routed::Close(Some(Binding::Select(Motion::Down))))
+        ));
+        assert!(matches!(
+            menu(Key::Character("x".into()), Modifiers::COMMAND, None),
+            Some(Routed::Close(Some(Binding::Cut)))
+        ));
+        // A host shortcut closes the menu and still reaches the host.
+        let policy = host_policy();
+        let hosted = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        assert!(matches!(
+            to_popover(
+                MENU,
+                Key::Character("f".into()),
+                Modifiers::COMMAND,
+                None,
+                hosted
+            ),
+            Some(Routed::Close(None))
+        ));
+        // A lone modifier leaves it alone.
+        assert!(menu(Key::Named(Named::Shift), Modifiers::SHIFT, None).is_none());
+    }
+
+    #[test]
+    fn escape_on_a_menu_of_the_hosts_or_on_suggestions_is_sent_on_in_its_order() {
+        for target in [MENU, Target::Suggest] {
+            // With no Ctrl, Alt or logo key it is the popover's: a message,
+            // so the host dismisses it before what is typed next;
+            // uncaptured and with no binding, so the editor keeps the
+            // keyboard and the host's own key handling hears of it.
+            for modifiers in [Modifiers::empty(), Modifiers::SHIFT] {
+                assert!(
+                    is_ordered_escape(to_popover(
+                        target,
+                        Key::Named(Named::Escape),
+                        modifiers,
+                        None,
+                        ASSIST
+                    )),
+                    "{target:?} {modifiers:?}"
+                );
+            }
+        }
+        // With one of them it is a shortcut, the host's by another road,
+        // and any other key to the popover: a menu closes first.
+        for modifiers in [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO] {
+            assert!(!is_plain_escape(modifiers));
+            assert!(
+                matches!(
+                    to_popover(MENU, Key::Named(Named::Escape), modifiers, None, ASSIST),
+                    Some(Routed::Close(Some(Binding::Unfocus)))
+                ),
+                "{modifiers:?}"
+            );
+            assert!(
+                matches!(
+                    to_popover(
+                        Target::Suggest,
+                        Key::Named(Named::Escape),
+                        modifiers,
+                        None,
+                        ASSIST
+                    ),
+                    Some(Routed::Binding(Binding::Unfocus))
+                ),
+                "{modifiers:?}"
+            );
+        }
+        assert!(is_plain_escape(Modifiers::empty()) && is_plain_escape(Modifiers::SHIFT));
+        // The suggestions menu leaves every Escape to the host's key
+        // handling, with no word.
+        for target in [Target::SpellMenu, Target::SpellOpening] {
+            for modifiers in [Modifiers::empty(), Modifiers::CTRL] {
+                assert!(
+                    to_popover(target, Key::Named(Named::Escape), modifiers, None, ASSIST)
+                        .is_none(),
+                    "{target:?} {modifiers:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_letter_closes_the_suggestions_menu_open_or_asked_for() {
+        // It has no accelerators, whether the host has opened it yet or
+        // not: the letter closes it and types.
+        for target in [Target::SpellMenu, Target::SpellOpening] {
+            assert!(
+                matches!(
+                    to_popover(
+                        target,
+                        Key::Character("x".into()),
+                        Modifiers::empty(),
+                        Some("x"),
+                        ASSIST
+                    ),
+                    Some(Routed::Close(Some(Binding::Insert('x'))))
+                ),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn suggestions_take_plain_up_down_enter_and_tab_whatever_the_host_has_bound() {
+        let none = Modifiers::empty();
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if *key == Key::Named(Named::Tab) && modifiers.is_empty() {
+                KeyRoute::Host
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        let hosted = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        for context in [ASSIST, PLAIN, hosted] {
+            for (named, text, key) in [
+                (Named::ArrowUp, None, MenuKey::Up),
+                (Named::ArrowDown, None, MenuKey::Down),
+                (Named::Enter, Some("\r"), MenuKey::Enter),
+                (Named::Tab, Some("\t"), MenuKey::Tab),
+            ] {
+                // Captured, and resolved by the host against the rows it
+                // has.
+                assert_eq!(
+                    menu_event(to_popover(
+                        Target::Suggest,
+                        Key::Named(named),
+                        none,
+                        text,
+                        context
+                    )),
+                    Some(SpellEvent::Key(key)),
+                    "{named:?}"
+                );
+            }
+        }
+        // With nothing open the host's Tab is the host's.
+        assert!(press(Key::Named(Named::Tab), none, Some("\t"), hosted).is_none());
+    }
+
+    #[test]
+    fn every_other_key_passes_suggestions_as_if_nothing_were_open() {
+        let suggest = |key: Key, modifiers, text: Option<&str>| match to_popover(
+            Target::Suggest,
+            key,
+            modifiers,
+            text,
+            ASSIST,
+        ) {
+            Some(Routed::Binding(binding)) => Some(binding),
+            Some(Routed::Close(_) | Routed::Pass(_)) => panic!("not the text's"),
+            None => None,
+        };
+        let none = Modifiers::empty();
+        assert!(matches!(
+            suggest(Key::Character("e".into()), none, Some("e")),
+            Some(Binding::Insert('e'))
+        ));
+        // Even a letter a menu would take as an accelerator.
+        assert!(matches!(
+            suggest(Key::Character("x".into()), none, Some("x")),
+            Some(Binding::Insert('x'))
+        ));
+        assert!(matches!(
+            suggest(Key::Named(Named::Space), none, Some(" ")),
+            Some(Binding::Insert(' '))
+        ));
+        assert!(matches!(
+            suggest(Key::Named(Named::Backspace), none, None),
+            Some(Binding::Custom(Message::Intent(Intent::Backspace)))
+        ));
+        assert!(matches!(
+            suggest(Key::Named(Named::ArrowLeft), none, None),
+            Some(Binding::Move(Motion::Left))
+        ));
+        // The popover's keys with a modifier are the text's.
+        assert!(matches!(
+            suggest(Key::Named(Named::ArrowDown), Modifiers::SHIFT, None),
+            Some(Binding::Select(Motion::Down))
+        ));
+        assert!(matches!(
+            suggest(Key::Named(Named::Enter), Modifiers::SHIFT, Some("\r")),
+            Some(Binding::Custom(Message::Intent(Intent::ShiftEnter)))
+        ));
+        assert!(matches!(
+            suggest(Key::Named(Named::Tab), Modifiers::SHIFT, Some("\t")),
+            Some(Binding::Custom(Message::Intent(Intent::ShiftTab)))
+        ));
+        assert!(matches!(
+            suggest(Key::Character("z".into()), Modifiers::COMMAND, None),
+            Some(Binding::Custom(Message::Undo))
+        ));
+        // A lone modifier and a key the editor ignores do nothing.
+        assert!(suggest(Key::Named(Named::Shift), Modifiers::SHIFT, None).is_none());
+        assert!(suggest(Key::Named(Named::F5), none, None).is_none());
+    }
+
+    #[test]
+    fn an_input_method_keeps_every_key_from_a_popover_while_it_composes() {
+        let none = Modifiers::empty();
+        for target in EVERY_TARGET {
+            let composing =
+                |key: Key, text: Option<&str>| to_popover(target, key, none, text, COMPOSING);
+            // Enter and Tab are the input method's own, as with nothing
+            // open: a menu opened while it composes accepts no row for
+            // them, and suggestions choose none.
+            assert!(
+                composing(Key::Named(Named::Enter), Some("\r")).is_none(),
+                "{target:?}"
+            );
+            assert!(
+                composing(Key::Named(Named::Tab), Some("\t")).is_none(),
+                "{target:?}"
+            );
+            // The arrows move, a letter types, and Escape drops focus, as
+            // they do then: no key is the popover's, an accelerator
+            // included.
+            assert!(
+                matches!(
+                    composing(Key::Named(Named::ArrowDown), None),
+                    Some(Routed::Binding(Binding::Move(Motion::Down)))
+                ),
+                "{target:?}"
+            );
+            assert!(
+                matches!(
+                    composing(Key::Character("x".into()), Some("x")),
+                    Some(Routed::Binding(Binding::Insert('x')))
+                ),
+                "{target:?}"
+            );
+            assert!(
+                matches!(
+                    composing(Key::Named(Named::Escape), None),
+                    Some(Routed::Binding(Binding::Unfocus))
+                ),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_took_the_keyboard_is_handed_each_key_as_a_stroke() {
+        let none = Modifiers::empty();
+        let keyboard = |key: Key, modifiers, text: Option<&str>, context| {
+            to_popover(Target::Keyboard, key, modifiers, text, context)
+        };
+        let stroke = |key: Key, modifiers, text: Option<&str>| match menu_event(keyboard(
+            key, modifiers, text, ASSIST,
+        )) {
+            Some(SpellEvent::Stroke(stroke)) => Some(stroke),
+            _ => None,
+        };
+        // The key, its modifiers and what it types, for the host's field:
+        // captured, and the editor does nothing with it.
+        let f = stroke(Key::Character("f".into()), none, Some("f")).unwrap();
+        assert_eq!(
+            (f.character(), f.named(), f.text(), f.modifiers()),
+            (Some('f'), None, Some('f'), none)
+        );
+        let shifted = stroke(Key::Character("h".into()), Modifiers::SHIFT, Some("H")).unwrap();
+        assert_eq!(
+            (shifted.character(), shifted.text()),
+            (Some('h'), Some('H'))
+        );
+        for (named, text) in [
+            (Named::Enter, Some("\r")),
+            (Named::Tab, Some("\t")),
+            (Named::Backspace, None),
+            (Named::ArrowDown, None),
+            (Named::Space, Some(" ")),
+        ] {
+            let stroke = stroke(Key::Named(named), none, text).unwrap();
+            assert_eq!(stroke.named(), Some(named));
+            // Control characters are not what a key types.
+            assert_eq!(stroke.text(), (named == Named::Space).then_some(' '));
+        }
+        let paste = stroke(Key::Character("v".into()), Modifiers::COMMAND, None).unwrap();
+        assert_eq!(
+            (paste.character(), paste.text(), paste.modifiers()),
+            (Some('v'), None, Modifiers::COMMAND)
+        );
+        // Nothing of the editor's is open, so Escape is the host's as it
+        // is with nothing open, and so is a key the host has bound.
+        assert!(matches!(
+            keyboard(Key::Named(Named::Escape), none, None, ASSIST),
+            Some(Routed::Binding(Binding::Unfocus))
+        ));
+        let policy = host_policy();
+        let hosted = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        assert!(keyboard(Key::Character("f".into()), Modifiers::COMMAND, None, hosted).is_none());
+        // A lone modifier does nothing, and a key of more than one
+        // character cannot be carried.
+        assert!(keyboard(Key::Named(Named::Shift), Modifiers::SHIFT, None, ASSIST).is_none());
+        assert!(keyboard(Key::Character("ab".into()), none, Some("ab"), ASSIST).is_none());
+    }
+
+    #[test]
+    fn a_host_key_asks_for_a_popover_of_the_hosts() {
+        let policy: KeyPolicy = Arc::new(|key: &Key, _, modifiers: Modifiers| {
+            if modifiers == Modifiers::COMMAND && *key == Key::Character("d".into()) {
+                KeyRoute::Popover(7)
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        let context = Context {
+            policy: Some(&policy),
+            ..ASSIST
+        };
+        let command_d = |context| {
+            press(
+                Key::Character("d".into()),
+                Modifiers::COMMAND,
+                None,
+                context,
+            )
+        };
+        assert!(matches!(
+            command_d(context),
+            Some(Binding::Custom(Message::Spell(SpellEvent::Request(7))))
+        ));
+        // Not while an input method composes.
+        assert!(command_d(Context {
+            policy: Some(&policy),
+            ..COMPOSING
+        })
+        .is_none());
+        // On an open menu it closes the menu and asks, as the suggest key
+        // does; suggestions pass it on.
+        for target in [MENU, Target::SpellMenu] {
+            assert!(
+                matches!(
+                    to_popover(
+                        target,
+                        Key::Character("d".into()),
+                        Modifiers::COMMAND,
+                        None,
+                        context
+                    ),
+                    Some(Routed::Close(Some(Binding::Custom(Message::Spell(
+                        SpellEvent::Request(7)
+                    )))))
+                ),
+                "{target:?}"
+            );
+        }
+        assert!(matches!(
+            to_popover(
+                Target::Suggest,
+                Key::Character("d".into()),
+                Modifiers::COMMAND,
+                None,
+                context
+            ),
+            Some(Routed::Binding(Binding::Custom(Message::Spell(
+                SpellEvent::Request(7)
+            ))))
+        ));
+    }
+
+    #[test]
+    fn an_unfocused_editor_routes_nothing_to_a_popover() {
+        for target in EVERY_TARGET {
+            let routed = route(
+                KeyPress {
+                    status: text_editor::Status::Active,
+                    ..focused(Key::Named(Named::Enter), Modifiers::empty(), None)
+                },
+                ASSIST,
+                Some(target),
+            );
+            assert!(routed.is_none(), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_menu_takes_the_editors_presses() {
+        assert_eq!(MENU.modal(), Some(false));
+        assert_eq!(Target::SpellMenu.modal(), Some(false));
+        // The host has yet to say whether the suggestions menu opened.
+        assert_eq!(Target::SpellOpening.modal(), Some(true));
+        assert_eq!(Target::Suggest.modal(), None);
+        assert_eq!(Target::Keyboard.modal(), None);
+        for target in EVERY_TARGET {
+            assert_eq!(
+                target.leaves_escape(),
+                matches!(target, Target::SpellMenu | Target::SpellOpening),
+                "{target:?}"
+            );
         }
     }
 }

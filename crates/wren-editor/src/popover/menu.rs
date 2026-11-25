@@ -1,5 +1,5 @@
-//! The suggestions menu as drawn: its size and place under the word (rule
-//! 4.4.3), and the overlay that draws it and takes the pointer (rule 4.4.5).
+//! A popover as drawn: its size and place under its anchor (rule 4.4.3),
+//! and the overlay that draws it and takes the pointer (rule 4.4.5).
 
 use std::cell::Cell;
 #[cfg(any(test, feature = "test-support"))]
@@ -12,9 +12,11 @@ use iced::advanced::{mouse, overlay, Clipboard, Shell};
 use iced::{alignment, Border, Event, Font, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::{publish, OpenMenu, Popover, PopoverEvent};
 #[cfg(any(test, feature = "test-support"))]
-use super::SpellFrame;
-use super::{publish, OpenMenu, SpellEvent, SpellMenu};
+use crate::proof::SpellFrame;
+#[cfg(test)]
+use crate::proof::{SpellEvent, SpellMenu};
 use crate::{MenuStyle, Message};
 
 /// The space between the word's row and the menu.
@@ -168,9 +170,9 @@ pub(crate) fn measure(content: &str, font: Font, size: f32) -> f32 {
     .min_width()
 }
 
-/// The open menu, drawn over the editor.
+/// The open popover, drawn over the editor.
 pub(crate) struct MenuOverlay<'a> {
-    pub menu: &'a SpellMenu,
+    pub menu: &'a Popover,
     /// The rows' text, from [`fit`].
     pub labels: &'a [String],
     /// Where the menu is, in window coordinates.
@@ -186,7 +188,7 @@ pub(crate) struct MenuOverlay<'a> {
 impl MenuOverlay<'_> {
     /// The row under `point` that can be selected, if any.
     fn active_row_at(&self, point: Point) -> Option<usize> {
-        row_at(self.bounds, self.menu.items().len(), point)
+        row_at(self.bounds, self.menu.labels().len(), point)
     }
 
     /// Handle `event` with the pointer at `cursor` (rule 4.4.5), unless an
@@ -203,7 +205,7 @@ impl MenuOverlay<'_> {
                 };
                 if let Some(row) = self.active_row_at(point) {
                     if open.selected != Some(row) {
-                        tell(SpellEvent::Hover(row));
+                        tell(PopoverEvent::Hover(row));
                     }
                 }
                 if self.bounds.contains(point) {
@@ -218,11 +220,11 @@ impl MenuOverlay<'_> {
                 Some(point) if self.bounds.contains(point) => {
                     if *button == mouse::Button::Left {
                         if let Some(row) = self.active_row_at(point) {
-                            tell(SpellEvent::Accept(row));
-                        } else if self.menu.items().is_empty()
+                            tell(PopoverEvent::Accept(row));
+                        } else if self.menu.labels().is_empty()
                             && row_at(self.bounds, 1, point).is_some()
                         {
-                            tell(SpellEvent::Close);
+                            tell(PopoverEvent::Close);
                         }
                     }
                     shell.capture_event();
@@ -282,7 +284,7 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
                 style.selected,
             );
         }
-        let color = if self.menu.items().is_empty() {
+        let color = if self.menu.labels().is_empty() {
             style.muted
         } else {
             style.text
@@ -310,6 +312,101 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
         if let Some(frame) = self.frame {
             frame.borrow_mut().menu = Some(self.bounds);
         }
+    }
+
+    fn update(
+        &mut self,
+        event: &Event,
+        _layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        self.on_event(event, cursor, shell);
+    }
+
+    fn mouse_interaction(
+        &self,
+        _layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.interaction(cursor.position())
+    }
+}
+
+/// The open popover's overlay as a window hands it events: all of a batch,
+/// before the editor widget sees any of them.
+///
+/// A press on a row would so be taken ahead of a key pressed before it,
+/// which the widget only routes afterwards: Enter and then a press on
+/// another row would choose the row pressed. So once an event of the batch
+/// ends or changes what is open, as `ends` says the widget will find, the
+/// overlay takes no more of the pointer, and the presses after that event
+/// reach the widget, after it. Up and Down leave the rows as they are
+/// drawn, and a press on a row after them still chooses that row.
+pub(crate) struct InOrder<'a> {
+    overlay: MenuOverlay<'a>,
+    /// Whether the widget, routing an event, will close the popover or
+    /// change its rows. It is asked about every event the overlay does not
+    /// take, in order, since what an event does depends on those before it.
+    ends: Box<dyn FnMut(&Event) -> bool + 'a>,
+    /// An event of this batch has ended or changed what is open.
+    spent: bool,
+}
+
+impl<'a> InOrder<'a> {
+    pub(crate) fn new(overlay: MenuOverlay<'a>, ends: impl FnMut(&Event) -> bool + 'a) -> Self {
+        Self {
+            overlay,
+            ends: Box::new(ends),
+            spent: false,
+        }
+    }
+
+    /// Handle `event` with the pointer at `cursor`, in its order with the
+    /// batch's other events.
+    pub(crate) fn on_event(
+        &mut self,
+        event: &Event,
+        cursor: mouse::Cursor,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        if self.spent {
+            return;
+        }
+        self.overlay.on_event(event, cursor, shell);
+        if shell.event_status() != iced::event::Status::Captured {
+            self.spent = (self.ends)(event);
+        }
+    }
+
+    /// What the pointer over `point` shows; nothing once the overlay takes
+    /// no more of it, so that the widget below is handed the pointer.
+    pub(crate) fn interaction(&self, point: Option<Point>) -> mouse::Interaction {
+        if self.spent {
+            mouse::Interaction::None
+        } else {
+            self.overlay.interaction(point)
+        }
+    }
+}
+
+impl overlay::Overlay<Message, Theme, Renderer> for InOrder<'_> {
+    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
+        self.overlay.layout(renderer, bounds)
+    }
+
+    fn draw(
+        &self,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+    ) {
+        self.overlay.draw(renderer, theme, style, layout, cursor);
     }
 
     fn update(
@@ -636,5 +733,89 @@ mod tests {
         let ten = measure(&"m".repeat(10), style.font, style.text_size);
         assert!(one > 5.0 && one < 10.0, "{one}");
         assert!((ten - 10.0 * one).abs() < 0.5, "{one} {ten}");
+    }
+
+    // ── In order with the batch's other events ─────────────────────────────
+
+    /// What the overlay for a menu of three publishes for `events`, each
+    /// with the pointer on row `row`, as a window hands it a batch in
+    /// which the widget would find the events for which `ends` is true to
+    /// end the popover; and the pointer it shows over that row afterwards.
+    fn in_order(
+        events: Vec<Event>,
+        ends: impl FnMut(&Event) -> bool,
+        row: usize,
+    ) -> (Vec<Message>, mouse::Interaction) {
+        let three = menu(&["the", "ten", "tea"], 0);
+        let labels = labels_of(&three);
+        let now = Cell::new(Some(OpenMenu::of(&three)));
+        let mut overlay = InOrder::new(overlay(&three, &labels, &now), ends);
+        let mut messages = Vec::new();
+        for event in events {
+            let mut shell = Shell::new(&mut messages);
+            overlay.on_event(&event, mouse::Cursor::Available(on_row(row)), &mut shell);
+        }
+        (messages, overlay.interaction(Some(on_row(row))))
+    }
+
+    /// Stands for any event the overlay takes nothing of.
+    fn other() -> Event {
+        Event::Mouse(mouse::Event::CursorLeft)
+    }
+
+    #[test]
+    fn the_overlay_takes_no_press_after_an_event_that_ends_the_popover() {
+        let left = || pressed(mouse::Button::Left);
+        // Alone, or after an event that leaves the popover as it is, a
+        // press on a row accepts it.
+        for events in [vec![left()], vec![other(), other(), left()]] {
+            let (messages, interaction) = in_order(events, |_| false, 2);
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::Spell(SpellEvent::Accept(2))]
+            ));
+            // The press closed the popover, so it shows no pointer.
+            assert_eq!(interaction, mouse::Interaction::None);
+        }
+        // After one that ends it, the press and the pointer are the
+        // editor's: the widget, which sees that event first, has closed or
+        // accepted by then.
+        let (messages, interaction) = in_order(vec![other(), moved(), left()], |_| true, 2);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert_eq!(interaction, mouse::Interaction::None);
+        // The widget is asked about each event the overlay leaves, in
+        // order, and about none after the one that ends the popover.
+        let mut asked = 0;
+        let ends = |_: &Event| {
+            asked += 1;
+            asked == 2
+        };
+        let (messages, _) = in_order(vec![other(), other(), other(), left()], ends, 2);
+        assert!(messages.is_empty());
+        assert_eq!(asked, 2);
+        // An event the overlay takes itself ends nothing: the pointer over
+        // a row, which only selects it.
+        let mut asked = 0;
+        let (messages, interaction) = in_order(
+            vec![moved(), left()],
+            |_| {
+                asked += 1;
+                true
+            },
+            2,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                Message::Spell(SpellEvent::Hover(2)),
+                Message::Spell(SpellEvent::Accept(2))
+            ]
+        ));
+        assert_eq!((asked, interaction), (0, mouse::Interaction::None));
+        // Until then it shows its own pointer.
+        assert_eq!(
+            in_order(Vec::new(), |_| false, 2).1,
+            mouse::Interaction::Pointer
+        );
     }
 }

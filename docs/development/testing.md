@@ -128,7 +128,9 @@ Each mark has its `line`, its `start` and `end` byte offsets in the line,
 its `word`, whether it is `shown` (the caret at its end hides it), and the
 `rects` of its zigzag in window coordinates. The menu has the `word`, its
 `line`, `start`, and `end`, the `items`, the `selected` row, and its
-`bounds` in window coordinates once a frame has drawn it. A frame must be
+`bounds` in window coordinates once a frame has drawn it, with `anchor`,
+the rectangle of the word's glyphs on their row that the menu hangs under,
+as the editor reports it to the app. A frame must be
 drawn before marks appear, so poll `editor.spell` with `wait_for`. The
 `shortcut` request runs `editor.spell_suggest` as its key does, and
 `command.run` runs it as the palette does.
