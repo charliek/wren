@@ -374,7 +374,13 @@ def test_fuzzy_commands_create_real_items_through_dialogs(
 ) -> None:
     with WrenApp(workspace=vault, artifacts_dir=artifact_directory(f"palette-{command_id}")) as app:
         jump(app, FIRST)
-        assert palette(app, "commands", "srt ttl")["results"][0]["key"] == {"command": "notes.sort_title"}
+        sort_rows = [row["key"] for row in palette(app, "commands", "srt ttl")["results"]]
+        # With tasks on, "Set task priority: Low" also matches the query and
+        # may rank first; the sort command is still offered.
+        if app.client.call("tasks.get")["tasks"]:
+            assert {"command": "notes.sort_title"} in sort_rows
+        else:
+            assert sort_rows[0] == {"command": "notes.sort_title"}
         activate(app, {"command": "notes.sort_title"})
         assert navigation(app)["sort"] == "title"
         rows = palette(app, "commands", query)["results"]

@@ -25,7 +25,12 @@ def test_the_menu_hangs_under_the_anchor_the_app_is_told(tmp_path: Path) -> None
             caret(app, line, mark(app, line, word)["start"] + 1)
             app.client.call("editor.focus")
             suggest(app)
-            state = drawn_menu(app)
+            # A frame draws the new menu after it opens; until then the
+            # bounds reported may still be the last menu's.
+            state = wait_for(
+                lambda: (s := drawn_menu(app)) and s["word"] == word
+                and s["bounds"]["y"] > s["anchor"]["y"] and s,
+                description=f"the menu for {word!r} is drawn")
             assert state["word"] == word, state
             anchor, bounds = state["anchor"], state["bounds"]
             # The anchor is the word's glyphs on their row: as wide as the
