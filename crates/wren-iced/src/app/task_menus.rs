@@ -1412,7 +1412,6 @@ mod tests {
         assert_eq!(app.editor.text(), NOTE, "one undo step a click");
         for (prefix, after) in [
             ("- [-] Cancelled", "- [ ] Cancelled task"),
-            ("- [?] Unknown", "- [/] Unknown task"),
             ("- [X] Shouted", "- [ ] Shouted task"),
             ("- [x] Done", "- [ ] Done task"),
         ] {
@@ -1422,6 +1421,12 @@ mod tests {
             let _ = app.update(Message::Editor(wren_editor::Message::Undo));
             assert_eq!(app.editor.text(), NOTE, "{prefix}");
         }
+        // A box of a symbol of no status of its own is not cycled, which
+        // would lose the symbol: the click places the caret.
+        let unknown = line_of(NOTE, "- [?] Unknown");
+        click(&mut app, unknown, 3);
+        assert_eq!(app.editor.text(), NOTE);
+        assert_eq!(app.editor.cursor().position.line, unknown);
         let draft = &app.session.as_ref().unwrap().document().unwrap().text;
         assert_eq!(draft, NOTE);
         // Off the box a click places the caret, and writes nothing.

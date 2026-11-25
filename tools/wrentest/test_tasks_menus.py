@@ -330,12 +330,17 @@ def test_a_click_on_the_box_cycles_the_status(tmp_path: Path, engine: str) -> No
         for _ in range(3):
             call("editor.undo")
         assert call("editor.get")["text"] == ORIGINAL and call("editor.get")["can_undo"] is False
-        for start, after in [("- [-] Cancelled", "- [ ] Cancelled delta"),
-                             ("- [?] Unknown", "- [/] Unknown echo")]:
-            at = line_of(start)
-            state = call("editor.click", {"line": at, "column": 3})
-            assert state["text"] == replaced(at, after), start
-            undo_to_original(app, path)
+        at = line_of("- [-] Cancelled")
+        state = call("editor.click", {"line": at, "column": 3})
+        assert state["text"] == replaced(at, "- [ ] Cancelled delta")
+        undo_to_original(app, path)
+        # A box of a symbol of no status of its own is not cycled, which
+        # would lose the symbol: the click places the caret.
+        at = line_of("- [?] Unknown")
+        for column in [2, 3, 4]:
+            state = call("editor.click", {"line": at, "column": column})
+            assert state["text"] == ORIGINAL, column
+            assert state["cursor"]["line"] == at, column
         # Off the box a click places the caret.
         state = call("editor.click", {"line": line, "column": column_of(line, "alpha")})
         assert state["text"] == ORIGINAL and state["cursor"]["line"] == line

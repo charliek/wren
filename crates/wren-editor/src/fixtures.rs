@@ -270,6 +270,43 @@ impl SuggestSource for CommandSuggestions {
     }
 }
 
+/// Owners offered after `@` and the start of a name, ranked as they were
+/// last ranked ([`Owners::rank`]): each row numbered by its place in the
+/// ranking, as a host numbers its owners, and bound to the suggestions it
+/// is offered in ([`Row::bound`]).
+pub struct Owners(Mutex<Vec<&'static str>>);
+
+impl Owners {
+    pub fn new(ranked: &[&'static str]) -> Self {
+        Self(Mutex::new(ranked.to_vec()))
+    }
+
+    /// Rank the owners anew, as a host does when its index changes.
+    pub fn rank(&self, ranked: &[&'static str]) {
+        *self.0.lock().expect("ranked") = ranked.to_vec();
+    }
+}
+
+impl SuggestSource for Owners {
+    fn suggest(&self, line: &str, caret: usize) -> Option<Suggestion> {
+        let before = line.get(..caret)?;
+        let at = before.rfind('@')?;
+        let typed = &before[at + 1..];
+        if typed.is_empty() || !typed.chars().all(char::is_alphanumeric) {
+            return None;
+        }
+        let rows: Vec<Row> = (0..)
+            .zip(self.0.lock().expect("ranked").iter())
+            .filter(|(_, name)| name.starts_with(typed))
+            .map(|(id, name)| Row::new(id, format!("@{name}")).bound())
+            .collect();
+        (!rows.is_empty()).then_some(Suggestion {
+            range: at..caret,
+            rows,
+        })
+    }
+}
+
 /// The request [`Menus`] answers with the status menu.
 pub const STATUS: u32 = 1;
 /// The request [`Menus`] answers by taking the keyboard.

@@ -284,10 +284,11 @@ fn route_suggest(key_press: KeyPress, context: Context, enter: bool) -> Option<R
 /// in the frame of a handover is no one's ([`crate::popover`]). A key that
 /// is neither named nor one character is no stroke, and is not taken. With
 /// `escape`, for a handover to a row of suggestions ([`Target::Handed`]),
-/// Escape is such a stroke too, whatever the policy says of it.
+/// Escape is such a stroke too, whatever the policy says of it; one with
+/// Ctrl, Alt or the logo key held ([`is_plain_escape`]) is the host's.
 fn route_keyboard(key_press: KeyPress, context: Context, escape: bool) -> Option<Routed> {
     match key_press.key.as_ref() {
-        Key::Named(Named::Escape) if escape => {
+        Key::Named(Named::Escape) if escape && is_plain_escape(key_press.modifiers) => {
             return Stroke::of(&key_press).map(|stroke| popover_event(SpellEvent::Stroke(stroke)));
         }
         Key::Named(Named::Escape) => return key_binding(key_press, context).map(Routed::Binding),

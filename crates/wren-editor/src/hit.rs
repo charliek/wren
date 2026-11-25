@@ -140,15 +140,18 @@ impl Reading<'_> {
     }
 }
 
-/// The hit at the character that starts at byte `column` of a line with
-/// these misspellings (`marks`) and `spans`.
-/// Whether the character that starts at byte `column` lies in a task's box,
-/// `[` to `]`, among a line's `spans`: what a click on the box is.
+/// Whether the character that starts at byte `column` lies in the box of a
+/// task of a known status, `[` to `]`, among a line's `spans`: what a click
+/// on the box, which cycles the status, is. A box of any other symbol
+/// (`[?]`) takes a click as the text does, so the click never rewrites a
+/// symbol the user chose.
 pub(crate) fn on_box(spans: &LineSpans, column: usize) -> bool {
-    spans
-        .spans
-        .iter()
-        .any(|span| matches!(span.kind, SpanKind::Box(_)) && span.range.contains(&column))
+    spans.spans.iter().any(|span| match &span.kind {
+        SpanKind::Box(task) => {
+            task.row().name != wren_markdown::status::UNKNOWN && span.range.contains(&column)
+        }
+        _ => false,
+    })
 }
 
 impl Reading<'_> {

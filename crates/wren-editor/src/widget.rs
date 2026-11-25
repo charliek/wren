@@ -34,6 +34,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::{DerefMut, Range};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use iced::advanced::graphics::text::cosmic_text::{self, Scroll};
@@ -408,12 +409,12 @@ pub struct TextEditor<'a> {
     /// provider takes is bound to.
     edition: Edition,
     /// The host took the keyboard earlier in this batch: the input after
-    /// the handover is dropped; see [`popover`].
+    /// the handover is dropped; see [`popover`]. When it took it for a row
+    /// of suggestions or a dialog's row chosen in this batch, or for a
+    /// request whose source holds Escape ([`crate::MenuSource::holds_escape`]),
+    /// Escape after it is dropped too ([`Target::Handed`],
+    /// [`Now::holds_escape`]).
     handed_over: Cell<bool>,
-    /// It took it for a row of suggestions chosen in this batch, or for a
-    /// request whose source holds Escape ([`crate::MenuSource::holds_escape`]):
-    /// Escape after it is dropped too ([`Target::Handed`]).
-    handed_by_suggestion: Cell<bool>,
     /// The open popover as the events this widget has handled leave it; see
     /// [`popover::OpenMenu`]. The host builds a new widget once it has
     /// applied them.
@@ -463,7 +464,6 @@ impl<'a> TextEditor<'a> {
             providers: &popover::SPELLING_ALONE,
             edition: Edition::default(),
             handed_over: Cell::new(false),
-            handed_by_suggestion: Cell::new(false),
             menu_now: Now::new(),
             origin: None,
             resolved_press: ResolvedPress::default(),
@@ -716,6 +716,15 @@ impl<'a> TextEditor<'a> {
         {
             self.publish(shell, Message::Spell(SpellEvent::Close));
         }
+        // A row the overlay chose with the pointer, in this batch or in one
+        // the widget saw nothing of, handed the host the keyboard: a
+        // composition under way is not the note's.
+        if state.handed_by_pointer.take() {
+            self.drop_composition(state, shell);
+        }
+        // A row the overlay chose with the pointer, which it saw before
+        // this event, may have handed the host the keyboard.
+        self.take_handover(state, shell);
         let mut accelerators = Vec::new();
         let target = self.target(&mut accelerators);
         // The host took the keyboard earlier in this batch: until the
@@ -724,7 +733,7 @@ impl<'a> TextEditor<'a> {
         let held = self.handed_over.get();
         let routes = Routes {
             presses: target,
-            keys: match (held, self.handed_by_suggestion.get()) {
+            keys: match (held, self.menu_now.holds_escape()) {
                 (true, true) => Some(Target::Handed),
                 (true, false) => Some(Target::Keyboard),
                 (false, _) => target,
@@ -1070,18 +1079,8 @@ impl<'a> TextEditor<'a> {
             }
         }
 
-        // The host took the keyboard for what this event asked for: a
-        // composition the note has under way is cancelled, and from here
-        // to the end of the batch the input is dropped.
-        if !held && matches!(self.menu_now.live(), Some((Opened::Keyboard, _))) {
-            self.handed_over.set(true);
-            self.handback_over.set(true);
-            if state.is_composing() {
-                state.preedit = Some(input_method::Preedit::new());
-                state.dropped = Dropped::Composing;
-                shell.request_redraw();
-            }
-        }
+        // The host took the keyboard for what this event asked for.
+        self.take_handover(state, shell);
 
         let focused = state.focus.is_some();
         closing |= state.was_focused && !focused;
@@ -1116,6 +1115,28 @@ impl<'a> TextEditor<'a> {
             .last_status
             .is_some_and(|last_status| status != last_status)
         {
+            shell.request_redraw();
+        }
+    }
+
+    /// Once the host has taken the keyboard in this batch, for what an
+    /// event asked for or a row chosen: a composition the note has under
+    /// way is cancelled, and from here to the end of the batch the input
+    /// is dropped.
+    fn take_handover(&self, state: &mut State, shell: &mut Shell<'_, Message>) {
+        if !self.handed_over.get() && matches!(self.menu_now.live(), Some((Opened::Keyboard, _))) {
+            self.handed_over.set(true);
+            self.handback_over.set(true);
+            self.drop_composition(state, shell);
+        }
+    }
+
+    /// Cancel the composition the note has under way, if any: what it
+    /// commits, whenever it does, is dropped ([`Dropped`]).
+    fn drop_composition(&self, state: &mut State, shell: &mut Shell<'_, Message>) {
+        if state.is_composing() {
+            state.preedit = Some(input_method::Preedit::new());
+            state.dropped = Dropped::Composing;
             shell.request_redraw();
         }
     }
@@ -1157,6 +1178,25 @@ impl<'a> TextEditor<'a> {
             .menu_now
             .live()
             .is_some_and(|(opened, _)| opened == Opened::Suggest);
+        // Suggestions the batch's own typing opened, which the host has not
+        // shown and whose source may answer otherwise when it opens them:
+        // Tab on them is no one's. Enter reaches here only on a row that
+        // opens a menu ([`Self::target`]): the host chooses that row if it
+        // has it selected, or else Enter is the text's; and since it may
+        // open the menu, the keys after it are dropped.
+        if suggestion && self.menu_now.predicts_suggestions() {
+            let enter = matches!(
+                message,
+                Message::Spell(SpellEvent::Key(proof::MenuKey::Enter))
+            );
+            if let Some(id) = self.menu_now.predicted_menu_row().filter(|_| enter) {
+                let message = Message::Spell(SpellEvent::EnterOn { id });
+                self.menu_now
+                    .publish(shell, message, &|| self.caret_line(), self.sources);
+                self.menu_now.hand_over(true);
+            }
+            return;
+        }
         // A row whose choice opens a menu of the host's, which the widget
         // cannot open the same: the keys after it are dropped.
         let chosen = row.or(suggestion.then_some(None));
@@ -1177,13 +1217,11 @@ impl<'a> TextEditor<'a> {
         // after it is no one's either.
         if let Some((id, source)) = request.zip(self.sources.menus) {
             if source.holds_escape(id) {
-                self.menu_now.hand_over();
-                self.handed_by_suggestion.set(true);
+                self.menu_now.hand_over(true);
             }
         }
         if opens {
-            self.menu_now.hand_over();
-            self.handed_by_suggestion.set(suggestion || dialog);
+            self.menu_now.hand_over(suggestion || dialog);
         }
     }
 
@@ -1214,19 +1252,43 @@ impl<'a> TextEditor<'a> {
             Opened::Menu if open.opening => Target::SpellOpening,
             Opened::Menu if spelling => Target::SpellMenu,
             Opened::Menu => Target::Menu(accelerators),
+            // Enter on suggestions opened in this batch, which the host has
+            // not shown, is the text's, whatever their rows, but on a row
+            // that opens a menu ("Due date…", which writes nothing).
+            Opened::Suggest if self.menu_now.predicts_suggestions() => {
+                if self.menu_now.predicted_menu_row().is_some() {
+                    Target::Suggest
+                } else {
+                    Target::Tentative
+                }
+            }
             Opened::Suggest if !self.menu_now.takes_enter(self.popover) => Target::Tentative,
             Opened::Suggest => Target::Suggest,
             Opened::Keyboard => Target::Keyboard,
         })
     }
 
-    /// Whether routing `event` ends the open popover or changes its rows,
-    /// for the overlay, which sees a batch before the widget routes it
-    /// ([`popover::InOrder`]). `focused` and `composing` are the widget's
-    /// state when the batch starts; composing follows the batch's preedits
-    /// as the widget's will.
-    fn ending<'b>(&'b self, focused: bool, mut composing: bool) -> impl FnMut(&Event) -> bool + 'b {
-        move |event| match event {
+    /// Whether routing `event` with the pointer at the cursor ends the open
+    /// popover or changes its rows, for the overlay, which sees a batch
+    /// before the widget routes it ([`popover::InOrder`]). `focused`,
+    /// `composing` and `scroll` (the part of a line the wheel has moved)
+    /// are the widget's state when the batch starts, and follow the batch's
+    /// preedits and wheel as the widget's will; `bounds` are the widget's.
+    ///
+    /// A press off the popover ends it: a menu closes for it, and for
+    /// suggestions a click moves the caret, or the press is outside the
+    /// editor; one that leaves suggestions open is taken as ending them
+    /// all the same, which only leaves the presses after it to the widget.
+    /// So does the wheel over the editor once it adds up to a whole line,
+    /// which scrolls.
+    fn ending<'b>(
+        &'b self,
+        focused: bool,
+        mut composing: bool,
+        mut scroll: f32,
+        bounds: Rectangle,
+    ) -> impl FnMut(&Event, mouse::Cursor) -> bool + 'b {
+        move |event, cursor| match event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modified_key,
@@ -1288,6 +1350,12 @@ impl<'a> TextEditor<'a> {
                 false
             }
             Event::Window(window::Event::Unfocused) => true,
+            Event::Mouse(mouse::Event::ButtonPressed(_)) => self.target(&mut Vec::new()).is_some(),
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                let lines = wheel_lines(*delta) + scroll;
+                scroll = lines.fract();
+                lines as i32 != 0
+            }
             _ => false,
         }
     }
@@ -1613,6 +1681,10 @@ struct State {
     /// change to them while it is open closes it.
     menu_look: Option<(Size, Look)>,
     zigzags: RefCell<Zigzags>,
+    /// The overlay chose a row with the pointer that handed the host the
+    /// keyboard ([`popover::InOrder`]), which the widget may hear of only
+    /// in a later batch, when every event of this one was the overlay's.
+    handed_by_pointer: Rc<Cell<bool>>,
 }
 
 /// A left press on a task's box, held: where it was pressed, relative to
@@ -1781,6 +1853,7 @@ impl State {
             was_focused: false,
             menu_look: None,
             zigzags: RefCell::new(Zigzags::default()),
+            handed_by_pointer: Rc::default(),
         }
     }
 
@@ -2200,10 +2273,20 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         let this: &'b Self = self;
         let state = tree.state.downcast_mut::<State>();
-        let ends = this.ending(state.focus.is_some(), state.is_composing());
-        let menu = this.menu_overlay(state, layout.bounds() + translation)?;
+        let bounds = layout.bounds() + translation;
+        let handed = Rc::clone(&state.handed_by_pointer);
+        let ends = this.ending(
+            state.focus.is_some(),
+            state.is_composing(),
+            state.partial_scroll,
+            bounds,
+        );
+        let menu = this.menu_overlay(state, bounds)?;
         Some(overlay::Element::new(Box::new(popover::InOrder::new(
-            menu, ends,
+            menu,
+            &this.menu_now,
+            handed,
+            ends,
         ))))
     }
 }
@@ -2211,6 +2294,21 @@ impl Widget<Message, Theme, Renderer> for TextEditor<'_> {
 impl<'a> From<TextEditor<'a>> for Element<'a, Message> {
     fn from(text_editor: TextEditor<'a>) -> Self {
         Self::new(text_editor)
+    }
+}
+
+/// The lines a wheel event scrolls, in quarters of a line for a trackpad's
+/// pixels; a wheel's line delta moves at least one line.
+fn wheel_lines(delta: mouse::ScrollDelta) -> f32 {
+    match delta {
+        mouse::ScrollDelta::Lines { y, .. } => {
+            if y.abs() > 0.0 {
+                y.signum() * -(y.abs() * 4.0).max(1.0)
+            } else {
+                0.0
+            }
+        }
+        mouse::ScrollDelta::Pixels { y, .. } => -y / 4.0,
     }
 }
 
@@ -2419,16 +2517,7 @@ impl Update {
                     _ => None,
                 },
                 mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => {
-                    Some(Update::Scroll(match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => {
-                            if y.abs() > 0.0 {
-                                y.signum() * -(y.abs() * 4.0).max(1.0)
-                            } else {
-                                0.0
-                            }
-                        }
-                        mouse::ScrollDelta::Pixels { y, .. } => -y / 4.0,
-                    }))
+                    Some(Update::Scroll(wheel_lines(*delta)))
                 }
                 _ => None,
             },
@@ -5857,9 +5946,11 @@ mod tests {
         editor.lay_out(state, BOUNDS.size());
         let mut held = vec![false; events.len()];
         let (focused, composing) = (state.focus.is_some(), state.is_composing());
+        let scroll = state.partial_scroll;
+        let handed = Rc::clone(&state.handed_by_pointer);
         if let Some(overlay) = editor.menu_overlay(state, BOUNDS) {
-            let ends = editor.ending(focused, composing);
-            let mut overlay = popover::InOrder::new(overlay, ends);
+            let ends = editor.ending(focused, composing, scroll, BOUNDS);
+            let mut overlay = popover::InOrder::new(overlay, &editor.menu_now, handed, ends);
             for (at, ((event, pointer), captured)) in events.iter().zip(&mut captured).enumerate() {
                 let mut messages = Vec::new();
                 let mut shell = Shell::new(&mut messages);
@@ -6514,17 +6605,24 @@ mod tests {
         use keyboard::key::Named;
         let line = "- [ ] Meet sam";
         let to = 15..17;
+        // In the typing's batch, Tab is dropped (ring review, third round),
+        // and chooses in the next.
         let mut ev = task_words(line);
-        let mut events = typing(" to");
-        events.push(named(Named::Tab));
-        let (_, _, choice) = keys_batch(&mut ev, events);
+        let mut state = None;
+        let mut events: Vec<_> = typing(" to").into_iter().map(|e| (e, None)).collect();
+        events.push((named(Named::Tab), None));
+        let (_, _, choice) = popover_batch(&mut ev, &mut state, events);
+        assert_eq!((choice, ev.text()), (None, format!("{line} to")));
+        let (_, _, choice) = popover_batch(&mut ev, &mut state, vec![(named(Named::Tab), None)]);
         assert_eq!(choice, suggested(0, to.clone()));
         // Down then Enter, in one batch and across two.
         let mut ev = task_words(line);
         let mut events = typing(" to");
         events.extend([named(Named::ArrowDown), named(Named::Enter)]);
         let (_, _, choice) = keys_batch(&mut ev, events);
-        assert_eq!(choice, suggested(1, to.clone()));
+        // In the typing's batch, before the host has shown them, Enter is
+        // the text's, whatever the move (ring review, third round).
+        assert_eq!((choice, ev.text()), (None, format!("{line} to\n- [ ] ")));
         let mut ev = task_words(line);
         let mut state = None;
         let mut events: Vec<_> = typing(" to").into_iter().map(|e| (e, None)).collect();
@@ -6547,26 +6645,57 @@ mod tests {
         assert_eq!(ev.text(), format!("{line} to\n- [ ] "));
     }
 
-    /// `du` and Enter at xdotool speed: "Due date…" is chosen, and since it
-    /// opens a menu of the host's (the calendar), what follows in the batch
-    /// is dropped, never typed into the note. An owner is chosen by Tab.
+    /// `du` and Enter at xdotool speed, or with `du` shown first: "Due
+    /// date…" is chosen, and since it opens a menu of the host's (the
+    /// calendar), what follows in the batch is dropped, never typed into
+    /// the note. An owner is chosen by Tab once shown; Tab in the typing's
+    /// own batch is dropped (ring review, third round).
     #[test]
     fn enter_chooses_the_calendar_for_du_and_tab_an_owner() {
         use keyboard::key::Named;
         let line = "- [ ] Mail the deck";
+        let typed = |text: &str| -> Vec<(Event, Option<Point>)> {
+            typing(text).into_iter().map(|e| (e, None)).collect()
+        };
         let mut ev = task_words(line);
         let mut events = typing(" du");
         events.push(named(Named::Enter));
         events.extend(typing("fri"));
         let (messages, _, choice) = keys_batch(&mut ev, events);
         assert_eq!(choice, suggested(0, 20..22), "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::Spell(SpellEvent::EnterOn { id: 0 }))),
+            "{messages:?}"
+        );
         assert_eq!(ev.text(), format!("{line} du"));
         let mut ev = task_words(line);
-        let mut events = typing(" @sa");
-        events.push(named(Named::Tab));
-        let (_, _, choice) = keys_batch(&mut ev, events);
+        let mut state = None;
+        popover_batch(&mut ev, &mut state, typed(" du"));
+        let mut events = vec![(named(Named::Enter), None)];
+        events.extend(typed("fri"));
+        let (messages, _, choice) = popover_batch(&mut ev, &mut state, events);
+        assert_eq!(choice, suggested(0, 20..22), "{messages:?}");
+        assert_eq!(ev.text(), format!("{line} du"));
+        let mut ev = task_words(line);
+        let mut state = None;
+        popover_batch(&mut ev, &mut state, typed(" @sa"));
+        let (_, _, choice) = popover_batch(&mut ev, &mut state, vec![(named(Named::Tab), None)]);
         assert_eq!(choice, suggested(0, 20..23));
         assert_eq!(ev.text(), format!("{line} @sa"));
+        // Tab in the typing's batch: dropped.
+        for word in [" du", " @sa"] {
+            let mut ev = task_words(line);
+            let mut events = typing(word);
+            events.push(named(Named::Tab));
+            let (_, _, choice) = keys_batch(&mut ev, events);
+            assert_eq!(
+                (choice, ev.text()),
+                (None, format!("{line}{word}")),
+                "{word}"
+            );
+        }
     }
 
     /// `du`, Enter and Escape in one batch: Enter chooses "Due date…",
@@ -6601,9 +6730,14 @@ mod tests {
         // After a choice that opens nothing, Escape stays the host's, as it
         // was.
         let mut ev = task_words(line);
-        let mut events = typing(" to");
-        events.extend([named(Named::Tab), named(Named::Escape)]);
-        let (messages, _, _) = keys_batch(&mut ev, events);
+        let mut state = None;
+        let shown = typing(" to").into_iter().map(|e| (e, None)).collect();
+        popover_batch(&mut ev, &mut state, shown);
+        let events = [named(Named::Tab), named(Named::Escape)]
+            .into_iter()
+            .map(|e| (e, None))
+            .collect();
+        let (messages, _, _) = popover_batch(&mut ev, &mut state, events);
         assert!(
             !messages
                 .iter()
@@ -6658,72 +6792,60 @@ mod tests {
         }
     }
 
+    /// Typing that opens suggestions, then their keys, in one batch: the
+    /// widget asks the source what the typing opens, as the host will, so
+    /// Up and Down are theirs. On suggestions the host has not shown, Tab
+    /// is dropped and Enter is the text's, choosing nothing (ring review,
+    /// third round); in the next batch both choose.
     #[test]
-    fn keys_after_typing_in_one_batch_go_to_the_suggestions_it_opens() {
+    fn on_suggestions_the_batch_opened_tab_is_dropped_and_enter_is_the_texts() {
         use keyboard::key::Named;
-        // `du` and the key that accepts, all in one batch: the widget asks
-        // the source what `du` opens, as the host will, so the key is the
-        // suggestions'.
-        for (accept, key) in [
-            (Named::Enter, proof::MenuKey::Enter),
-            (Named::Tab, proof::MenuKey::Tab),
-        ] {
-            let mut ev = completing("", 0, 0);
-            let (messages, captured, choice) =
-                keys_batch(&mut ev, vec![typed("d"), typed("u"), named(accept)]);
-            assert!(
-                matches!(
-                    messages.as_slice(),
-                    [
-                        Message::Action(Action::Edit(Edit::Insert('d'))),
-                        Message::Action(Action::Edit(Edit::Insert('u'))),
-                        Message::Spell(SpellEvent::Key(sent)),
-                    ] if *sent == key
-                ),
-                "{accept:?}: {messages:?}"
-            );
-            assert_eq!(captured, [true; 3], "{accept:?}");
-            assert_eq!(choice, suggested(0, 0..2), "{accept:?}");
-            assert_eq!((ev.text().as_str(), ev.cursor()), ("du", caret(0, 2)));
-            assert!(ev.popover().is_none(), "{accept:?}");
-        }
-        // Down first chooses the second row, and the keys after the choice
-        // are the text's again.
+        let batch = |events: Vec<Event>| -> Vec<(Event, Option<Point>)> {
+            events.into_iter().map(|e| (e, None)).collect()
+        };
+        // Tab: dropped, and theirs in the next batch.
         let mut ev = completing("", 0, 0);
-        let (messages, _, choice) = keys_batch(
-            &mut ev,
-            vec![
-                typed("d"),
-                typed("u"),
-                named(Named::ArrowDown),
-                named(Named::Enter),
-                named(Named::Enter),
-            ],
-        );
+        let mut state = None;
+        let events = batch(vec![typed("d"), typed("u"), named(Named::Tab)]);
+        let (messages, captured, choice) = popover_batch(&mut ev, &mut state, events);
         assert!(
             matches!(
-                &messages[2..],
+                messages.as_slice(),
                 [
-                    Message::Spell(SpellEvent::Key(proof::MenuKey::Down)),
-                    Message::Spell(SpellEvent::Key(proof::MenuKey::Enter)),
-                    Message::Intent(Intent::Enter),
+                    Message::Action(Action::Edit(Edit::Insert('d'))),
+                    Message::Action(Action::Edit(Edit::Insert('u'))),
                 ]
             ),
             "{messages:?}"
         );
-        assert_eq!(choice, suggested(1, 0..2));
-        assert_eq!(ev.text(), "du\n");
+        assert_eq!(captured, [true; 3]);
+        assert_eq!((choice, ev.text().as_str()), (None, "du"));
+        let (_, _, choice) = popover_batch(&mut ev, &mut state, batch(vec![named(Named::Tab)]));
+        assert_eq!(choice, suggested(0, 0..2));
+        assert_eq!((ev.text().as_str(), ev.cursor()), ("du", caret(0, 2)));
 
-        // They follow each letter of the batch: a third narrows them, and
-        // a fourth that matches nothing closes them, so Enter is the
-        // text's.
+        // Enter, after a move too: the text's, as with nothing open.
+        for keys in [vec![], vec![named(Named::ArrowDown)]] {
+            let mut ev = completing("", 0, 0);
+            let mut events = vec![typed("d"), typed("u")];
+            events.extend(keys.clone());
+            events.push(named(Named::Enter));
+            let (messages, _, choice) = keys_batch(&mut ev, events);
+            assert!(
+                matches!(messages.last(), Some(Message::Intent(Intent::Enter))),
+                "{keys:?}: {messages:?}"
+            );
+            assert_eq!((choice, ev.text().as_str()), (None, "du\n"), "{keys:?}");
+        }
+        // Shown, Enter chooses the selected row.
         let mut ev = completing("", 0, 0);
-        let (messages, _, choice) = keys_batch(
-            &mut ev,
-            vec![typed("d"), typed("u"), typed("p"), named(Named::Tab)],
-        );
-        assert_eq!(spell_events(&messages), [SpellEvent::Key(MenuKey::Tab)]);
-        assert_eq!(choice, suggested(1, 0..3));
+        let mut state = None;
+        popover_batch(&mut ev, &mut state, batch(vec![typed("d"), typed("u")]));
+        let (_, _, choice) = popover_batch(&mut ev, &mut state, batch(vec![named(Named::Enter)]));
+        assert_eq!(choice, suggested(0, 0..2));
+
+        // A letter that matches nothing closes them, so Enter after it is
+        // the text's.
         let mut ev = completing("", 0, 0);
         let (messages, _, choice) = keys_batch(
             &mut ev,
@@ -6734,6 +6856,44 @@ mod tests {
             "{messages:?}"
         );
         assert_eq!((choice, ev.text().as_str()), (None, "dux\n"));
+    }
+
+    /// Enter on "Due date…" the widget only predicted names that row by its
+    /// id ([`SpellEvent::EnterOn`]): the host chooses it if its suggestions
+    /// have it selected, and otherwise Enter is the text's and chooses
+    /// nothing else (ring review, third round).
+    #[test]
+    fn enter_on_a_predicted_menu_row_chooses_only_that_row() {
+        let line = "- [ ] Mail the deck du";
+        let at_end = |ev: &mut crate::EditorView| {
+            let end = ev.line_text(0).unwrap().len();
+            ev.move_cursor(caret(0, end));
+        };
+        // The host's suggestions have it selected: it is chosen.
+        let mut ev = editing(BackendKind::Owned, "", 0, 0);
+        ev.set_suggest_source(Some(Arc::new(fixtures::TaskWords)));
+        ev.replace_text(&line[..line.len() - 1], true);
+        at_end(&mut ev);
+        ev.perform(Action::Edit(Edit::Insert('u')));
+        ev.spell(SpellEvent::EnterOn { id: 0 });
+        assert_eq!(ev.text(), line);
+        assert_eq!(ev.take_choice().map(|choice| choice.id), Some(0));
+        // Another id, or suggestions without that row: Enter is the
+        // text's, and nothing is chosen.
+        for (id, rows) in [
+            (5, vec![Row::new(0, "Due date…").opens_menu()]),
+            (0, vec![Row::new(0, "due")]),
+        ] {
+            let mut ev = editing(BackendKind::Owned, line, 0, line.len());
+            ev.set_tasks(Some(wren_markdown::TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, 19).expect("a date"),
+            }));
+            assert!(ev.open_popover(crate::Anchor::Caret, Mode::Suggest, rows));
+            assert!(ev.spell(SpellEvent::EnterOn { id }), "{id}");
+            assert_eq!(ev.take_choice(), None, "{id}");
+            assert_eq!(ev.text(), format!("{line}\n- [ ] "), "{id}");
+            assert!(ev.popover().is_none(), "{id}");
+        }
     }
 
     #[test]
@@ -7678,7 +7838,8 @@ mod tests {
         use keyboard::key::Named;
         let left = || press(mouse::Button::Left);
         // Enter, then a press on the second row: Enter accepts the first,
-        // which is selected, and the press finds no menu.
+        // which is selected, and the press on the menu as drawn is dropped
+        // there, never a click in the text (ring review, third round).
         let mut ev = spelled_menu();
         let (messages, captured, _) = popover_batch(
             &mut ev,
@@ -7691,10 +7852,7 @@ mod tests {
         assert!(
             matches!(
                 messages.as_slice(),
-                [
-                    Message::Spell(SpellEvent::AcceptSelected),
-                    Message::Action(Action::Click(_)),
-                ]
+                [Message::Spell(SpellEvent::AcceptSelected)]
             ),
             "{messages:?}"
         );
@@ -7715,7 +7873,6 @@ mod tests {
                 [
                     Message::Spell(SpellEvent::Close),
                     Message::Action(Action::Edit(Edit::Insert('x'))),
-                    Message::Action(Action::Click(_)),
                 ]
             ),
             "{messages:?}"
@@ -7744,10 +7901,11 @@ mod tests {
         );
         assert_eq!(ev.text(), "cat ten\n");
 
-        // Up and Down leave the rows as they are drawn: a press on a row
-        // after one still chooses that row, ahead of the key.
+        // Any key before the press, Down too: the press chooses no row and
+        // is dropped on the menu, and the key moves the selection of the
+        // menu it was pressed on (ring review, third round).
         let mut ev = spelled_menu();
-        let (messages, _, _) = popover_batch(
+        let (messages, captured, _) = popover_batch(
             &mut ev,
             &mut None,
             vec![
@@ -7756,16 +7914,12 @@ mod tests {
             ],
         );
         assert!(
-            matches!(
-                messages.as_slice(),
-                [
-                    Message::Spell(SpellEvent::Accept(1)),
-                    Message::Action(Action::Move(_)),
-                ]
-            ),
+            matches!(messages.as_slice(), [Message::Spell(SpellEvent::Move(1))]),
             "{messages:?}"
         );
-        assert_eq!(ev.text(), "cat ten");
+        assert_eq!(captured, [true, true]);
+        assert_eq!(ev.text(), "cat teh");
+        assert_eq!(ev.spell_menu().and_then(|menu| menu.selected()), Some(1));
 
         // The host's menus and suggestions alike.
         for kind in BackendKind::ALL {
@@ -7830,11 +7984,19 @@ mod tests {
             accepts(&mut ev, before, on_spelled_row(1), name);
             assert_eq!(ev.text(), "cat ten", "{name}");
         }
-        // A key the editor ignores passes suggestions by, and a key of a
-        // composition is none of a popover's.
+        // Any other key before the press, even one the editor ignores, and
+        // the press chooses no row: it is dropped on the popover (ring
+        // review, third round).
         for kind in BackendKind::ALL {
             let mut ev = on_task(kind, Mode::Suggest, status_rows());
-            accepts(&mut ev, named(Named::F5), on_task_row(1), "an ignored key");
+            let (messages, captured, choice) = popover_batch(
+                &mut ev,
+                &mut None,
+                vec![(named(Named::F5), None), (left(), Some(on_task_row(1)))],
+            );
+            assert!(messages.is_empty(), "{kind:?}: {messages:?}");
+            assert_eq!((captured[1], choice), (true, None), "{kind:?}");
+            assert!(ev.popover().is_some(), "{kind:?}");
         }
         // A preedit that starts a composition closes the menu: the press
         // after it is the editor's.
@@ -7985,23 +8147,25 @@ mod tests {
             range: 2..4,
         });
 
-        // Open when the batch starts, or opened by the letters of the
-        // batch, which the widget knows either way: Tab is theirs, and
-        // captured, so no host hears of it as its own.
+        // Open when the batch starts: Tab is theirs, and captured, so no
+        // host hears of it as its own. Opened by the letters of the batch,
+        // which the host has not shown: Tab is dropped, and captured all
+        // the same (ring review, third round).
         let mut ev = hosted();
         let mut state = None;
         keys(&mut ev, &mut state, vec![typed("d"), typed("u")]);
         let (messages, captured, choice) = keys(&mut ev, &mut state, vec![named(Named::Tab)]);
         assert_eq!(spell_events(&messages), [SpellEvent::Key(MenuKey::Tab)]);
-        assert_eq!((captured, choice), (vec![true], due.clone()));
+        assert_eq!((captured, choice), (vec![true], due));
         let mut ev = hosted();
         let (messages, captured, choice) = keys(
             &mut ev,
             &mut None,
             vec![typed("d"), typed("u"), named(Named::Tab)],
         );
-        assert_eq!(spell_events(&messages), [SpellEvent::Key(MenuKey::Tab)]);
-        assert_eq!((captured, choice), (vec![true; 3], due));
+        assert!(spell_events(&messages).is_empty(), "{messages:?}");
+        assert_eq!((captured, choice), (vec![true; 3], None));
+        assert_eq!(ev.text(), "- a\n- du");
 
         // Nothing opened, which the widget knows too: the key is the
         // host's alone. The editor publishes nothing for it, does not
@@ -9082,6 +9246,515 @@ mod tests {
         );
     }
 
+    /// A row chosen with the pointer that opens a menu or a dialog of the
+    /// host's hands it the keyboard as the row's key does: the keys and the
+    /// input-method text after it in its batch are dropped, on both
+    /// engines (ring review, finding 2). A row that opens nothing leaves
+    /// the batch's keys to the text, as before.
+    #[test]
+    fn a_row_chosen_with_the_pointer_that_opens_a_menu_drops_the_rest_of_its_batch() {
+        use keyboard::key::Named;
+        let left = || press(mouse::Button::Left);
+        let rows = || {
+            let mut rows = status_rows();
+            rows.push(Row::new(29, "Priority…").opens_menu());
+            rows.push(Row::new(14, "Edit task…").opens_dialog());
+            rows
+        };
+        let accepted = |messages: &[Message], menu: u64, row: usize| {
+            matches!(
+                messages.first(),
+                Some(Message::Spell(SpellEvent::AcceptOf { menu: m, row: Some(r) }))
+                    if *m == menu && *r == row
+            )
+        };
+        for kind in BackendKind::ALL {
+            for (row, id) in [(3, 29), (4, 14)] {
+                let mut ev = on_task(kind, Mode::Menu, rows());
+                let menu = ev.popover().map(crate::Popover::instance).unwrap();
+                let events = vec![
+                    (left(), Some(on_task_row(row))),
+                    (typed("h"), None),
+                    committing("x"),
+                    (named(Named::Enter), None),
+                    (space(), None),
+                ];
+                let (messages, captured, choice) = popover_batch(&mut ev, &mut None, events);
+                assert!(
+                    accepted(&messages, menu, row),
+                    "{kind:?} {row}: {messages:?}"
+                );
+                assert_eq!(messages.len(), 1, "{kind:?} {row}: {messages:?}");
+                assert!(captured[0] && captured[1], "{kind:?} {row}: {captured:?}");
+                assert_eq!(choice, chose(id, Mode::Menu), "{kind:?} {row}");
+                assert_eq!(ev.text(), TASK, "{kind:?} {row}");
+                assert_eq!(ev.cursor(), caret(0, 8), "{kind:?} {row}");
+            }
+
+            // The Escape after a dialog's row is the dialog's, dropped;
+            // after a menu's row it stays the host's, as after its key.
+            for (row, dropped) in [(4, true), (3, false)] {
+                let ev = on_task(kind, Mode::Menu, rows());
+                let events = vec![
+                    (left(), Some(on_task_row(row))),
+                    (named(Named::Escape), None),
+                ];
+                let (messages, _) = widget_batch(&ev, &mut None, events);
+                let stroke = matches!(
+                    messages.as_slice(),
+                    [_, Message::Spell(SpellEvent::Stroke(stroke))]
+                        if stroke.named() == Some(Named::Escape)
+                );
+                assert_eq!(stroke, dropped, "{kind:?} {row}: {messages:?}");
+                if !dropped {
+                    assert_eq!(messages.len(), 1, "{kind:?}: {messages:?}");
+                }
+            }
+
+            // A composition under way is cancelled, and what it commits
+            // is not the note's.
+            let mut ev = on_task(kind, Mode::Menu, rows());
+            let mut state = composing_state(&ev);
+            let events = vec![(left(), Some(on_task_row(3))), committing("き")];
+            let (messages, _, _) = popover_batch(&mut ev, &mut state, events);
+            assert_eq!(messages.len(), 1, "{kind:?}: {messages:?}");
+            assert!(!state.as_ref().unwrap().is_composing(), "{kind:?}");
+            assert_eq!(ev.text(), TASK, "{kind:?}");
+
+            // A row that opens nothing: the key after it is the text's.
+            let mut ev = on_task(kind, Mode::Menu, rows());
+            let menu = ev.popover().map(crate::Popover::instance).unwrap();
+            let events = vec![(left(), Some(on_task_row(2))), (typed("h"), None)];
+            let (messages, _, choice) = popover_batch(&mut ev, &mut None, events);
+            assert!(accepted(&messages, menu, 2), "{kind:?}: {messages:?}");
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [_, Message::Action(Action::Edit(Edit::Insert('h')))]
+                ),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(choice, chose(22, Mode::Menu), "{kind:?}");
+        }
+    }
+
+    /// A press off a menu that closes it, or a wheel that scrolls the
+    /// editor, ends the menu for the overlay too: a press on one of its
+    /// rows later in the batch chooses nothing (ring review, finding 4).
+    #[test]
+    fn a_press_or_a_scroll_that_dismisses_a_menu_comes_before_a_later_press_on_a_row() {
+        let left = || press(mouse::Button::Left);
+        let on_text = Some(over(1.0, 0.0));
+        let outside = Some(Point::new(700.0, 100.0));
+        for (name, first) in [
+            ("a left press in the text", (left(), on_text)),
+            (
+                "a right press in the text",
+                (press(mouse::Button::Right), on_text),
+            ),
+            ("a press outside the editor", (left(), outside)),
+            ("a whole line of wheel", (wheel(pixels(-4.0)), on_text)),
+            (
+                "a wheel's line",
+                (
+                    wheel(mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 }),
+                    on_text,
+                ),
+            ),
+        ] {
+            let mut ev = spelled_menu();
+            let (messages, _, _) = popover_batch(
+                &mut ev,
+                &mut None,
+                vec![first, (left(), Some(on_spelled_row(1)))],
+            );
+            assert!(
+                !messages.iter().any(|message| matches!(
+                    message,
+                    Message::Spell(SpellEvent::Accept(_) | SpellEvent::AcceptSelected)
+                )),
+                "{name}: {messages:?}"
+            );
+            assert_eq!(ev.text(), "cat teh", "{name}");
+            assert!(ev.spell_menu().is_none(), "{name}");
+        }
+        // Wheel events of no whole line scroll nothing: the press on a row
+        // after them still chooses it.
+        for delta in no_whole_line() {
+            let mut ev = spelled_menu();
+            let (messages, _, _) = popover_batch(
+                &mut ev,
+                &mut None,
+                vec![
+                    (wheel(delta), Some(over(1.0, 0.0))),
+                    (left(), Some(on_spelled_row(1))),
+                ],
+            );
+            assert!(
+                matches!(messages.as_slice(), [Message::Spell(SpellEvent::Accept(1))]),
+                "{delta:?}: {messages:?}"
+            );
+            assert_eq!(ev.text(), "cat ten", "{delta:?}");
+        }
+        // The host's menus alike.
+        for kind in BackendKind::ALL {
+            let mut ev = on_task(kind, Mode::Menu, status_rows());
+            let (_, _, choice) = popover_batch(
+                &mut ev,
+                &mut None,
+                vec![(left(), on_text), (left(), Some(on_task_row(2)))],
+            );
+            assert_eq!(choice, None, "{kind:?}");
+            assert!(ev.popover().is_none(), "{kind:?}");
+        }
+    }
+
+    /// Backspace and then Tab in one batch on a task line whose suggestions
+    /// the deletion asks again: the widget cannot know what the host
+    /// offers after a deletion, so Tab is the text's, as with nothing open
+    /// (item 3.1), and indents. It writes no suggestion, and closes the
+    /// ones the host opened (ring review, finding 7).
+    #[test]
+    fn backspace_then_tab_in_one_batch_indents_and_takes_no_suggestion() {
+        use keyboard::key::Named;
+        let text = "- a\n- [ ] Call to";
+        for kind in BackendKind::ALL {
+            let mut ev = editing(kind, text, 1, 13);
+            ev.set_suggest_source(Some(Arc::new(fixtures::TaskWords)));
+            ev.perform(Action::Edit(Edit::Insert('d')));
+            assert_eq!(
+                ev.popover().is_some(),
+                kind == BackendKind::Owned,
+                "{kind:?}: suggestions for `tod`"
+            );
+            let (messages, _, choice) =
+                keys_batch(&mut ev, vec![named(Named::Backspace), named(Named::Tab)]);
+            assert!(
+                !messages.iter().any(|message| matches!(
+                    message,
+                    Message::Spell(SpellEvent::Key(_) | SpellEvent::AcceptOf { .. })
+                )),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(choice, None, "{kind:?}");
+            assert!(ev.popover().is_none(), "{kind:?}");
+            let line = ev.line_text(1).unwrap();
+            assert!(
+                line.starts_with(char::is_whitespace) && line.ends_with("- [ ] Call to"),
+                "{kind:?}: {line:?}"
+            );
+        }
+    }
+
+    /// Enter and Tab on suggestions with a bound row (owners) name them, as
+    /// on suggestions with a row that runs a command: queued while the
+    /// host refreshes them into others, they choose nothing (ring review,
+    /// finding 3).
+    #[test]
+    fn tab_on_bound_suggestions_names_them() {
+        use keyboard::key::Named;
+        for accept in [Named::Tab, Named::Enter] {
+            let source = Arc::new(fixtures::Owners::new(&["sam", "samantha"]));
+            let mut ev = editing(BackendKind::Owned, "", 0, 0);
+            ev.set_suggest_source(Some(source.clone()));
+            for c in ['@', 's', 'a'] {
+                ev.perform(Action::Edit(Edit::Insert(c)));
+            }
+            let a = ev.popover().expect("owners").instance();
+            let (messages, captured) = widget_batch(&ev, &mut None, vec![(named(accept), None)]);
+            assert_eq!(captured, [true], "{accept:?}");
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Spell(SpellEvent::AcceptOf { menu, row: None })] if *menu == a
+                ),
+                "{accept:?}: {messages:?}"
+            );
+            // The ranking changes, and the host refreshes the suggestions.
+            source.rank(&["samantha", "sam"]);
+            assert!(ev.refresh_suggestions());
+            let b = ev.popover().unwrap().instance();
+            assert_ne!(a, b);
+            for message in messages {
+                assert_eq!(host_applies(&mut ev, message).choice, None, "{accept:?}");
+            }
+            assert_eq!(ev.popover().map(crate::Popover::instance), Some(b));
+            assert_eq!(ev.text(), "@sa", "{accept:?}");
+
+            // Opened by the batch's own typing, which the host has not
+            // shown and may rank otherwise when it applies the typing: Tab
+            // is dropped, choosing nothing and neither indenting nor typing,
+            // and Enter is the text's, choosing nothing. In the next batch
+            // the key chooses what is shown.
+            let source = Arc::new(fixtures::Owners::new(&["sam", "samantha"]));
+            let mut ev = editing(BackendKind::Owned, "- [ ] call ", 0, 11);
+            ev.set_suggest_source(Some(source.clone()));
+            let mut state = None;
+            let events = [typed("@"), typed("s"), typed("a"), named(accept)]
+                .into_iter()
+                .map(|event| (event, None))
+                .collect();
+            let (messages, captured) = widget_batch(&ev, &mut state, events);
+            assert_eq!(captured, [true; 4], "{accept:?}");
+            let enter = accept == Named::Enter;
+            assert_eq!(
+                messages.len(),
+                3 + usize::from(enter),
+                "{accept:?}: {messages:?}"
+            );
+            source.rank(&["samantha", "sam"]);
+            for message in messages {
+                assert_eq!(host_applies(&mut ev, message).choice, None, "{accept:?}");
+            }
+            if enter {
+                assert_eq!(ev.text(), "- [ ] call @sa\n- [ ] ");
+                continue;
+            }
+            assert_eq!(ev.text(), "- [ ] call @sa", "{accept:?}");
+            assert_eq!(ev.popover().unwrap().labels()[0], "@samantha");
+            let (_, _, choice) = popover_batch(&mut ev, &mut state, vec![(named(accept), None)]);
+            assert_eq!(choice.map(|choice| choice.id), Some(0), "{accept:?}");
+        }
+    }
+
+    /// iced hands the overlay one place of the pointer for a whole batch,
+    /// where it ends: only the batch's first press may choose a row (ring
+    /// review, second round, finding 1). A later press on the popover as
+    /// drawn is dropped there with its release, so it never reaches the
+    /// text or a task's box under it (third round, finding 4). A row
+    /// pressed after a middle press or a right press that chose nothing is
+    /// not chosen either; the user presses it again.
+    #[test]
+    fn only_a_batchs_first_press_may_choose_a_row_and_later_ones_on_it_are_dropped() {
+        let left = || press(mouse::Button::Left);
+        // One place for every event of the batch, as iced gives it.
+        let at = |events: Vec<Event>, point: Point| -> Vec<(Event, Option<Point>)> {
+            events
+                .into_iter()
+                .map(|event| (event, Some(point)))
+                .collect()
+        };
+        let row = on_spelled_row(1);
+        // A known limit of the toolkit's, not a wanted result: a press in
+        // the text, a move onto a row and a press there all come with the
+        // pointer on the row, so the first press is taken as made there
+        // and chooses it. What is pinned is that it is chosen at most once,
+        // and the second press is dropped on the menu, no click.
+        let mut ev = spelled_menu();
+        let events = at(vec![left(), moved_to(row), left()], row);
+        let (messages, captured, _) = popover_batch(&mut ev, &mut None, events);
+        let accepted = (messages.iter())
+            .filter(|message| matches!(message, Message::Spell(SpellEvent::Accept(_))))
+            .count();
+        assert!(accepted <= 1, "{messages:?}");
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, Message::Action(_))),
+            "{messages:?}"
+        );
+        assert!(captured[0] && captured[2], "{captured:?}");
+        // A press that chooses nothing, then a press on a row and its
+        // release: the row is not chosen, and the press and the release
+        // are dropped on the menu, which stays.
+        for first in [mouse::Button::Middle, mouse::Button::Right] {
+            let mut ev = spelled_menu();
+            let (messages, captured, _) = popover_batch(
+                &mut ev,
+                &mut None,
+                at(vec![press(first), left(), released()], row),
+            );
+            assert!(messages.is_empty(), "{first:?}: {messages:?}");
+            assert_eq!(captured, [true, true, true], "{first:?}");
+            assert_eq!(ev.text(), "cat teh", "{first:?}");
+            assert!(ev.spell_menu().is_some(), "{first:?}");
+        }
+        // The host's menus alike, on both engines.
+        for kind in BackendKind::ALL {
+            let row = on_task_row(2);
+            let mut ev = on_task(kind, Mode::Menu, status_rows());
+            let (messages, captured, choice) = popover_batch(
+                &mut ev,
+                &mut None,
+                at(
+                    vec![press(mouse::Button::Middle), left(), released(), left()],
+                    row,
+                ),
+            );
+            assert_eq!(choice, None, "{kind:?}");
+            assert!(messages.is_empty(), "{kind:?}: {messages:?}");
+            assert_eq!(captured, [true; 4], "{kind:?}");
+            assert_eq!(ev.text(), TASK, "{kind:?}");
+            // Suggestions over the text alike: no click, no box click.
+            let mut ev = on_task(kind, Mode::Suggest, status_rows());
+            let (messages, captured, choice) = popover_batch(
+                &mut ev,
+                &mut None,
+                at(vec![press(mouse::Button::Middle), left(), released()], row),
+            );
+            assert_eq!(choice, None, "{kind:?}");
+            assert!(messages.is_empty(), "{kind:?}: {messages:?}");
+            assert_eq!(captured, [true; 3], "{kind:?}");
+            let (messages, _) = widget_batch(&ev, &mut None, vec![(later(), Some(row))]);
+            assert_eq!(box_clicks(&messages), 0, "{kind:?}");
+            let mut ev = on_task(kind, Mode::Menu, status_rows());
+            let (_, _, choice) = popover_batch(&mut ev, &mut None, at(vec![left(), left()], row));
+            assert_eq!(choice, chose(22, Mode::Menu), "{kind:?}");
+        }
+    }
+
+    /// A key that reached the open menu, then a press on a row, in one
+    /// batch: the press chooses nothing and is dropped on the menu, and the
+    /// key is routed against the menu it was pressed on, so a disabled
+    /// row's accelerator stays inert and types nothing (ring review, third
+    /// round, finding 3).
+    #[test]
+    fn a_key_before_a_press_in_one_batch_leaves_the_press_no_row() {
+        use keyboard::key::Named;
+        for kind in BackendKind::ALL {
+            let rows = || {
+                let mut rows = status_rows();
+                rows.push(
+                    Row::new(23, "Cancelled")
+                        .accelerator(crate::Accelerator::plain('q'))
+                        .enabled(false),
+                );
+                rows
+            };
+            let row = on_task_row(2);
+            for key in [typed("q"), named(Named::ArrowDown), named(Named::ArrowUp)] {
+                let mut ev = on_task(kind, Mode::Menu, rows());
+                let (messages, captured, choice) = popover_batch(
+                    &mut ev,
+                    &mut None,
+                    vec![
+                        (key.clone(), Some(row)),
+                        (press(mouse::Button::Left), Some(row)),
+                        (released(), Some(row)),
+                    ],
+                );
+                assert_eq!(choice, None, "{kind:?} {key:?}: {messages:?}");
+                assert!(
+                    !messages.iter().any(|message| matches!(
+                        message,
+                        Message::Action(_) | Message::Spell(SpellEvent::AcceptOf { .. })
+                    )),
+                    "{kind:?} {key:?}: {messages:?}"
+                );
+                assert_eq!(captured, [true; 3], "{kind:?} {key:?}");
+                assert_eq!(ev.text(), TASK, "{kind:?} {key:?}");
+                assert!(ev.popover().is_some(), "{kind:?} {key:?}");
+            }
+        }
+    }
+
+    /// A row that opens a menu, clicked alone in its batch while an input
+    /// method composes: the widget sees none of that batch, and the
+    /// composition's commit in a later one is dropped all the same (ring
+    /// review, second round, finding 2).
+    #[test]
+    fn a_composition_under_a_row_clicked_alone_commits_nothing_later() {
+        for kind in BackendKind::ALL {
+            let rows = || {
+                let mut rows = status_rows();
+                rows.push(Row::new(29, "Priority…").opens_menu());
+                rows
+            };
+            let mut ev = on_task(kind, Mode::Menu, rows());
+            let mut state = composing_state(&ev);
+            let row = on_task_row(3);
+            let (messages, captured, choice) = popover_batch(
+                &mut ev,
+                &mut state,
+                vec![(press(mouse::Button::Left), Some(row))],
+            );
+            assert_eq!((messages.len(), captured), (1, vec![true]), "{kind:?}");
+            assert_eq!(choice, chose(29, Mode::Menu), "{kind:?}");
+            let (messages, _, _) = popover_batch(&mut ev, &mut state, vec![committing("き")]);
+            assert!(messages.is_empty(), "{kind:?}: {messages:?}");
+            assert_eq!(ev.text(), TASK, "{kind:?}");
+            assert!(!state.as_ref().unwrap().is_composing(), "{kind:?}");
+            // A later composition is the note's again.
+            let (messages, _, _) =
+                popover_batch(&mut ev, &mut state, vec![composing("か"), committing("か")]);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Action(Action::Edit(Edit::Paste(text)))] if text.as_str() == "か"
+                ),
+                "{kind:?}: {messages:?}"
+            );
+
+            // A row that opens nothing leaves the composition alone.
+            let mut ev = on_task(kind, Mode::Menu, rows());
+            let mut state = composing_state(&ev);
+            popover_batch(
+                &mut ev,
+                &mut state,
+                vec![(press(mouse::Button::Left), Some(on_task_row(2)))],
+            );
+            assert!(state.as_ref().unwrap().is_composing(), "{kind:?}");
+        }
+    }
+
+    /// A row of suggestions that opens a menu ("Due date…"), clicked, then
+    /// Escape in the batch: the Escape is the menu's, dropped, as after the
+    /// row's key (ring review, second round, finding 5). Ctrl+Escape is
+    /// any other key, the host's, and claims nothing (finding 7).
+    #[test]
+    fn escape_after_a_suggestion_clicked_that_opens_a_menu_is_dropped() {
+        use keyboard::key::Named;
+        let rows = || vec![Row::new(1, "today"), Row::new(2, "Due date…").opens_menu()];
+        for kind in BackendKind::ALL {
+            let ev = on_task(kind, Mode::Suggest, rows());
+            let events = vec![
+                (press(mouse::Button::Left), Some(on_task_row(1))),
+                (named(Named::Escape), None),
+            ];
+            let (messages, captured) = widget_batch(&ev, &mut None, events);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [
+                        Message::Spell(SpellEvent::Accept(1)),
+                        Message::Spell(SpellEvent::Stroke(stroke)),
+                    ] if stroke.named() == Some(Named::Escape)
+                ),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(captured, [true, true], "{kind:?}");
+
+            // Ctrl+Escape after it, or after a dialog's row or request.
+            let ctrl_escape = || {
+                key(
+                    keyboard::Key::Named(Named::Escape),
+                    keyboard::Modifiers::CTRL,
+                    None,
+                )
+            };
+            let ev = on_task(kind, Mode::Suggest, rows());
+            let events = vec![
+                (press(mouse::Button::Left), Some(on_task_row(1))),
+                (ctrl_escape(), None),
+            ];
+            let (messages, _) = widget_batch(&ev, &mut None, events);
+            assert!(
+                matches!(messages.as_slice(), [Message::Spell(SpellEvent::Accept(1))]),
+                "{kind:?}: {messages:?}"
+            );
+            let ev = requesting(kind, TASK, 0, 8);
+            let events = vec![(request_key("d"), None), (ctrl_escape(), None)];
+            let (messages, _) = widget_batch(&ev, &mut None, events);
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Spell(SpellEvent::Request(DIALOG))]
+                ),
+                "{kind:?}: {messages:?}"
+            );
+        }
+    }
+
     /// A preedit of the note's own, under way in the widget's state.
     fn composing_state(ev: &crate::EditorView) -> Option<State> {
         let editor = editor_with(&ev.content, true, Measure::default());
@@ -9696,7 +10369,11 @@ mod tests {
             | Opener::RequestForTheKeyboard
             | Opener::MenuOpenThenARowThatOpensAMenu => "DDDDAADDDT",
             // Suggestions leave every other key and the press to the text.
-            Opener::TypingThatOffers | Opener::SuggestionsOpen => "PPPPPATTTT",
+            Opener::SuggestionsOpen => "PPPPPATTTT",
+            // Those the batch's own typing opened, which the host has not
+            // shown: Enter is the text's and Tab is dropped (ring review,
+            // third round).
+            Opener::TypingThatOffers => "PPTDPATTTT",
         }
     }
 
@@ -9955,9 +10632,9 @@ mod tests {
     }
 
     /// Enter on suggestions with rows that run commands names them, by the
-    /// number the editor gave them, or for those the batch's own letters
-    /// open, the number it will give them; queued while others replace
-    /// them, it chooses nothing.
+    /// number the editor gave them; queued while others replace them, it
+    /// chooses nothing. On those the batch's own letters open it is
+    /// dropped.
     #[test]
     fn enter_on_command_suggestions_names_them() {
         use keyboard::key::Named;
@@ -9971,13 +10648,16 @@ mod tests {
             _ => None,
         };
 
-        // Opened by the batch's own letters: named by the number the editor
-        // gives them, so the host chooses from them.
+        // Opened by the batch's own letters, which the host has not shown:
+        // Tab is dropped and Enter is the text's, and no command runs (ring
+        // review, third round). In the next batch they name the
+        // suggestions shown.
         for accept in [Named::Enter, Named::Tab] {
             let mut ev = commands();
+            let mut state = None;
             let (messages, captured) = widget_batch(
                 &ev,
-                &mut None,
+                &mut state,
                 vec![
                     (typed("d"), None),
                     (typed("u"), None),
@@ -9985,21 +10665,33 @@ mod tests {
                 ],
             );
             assert_eq!(captured, [true; 3], "{accept:?}");
-            let menu = named_menu(&messages).unwrap_or_else(|| panic!("{messages:?}"));
+            assert_eq!(named_menu(&messages), None, "{messages:?}");
+            for message in messages {
+                host_applies(&mut ev, message);
+            }
+            assert_eq!(ev.take_command(), None, "{accept:?}");
+            if accept == Named::Enter {
+                assert_eq!(ev.text(), "du\n");
+                let mut ev = commands();
+                for c in ['d', 'u'] {
+                    ev.perform(Action::Edit(Edit::Insert(c)));
+                }
+                let shown = ev.popover().expect("suggestions").instance();
+                let (messages, _) = widget_batch(&ev, &mut None, vec![(named(accept), None)]);
+                assert_eq!(named_menu(&messages), Some(shown), "{messages:?}");
+                continue;
+            }
+            let shown = ev.popover().expect("suggestions").instance();
+            let (messages, _) = widget_batch(&ev, &mut state, vec![(named(accept), None)]);
+            assert_eq!(named_menu(&messages), Some(shown), "{messages:?}");
             let mut chosen = None;
             for message in messages {
                 if let Message::Spell(event) = message {
                     ev.spell(event);
                     chosen = chosen.or(ev.take_command());
-                } else {
-                    host_applies(&mut ev, message);
                 }
             }
-            assert_eq!(
-                chosen.map(|choice| choice.id),
-                Some(7),
-                "{accept:?} of {menu}"
-            );
+            assert_eq!(chosen.map(|choice| choice.id), Some(7), "{accept:?}");
         }
 
         // Open when the batch starts: named by their own number. Queued,
@@ -10148,14 +10840,14 @@ mod tests {
     }
 
     #[test]
-    fn a_box_of_any_symbol_is_hit_on_each_of_its_glyphs() {
-        // A symbol of no status of its own, one of several bytes, and a
-        // priority glyph with U+FE0F after it next to the box.
-        let text = "- [?] a\n- [界] b\n- [x] ⏫\u{fe0f} c";
+    fn a_box_of_a_known_status_is_hit_on_each_of_its_glyphs() {
+        // Doing, cancelled, and done with a priority glyph with U+FE0F
+        // after it next to the box.
+        let text = "- [/] a\n- [-] b\n- [x] ⏫\u{fe0f} c";
         let ev = boxed(BackendKind::Owned, text, true);
         for (line, columns, off) in [
             (0, vec![2, 3, 4], 5),
-            (1, vec![2, 3, 6], 7),
+            (1, vec![2, 3, 4], 5),
             (2, vec![2, 3, 4], 6),
         ] {
             for column in columns {
@@ -10173,12 +10865,60 @@ mod tests {
         }
     }
 
+    /// A box of a symbol of no status of its own, one byte or several, is
+    /// not cycled by a click, which would rewrite the user's symbol: the
+    /// click is the text's and places the caret.
+    #[test]
+    fn a_click_on_a_box_of_an_unknown_symbol_is_a_click_in_the_text() {
+        let text = "- [?] a\n- [界] b\n- [>] c\n- [1] d";
+        for kind in BackendKind::ALL {
+            let ev = boxed(kind, text, true);
+            for (line, columns) in [
+                (0, vec![2, 3, 4]),
+                (1, vec![2, 3, 6]),
+                (2, vec![2, 3, 4]),
+                (3, vec![2, 3, 4]),
+            ] {
+                for column in columns {
+                    let [(pressed, _), (released, _), (settled, _)] =
+                        press_release(&ev, &mut None, middle(&ev, line, column));
+                    assert!(
+                        matches!(pressed.as_slice(), [Message::Action(Action::Click(_))]),
+                        "{kind:?} {line} {column}: {pressed:?}"
+                    );
+                    assert!(
+                        released.is_empty() && settled.is_empty(),
+                        "{kind:?} {line} {column}: {released:?} {settled:?}"
+                    );
+                    assert!(
+                        matches!(
+                            ev.click_message(line, column),
+                            Some(Message::Action(Action::Click(_)))
+                        ),
+                        "{kind:?} {line} {column}"
+                    );
+                }
+            }
+        }
+        // Carried out, the click moves the caret into the box and leaves
+        // the symbol as it is.
+        let mut ev = boxed(BackendKind::Owned, text, true);
+        let at = middle(&ev, 0, 3);
+        let (pressed, _) =
+            widget_batch(&ev, &mut None, vec![(press(mouse::Button::Left), Some(at))]);
+        for message in pressed {
+            host_applies(&mut ev, message);
+        }
+        assert_eq!(ev.cursor().position.line, 0);
+        assert_eq!(ev.text(), text);
+    }
+
     #[test]
     fn a_release_off_the_box_or_out_of_reach_is_a_click_in_the_text() {
-        let ev = boxed(BackendKind::Owned, "- [界] task", true);
+        let ev = boxed(BackendKind::Owned, "- [x] task", true);
         // Pressed at the far edge of `]` and let go 2 px on, on the blank
         // after the box.
-        let row = ev.content.anchor_row(0, 6..7).expect("laid out");
+        let row = ev.content.anchor_row(0, 4..5).expect("laid out");
         let edge = Point::new(row.right - 1.0 + 60.0, (row.top + row.bottom) / 2.0 + 24.0);
         let past = Point::new(edge.x + 2.0, edge.y);
         let mut state = None;

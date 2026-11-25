@@ -182,8 +182,9 @@ pub enum Message {
     HandbackOver,
 }
 
-/// A primary click on a task's box, `[` to `]`, with the host's tasks on
-/// ([`EditorView::set_tasks`]), on the advanced engine: a single click with
+/// A primary click on a task's box, `[` to `]`, of one of the four known
+/// statuses, with the host's tasks on ([`EditorView::set_tasks`]), on the
+/// advanced engine: a single click with
 /// no modifier held, pressed on the box and let go on the same box, the
 /// pointer never more than [`BoxClick::DRAG`] from where it was pressed,
 /// inside the editor or out. It leaves the caret and the selection where
@@ -196,7 +197,8 @@ pub enum Message {
 /// A press that becomes a drag selects from where it was pressed, as any
 /// other; one let go off the box is a click in the text where it was
 /// pressed. A click with Shift, Ctrl, Alt or the logo key held is the
-/// text's, and a key, another button, a modifier or the editor losing the
+/// text's, as is a click on a box of a symbol of no status of its own
+/// (`[?]`), and a key, another button, a modifier or the editor losing the
 /// keyboard before it is let go makes it no click at all.
 ///
 /// The host asks [`EditorView::box_clicked`] which task it was for.
@@ -446,8 +448,18 @@ impl EditorView {
     /// the editor that reads a task line takes: the Markdown keys' plans,
     /// the highlighter, and so the prose spell check reads. On, a box of
     /// any status is a task; off, only `[ ]`, `[x]` and `[X]` are.
+    ///
+    /// Turning tasks on or off closes what is open. A new day alone, with
+    /// tasks on, closes only suggestions, whose rows may name the day
+    /// ("Today"); the suggestions menu and the host's menus stay.
     pub fn set_tasks(&mut self, tasks: Option<wren_markdown::TaskOptions>) {
-        if tasks != self.tasks {
+        if tasks.is_some() && self.tasks.is_some() {
+            if tasks != self.tasks
+                && self.popover.as_ref().map(Popover::mode) == Some(Mode::Suggest)
+            {
+                self.popover = None;
+            }
+        } else if tasks != self.tasks {
             self.close_open();
         }
         if tasks.is_some() != self.tasks.is_some() {
@@ -1318,6 +1330,19 @@ impl EditorView {
                     None => self.close_open(),
                 }
             }
+            SpellEvent::EnterOn { id } => {
+                let row = (self.popover())
+                    .filter(|open| open.mode() == Mode::Suggest && open.takes_enter())
+                    .and_then(|open| {
+                        open.selected()
+                            .filter(|&row| open.id(row) == Some(id) && open.opens_menu_row(row))
+                    });
+                if let Some(row) = row {
+                    return self.accept(row, true);
+                }
+                self.close_open();
+                return self.press_without_popover(MenuKey::Enter);
+            }
             SpellEvent::Dismiss => {
                 self.dismiss_popover();
             }
@@ -1433,19 +1458,16 @@ impl EditorView {
     /// [`EditorView::take_choice`]. A row the popover does not have, one
     /// that cannot be chosen ([`Row::enabled`]), or an anchor whose text no
     /// longer reads as it did when the popover opened, closes it and
-    /// changes nothing. So does a row of suggestions that
-    /// runs a command, unless the choice named the suggestions (`named`,
-    /// [`SpellEvent::AcceptOf`]): a key that did not may have been meant
-    /// for suggestions that these replaced.
+    /// changes nothing. So does a row of suggestions that runs a command
+    /// or is bound to them ([`Row::bound`]), unless the choice named the
+    /// suggestions (`named`, [`SpellEvent::AcceptOf`]): a key that did not
+    /// may have been meant for suggestions that these replaced.
     fn accept(&mut self, row: usize, named: bool) -> bool {
         let menu = self.menu.take();
         let Some(popover) = menu.as_deref().or(self.popover.as_ref()) else {
             return false;
         };
-        let unnamed_command = popover.mode() == Mode::Suggest
-            && popover.kind(row) == Some(RowKind::Command)
-            && !named;
-        if unnamed_command {
+        if popover.wants_its_name(row) && !named {
             self.close_open();
             return false;
         }
@@ -2095,9 +2117,9 @@ impl EditorView {
             keys::messages(binding, selected, &line, &mut out);
         }
         // A menu other than the suggestions menu, and suggestions with a
-        // row that runs a command, are named by a choice from them, as the
-        // widget names them: by an accelerator or Enter, and by Enter and
-        // Tab on such suggestions.
+        // row that runs a command or is bound, are named by a choice from
+        // them, as the widget names them: by an accelerator or Enter, and
+        // by Enter and Tab on such suggestions.
         let open = self.popover().filter(|open| open.named_by_choice());
         if let Some(open) = open {
             for message in &mut out {
@@ -2105,7 +2127,7 @@ impl EditorView {
                     Message::Spell(SpellEvent::Accept(row)) => Some(Some(*row)),
                     Message::Spell(SpellEvent::AcceptSelected) => Some(None),
                     Message::Spell(SpellEvent::Key(MenuKey::Enter | MenuKey::Tab))
-                        if open.mode() == Mode::Suggest && open.runs_commands() =>
+                        if open.binds_its_keys() =>
                     {
                         Some(None)
                     }
@@ -8337,6 +8359,117 @@ mod tests {
                 command.map(|id| (id, 0, 0..1))
             );
         }
+    }
+
+    /// Enter and Tab on suggestions with a bound row ([`Row::bound`]), as
+    /// owners are, name them: queued while the host refreshes them into
+    /// others, they choose nothing, and a key that names none never
+    /// chooses such a row (ring review, finding 3).
+    #[test]
+    fn a_queued_key_on_bound_suggestions_chooses_only_from_them() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+
+        let suggesting = || {
+            let source = Arc::new(fixtures::Owners::new(&["sam", "samantha"]));
+            let mut ev = EditorView::with_backend(BackendKind::Owned, "");
+            ev.set_suggest_source(Some(source.clone()));
+            for c in ['@', 's', 'a'] {
+                ev.perform(Action::Edit(Edit::Insert(c)));
+            }
+            assert!(ev.popover().expect("owners").binds_its_keys());
+            (ev, source)
+        };
+        for (key, menu_key) in [(Named::Tab, MenuKey::Tab), (Named::Enter, MenuKey::Enter)] {
+            // Chosen from the suggestions it was pressed on.
+            let (mut ev, _) = suggesting();
+            let (messages, _) = ev.key_routing(Key::Named(key), Modifiers::empty());
+            for message in messages {
+                ev.carry_out(message);
+            }
+            assert_eq!(ev.take_choice().map(|choice| choice.id), Some(0), "{key:?}");
+
+            // Queued on A, applied once a new ranking refreshed A into B:
+            // nothing is chosen, from B either, and B stays open.
+            let (mut ev, source) = suggesting();
+            let a = ev.popover().unwrap().instance();
+            let (messages, _) = ev.key_routing(Key::Named(key), Modifiers::empty());
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Spell(SpellEvent::AcceptOf { menu, row: None })] if *menu == a
+                ),
+                "{key:?}: {messages:?}"
+            );
+            source.rank(&["samantha", "sam"]);
+            assert!(ev.refresh_suggestions());
+            let b = ev.popover().unwrap().instance();
+            assert_ne!(a, b, "{key:?}");
+            for message in messages {
+                assert!(!ev.carry_out(message), "{key:?}");
+            }
+            assert_eq!(ev.take_choice(), None, "{key:?}");
+            assert_eq!(ev.popover().map(Popover::instance), Some(b), "{key:?}");
+            assert_eq!(ev.text(), "@sa", "{key:?}");
+
+            // A key that names no suggestions chooses no bound row.
+            let (mut ev, _) = suggesting();
+            assert!(!ev.spell(SpellEvent::Key(menu_key)), "{key:?}");
+            assert_eq!(ev.take_choice(), None, "{key:?}");
+            assert!(ev.popover().is_none(), "{key:?}");
+            assert_eq!(ev.text(), "@sa", "{key:?}");
+        }
+    }
+
+    /// A new day alone keeps the suggestions menu and the host's menus
+    /// open, and closes suggestions, whose rows may name the day; turning
+    /// tasks on or off closes everything, as before (ring review,
+    /// finding 18).
+    #[test]
+    fn a_new_day_keeps_the_menus_and_closes_suggestions() {
+        let day = |n| {
+            Some(wren_markdown::TaskOptions {
+                today: wren_markdown::date::Date::new(2026, 11, n).expect("a date"),
+            })
+        };
+        let proofread = |ev: &mut EditorView| {
+            ev.set_proofreader(Some(Arc::new(
+                fixtures::Rejects::new(&["teh"]).suggesting(&[("teh", &["the"])]),
+            )));
+        };
+        // The suggestions menu.
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "cat teh");
+        proofread(&mut ev);
+        ev.set_tasks(day(19));
+        ev.move_cursor(at(0, 7));
+        ev.spell(SpellEvent::OpenAtCaret);
+        assert!(ev.spell_menu().is_some());
+        ev.set_tasks(day(19));
+        ev.set_tasks(day(20));
+        assert!(ev.spell_menu().is_some());
+        ev.set_tasks(None);
+        assert!(ev.spell_menu().is_none());
+
+        // A menu of the host's.
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call");
+        ev.set_tasks(day(19));
+        assert!(ev.open_popover(range(0, 2..5), Mode::Menu, rows(&["Open", "Done"])));
+        ev.set_tasks(day(20));
+        assert_eq!(ev.popover().map(Popover::mode), Some(Mode::Menu));
+        ev.set_tasks(None);
+        assert!(ev.popover().is_none());
+
+        // Suggestions close; the same day keeps them.
+        let mut ev = EditorView::with_backend(BackendKind::Owned, "- [ ] call to");
+        ev.set_tasks(day(19));
+        ev.set_suggest_source(Some(Arc::new(fixtures::TaskWords)));
+        ev.move_cursor(at(0, 13));
+        ev.perform(Action::Edit(Edit::Insert('d')));
+        assert_eq!(ev.popover().map(Popover::mode), Some(Mode::Suggest));
+        ev.set_tasks(day(19));
+        assert!(ev.popover().is_some());
+        ev.set_tasks(day(20));
+        assert!(ev.popover().is_none());
     }
 
     /// Enter and Tab on suggestions with rows that run commands name the

@@ -49,6 +49,15 @@
 //! - A character typed asks the host's [`SuggestSource`] the same way, and
 //!   the keys after it find the suggestions open, or not.
 //!
+//! Suggestions a typed character opens in the batch have not been shown,
+//! and the host's source may answer otherwise by the time it opens them.
+//! Up and Down are theirs, Tab on them is dropped, and Enter is the
+//! text's, as with nothing open, but on a selected row that opens a menu
+//! of the host's ("Due date…", which writes nothing until a date is
+//! picked): the widget names that row ([`PopoverEvent::EnterOn`]), which
+//! the host chooses only if its suggestions have it selected, and the
+//! batch's keys after it are dropped.
+//!
 //! The widget knows the caret's line while the batch has only typed
 //! characters at the caret. After anything else that changes the text or
 //! moves the caret (a deletion, a motion, a click, a chosen row), it knows
@@ -84,7 +93,8 @@
 //! host opened, is chosen by an event that names the menu
 //! ([`PopoverEvent::AcceptOf`]): the editor ignores it when another popover
 //! is open by then, one the host opened in between included. So are rows
-//! of suggestions with a row that runs a command.
+//! of suggestions with a row that runs a command or is bound to them
+//! ([`Row::bound`]).
 //!
 //! A row may be checked, which marks what the menu's subject is now, and a
 //! menu opens with it selected; and a row may be one that cannot be chosen
@@ -114,7 +124,8 @@
 //! too, though the editor still has the keyboard then. Escape and the
 //! host's shortcuts stay the host's, as with nothing open. From the next
 //! batch on the host's field has the keyboard, by the toolkit's own
-//! focus.
+//! focus. A row that opens a menu of the host's ([`Row::opens_menu`]) hands
+//! it the keyboard the same, chosen with a key or with the pointer.
 //!
 //! **Escape** belongs to whoever has the keyboard when it is pressed, with
 //! no Ctrl, Alt or logo key held, which is the Escape a host navigates
@@ -128,9 +139,10 @@
 //!
 //! The popover's overlay sees a batch before the widget does. It takes the
 //! pointer over its rows until an event of the batch ends or changes what
-//! is open, as the widget will find when it routes that event, and leaves
-//! the presses after it to the widget, which sees them after it. Up and
-//! Down leave the rows as they are drawn, and a press on a row after them
+//! is open, as the widget will find when it routes that event (a key, a
+//! press off the popover, a wheel that scrolls the editor), and leaves the
+//! presses after it to the widget, which sees them after it. Up and Down
+//! leave the rows as they are drawn, and a press on a row after them
 //! still chooses that row.
 //!
 //! [`KeyRoute::Popover`]: crate::KeyRoute::Popover
@@ -326,6 +338,12 @@ pub struct Row {
     /// that may be ordinary words, so that a line ending in one is never
     /// rewritten by the Enter that ends it.
     pub tentative: bool,
+    /// Among suggestions, a row chosen only from the suggestions it was
+    /// offered in, as a row that runs a command is: Enter and Tab on
+    /// suggestions with such a row name them ([`PopoverEvent::AcceptOf`]),
+    /// so a key queued while the host replaces them chooses nothing. For
+    /// rows whose order a refresh may change, such as owners ranked by use.
+    pub bound: bool,
     /// A short note drawn muted at the row's right, where a menu names a
     /// row's key: a date, how often a name is used. A row's key, if it
     /// has one, is drawn there instead.
@@ -345,6 +363,7 @@ impl Row {
             opens_menu: false,
             opens_dialog: false,
             tentative: false,
+            bound: false,
             detail: None,
         }
     }
@@ -399,6 +418,13 @@ impl Row {
         self
     }
 
+    /// A suggestion chosen only from the suggestions it was offered in
+    /// ([`Row::bound`]).
+    pub fn bound(mut self) -> Self {
+        self.bound = true;
+        self
+    }
+
     /// A note drawn at the row's right ([`Row::detail`]).
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
@@ -419,6 +445,7 @@ struct Entry {
     opens_menu: bool,
     opens_dialog: bool,
     tentative: bool,
+    bound: bool,
     detail: Option<String>,
 }
 
@@ -492,6 +519,7 @@ impl Popover {
                 opens_menu: row.opens_menu,
                 opens_dialog: row.opens_dialog,
                 tentative: row.tentative,
+                bound: row.bound,
                 detail: row.detail,
             });
         }
@@ -633,6 +661,28 @@ impl Popover {
             .any(|entry| entry.kind == RowKind::Command)
     }
 
+    /// Whether these are suggestions whose Enter and Tab choose only by
+    /// naming them ([`PopoverEvent::AcceptOf`]): those with a row that runs
+    /// a command or is bound to them ([`Row::bound`]).
+    pub(crate) fn binds_its_keys(&self) -> bool {
+        self.mode == Mode::Suggest
+            && (self.entries.iter()).any(|entry| entry.kind == RowKind::Command || entry.bound)
+    }
+
+    /// Whether `row` can be chosen and opens a menu of the host's
+    /// ([`Row::opens_menu`]).
+    pub(crate) fn opens_menu_row(&self, row: usize) -> bool {
+        (self.entries.get(row)).is_some_and(|entry| entry.enabled && entry.opens_menu)
+    }
+
+    /// Whether `row` is chosen only by a choice that names the popover:
+    /// a suggestion that runs a command or is bound ([`Row::bound`]).
+    pub(crate) fn wants_its_name(&self, row: usize) -> bool {
+        self.mode == Mode::Suggest
+            && (self.entries.get(row))
+                .is_some_and(|entry| entry.kind == RowKind::Command || entry.bound)
+    }
+
     /// Each row's accelerator, inert for a row that cannot be chosen.
     pub(crate) fn accelerators(&self) -> &[Option<Accelerator>] {
         &self.accelerators
@@ -690,10 +740,11 @@ impl Popover {
     /// Whether a choice of one of its rows names it
     /// ([`PopoverEvent::AcceptOf`]), so that a choice waiting to be applied
     /// is never made from another popover: every menu but the suggestions
-    /// menu, and suggestions with a row that runs a command.
+    /// menu, and suggestions with a row that runs a command or is bound
+    /// ([`Self::binds_its_keys`]).
     pub(crate) fn named_by_choice(&self) -> bool {
         !self.spelling
-            && (self.mode == Mode::Menu || self.provider.is_some() || self.runs_commands())
+            && (self.mode == Mode::Menu || self.provider.is_some() || self.binds_its_keys())
     }
 
     /// The anchor, when its text is tinted: the suggestions menu's word
@@ -1179,6 +1230,15 @@ pub enum PopoverEvent {
         menu: u64,
         row: Option<usize>,
     },
+    /// Enter on suggestions the widget opened in its own batch, which the
+    /// host had not shown, whose selected row it found to be the one with
+    /// this id, a row that opens a menu of the host's ("Due date…", which
+    /// writes nothing until a date is picked). The editor chooses that row
+    /// if the suggestions it opened have it selected; otherwise Enter is
+    /// the text's, as with nothing open, and chooses nothing.
+    EnterOn {
+        id: u32,
+    },
     /// A press of one of a popover's keys with no modifier: of
     /// suggestions' while they are open, or of the suggestions menu's after
     /// a request for it earlier in the same batch of events, which may not
@@ -1613,6 +1673,10 @@ pub(crate) struct Now {
     /// Up or Down has moved the selection of what is open since it
     /// opened ([`Popover::takes_enter`]).
     confirmed: Cell<bool>,
+    /// The host took the keyboard for something that holds Escape too: a
+    /// dialog's request, or a row of suggestions or a dialog's row chosen
+    /// in this batch.
+    holds_escape: Cell<bool>,
 }
 
 impl Now {
@@ -1630,6 +1694,7 @@ impl Now {
             own_instance: Cell::new(None),
             live: RefCell::new(Vec::new()),
             confirmed: Cell::new(false),
+            holds_escape: Cell::new(false),
         }
     }
 
@@ -1765,10 +1830,48 @@ impl Now {
 
     /// The host will open a menu the widget cannot know of for a row
     /// chosen in this batch: from here to the end of the batch, the input
-    /// is no one's, as after a handover of the keyboard.
-    pub(crate) fn hand_over(&self) {
+    /// is no one's, as after a handover of the keyboard; with `escape`,
+    /// Escape too.
+    pub(crate) fn hand_over(&self, escape: bool) {
         self.set(Some((Opened::Keyboard, OpenMenu::OPENING)));
         self.own.replace(None);
+        self.holds_escape.set(escape);
+    }
+
+    /// Whether the host took the keyboard for something that holds Escape
+    /// too ([`Self::hand_over`]).
+    pub(crate) fn holds_escape(&self) -> bool {
+        self.holds_escape.get()
+    }
+
+    /// What choosing row `row` of `handed`, the popover the host has open,
+    /// hands the host: `None` when the row opens nothing of the host's, or
+    /// whether what it opens holds Escape, as for the row's key: a dialog's
+    /// row ([`Row::opens_dialog`]) or a row of suggestions ("Due date…").
+    pub(crate) fn handover_for(&self, handed: &Popover, row: usize) -> Option<bool> {
+        self.opens_menu(Some(handed), Some(row))
+            .then(|| handed.mode() == Mode::Suggest || self.opens_dialog(Some(handed), Some(row)))
+    }
+
+    /// A row of the popover the host has open was chosen with the pointer,
+    /// ahead of every event of the batch the widget routes ([`InOrder`]).
+    /// The host acts on the row, which may change anything, as for a row
+    /// chosen with a key ([`Self::publish`]): the caret's line, the text
+    /// under the pointer and the popovers opened are not known after it.
+    /// A row that opens a menu or a dialog of the host's (`handover`, from
+    /// [`Self::handover_for`]) hands it the keyboard, as its key does.
+    pub(crate) fn chosen(&self, handover: Option<bool>) {
+        self.still.set(false);
+        self.typed.replace(None);
+        self.count.set(None);
+        self.own_instance.set(None);
+        self.confirmed.set(false);
+        self.live.replace(Vec::new());
+        self.own.replace(None);
+        self.open.set(None);
+        if let Some(escape) = handover {
+            self.hand_over(escape);
+        }
     }
 
     /// The [`Popover::instance`] of what is open, of the popover the host
@@ -1791,13 +1894,36 @@ impl Now {
         }
     }
 
-    /// Whether what is open are suggestions with a row that runs a command:
-    /// Enter and Tab then choose from them only by naming them
-    /// ([`PopoverEvent::AcceptOf`]).
+    /// Whether what is open are suggestions the widget opened in this
+    /// batch, which the host has not shown: its source may answer otherwise
+    /// by the time it opens them. Tab on them is dropped, and Enter is the
+    /// text's, but on a row that opens a menu ([`Self::predicted_menu_row`]).
+    pub(crate) fn predicts_suggestions(&self) -> bool {
+        self.open.get().is_some()
+            && (self.own.borrow().as_ref()).is_some_and(|own| own.mode() == Mode::Suggest)
+    }
+
+    /// The id of the selected row of suggestions the widget opened in this
+    /// batch, when it opens a menu of the host's ("Due date…") and Enter
+    /// chooses it ([`Popover::takes_enter`]): Enter on it asks the host to
+    /// choose that row ([`PopoverEvent::EnterOn`]).
+    pub(crate) fn predicted_menu_row(&self) -> Option<u32> {
+        if !self.takes_enter(None) {
+            return None;
+        }
+        let row = self.open.get()?.selected?;
+        let own = self.own.borrow();
+        let own = own.as_ref().filter(|own| own.mode() == Mode::Suggest)?;
+        (own.opens_menu_row(row)).then(|| own.id(row)).flatten()
+    }
+
+    /// Whether what is open are suggestions with a row that runs a command
+    /// or is bound to them: Enter and Tab then choose from them only by
+    /// naming them ([`PopoverEvent::AcceptOf`]).
     pub(crate) fn binds_its_keys(&self, handed: Option<&Popover>) -> bool {
         let own = self.own.borrow();
         let open = self.open.get().and(own.as_ref().or(handed));
-        open.is_some_and(|open| open.mode() == Mode::Suggest && open.runs_commands())
+        open.is_some_and(Popover::binds_its_keys)
     }
 
     /// The host closes its popover without a message from the widget.
@@ -2004,6 +2130,7 @@ fn keeps_the_text(message: &Message, open: bool) -> bool {
             | PopoverEvent::Accept(_)
             | PopoverEvent::AcceptSelected
             | PopoverEvent::AcceptOf { .. }
+            | PopoverEvent::EnterOn { .. }
             | PopoverEvent::Press(MenuPress::Left(..)) => false,
         },
         _ => false,

@@ -4,17 +4,19 @@
 use std::cell::Cell;
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::{self, LineHeight, Paragraph as _, Renderer as _, Text, Wrapping};
 use iced::advanced::{mouse, overlay, Clipboard, Shell};
+use iced::keyboard;
 use iced::{
     alignment, Border, Color, Event, Font, Pixels, Point, Rectangle, Renderer, Size, Theme,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{publish, OpenMenu, Popover, PopoverEvent};
+use super::{publish, Now, OpenMenu, Popover, PopoverEvent};
 #[cfg(any(test, feature = "test-support"))]
 use crate::proof::SpellFrame;
 #[cfg(test)]
@@ -527,6 +529,10 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
     }
 }
 
+/// Whether the widget, routing an event with the pointer where it finds
+/// it, will close the popover or change its rows ([`InOrder`]).
+type Ends<'a> = dyn FnMut(&Event, mouse::Cursor) -> bool + 'a;
+
 /// The open popover's overlay as a window hands it events: all of a batch,
 /// before the editor widget sees any of them.
 ///
@@ -537,22 +543,71 @@ impl overlay::Overlay<Message, Theme, Renderer> for MenuOverlay<'_> {
 /// overlay takes no more of the pointer, and the presses after that event
 /// reach the widget, after it. Up and Down leave the rows as they are
 /// drawn, and a press on a row after them still chooses that row.
+///
+/// A row chosen with the pointer comes before every event the widget
+/// routes, and the widget routes them against what the choice leaves
+/// ([`Now::chosen`]): after a row that opens a menu of the host's, the
+/// batch's keys and input-method text are no one's, and so is what a
+/// composition under way commits, in this batch or a later one.
+///
+/// Only a batch's first press may choose a row, and only before any key of
+/// the batch: once a press of any button or a key (not a modifier alone)
+/// has been seen, the overlay chooses no row, and the keys keep their
+/// routing against the popover as it was. A press it does not take on the
+/// popover as drawn is dropped there: captured, with its release, so it
+/// never reaches the text, a task's box or a selection under it. One off
+/// the popover is the widget's, which dismisses it or is the text's. A row
+/// pressed after a press that chose nothing (a middle press, or a right
+/// press no provider takes) is so not chosen either; the user presses it
+/// again.
+///
+/// Two limits are the toolkit's, as they were for the suggestions menu
+/// before there were other popovers. The window hands the overlay one
+/// place of the pointer for the whole batch, where it is at the end, so a
+/// batch's first press is taken as made there: a press in the text, then
+/// a move onto a row before the batch ends, chooses that row. And the
+/// overlay sees the whole batch before the widget: a move of the pointer
+/// over a row selects it ahead of an Up or Down pressed before it, so
+/// Enter after both chooses from where the key left the selection.
 pub(crate) struct InOrder<'a> {
     overlay: MenuOverlay<'a>,
-    /// Whether the widget, routing an event, will close the popover or
-    /// change its rows. It is asked about every event the overlay does not
-    /// take, in order, since what an event does depends on those before it.
-    ends: Box<dyn FnMut(&Event) -> bool + 'a>,
+    /// What is open as the widget's events leave it, of which the
+    /// overlay's `now` is the copy.
+    now: &'a Now,
+    /// Whether the widget, routing an event with the pointer where it
+    /// finds it, will close the popover or change its rows. It is asked
+    /// about every event the overlay does not take, in order, since what
+    /// an event does depends on those before it.
+    ends: Box<Ends<'a>>,
     /// An event of this batch has ended or changed what is open.
     spent: bool,
+    /// A press of this batch has been seen.
+    pressed: bool,
+    /// A key of this batch, other than a modifier alone, has been seen.
+    keyed: bool,
+    /// A press dropped on the popover, whose release is dropped too.
+    dropped: bool,
+    /// Set when a row chosen with the pointer hands the host the keyboard,
+    /// in the widget's state, which outlasts the batch.
+    handed: Rc<Cell<bool>>,
 }
 
 impl<'a> InOrder<'a> {
-    pub(crate) fn new(overlay: MenuOverlay<'a>, ends: impl FnMut(&Event) -> bool + 'a) -> Self {
+    pub(crate) fn new(
+        overlay: MenuOverlay<'a>,
+        now: &'a Now,
+        handed: Rc<Cell<bool>>,
+        ends: impl FnMut(&Event, mouse::Cursor) -> bool + 'a,
+    ) -> Self {
         Self {
             overlay,
+            now,
             ends: Box::new(ends),
             spent: false,
+            pressed: false,
+            keyed: false,
+            dropped: false,
+            handed,
         }
     }
 
@@ -564,12 +619,57 @@ impl<'a> InOrder<'a> {
         cursor: mouse::Cursor,
         shell: &mut Shell<'_, Message>,
     ) {
+        match event {
+            Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) if !matches!(key, keyboard::Key::Named(named) if crate::keys::is_modifier(*named)) =>
+            {
+                self.keyed = true;
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(_)) => {
+                let refused = self.spent || self.pressed || self.keyed;
+                self.pressed = true;
+                if refused {
+                    if (cursor.position()).is_some_and(|point| self.overlay.bounds.contains(point))
+                    {
+                        shell.capture_event();
+                        self.dropped = true;
+                    }
+                    self.spent = true;
+                    return;
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(_)) if self.dropped => {
+                shell.capture_event();
+                return;
+            }
+            _ => {}
+        }
         if self.spent {
             return;
         }
+        // A row a press chooses, and what choosing it hands the host,
+        // known before the choice closes the popover.
+        let chosen = match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => cursor
+                .position()
+                .filter(|_| self.overlay.now.get().is_some())
+                .and_then(|point| self.overlay.active_row_at(point)),
+            _ => None,
+        };
+        let handover = chosen.and_then(|row| self.now.handover_for(self.overlay.menu, row));
         self.overlay.on_event(event, cursor, shell);
-        if shell.event_status() != iced::event::Status::Captured {
-            self.spent = (self.ends)(event);
+        if chosen.is_some() {
+            self.now.chosen(handover);
+            if handover.is_some() {
+                self.handed.set(true);
+            }
+            self.spent = true;
+        } else if shell.event_status() != iced::event::Status::Captured {
+            // The widget finds no pointer where the overlay holds it.
+            let below = match cursor.position() {
+                Some(point) if self.overlay.bounds.contains(point) => mouse::Cursor::Unavailable,
+                _ => cursor,
+            };
+            self.spent = (self.ends)(event, below);
         }
     }
 
@@ -934,13 +1034,19 @@ mod tests {
     /// end the popover; and the pointer it shows over that row afterwards.
     fn in_order(
         events: Vec<Event>,
-        ends: impl FnMut(&Event) -> bool,
+        mut ends: impl FnMut(&Event) -> bool,
         row: usize,
     ) -> (Vec<Message>, mouse::Interaction) {
         let three = menu(&["the", "ten", "tea"], 0);
         let labels = labels_of(&three);
-        let now = Cell::new(Some(OpenMenu::of(&three)));
-        let mut overlay = InOrder::new(overlay(&three, &labels, &now), ends);
+        let now = Now::new();
+        now.start(Some(&three));
+        let mut overlay = InOrder::new(
+            overlay(&three, &labels, now.cell()),
+            &now,
+            Rc::default(),
+            |event, _| ends(event),
+        );
         let mut messages = Vec::new();
         for event in events {
             let mut shell = Shell::new(&mut messages);
