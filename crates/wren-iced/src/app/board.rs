@@ -1438,7 +1438,6 @@ z = "c"
             Message::Editor(wren_editor::Message::Action(Action::Edit(Edit::Enter))),
             Message::Editor(wren_editor::Message::Undo),
             Message::Editor(wren_editor::Message::Redo),
-            Message::Editor(wren_editor::Message::Find),
         ] {
             let _ = app.update(message);
             untouched(&app);

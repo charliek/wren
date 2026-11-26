@@ -68,7 +68,7 @@ Default tables are written with two logical modifiers:
 
 The palette input, dialogs, the find bar, the calendar field and the task form's fields are iced `text_input`s, which take Ctrl for clipboard, select all and undo. In Alt mode, a small wrapper turns Alt+C/X/V/A/Z (and Shift+Z) into what the input expects before passing the event on. `form_keys.rs` and `date_field.rs` already wrap their inputs; extend them, and add one shared wrapper for the rest. The board's label editor (`wren-canvas`) reads its clipboard and select-all keys from the host's key policy instead of hard-coded Ctrl/⌘. With the default Ctrl-mode keymap no wrapper changes anything.
 
-As built (`field_keys.rs`), on Linux only: any `edit.*` binding that is not the input's own Ctrl press is rewritten to it, in either mode, so a Ctrl-mode user's `alt+c = edit.copy` copies in a field too; a native chord the keymap gives another command or unbinds is taken from the focused field, unless it is another edit, which wins; every press first tells the input its real modifiers, so a field mounted with Ctrl held still pastes. AltGr's text (`wren_editor::is_alt_graph`) comes first of all: the input hears it without Ctrl and Alt, so it types and is never rewritten, taken or read as a clipboard chord, and the editor inserts it before its own and iced's keys. The mounted keys sheet owns its toggle at routing time, ahead of the filter and wherever a click inside the sheet left the keyboard, read with the board's own text-aware resolver (`wren_canvas::resolve`, so Shift+ß typing `?` closes it); a held toggle's repeats do nothing, `what?` pasted filters, and `mod+x = board.keys` closes the sheet without cutting.
+As built (`field_keys.rs`), on Linux, and on macOS with ⌘ for Ctrl since 2026-11-26 (§6): any `edit.*` binding that is not the input's own Ctrl press is rewritten to it, in either mode, so a Ctrl-mode user's `alt+c = edit.copy` copies in a field too; a native chord the keymap gives another command or unbinds is taken from the focused field, unless it is another edit, which wins; every press first tells the input its real modifiers, so a field mounted with Ctrl held still pastes. AltGr's text (`wren_editor::is_alt_graph`) comes first of all: the input hears it without Ctrl and Alt, so it types and is never rewritten, taken or read as a clipboard chord, and the editor inserts it before its own and iced's keys. The mounted keys sheet owns its toggle at routing time, ahead of the filter and wherever a click inside the sheet left the keyboard, read with the board's own text-aware resolver (`wren_canvas::resolve`, so Shift+ß typing `?` closes it); a held toggle's repeats do nothing, `what?` pasted filters, and `mod+x = board.keys` closes the sheet without cutting.
 
 ## 5. The build
 
@@ -107,7 +107,7 @@ The owner approved a faster run on 2026-11-25:
 
 What differs from §3 and §4:
 - **Word motion.** On Linux it is Ctrl+←/→ only; Alt+←/→ was never bound. Alt+Backspace and Alt+Delete still delete a word.
-- **`edit.*` is Linux only.** On macOS the editor keeps its own ⌘Z, ⌘⇧Z and ⌘F, and a `keybind` line naming an `edit.*` action is refused. The palette rows are hidden.
+- **`edit.*` was Linux only at first.** On macOS the editor kept its own ⌘Z, ⌘⇧Z and ⌘F, and a `keybind` line naming an `edit.*` action was refused. The owner reversed this on 2026-11-26 (below).
 - **Unbound and reassigned clipboard chords.** An explicitly unbound Ctrl+C/X/V/A does nothing, in the editor and in a focused field. One given to another command does only that command.
 - **Text fields have no undo.** iced's text input has none, so Alt+Z and Ctrl+Z do nothing there.
 - **Branch review fixes** (2026-11-25):
@@ -119,8 +119,20 @@ What differs from §3 and §4:
   6. field rewrites apply in both Linux modes (the default Ctrl keymap has none), and the keymap records the triggers a line unbinds (`Keymap::unbound`).
 - **CI** runs one Linux smoke lane (X11, wgpu) in Ctrl mode, the shipped default.
 - **Ctrl+Y in Ctrl mode is Focus mode,** on a board too, where an open label stays open.
-- **Board labels.** On Linux the board's select all, copy, cut, paste, undo and redo keys act on an open label's text; on macOS a label keeps its fixed ⌘ chords whatever the board layer binds, so ⌘Z still undoes in a label after board Undo moves. Typed text and AltGr text win over any binding. The label's caret and erase keys win over board-layer bindings; an app-scope binding on one of them, such as Ctrl+Left, still runs first. A held paste repeats in a label.
+- **Board labels.** The board's select all, copy, cut, paste, undo and redo keys act on an open label's text. (At first a macOS label kept its fixed ⌘ chords whatever the board layer bound; that went with the change of 2026-11-26 below.) Typed text and AltGr text win over any binding. The label's caret and erase keys win over board-layer bindings; an app-scope binding on one of them, such as Ctrl+Left, still runs first. A held paste repeats in a label.
 - **Harness.** `WRENTEST_LINUX_MODIFIER` picks a lane's mode (default `alt`). `mod` and `opt` work in `editor.key` and `board.key`, and `native_mod`, `native_opt` and `mod_label` cover native chords.
+
+**macOS overrides (owner, 2026-11-26).** Decision 5 applies on macOS too:
+- the Mac keymap binds `edit.undo` ⌘Z, `edit.redo` ⇧⌘Z, `edit.copy` ⌘C, `edit.cut` ⌘X, `edit.paste` ⌘V and `edit.select_all` ⌘A (`mod+…`, as on Linux), and `keybind` lines may name them. Only the Linux-modifier switch is still Linux only;
+- the editor has no keys of its own: its hard-coded ⌘Z, ⇧⌘Z and ⌘F are gone, and with them `wren_editor::Message::Find`. ⌘F was already `navigation.find`, which the key policy hands the app before the editor's own keys, so the find bar opens as before; with ⌘F unbound it now opens nothing, as on Linux;
+- iced's own clipboard chords, which `unbound_chords`, `native_edit` and `native_chords` describe, are ⌘'s on macOS and Ctrl's on Linux, read from the keymap's scheme, so an unbound ⌘V does nothing and one given another command does only that;
+- `field_keys` wraps the text fields on macOS too, rewriting a user's edit key to the ⌘ chord iced expects. The default Mac keymap rewrites and takes nothing, so it has no wrapper and the fields are as they were. A ⌥ letter types its character unless a line binds exactly that chord: then, as in the editor, it is that edit and types nothing. A board label still types it (typed text wins there);
+- a board label follows the board layer on macOS as on Linux: `super+z = board.unbind` leaves ⌘Z undoing nothing in a label, and rebinding moves it;
+- no native menu item shows an `edit.*` chord, so none takes ⌘C, ⌘V, ⌘A or ⌘Z from the focused widget (there is no Edit menu). The predefined items keep muda's keys (Hide ⌘H, Hide Others ⌥⌘H, Minimize ⌘M, Toggle Full Screen ⌃⌘F), which AppKit fires before the keymap sees the press, so a `keybind` line on one is refused on macOS with a warning naming the item (`menu::native_item`; review fix, severity 3).
+
+Known limits on macOS, documented rather than fixed (review, 2026-11-26):
+- bindings are exact: ⌥⌘Z, ⌃⌘Z, ⇧⌥⌘Z and the like no longer undo or redo in the editor or a label, where the old `mac_keys()` and the label's fixed chords tolerated extra modifiers. A user binds them explicitly if wanted;
+- an ⌥ chord that starts a dead key (⌥E, ⌥U, ⌥N, ⌥I, ⌥\` on US layouts) cannot be bound: with the input method on, AppKit turns it into preedit before Wren sees a press. Resolving bound dead-key chords first would need `vendor/` (iced_winit).
 
 Deferred:
 - the settings writer turns CRLF line endings into LF when it replaces a line (pre-existing);

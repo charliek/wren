@@ -5302,7 +5302,7 @@ mod tests {
                     ev.handback_over();
                     false
                 }
-                Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
+                Message::Command(_) | Message::BoxClick(_) => false,
             };
         }
         messages
@@ -5908,7 +5908,7 @@ mod tests {
                 ev.handback_over();
                 false
             }
-            Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
+            Message::Command(_) | Message::BoxClick(_) => false,
         };
         applied
     }

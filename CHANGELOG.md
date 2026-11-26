@@ -49,6 +49,14 @@ version's section as its notes, and publishes to the apt repo. See
   copy, cut, paste and select all are now the actions `edit.undo`,
   `edit.redo`, `edit.copy`, `edit.cut`, `edit.paste` and `edit.select_all`.
   Settings opens with Ctrl+, on Linux.
+- **On macOS too, undo, redo, copy, cut, paste and select all can be
+  rebound.** The `edit.*` actions default to ⌘Z, ⇧⌘Z, ⌘C, ⌘X, ⌘V and ⌘A,
+  and a `keybind` line moves or unbinds them in the editor and the text
+  fields, as on Linux: `keybind = mod+u = edit.undo` adds ⌘U as undo there.
+  A board label follows the board's keys instead: `keybind = mod+u =
+  board.undo` makes ⌘U undo on a board and in its labels. With no such line
+  nothing changes. A line on a key of the macOS menu (⌘H, ⌥⌘H, ⌘M, ⌃⌘F) is
+  refused with a warning, since the menu takes the key first.
 
 
 - **Tasks** (`tasks = on` in `config.conf`, off by default; restart Wren to

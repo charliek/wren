@@ -359,7 +359,6 @@ mod tests {
         for message in [
             Message::Undo,
             Message::Redo,
-            Message::Find,
             Message::Intent(crate::Intent::Enter),
             Message::Action(iced::widget::text_editor::Action::SelectAll),
         ] {

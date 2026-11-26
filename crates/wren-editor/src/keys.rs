@@ -424,14 +424,12 @@ pub(crate) fn clip_messages(
 }
 
 /// Custom key-binding handler.  Leaves an input method its editing keys
-/// while it composes, asks the host's [`KeyPolicy`], then on macOS
-/// intercepts the Undo, Redo, and Find shortcuts, and turns the editing keys
-/// into [`Message::Intent`]s.
+/// while it composes, asks the host's [`KeyPolicy`], then turns the editing
+/// keys into [`Message::Intent`]s.
 ///
-/// On macOS, ⌘Z is [`Message::Undo`], ⌘⇧Z [`Message::Redo`] and ⌘F
-/// [`Message::Find`], the Mac's own keys. Elsewhere the editor has no such
-/// keys of its own: the host binds undo and redo as [`KeyRoute::Edit`], and
-/// find as a command of its own.
+/// The editor has no undo, redo or find keys of its own on any platform:
+/// the host binds undo and redo as [`KeyRoute::Edit`], and find as a
+/// command of its own, so an unbound ⌘Z or Ctrl+Z does nothing.
 ///
 /// The editing keys are read from iced's own bindings, so platform mappings
 /// (macOS ⌘← as Home, ⌃H as Backspace) carry over; macOS's ⌃A, ⌃E, ⌃B, and
@@ -496,16 +494,13 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         // Nor does a host command act on the text under a preedit.
         KeyRoute::Command(_) if context.composing => return None,
         KeyRoute::Command(id) => return Some(Binding::Custom(Message::Command(id))),
-        // As iced's own clipboard keys and the Mac's history keys, which act
-        // while an input method composes too.
+        // As iced's own clipboard keys, which act while an input method
+        // composes too.
         KeyRoute::Edit(edit) => return Some(edit.binding()),
         KeyRoute::Pass => {}
     }
 
     let macos = cfg!(target_os = "macos");
-    if let Some(binding) = mac_keys(key, physical, m, macos) {
-        return Some(binding);
-    }
 
     // iced has no Tab binding (its text is a control character), and a Tab
     // the editor ignores could move focus, so the editor always takes it.
@@ -549,25 +544,6 @@ pub fn is_alt_graph(
         (None, _, _) => false,
         (Some(one), None, Some(own)) => !one.to_lowercase().eq(own.to_lowercase()),
         _ => true,
-    }
-}
-
-/// On macOS (`macos`), ⌘Z, ⌘⇧Z and ⌘F, which the editor keeps there because
-/// a Mac host's keymap binds no text editing keys: they are the Mac's own.
-fn mac_keys(
-    key: &Key,
-    physical: key::Physical,
-    m: Modifiers,
-    macos: bool,
-) -> Option<Binding<Message>> {
-    if !(macos && m.logo()) {
-        return None;
-    }
-    match key.to_latin(physical)? {
-        'z' if m.shift() => Some(Binding::Custom(Message::Redo)),
-        'z' => Some(Binding::Custom(Message::Undo)),
-        'f' if !m.shift() => Some(Binding::Custom(Message::Find)),
-        _ => None,
     }
 }
 
@@ -838,7 +814,7 @@ mod tests {
     }
 
     /// A host that binds Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z to the editor's
-    /// undo and redo, as Wren's Linux keymap does.
+    /// undo and redo, as Wren's keymap does.
     fn history_policy() -> KeyPolicy {
         Arc::new(|key: &Key, _, modifiers: Modifiers| {
             match (key.as_ref(), modifiers.command(), modifiers.shift()) {
@@ -919,30 +895,32 @@ mod tests {
         }
     }
 
+    /// The editor has no undo, redo or find keys of its own, on macOS as
+    /// elsewhere: without the host's word ⌘Z, ⇧⌘Z, ⌘F and their Ctrl
+    /// versions do nothing, and type nothing.
     #[test]
-    fn the_history_and_find_keys_of_the_editor_s_own_are_the_mac_s() {
-        let m = Modifiers::LOGO;
-        let z = Key::Character("z".into());
-        let f = Key::Character("f".into());
-        let unidentified = key::Physical::Unidentified(key::NativeCode::Unidentified);
-        assert!(matches!(
-            mac_keys(&z, unidentified, m, true),
-            Some(Binding::Custom(Message::Undo))
-        ));
-        assert!(matches!(
-            mac_keys(&z, unidentified, m | Modifiers::SHIFT, true),
-            Some(Binding::Custom(Message::Redo))
-        ));
-        assert!(matches!(
-            mac_keys(&f, unidentified, m, true),
-            Some(Binding::Custom(Message::Find))
-        ));
-        assert!(mac_keys(&f, unidentified, m | Modifiers::SHIFT, true).is_none());
-        assert!(mac_keys(&z, unidentified, Modifiers::CTRL, true).is_none());
-        // Elsewhere none of them is the editor's.
-        for modifiers in [Modifiers::LOGO, Modifiers::CTRL, Modifiers::ALT] {
-            for key in [&z, &f, &Key::Character("y".into())] {
-                assert!(mac_keys(key, unidentified, modifiers, false).is_none());
+    fn the_editor_has_no_history_or_find_keys_of_its_own() {
+        for modifiers in [Modifiers::LOGO, Modifiers::CTRL] {
+            for shift in [false, true] {
+                let held = if shift {
+                    modifiers | Modifiers::SHIFT
+                } else {
+                    modifiers
+                };
+                for letter in ["z", "f", "y"] {
+                    // ⌃F moves right on macOS, as in Emacs.
+                    if cfg!(target_os = "macos") && modifiers == Modifiers::CTRL && letter == "f" {
+                        continue;
+                    }
+                    // macOS reports the letter as the text of a ⌘ press.
+                    let text = (modifiers == Modifiers::LOGO).then_some(letter);
+                    for context in [ASSIST, PLAIN, COMPOSING] {
+                        let binding = press(Key::Character(letter.into()), held, text, context);
+                        if cfg!(target_os = "macos") || modifiers == Modifiers::CTRL {
+                            assert!(binding.is_none(), "{letter} {held:?}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -965,16 +943,12 @@ mod tests {
             letter("b", context),
             Some(Binding::Custom(Message::Intent(Intent::Bold)))
         ));
-        // A host shortcut is the host's alone, even over the editor's own
-        // Find and Undo.
+        // A host shortcut is the host's alone.
         assert!(letter("f", context).is_none());
         assert!(letter("z", context).is_none());
-        // Without the host's word, ⌘F is the editor's Find on macOS, and
-        // Ctrl+F nothing elsewhere.
-        assert_eq!(
-            matches!(letter("f", ASSIST), Some(Binding::Custom(Message::Find))),
-            cfg!(target_os = "macos")
-        );
+        // Without the host's word, ⌘F and Ctrl+F are nothing of the
+        // editor's.
+        assert!(letter("f", ASSIST).is_none());
         // Everything else is the editor's, as without a policy.
         assert_eq!(
             named(Named::Enter, Modifiers::empty(), context),
@@ -1475,12 +1449,9 @@ mod tests {
             policy: Some(&history),
             ..ASSIST
         };
-        for (letter, physical, shift) in [
-            ("z", key::Code::KeyZ, false),
-            ("z", key::Code::KeyZ, true),
-            #[cfg(target_os = "macos")]
-            ("f", key::Code::KeyF, false),
-        ] {
+        for (letter, physical, shift) in
+            [("z", key::Code::KeyZ, false), ("z", key::Code::KeyZ, true)]
+        {
             for status in [
                 text_editor::Status::Active,
                 text_editor::Status::Hovered,
@@ -1522,8 +1493,7 @@ mod tests {
             );
             assert!(matches!(binding, Some(Binding::Custom(_))));
         }
-        // Off macOS the editor has no Find, and no Ctrl+Y redo, of its own.
-        #[cfg(not(target_os = "macos"))]
+        // The editor has no Find, and no Mod+Y redo, of its own.
         for (letter, physical) in [("f", key::Code::KeyF), ("y", key::Code::KeyY)] {
             for context in [ASSIST, edits] {
                 let binding = key_binding(
@@ -1531,7 +1501,7 @@ mod tests {
                         key: Key::Character(letter.into()),
                         modified_key: Key::Character(letter.into()),
                         physical_key: key::Physical::Code(physical),
-                        modifiers: Modifiers::CTRL,
+                        modifiers: command,
                         text: None,
                         status: text_editor::Status::Focused { is_hovered: false },
                     },

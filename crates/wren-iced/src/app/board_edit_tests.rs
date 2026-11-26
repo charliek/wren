@@ -546,6 +546,7 @@ fn chord(app: &mut App, name: &str, modifiers: iced::keyboard::Modifiers) {
         "a" => (Key::Character("a".into()), Code::KeyA),
         "c" => (Key::Character("c".into()), Code::KeyC),
         "d" => (Key::Character("d".into()), Code::KeyD),
+        "u" => (Key::Character("u".into()), Code::KeyU),
         "v" => (Key::Character("v".into()), Code::KeyV),
         "x" => (Key::Character("x".into()), Code::KeyX),
         "y" => (Key::Character("y".into()), Code::KeyY),
@@ -575,8 +576,7 @@ fn reselect(app: &mut App) {
 /// app in each scheme: on a board Mod+arrow connects and the other key
 /// with an arrow moves, Mod+D duplicates, Mod+A selects all, Mod+C, X and
 /// V are the clipboard's, and Mod+Z and Mod+Shift+Z undo and redo, on the
-/// board and in an open label (on macOS, only the Mac scheme's label
-/// keys, which are its fixed chords). In Alt mode the Ctrl versions of the
+/// board and in an open label. In Alt mode the Ctrl versions of the
 /// clipboard, select all and undo keys work too. Ctrl+Y redoes nothing.
 #[test]
 fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
@@ -678,11 +678,7 @@ fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
             assert_eq!(nodes(&app), 2, "{scheme:?}");
         }
 
-        // In a label. On macOS a label keeps its fixed ⌘ chords, so a
-        // Linux scheme's keys are not its own there.
-        if cfg!(target_os = "macos") && scheme.platform == Platform::Linux {
-            continue;
-        }
+        // In a label.
         for &each in board_keys {
             click_at(&mut app, EMPTY);
             relabel(&mut app, "pack", "Ship");
@@ -821,20 +817,24 @@ fn altgr_text_types_in_a_label_whatever_app_command_its_chord_is() {
     }
 }
 
-/// Branch review, severity 4: on macOS a label keeps its fixed ⌘ chords
-/// whatever the board layer binds, as before the command-key work: with
-/// `super+z = board.unbind`, or ⌘Z rebound to another board command, ⌘Z
-/// still undoes the label's typing.
-#[cfg(target_os = "macos")]
+/// The owner's decision of 2026-11-26: a label follows the board layer's
+/// undo on macOS as on Linux. With the Mac keymap ⌘Z undoes the label's
+/// typing by default; `super+z = board.unbind` leaves it undoing nothing;
+/// with ⌘Z given to the board's copy and ⌘U to its undo, ⌘U undoes and ⌘Z
+/// does not. Redo and select all keep ⇧⌘Z and ⌘A. Read with the Mac
+/// scheme, so it runs on every host.
 #[test]
-fn on_macos_a_label_keeps_command_z_whatever_the_board_layer_binds() {
+fn a_mac_label_s_undo_follows_the_board_layer() {
     use iced::keyboard::Modifiers;
     use wren_core::keybind::{LinuxModifier, Platform, Scheme};
     let mac = Scheme::new(Platform::Mac, LinuxModifier::default());
-    for user in [
-        &[("super+z", "board.unbind")][..],
-        &[("super+z", "board.copy")][..],
-        &[("super+z", "board.unbind"), ("super+u", "board.undo")][..],
+    for (user, undo) in [
+        (&[][..], Some("z")),
+        (&[("super+z", "board.unbind")][..], None),
+        (
+            &[("super+z", "board.copy"), ("super+u", "board.undo")][..],
+            Some("u"),
+        ),
     ] {
         let (_directory, mut app) = fixture();
         open_board(&mut app, "Flow");
@@ -844,12 +844,48 @@ fn on_macos_a_label_keeps_command_z_whatever_the_board_layer_binds() {
         relabel(&mut app, "pack", "Ship");
         let text = |app: &App| view(app).label().map(|label| label.text().to_owned());
         chord(&mut app, "z", Modifiers::LOGO);
-        assert_eq!(text(&app).as_deref(), Some("Pack"), "{user:?}: ⌘Z");
+        let after_z = if undo == Some("z") { "Pack" } else { "Ship" };
+        assert_eq!(text(&app).as_deref(), Some(after_z), "{user:?}: ⌘Z");
+        if undo == Some("u") {
+            chord(&mut app, "u", Modifiers::LOGO);
+            assert_eq!(text(&app).as_deref(), Some("Pack"), "{user:?}: ⌘U");
+        }
         chord(&mut app, "z", Modifiers::LOGO | Modifiers::SHIFT);
         assert_eq!(text(&app).as_deref(), Some("Ship"), "{user:?}: ⇧⌘Z");
         chord(&mut app, "a", Modifiers::LOGO);
         label(&mut app, LabelAction::Insert("Go".into()));
         assert_eq!(text(&app).as_deref(), Some("Go"), "{user:?}: ⌘A");
+    }
+}
+
+/// On a Mac host ⌥ with a letter types its character in a label, even on
+/// a chord the board layer gives the label's copy.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_macos_option_text_types_in_a_label_whatever_its_chord_is_bound_to() {
+    use iced::keyboard::key::{Code, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    use wren_core::keybind::{LinuxModifier, Platform, Scheme};
+    let mac = Scheme::new(Platform::Mac, LinuxModifier::default());
+    for user in [&[][..], &[("alt+c", "board.copy")][..]] {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        bind(&mut app, mac, user);
+        lay_out(&mut app);
+        click_at(&mut app, EMPTY);
+        relabel(&mut app, "pack", "Ship");
+        let epoch = view(&app).epoch();
+        let press = wren_canvas::KeyPress {
+            key: Key::Character("c".into()),
+            physical: Physical::Code(Code::KeyC),
+            modifiers: Modifiers::ALT,
+            text: Some("ç".into()),
+            repeat: false,
+            held: true,
+        };
+        let _ = app.update(Message::Board(Sent::Key(epoch, press)));
+        let text = view(&app).label().map(|label| label.text().to_owned());
+        assert_eq!(text.as_deref(), Some("Shipç"), "{user:?}");
     }
 }
 
