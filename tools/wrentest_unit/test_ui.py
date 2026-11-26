@@ -382,6 +382,20 @@ class TestBuildEnv(unittest.TestCase):
                 self.assertTrue(str(p).startswith(d), f"{var} not under sandbox")
 
 
+    def test_decorations_follow_the_lane(self) -> None:
+        for lane, expected in (({}, None), ({"WRENTEST_DECORATIONS": "on"}, None),
+                               ({"WRENTEST_DECORATIONS": "off"}, "off")):
+            with self.subTest(lane=lane), tempfile.TemporaryDirectory() as d:
+                with patch.dict(os.environ, {"WREN_TEST_DECORATIONS": "off", **lane},
+                                clear=True):
+                    env = ui._build_env(Path(d))
+                self.assertEqual(env.get("WREN_TEST_DECORATIONS"), expected)
+        with tempfile.TemporaryDirectory() as d:
+            with patch.dict(os.environ, {"WRENTEST_DECORATIONS": "no"}, clear=True):
+                with self.assertRaises(ValueError):
+                    ui._build_env(Path(d))
+
+
 # ── WrenApp readiness tests ───────────────────────────────────────────────────
 
 

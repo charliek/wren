@@ -122,6 +122,21 @@ pub fn test_today(value: Option<&OsStr>) -> Result<Option<wren_markdown::date::D
         .transpose()
 }
 
+/// Whether the window asks for decorations: `WREN_TEST_DECORATIONS=off`
+/// turns them off and `on` or unset leaves them on. `tools/run_display.py`
+/// asks for off under its headless Weston, whose pixman renderer can crash
+/// compositing the title bar winit draws itself when that bar is redrawn.
+#[cfg(any(test, feature = "smoke-test"))]
+pub fn test_decorations(value: Option<&OsStr>) -> Result<bool, String> {
+    match value.map(|value| value.to_str()) {
+        None | Some(Some("on")) => Ok(true),
+        Some(Some("off")) => Ok(false),
+        Some(_) => Err(format!(
+            "WREN_TEST_DECORATIONS must be on or off, not {value:?}"
+        )),
+    }
+}
+
 pub fn parse(args: &[OsString], _test_mode: Option<&OsStr>) -> Result<Command, Refusal> {
     if args.first().is_some_and(|arg| arg == "export") {
         return parse_export(&args[1..]);
@@ -350,6 +365,16 @@ mod tests {
         );
         for bad in ["", "2026-11-31", "19/11/2026", "today"] {
             assert!(test_today(Some(OsStr::new(bad))).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn decorations_are_on_unless_the_harness_turns_them_off() {
+        assert_eq!(test_decorations(None), Ok(true));
+        assert_eq!(test_decorations(Some(OsStr::new("on"))), Ok(true));
+        assert_eq!(test_decorations(Some(OsStr::new("off"))), Ok(false));
+        for bad in ["", "no", "OFF"] {
+            assert!(test_decorations(Some(OsStr::new(bad))).is_err(), "{bad:?}");
         }
     }
 

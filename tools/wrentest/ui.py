@@ -264,6 +264,11 @@ def _build_env(sandbox: Path) -> dict[str, str]:
         path.mkdir(mode=0o700, exist_ok=True)
         env[var] = str(path)
     env["WREN_TEST_MODE"] = "1"
+    decorations = os.environ.get("WRENTEST_DECORATIONS", "") or "on"
+    if decorations not in ("on", "off"):
+        raise ValueError(f"WRENTEST_DECORATIONS must be on or off, got {decorations!r}")
+    if decorations == "off":
+        env["WREN_TEST_DECORATIONS"] = "off"
     return env
 
 

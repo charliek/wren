@@ -23,9 +23,16 @@ Every commit on `main` builds and passes these. CI's aggregate `ci-success`
 check covers the Rust jobs (Linux and macOS), the harness units, and four
 Linux smoke lanes: X11 and Wayland, each with wgpu and tiny-skia.
 
-One headless Weston serves a whole Wayland run. Weston 13's pixman renderer
-sometimes crashes (SIGSEGV) while it composites the app's client-side title
-bar, and it logs nothing when it does. `tools/run_display.py` then prints
+One headless Weston serves a whole Wayland run. Weston 13 has no
+server-side decorations, so winit draws the title bar itself, and Weston's
+pixman renderer can crash (SIGSEGV) compositing it after it is redrawn soon
+after launch, as a theme switch from light to dark does. So under that
+Weston the app runs without decorations, as it does under Xvfb:
+`tools/run_display.py` sets `WRENTEST_DECORATIONS=off`, and the harness
+passes `WREN_TEST_DECORATIONS=off` (the `smoke-test` build only) to each
+launch. Set `WRENTEST_DECORATIONS=on` to keep them.
+
+If Weston still dies, it logs nothing. `tools/run_display.py` then prints
 `run_display: Weston exited with signal …` with the old and new logs and
 starts it again on the same socket, up to three times, so the crash fails
 the case it interrupts and not every case after it. An app launched

@@ -314,6 +314,13 @@ def run_display(mode: str, command: list[str]) -> int:
             ], env)
 
         socket_name = "wayland-wren"
+        # Weston 13 has no server-side decorations, so winit draws the title
+        # bar itself, from a shared-memory pool it grows as it redraws the
+        # bar. After a redraw soon after launch (as a theme switch makes),
+        # Weston's pixman renderer can read past that pool's mapping and
+        # crash, so the app is launched without decorations here, as it runs
+        # under Xvfb.
+        env.setdefault("WRENTEST_DECORATIONS", "off")
         compositor = Compositor(artifacts, Path(runtime) / socket_name, env)
         try:
             compositor.start()
