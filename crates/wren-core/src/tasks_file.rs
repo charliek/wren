@@ -71,14 +71,49 @@ pub enum GroupBy {
     Owner,
 }
 
-/// The due buckets a view groups and filters by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The due buckets a view groups and filters by, in the order a view
+/// lists them. Weeks run Monday to Sunday.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DueBucket {
+    /// Unfinished and due before today.
     Overdue,
+    /// Finished, and due before today.
+    Earlier,
     Today,
+    /// Due after today, by Sunday.
     ThisWeek,
+    /// Due in the week after this one.
+    NextWeek,
+    /// Due after next week.
     Later,
+    /// No due date, or one that is no real day.
     NoDate,
+}
+
+impl DueBucket {
+    /// Every bucket, in the order a view lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Overdue,
+        Self::Earlier,
+        Self::Today,
+        Self::ThisWeek,
+        Self::NextWeek,
+        Self::Later,
+        Self::NoDate,
+    ];
+
+    /// The bucket's name, as a view shows it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Overdue => "Overdue",
+            Self::Earlier => "Earlier",
+            Self::Today => "Today",
+            Self::ThisWeek => "This week",
+            Self::NextWeek => "Next week",
+            Self::Later => "Later",
+            Self::NoDate => "No date",
+        }
+    }
 }
 
 /// The priority a view narrows to.
@@ -122,10 +157,12 @@ const GROUPS: [(GroupBy, &str); 4] = [
     (GroupBy::Owner, "owner"),
 ];
 
-const BUCKETS: [(DueBucket, &str); 5] = [
+const BUCKETS: [(DueBucket, &str); 7] = [
     (DueBucket::Overdue, "overdue"),
+    (DueBucket::Earlier, "earlier"),
     (DueBucket::Today, "today"),
     (DueBucket::ThisWeek, "week"),
+    (DueBucket::NextWeek, "next"),
     (DueBucket::Later, "later"),
     (DueBucket::NoDate, "none"),
 ];
@@ -684,6 +721,25 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    #[test]
+    fn every_due_bucket_is_written_and_read_back() {
+        let mut words = Vec::new();
+        for bucket in DueBucket::ALL {
+            let filters = TaskFilters {
+                due: Some(bucket),
+                ..TaskFilters::default()
+            };
+            let mut table = Table::new();
+            filters.write(&mut table);
+            words.push(table["due"].as_str().unwrap().to_owned());
+            assert_eq!(TaskFilters::read(&table), filters, "{bucket:?}");
+        }
+        assert_eq!(
+            words,
+            ["overdue", "earlier", "today", "week", "next", "later", "none"]
+        );
     }
 
     #[test]

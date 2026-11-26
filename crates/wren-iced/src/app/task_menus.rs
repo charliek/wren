@@ -133,7 +133,7 @@ fn level_number(level: Priority) -> u32 {
 }
 
 /// The priority menu's rows, from highest to lowest: a level and its key.
-const PRIORITY_ROWS: [(Option<Priority>, Accelerator); 6] = [
+pub(super) const PRIORITY_ROWS: [(Option<Priority>, Accelerator); 6] = [
     (Some(Priority::Highest), Accelerator::shifted('h')),
     (Some(Priority::High), Accelerator::plain('h')),
     (Some(Priority::Medium), Accelerator::plain('m')),

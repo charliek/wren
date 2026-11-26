@@ -697,6 +697,10 @@ impl App {
         }
         let open = self.calendar.as_ref().zip(self.calendar_bounds());
         let Some((open, card)) = open else {
+            // The task view's menu takes the same two layers.
+            if let Some((scrim, menu)) = self.task_menu_layers() {
+                return stack![base, scrim, menu].into();
+            }
             return stack![base, iced::widget::Space::new(), iced::widget::Space::new()].into();
         };
         let at = card.position();

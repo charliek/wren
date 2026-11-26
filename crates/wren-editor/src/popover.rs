@@ -251,7 +251,7 @@ impl Accelerator {
     /// [`Self::matches`], or for a key that is no letter, a press of any
     /// key that types it (`text`) with no Ctrl, Alt or logo key held, with
     /// or without Shift: on many keyboards `/` and `-` are shifted keys.
-    pub(crate) fn matches_press(
+    pub fn matches_press(
         self,
         key: &Key,
         physical: Physical,

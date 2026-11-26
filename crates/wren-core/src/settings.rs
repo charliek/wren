@@ -181,6 +181,10 @@ pub struct Settings {
     /// Whether typing on a task line offers dates, priorities and owners,
     /// with `tasks` on.
     pub tasks_suggest: bool,
+    /// The owners who count as Me in a task view, besides tasks with no
+    /// owner: each name without its `@`, case folded as owners compare
+    /// ([`wren_markdown::task::fold_name`]), in the order written.
+    pub tasks_me: Vec<String>,
     /// When the tool dock's buttons show their keys.
     pub board_key_badges: KeyBadges,
     /// Linux's command key, the `mod` of the keymap. Parsed everywhere and
@@ -209,6 +213,7 @@ impl Default for Settings {
             board_key_badges: KeyBadges::Hold,
             tasks: true,
             tasks_suggest: true,
+            tasks_me: Vec::new(),
             linux_modifier: LinuxModifier::default(),
             keybinds: Vec::new(),
             warnings: Vec::new(),
@@ -230,6 +235,28 @@ fn unquote(value: &str) -> &str {
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
         .unwrap_or(value)
+}
+
+/// The owner names of `tasks-me`: separated by commas, each with or
+/// without its `@`, case folded and without repeats. An empty value names
+/// no one; a name with a space in it, or an `@` alone, is no name.
+fn parse_names(value: &str) -> Option<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    for name in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let name = name.strip_prefix('@').unwrap_or(name);
+        if name.is_empty() || name.contains(char::is_whitespace) || name.contains('@') {
+            return None;
+        }
+        let folded = wren_markdown::task::fold_name(name);
+        if !names.contains(&folded) {
+            names.push(folded);
+        }
+    }
+    Some(names)
 }
 
 /// Split a line into `(key, value)`, or `None` for blanks and comments.
@@ -330,6 +357,10 @@ impl Settings {
                 },
                 "tasks-suggest" => match parse_bool(value) {
                     Some(enabled) => settings.tasks_suggest = enabled,
+                    None => invalid(),
+                },
+                "tasks-me" => match parse_names(value) {
+                    Some(names) => settings.tasks_me = names,
                     None => invalid(),
                 },
                 "linux-modifier" => match LinuxModifier::parse(value) {
@@ -606,6 +637,10 @@ pub const TEMPLATE: &str = "\
 # tasks = on and editor-engine = advanced.
 # tasks-suggest = on
 
+# Me in the task views: the owners who count as you, besides tasks with no
+# owner. Names without the @, separated by commas; case does not matter.
+# tasks-me = sam, sam.lee
+
 # The command key on Linux: ctrl, as other apps use, or alt, the way Cmd
 # works on macOS (Ctrl then still undoes, copies, pastes, finds and quits).
 # Ignored on macOS.
@@ -844,6 +879,40 @@ mod tests {
         let off = with_value(TEMPLATE, "boards", "off");
         assert!(!Settings::parse(&off).boards);
         assert!(off.contains("\n# boards = on\n") && off.ends_with("boards = off\n"));
+    }
+
+    #[test]
+    fn tasks_me_names_folded_owners_and_warns_on_bad_names() {
+        assert!(Settings::default().tasks_me.is_empty());
+        assert!(Settings::parse("").tasks_me.is_empty());
+        assert!(Settings::parse(TEMPLATE).tasks_me.is_empty());
+        assert!(TEMPLATE.contains("\n# tasks-me = sam, sam.lee\n"));
+        for (value, names) in [
+            ("sam", vec!["sam"]),
+            ("Sam, @Sam.Lee", vec!["sam", "sam.lee"]),
+            ("  @SAM ,sam,, ", vec!["sam"]),
+            ("\"ÉMILE\"", vec!["émile"]),
+            ("", vec![]),
+        ] {
+            let settings = Settings::parse(&format!("tasks-me = {value}\n"));
+            assert_eq!(settings.tasks_me, names, "{value:?}");
+            assert!(settings.warnings.is_empty(), "{value:?}");
+        }
+        // A later line replaces an earlier one.
+        let settings = Settings::parse("tasks-me = sam\ntasks-me = priya\n");
+        assert_eq!(settings.tasks_me, ["priya"]);
+        for bad in ["sam lee", "@", "sam, @", "a@b"] {
+            let settings = Settings::parse(&format!("tasks-me = sam\ntasks-me = {bad}\n"));
+            assert_eq!(
+                settings.tasks_me,
+                ["sam"],
+                "{bad:?} keeps the earlier value"
+            );
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid tasks-me value"));
+        }
+        let set = with_value(TEMPLATE, "tasks-me", "Sam, priya");
+        assert_eq!(Settings::parse(&set).tasks_me, ["sam", "priya"]);
     }
 
     #[test]

@@ -27,6 +27,7 @@ mod workspace_view;
 
 pub(crate) mod commands;
 mod gestures;
+mod host_menu;
 mod navigation;
 mod palette;
 mod preferences;
@@ -34,6 +35,8 @@ mod spelling;
 mod task_commands;
 mod task_footer;
 mod task_form;
+mod task_list;
+mod task_list_view;
 mod task_menus;
 mod task_suggest;
 // Its callers are the task view's keys and menus and the Notes column's
@@ -99,6 +102,9 @@ pub struct App {
     /// The task writes made from outside the editor that can be undone;
     /// see `task_target`.
     task_writes: task_target::Writes,
+    /// The list of the task view in the pane: what it shows, its
+    /// selection, its keyboard and its menu; see `task_list_view`.
+    task_list: task_list_view::ListState,
     /// Each time the keyboard was given to a column: the surface the pane
     /// showed when it was the pane's, `None` for a browser column.
     #[cfg(test)]
@@ -447,6 +453,7 @@ impl App {
             label_widths: task_footer::Widths::default(),
             task_views: tasks_view::Trail::default(),
             task_writes: task_target::Writes::default(),
+            task_list: task_list_view::ListState::default(),
             #[cfg(test)]
             focus_given: Default::default(),
             editor: EditorView::with_backend(engine, &contents),
@@ -583,9 +590,10 @@ impl App {
         let (calendar, form) = if self.preferences.tasks {
             let calendar = self.sync_calendar();
             let form = self.sync_task_form();
+            let list = self.sync_task_list();
             self.sync_due_target();
             self.sync_suggestions();
-            (calendar, form)
+            (calendar, Task::batch([form, list]))
         } else {
             (Task::none(), Task::none())
         };
@@ -827,6 +835,11 @@ impl App {
                 if self.task_form.is_some() {
                     return self.escape_task_form();
                 }
+                // Then the menu over the task view, and a control of the
+                // view's, which gives the keyboard back to its list.
+                if self.close_task_menu() || self.unfocus_task_control() {
+                    return Task::none();
+                }
                 // An open suggestions menu, or any popover of the editor's,
                 // is the topmost thing Escape closes; the editor keeps the
                 // keyboard and the find bar stays.
@@ -954,6 +967,11 @@ impl App {
                 *ledger -= 1;
                 return true;
             }
+        }
+        // An Escape the task view dropped with the rest of a batch a key
+        // of its stopped.
+        if self.take_task_list_claim(true) {
+            return true;
         }
         self.editor.take_claimed_escape()
     }

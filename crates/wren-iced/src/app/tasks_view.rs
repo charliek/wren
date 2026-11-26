@@ -16,8 +16,8 @@
 //! [`App::task_view_key`] and [`App::task_view_focus`] are where they take
 //! the keyboard.
 
-use iced::widget::{column, container, mouse_area, row};
-use iced::{Element, Fill, Shrink, Task};
+use iced::widget::row;
+use iced::{Element, Task};
 use wren_core::fs_store::RelPath;
 use wren_core::model::{ItemRef, Workspace};
 use wren_core::ops::{Event as CoreEvent, Op, Session, Visit};
@@ -26,10 +26,7 @@ use super::board::Surface;
 use super::columns::Column;
 use super::commands::{Disposition, Gateway};
 use super::{App, Message};
-use crate::chrome::{self, Icon};
-use crate::ellipsis::ellipsis;
 use crate::keys::Nav;
-use crate::{fonts, theme};
 
 /// How many stops the trail keeps, as many as the Session keeps visits.
 const MAX_STOPS: usize = 50;
@@ -95,7 +92,7 @@ impl Scope {
 
     /// The tree item the scope names, if the model still has it. The
     /// workspace is no item.
-    fn item(&self, model: &Workspace) -> Option<ItemRef> {
+    pub(super) fn item(&self, model: &Workspace) -> Option<ItemRef> {
         match self {
             Self::Workspace => None,
             Self::Section(path) => model
@@ -469,11 +466,24 @@ impl Trail {
 }
 
 /// Input from the task view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// A press inside the view, which takes the keyboard as a press in the
     /// editor does.
     Press,
+    /// A key the view's key wrapper reported (`crate::list_keys`).
+    Key(crate::list_keys::ListKey),
+    /// The list scrolled to `y`, and is `height` tall.
+    Scrolled { y: f32, height: f32 },
+    /// A click on the list's row at this entry.
+    Select(usize),
+    /// A click on the source of the list's row at this entry: open the
+    /// note at its line.
+    Open(usize),
+    /// A click on a control of the view.
+    Control(super::task_list_view::Control),
+    /// Input from the menu over the view.
+    Menu(super::host_menu::Event),
 }
 
 impl App {
@@ -669,15 +679,7 @@ impl App {
     }
 
     pub(super) fn task_view_event(&mut self, event: Event) -> Task<Message> {
-        if self.task_view().is_none() || self.dialog.is_some() || self.palette.is_some() {
-            return Task::none();
-        }
-        match event {
-            Event::Press => {
-                self.column = Column::Editor;
-                self.column_focus()
-            }
-        }
+        self.task_list_event(event)
     }
 
     /// The name of what a view lists, as its header shows it: the item's,
@@ -690,30 +692,12 @@ impl App {
             .to_owned()
     }
 
-    /// The pane's header over a task view: Back and Forward, then what
-    /// the view lists.
+    /// The pane's header over a task view: Back and Forward, then the
+    /// scope chip, which opens "Show tasks in".
     pub(super) fn task_view_header(&self, scope: &Scope) -> Element<'_, Message> {
-        let colors = self.definition.colors;
-        let label = self.task_view_label(scope);
-        let chip = container(
-            row![
-                chrome::icon(Icon::Tasks, 14.0, colors.accent),
-                chrome::label("Tasks in", 13, colors.body),
-                ellipsis(label, 13.0, theme::color(colors.text))
-                    .font(fonts::SEMIBOLD)
-                    .width(Shrink),
-                chrome::label(scope.kind(), 11, colors.faint),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-        )
-        .id("task-view-scope")
-        .padding([3, 8])
-        .clip(true)
-        .style(move |_| chrome::surface(self.definition, colors.raised, 6.0, true));
         row![
             self.history_buttons(),
-            chip,
+            self.task_scope_chip(scope),
             iced::widget::space::horizontal()
         ]
         .spacing(6)
@@ -722,43 +706,15 @@ impl App {
         .into()
     }
 
-    /// The task view itself. The list is item 10.3's; this says what it
-    /// will be of.
-    pub(super) fn task_view_body(&self, scope: &Scope) -> Element<'_, Message> {
-        let colors = self.definition.colors;
-        let label = self.task_view_label(scope);
-        let place = scope
-            .prefix()
-            .map(|path| path.as_path().to_string_lossy().into_owned());
-        let mut lines = column![iced::widget::text(format!("Tasks in {label}"))
-            .size(18)
-            .color(theme::color(colors.muted))]
-        .spacing(8)
-        .align_x(iced::Center);
-        if let Some(place) = place {
-            lines = lines.push(chrome::label(place, 12, colors.faint));
-        }
-        mouse_area(
-            container(lines)
-                .id("task-view")
-                .center_x(Fill)
-                .center_y(Fill)
-                .style(move |_| chrome::surface(self.definition, colors.editor, 0.0, false)),
-        )
-        .on_press(Message::TaskView(Event::Press))
-        .into()
+    /// The task view itself: its filters over its list
+    /// (`task_list_view`).
+    pub(super) fn task_view_body(&self, _scope: &Scope) -> Element<'_, Message> {
+        self.task_list_body()
     }
 
     /// The pane's footer under a task view.
     pub(super) fn task_view_footer(&self, scope: &Scope) -> Element<'_, Message> {
-        let colors = self.definition.colors;
-        row![
-            chrome::label(format!("Tasks · {}", scope.kind()), 11, colors.muted),
-            iced::widget::space::horizontal(),
-        ]
-        .align_y(iced::Center)
-        .clip(true)
-        .into()
+        self.task_list_footer(scope)
     }
 }
 

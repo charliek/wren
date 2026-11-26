@@ -90,9 +90,29 @@ impl App {
                 }
                 let press = request.params.get("key");
                 let open = request.params.get("open");
-                if (press.is_some() || open.is_some()) && !self.preferences.tasks {
+                let click = request.params.get("click");
+                let list = request.params.get("list").and_then(Value::as_bool) == Some(true);
+                if (press.is_some() || open.is_some() || click.is_some()) && !self.preferences.tasks
+                {
                     return Err("Tasks are off".into());
                 }
+                // What the list shows follows every message (`App::update`);
+                // the answer is read before this one's turn ends.
+                let synced = |app: &mut Self, task: Task<Message>| {
+                    let list = if app.preferences.tasks {
+                        app.sync_task_list()
+                    } else {
+                        Task::none()
+                    };
+                    Task::batch([task, list])
+                };
+                let answer = |app: &Self| {
+                    let mut answer = app.task_view_snapshot();
+                    if list && app.preferences.tasks {
+                        answer["list"] = app.task_list_snapshot();
+                    }
+                    answer
+                };
                 if let Some(press) = press {
                     if !self.task_view_has_keys() {
                         return Err("The task view does not have the keyboard".into());
@@ -100,23 +120,32 @@ impl App {
                     let scheme = self.preferences.keymap.scheme();
                     let (key, modifiers) = super::test_requests::key_press(press, scheme)?;
                     let task = self.task_view_press(key, modifiers);
-                    request.respond(Ok(self.task_view_snapshot()));
+                    let task = synced(self, task);
+                    request.respond(Ok(answer(self)));
+                    return Ok(task);
+                }
+                if let Some(click) = click {
+                    let task = self.task_view_click(click)?;
+                    let task = synced(self, task);
+                    request.respond(Ok(answer(self)));
                     return Ok(task);
                 }
                 let Some(open) = open else {
-                    request.respond(Ok(self.task_view_snapshot()));
-                    return Ok(Task::none());
+                    let task = synced(self, Task::none());
+                    request.respond(Ok(answer(self)));
+                    return Ok(task);
                 };
                 let scope = super::tasks_view::Scope::parse(
                     string(open, "scope")?,
                     open.get("path").and_then(Value::as_str),
                 )?;
                 let outcome = self.dispatch(super::commands::Command::ShowTasks(scope));
-                let mut answer = self.task_view_snapshot();
-                answer["disposition"] = json!(outcome.processed.disposition.key());
-                answer["warning"] = json!(outcome.processed.warning);
-                request.respond(Ok(answer));
-                return Ok(outcome.task);
+                let task = synced(self, outcome.task);
+                let mut reply = answer(self);
+                reply["disposition"] = json!(outcome.processed.disposition.key());
+                reply["warning"] = json!(outcome.processed.warning);
+                request.respond(Ok(reply));
+                return Ok(task);
             }
             "tasks.calendar"
             | "tasks.calendar_type"
@@ -565,30 +594,258 @@ impl App {
         })
     }
 
-    /// A key pressed while the task view has the keyboard: no widget takes
-    /// it, so the app's key handling reads it as it reads any press that
-    /// reaches it.
+    /// A key pressed while the task view has the keyboard, as one batch of
+    /// its own: the view's key wrapper reports it first, and the app's key
+    /// handling then reads its copy, if the wrapper let it through.
     fn task_view_press(
         &mut self,
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
+        let text = match &key {
+            iced::keyboard::Key::Character(c) => Some(c.to_string()),
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space) => Some(" ".into()),
+            _ => None,
+        };
+        let physical = iced::keyboard::key::Physical::Unidentified(
+            iced::keyboard::key::NativeCode::Unidentified,
+        );
+        let press = crate::list_keys::Press {
+            key: key.clone(),
+            physical,
+            modifiers,
+            text: text.filter(|_| !(modifiers.control() || modifiers.alt() || modifiers.logo())),
+        };
+        let passes = press.is_shortcut() || press.is_plain_escape();
+        let listed = self.update(Message::TaskView(super::tasks_view::Event::Key(
+            crate::list_keys::ListKey {
+                press,
+                first: true,
+                after_press: false,
+            },
+        )));
+        if !passes {
+            return listed;
+        }
         let event = iced::keyboard::Event::KeyPressed {
             modified_key: key.clone(),
             key,
-            physical_key: iced::keyboard::key::Physical::Unidentified(
-                iced::keyboard::key::NativeCode::Unidentified,
-            ),
+            physical_key: physical,
             location: iced::keyboard::Location::Standard,
             modifiers,
             text: None,
             repeat: false,
         };
         let status = iced::event::Status::Ignored;
-        match crate::keys::input(&event).filter(|input| crate::keys::reaches_app(input, status)) {
+        let copy = match crate::keys::input(&event)
+            .filter(|input| crate::keys::reaches_app(input, status))
+        {
             Some(input) => self.update(Message::Key(crate::keys::with_status(input, status))),
             None => Task::none(),
+        };
+        Task::batch([listed, copy])
+    }
+
+    /// A click in the task view: on a control (`{"control": name}`), on a
+    /// row (`{"row": n}`, the nth row in the list's order) or its source
+    /// (`{"source": n}`), on a row of the menu over the view
+    /// (`{"menu": label}`), or outside that menu (`{"outside": true}`).
+    fn task_view_click(&mut self, click: &Value) -> Result<Task<Message>, String> {
+        use super::task_list_view::Control;
+        use super::tasks_view::Event;
+        if self.task_view().is_none() {
+            return Err("No task view is open".into());
         }
+        let row = |name: &str| -> Result<Option<usize>, String> {
+            click
+                .get(name)
+                .map(|row| {
+                    let row = row
+                        .as_u64()
+                        .ok_or_else(|| format!("{name} must be a number"))?;
+                    self.task_list
+                        .listing
+                        .rows()
+                        .nth(row as usize)
+                        .ok_or_else(|| format!("the list has no row {row}"))
+                })
+                .transpose()
+        };
+        let event = if let Some(name) = click.get("control").and_then(Value::as_str) {
+            let controls = [
+                Control::Scope,
+                Control::Chip(0),
+                Control::Chip(1),
+                Control::Chip(2),
+                Control::Chip(3),
+                Control::ShowAll,
+                Control::Owner,
+                Control::GroupBy,
+                Control::Due,
+                Control::Priority,
+                Control::HideOld,
+            ];
+            let control = controls
+                .into_iter()
+                .find(|control| control.name() == name)
+                .ok_or_else(|| format!("no control {name:?}"))?;
+            Event::Control(control)
+        } else if let Some(entry) = row("row")? {
+            Event::Select(entry)
+        } else if let Some(entry) = row("source")? {
+            Event::Open(entry)
+        } else if let Some(label) = click.get("menu").and_then(Value::as_str) {
+            let menu = self.task_list.menu.as_ref().ok_or("No menu is open")?;
+            let found = menu
+                .rows()
+                .iter()
+                .find(|row| row.label == label || row.label.starts_with(&format!("{label} (")))
+                .ok_or_else(|| format!("the menu has no row {label:?}"))?;
+            Event::Menu(super::host_menu::Event::Choose {
+                instance: click
+                    .get("instance")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(menu.instance()),
+                row: found.id,
+            })
+        } else if click.get("outside").and_then(Value::as_bool) == Some(true) {
+            let menu = self.task_list.menu.as_ref().ok_or("No menu is open")?;
+            Event::Menu(super::host_menu::Event::Outside {
+                instance: menu.instance(),
+            })
+        } else {
+            return Err("click needs control, row, source, menu or outside".into());
+        };
+        Ok(self.update(Message::TaskView(event)))
+    }
+
+    /// The task view's list, its filters, its menu and where its controls
+    /// were drawn.
+    fn task_list_snapshot(&self) -> Value {
+        use super::task_list_view::{due_cell, source_text, Control};
+        let Some(scope) = self.task_view() else {
+            return Value::Null;
+        };
+        let list = &self.task_list;
+        let listing = &list.listing;
+        let filters = self.task_filters(scope);
+        let today = self.today();
+        let rectangle = |at: iced::Rectangle| json!({"x": at.x, "y": at.y, "width": at.width, "height": at.height});
+        let by_note = filters.group_by == wren_core::tasks_file::GroupBy::Note;
+        let rows: Vec<Value> = listing
+            .rows()
+            .map(|entry| {
+                let record = listing.record(entry).expect("a row");
+                let group = match listing.entries[entry] {
+                    super::task_list::Entry::Row { group, .. } => group,
+                    super::task_list::Entry::Header(_) => unreachable!(),
+                };
+                let title = self
+                    .model()
+                    .and_then(|model| model.note(record.note))
+                    .map(|note| note.title.clone())
+                    .unwrap_or_default();
+                let due = due_cell(record, today);
+                let finished = record.status.is_finished();
+                json!({
+                    "entry": entry,
+                    "group": group,
+                    "path": record.path.as_path().to_string_lossy(),
+                    "line": record.line,
+                    "status": record.status.name(),
+                    "symbol": record.symbol.to_string(),
+                    "description": super::task_list::plain(record),
+                    "owners": record.owners,
+                    "struck": finished,
+                    "dimmed": finished,
+                    "overdue": record.is_overdue(today),
+                    "priority": record.priority.map(|level| level.name()),
+                    "due": due.as_ref().map(|cell| cell.text.clone()),
+                    "due_look": due.as_ref().map(|cell| cell.look),
+                    "source": source_text(record, &title, by_note),
+                    "selected": list.selected.as_ref().is_some_and(|selected| selected.entry == entry),
+                    "source_bounds": list.drawn(Control::Source(entry)).map(rectangle),
+                })
+            })
+            .collect();
+        let groups: Vec<Value> = listing
+            .groups
+            .iter()
+            .map(|group| json!({"label": group.label, "detail": group.detail, "count": group.rows.len()}))
+            .collect();
+        let chips: Vec<Value> = super::task_list::CHIPS
+            .iter()
+            .enumerate()
+            .map(|(index, status)| {
+                json!({
+                    "status": status.name(),
+                    "count": listing.chip_counts[index],
+                    "pressed": filters.statuses.contains(status),
+                })
+            })
+            .collect();
+        let owner = match &filters.owner {
+            wren_core::tasks_file::OwnerFilter::Anyone => "anyone".to_owned(),
+            wren_core::tasks_file::OwnerFilter::Me => "me".to_owned(),
+            wren_core::tasks_file::OwnerFilter::Name(name) => format!("@{name}"),
+        };
+        let menu = list.menu.as_ref().map(|menu| {
+            json!({
+                "instance": menu.instance(),
+                "for": menu.purpose.name(),
+                "title": menu.title(),
+                "selected": menu.selected(),
+                "rows": menu.rows().iter().map(|row| json!({
+                    "id": row.id,
+                    "label": row.label,
+                    "checked": row.checked,
+                    "enabled": row.enabled,
+                    "key": row.accelerator.map(wren_editor::Accelerator::label),
+                })).collect::<Vec<_>>(),
+                "anchor": rectangle(menu.anchor()),
+                "bounds": rectangle(menu.bounds(self.viewport)),
+            })
+        });
+        let mut bounds = serde_json::Map::new();
+        for (control, at) in list.drawn.borrow().iter() {
+            if !matches!(control, Control::Source(_)) {
+                bounds.insert(control.name(), rectangle(*at));
+            }
+        }
+        let (counts, left_out) = self.task_list_counts(scope);
+        json!({
+            "filters": {
+                "statuses": filters.statuses.iter().map(|status| status.name()).collect::<Vec<_>>(),
+                "owner": owner,
+                "group": match filters.group_by {
+                    wren_core::tasks_file::GroupBy::Note => "note",
+                    wren_core::tasks_file::GroupBy::Due => "due",
+                    wren_core::tasks_file::GroupBy::Priority => "priority",
+                    wren_core::tasks_file::GroupBy::Owner => "owner",
+                },
+                "hide_old": filters.hide_old,
+                "due": filters.due.map(wren_core::tasks_file::DueBucket::label),
+                "priority": filters.priority.map(|priority| match priority {
+                    wren_core::tasks_file::PriorityFilter::Unset => "None",
+                    wren_core::tasks_file::PriorityFilter::Level(level) => level.name(),
+                }),
+            },
+            "chips": chips,
+            "groups": groups,
+            "rows": rows,
+            "shown": listing.shown,
+            "open": counts.open_and_doing,
+            "overdue": counts.overdue,
+            "left_out": left_out,
+            "hint": super::task_list_view::HINT,
+            "empty": listing.entries.is_empty().then(|| {
+                super::task_list_view::empty_hint(&filters, &self.task_view_label(scope))
+            }),
+            "focus": list.focus.map_or_else(|| "list".to_owned(), Control::name),
+            "menu": menu,
+            "bounds": bounds,
+            "scroll": list.scroll,
+        })
     }
 
     pub(super) fn task_view_snapshot(&self) -> Value {

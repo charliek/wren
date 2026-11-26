@@ -162,8 +162,9 @@ def test_the_view_opens_over_the_note_and_the_editor_under_it_takes_nothing(
         assert session(app)["document"]["dirty"] is False
         assert (root / LIST).read_text(encoding="utf-8") == FILES[LIST]
 
-        # Escape and the arrows do nothing in the view.
-        for key in ("escape", "up", "down", "left", "right", "enter"):
+        # Escape and the arrows leave the view in place (Enter opens the
+        # selected task's note: test_tasks_view_list.py).
+        for key in ("escape", "up", "down", "left", "right"):
             press(app, key)
             shown(app, "group", GROUP, "Tasks", LIST)
         assert navigation(app)["column"] == "editor"
@@ -439,7 +440,8 @@ def test_native_keys_in_the_view_reach_the_app_and_never_the_note(tmp_path: Path
         # Typing, editing keys, the editor's shortcuts and Escape: none
         # reaches the note, and the view stays.
         native.type_text(window, "typed at the view")
-        native.keys(window, "Return", "BackSpace", "Delete", "space", "Escape",
+        # Return would open the selected task's note (test_tasks_view_list.py).
+        native.keys(window, "BackSpace", "Delete", "space", "Escape",
                     native_mod("b"), native_mod("d"), native_mod("Return"),
                     native_mod("shift+Return"), native_mod("z"), native_mod("v"))
         native.settle_focus()

@@ -27,6 +27,12 @@ writes to
 `<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
 scene depends on; `--fonts` names the font setup instead of the check for Noto
 Color Emoji.
+`--only task-list` opens the summary view's fixture
+(`tools/wrentest/fixtures/tasks/list/`, two groups, with `tasks-me = sam,
+sam.lee`) on the advanced engine with `tasks = on` and the same pinned day,
+and shoots the view of the workspace's tasks: all of them, narrowed by a
+status chip, grouped by due date and by owner, an empty list with its hint,
+and the scope menu open; the PNGs go where `--only tasks` writes them.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -325,6 +331,10 @@ def spell_scenes(client, shot_here) -> None:
 
 
 TASKS_FIXTURE = Path(__file__).resolve().parent / "wrentest" / "fixtures" / "tasks" / "workspace"
+# The summary view's fixture (item 10.3): two groups, `tasks-me` names, a
+# task with two owners, finished work with and without stamps.
+TASK_LIST_FIXTURE = TASKS_FIXTURE.parent / "list"
+TASK_LIST_SETTINGS = "tasks-me = sam, sam.lee\n"
 # Every task scene pins the design page's day, a Thursday.
 TASKS_TODAY = "2026-11-19"
 
@@ -409,6 +419,54 @@ def view_scenes(client, shot_here) -> None:
         client.call("command.run", {"id": "navigation.back"})
     assert not client.call("tasks.view")["open"]
     assert client.call("navigation.get")["surface"] == "text"
+
+
+def task_list_scenes(client, shot_here) -> None:
+    """The summary view's list (discovery/tasks-build.md item 10.3), of
+    the whole workspace: every task, then narrowed by the Doing chip,
+    grouped by due date, grouped by owner (Me first, a task with two owners
+    under each), an empty list with the hint that says how to widen it, and
+    the scope menu ("Show tasks in") open under its chip. Each filter is
+    put back after its scene, so `.wren/tasks.toml` ends with no view."""
+    def view(**params):
+        return client.call("tasks.view", {**params, "list": True})
+
+    def click(**target):
+        return view(click=target)["list"]
+
+    state = view(open={"scope": "workspace"})
+    assert state["open"] and state["keys"], state
+    assert len(state["list"]["rows"]) == 12, state["list"]
+    shot_here("task-list")
+    click(control="chip:doing")
+    assert [row["status"] for row in view()["list"]["rows"]] == ["doing"]
+    shot_here("task-list-narrowed")
+    click(control="chip:doing")
+    for group, row in (("due", "Due date"), ("owner", "Owner")):
+        click(control="group")
+        assert view()["list"]["menu"]["for"] == "group"
+        click(menu=row)
+        assert view()["list"]["filters"]["group"] == group
+        shot_here(f"task-list-by-{group}")
+    click(control="group")
+    click(menu="Note")
+    click(control="priority")
+    click(menu="Lowest")
+    click(control="chip:done")
+    state = view()["list"]
+    assert not state["rows"] and state["empty"], state
+    shot_here("task-list-empty")
+    click(control="chip:done")
+    click(control="priority")
+    click(menu="Any priority")
+    click(control="scope")
+    menu = view()["list"]["menu"]
+    assert menu["for"] == "scope" and menu["title"] == "Show tasks in", menu
+    shot_here("task-list-scope-menu")
+    view(key={"key": "escape", "mods": []})
+    assert view()["list"]["menu"] is None
+    assert view()["list"]["filters"] == {"statuses": [], "owner": "anyone", "group": "note",
+                                          "hide_old": True, "due": None, "priority": None}
 
 
 def suggestion_scenes(client, shot_here) -> None:
@@ -1545,7 +1603,7 @@ def main() -> int:
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown", "spell", "boards", "tasks"),
+    parser.add_argument("--only", choices=("markdown", "spell", "boards", "tasks", "task-list"),
                         help="shoot only these scenes")
     parser.add_argument("--fonts", metavar="LABEL",
                         help="with --only tasks, name the font setup in the output path "
@@ -1555,8 +1613,8 @@ def main() -> int:
                              "pair it with --label")
     args = parser.parse_args()
     if args.engine is None:
-        args.engine = "advanced" if args.only == "tasks" else "classic"
-    if args.fonts and args.only != "tasks":
+        args.engine = "advanced" if args.only in ("tasks", "task-list") else "classic"
+    if args.fonts and args.only not in ("tasks", "task-list"):
         parser.error("--fonts goes with --only tasks")
     if args.only == "spell" and args.engine != "advanced":
         parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
@@ -1571,7 +1629,7 @@ def main() -> int:
         settings += f"{key.strip()} = {value.strip()}\n"
     # A `--setting editor-engine=…` comes later in the file, so it wins.
     engine = last_value(settings, "editor-engine")
-    if args.only == "tasks":
+    if args.only in ("tasks", "task-list"):
         out = tasks_out(args.out, engine, args.fonts)
     else:
         out = args.out if engine == "classic" else args.out / engine
@@ -1635,6 +1693,22 @@ def main() -> int:
 
                 task_scenes(app.client, shot_tasks, engine,
                             lambda size: window_size(app, size))
+            return 0
+        if args.only == "task-list":
+            workspace = Path(temp).resolve() / "list"
+            shutil.copytree(TASK_LIST_FIXTURE, workspace)
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "tasks = on\n" + TASK_LIST_SETTINGS,
+                         today=TASKS_TODAY) as app:
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_list(name: str) -> None:
+                    shot(app.client, name)
+
+                task_list_scenes(app.client, shot_list)
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"
