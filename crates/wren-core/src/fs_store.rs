@@ -366,7 +366,10 @@ impl FsStore {
             Mode::from_raw_mode(0o600),
         )?
         .into();
-        require_type(&fs::fstat(&lock)?, FileType::RegularFile, LOCK_NAME)?;
+        // Only the identity of this stat is kept, so nothing fallible runs
+        // between taking the lock and the store whose drop releases it.
+        let identity = fs::fstat(&lock)?;
+        require_type(&identity, FileType::RegularFile, LOCK_NAME)?;
         if let Err(error) = fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
             return if error == Errno::WOULDBLOCK {
                 Err(StoreError::Locked)
@@ -377,7 +380,7 @@ impl FsStore {
         let reader = StoreReader {
             root,
             directory,
-            lock: fs::fstat(&lock)?,
+            lock: identity,
         };
         let store = Self {
             reader,
