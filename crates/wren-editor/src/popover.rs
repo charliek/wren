@@ -829,6 +829,17 @@ pub trait MenuSource: Send + Sync {
         let _ = id;
         false
     }
+
+    /// Whether what request `id` opens, where the source answers it by
+    /// taking the keyboard ([`Requested::Keyboard`]), holds Escape as a
+    /// dialog does ([`MenuSource::holds_escape`]): an Escape after it in
+    /// its batch is dropped, published as [`PopoverEvent::Stroke`]. Where
+    /// the source does not take the keyboard, the keys after the request
+    /// are left as they are. By default no request is.
+    fn holds_escape_when_taken(&self, id: u32) -> bool {
+        let _ = id;
+        false
+    }
 }
 
 /// A host's source of menus on the engine that opens no popovers: it opens
@@ -890,6 +901,15 @@ pub trait MenuProvider: Send + Sync {
     /// the next provider, as an answer that opens nothing does: a menu
     /// with no rows, or one whose range is off the line.
     fn menu(&self, clicked: &Clicked) -> Option<Requested>;
+
+    /// Whether what this provider opens by taking the keyboard
+    /// ([`Requested::Keyboard`]) holds Escape as a dialog does
+    /// ([`MenuSource::holds_escape`]): an Escape after the right-click in
+    /// its batch is dropped, published as [`PopoverEvent::Stroke`]. By
+    /// default no provider's is.
+    fn holds_escape(&self) -> bool {
+        false
+    }
 
     /// [`Self::menu`], for a click on a line of a task's text after the
     /// line of its box, which `task` is, as the whole text reads it; with

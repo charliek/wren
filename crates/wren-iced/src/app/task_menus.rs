@@ -192,8 +192,10 @@ fn rows(kind: MenuKind, line: &TaskLine<'_>) -> Vec<Row> {
             rows.push(
                 Row::new(TaskRow::Due.id(), due)
                     .glyph(DateField::Due.glyph().to_string())
+                    // The calendar holds an Escape after the choice in
+                    // its batch, as the form does.
                     .accelerator(Accelerator::plain('d'))
-                    .opens_menu(),
+                    .opens_dialog(),
             );
             rows.push(
                 Row::new(TaskRow::PriorityMenu.id(), "Priority…")
@@ -274,6 +276,12 @@ impl TaskMenus {
 impl MenuProvider for TaskMenus {
     fn menu(&self, clicked: &Clicked) -> Option<Requested> {
         self.menu_in_task(clicked, None)
+    }
+
+    /// The keyboard it takes is the calendar's, for a due date clicked: an
+    /// Escape after the click in its batch is no one's.
+    fn holds_escape(&self) -> bool {
+        true
     }
 
     /// On a line of a task's text after its box, the task menu for that

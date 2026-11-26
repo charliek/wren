@@ -515,15 +515,6 @@ impl App {
         }
     }
 
-    /// Whether a press of Escape the app's key handling hears was the
-    /// form's, once for each: the form, its calendar, or an input method
-    /// composing in one of its fields, took it.
-    pub(super) fn take_form_escape(&mut self) -> bool {
-        let claimed = self.form_escapes > 0;
-        self.form_escapes = self.form_escapes.saturating_sub(1);
-        claimed
-    }
-
     /// Escape that reached the app with no field of the form's taking it:
     /// the calendar over the form closes, or else the form.
     pub(super) fn escape_task_form(&mut self) -> Task<Message> {
@@ -1302,6 +1293,9 @@ impl App {
         )
         .save_keys(save)
         .claims(&FORM_CLAIMS)
+        // The calendar's button hands it the keyboard, as Down does: an
+        // Escape after the click in its batch is no one's.
+        .stops_on(|message| matches!(message, Message::TaskForm(Event::OpenCalendar)))
         // A choice no longer offered is held all the same: Enter hands it
         // to the app, which adds nothing for it, and never saves.
         .owner_choice(self.owner_suggestions().len(), open.suggestion.is_some())
@@ -1598,21 +1592,45 @@ mod tests {
     /// The form's own key, as the focused editor routes it, carried out as
     /// the app carries out what the editor publishes.
     fn form_key(app: &mut App) -> Vec<wren_editor::Message> {
-        let modifiers = if cfg!(target_os = "macos") {
+        let messages = widget_press(app, Key::Named(Named::Enter), form_modifiers());
+        // The app's key handling hears of the same press afterwards.
+        form_key_copy(app);
+        messages
+    }
+
+    /// The modifiers of the form's key, ⇧⌘↵ or Ctrl+Shift+Enter.
+    fn form_modifiers() -> Modifiers {
+        if cfg!(target_os = "macos") {
             Modifiers::LOGO | Modifiers::SHIFT
         } else {
             Modifiers::CTRL | Modifiers::SHIFT
-        };
-        let messages = app.editor.key_message(Key::Named(Named::Enter), modifiers);
+        }
+    }
+
+    /// A press into the focused editor: what its widget publishes for it,
+    /// carried out in order, without the app's own copy of the press.
+    fn widget_press(app: &mut App, key: Key, modifiers: Modifiers) -> Vec<wren_editor::Message> {
+        let messages = app.editor.key_message(key, modifiers);
         for message in messages.clone() {
             let _ = app.update(Message::Editor(message));
         }
-        // The app's key handling hears of the same press afterwards.
+        messages
+    }
+
+    /// The app's key handling hearing of a press of the form's key.
+    fn form_key_copy(app: &mut App) {
         let accel = app.preferences.keymap.accel("task.edit").cloned();
         if let Some(accel) = accel.filter(|_| app.preferences.tasks) {
             let _ = app.update(Message::Key(crate::keys::Input::Accel(accel)));
         }
-        messages
+    }
+
+    /// The app's key handling hearing of a plain Escape, which it does after
+    /// the widgets' messages of the press's batch.
+    fn escape_copy(app: &mut App) {
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::Escape,
+        )));
     }
 
     /// The note's text in the editor and in the session's draft.
@@ -2770,5 +2788,387 @@ mod tests {
         let _ = app.process_core(Op::OpenNote { note: None });
         let _ = app.update(Message::Tick);
         assert!(app.task_form.is_none());
+    }
+
+    /// Escape on a task menu, then the form's key, in one batch: the
+    /// editor's widget sends the Escape to the menu, which closes it, and
+    /// asks for the form; the app's key handling hears of both presses
+    /// after that. The Escape was the menu's: the form stays open, and no
+    /// claim is left over to swallow a later Escape.
+    #[test]
+    fn escape_on_a_menu_then_the_forms_key_in_one_batch_leaves_the_form_open() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        app.find_open = true;
+        let _ = app.dispatch(Command::Run(CommandId::TaskSetStatus));
+        assert!(app.editor.popover().is_some());
+        widget_press(&mut app, Key::Named(Named::Escape), Modifiers::empty());
+        assert!(app.editor.popover().is_none());
+        widget_press(&mut app, Key::Named(Named::Enter), form_modifiers());
+        assert!(app.task_form.is_some());
+        escape_copy(&mut app);
+        form_key_copy(&mut app);
+        assert!(app.task_form.is_some(), "the Escape was the menu's");
+        assert!(app.find_open);
+        // The next Escape is the form's alone, and the one after it the
+        // find bar's.
+        key(&mut app, FormKey::Escape);
+        escape_copy(&mut app);
+        assert!(app.task_form.is_none());
+        assert!(app.find_open, "one action for one Escape");
+        escape_copy(&mut app);
+        assert!(!app.find_open, "no claim is left over");
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// The command key: ⌘ on macOS, Ctrl on Linux in the tests' keymap.
+    fn command_modifier() -> Modifiers {
+        if cfg!(target_os = "macos") {
+            Modifiers::LOGO
+        } else {
+            Modifiers::CTRL
+        }
+    }
+
+    /// The app's copy of a plain Escape a focused field captured.
+    fn field_escape_copy(app: &mut App) {
+        let _ = app.update(Message::Key(crate::keys::Input::Nav(
+            crate::keys::Nav::FieldEscape,
+        )));
+    }
+
+    /// An event of the calendar's field, the calendar over the note.
+    fn calendar_field(app: &mut App, event: FieldEvent) {
+        let _ = app.update(Message::Calendar(CalendarEvent::Field(event)));
+    }
+
+    /// An event of the calendar's field, the calendar over the form.
+    fn form_calendar_field(app: &mut App, event: FieldEvent) {
+        send(app, Event::Calendar(CalendarEvent::Field(event)));
+    }
+
+    /// No Escape is claimed and not yet heard of.
+    fn no_claims(app: &mut App) {
+        assert_eq!(app.calendar_escapes, 0);
+        assert_eq!(app.form_escapes, 0);
+        assert!(!app.editor.take_claimed_escape());
+    }
+
+    /// Escape, Escape in one batch on the calendar: its field closes it on
+    /// the first and reports the second as no one's; the app hears of both
+    /// and drops both, so the find bar is the next batch's.
+    #[test]
+    fn escape_escape_on_the_calendar_in_one_batch_closes_only_the_calendar() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        app.find_open = true;
+        widget_press(&mut app, Key::Character("d".into()), command_modifier());
+        assert!(app.calendar.is_some());
+        calendar_field(&mut app, FieldEvent::Escape);
+        calendar_field(&mut app, FieldEvent::HeldEscape);
+        field_escape_copy(&mut app);
+        field_escape_copy(&mut app);
+        assert!(app.calendar.is_none());
+        assert!(app.find_open);
+        no_claims(&mut app);
+        escape_copy(&mut app);
+        assert!(!app.find_open);
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// Escape, Escape in one batch on the form, or on its calendar: the
+    /// first closes what it was pressed in, the second is no one's, and the
+    /// app drops its copies of both.
+    #[test]
+    fn escape_escape_on_the_form_or_its_calendar_in_one_batch_closes_only_that() {
+        for engine in ["classic", "advanced"] {
+            let (_directory, mut app) = note_app(engine, "on", NOTE);
+            app.editor
+                .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+            app.find_open = true;
+            let _ = form_key(&mut app);
+            send(&mut app, Event::OpenCalendar);
+            assert!(open(&app).calendar.is_some(), "{engine}");
+            form_calendar_field(&mut app, FieldEvent::Escape);
+            form_calendar_field(&mut app, FieldEvent::HeldEscape);
+            field_escape_copy(&mut app);
+            field_escape_copy(&mut app);
+            assert!(open(&app).calendar.is_none(), "{engine}");
+            no_claims(&mut app);
+            // The form closes on the first of the next batch's.
+            key(&mut app, FormKey::Escape);
+            key(&mut app, FormKey::HeldEscape);
+            field_escape_copy(&mut app);
+            field_escape_copy(&mut app);
+            assert!(app.task_form.is_none(), "{engine}");
+            assert!(app.find_open, "{engine}");
+            no_claims(&mut app);
+            escape_copy(&mut app);
+            assert!(!app.find_open, "{engine}");
+            assert_eq!(text(&app), NOTE, "{engine}");
+        }
+    }
+
+    /// Escape on a task menu, then the calendar's key, in one batch: the
+    /// Escape was the menu's, and the calendar stays open for the next.
+    #[test]
+    fn escape_on_a_menu_then_the_calendars_key_in_one_batch_leaves_the_calendar_open() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        app.find_open = true;
+        let _ = app.dispatch(Command::Run(CommandId::TaskSetPriority));
+        assert!(app.editor.popover().is_some());
+        widget_press(&mut app, Key::Named(Named::Escape), Modifiers::empty());
+        widget_press(&mut app, Key::Character("d".into()), command_modifier());
+        assert!(app.calendar.is_some());
+        escape_copy(&mut app);
+        assert!(app.calendar.is_some(), "the Escape was the menu's");
+        no_claims(&mut app);
+        calendar_field(&mut app, FieldEvent::Escape);
+        field_escape_copy(&mut app);
+        assert!(app.calendar.is_none());
+        assert!(app.find_open, "one action for one Escape");
+        escape_copy(&mut app);
+        assert!(!app.find_open);
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// One batch of events through the editor's widget, as a window hands
+    /// a frame's events to it: what the widget publishes, carried out in
+    /// order. The app's copies of the presses are the test's to send.
+    fn editor_batch(
+        app: &mut App,
+        inputs: &[wren_editor::BatchInput],
+    ) -> Vec<wren_editor::Message> {
+        // What the app tells its sources after every message, as a window's
+        // frames would have before the batch.
+        let _ = app.update(Message::Tick);
+        let (style, palette) = crate::theme::editor_colors(app.definition);
+        app.editor.lay_out(800.0, palette);
+        let messages = app.editor.batch_messages(inputs, 800.0, style, palette);
+        for message in messages.clone() {
+            let _ = app.update(Message::Editor(message));
+        }
+        messages
+    }
+
+    fn pressed(key: Key, modifiers: Modifiers) -> wren_editor::BatchInput {
+        wren_editor::BatchInput::Key(key, modifiers)
+    }
+
+    fn plain_escape() -> wren_editor::BatchInput {
+        pressed(Key::Named(Named::Escape), Modifiers::empty())
+    }
+
+    /// Whatever opens the form or the calendar from the note, then Escape,
+    /// in one batch through the editor's widget: the widget drops the
+    /// Escape after the handover as no one's, and the app drops its copy,
+    /// so what opened stays open. Off a task, the calendar's key opens
+    /// nothing and the Escape is the app's.
+    #[test]
+    fn an_escape_after_the_handover_in_its_batch_closes_nothing() {
+        let draft = line_of(NOTE, "- [/] Draft");
+        type Opener = fn(&mut App) -> Vec<wren_editor::BatchInput>;
+        let openers: [(&str, &str, Opener); 5] = [
+            ("classic", "the form's key", |_| {
+                vec![pressed(Key::Named(Named::Enter), form_modifiers())]
+            }),
+            ("advanced", "the form's key", |_| {
+                vec![pressed(Key::Named(Named::Enter), form_modifiers())]
+            }),
+            ("advanced", "the calendar's key", |_| {
+                vec![pressed(Key::Character("d".into()), command_modifier())]
+            }),
+            ("advanced", "a right-click on the due date", |_| {
+                let draft = line_of(NOTE, "- [/] Draft");
+                let date = NOTE.split('\n').nth(draft).unwrap().find("2026").unwrap();
+                vec![wren_editor::BatchInput::RightClick {
+                    line: draft,
+                    column: date,
+                }]
+            }),
+            ("advanced", "the task menu's due date row", |app| {
+                let draft = line_of(NOTE, "- [/] Draft");
+                let (_, palette) = crate::theme::editor_colors(app.definition);
+                app.editor.lay_out(800.0, palette);
+                let message = app.editor.right_click_message(draft, 7).expect("a menu");
+                let _ = app.update(Message::Editor(message));
+                assert!(app.editor.popover().is_some(), "the task menu");
+                vec![pressed(Key::Character("d".into()), Modifiers::empty())]
+            }),
+        ];
+        for (engine, opener, inputs) in openers {
+            let (_directory, mut app) = note_app(engine, "on", NOTE);
+            app.editor.move_cursor(caret(draft, 3));
+            app.find_open = true;
+            let mut batch = inputs(&mut app);
+            batch.push(plain_escape());
+            editor_batch(&mut app, &batch);
+            let opened = app.task_form.is_some() || app.calendar.is_some();
+            assert!(opened, "{engine}: {opener}");
+            if opener == "the form's key" {
+                form_key_copy(&mut app);
+            }
+            escape_copy(&mut app);
+            let open = app.task_form.is_some() || app.calendar.is_some();
+            assert!(open, "{engine}: {opener} stays open");
+            no_claims(&mut app);
+            escape_copy(&mut app);
+            assert!(
+                app.task_form.is_none() && app.calendar.is_none(),
+                "{engine}: {opener}"
+            );
+            assert!(app.find_open, "{engine}: {opener}");
+            escape_copy(&mut app);
+            assert!(!app.find_open, "{engine}: {opener}");
+            assert_eq!(text(&app), NOTE, "{engine}: {opener}");
+        }
+        // Off a task the calendar's key takes nothing: the Escape after it
+        // is the app's, and closes the find bar.
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "Plain line"), 2));
+        app.find_open = true;
+        editor_batch(
+            &mut app,
+            &[
+                pressed(Key::Character("d".into()), command_modifier()),
+                plain_escape(),
+            ],
+        );
+        assert!(app.calendar.is_none());
+        no_claims(&mut app);
+        escape_copy(&mut app);
+        assert!(!app.find_open, "the Escape was the app's");
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// Escape on a task menu, the form's key, then Escape on the form, in
+    /// one batch: two ledgers hold a claim at once, the editor's and the
+    /// form's, and each of the app's two copies takes exactly one.
+    #[test]
+    fn two_claims_in_one_batch_are_each_taken_once() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        app.find_open = true;
+        let _ = app.dispatch(Command::Run(CommandId::TaskSetStatus));
+        assert!(app.editor.popover().is_some());
+        editor_batch(
+            &mut app,
+            &[
+                plain_escape(),
+                pressed(Key::Named(Named::Enter), form_modifiers()),
+                plain_escape(),
+            ],
+        );
+        assert!(app.task_form.is_some());
+        assert_eq!(app.form_escapes, 1, "the Escape after the handover");
+        escape_copy(&mut app);
+        assert!(app.task_form.is_some(), "the menu's Escape");
+        assert_eq!(app.form_escapes, 0, "one claim for one copy");
+        form_key_copy(&mut app);
+        escape_copy(&mut app);
+        assert!(app.task_form.is_some(), "the dropped Escape");
+        no_claims(&mut app);
+        // The next Escape is the form's, and the one after the find bar's.
+        key(&mut app, FormKey::Escape);
+        field_escape_copy(&mut app);
+        assert!(app.task_form.is_none());
+        assert!(app.find_open);
+        escape_copy(&mut app);
+        assert!(!app.find_open);
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// A click on the form's calendar button, then Escape, in one batch:
+    /// the form's keys report the Escape as no one's, so the calendar
+    /// opened by the click stays open and the form with it.
+    #[test]
+    fn an_escape_after_the_calendars_button_in_its_batch_closes_nothing() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        let _ = app.dispatch(Command::Run(CommandId::TaskEdit));
+        send(&mut app, Event::OpenCalendar);
+        key(&mut app, FormKey::HeldEscape);
+        field_escape_copy(&mut app);
+        assert!(open(&app).calendar.is_some());
+        no_claims(&mut app);
+        escape_copy(&mut app);
+        assert!(
+            open(&app).calendar.is_none(),
+            "the next Escape is the calendar's"
+        );
+        assert!(app.task_form.is_some());
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// Escape that no widget took closes one layer at a time, innermost
+    /// first, writing nothing. The calendar over the note, the form, the
+    /// editor's popovers, the palette and the dialogs are never open
+    /// together (each closes the others as it opens, or cannot open over
+    /// them), so each is stacked here only over the find bar.
+    #[test]
+    fn escape_closes_one_layer_at_a_time_innermost_first() {
+        let (_directory, mut app) = note_app("advanced", "on", NOTE);
+        app.editor
+            .move_cursor(caret(line_of(NOTE, "- [/] Draft"), 3));
+        type Open = fn(&mut App) -> bool;
+        let layers: [(&str, Open); 5] = [
+            ("calendar", |app| {
+                widget_press(app, Key::Character("d".into()), command_modifier());
+                app.calendar.is_some()
+            }),
+            ("form", |app| {
+                let _ = form_key(app);
+                app.task_form.is_some()
+            }),
+            ("menu", |app| {
+                let _ = app.dispatch(Command::Run(CommandId::TaskSetStatus));
+                app.editor.popover().is_some()
+            }),
+            ("palette", |app| {
+                let _ = app.dispatch(Command::Run(CommandId::CommandPalette));
+                app.palette.is_some()
+            }),
+            ("dialog", |app| {
+                let _ = app.show_dialog(super::super::workspace::DialogKind::CreateSection);
+                app.dialog.is_some()
+            }),
+        ];
+        for (name, open_layer) in layers {
+            app.find_open = true;
+            assert!(open_layer(&mut app), "{name}");
+            escape_copy(&mut app);
+            assert!(!open_layer_still(&app), "{name}");
+            assert!(app.find_open, "{name}: one layer for one Escape");
+            escape_copy(&mut app);
+            assert!(!app.find_open, "{name}");
+            assert_eq!(text(&app), NOTE, "{name}");
+        }
+        // The calendar over the form closes before the form.
+        app.find_open = true;
+        let _ = form_key(&mut app);
+        send(&mut app, Event::OpenCalendar);
+        escape_copy(&mut app);
+        assert!(open(&app).calendar.is_none());
+        escape_copy(&mut app);
+        assert!(app.task_form.is_none());
+        assert!(app.find_open);
+        no_claims(&mut app);
+        assert_eq!(text(&app), NOTE);
+    }
+
+    /// Whether any layer Escape closes before the find bar is open.
+    fn open_layer_still(app: &App) -> bool {
+        app.calendar.is_some()
+            || app.task_form.is_some()
+            || app.editor.popover().is_some()
+            || app.palette.is_some()
+            || app.dialog.is_some()
     }
 }

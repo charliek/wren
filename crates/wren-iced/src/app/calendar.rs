@@ -177,6 +177,12 @@ impl MenuSource for TaskSource {
         id == CommandId::TaskEdit.payload() && self.form.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The calendar, where it opens, holds an Escape after its request
+    /// as the form does; off a task the keys after it are the note's.
+    fn holds_escape_when_taken(&self, id: u32) -> bool {
+        id == CommandId::TaskSetDue.payload()
+    }
+
     fn menu_on(&self, id: u32, index: usize, line: &str, caret: usize) -> Option<Requested> {
         // The task form opens on any line of a note, or says why not: the
         // keys after its request in their batch are no one's either way.
@@ -498,15 +504,6 @@ impl App {
     /// and give the editor the keyboard for when the window has it again.
     pub(super) fn close_calendar_for_window(&mut self) -> Task<Message> {
         self.cancel_calendar()
-    }
-
-    /// Whether a press of Escape the app's key handling hears was the
-    /// calendar's, once for each: its field took it, as Escape or for an
-    /// input method's composition.
-    pub(super) fn take_calendar_escape(&mut self) -> bool {
-        let claimed = self.calendar_escapes > 0;
-        self.calendar_escapes = self.calendar_escapes.saturating_sub(1);
-        claimed
     }
 
     pub(super) fn calendar_event(&mut self, event: Event) -> Task<Message> {

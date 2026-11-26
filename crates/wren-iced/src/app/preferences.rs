@@ -1098,11 +1098,9 @@ impl App {
 
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
-        // A press of Escape the calendar's field took: it was the
-        // calendar's alone.
-        if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape))
-            && (self.take_calendar_escape() || self.take_form_escape())
-        {
+        // A plain Escape a widget took (the calendar, the task form, or a
+        // popover of the editor's) was that widget's alone.
+        if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape)) && self.take_escape_claim() {
             return Task::none();
         }
         // The task form owns the keyboard: its own keys took what it gives
@@ -1128,13 +1126,9 @@ impl App {
             };
         }
         let accel = match input {
-            // A press the editor's popover has already taken, in the key's
-            // order with the typing around it, does nothing more here. The
-            // suggestions menu is closed from here instead: the editor
-            // leaves it Escape with no word.
-            Input::Nav(Nav::Escape | Nav::FieldEscape)
-                if self.editor.take_claimed_escape() || self.editor.dismiss_popover() =>
-            {
+            // The suggestions menu is closed from here: the editor leaves
+            // it Escape with no word.
+            Input::Nav(Nav::Escape | Nav::FieldEscape) if self.editor.dismiss_popover() => {
                 return Task::none();
             }
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),

@@ -588,6 +588,11 @@ impl EditorView {
     /// Returns `Element<'_, Message>` so the parent can map it to its own
     /// message type.
     pub fn view(&self, style: Style, palette: Palette, measure: Measure) -> Element<'_, Message> {
+        self.widget(style, palette, measure).into()
+    }
+
+    /// The widget [`EditorView::view`] shows.
+    fn widget(&self, style: Style, palette: Palette, measure: Measure) -> TextEditor<'_> {
         let editor = TextEditor::new(
             &self.content,
             "note-editor",
@@ -612,7 +617,51 @@ impl EditorView {
         };
         #[cfg(any(test, feature = "test-support"))]
         let editor = editor.spell_frame(&self.spell_frame);
-        editor.into()
+        editor
+    }
+
+    /// What the widget [`EditorView::view`] shows, with the keyboard and
+    /// laid out `width` wide, publishes for `inputs` as one batch of
+    /// events, in order, none of it applied: as iced hands a frame's
+    /// events to one view, so what the widget knows of the batch (a
+    /// handover of the keyboard, a popover closed or opened in it) is as
+    /// in a window. A right-click names its character as
+    /// [`EditorView::right_click_message`] does; one whose place is not
+    /// laid out is left out.
+    #[cfg(feature = "test-support")]
+    pub fn batch_messages(
+        &self,
+        inputs: &[BatchInput],
+        width: f32,
+        style: Style,
+        palette: Palette,
+    ) -> Vec<Message> {
+        use iced::keyboard::{self, key::NativeCode, key::Physical, Location};
+        let events = inputs
+            .iter()
+            .filter_map(|input| match input {
+                BatchInput::Key(key, modifiers) => {
+                    let press = key_press(key.clone(), *modifiers);
+                    let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: press.key,
+                        modified_key: press.modified_key,
+                        physical_key: Physical::Unidentified(NativeCode::Unidentified),
+                        location: Location::Standard,
+                        modifiers: press.modifiers,
+                        text: press.text,
+                        repeat: false,
+                    });
+                    Some((event, None))
+                }
+                BatchInput::RightClick { line, column } => {
+                    let at = self.middle_of(*line, *column)?;
+                    let press = iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right);
+                    Some((iced::Event::Mouse(press), Some(at)))
+                }
+            })
+            .collect();
+        let mut editor = self.widget(style, palette, Measure::default());
+        widget::batch_of(&mut editor, iced::Size::new(width, 2000.0), events)
     }
 
     /// What the widget's highlighter is set up with, for `palette`.
@@ -2583,6 +2632,18 @@ impl EditorView {
 /// A focused press of `key` with `modifiers`, as a window would deliver it:
 /// its own physical key, and the text it types, which a character types
 /// unless Ctrl or the logo key is held (or Alt, off macOS).
+/// An input of a batch of events ([`EditorView::batch_messages`]).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone)]
+pub enum BatchInput {
+    /// A key pressed with these modifiers, typing as
+    /// [`EditorView::key_message`] has it.
+    Key(iced::keyboard::Key, iced::keyboard::Modifiers),
+    /// A right-click on the middle of the character that starts at byte
+    /// `column` of `line`.
+    RightClick { line: usize, column: usize },
+}
+
 fn key_press(
     key: iced::keyboard::Key,
     modifiers: iced::keyboard::Modifiers,

@@ -913,6 +913,26 @@ impl App {
         Task::none()
     }
 
+    /// Whether the app's copy of a plain Escape (no Ctrl, Alt or logo key)
+    /// was a press a widget already took, so the app does nothing more.
+    ///
+    /// The one Escape contract: every plain Escape a widget consumes gives
+    /// exactly one credit, to the calendar's, the form's or the editor's
+    /// ledger, and the app's copy of each plain Escape, which iced delivers
+    /// after the widgets' messages of its batch, takes exactly one credit,
+    /// here, before any other routing. A layer that opens later in that
+    /// batch (the form after Escape on an editor menu) must not see the
+    /// copy, and a credit left over would swallow a later Escape.
+    pub(super) fn take_escape_claim(&mut self) -> bool {
+        for ledger in [&mut self.calendar_escapes, &mut self.form_escapes] {
+            if *ledger > 0 {
+                *ledger -= 1;
+                return true;
+            }
+        }
+        self.editor.take_claimed_escape()
+    }
+
     /// A key in the batch of the handover to the calendar or the form,
     /// which the editor dropped: a plain Escape (no Ctrl, Alt or logo
     /// key), which the app's key handling hears of too, is claimed for it
