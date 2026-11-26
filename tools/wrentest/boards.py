@@ -146,10 +146,12 @@ def routed_board(kind: str, shapes: int) -> str:
     return "".join(parts)
 
 
-def board_app(workspace: Path, case: str, setting: str = "on", **kwargs) -> WrenApp:
+def board_app(workspace: Path, case: str, setting: str = "on", more: str = "",
+              **kwargs) -> WrenApp:
+    """A Wren with ``boards = setting``, and the settings lines *more*."""
     from tools.wrentest.test_setup import artifact_directory
 
-    return WrenApp(workspace=workspace, settings=f"boards = {setting}\n",
+    return WrenApp(workspace=workspace, settings=f"boards = {setting}\n{more}",
                    artifacts_dir=artifact_directory(case), **kwargs)
 
 
@@ -330,9 +332,6 @@ SCRIPT_KEYS = {"Tab": "tab", "Esc": "escape", "↵": "enter", "←": "left", "�
                "↑": "up", "↓": "down", "⌫": "backspace"}
 SCRIPT_MODS = {"⌘": "mod", "⇧": "shift", "⌥": "opt"}
 
-# An open label's own undo and paste keys: ⌘ on macOS and Ctrl on Linux in
-# either mode, as every text field's are (discovery/keybindings.md §4).
-LABEL_MOD = "logo" if os.uname().sysname == "Darwin" else "ctrl"
 NUMBERS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
            "nine": 9, "ten": 10}
 

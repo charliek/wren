@@ -1435,6 +1435,68 @@ pub(super) mod tests {
         assert_eq!(dimmed(&app, "Hand tool"), Some(false));
     }
 
+    /// discovery/keybindings.md §2 item 2: the hint line, the keys sheet,
+    /// the style bar and the footer name the command key of the mode
+    /// `config.conf` gives, and a change of mode reaches them as soon as the
+    /// settings are applied. macOS ignores the setting.
+    #[test]
+    fn the_board_s_key_labels_follow_the_command_key_mode() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let (_workspace, mut app) = fixture();
+        std::fs::write(&path, "boards = on\nlinux-modifier = ctrl\n").unwrap();
+        app.preferences = super::super::preferences::Preferences::load(Some(path.clone()));
+        app.preferences.boards = true;
+        app.apply_preferences();
+        open_board(&mut app, "Flow");
+        focus(&mut app);
+        let _ = run(&mut app, Command::Select(Dir::Down));
+        app.style_menu = Some(super::super::board_style_bar::Menu::More);
+        let shown = |app: &App| {
+            let hint = app.board_hint();
+            let connect = hint.iter().find(|segment| segment.words == "connect");
+            let sheet = app.board_sheet("");
+            let redo = sheet.iter().find(|row| row.words == "Redo");
+            let bar = app.board_style_bar().expect("a style bar");
+            let (_, more) = bar.menu.expect("the More menu");
+            let duplicate = more.iter().find(|row| row.command == Command::Duplicate);
+            (
+                connect.map(|segment| segment.keys.clone()),
+                redo.and_then(|row| row.keys.first().cloned()),
+                duplicate.and_then(|row| row.key.clone()),
+                app.board_footer_controls()[0].tip(),
+            )
+        };
+        let labels = |command: &str| {
+            let owned = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
+            match Platform::current() {
+                Platform::Mac => (
+                    Some(owned(&["⌘Arrow"])),
+                    Some("⇧⌘Z".to_owned()),
+                    Some("⌘D".to_owned()),
+                    "Undo   ⌘Z".to_owned(),
+                ),
+                Platform::Linux => (
+                    Some(owned(&[&format!("{command}+Arrow")])),
+                    Some(format!("{command}+Shift+Z")),
+                    Some(format!("{command}+D")),
+                    format!("Undo   {command}+Z"),
+                ),
+            }
+        };
+        assert_eq!(shown(&app), labels("Ctrl"));
+        std::fs::write(&path, "boards = on\nlinux-modifier = alt\n").unwrap();
+        let _ = app.reload_settings(false);
+        let alt = labels("Alt");
+        assert_eq!(shown(&app), alt);
+        // In Alt mode the Ctrl version of redo is listed after Alt's.
+        if Platform::current() == Platform::Linux {
+            let sheet = app.board_sheet("");
+            let redo = sheet.iter().find(|row| row.words == "Redo").unwrap();
+            assert_eq!(redo.keys, ["Alt+Shift+Z", "Ctrl+Shift+Z"]);
+        }
+    }
+
     #[test]
     fn a_rebound_sheet_key_closes_the_sheet() {
         let (_directory, mut app) = fixture();

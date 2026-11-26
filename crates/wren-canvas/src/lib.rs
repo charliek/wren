@@ -1253,7 +1253,10 @@ impl BoardView {
 
     /// The host's say over each key the focused board is given (§5.1);
     /// without one, a key with Ctrl, Alt or the logo key is the host's and
-    /// every other key the board's.
+    /// every other key the board's. In an open label, the chords it gives
+    /// [`Command::SelectAll`], the clipboard's commands, [`Command::Undo`]
+    /// and [`Command::Redo`] act on the text; without one, ⌘ or Ctrl with
+    /// A, C, X, V, Z and Shift+Z do.
     pub fn set_key_policy(&mut self, policy: KeyPolicy) {
         self.key_policy = Some(policy);
     }

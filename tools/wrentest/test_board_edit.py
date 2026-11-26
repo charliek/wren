@@ -10,6 +10,7 @@ before what a case is about.
 
 from __future__ import annotations
 
+import os
 import time
 import tomllib
 from pathlib import Path
@@ -374,6 +375,61 @@ def test_copy_and_paste_make_new_ids_one_cell_on_and_survive_a_restart(samples: 
         ready(app)
         assert board(app)["counts"] == {"nodes": 19, "edges": 19}
     assert flow.read_bytes() == after
+
+
+@pytest.mark.parametrize("mode", ["ctrl", "alt"])
+def test_the_command_key_undoes_a_label_and_copies_a_node_in_either_mode(samples: Path,
+                                                                         mode: str) -> None:
+    """discovery/keybindings.md §2 items 3 and 4, with ``linux-modifier`` set
+    either way (macOS ignores it, and Mod is ⌘ in both): in an open label
+    Mod+Z and Mod+Shift+Z undo and redo the typing and Mod+A, Mod+C copy its
+    text; on the board Mod+C and Mod+V copy and paste a node and Mod+Z takes
+    the paste back. In Alt mode Ctrl+Z, Ctrl+C and Ctrl+V do the same, and
+    Ctrl+Y redoes nothing."""
+    linux_alt = mode == "alt" and os.uname().sysname != "Darwin"
+    with board_app(samples, f"board-edit-mode-{mode}", more=f"linux-modifier = {mode}\n") as app:
+        ready(app)
+        # As in the paste case: an app clipboard where the system's reads
+        # back nothing.
+        app.client.call("clipboard.write", {"text": "probe"})
+        try:
+            wait_for(lambda: app.client.call("clipboard.read") == "probe", timeout=2,
+                     interval=0.05, description="the clipboard")
+        except TimeoutError:
+            app.client.call("test.clipboard", {"own": True})
+        undo_keys = [("mod",), ("ctrl",)] if linux_alt else [("mod",)]
+        for held in undo_keys:
+            if board(app)["selection"] != [PACK]:
+                # Past the double-click's 300 ms, so the click only selects.
+                time.sleep(0.35)
+                click(app, {"node": PACK})
+            assert key(app, "enter")["editing"]["text"] == "Pack"
+            assert type_text(app, "Boxed")["editing"]["text"] == "Boxed"
+            assert key(app, "z", *held)["editing"]["text"] == "Pack", held
+            if linux_alt:
+                assert key(app, "y", "ctrl")["editing"]["text"] == "Pack"
+            assert key(app, "z", *held, "shift")["editing"]["text"] == "Boxed", held
+            key(app, "a", *held)
+            key(app, "c", *held)
+            wait_for(lambda: app.client.call("clipboard.read") == "Boxed", timeout=5,
+                     description="the label's text copied")
+            app.client.call("clipboard.write", {"text": "probe"})
+            state = key(app, "escape")
+            assert state["state"] == "idle" and state["selection"] == [PACK], state
+            assert node(app, PACK)["text"] == "Boxed"
+            nodes = state["counts"]["nodes"]
+            assert key(app, "c", *held)["handled"]
+            wait_for(lambda: app.client.call("clipboard.read").startswith(HEADER), timeout=5,
+                     description="the node copied")
+            key(app, "v", *held)
+            wait_for(lambda: board(app)["counts"]["nodes"] == nodes + 1, timeout=5,
+                     description="the paste")
+            assert key(app, "z", *held)["counts"]["nodes"] == nodes
+            if linux_alt:
+                state = key(app, "y", "ctrl")
+                assert state["counts"]["nodes"] == nodes and state["can_redo"], state
+            # Undo the label too, for the next round.
+            assert key(app, "z", *held)["pristine"], held
 
 
 def test_a_change_on_disk_reloads_keeps_the_view_and_ends_what_was_in_flight(samples: Path) -> None:

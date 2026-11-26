@@ -521,6 +521,7 @@ fn translate(
                 sent.messages.push(input(Input::Wheel {
                     delta,
                     at: local(at),
+                    // Ctrl in both Linux modes, like Ctrl+drag: window managers take Alt+drag.
                     zoom: state.modifiers.command(),
                     sideways: state.modifiers.shift(),
                     scale_factor: style.scale_factor,

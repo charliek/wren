@@ -533,6 +533,220 @@ fn a_board_key_reads_the_keymap_the_app_reads() {
     );
 }
 
+/// A chord pressed on the focused board, as the widget publishes it; an
+/// arrow is named by `"left"`, `"right"`, `"up"` or `"down"`.
+fn chord(app: &mut App, name: &str, modifiers: iced::keyboard::Modifiers) {
+    use iced::keyboard::key::{Code, Named, Physical};
+    use iced::keyboard::Key;
+    let (key, code) = match name {
+        "left" => (Key::Named(Named::ArrowLeft), Code::ArrowLeft),
+        "right" => (Key::Named(Named::ArrowRight), Code::ArrowRight),
+        "up" => (Key::Named(Named::ArrowUp), Code::ArrowUp),
+        "down" => (Key::Named(Named::ArrowDown), Code::ArrowDown),
+        "a" => (Key::Character("a".into()), Code::KeyA),
+        "c" => (Key::Character("c".into()), Code::KeyC),
+        "d" => (Key::Character("d".into()), Code::KeyD),
+        "v" => (Key::Character("v".into()), Code::KeyV),
+        "x" => (Key::Character("x".into()), Code::KeyX),
+        "y" => (Key::Character("y".into()), Code::KeyY),
+        "z" => (Key::Character("z".into()), Code::KeyZ),
+        _ => panic!("no key {name}"),
+    };
+    let epoch = view(app).epoch();
+    let press = wren_canvas::KeyPress {
+        key,
+        physical: Physical::Code(code),
+        modifiers,
+        text: None,
+        repeat: false,
+        held: true,
+    };
+    let _ = app.update(Message::Board(Sent::Key(epoch, press)));
+}
+
+/// Select `pack` alone, by a click on empty canvas and one on it, which
+/// is no double click.
+fn reselect(app: &mut App) {
+    click_at(app, EMPTY);
+    click(app, "pack");
+}
+
+/// discovery/keybindings.md §2 items 1, 3 and 4, end to end through the
+/// app in each scheme: on a board Mod+arrow connects and the other key
+/// with an arrow moves, Mod+D duplicates, Mod+A selects all, Mod+C, X and
+/// V are the clipboard's, and Mod+Z and Mod+Shift+Z undo and redo, on the
+/// board and in an open label. In Alt mode the Ctrl versions of the
+/// clipboard, select all and undo keys work too. Ctrl+Y redoes nothing.
+#[test]
+fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
+    use iced::keyboard::Modifiers;
+    use wren_core::keybind::{LinuxModifier, Logical, Platform};
+    let held = |scheme: wren_core::keybind::Scheme, token| match scheme.modifier(token) {
+        "super" => Modifiers::LOGO,
+        "ctrl" => Modifiers::CTRL,
+        _ => Modifiers::ALT,
+    };
+    for scheme in super::preferences::SCHEMES {
+        let (modifier, opt) = (held(scheme, Logical::Mod), held(scheme, Logical::Opt));
+        let shifted = modifier | Modifiers::SHIFT;
+        let alt_mode = scheme.platform == Platform::Linux && scheme.linux == LinuxModifier::Alt;
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        app.preferences.keymap = super::preferences::build_keymap(scheme, &[], false).0;
+        app.apply_preferences();
+        lay_out(&mut app);
+        let nodes = |app: &App| view(app).board().nodes.len();
+        let edges = |app: &App| view(app).board().edges.len();
+
+        // On the board.
+        reselect(&mut app);
+        chord(&mut app, "d", modifier);
+        assert_eq!(nodes(&app), 3, "{scheme:?}: Mod+D duplicates");
+        chord(&mut app, "z", modifier);
+        assert_eq!(nodes(&app), 2, "{scheme:?}: Mod+Z undoes");
+        chord(&mut app, "z", shifted);
+        assert_eq!(nodes(&app), 3, "{scheme:?}: Mod+Shift+Z redoes");
+        chord(&mut app, "z", modifier);
+        let revision = app.board_revision;
+        for ctrl_y in [Modifiers::CTRL, modifier] {
+            chord(&mut app, "y", ctrl_y);
+            assert_eq!(nodes(&app), 2, "{scheme:?}: {ctrl_y:?}+Y redoes nothing");
+        }
+        assert_eq!(app.board_revision, revision, "{scheme:?}");
+        reselect(&mut app);
+        let before = at(&app, "pack");
+        chord(&mut app, "right", opt);
+        assert_ne!(at(&app, "pack"), before, "{scheme:?}: Opt+→ moves");
+        chord(&mut app, "z", modifier);
+        reselect(&mut app);
+        chord(&mut app, "right", modifier);
+        assert_eq!(
+            (nodes(&app), edges(&app)),
+            (3, 2),
+            "{scheme:?}: Mod+→ connects"
+        );
+        let _ = app.update(Message::Board(Sent::Input(
+            view(&app).epoch(),
+            Input::Key {
+                key: wren_canvas::Key::Escape,
+                repeat: false,
+            },
+        )));
+        chord(&mut app, "z", modifier);
+        assert_eq!((nodes(&app), edges(&app)), (2, 1), "{scheme:?}");
+        chord(&mut app, "a", modifier);
+        assert_eq!(
+            view(&app).machine().selection().len(),
+            3,
+            "{scheme:?}: Mod+A selects every element"
+        );
+        // The clipboard's keys are the board's copy, cut and paste.
+        let board_keys: &[Modifiers] = if alt_mode {
+            &[modifier, Modifiers::CTRL]
+        } else {
+            &[modifier]
+        };
+        let read = |app: &App, letter: &str, modifiers| {
+            use iced::keyboard::key::{Code, Physical};
+            let code = match letter {
+                "c" => Code::KeyC,
+                "x" => Code::KeyX,
+                _ => Code::KeyV,
+            };
+            view(app).key(
+                &iced::keyboard::Key::Character(letter.into()),
+                Physical::Code(code),
+                modifiers,
+                None,
+                false,
+                false,
+            )
+        };
+        for &each in board_keys {
+            let epoch = view(&app).epoch();
+            for (letter, command) in [("c", C::Copy), ("x", C::Cut), ("v", C::Paste)] {
+                assert_eq!(
+                    read(&app, letter, each),
+                    Some(vec![Sent::Command(epoch, command)]),
+                    "{scheme:?}: {each:?}+{letter}"
+                );
+            }
+            chord(&mut app, "x", each);
+            assert_eq!(nodes(&app), 0, "{scheme:?}: {each:?}+X cuts");
+            chord(&mut app, "z", modifier);
+            assert_eq!(nodes(&app), 2, "{scheme:?}");
+        }
+
+        // In a label.
+        for &each in board_keys {
+            click_at(&mut app, EMPTY);
+            relabel(&mut app, "pack", "Ship");
+            let text = |app: &App| view(app).label().map(|label| label.text().to_owned());
+            chord(&mut app, "z", each);
+            assert_eq!(
+                text(&app).as_deref(),
+                Some("Pack"),
+                "{scheme:?}: {each:?}+Z"
+            );
+            for ctrl_y in [Modifiers::CTRL, modifier] {
+                chord(&mut app, "y", ctrl_y);
+                assert_eq!(
+                    text(&app).as_deref(),
+                    Some("Pack"),
+                    "{scheme:?}: {ctrl_y:?}+Y"
+                );
+            }
+            chord(&mut app, "z", each | Modifiers::SHIFT);
+            assert_eq!(
+                text(&app).as_deref(),
+                Some("Ship"),
+                "{scheme:?}: {each:?}+Shift+Z"
+            );
+            chord(&mut app, "a", each);
+            label(&mut app, LabelAction::Insert("Go".into()));
+            assert_eq!(text(&app).as_deref(), Some("Go"), "{scheme:?}: {each:?}+A");
+            // Copy, cut and paste are the label's, not the board's.
+            let epoch = view(&app).epoch();
+            let label_keys = [
+                ("c", LabelAction::Copy),
+                ("x", LabelAction::Cut),
+                ("v", LabelAction::Paste),
+            ];
+            for (letter, action) in label_keys {
+                assert_eq!(
+                    read(&app, letter, each),
+                    Some(vec![Sent::Label(epoch, action)]),
+                    "{scheme:?}: {each:?}+{letter}"
+                );
+            }
+            // A held paste pastes again in a label, though not on the board.
+            let held_v = |app: &App| {
+                use iced::keyboard::key::{Code, Physical};
+                view(app).key(
+                    &iced::keyboard::Key::Character("v".into()),
+                    Physical::Code(Code::KeyV),
+                    each,
+                    None,
+                    true,
+                    false,
+                )
+            };
+            assert_eq!(
+                held_v(&app),
+                Some(vec![Sent::Label(epoch, LabelAction::Paste)]),
+                "{scheme:?}: held {each:?}+V"
+            );
+            assert_eq!(key(&mut app, C::CommitLabel), Disposition::Completed);
+            assert_eq!(
+                held_v(&app),
+                Some(Vec::new()),
+                "{scheme:?}: held {each:?}+V"
+            );
+            chord(&mut app, "z", modifier);
+        }
+    }
+}
+
 /// Exit criterion 3 of Phase 2: a board's draft has one sender. Outside
 /// the tests, the app builds `Op::EditDraft` in two places: the editor's
 /// `text_changed`, which returns early on a board, and `board_changed`.

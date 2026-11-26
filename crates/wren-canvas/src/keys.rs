@@ -4,6 +4,9 @@
 //! key the host claims is left to it; every other key is taken, so it
 //! never falls through to the host's column keys, and is a command, an
 //! edit of the open label ([`label`]), the connect query's text or nothing.
+//! In a label, the keys the policy gives the board's select all,
+//! clipboard, undo and redo are the text's own ([`label_command`]), so
+//! they follow the host's keymap and its command key.
 
 use std::sync::Arc;
 
@@ -105,7 +108,6 @@ pub(crate) fn route(
         }
         _ => {}
     }
-    let edits = || label(key, physical, modifiers, text);
     let route = match context.policy {
         // A keymap spells `?` as Shift+/, the key that types it on a US
         // layout; another layout types it elsewhere (Shift with `,` on
@@ -132,7 +134,9 @@ pub(crate) fn route(
             }
         }
         // With no keymap to ask, a chord the label reads is the label's.
-        None if shortcut && context.editing && edits().is_some() => KeyRoute::Pass,
+        None if shortcut && context.editing && label(key, physical, modifiers, text).is_some() => {
+            KeyRoute::Pass
+        }
         None if shortcut => KeyRoute::Host,
         None => KeyRoute::Pass,
     };
@@ -146,33 +150,126 @@ pub(crate) fn route(
         } else {
             plain(key, text, false, repeat)
         }),
-        // In a label only these two leave the text (§5.1 rule 3); every
-        // other key is the label's, and is taken whether or not the label
-        // has a use for it.
-        KeyRoute::Command(command @ (Command::CommitLabel | Command::ConnectNext))
-            if context.editing =>
-        {
-            Keyed::Take(vec![Out::Command(command)])
-        }
-        KeyRoute::Command(_) | KeyRoute::Pass if context.editing => {
-            let actions = edits().unwrap_or_default();
-            Keyed::Take(actions.into_iter().map(Out::Label).collect())
-        }
+        // Every key the host leaves is the label's, and is taken whether
+        // or not the label has a use for it.
+        _ if context.editing => Keyed::Take(in_label(
+            key,
+            physical,
+            modifiers,
+            text,
+            repeat,
+            route,
+            context.policy,
+        )),
         KeyRoute::Command(command) => Keyed::Take(vec![Out::Command(command)]),
         KeyRoute::Pass => Keyed::Take(plain(key, text, shortcut, repeat)),
     }
 }
 
-/// What a key does in an open label (§5.9 rule 3), or `None` for a key
-/// the label has no use for. Enter breaks the line, with Shift or without;
-/// the arrows, Home and End move the caret, by words and to the ends with
-/// the platform's modifiers, and select with Shift; ⌘ or Ctrl with A, C,
-/// X, V, Z and Y are the text's own; anything else that types, types.
+/// What an open label makes of a key the host left to the board, which
+/// the policy routed as `route` (§5.1 rule 3), in this order:
+/// - text typed without Ctrl or the logo key (nor Alt off macOS), and
+///   AltGr's, types, whatever the key is bound to;
+/// - commit and next leave the text, the only commands that do;
+/// - the label's own caret, erasing and line-break keys;
+/// - a key the policy gives the board's select all, clipboard, undo or
+///   redo is the text's. It is asked as a first press, since a held paste
+///   pastes again in a label while the board's does not.
+///
+/// Without a policy the label reads its fixed chords instead.
+fn in_label(
+    key: &Key,
+    physical: key::Physical,
+    modifiers: Modifiers,
+    text: Option<&str>,
+    repeat: bool,
+    route: KeyRoute,
+    policy: Option<&KeyPolicy>,
+) -> Vec<Out> {
+    let edits = |actions: Vec<LabelAction>| actions.into_iter().map(Out::Label).collect();
+    if let Some(typing) =
+        typed(text, modifiers).or_else(|| alt_graph(key, physical, modifiers, text))
+    {
+        return edits(typing);
+    }
+    if let KeyRoute::Command(command @ (Command::CommitLabel | Command::ConnectNext)) = route {
+        return vec![Out::Command(command)];
+    }
+    let Some(policy) = policy else {
+        return edits(label(key, physical, modifiers, text).unwrap_or_default());
+    };
+    if let Some(fixed) = read_label(key, physical, modifiers, text, false) {
+        return edits(fixed);
+    }
+    let first = if repeat {
+        policy(key, physical, modifiers, false)
+    } else {
+        route
+    };
+    match first {
+        KeyRoute::Command(command) => edits(label_command(command).into_iter().collect()),
+        KeyRoute::Host | KeyRoute::Pass => Vec::new(),
+    }
+}
+
+/// The text AltGr types on Linux, where it can arrive as Ctrl+Alt: printable
+/// text other than the key's own letter, which a real Ctrl+Alt chord would
+/// echo if it typed anything.
+fn alt_graph(
+    key: &Key,
+    physical: key::Physical,
+    modifiers: Modifiers,
+    text: Option<&str>,
+) -> Option<Vec<LabelAction>> {
+    if cfg!(target_os = "macos") || !(modifiers.control() && modifiers.alt()) || modifiers.logo() {
+        return None;
+    }
+    let text: String = text?.chars().filter(|c| !c.is_control()).collect();
+    let mut letters = text.chars();
+    let echoes = match (letters.next(), letters.next(), key.to_latin(physical)) {
+        (Some(typed), None, Some(own)) => typed.to_lowercase().eq(own.to_lowercase()),
+        _ => false,
+    };
+    (!text.is_empty() && !echoes).then(|| vec![LabelAction::Insert(text)])
+}
+
+/// What an open label makes of the board command a key is bound to: the
+/// board's select all, clipboard, undo and redo are the text's.
+fn label_command(command: Command) -> Option<LabelAction> {
+    Some(match command {
+        Command::SelectAll => LabelAction::SelectAll,
+        Command::Copy => LabelAction::Copy,
+        Command::Cut => LabelAction::Cut,
+        Command::Paste => LabelAction::Paste,
+        Command::Undo => LabelAction::Undo,
+        Command::Redo => LabelAction::Redo,
+        _ => return None,
+    })
+}
+
+/// What a key does in an open label (§5.9 rule 3) with no host policy, or
+/// `None` for a key the label has no use for. Enter breaks the line, with
+/// Shift or without; the arrows, Home and End move the caret, by words
+/// and to the ends with the platform's modifiers, and select with Shift;
+/// ⌘ or Ctrl with A, C, X, V, Z and Shift+Z are the text's own; anything
+/// else that types, types. With a policy those chords are the policy's
+/// ([`label_command`]).
 pub(crate) fn label(
     key: &Key,
     physical: key::Physical,
     modifiers: Modifiers,
     text: Option<&str>,
+) -> Option<Vec<LabelAction>> {
+    read_label(key, physical, modifiers, text, true)
+}
+
+/// [`label`], reading the fixed ⌘ or Ctrl chords only with `chords`.
+fn read_label(
+    key: &Key,
+    physical: key::Physical,
+    modifiers: Modifiers,
+    text: Option<&str>,
+    chords: bool,
 ) -> Option<Vec<LabelAction>> {
     use key::Named;
     let select = modifiers.shift();
@@ -224,7 +321,10 @@ pub(crate) fn label(
             _ => None,
         };
     }
-    if command && !modifiers.alt() {
+    if let Some(typing) = alt_graph(key, physical, modifiers, text) {
+        return Some(typing);
+    }
+    if chords && command && !modifiers.alt() {
         return match (key.to_latin(physical), modifiers.shift()) {
             (Some('a'), false) => Some(vec![LabelAction::SelectAll]),
             (Some('c'), false) => Some(vec![LabelAction::Copy]),
@@ -232,7 +332,6 @@ pub(crate) fn label(
             (Some('v'), false) => Some(vec![LabelAction::Paste]),
             (Some('z'), false) => Some(vec![LabelAction::Undo]),
             (Some('z'), true) => Some(vec![LabelAction::Redo]),
-            (Some('y'), false) if !cfg!(target_os = "macos") => Some(vec![LabelAction::Redo]),
             _ => None,
         };
     }
@@ -285,6 +384,7 @@ pub(crate) fn is_arrow(key: &Key) -> bool {
 
 /// The modifiers the machine reads, resolved for the platform: the
 /// duplicate-drag key is ⌥ on macOS and Ctrl elsewhere (§5.8 rule 3).
+/// It is Ctrl in both Linux modes, since window managers take Alt+drag.
 pub(crate) fn mods(modifiers: Modifiers) -> machine::Mods {
     machine::Mods {
         shift: modifiers.shift(),
@@ -894,14 +994,8 @@ mod tests {
             one(LabelAction::Redo)
         );
         assert_eq!(lettered("я", Code::KeyZ, command), one(LabelAction::Undo));
-        assert_eq!(
-            lettered("y", Code::KeyY, command),
-            if cfg!(target_os = "macos") {
-                None
-            } else {
-                one(LabelAction::Redo)
-            }
-        );
+        // Ctrl+Y does not redo (discovery/keybindings.md §2 item 4).
+        assert_eq!(lettered("y", Code::KeyY, command), None);
         assert_eq!(lettered("b", Code::KeyB, command), None);
 
         // Everything else types what it types, control characters left
@@ -984,6 +1078,420 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The command key and whether the Ctrl editing keys bind beside it,
+    /// for each scheme the host builds its board layer for.
+    const MODES: [(&str, Modifiers, bool); 3] = [
+        ("macOS", Modifiers::LOGO, false),
+        ("Linux Ctrl mode", Modifiers::CTRL, false),
+        ("Linux Alt mode", Modifiers::ALT, true),
+    ];
+
+    /// A board layer's select all, clipboard, undo, redo and duplicate keys
+    /// in the shape the host builds them for a mode: the command key with
+    /// A, C, X, V, D, Z and Shift+Z, and in Alt mode Ctrl with them too.
+    fn mode_policy(command_key: Modifiers, ctrl_too: bool) -> KeyPolicy {
+        Arc::new(move |key, physical, modifiers, _| {
+            let held = modifiers.difference(Modifiers::SHIFT);
+            if held != command_key && !(ctrl_too && held == Modifiers::CTRL) {
+                return KeyRoute::Pass;
+            }
+            KeyRoute::Command(match (key.to_latin(physical), modifiers.shift()) {
+                (Some('a'), false) => Command::SelectAll,
+                (Some('c'), false) => Command::Copy,
+                (Some('x'), false) => Command::Cut,
+                (Some('v'), false) => Command::Paste,
+                (Some('d'), false) => Command::Duplicate,
+                (Some('z'), false) => Command::Undo,
+                (Some('z'), true) => Command::Redo,
+                _ => return KeyRoute::Pass,
+            })
+        })
+    }
+
+    /// discovery/keybindings.md §2 items 3 and 4, §4: an open label's select
+    /// all, clipboard, undo and redo keys are the ones the host's policy
+    /// gives the board's commands, so they follow the command key: ⌘ on
+    /// macOS, Ctrl in Linux's Ctrl mode, and Alt, or Ctrl, in its Alt mode.
+    /// Ctrl+Y redoes in none of them.
+    #[test]
+    fn in_a_label_the_policy_s_select_all_clipboard_and_undo_keys_are_the_text_s() {
+        let table = [
+            ("a", Code::KeyA, false, LabelAction::SelectAll),
+            ("c", Code::KeyC, false, LabelAction::Copy),
+            ("x", Code::KeyX, false, LabelAction::Cut),
+            ("v", Code::KeyV, false, LabelAction::Paste),
+            ("z", Code::KeyZ, false, LabelAction::Undo),
+            ("z", Code::KeyZ, true, LabelAction::Redo),
+        ];
+        for (mode, command_key, ctrl_too) in MODES {
+            let policy = mode_policy(command_key, ctrl_too);
+            let ruled = Context {
+                policy: Some(&policy),
+                ..IDLE
+            };
+            let editing = Context {
+                editing: true,
+                escapes: true,
+                ..ruled
+            };
+            let chord = |letter: &str, code, held: Modifiers, shift: bool, context| {
+                let modifiers = if shift { held | Modifiers::SHIFT } else { held };
+                route(
+                    &character(letter),
+                    Physical::Code(code),
+                    modifiers,
+                    None,
+                    false,
+                    context,
+                )
+            };
+            let mut held = vec![command_key];
+            if ctrl_too {
+                held.push(Modifiers::CTRL);
+            }
+            for &key in &held {
+                for (letter, code, shift, action) in table.clone() {
+                    assert_eq!(
+                        chord(letter, code, key, shift, editing),
+                        edits(&[action]),
+                        "{mode}: {letter} with {key:?}, Shift {shift}"
+                    );
+                }
+                // Outside a label they are the board's commands.
+                assert_eq!(
+                    chord("c", Code::KeyC, key, false, ruled),
+                    Keyed::Take(vec![Out::Command(Command::Copy)]),
+                    "{mode}"
+                );
+                // A board command with no meaning in a label does nothing.
+                assert_eq!(
+                    chord("d", Code::KeyD, key, false, editing),
+                    Keyed::Take(Vec::new()),
+                    "{mode}"
+                );
+            }
+            // Ctrl+Y, and the letters with a modifier the mode does not
+            // bind, do nothing in the label.
+            let unbound = [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO]
+                .into_iter()
+                .filter(|other| !held.contains(other));
+            for other in unbound {
+                for (letter, code, shift, _) in table.clone() {
+                    assert_eq!(
+                        chord(letter, code, other, shift, editing),
+                        Keyed::Take(Vec::new()),
+                        "{mode}: {letter} with {other:?}"
+                    );
+                }
+            }
+            for key in [command_key, Modifiers::CTRL] {
+                assert_eq!(
+                    chord("y", Code::KeyY, key, false, editing),
+                    Keyed::Take(Vec::new()),
+                    "{mode}: Y with {key:?}"
+                );
+            }
+        }
+    }
+
+    /// The label's text keys are only what the policy binds: an unbound
+    /// Ctrl+C copies nothing, a rebound chord copies, and a bare key bound
+    /// to undo types its letter.
+    #[test]
+    fn a_label_s_text_keys_are_the_ones_the_policy_binds() {
+        let policy: KeyPolicy = Arc::new(|key, _, modifiers, _| match key.as_ref() {
+            Key::Character("c") if modifiers == Modifiers::CTRL | Modifiers::SHIFT => {
+                KeyRoute::Command(Command::Copy)
+            }
+            Key::Character("u") if modifiers.is_empty() => KeyRoute::Command(Command::Undo),
+            _ => KeyRoute::Pass,
+        });
+        let editing = Context {
+            editing: true,
+            escapes: true,
+            policy: Some(&policy),
+            ..IDLE
+        };
+        assert_eq!(
+            press(character("c"), Modifiers::CTRL, None, editing),
+            Keyed::Take(Vec::new())
+        );
+        assert_eq!(
+            press(
+                character("c"),
+                Modifiers::CTRL | Modifiers::SHIFT,
+                None,
+                editing
+            ),
+            edits(&[LabelAction::Copy])
+        );
+        assert_eq!(
+            press(character("u"), Modifiers::default(), Some("u"), editing),
+            edits(&[insert("u")])
+        );
+    }
+
+    /// An open label, with `policy` to ask.
+    fn editing(policy: &KeyPolicy) -> Context<'_> {
+        Context {
+            editing: true,
+            escapes: true,
+            policy: Some(policy),
+            ..IDLE
+        }
+    }
+
+    /// `route` for a press of `key` on the `code` key.
+    fn pressed(
+        key: Key,
+        code: Code,
+        modifiers: Modifiers,
+        text: Option<&str>,
+        repeat: bool,
+        context: Context<'_>,
+    ) -> Keyed {
+        route(&key, Physical::Code(code), modifiers, text, repeat, context)
+    }
+
+    /// A held paste pastes again in a label, though the host's policy, as
+    /// the board's paste does not repeat, routes a held one nowhere.
+    #[test]
+    fn a_held_paste_pastes_again_in_a_label_and_once_on_the_board() {
+        for (mode, command_key, ctrl_too) in MODES {
+            let keys = mode_policy(command_key, ctrl_too);
+            let policy: KeyPolicy = Arc::new(move |key, physical, modifiers, repeat| {
+                match keys(key, physical, modifiers, repeat) {
+                    KeyRoute::Command(Command::Paste) if repeat => KeyRoute::Pass,
+                    route => route,
+                }
+            });
+            let v = |repeat, context| {
+                pressed(
+                    character("v"),
+                    Code::KeyV,
+                    command_key,
+                    None,
+                    repeat,
+                    context,
+                )
+            };
+            for repeat in [false, true] {
+                assert_eq!(
+                    v(repeat, editing(&policy)),
+                    edits(&[LabelAction::Paste]),
+                    "{mode}, held {repeat}"
+                );
+            }
+            let board = Context {
+                policy: Some(&policy),
+                ..IDLE
+            };
+            assert_eq!(
+                v(false, board),
+                Keyed::Take(vec![Out::Command(Command::Paste)])
+            );
+            assert_eq!(v(true, board), Keyed::Take(Vec::new()), "{mode}");
+        }
+    }
+
+    /// Printable text typed bare or with Shift types in a label even on a
+    /// key bound to commit or next; Tab and Mod+Enter keep both.
+    #[test]
+    fn typed_text_types_in_a_label_whatever_commit_or_next_it_is_bound_to() {
+        let policy: KeyPolicy = Arc::new(|key, _, modifiers, _| match key.as_ref() {
+            Key::Character("r") if modifiers == Modifiers::SHIFT => {
+                KeyRoute::Command(Command::ConnectNext)
+            }
+            Key::Character("t") if modifiers.is_empty() => KeyRoute::Command(Command::CommitLabel),
+            Key::Named(Named::Tab) => KeyRoute::Command(Command::ConnectNext),
+            Key::Named(Named::Enter) if modifiers.command() => {
+                KeyRoute::Command(Command::CommitLabel)
+            }
+            _ => KeyRoute::Pass,
+        });
+        let label = editing(&policy);
+        let r = pressed(
+            character("r"),
+            Code::KeyR,
+            Modifiers::SHIFT,
+            Some("R"),
+            false,
+            label,
+        );
+        assert_eq!(r, edits(&[insert("R")]));
+        let t = pressed(
+            character("t"),
+            Code::KeyT,
+            Modifiers::empty(),
+            Some("t"),
+            false,
+            label,
+        );
+        assert_eq!(t, edits(&[insert("t")]));
+        let tab = pressed(
+            Key::Named(Named::Tab),
+            Code::Tab,
+            Modifiers::empty(),
+            Some("\t"),
+            false,
+            label,
+        );
+        assert_eq!(tab, Keyed::Take(vec![Out::Command(Command::ConnectNext)]));
+        let commit = pressed(
+            Key::Named(Named::Enter),
+            Code::Enter,
+            Modifiers::COMMAND,
+            Some("\r"),
+            false,
+            label,
+        );
+        assert_eq!(
+            commit,
+            Keyed::Take(vec![Out::Command(Command::CommitLabel)])
+        );
+        // Outside a label the binding holds.
+        let board = Context {
+            policy: Some(&policy),
+            ..IDLE
+        };
+        assert_eq!(
+            pressed(
+                character("r"),
+                Code::KeyR,
+                Modifiers::SHIFT,
+                Some("R"),
+                false,
+                board
+            ),
+            Keyed::Take(vec![Out::Command(Command::ConnectNext)])
+        );
+    }
+
+    /// The label's caret and erasing keys win over a policy that gives
+    /// their chords the board's clipboard or undo; and on macOS, so does
+    /// the text ⌥ with a letter types.
+    #[test]
+    fn the_label_s_own_keys_win_over_the_policy_s_label_actions() {
+        let policy: KeyPolicy = Arc::new(|_, _, _, _| KeyRoute::Command(Command::Copy));
+        let label = editing(&policy);
+        let named = |named, code, modifiers| {
+            pressed(Key::Named(named), code, modifiers, None, false, label)
+        };
+        assert_eq!(
+            named(Named::ArrowLeft, Code::ArrowLeft, JUMP),
+            edits(&[moved(Motion::WordLeft, false)])
+        );
+        assert_eq!(
+            named(Named::ArrowRight, Code::ArrowRight, JUMP | Modifiers::SHIFT),
+            edits(&[moved(Motion::WordRight, true)])
+        );
+        assert_eq!(
+            named(Named::Backspace, Code::Backspace, JUMP),
+            edits(&[moved(Motion::WordLeft, true), LabelAction::Backspace])
+        );
+        assert_eq!(
+            named(Named::Delete, Code::Delete, JUMP),
+            edits(&[moved(Motion::WordRight, true), LabelAction::Backspace])
+        );
+        assert_eq!(
+            named(Named::Home, Code::Home, Modifiers::empty()),
+            edits(&[moved(Motion::LineStart, false)])
+        );
+        assert_eq!(
+            named(Named::End, Code::End, JUMP),
+            edits(&[moved(Motion::End, false)])
+        );
+        // ⌥C types `ç` on macOS; off it, Alt is a command key and copies.
+        let option_c = pressed(
+            character("c"),
+            Code::KeyC,
+            Modifiers::ALT,
+            Some("ç"),
+            false,
+            label,
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(option_c, edits(&[insert("ç")]));
+        } else {
+            assert_eq!(option_c, edits(&[LabelAction::Copy]));
+        }
+        // A chord with no fixed meaning is the policy's.
+        assert_eq!(
+            pressed(
+                character("c"),
+                Code::KeyC,
+                Modifiers::COMMAND,
+                None,
+                false,
+                label
+            ),
+            edits(&[LabelAction::Copy])
+        );
+    }
+
+    /// Off macOS, AltGr can arrive as Ctrl+Alt with the text it types: in a
+    /// label that text types, in either Linux mode, while a real Ctrl+Alt
+    /// chord, which types no text or its own letter, keeps its binding.
+    #[test]
+    fn altgr_text_types_in_a_label_and_a_ctrl_alt_chord_keeps_its_binding() {
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        for (mode, command_key, ctrl_too) in MODES {
+            let keys = mode_policy(command_key, ctrl_too);
+            let policy: KeyPolicy =
+                Arc::new(move |key, physical, modifiers, repeat| match key.as_ref() {
+                    Key::Character("e") if modifiers == ctrl_alt => {
+                        KeyRoute::Command(Command::Undo)
+                    }
+                    _ => keys(key, physical, modifiers, repeat),
+                });
+            let label = editing(&policy);
+            let e = |text| pressed(character("e"), Code::KeyE, ctrl_alt, text, false, label);
+            if cfg!(target_os = "macos") {
+                assert_eq!(e(Some("€")), edits(&[LabelAction::Undo]), "{mode}");
+            } else {
+                assert_eq!(e(Some("€")), edits(&[insert("€")]), "{mode}");
+            }
+            assert_eq!(e(None), edits(&[LabelAction::Undo]), "{mode}");
+            assert_eq!(e(Some("\u{5}")), edits(&[LabelAction::Undo]), "{mode}");
+            assert_eq!(e(Some("E")), edits(&[LabelAction::Undo]), "{mode}");
+        }
+        // And with no policy to ask.
+        let altgr = label(
+            &character("e"),
+            Physical::Code(Code::KeyE),
+            ctrl_alt,
+            Some("€"),
+        );
+        assert_eq!(
+            altgr,
+            (!cfg!(target_os = "macos")).then(|| vec![insert("€")])
+        );
+    }
+
+    /// A function key the policy gives the board's undo undoes in a label.
+    #[test]
+    fn a_function_key_s_label_action_is_the_label_s() {
+        let policy: KeyPolicy = Arc::new(|key, _, modifiers, _| match key.as_ref() {
+            Key::Named(Named::F6) if modifiers == Modifiers::SHIFT => {
+                KeyRoute::Command(Command::Undo)
+            }
+            _ => KeyRoute::Pass,
+        });
+        let label = editing(&policy);
+        let f6 = |modifiers| {
+            pressed(
+                Key::Named(Named::F6),
+                Code::F6,
+                modifiers,
+                None,
+                false,
+                label,
+            )
+        };
+        assert_eq!(f6(Modifiers::SHIFT), edits(&[LabelAction::Undo]));
+        assert_eq!(f6(Modifiers::empty()), Keyed::Take(Vec::new()));
     }
 
     #[test]

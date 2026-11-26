@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, GROUP, HAND_WRITTEN, LABEL_MOD, NOTES, blocks, board, board_app, click, copy_samples,
+    FLOW, GROUP, HAND_WRITTEN, NOTES, blocks, board, board_app, click, copy_samples,
     fitted, flushed, key, note_id, open_note, stamp, type_text,
 )
 from tools.wrentest.client import RemoteError
@@ -152,7 +152,7 @@ def test_a_sequence_that_changes_nothing_writes_nothing(samples: Path) -> None:
         click(app, {"node": "second"})
         key(app, "enter")
         type_text(app, "Other")
-        key(app, "z", LABEL_MOD)
+        key(app, "z", "mod")
         state = key(app, "escape")
         assert state["pristine"], state
         # Past the autosave debounce.
@@ -189,7 +189,7 @@ def test_an_edit_that_comes_to_nothing_writes_nothing(samples: Path) -> None:
         key(app, "enter")
         type_text(app, "C")
         assert not board(app)["pristine"]
-        key(app, "z", LABEL_MOD)
+        key(app, "z", "mod")
         state = key(app, "escape")
         assert state["pristine"] and not state["can_undo"], state
         # Past the autosave debounce.
@@ -212,7 +212,7 @@ def test_a_notice_leaves_the_keyboard_where_it_was(samples: Path, notice: str) -
         else:
             label_typed(app, "abc")
             app.client.call("clipboard.write", {"text": "y" * 20_000})
-        key(app, "v", LABEL_MOD)
+        key(app, "v", "mod")
         wait_for(lambda: app.client.call("session.get")["banner"], timeout=5, interval=0.02,
                  description="the notice")
         # Let the frame that shows the banner be drawn.
