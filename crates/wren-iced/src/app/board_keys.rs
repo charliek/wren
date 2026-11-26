@@ -712,12 +712,15 @@ impl App {
             )
             .padding([3, 8])
             .style(move |_| chrome::surface(definition, colors.selected, 4.0, false)),
-            text_input("Filter the board's keys…", &palette.query)
-                .id("palette-query")
-                .size(15)
-                .padding([4, 0])
-                .on_input_maybe(self.loading.is_none().then_some(Message::PaletteQuery))
-                .style(move |_, status| chrome::input(definition, status, false)),
+            crate::field_keys::field_keys(
+                text_input("Filter the board's keys…", &palette.query)
+                    .id("palette-query")
+                    .size(15)
+                    .padding([4, 0])
+                    .on_input_maybe(self.loading.is_none().then_some(Message::PaletteQuery))
+                    .style(move |_, status| chrome::input(definition, status, false)),
+                &self.preferences.field_keys,
+            ),
             chrome::keycap("esc", definition),
         ]
         .spacing(8)
