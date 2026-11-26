@@ -46,7 +46,7 @@ LINES = [
 ]
 ORIGINAL = "\n".join(LINES)
 STATUS = ["Open", "Doing", "Done", "Cancelled"]
-PRIORITY = ["High", "Medium", "Low", "Highest", "Lowest", "None"]
+PRIORITY = ["Highest", "High", "Medium", "Low", "Lowest", "None"]
 TASK = STATUS + ["Change due date…", "Priority…", "Edit task…"]
 
 
@@ -138,8 +138,8 @@ def test_each_menu_opens_on_its_token_with_its_rows_and_the_current_one_marked(
 
         priority = right_click(app, doing, "⏫")
         assert labels(priority) == PRIORITY
-        assert [row["key"] for row in priority["rows"]] == ["H", "M", "L", "⇧H", "⇧L", "N"]
-        assert checked(priority) == ["High"] and priority["selected"] == 0
+        assert [row["key"] for row in priority["rows"]] == ["⇧H", "H", "M", "L", "⇧L", "N"]
+        assert checked(priority) == ["High"] and priority["selected"] == 1
         assert priority["text"] == "⏫"
         key(app, "escape")
 

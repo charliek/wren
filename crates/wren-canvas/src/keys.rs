@@ -66,16 +66,7 @@ pub(crate) struct Context<'a> {
     /// that opens one is: its repeats are not the label's.
     pub(crate) held_from_before: bool,
     pub(crate) policy: Option<&'a KeyPolicy>,
-    /// A label keeps its fixed ⌘ chords for select all, the clipboard and
-    /// its history whatever the policy binds, as on macOS, where they never
-    /// were the board layer's to give (see [`FIXED_CHORDS`]).
-    pub(crate) fixed_chords: bool,
 }
-
-/// Whether a label keeps its fixed chords: on macOS, as it always has, so
-/// a board binding never takes ⌘Z from a label; elsewhere the policy's
-/// keys are the label's, so they follow Linux's command-key mode.
-pub(crate) const FIXED_CHORDS: bool = cfg!(target_os = "macos");
 
 /// What the focused board makes of a press of `key`, which typed `text`.
 pub(crate) fn route(
@@ -152,7 +143,7 @@ pub(crate) fn route(
             text,
             repeat,
             route,
-            context.policy.filter(|_| !context.fixed_chords),
+            context.policy,
         )),
         KeyRoute::Command(command) => Keyed::Take(vec![Out::Command(command)]),
         KeyRoute::Pass => Keyed::Take(plain(key, text, shortcut, repeat)),
@@ -458,7 +449,6 @@ mod tests {
         escapes: false,
         held_from_before: false,
         policy: None,
-        fixed_chords: false,
     };
 
     fn press(key: Key, modifiers: Modifiers, text: Option<&str>, context: Context<'_>) -> Keyed {
@@ -1096,7 +1086,6 @@ mod tests {
             escapes: true,
             held_from_before: false,
             policy: Some(&policy),
-            fixed_chords: false,
         };
         let plain = Modifiers::default();
         for (key, modifiers, text) in [
@@ -1544,113 +1533,114 @@ mod tests {
         assert_eq!(f6(Modifiers::empty()), Keyed::Take(Vec::new()));
     }
 
-    /// The macOS route (branch review, severity 4): with
-    /// `super+z = board.unbind`, or ⌘Z rebound, ⌘Z still undoes the
-    /// label's typing, as the fixed ⌘ chords always have there; a chord
-    /// the board layer gives the board's undo is not the label's. The
-    /// platform's command key stands in for ⌘, as the fixed chords read it.
+    /// A label's undo is the board layer's, on macOS as on Linux: with
+    /// Mod+Z given `board.unbind` it undoes nothing in a label, and with
+    /// Mod+Z rebound to the board's copy and Mod+U to its undo, Mod+Z copies
+    /// and Mod+U undoes. Typing, the caret and commit are as before.
     #[test]
-    fn on_the_mac_route_a_label_keeps_its_fixed_chords_whatever_the_board_binds() {
-        let command = Modifiers::COMMAND;
-        let unbound: KeyPolicy = Arc::new(|_, _, _, _| KeyRoute::Pass);
-        let rebound: KeyPolicy = Arc::new(|key, _, modifiers, _| match key.as_ref() {
-            Key::Character("z") if modifiers.command() && !modifiers.shift() => {
-                KeyRoute::Command(Command::Copy)
-            }
-            Key::Character("u") if modifiers.command() => KeyRoute::Command(Command::Undo),
-            Key::Named(Named::Enter) if modifiers.command() => {
-                KeyRoute::Command(Command::CommitLabel)
-            }
-            _ => KeyRoute::Pass,
-        });
-        for policy in [&unbound, &rebound] {
-            let mac = Context {
-                fixed_chords: true,
-                ..editing(policy)
+    fn a_label_s_undo_follows_the_board_layer_unbound_or_rebound() {
+        for (mode, command_key, ctrl_too) in MODES {
+            let keys = mode_policy(command_key, ctrl_too);
+            let z_held = move |key: &Key, physical, modifiers: Modifiers| {
+                key.to_latin(physical) == Some('z')
+                    && !modifiers.shift()
+                    && modifiers == command_key
             };
-            let chord = |letter: &str, code, modifiers, repeat| {
-                pressed(character(letter), code, modifiers, None, repeat, mac)
+            let keys_unbound = keys.clone();
+            let unbound: KeyPolicy = Arc::new(move |key, physical, modifiers, repeat| {
+                if z_held(key, physical, modifiers) {
+                    return KeyRoute::Pass;
+                }
+                keys_unbound(key, physical, modifiers, repeat)
+            });
+            let rebound: KeyPolicy = Arc::new(move |key, physical, modifiers, repeat| {
+                if z_held(key, physical, modifiers) {
+                    return KeyRoute::Command(Command::Copy);
+                }
+                match key.as_ref() {
+                    Key::Character("u") if modifiers == command_key => {
+                        KeyRoute::Command(Command::Undo)
+                    }
+                    Key::Named(Named::Enter) if modifiers == command_key => {
+                        KeyRoute::Command(Command::CommitLabel)
+                    }
+                    _ => keys(key, physical, modifiers, repeat),
+                }
+            });
+            let chord = |letter: &str, code, modifiers, policy| {
+                pressed(
+                    character(letter),
+                    code,
+                    modifiers,
+                    None,
+                    false,
+                    editing(policy),
+                )
             };
-            for (letter, code, modifiers, action) in [
-                ("z", Code::KeyZ, command, LabelAction::Undo),
-                (
-                    "z",
-                    Code::KeyZ,
-                    command | Modifiers::SHIFT,
-                    LabelAction::Redo,
-                ),
-                ("a", Code::KeyA, command, LabelAction::SelectAll),
-                ("c", Code::KeyC, command, LabelAction::Copy),
-                ("x", Code::KeyX, command, LabelAction::Cut),
-                ("v", Code::KeyV, command, LabelAction::Paste),
-            ] {
+            assert_eq!(
+                chord("z", Code::KeyZ, command_key, &unbound),
+                Keyed::Take(Vec::new()),
+                "{mode}"
+            );
+            assert_eq!(
+                chord("z", Code::KeyZ, command_key, &rebound),
+                edits(&[LabelAction::Copy]),
+                "{mode}"
+            );
+            assert_eq!(
+                chord("u", Code::KeyU, command_key, &rebound),
+                edits(&[LabelAction::Undo]),
+                "{mode}"
+            );
+            for policy in [&unbound, &rebound] {
+                // Redo and the clipboard keep their keys.
                 assert_eq!(
-                    chord(letter, code, modifiers, false),
-                    edits(&[action]),
-                    "{letter}"
+                    chord("z", Code::KeyZ, command_key | Modifiers::SHIFT, policy),
+                    edits(&[LabelAction::Redo]),
+                    "{mode}"
+                );
+                assert_eq!(
+                    chord("a", Code::KeyA, command_key, policy),
+                    edits(&[LabelAction::SelectAll]),
+                    "{mode}"
+                );
+                let label = editing(policy);
+                assert_eq!(
+                    pressed(
+                        character("q"),
+                        Code::KeyQ,
+                        Modifiers::empty(),
+                        Some("q"),
+                        false,
+                        label
+                    ),
+                    edits(&[insert("q")])
+                );
+                assert_eq!(
+                    pressed(
+                        Key::Named(Named::ArrowLeft),
+                        Code::ArrowLeft,
+                        JUMP,
+                        None,
+                        false,
+                        label
+                    ),
+                    edits(&[moved(Motion::WordLeft, false)])
                 );
             }
             assert_eq!(
-                chord("v", Code::KeyV, command, true),
-                edits(&[LabelAction::Paste])
-            );
-            // A chord bound to the board's undo, and not a fixed one, does
-            // nothing in the label.
-            assert_eq!(
-                chord("u", Code::KeyU, command, false),
-                Keyed::Take(Vec::new())
-            );
-            // Typing, the caret and commit are as off macOS.
-            assert_eq!(
                 pressed(
-                    character("q"),
-                    Code::KeyQ,
-                    Modifiers::empty(),
-                    Some("q"),
-                    false,
-                    mac
-                ),
-                edits(&[insert("q")])
-            );
-            assert_eq!(
-                pressed(
-                    Key::Named(Named::ArrowLeft),
-                    Code::ArrowLeft,
-                    JUMP,
+                    Key::Named(Named::Enter),
+                    Code::Enter,
+                    command_key,
                     None,
                     false,
-                    mac
+                    editing(&rebound)
                 ),
-                edits(&[moved(Motion::WordLeft, false)])
+                Keyed::Take(vec![Out::Command(Command::CommitLabel)]),
+                "{mode}"
             );
         }
-        let mac = Context {
-            fixed_chords: true,
-            ..editing(&rebound)
-        };
-        assert_eq!(
-            pressed(
-                Key::Named(Named::Enter),
-                Code::Enter,
-                command,
-                None,
-                false,
-                mac
-            ),
-            Keyed::Take(vec![Out::Command(Command::CommitLabel)])
-        );
-        // Off the Mac route the same rebinding is the policy's.
-        assert_eq!(
-            pressed(
-                character("z"),
-                Code::KeyZ,
-                command,
-                None,
-                false,
-                editing(&rebound)
-            ),
-            edits(&[LabelAction::Copy])
-        );
     }
 
     /// Branch review, severity 3: AltGr's text types in a label even where
@@ -1705,50 +1695,45 @@ mod tests {
             }
             _ => KeyRoute::Pass,
         });
-        for fixed_chords in [false, true] {
-            let label = Context {
-                fixed_chords,
-                ..editing(&policy)
-            };
-            let named = |named, code, modifiers| {
-                pressed(Key::Named(named), code, modifiers, None, false, label)
-            };
-            let plain = Modifiers::empty();
-            assert_eq!(
-                named(Named::Backspace, Code::Backspace, plain),
-                edits(&[LabelAction::Backspace])
-            );
-            assert_eq!(
-                named(Named::Backspace, Code::Backspace, JUMP),
-                edits(&[moved(Motion::WordLeft, true), LabelAction::Backspace])
-            );
-            assert_eq!(
-                named(Named::Delete, Code::Delete, plain),
-                edits(&[LabelAction::Delete])
-            );
-            assert_eq!(
-                named(Named::ArrowLeft, Code::ArrowLeft, plain),
-                edits(&[moved(Motion::Left, false)])
-            );
-            assert_eq!(
-                named(Named::Home, Code::Home, plain),
-                edits(&[moved(Motion::LineStart, false)])
-            );
-            let leaves = |command| Keyed::Take(vec![Out::Command(command)]);
-            assert_eq!(
-                named(Named::Tab, Code::Tab, plain),
-                leaves(Command::ConnectNext)
-            );
-            assert_eq!(
-                named(Named::Enter, Code::Enter, Modifiers::COMMAND),
-                leaves(Command::CommitLabel)
-            );
-            // A line break is no caret key: a rebound Shift+Enter commits.
-            assert_eq!(
-                named(Named::Enter, Code::Enter, Modifiers::SHIFT),
-                leaves(Command::CommitLabel)
-            );
-        }
+        let label = editing(&policy);
+        let named = |named, code, modifiers| {
+            pressed(Key::Named(named), code, modifiers, None, false, label)
+        };
+        let plain = Modifiers::empty();
+        assert_eq!(
+            named(Named::Backspace, Code::Backspace, plain),
+            edits(&[LabelAction::Backspace])
+        );
+        assert_eq!(
+            named(Named::Backspace, Code::Backspace, JUMP),
+            edits(&[moved(Motion::WordLeft, true), LabelAction::Backspace])
+        );
+        assert_eq!(
+            named(Named::Delete, Code::Delete, plain),
+            edits(&[LabelAction::Delete])
+        );
+        assert_eq!(
+            named(Named::ArrowLeft, Code::ArrowLeft, plain),
+            edits(&[moved(Motion::Left, false)])
+        );
+        assert_eq!(
+            named(Named::Home, Code::Home, plain),
+            edits(&[moved(Motion::LineStart, false)])
+        );
+        let leaves = |command| Keyed::Take(vec![Out::Command(command)]);
+        assert_eq!(
+            named(Named::Tab, Code::Tab, plain),
+            leaves(Command::ConnectNext)
+        );
+        assert_eq!(
+            named(Named::Enter, Code::Enter, Modifiers::COMMAND),
+            leaves(Command::CommitLabel)
+        );
+        // A line break is no caret key: a rebound Shift+Enter commits.
+        assert_eq!(
+            named(Named::Enter, Code::Enter, Modifiers::SHIFT),
+            leaves(Command::CommitLabel)
+        );
         let board = Context {
             policy: Some(&policy),
             ..IDLE

@@ -50,9 +50,10 @@ const APP_ID: &str = "wren";
 /// The 256 px hicolor icon, derived from `assets/icon/wren-icon.svg` by `make icons`.
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon/hicolor/256x256/apps/wren.png");
 
-fn window_settings() -> iced::window::Settings {
+fn window_settings(decorations: bool) -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(1280.0, 800.0),
+        decorations,
         exit_on_close_request: false,
         icon: window_icon(),
         #[cfg(target_os = "linux")]
@@ -136,6 +137,10 @@ fn launch(options: cli::Options) -> Result<(), Box<dyn Error>> {
         options
     };
     #[cfg(feature = "smoke-test")]
+    let decorations = cli::test_decorations(std::env::var_os("WREN_TEST_DECORATIONS").as_deref())?;
+    #[cfg(not(feature = "smoke-test"))]
+    let decorations = true;
+    #[cfg(feature = "smoke-test")]
     let completion = options.smoke.as_ref().map(|request| request.completion());
 
     let title = if options.board_spike.is_some() {
@@ -148,7 +153,7 @@ fn launch(options: cli::Options) -> Result<(), Box<dyn Error>> {
     let mut application =
         iced::application(move || App::new(options.clone()), App::update, App::view)
             .title(title)
-            .window(window_settings())
+            .window(window_settings(decorations))
             .default_font(fonts::UI)
             .theme(App::theme)
             .subscription(App::subscription);
@@ -182,8 +187,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn window_settings_carry_the_desktop_entry_application_id() {
-        let settings = window_settings();
+        let settings = window_settings(true);
         assert_eq!(settings.platform_specific.application_id, APP_ID);
+        assert!(settings.decorations);
         assert!(settings.icon.is_some());
         assert!(!settings.exit_on_close_request);
     }

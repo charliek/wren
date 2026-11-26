@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -28,7 +29,7 @@ from typing import Any
 
 from tools.wrentest.client import Client, ProtocolError, RemoteError, TransportError
 
-__all__ = ["WrenApp", "spell_setting", "tasks_setting", "wait_for"]
+__all__ = ["WrenApp", "engine_setting", "spell_setting", "tasks_setting", "wait_for"]
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,6 +38,8 @@ READINESS_POLL: float = 0.15
 QUIT_TIMEOUT: float = 10.0
 SIGTERM_TIMEOUT: float = 5.0
 _FINAL_REAP_TIMEOUT: float = 5.0
+# Long enough for tools/run_display.py to start Weston again three times.
+COMPOSITOR_TIMEOUT: float = 60.0
 
 _PRESERVE_VARS = frozenset({
     "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
@@ -133,24 +136,50 @@ def _boards_setting(settings: str | None) -> str | None:
     return _with_setting(settings, "boards", value)
 
 
-def tasks_setting() -> str | None:
-    """The lane's ``tasks`` value: ``WRENTEST_TASKS``, or ``None`` unset."""
-    value = os.environ.get("WRENTEST_TASKS", "")
-    if value and value not in ("off", "on"):
+def tasks_setting() -> str:
+    """The lane's ``tasks`` value: ``WRENTEST_TASKS``, ``off`` when unset or
+    empty.
+
+    The build defaults to on. Like ``spell-check``, the lane pins a value,
+    so a lane that does not ask for tasks runs with them off, as it did
+    before the default changed.
+    """
+    value = os.environ.get("WRENTEST_TASKS", "") or "off"
+    if value not in ("off", "on"):
         raise ValueError(f"WRENTEST_TASKS must be off or on, got {value!r}")
-    return value or None
+    return value
 
 
-def _tasks_setting(settings: str | None) -> str | None:
+def _tasks_setting(settings: str | None) -> str:
     """*settings* with the ``tasks`` line ``WRENTEST_TASKS`` asks for.
 
-    Like ``WRENTEST_BOARDS``: ``off`` or ``on`` writes that setting into
-    every launch's ``config.conf``, unset adds nothing, and settings that
-    already name ``tasks`` are left as they are, since a task case sets it
-    itself.
+    It is always written, and settings that already name ``tasks`` are left
+    as they are, since a task case sets it itself.
     """
-    value = tasks_setting()
-    return settings if value is None else _with_setting(settings, "tasks", value)
+    return _with_setting(settings, "tasks", tasks_setting())
+
+
+def engine_setting() -> str:
+    """The ``editor-engine`` for a case that does not choose one: the first
+    engine ``WRENTEST_ENGINE`` names, ``classic`` when unset.
+
+    The build defaults to ``advanced``. The editor cases run on each engine
+    ``WRENTEST_ENGINE`` names and write their own line; every other case
+    runs on this one, so ``WRENTEST_ENGINE=classic,advanced`` keeps them on
+    ``classic``, as before the default changed, and
+    ``WRENTEST_ENGINE=advanced`` moves the whole suite to ``advanced``.
+    """
+    value = os.environ.get("WRENTEST_ENGINE", "").strip()
+    first = value.split(",")[0].strip() if value else "classic"
+    if first not in ("classic", "advanced"):
+        raise ValueError(f"WRENTEST_ENGINE must name classic or advanced, got {first!r}")
+    return first
+
+
+def _engine_setting(settings: str | None) -> str:
+    """*settings* with the ``editor-engine`` line the lane pins, unless they
+    name ``editor-engine`` themselves."""
+    return _with_setting(settings, "editor-engine", engine_setting())
 
 
 def linux_modifier() -> str:
@@ -235,7 +264,44 @@ def _build_env(sandbox: Path) -> dict[str, str]:
         path.mkdir(mode=0o700, exist_ok=True)
         env[var] = str(path)
     env["WREN_TEST_MODE"] = "1"
+    add_decorations(env)
     return env
+
+
+def add_decorations(env: dict[str, str]) -> None:
+    """Pass the lane's ``WRENTEST_DECORATIONS`` to a launch as the app's
+    ``WREN_TEST_DECORATIONS``: ``off`` opens the window undecorated (what
+    ``run_display.py`` asks for under its Weston), and ``on`` or unset adds
+    nothing. Every builder of a launch environment calls this."""
+    decorations = os.environ.get("WRENTEST_DECORATIONS", "") or "on"
+    if decorations not in ("on", "off"):
+        raise ValueError(f"WRENTEST_DECORATIONS must be on or off, got {decorations!r}")
+    if decorations == "off":
+        env["WREN_TEST_DECORATIONS"] = "off"
+
+
+def _wait_for_compositor(env: dict[str, str], timeout: float = COMPOSITOR_TIMEOUT) -> None:
+    """Wait until the Wayland compositor in *env*, if any, accepts a
+    connection: one tools/run_display.py is starting again after a crash
+    refuses it for a moment, and an app launched then could not connect."""
+    name, runtime = env.get("WAYLAND_DISPLAY"), env.get("XDG_RUNTIME_DIR")
+    if not name or not (runtime or name.startswith("/")):
+        return
+    path = name if name.startswith("/") else os.path.join(runtime, name)
+    deadline = time.monotonic() + timeout
+    while True:
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(1)
+            try:
+                probe.connect(path)
+                return
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"No Wayland compositor accepted a connection at {path} "
+                        f"within {timeout:g}s: {error}"
+                    ) from error
+        time.sleep(0.1)
 
 
 class WrenApp:
@@ -260,11 +326,13 @@ class WrenApp:
     settings:
         Text for the sandbox's ``config.conf``, written before the first
         launch, with ``spell-check = <WRENTEST_SPELL>`` appended unless it
-        names ``spell-check`` itself; without it the file holds only that
-        line. ``WRENTEST_BOARDS`` adds a ``boards`` line after it unless the
-        text has one, ``WRENTEST_TASKS`` a ``tasks`` line after that, and
-        last comes ``linux-modifier = <WRENTEST_LINUX_MODIFIER>`` (``alt``
-        unless set), unless the text names ``linux-modifier`` itself.
+        names ``spell-check`` itself; without it the file holds only the
+        lane's lines. ``WRENTEST_BOARDS`` adds a ``boards`` line after it
+        unless the text has one, then come ``tasks = <WRENTEST_TASKS>``
+        (``off`` unless set), ``editor-engine = <engine_setting()>``
+        (``classic`` unless ``WRENTEST_ENGINE`` names ``advanced`` first),
+        and last ``linux-modifier = <WRENTEST_LINUX_MODIFIER>`` (``alt``
+        unless set), each unless the text names its key itself.
         Restarts keep whatever the app has written there since.
     lane_settings:
         Set to ``False`` to add no lane line: ``config.conf`` is then
@@ -316,7 +384,8 @@ class WrenApp:
         self._extra_args = extra_args
         self._evaluation = evaluation
         self._settings = (
-            _modifier_setting(_tasks_setting(_boards_setting(_spell_setting(settings))))
+            _modifier_setting(_engine_setting(_tasks_setting(
+                _boards_setting(_spell_setting(settings)))))
             if lane_settings else settings)
         self._words = words
         self._today = today
@@ -536,6 +605,7 @@ class WrenApp:
         env = _build_env(home_root)
         if self._today is not None:
             env["WREN_TEST_TODAY"] = self._today
+        _wait_for_compositor(env)
 
         self._artifacts_base.mkdir(parents=True, exist_ok=True)
         stamp = f"{time.monotonic_ns()}-{self._launch_counter}"

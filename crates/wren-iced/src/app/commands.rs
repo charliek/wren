@@ -1082,11 +1082,10 @@ impl CommandId {
             || matches!(self, Self::TaskSetDue | Self::TaskEdit)
     }
 
-    /// Whether the command exists on Linux only: the `edit.*` keys, which
-    /// on macOS belong to the editor and the Edit menu, and the switch of
-    /// Linux's command key. On macOS it is neither bindable nor listed.
+    /// Whether the command exists on Linux only: the switch of Linux's
+    /// command key. On macOS it is neither bindable nor listed.
     pub fn linux_only(self) -> bool {
-        self.edit_key().is_some() || self == Self::ToggleLinuxModifier
+        self == Self::ToggleLinuxModifier
     }
 
     /// The task menu a command opens at the caret's task.
@@ -2103,10 +2102,11 @@ mod tests {
             .committed());
         assert_eq!(app.editor.text(), "- [ ] first **body**");
         assert_eq!(app.edit_revision, revision + 2);
+        // With tasks on, the default, the toggle stamps the done date.
         let _ = app.dispatch(Command::Run(CommandId::ToggleTask));
         assert_eq!(
             app.session.as_ref().unwrap().document().unwrap().text,
-            "- [x] first **body**"
+            format!("- [x] first **body** ✅ {}", app.today())
         );
     }
 

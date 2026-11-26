@@ -184,13 +184,12 @@ impl Slot {
     }
 }
 
-/// The priorities in the form's order (Q7): High, Medium, Low, Highest,
-/// Lowest, then none.
+/// The priorities in the form's order, from highest to lowest, then none.
 pub(super) const PRIORITIES: [Option<Priority>; 6] = [
+    Some(Priority::Highest),
     Some(Priority::High),
     Some(Priority::Medium),
     Some(Priority::Low),
-    Some(Priority::Highest),
     Some(Priority::Lowest),
     None,
 ];
@@ -2090,10 +2089,33 @@ mod tests {
             key(&mut app, FormKey::Pick(pick.into()));
             assert_eq!(open(&app).form.priority(), priority, "{pick:?}");
         }
+        // Right walks the chips in rank order and wraps; Left walks back.
+        let ranked = [
+            Some(Priority::Highest),
+            Some(Priority::High),
+            Some(Priority::Medium),
+            Some(Priority::Low),
+            Some(Priority::Lowest),
+            None,
+        ];
+        key(&mut app, FormKey::Pick("H".into()));
+        assert_eq!(open(&app).form.priority(), ranked[0]);
+        for (at, expected) in ranked.iter().enumerate().skip(1) {
+            key(&mut app, FormKey::Step(1));
+            assert_eq!(open(&app).form.priority(), *expected, "right to {at}");
+        }
         key(&mut app, FormKey::Step(1));
-        assert_eq!(open(&app).form.priority(), Some(Priority::Medium));
-        key(&mut app, FormKey::Step(-2));
-        assert_eq!(open(&app).form.priority(), None, "round the ends: None");
+        assert_eq!(
+            open(&app).form.priority(),
+            ranked[0],
+            "right wraps to Highest"
+        );
+        key(&mut app, FormKey::Step(-1));
+        assert_eq!(open(&app).form.priority(), None, "left wraps to None");
+        for (at, expected) in ranked.iter().enumerate().rev().skip(1) {
+            key(&mut app, FormKey::Step(-1));
+            assert_eq!(open(&app).form.priority(), *expected, "left to {at}");
+        }
         // The buttons are pressed by their slot.
         key(&mut app, FormKey::Press(Slot::Cancel.index()));
         assert!(app.task_form.is_none());

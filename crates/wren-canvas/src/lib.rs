@@ -1313,7 +1313,6 @@ impl BoardView {
             escapes: self.machine.escapes(),
             held_from_before,
             policy: self.key_policy.as_ref(),
-            fixed_chords: keys::FIXED_CHORDS,
         };
         let keys::Keyed::Take(outs) = keys::route(key, physical, modifiers, text, repeat, context)
         else {

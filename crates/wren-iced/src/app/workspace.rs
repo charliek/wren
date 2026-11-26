@@ -1333,7 +1333,8 @@ mod tests {
             ]
         );
 
-        // The app passes the launch value, not the file's later one.
+        // The app passes the launch value, not the file's later one. Tasks
+        // are on, the default.
         let (mut app, _) = App::new(Options::default());
         app.preferences.boards = false;
         app.preferences.settings.boards = true;
@@ -1341,7 +1342,7 @@ mod tests {
             app.session_options(),
             SessionOptions {
                 boards: false,
-                tasks: false,
+                tasks: true,
             }
         );
         app.preferences.boards = true;
@@ -1350,7 +1351,7 @@ mod tests {
             app.session_options(),
             SessionOptions {
                 boards: true,
-                tasks: false,
+                tasks: true,
             }
         );
     }

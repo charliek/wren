@@ -1049,11 +1049,6 @@ impl App {
             }
             wren_editor::Message::Undo => self.editor.undo(),
             wren_editor::Message::Redo => self.editor.redo(),
-            wren_editor::Message::Find => {
-                self.editor.break_group();
-                self.find_open = true;
-                return iced::widget::operation::focus("find-query");
-            }
         };
         if changed {
             self.text_changed(started);

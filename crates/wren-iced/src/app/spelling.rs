@@ -387,7 +387,8 @@ mod tests {
 
     #[test]
     fn the_classic_engine_opens_no_menu_whatever_the_host_hands_it() {
-        let (_directory, mut app) = spell_app("", "A mispelled word\n", None);
+        let (_directory, mut app) =
+            spell_app("editor-engine = classic\n", "A mispelled word\n", None);
         load(&mut app);
         assert!(app.wanted_proofreader().is_some());
         let _ = caret(&mut app, 0, 4);
@@ -479,7 +480,7 @@ mod tests {
         std::fs::write(&config, "editor-engine = advanced\nspell-check = off\n").unwrap();
         let _ = app.reload_settings(false);
         assert!(!app.command_enabled(CommandId::SpellSuggest));
-        std::fs::write(&config, "").unwrap();
+        std::fs::write(&config, "editor-engine = classic\n").unwrap();
         let _ = app.reload_settings(false);
         assert!(!app.command_enabled(CommandId::SpellSuggest));
         std::fs::write(&config, ADVANCED).unwrap();

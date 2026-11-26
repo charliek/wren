@@ -351,8 +351,7 @@ impl fmt::Display for Accel {
 }
 
 /// The `edit.*` actions on their key, which a default table puts after a
-/// modifier. They are Linux defaults only: on macOS the editor and the Edit
-/// menu own ⌘Z, ⌘C and the rest.
+/// modifier: Mod's on every platform, and in Linux's Alt mode Ctrl's too.
 const EDIT_KEYS: [(&str, &str); 6] = [
     ("z", "edit.undo"),
     ("shift+z", "edit.redo"),
@@ -425,17 +424,15 @@ pub fn default_bindings(scheme: Scheme) -> Vec<(String, &'static str)> {
         ("mod+comma", "settings.open"),
         ("mod+q", "app.quit"),
     ]));
-    if scheme.platform == Platform::Linux {
-        bindings.extend(EDIT_KEYS.map(|(key, action)| (format!("mod+{key}"), action)));
-        // With Alt as the command key, the desktop's Ctrl habits keep
-        // working: find, quit, and every text field's editing keys.
-        if scheme.linux == LinuxModifier::Alt {
-            bindings.extend(owned(&[
-                ("ctrl+f", "navigation.find"),
-                ("ctrl+q", "app.quit"),
-            ]));
-            bindings.extend(EDIT_KEYS.map(|(key, action)| (format!("ctrl+{key}"), action)));
-        }
+    bindings.extend(EDIT_KEYS.map(|(key, action)| (format!("mod+{key}"), action)));
+    // With Alt as the command key, the desktop's Ctrl habits keep working:
+    // find, quit, and every text field's editing keys.
+    if scheme.platform == Platform::Linux && scheme.linux == LinuxModifier::Alt {
+        bindings.extend(owned(&[
+            ("ctrl+f", "navigation.find"),
+            ("ctrl+q", "app.quit"),
+        ]));
+        bindings.extend(EDIT_KEYS.map(|(key, action)| (format!("ctrl+{key}"), action)));
     }
     resolved(scheme, bindings)
 }
@@ -797,7 +794,9 @@ mod tests {
     }
 
     /// The macOS base layer as Wren shipped it before Linux had a command
-    /// key, which `mod` must reproduce exactly.
+    /// key, which `mod` must reproduce exactly, with the `edit.*` keys
+    /// after it: ⌘Z, ⇧⌘Z, ⌘C, ⌘X, ⌘V and ⌘A, the keys the editor and the
+    /// text fields always took for them.
     const MAC_BASE: &[(&str, &str)] = &[
         ("super+shift+p", "palette.commands"),
         ("super+k", "palette.commands"),
@@ -829,6 +828,12 @@ mod tests {
         ("super+period", "editor.spell_suggest"),
         ("super+comma", "settings.open"),
         ("super+q", "app.quit"),
+        ("super+z", "edit.undo"),
+        ("super+shift+z", "edit.redo"),
+        ("super+c", "edit.copy"),
+        ("super+x", "edit.cut"),
+        ("super+v", "edit.paste"),
+        ("super+a", "edit.select_all"),
     ];
 
     /// The macOS task defaults as they were.
@@ -1279,11 +1284,11 @@ mod tests {
     #[test]
     fn default_labels_follow_the_mode() {
         for (scheme, palette, undo, quit, connect, step, suggest) in [
-            (MAC, "⇧⌘P", None, "⌘Q", "⌘→", "⌥→", "⌘."),
+            (MAC, "⇧⌘P", "⌘Z", "⌘Q", "⌘→", "⌥→", "⌘."),
             (
                 CTRL,
                 "Ctrl+Shift+P",
-                Some("Ctrl+Z"),
+                "Ctrl+Z",
                 "Ctrl+Q",
                 "Ctrl+→",
                 "Alt+→",
@@ -1292,7 +1297,7 @@ mod tests {
             (
                 ALT,
                 "Alt+Shift+P",
-                Some("Alt+Z"),
+                "Alt+Z",
                 "Alt+Q",
                 "Alt+→",
                 "Ctrl+→",
@@ -1303,7 +1308,7 @@ mod tests {
             let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &[], by_name);
             let label = |action| keymap.label(action, platform);
             assert_eq!(label("palette.commands").as_deref(), Some(palette));
-            assert_eq!(label("edit.undo").as_deref(), undo);
+            assert_eq!(label("edit.undo").as_deref(), Some(undo));
             assert_eq!(label("app.quit").as_deref(), Some(quit));
             assert_eq!(label("board.connect.right").as_deref(), Some(connect));
             assert_eq!(label("board.move.right").as_deref(), Some(step));
@@ -1396,12 +1401,12 @@ mod tests {
         assert_eq!(keymap.action(&accel("alt+q")), None);
     }
 
+    /// The `edit.*` actions are Mod's on every platform (⌘ on macOS).
     /// Exception: in Alt mode the editing keys of every other text field,
     /// Ctrl+Z, Ctrl+Shift+Z, Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A, keep working
-    /// beside Mod's; in Ctrl mode they are Mod's. The Mac has no `edit.*`
-    /// default: the editor and the Edit menu own ⌘Z and the rest there.
+    /// beside Mod's; in Ctrl mode they are Mod's.
     #[test]
-    fn the_edit_actions_are_mod_on_linux_with_ctrl_aliases_in_alt_mode() {
+    fn the_edit_actions_are_mod_with_ctrl_aliases_in_alt_mode() {
         let edits = [
             ("z", "edit.undo"),
             ("shift+z", "edit.redo"),
@@ -1410,15 +1415,21 @@ mod tests {
             ("v", "edit.paste"),
             ("a", "edit.select_all"),
         ];
-        for scheme in [CTRL, ALT] {
+        for scheme in SCHEMES {
             let (keymap, _) = Keymap::build(scheme, default_bindings(scheme), &[], base);
             for (key, action) in edits {
                 let primary = scheme.parse(&format!("mod+{key}")).unwrap();
                 assert_eq!(keymap.action(&primary), Some(action), "{scheme:?}");
                 assert_eq!(keymap.accel(action), Some(&primary), "{scheme:?}");
+                // The Mac binds them on ⌘ alone; Ctrl is ⌃, a motion key.
                 let ctrl = accel(&format!("ctrl+{key}"));
-                assert_eq!(keymap.action(&ctrl), Some(action), "{scheme:?}");
-                // Ctrl mode binds none of them on Alt.
+                assert_eq!(
+                    keymap.action(&ctrl),
+                    (scheme != MAC).then_some(action),
+                    "{scheme:?}"
+                );
+                // Ctrl mode binds none of them on Alt, nor the Mac on ⌥,
+                // which types.
                 let alt = accel(&format!("alt+{key}"));
                 assert_eq!(
                     keymap.action(&alt),
@@ -1427,9 +1438,6 @@ mod tests {
                 );
             }
         }
-        assert!(default_bindings(MAC)
-            .iter()
-            .all(|(_, action)| !EDIT_KEYS.iter().any(|(_, edit)| edit == action)));
         // Redo is Mod+Shift+Z only, so Ctrl+Y is free for Focus in Ctrl mode.
         let (keymap, _) = Keymap::build(CTRL, both_defaults(CTRL), &[], by_name);
         assert_eq!(keymap.action(&accel("ctrl+y")), Some("view.focus"));
@@ -1624,9 +1632,7 @@ mod tests {
                 .filter_map(|(trigger, _)| keymap.action(&accel(trigger)))
                 .collect();
             let mut expected: HashSet<&str> = editor.into();
-            if scheme.platform == Platform::Linux {
-                expected.extend(edits);
-            }
+            expected.extend(edits);
             assert_eq!(shared, expected, "{scheme:?}");
         }
     }
@@ -1778,7 +1784,7 @@ mod tests {
             .board_bindings()
             .all(|(_, action)| action.starts_with("board.")));
         assert_eq!(keymap.action(&accel("v")), None);
-        assert_eq!(keymap.action(&accel("super+z")), None);
+        assert_eq!(keymap.action(&accel("super+d")), None);
         assert_eq!(keymap.board_action(&accel("super+shift+p")), None);
     }
 

@@ -25,6 +25,41 @@ pub enum Native {
     BringAllToFront,
 }
 
+impl Native {
+    /// The key equivalent muda gives the item, as a trigger, and the item's
+    /// title, for the items that have one. AppKit fires it before the
+    /// focused widget, or the keymap, sees the press.
+    pub fn accelerator(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
+            Self::Hide => ("super+h", "Hide"),
+            Self::HideOthers => ("alt+super+h", "Hide Others"),
+            Self::Minimize => ("super+m", "Minimize"),
+            Self::Fullscreen => ("ctrl+super+f", "Toggle Full Screen"),
+            Self::About
+            | Self::CheckForUpdates
+            | Self::Services
+            | Self::ShowAll
+            | Self::BringAllToFront => return None,
+        })
+    }
+}
+
+/// The title of the predefined item of the menu bar whose key equivalent
+/// is `accel`, if one has it: a `keybind` line cannot take that key.
+pub fn native_item(accel: &Accel) -> Option<&'static str> {
+    fn find(rows: &[Row], accel: &Accel) -> Option<&'static str> {
+        rows.iter().find_map(|row| match row {
+            Row::Native(native) => native.accelerator().and_then(|(trigger, title)| {
+                (wren_core::keybind::parse_trigger(trigger).as_ref() == Some(accel))
+                    .then_some(title)
+            }),
+            Row::Submenu(_, rows) => find(rows, accel),
+            Row::Command(..) | Row::Separator => None,
+        })
+    }
+    MENUS.iter().find_map(|menu| find(menu.rows, accel))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Row {
     /// A command key and the item's title.
@@ -434,6 +469,86 @@ mod tests {
             ]
         );
         assert_eq!(menu("Window").kind, Kind::Window);
+    }
+
+    /// The Mac keymap binds the `edit.*` keys to ⌘Z, ⇧⌘Z, ⌘C, ⌘X, ⌘V and
+    /// ⌘A, and no menu item shows one, a command's or a predefined one's: a
+    /// key equivalent fires before the focused widget sees the press, so it
+    /// would take the key from the editor, a label and the text fields.
+    #[test]
+    fn no_menu_item_takes_an_editing_key() {
+        let mac = keymap(Platform::Mac, &[]);
+        let edits: Vec<&Accel> = mac
+            .bindings()
+            .filter(|(_, action)| {
+                CommandId::parse(action)
+                    .and_then(CommandId::edit_key)
+                    .is_some()
+            })
+            .map(|(accel, _)| accel)
+            .collect();
+        let shown: Vec<String> = edits.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            [
+                "super+z",
+                "shift+super+z",
+                "super+c",
+                "super+x",
+                "super+v",
+                "super+a"
+            ]
+        );
+        for menu in &MENUS {
+            for (key, _) in commands(menu.rows) {
+                for accel in triggers(&mac, key, menu.kind) {
+                    assert!(!edits.contains(&accel), "{key} shows {accel}");
+                }
+            }
+        }
+        for accel in edits {
+            assert_eq!(native_item(accel), None, "{accel}");
+        }
+    }
+
+    /// The predefined items' key equivalents, muda's for each `Native`
+    /// row: ⌘H, ⌥⌘H, ⌘M and ⌃⌘F. No default binding of either layer is
+    /// one, so the menu takes no key the keymap gives.
+    #[test]
+    fn the_predefined_items_keys_are_known_and_no_default_takes_one() {
+        let mut found = Vec::new();
+        fn natives(rows: &[Row], found: &mut Vec<Native>) {
+            for row in rows {
+                match row {
+                    Row::Native(native) => found.push(*native),
+                    Row::Submenu(_, rows) => natives(rows, found),
+                    Row::Command(..) | Row::Separator => {}
+                }
+            }
+        }
+        for menu in &MENUS {
+            natives(menu.rows, &mut found);
+        }
+        let keyed: Vec<(&str, &str)> = found.iter().filter_map(|n| n.accelerator()).collect();
+        assert_eq!(
+            keyed,
+            [
+                ("super+h", "Hide"),
+                ("alt+super+h", "Hide Others"),
+                ("super+m", "Minimize"),
+                ("ctrl+super+f", "Toggle Full Screen"),
+            ]
+        );
+        let accel = |trigger: &str| wren_core::keybind::parse_trigger(trigger).unwrap();
+        assert_eq!(native_item(&accel("super+h")), Some("Hide"));
+        assert_eq!(native_item(&accel("super+alt+h")), Some("Hide Others"));
+        assert_eq!(native_item(&accel("super+shift+h")), None);
+        let mac = keymap(Platform::Mac, &[]);
+        for (accel, action) in mac.bindings().chain(mac.board_bindings()) {
+            assert_eq!(native_item(accel), None, "{accel} = {action}");
+        }
+        // App quit is a command row, so ⌘Q is the keymap's.
+        assert_eq!(native_item(&accel("super+q")), None);
     }
 
     #[test]

@@ -98,9 +98,8 @@ Quit.
 
 Undo, redo, cut, copy, paste, and select all are the `edit.undo`,
 `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, and `edit.select_all`
-actions, so a `keybind` line can move them (see
-[Custom keybindings](#custom-keybindings)). On macOS the editor keeps ⌘Z,
-⌘C and the rest.
+actions, on macOS and Linux alike, so a `keybind` line can move them (see
+[Custom keybindings](#custom-keybindings)).
 
 Add Shift to Home and the motions to select as you go. Word deletes take
 the spaces next to the cursor, then one word or one run of punctuation:
@@ -229,7 +228,7 @@ chooses a row directly:
 | Menu | Keys |
 |---|---|
 | Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
-| Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
+| Priority | ⇧H Highest, `h` High, `m` Medium, `l` Low, ⇧L Lowest, `n` None |
 | Task | the status keys, then `d` Set or Change due date…, `p` Priority…, `e` Edit task… |
 
 A choice rewrites the task's line as one undo step, with the done or
@@ -287,7 +286,7 @@ matter has no form.
 | Tab, ⇧Tab | the next or the previous field, round the ends: description, status, due, priority, owners, Save, Cancel |
 | ← → | on the status or the priority, the previous or the next choice |
 | Space `/` `x` `-` | on the status, Open, Doing, Done or Cancelled |
-| `h` `m` `l` ⇧H ⇧L `n` | on the priority, High, Medium, Low, Highest, Lowest or None |
+| ⇧H `h` `m` `l` ⇧L `n` | on the priority, Highest, High, Medium, Low, Lowest or None |
 | ↓ | in the due field, opens the calendar under it; whatever closes it gives the due field the keyboard back |
 | ↵ | saves, from any field but these: in the owners field with a name typed it adds that name as typed, or the owner chosen with ↑ ↓; on Save or Cancel it presses the button |
 | Space | on Save or Cancel, presses the button |
@@ -475,7 +474,11 @@ While a label is open, only Finish label (⌘↵ / Mod+Enter) and Add next
 shape (Tab) act as board keys, and every other key edits the label's text,
 so ⌘C / Mod+C, ⌘Z / Mod+Z, ⌘A / Mod+A, arrows, and Backspace are the
 label's: the board's select all, copy, cut, paste, undo and redo keys act on
-the label's text, and typed text always wins over a binding. While you connect from
+the label's text, on macOS as on Linux, so `keybind = super+z = board.unbind`
+leaves ⌘Z undoing nothing in a label and `keybind = super+u = board.undo`
+undoes there too. Typed text always wins over a binding, ⌥'s characters on
+macOS included, and the caret and erase keys win over a bound text action.
+While you connect from
 the keyboard (C with one shape selected), letters type into the search for
 a target. The app's own shortcuts, such as the command palette, work in
 both.
@@ -603,15 +606,39 @@ task form, on either engine.
 The board actions are listed under [On a board](#on-a-board).
 
 `edit.undo`, `edit.redo`, `edit.copy`, `edit.cut`, `edit.paste`, and
-`edit.select_all` are the editor's own keys as actions. Their Linux
-defaults are Mod+Z, Mod+Shift+Z, Mod+C, Mod+X, Mod+V, and Mod+A (plus the
-Ctrl versions in Alt mode). They are Linux only: on macOS they have no
-default key, a `keybind` line for one is refused, and the editor keeps ⌘Z, ⌘C
-and the rest. They are not in the command palette, so they only run from
-their keys. `keybind = ctrl+v = unbind` makes Ctrl+V do nothing, and binding
-a key such as Ctrl+V to another command makes it do only that command. Keys
-that belong to a single widget cannot be rebound: ↵, Esc, Tab, and the
-arrows in menus, the calendar, and the form.
+`edit.select_all` are the editor's own keys as actions, on both platforms.
+Their defaults are ⌘Z, ⇧⌘Z, ⌘C, ⌘X, ⌘V, and ⌘A on macOS, and Mod+Z,
+Mod+Shift+Z, Mod+C, Mod+X, Mod+V, and Mod+A on Linux (plus the Ctrl
+versions in Alt mode). A binding of one works in the editor and in the text
+fields (the palette, dialogs, the find bars, the column filters, the
+calendar, the task form, and the board keys sheet's filter); a text field
+has no undo, so undo and redo do nothing there. They are not in the
+command palette, so they only run from their keys.
+`keybind = mod+u = edit.undo` adds a second undo key, and
+`keybind = mod+v = unbind` makes ⌘V (Ctrl+V on Linux) do nothing, in the
+editor and in a focused text field; binding a key such as ⌘V to another
+command makes it do only that command. On macOS ⌥ with a letter types its
+character (⌥C types `ç`) unless a `keybind` line binds exactly that chord:
+`keybind = alt+c = edit.copy` makes ⌥C copy in the editor and the text
+fields, and type nothing there. In a board label typed text always wins,
+so ⌥C still types `ç` there. Keys that belong to a single widget cannot be
+rebound: ↵, Esc, Tab, and the arrows in menus, the calendar, and the form.
+
+A few limits on macOS:
+
+- **Bindings are exact.** A key acts only with exactly the modifiers bound,
+  so ⌥⌘Z and ⌃⌘Z no longer undo, nor ⇧⌥⌘Z and ⇧⌃⌘Z redo, in the editor
+  (and ⌃⌘ with Z, C, X, V or A in a board label), where older versions took
+  them. Bind them yourself if you use them, for example
+  `keybind = super+alt+z = edit.undo`, or `keybind = ctrl+super+z =
+  board.undo` for labels.
+- **The menu bar's keys.** ⌘H (Hide), ⌥⌘H (Hide Others), ⌘M (Minimize) and
+  ⌃⌘F (Toggle Full Screen) belong to the macOS menu, which takes them before
+  Wren sees them. A `keybind` line on one of them is refused with a warning
+  that names the menu item.
+- **Dead keys.** An ⌥ chord that starts an accent on your layout (on US
+  layouts ⌥E, ⌥U, ⌥N, ⌥I and ⌥\`) cannot be bound: macOS turns it into the
+  accent before Wren sees the key. Choose another chord.
 
 `editor.toggle_markdown_assist`, `editor.toggle_engine`, and
 `editor.toggle_spell_check` have no default key. They flip

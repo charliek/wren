@@ -1,14 +1,17 @@
-//! The text editing keys of the app's text fields on Linux
-//! (discovery/keybindings.md §4). iced's text input takes Ctrl for copy,
-//! cut, paste and select all, and the keymap may put those keys elsewhere.
-//! [`field_keys`] wraps a text input:
+//! The text editing keys of the app's text fields
+//! (discovery/keybindings.md §4). iced's text input takes its command key,
+//! Ctrl on Linux and ⌘ on macOS, for copy, cut, paste and select all, and
+//! the keymap may put those keys elsewhere. [`field_keys`] wraps a text
+//! input:
 //!
 //! - A press the keymap gives an `edit.*` action, other than the input's
-//!   own press for it, reaches the input as that Ctrl press, with the
-//!   modifiers it reads (the ones it last heard change) set for that press
-//!   alone: Alt mode's Alt keys, or a user's own. The input has no history,
-//!   so undo and redo reach it as Ctrl+Z and Ctrl+Shift+Z, which it
-//!   ignores: they never type their letter.
+//!   own press for it, reaches the input as that command-key press, with
+//!   the modifiers it reads (the ones it last heard change) set for that
+//!   press alone: Alt mode's Alt keys, or a user's own. The input has no
+//!   history, so undo and redo reach it as Ctrl+Z and Ctrl+Shift+Z (⌘Z and
+//!   ⇧⌘Z), which it ignores: they never type their letter. On macOS a
+//!   user's ⌥ chord given an edit is that edit, as it is in the editor, so
+//!   it types no ⌥ character; an unbound ⌥ letter is the input's to type.
 //! - Otherwise, one of the input's own clipboard chords that the keymap
 //!   gives another command, or that a `keybind` line unbinds, is taken from
 //!   the focused input, so one press does one thing.
@@ -21,7 +24,8 @@
 //!
 //! With the default Ctrl-mode keymap only the last two hold, which change
 //! nothing for an input that saw the modifiers change and typed nothing
-//! with AltGr. On macOS the keys are not wrapped at all.
+//! with AltGr. With the default macOS keymap, which rewrites and takes
+//! nothing, the keys are not wrapped at all.
 //!
 //! [`key_owner`] takes the presses of one key from everything under it,
 //! for a host that closes on that key (the board's keys sheet on its own
@@ -37,17 +41,27 @@ use iced::{Element, Event, Length, Rectangle, Size, Vector};
 use wren_core::keybind::{Accel, Mods, Platform, Scheme};
 use wren_editor::EditKey;
 
-/// What the wrapper does with a Linux keymap's keys; with none (macOS),
-/// nothing at all.
+/// What the wrapper does with a keymap's keys; with none (the default
+/// macOS keymap), nothing at all.
 #[derive(Debug, Clone, Default)]
 pub struct FieldKeys(Option<Arc<Table>>);
 
 #[derive(Debug, Default)]
 struct Table {
-    /// Alt mode's editing keys that are not the input's own presses.
+    /// The input's command key: Ctrl, or ⌘ on macOS.
+    command: Modifiers,
+    /// The keymap's editing keys that are not the input's own presses.
     rewrites: Vec<(Accel, EditKey)>,
     /// The input's own clipboard chords that the keymap gives elsewhere.
     taken: Vec<Accel>,
+}
+
+/// The modifier iced's text widgets read as the command key on `platform`.
+fn command_key(platform: Platform) -> Modifiers {
+    match platform {
+        Platform::Mac => Modifiers::LOGO,
+        Platform::Linux => Modifiers::CTRL,
+    }
 }
 
 /// The letter of the press a text input knows for `edit`, and whether
@@ -84,20 +98,20 @@ pub fn native_edit(platform: Platform, accel: &Accel) -> Option<EditKey> {
     })
 }
 
-/// Every trigger that [`native_edit`] takes on Linux.
-pub fn native_chords() -> impl Iterator<Item = Accel> {
-    ["c", "x", "v", "a"].into_iter().flat_map(|key| {
-        (0..8u8).filter_map(move |held| {
+/// Every trigger that [`native_edit`] takes on `platform`.
+pub fn native_chords(platform: Platform) -> impl Iterator<Item = Accel> {
+    ["c", "x", "v", "a"].into_iter().flat_map(move |key| {
+        (0..16u8).filter_map(move |held| {
             let accel = Accel {
                 mods: Mods {
-                    ctrl: true,
-                    shift: held & 1 != 0,
-                    alt: held & 2 != 0,
-                    logo: held & 4 != 0,
+                    ctrl: held & 1 != 0,
+                    shift: held & 2 != 0,
+                    alt: held & 4 != 0,
+                    logo: held & 8 != 0,
                 },
                 key: key.to_owned(),
             };
-            native_edit(Platform::Linux, &accel).map(|_| accel)
+            native_edit(platform, &accel).map(|_| accel)
         })
     })
 }
@@ -106,22 +120,23 @@ impl FieldKeys {
     /// The wrapper for a keymap of `scheme`: its `edits` (each trigger the
     /// keymap gives an `edit.*` action, and that action's key), rewritten
     /// but for those on the input's own press, and `taken`, the input's own
-    /// chords the keymap gives elsewhere, but for those it rewrites.
+    /// chords the keymap gives elsewhere, but for those it rewrites. On
+    /// macOS a keymap that rewrites and takes nothing, as the default one,
+    /// has no wrapper, so the fields are as they always were there.
     pub fn new(
         scheme: Scheme,
         edits: impl IntoIterator<Item = (Accel, EditKey)>,
         taken: impl IntoIterator<Item = Accel>,
     ) -> Self {
-        if scheme.platform == Platform::Mac {
-            return Self(None);
-        }
+        let mac = scheme.platform == Platform::Mac;
         let own = |accel: &Accel, edit: EditKey| {
             let (letter, shift) = native(edit);
             *accel
                 == Accel {
                     mods: Mods {
-                        ctrl: true,
+                        ctrl: !mac,
                         shift,
+                        logo: mac,
                         ..Mods::default()
                     },
                     key: letter.to_owned(),
@@ -132,11 +147,18 @@ impl FieldKeys {
             .filter(|(accel, edit)| !own(accel, *edit))
             .collect();
         // A chord the keymap gives another edit is that edit, not nothing.
-        let taken = taken
+        let taken: Vec<Accel> = taken
             .into_iter()
             .filter(|accel| rewrites.iter().all(|(bound, _)| bound != accel))
             .collect();
-        Self(Some(Arc::new(Table { rewrites, taken })))
+        if mac && rewrites.is_empty() && taken.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Arc::new(Table {
+            command: command_key(scheme.platform),
+            rewrites,
+            taken,
+        })))
     }
 
     fn press(event: &Event) -> Option<(Accel, Modifiers)> {
@@ -177,9 +199,9 @@ impl FieldKeys {
             .map(|(_, edit)| *edit)?;
         let (letter, shift) = native(edit);
         let held = if shift {
-            Modifiers::CTRL | Modifiers::SHIFT
+            table.command | Modifiers::SHIFT
         } else {
-            Modifiers::CTRL
+            table.command
         };
         let press = Event::Keyboard(keyboard::Event::KeyPressed {
             key: Key::Character(letter.into()),
@@ -204,8 +226,8 @@ impl FieldKeys {
 
     /// Hand `event` on through `update` as the text input knows it: a
     /// press with its own modifiers set first, and a rewritten key as its
-    /// Ctrl press, the modifiers put back after it. Unwrapped keys (macOS)
-    /// hand it on as it is.
+    /// command-key press, the modifiers put back after it. Unwrapped keys
+    /// (the default macOS keymap) hand it on as it is.
     fn deliver(&self, event: &Event, mut update: impl FnMut(&Event)) {
         let Event::Keyboard(keyboard::Event::KeyPressed { modifiers, .. }) = event else {
             return update(event);
@@ -505,7 +527,6 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    #[cfg(not(target_os = "macos"))]
     use iced::advanced::clipboard;
     use iced::keyboard::key::{Code, Physical};
     use iced::keyboard::Location;
@@ -514,11 +535,9 @@ pub(crate) mod tests {
     use super::*;
 
     /// A clipboard that keeps what is written to it.
-    #[cfg(not(target_os = "macos"))]
     #[derive(Default)]
     pub(crate) struct Kept(pub(crate) Option<String>);
 
-    #[cfg(not(target_os = "macos"))]
     impl Clipboard for Kept {
         fn read(&self, kind: clipboard::Kind) -> Option<String> {
             self.0.clone().filter(|_| kind == clipboard::Kind::Standard)
@@ -651,25 +670,101 @@ pub(crate) mod tests {
         assert_eq!(key, Key::Character("c".into()));
     }
 
+    /// The `edit.*` defaults of the macOS keymap: ⌘Z, ⇧⌘Z, ⌘C, ⌘X, ⌘V
+    /// and ⌘A, the text input's own presses.
+    pub(crate) fn mac_edits() -> Vec<(Accel, EditKey)> {
+        [
+            ("super+z", EditKey::Undo),
+            ("super+shift+z", EditKey::Redo),
+            ("super+c", EditKey::Copy),
+            ("super+x", EditKey::Cut),
+            ("super+v", EditKey::Paste),
+            ("super+a", EditKey::SelectAll),
+        ]
+        .map(|(trigger, edit)| (accel(trigger), edit))
+        .into()
+    }
+
+    const MAC: Scheme = Scheme::new(Platform::Mac, LinuxModifier::Ctrl);
+
     #[test]
-    fn on_macos_there_is_no_wrapper() {
-        for linux in [LinuxModifier::Ctrl, LinuxModifier::Alt] {
-            let scheme = Scheme::new(Platform::Mac, linux);
-            let keys = FieldKeys::new(scheme, linux_edits(linux), [accel("super+v")]);
-            assert!(keys.0.is_none());
-            assert!(keys.rewrite(&chord("c", Modifiers::ALT)).is_none());
-            assert!(!keys.takes(&chord("v", Modifiers::LOGO)));
+    fn the_default_mac_keymap_has_no_wrapper() {
+        let keys = FieldKeys::new(MAC, mac_edits(), []);
+        assert!(keys.0.is_none());
+        for letter in ["z", "c", "x", "v", "a"] {
+            for modifiers in [Modifiers::ALT, Modifiers::LOGO, Modifiers::CTRL] {
+                assert!(keys.rewrite(&chord(letter, modifiers)).is_none());
+                assert!(!keys.takes(&chord(letter, modifiers)));
+            }
         }
         assert!(FieldKeys::default().0.is_none());
     }
 
     #[test]
+    fn on_macos_a_user_s_edit_key_is_rewritten_to_the_command_key() {
+        // `keybind = mod+u = edit.undo`, `ctrl+c = edit.copy` and
+        // `alt+v = edit.paste`.
+        let mut edits = mac_edits();
+        edits.extend([
+            (accel("super+u"), EditKey::Undo),
+            (accel("ctrl+c"), EditKey::Copy),
+            (accel("alt+v"), EditKey::Paste),
+        ]);
+        let keys = FieldKeys::new(MAC, edits, []);
+        let rewritten = |letter, modifiers| match keys.rewrite(&chord(letter, modifiers)) {
+            Some((
+                held,
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key,
+                    modifiers: pressed,
+                    text,
+                    ..
+                }),
+            )) => {
+                assert_eq!((held, text), (pressed, None));
+                Some((key, held))
+            }
+            _ => None,
+        };
+        let command = |letter: &str| Some((Key::Character(letter.into()), Modifiers::LOGO));
+        assert_eq!(rewritten("u", Modifiers::LOGO), command("z"));
+        assert_eq!(rewritten("c", Modifiers::CTRL), command("c"));
+        // A ⌥ chord given an edit is that edit, and types no ⌥ character.
+        assert_eq!(rewritten("v", Modifiers::ALT), command("v"));
+        // The input's own presses, and every unbound ⌥ letter, are its own.
+        for letter in ["z", "c", "x", "v", "a"] {
+            assert!(rewritten(letter, Modifiers::LOGO).is_none(), "{letter}");
+        }
+        assert!(rewritten("c", Modifiers::ALT).is_none());
+        assert!(rewritten("u", Modifiers::ALT).is_none());
+    }
+
+    #[test]
+    fn on_macos_a_command_chord_unbound_or_given_elsewhere_is_taken() {
+        // `keybind = super+v = unbind`, or `= view.focus`.
+        let mut edits = mac_edits();
+        edits.retain(|(bound, _)| *bound != accel("super+v"));
+        let keys = FieldKeys::new(MAC, edits, [accel("super+v")]);
+        assert!(keys.takes(&chord("v", Modifiers::LOGO)));
+        assert!(!keys.takes(&chord("c", Modifiers::LOGO)));
+        // Ctrl+V on the Mac is no chord of the input's.
+        assert!(!keys.takes(&chord("v", Modifiers::CTRL)));
+        assert!(keys.rewrite(&chord("v", Modifiers::LOGO)).is_none());
+    }
+
+    #[test]
     fn the_native_chords_are_iced_s_clipboard_keys() {
-        let chords: Vec<Accel> = native_chords().collect();
+        let chords: Vec<Accel> = native_chords(Platform::Linux).collect();
         // Eight modifier sets for C, X and A; Paste never with Alt.
         assert_eq!(chords.len(), 8 * 3 + 4);
         assert!(chords.contains(&accel("ctrl+shift+v")));
         assert!(!chords.contains(&accel("ctrl+alt+v")));
+        assert!(chords.iter().all(|chord| chord.mods.ctrl));
+        let mac: Vec<Accel> = native_chords(Platform::Mac).collect();
+        assert_eq!(mac.len(), 8 * 3 + 4);
+        assert!(mac.contains(&accel("super+shift+v")));
+        assert!(!mac.contains(&accel("super+alt+v")));
+        assert!(mac.iter().all(|chord| chord.mods.logo));
         assert_eq!(
             native_edit(Platform::Linux, &accel("ctrl+a")),
             Some(EditKey::SelectAll)
@@ -683,8 +778,8 @@ pub(crate) mod tests {
         assert_eq!(native_edit(Platform::Mac, &accel("ctrl+a")), None);
     }
 
-    /// Real iced input on Linux, where its clipboard keys are Ctrl's.
-    #[cfg(not(target_os = "macos"))]
+    /// Real iced input, whose clipboard keys are Ctrl's on Linux and ⌘'s
+    /// on macOS: each platform's cases run on that platform.
     mod input {
         use iced::advanced::widget::operation;
         use iced::keyboard::key::Named;
@@ -805,6 +900,7 @@ pub(crate) mod tests {
             (run.published, run.kept)
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn in_alt_mode_alt_edits_a_text_field_as_ctrl_does() {
             let keys = linux(LinuxModifier::Alt);
@@ -841,6 +937,7 @@ pub(crate) mod tests {
             assert!(published.is_empty(), "{published:?}");
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn in_ctrl_mode_the_default_field_does_what_it_does_without_the_wrapper() {
             let keys = linux(LinuxModifier::Ctrl);
@@ -880,6 +977,7 @@ pub(crate) mod tests {
             );
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn a_chord_given_another_edit_does_that_edit_in_the_field() {
             let scheme = Scheme::new(Platform::Linux, LinuxModifier::Alt);
@@ -901,6 +999,7 @@ pub(crate) mod tests {
 
         /// AltGr typing `text` on the key `letter`, as Linux can report it:
         /// Ctrl+Alt with the text.
+        #[cfg(not(target_os = "macos"))]
         fn alt_graph(letter: &str, text: &str) -> Event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character(letter.into()),
@@ -913,6 +1012,7 @@ pub(crate) mod tests {
             })
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn alt_graph_text_types_in_a_field_and_is_never_a_clipboard_chord() {
             let ctrl = Modifiers::CTRL;
@@ -945,6 +1045,7 @@ pub(crate) mod tests {
         /// as the keys sheet owns its toggle wherever its keyboard is: the
         /// field `focused` or not. Returns what was published, whether each press
         /// was captured, and the clipboard.
+        #[cfg(not(target_os = "macos"))]
         fn owned(
             events: &[Event],
             clip: Option<&str>,
@@ -1014,6 +1115,7 @@ pub(crate) mod tests {
             (published, captured, kept.0)
         }
 
+        #[cfg(not(target_os = "macos"))]
         fn question(repeat: bool) -> Event {
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character("?".into()),
@@ -1026,6 +1128,7 @@ pub(crate) mod tests {
             })
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn an_owned_key_is_taken_from_everything_under_it_and_its_text_is_not() {
             for focused in [true, false] {
@@ -1071,6 +1174,7 @@ pub(crate) mod tests {
             );
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn a_chord_the_keymap_gives_elsewhere_is_taken_from_the_focused_field() {
             // `keybind = ctrl+v = navigation.find`, or `= unbind`.
@@ -1098,6 +1202,7 @@ pub(crate) mod tests {
             }
         }
 
+        #[cfg(not(target_os = "macos"))]
         #[test]
         fn a_field_mounted_with_ctrl_held_pastes_on_ctrl_v() {
             // Ctrl held to open the find bar: the field never heard Ctrl go
@@ -1117,6 +1222,95 @@ pub(crate) mod tests {
                 false,
             );
             assert!(bare.published.is_empty(), "{:?}", bare.published);
+        }
+
+        /// ⌥ with `letter` on macOS, typing `text`.
+        #[cfg(target_os = "macos")]
+        fn option(letter: &str, text: &str) -> Event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(letter.into()),
+                modified_key: Key::Character(text.into()),
+                physical_key: Physical::Code(Code::KeyC),
+                location: Location::Standard,
+                modifiers: Modifiers::ALT,
+                text: Some(text.into()),
+                repeat: false,
+            })
+        }
+
+        /// The default macOS fields, which have no wrapper, edit with ⌘ and
+        /// type ⌥'s characters, as they always have.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn the_default_mac_field_edits_with_command_and_types_option_text() {
+            let keys = FieldKeys::new(MAC, mac_edits(), []);
+            let logo = Modifiers::LOGO;
+            let (published, kept) = field(
+                &keys,
+                "abc",
+                &[chord("a", logo), chord("c", logo), end(), chord("v", logo)],
+            );
+            assert_eq!(
+                (published, kept.as_deref()),
+                (vec!["abcabc".to_owned()], Some("abc"))
+            );
+            let (published, _) = field(&keys, "abc", &[end(), option("c", "ç")]);
+            assert_eq!(published, ["abcç"]);
+        }
+
+        /// `keybind = ctrl+c = edit.copy` and `alt+x = edit.cut` work in a
+        /// macOS field; the bound ⌥X cuts and types nothing, while an
+        /// unbound ⌥C still types `ç`.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn a_mac_user_s_edit_keys_edit_a_field() {
+            let mut edits = mac_edits();
+            edits.extend([
+                (accel("ctrl+c"), EditKey::Copy),
+                (accel("alt+x"), EditKey::Cut),
+            ]);
+            let keys = FieldKeys::new(MAC, edits, []);
+            let logo = Modifiers::LOGO;
+            let (published, kept) = field(
+                &keys,
+                "abc",
+                &[chord("a", logo), chord("c", Modifiers::CTRL)],
+            );
+            assert_eq!((published, kept.as_deref()), (Vec::new(), Some("abc")));
+            let (published, kept) = field(&keys, "abc", &[chord("a", logo), option("x", "≈")]);
+            assert_eq!(
+                (published, kept.as_deref()),
+                (vec![String::new()], Some("abc"))
+            );
+            let (published, _) = field(&keys, "abc", &[end(), option("c", "ç")]);
+            assert_eq!(published, ["abcç"]);
+        }
+
+        /// `keybind = super+v = unbind`, or `= view.focus`: ⌘V pastes
+        /// nothing in a focused macOS field.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn an_unbound_command_v_does_nothing_in_a_mac_field() {
+            let mut edits = mac_edits();
+            edits.retain(|(bound, _)| *bound != accel("super+v"));
+            let keys = FieldKeys::new(MAC, edits, [accel("super+v")]);
+            let run = run(
+                &keys,
+                "abc",
+                Some("clip"),
+                &[end(), chord("v", Modifiers::LOGO)],
+                true,
+                true,
+            );
+            assert!(run.published.is_empty(), "{:?}", run.published);
+            assert!(run.captured[1]);
+            // ⌘C is the field's still.
+            let (_, kept) = field(
+                &keys,
+                "abc",
+                &[chord("a", Modifiers::LOGO), chord("c", Modifiers::LOGO)],
+            );
+            assert_eq!(kept.as_deref(), Some("abc"));
         }
     }
 }

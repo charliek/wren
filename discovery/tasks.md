@@ -58,7 +58,7 @@ Decided in the design review, 2026-11-24 (questions D1 to D16, §3.3):
 | Q4 | The opt-out layers: `tasks: off` in a note's front matter, and folder exclusions in `.wren/tasks.toml`? | **Resolved (§2 item 10).** |
 | Q5 | An unknown character in the box (`[?]`, `[>]`): an open task, as in Obsidian, or not a task? | **Resolved (§2 item 11).** |
 | Q6 | Does priority ship in the first release? | **Resolved (§2 item 16).** |
-| Q7 | How many priority levels do Wren's pickers offer? (§3.1) | **Resolved (§2 item 17):** all five, High, Medium and Low first |
+| Q7 | How many priority levels do Wren's pickers offer? (§3.1) | **Resolved (§2 item 17):** all five; ordered Highest to Lowest since the owner's change of 2026-11-26 |
 | Q8 | Where does `@` completion find owners in ring 0? (§3.1) | **Resolved (§2 item 17):** scan the notes the search index already holds, on demand; no task index until ring 1 |
 | Q9 | Are tokens shown as text or collapsed into chips? (§3.2) | **Resolved (§2 item 17):** text with colour first; decide on chips after use. As built, ring 0 shipped coloured text and no chips (item 2.2); whether chips are worth building stays open until the text has been used day to day |
 | Q10 | Where on the line does Wren write tokens, and in what order? (§3.2) | **Resolved (§2 item 17):** the end of the line, in Obsidian Tasks' own order |
@@ -81,7 +81,7 @@ Q7 is about those lists only. The text is never limited: Wren reads and shows al
 - *All five* (the answer): matches Obsidian, so a user moving between the two apps sees the same choices. The cost is a longer list.
 - *Three* (High, Medium, Low): fewer choices, as Logseq, org-mode and NotePlan offer. Highest and Lowest stay readable and still sort, but Wren gives no way to *set* them except typing the glyph or raising and lowering.
 
-The list is ordered High, Medium, Low, Highest, Lowest, so the common three are always the first keys pressed, while Obsidian's two extremes stay one step away.
+The list was ordered High, Medium, Low, Highest, Lowest, so the common three were always the first keys pressed. The owner changed Q7's order on 2026-11-26 to rank order: Highest, High, Medium, Low, Lowest, None (the task form and the priority menu; accelerators unchanged).
 
 **Q8: where `@` completion finds its names.** When the user types `@` on a task line, Wren offers names to complete. The question is which names it knows, given that ring 0 has no rollup.
 
@@ -262,7 +262,7 @@ Obsidian Tasks' indicators, appended to the line like the due date:
 - **No priority sorts between Medium and Low**, as in Obsidian Tasks: Low and Lowest mean "deliberately later", so they sort below unmarked tasks, and nobody has to mark every task to use priority at all.
 - **Read with or without the variation selector.** An emoji may be followed by U+FE0F, which macOS's emoji picker (Ctrl+Cmd+Space) inserts after `⏫`. Obsidian Tasks failed to read such a `⏫` until 6.1.1 (issue 2273). Wren reads each indicator with or without U+FE0F. It writes what Obsidian Tasks writes: each glyph as a single code point, with no U+FE0F (confirmed in `DefaultTaskSerializer.ts`), pinned in tests.
 - **One priority per task.** If a line has several indicators, the last one wins on read. Setting a priority replaces every indicator on the line.
-- **Why five levels.** Other tools use fewer: three in Logseq, org-mode and NotePlan (`!`, `!!`, `!!!`), four in Todoist, and todo.txt guides advise using only A to C. Wren still reads all five for compatibility. Its menus put High, Medium and Low first and Highest and Lowest after them (Q7), so the everyday choice is three.
+- **Why five levels.** Other tools use fewer: three in Logseq, org-mode and NotePlan (`!`, `!!`, `!!!`), four in Todoist, and todo.txt guides advise using only A to C. Wren still reads all five for compatibility. Its menus list Highest to Lowest in rank order (Q7, order changed by the owner on 2026-11-26).
 - **Shown as:**
   - in the editor, the glyph itself (no colour of its own, so the line stays calm);
   - in the rollup, a narrow priority column, the default sort (overdue, then priority, then due date), and a "by priority" grouping;

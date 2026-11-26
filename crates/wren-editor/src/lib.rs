@@ -153,12 +153,10 @@ pub struct Palette {
 pub enum Message {
     /// An iced text-editor action (typing, cursor motion, scroll, mouse, IME).
     Action(text_editor::Action),
-    /// Undo the last edit unit: ⌘Z, or the host's [`EditKey::Undo`] key.
+    /// Undo the last edit unit: the host's [`EditKey::Undo`] key.
     Undo,
-    /// Redo the next edit unit: ⌘⇧Z, or the host's [`EditKey::Redo`] key.
+    /// Redo the next edit unit: the host's [`EditKey::Redo`] key.
     Redo,
-    /// Open the find bar (⌘F on macOS).  The parent owns the bar UI and focus.
-    Find,
     /// An editing key that depends on the text around the cursor: Enter,
     /// Tab, Backspace, Home, and the like. See [`EditorView::intent`].
     Intent(Intent),
@@ -261,8 +259,8 @@ impl Viewport {
 /// that adds the mockup's line-number gutter, current-line band, and caret.
 ///
 /// Owns the [`Content`], the [`History`], and the find state.  The parent is
-/// responsible for the find bar UI and focus tasks; it shows the bar in
-/// response to [`Message::Find`] and feeds queries via
+/// responsible for the find bar UI and focus tasks: it shows the bar for a
+/// find command of its own and feeds queries via
 /// [`EditorView::set_find_query`].
 pub struct EditorView {
     content: Content,
@@ -1416,9 +1414,8 @@ impl EditorView {
                 self.handback_over();
                 false
             }
-            // Only ⌘F routes to Find, never a plain key; a command and a
-            // click on a box are the host's.
-            Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
+            // A command and a click on a box are the host's.
+            Message::Command(_) | Message::BoxClick(_) => false,
         }
     }
 
@@ -2122,6 +2119,20 @@ impl EditorView {
         self.key_routing(key, modifiers).0
     }
 
+    /// [`key_message`](Self::key_message) for a press that types `text`,
+    /// as ⌥ with a letter types another character on macOS.
+    #[cfg(feature = "test-support")]
+    pub fn key_message_typing(
+        &self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+        text: &str,
+    ) -> Vec<Message> {
+        let mut press = key_press(key, modifiers);
+        press.text = Some(text.into());
+        self.route_press(press).0
+    }
+
     /// [`key_message`](Self::key_message), and whether the focused editor
     /// captures the press, as the widget does: a press it handles through
     /// a binding of its own, but not one it gives up the keyboard for,
@@ -2133,12 +2144,18 @@ impl EditorView {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> (Vec<Message>, bool) {
+        self.route_press(key_press(key, modifiers))
+    }
+
+    /// [`key_routing`](Self::key_routing) of a press as given.
+    #[cfg(any(test, feature = "test-support"))]
+    fn route_press(&self, press: text_editor::KeyPress) -> (Vec<Message>, bool) {
         use iced::widget::text_editor::Binding;
         let popover = self.popover().map(keys::Target::of);
         let selected = self.has_selection();
         let line = || self.caret_line();
         let mut out = Vec::new();
-        let binding = match keys::route(key_press(key, modifiers), self.key_context(), popover) {
+        let binding = match keys::route(press, self.key_context(), popover) {
             None => None,
             Some(keys::Routed::Binding(binding)) => Some(binding),
             Some(keys::Routed::Close(binding)) => {
@@ -3282,7 +3299,7 @@ mod tests {
                     ev.handback_over();
                     false
                 }
-                Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
+                Message::Command(_) | Message::BoxClick(_) => false,
             }
         }
 

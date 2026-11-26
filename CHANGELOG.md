@@ -15,6 +15,20 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Changed
 
+- **Tasks are on by default.** Task lines get their statuses, dates,
+  priorities, owners, menus, calendar, suggestions, form and commands
+  without any setting; see
+  [Tasks](https://charliek.github.io/wren/reference/tasks/). To turn them
+  off, set `tasks = off` in `config.conf` and restart Wren; task lines are
+  then plain Markdown checkboxes, as before.
+- **The advanced editor is the default engine.** It sets H1–H3 headings
+  larger, wraps a list item's or a quote's long lines under its text, keeps
+  the exact scroll through undo, and carries spell check and the task
+  menus, calendar and suggestions. The classic editor stays as a fallback:
+  set `editor-engine = classic` in `config.conf`, or run **Switch editor
+  engine** from the palette. A `config.conf` that already says
+  `editor-engine = classic` keeps it.
+- The task form and the priority menu list priorities from highest to lowest.
 - **On Linux the command key is now Ctrl, like other apps.** Wren's commands
   used Alt there; the app's shortcuts, Markdown formatting, tasks and the
   board now take Ctrl (Ctrl+N, Ctrl+Shift+P, Ctrl+B, Ctrl+D, Ctrl+Z, and so
@@ -49,10 +63,18 @@ version's section as its notes, and publishes to the apt repo. See
   copy, cut, paste and select all are now the actions `edit.undo`,
   `edit.redo`, `edit.copy`, `edit.cut`, `edit.paste` and `edit.select_all`.
   Settings opens with Ctrl+, on Linux.
+- **On macOS too, undo, redo, copy, cut, paste and select all can be
+  rebound.** The `edit.*` actions default to ⌘Z, ⇧⌘Z, ⌘C, ⌘X, ⌘V and ⌘A,
+  and a `keybind` line moves or unbinds them in the editor and the text
+  fields, as on Linux: `keybind = mod+u = edit.undo` adds ⌘U as undo there.
+  A board label follows the board's keys instead: `keybind = mod+u =
+  board.undo` makes ⌘U undo on a board and in its labels. With no such line
+  nothing changes. A line on a key of the macOS menu (⌘H, ⌥⌘H, ⌘M, ⌃⌘F) is
+  refused with a warning, since the menu takes the key first.
 
 
-- **Tasks** (`tasks = on` in `config.conf`, off by default; restart Wren to
-  apply). A task line's box takes a status: `[ ]` open, `[/]` doing,
+- **Tasks**, on by default (`tasks = off` in `config.conf` turns them off;
+  restart Wren to apply). A task line's box takes a status: `[ ]` open, `[/]` doing,
   `[x]` or `[X]` done, `[-]` cancelled, and any other character reads as
   open.
   After the description go a due date (`📅 2026-12-01`), a priority

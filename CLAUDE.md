@@ -99,7 +99,7 @@ when one lands, move what users need into `docs/` and trim the note.
     and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
     `ellipsis.rs`, `keys.rs`, `field_keys.rs` (the text fields' editing
-    keys on Linux, from the keymap), and `layers.rs` (a stack whose layers
+    keys, from the keymap), and `layers.rs` (a stack whose layers
     all hear a press something before them took).
   - `macos_menu.rs` is the native menu bar, built from the table in
     `menu.rs`, which is compiled on macOS, in tests and with `smoke-test`
@@ -185,7 +185,7 @@ when one lands, move what users need into `docs/` and trim the note.
 - Settle before any non-passive op: `App::settle_board()` commits an open
   label, cancels a gesture and drops a preview before a note switch, a
   palette or dialog, a blur, or quit, so a flush never writes half a drag.
-- With `tasks = off` (the default; restart-only) the shared classifier
+- With `tasks = off` (restart-only) the shared classifier
   accepts only the boxes it always did, the toggle writes no stamp, and no
   task command, key or file exists (the harness's `tasks.get` alone still
   answers, `{"tasks": false}`): `tasks_baseline.rs` and

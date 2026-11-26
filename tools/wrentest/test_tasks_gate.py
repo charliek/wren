@@ -103,3 +103,17 @@ def test_without_a_pin_today_is_a_real_date() -> None:
         state = tasks(app)
         assert len(state["today"]) == 10 and state["today"][4] == "-"
         assert state["day_changes"] == 0
+
+
+def test_a_fresh_install_has_tasks_on_and_the_advanced_engine(tmp_path) -> None:
+    """The defaults, as a fresh install has them: no `config.conf`."""
+    workspace = tmp_path / "workspace"
+    (workspace / "Plans" / "Q1").mkdir(parents=True)
+    with WrenApp(workspace=workspace, evaluation=False, lane_settings=False, today=TODAY,
+                 artifacts_dir=artifact_directory("tasks-gate-fresh")) as app:
+        assert not app.settings_path.exists()
+        state = tasks(app)
+        assert state["tasks"] is True and state["engine"] == "advanced"
+        assert app.client.call("editor.get")["engine"] == "advanced"
+        assert app.client.call("editor.spell")["enabled"] is True
+        assert any(key.startswith("task.") for key in palette_keys(app))
