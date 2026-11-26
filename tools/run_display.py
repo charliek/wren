@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from xml.sax.saxutils import escape
@@ -61,6 +62,88 @@ def wait_for_socket(path: Path, process: subprocess.Popen, log: Path) -> None:
         time.sleep(0.05)
 
 
+def describe_exit(code: int) -> str:
+    if code < 0:
+        try:
+            return f"signal {signal.Signals(-code).name}"
+        except ValueError:
+            return f"signal {-code}"
+    return f"code {code}"
+
+
+class Compositor:
+    """Headless Weston for the whole run, started again on the same socket if
+    it dies, so one crash fails the test it interrupts rather than every test
+    after it. Weston 13 logs no fatal signal, so the notice names it."""
+
+    RESTARTS = 3
+
+    def __init__(self, artifacts: Path, socket: Path, env: dict[str, str]) -> None:
+        self.artifacts = artifacts
+        self.socket = socket
+        self.env = dict(env)
+        self.process: subprocess.Popen | None = None
+        self.log: Path | None = None
+        self.restarts = 0
+        self.stopping = False
+        self.lock = threading.Lock()
+        self.watcher: threading.Thread | None = None
+
+    def launch(self) -> None:
+        self.log = self.artifacts / f"weston-{uuid.uuid4().hex}.log"
+        with self.log.open("xb") as output:
+            self.process = subprocess.Popen([
+                "weston", "--backend=headless", "--renderer=pixman", "--no-config",
+                "--idle-time=0", "--width=1440", "--height=900",
+                f"--socket={self.socket.name}",
+            ], env=self.env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        wait_for_socket(self.socket, self.process, self.log)
+
+    def start(self) -> None:
+        try:
+            self.launch()
+        except BaseException:
+            if self.process is not None:
+                stop_owned_group(self.process)
+            raise
+        self.watcher = threading.Thread(target=self.watch, name="compositor", daemon=True)
+        self.watcher.start()
+
+    def watch(self) -> None:
+        while True:
+            process = self.process
+            assert process is not None
+            code = process.wait()
+            with self.lock:
+                if self.stopping:
+                    return
+                # Its helpers share its process group and may outlive it.
+                stop_owned_group(process)
+                notice = f"run_display: Weston exited with {describe_exit(code)}; log: {self.log}"
+                if self.restarts >= self.RESTARTS:
+                    print(f"{notice}; not restarting after {self.restarts} restarts",
+                          file=sys.stderr, flush=True)
+                    return
+                self.restarts += 1
+                # A stale socket would pass the readiness check at once.
+                self.socket.unlink(missing_ok=True)
+                try:
+                    self.launch()
+                except (OSError, RuntimeError) as error:
+                    print(f"{notice}; restart failed: {error}", file=sys.stderr, flush=True)
+                    return
+                print(f"{notice}; restarted ({self.restarts} of {self.RESTARTS}), log: {self.log}",
+                      file=sys.stderr, flush=True)
+
+    def stop(self) -> None:
+        with self.lock:
+            self.stopping = True
+            if self.process is not None:
+                stop_owned_group(self.process)
+        if self.watcher is not None:
+            self.watcher.join(timeout=10)
+
+
 def session_bus_command(runtime: Path, command: list[str]) -> list[str]:
     # Default session services can create FUSE mounts or contact a real desktop.
     config = runtime / "dbus.conf"
@@ -106,20 +189,14 @@ def run_display(mode: str, command: list[str]) -> int:
                 f"--error-file={artifacts / f'xvfb-{token}.log'}", *bus_command,
             ], env)
 
-        log = artifacts / f"weston-{token}.log"
         socket_name = "wayland-wren"
-        with log.open("xb") as output:
-            compositor = subprocess.Popen([
-                "weston", "--backend=headless", "--renderer=pixman", "--no-config",
-                "--idle-time=0", "--width=1440", "--height=900",
-                f"--socket={socket_name}",
-            ], env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                wait_for_socket(Path(runtime) / socket_name, compositor, log)
-                env["WAYLAND_DISPLAY"] = socket_name
-                return run_owned(bus_command, env)
-            finally:
-                stop_owned_group(compositor)
+        compositor = Compositor(artifacts, Path(runtime) / socket_name, env)
+        compositor.start()
+        try:
+            env["WAYLAND_DISPLAY"] = socket_name
+            return run_owned(bus_command, env)
+        finally:
+            compositor.stop()
 
 
 def terminate(_signum: int, _frame: object) -> None:

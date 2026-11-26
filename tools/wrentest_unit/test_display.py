@@ -1,5 +1,6 @@
 """Regression checks for display ownership and smoke-test assertions."""
 
+import io
 import os
 from pathlib import Path
 import signal
@@ -71,6 +72,59 @@ class DisplayTests(unittest.TestCase):
             process.poll.return_value = 1
             with self.assertRaisesRegex(RuntimeError, "failed to initialize"):
                 run_display.wait_for_socket(Path(root) / "missing", process, log)
+
+    def compositor(self, root: str, codes: list[int]) -> tuple[run_display.Compositor, Mock]:
+        socket_path = Path(root) / "wayland-test"
+        compositor = run_display.Compositor(Path(root), socket_path, {})
+        processes = iter([Mock(**{"wait.return_value": code}) for code in codes])
+
+        def launch():
+            # Each Weston leaves its socket behind when it dies.
+            socket_path.touch()
+            compositor.process = next(processes)
+            compositor.log = Path(root) / "weston.log"
+
+        launch = Mock(side_effect=launch)
+        compositor.launch = launch
+        compositor.launch()
+        launch.reset_mock()
+        return compositor, launch
+
+    def test_a_dead_compositor_is_restarted_a_few_times_with_a_notice(self):
+        with tempfile.TemporaryDirectory() as root:
+            compositor, launch = self.compositor(root, [-signal.SIGSEGV, -signal.SIGKILL, 0, 1])
+            unlinked = []
+            original = Path.unlink
+
+            def unlink(path, missing_ok=False):
+                unlinked.append(path.exists())
+                original(path, missing_ok=missing_ok)
+
+            with patch.object(run_display, "stop_owned_group") as stop, \
+                    patch.object(Path, "unlink", unlink), \
+                    patch.object(run_display.sys, "stderr", new_callable=io.StringIO) as err:
+                compositor.watch()
+            self.assertEqual(launch.call_count, run_display.Compositor.RESTARTS)
+            self.assertEqual(stop.call_count, run_display.Compositor.RESTARTS + 1)
+            self.assertEqual(unlinked, [True] * run_display.Compositor.RESTARTS)
+            lines = err.getvalue().splitlines()
+            self.assertIn("Weston exited with signal SIGSEGV", lines[0])
+            self.assertIn("restarted (1 of 3)", lines[0])
+            self.assertIn("signal SIGKILL", lines[1])
+            self.assertIn("code 0", lines[2])
+            self.assertIn("code 1", lines[3])
+            self.assertIn("not restarting after 3 restarts", lines[3])
+
+    def test_a_compositor_stopped_on_purpose_is_not_restarted(self):
+        with tempfile.TemporaryDirectory() as root:
+            compositor, launch = self.compositor(root, [-signal.SIGTERM])
+            with patch.object(run_display, "stop_owned_group") as stop, \
+                    patch.object(run_display.sys, "stderr", new_callable=io.StringIO) as err:
+                compositor.stop()
+                compositor.watch()
+            launch.assert_not_called()
+            stop.assert_called_once()
+            self.assertEqual(err.getvalue(), "")
 
     def test_private_bus_has_no_desktop_service_activation(self):
         with tempfile.TemporaryDirectory() as root:

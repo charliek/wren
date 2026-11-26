@@ -23,6 +23,13 @@ Every commit on `main` builds and passes these. CI's aggregate `ci-success`
 check covers the Rust jobs (Linux and macOS), the harness units, and four
 Linux smoke lanes: X11 and Wayland, each with wgpu and tiny-skia.
 
+One headless Weston serves a whole Wayland run. Weston 13's pixman renderer
+sometimes crashes (SIGSEGV) while it composites the app's client-side title
+bar, and it logs nothing when it does. `tools/run_display.py` then prints
+`run_display: Weston exited with signal …` with the old and new logs and
+starts it again on the same socket, up to three times, so the crash fails
+the case it interrupts and not every case after it.
+
 !!! warning
     Never run a normal `cargo build` while a smoke suite is running. It
     replaces `target/debug/wren`, the smoke-test build, and every later launch
