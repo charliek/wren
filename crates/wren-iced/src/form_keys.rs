@@ -552,12 +552,22 @@ where
         // claimed.
         let claimed = !self.passive
             && match event {
+                // AltGr's text is no shortcut to the host either.
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key,
                     physical_key,
                     modifiers,
+                    text,
                     ..
-                }) => crate::keys::shortcut(key, *physical_key, *modifiers).is_some(),
+                }) => {
+                    crate::keys::shortcut(key, *physical_key, *modifiers).is_some()
+                        && !wren_editor::is_alt_graph(
+                            key,
+                            *physical_key,
+                            *modifiers,
+                            text.as_deref(),
+                        )
+                }
                 _ => false,
             };
         'update: {
@@ -1150,6 +1160,56 @@ mod tests {
         }
         assert_eq!(captured, [true, false, true, true]);
         assert_eq!(claims.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    /// AltGr's text, which Linux can report as Ctrl+Alt, is the field's
+    /// and no shortcut: the host's copy of it claims nothing, so neither
+    /// does the form.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn alt_graph_text_is_no_claimed_shortcut() {
+        let claims: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let mut element: Element<'static, Out, Theme, ()> = form_keys(
+            column![text_input("", "").id(IDS[0])],
+            slots(),
+            0,
+            Rc::new(RefCell::new(String::new())),
+            Out::Key,
+        )
+        .claims(claims)
+        .into();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+        );
+        let alt_graph = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Character("e".into()),
+            modified_key: Key::Character("€".into()),
+            physical_key: Physical::Code(Code::KeyE),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL | Modifiers::ALT,
+            text: Some("€".into()),
+            repeat: false,
+        });
+        let jump = press(Key::Character("p".into()), Modifiers::ALT, None);
+        for event in [alt_graph, jump] {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+            );
+        }
+        assert_eq!(claims.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

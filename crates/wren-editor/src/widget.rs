@@ -6137,6 +6137,63 @@ mod tests {
     }
 
     #[test]
+    fn alt_graph_text_replaces_a_selection_and_is_never_a_clipboard_chord() {
+        use crate::{EditKey, KeyRoute};
+        // Off macOS AltGr can arrive as Ctrl+Alt with its text, which iced
+        // alone would read as Cut, Copy or Paste first.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        // A host that binds Ctrl+Alt+X to Cut and Ctrl+Alt+V to its own.
+        let host: crate::KeyPolicy = Arc::new(|key: &keyboard::Key, _, modifiers| {
+            let chord = keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT;
+            match key.as_ref() {
+                keyboard::Key::Character("x") if modifiers == chord => KeyRoute::Edit(EditKey::Cut),
+                keyboard::Key::Character("v") if modifiers == chord => KeyRoute::Host,
+                _ => KeyRoute::Pass,
+            }
+        });
+        for kind in BackendKind::ALL {
+            for policy in [None, Some(&host)] {
+                for (letter, typed) in [("x", "»"), ("c", "¢"), ("v", "“"), ("a", "æ")] {
+                    let mut ev = editing(kind, "cat teh", 0, 0);
+                    ev.perform(Action::SelectAll);
+                    let mut editor =
+                        editor_with(&ev.content, true, Measure::default()).key_policy(policy);
+                    let mut state = laid_out_state(&editor);
+                    state.focus = Some(Focus::now());
+                    let mut kept = Kept(Some("sentinel".into()));
+                    let mut messages = Vec::new();
+                    let mut shell = Shell::new(&mut messages);
+                    editor.on_event(
+                        &mut state,
+                        &Event::Keyboard(keyboard::Event::KeyPressed {
+                            key: keyboard::Key::Character(letter.into()),
+                            modified_key: keyboard::Key::Character(typed.into()),
+                            physical_key: keyboard::key::Physical::Unidentified(
+                                keyboard::key::NativeCode::Unidentified,
+                            ),
+                            location: keyboard::Location::Standard,
+                            modifiers: keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT,
+                            text: Some(typed.into()),
+                            repeat: false,
+                        }),
+                        BOUNDS,
+                        mouse::Cursor::Unavailable,
+                        &mut kept,
+                        &mut shell,
+                    );
+                    for message in messages {
+                        host_applies(&mut ev, message);
+                    }
+                    assert_eq!(ev.text(), typed, "{kind:?} {letter}");
+                    assert_eq!(kept.0.as_deref(), Some("sentinel"), "{kind:?} {letter}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_clipboard_key_the_host_takes_does_nothing_in_the_text() {
         use crate::KeyRoute;
         // A host whose user unbound Cmd/Ctrl+V: the key is the host's, so

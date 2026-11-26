@@ -125,30 +125,7 @@ pub(crate) fn route(
         }
     }
     let route = match context.policy {
-        // A keymap spells `?` as Shift+/, the key that types it on a US
-        // layout; another layout types it elsewhere (Shift with `,` on
-        // AZERTY, with `ß` on German), so a typed `?` is asked as Shift+/
-        // first, as the digit row's symbols are asked as digits (§5.1
-        // rule 7). First, because the key that types it may be another
-        // board command's by its place: on Dvorak it is Shift with the
-        // key a keymap calls `[`. A key the app has bound stays the
-        // app's, as it is ahead of every board key.
-        Some(policy) => {
-            let asked = (text == Some("?") && !shortcut).then(|| {
-                policy(
-                    &Key::Character("/".into()),
-                    key::Physical::Code(key::Code::Slash),
-                    Modifiers::SHIFT,
-                    repeat,
-                )
-            });
-            match (asked, policy(key, physical, modifiers, repeat)) {
-                (Some(KeyRoute::Command(_)), KeyRoute::Host) => KeyRoute::Host,
-                (Some(bound @ KeyRoute::Command(_)), _) => bound,
-                (Some(asked), KeyRoute::Pass) => asked,
-                (_, route) => route,
-            }
-        }
+        Some(policy) => resolve(&**policy, key, physical, modifiers, text, repeat),
         // With no keymap to ask, a chord the label reads is the label's.
         None if shortcut && context.editing && label(key, physical, modifiers, text).is_some() => {
             KeyRoute::Pass
@@ -179,6 +156,42 @@ pub(crate) fn route(
         )),
         KeyRoute::Command(command) => Keyed::Take(vec![Out::Command(command)]),
         KeyRoute::Pass => Keyed::Take(plain(key, text, shortcut, repeat)),
+    }
+}
+
+/// Where `policy` sends a press of `key` that typed `text`, as a focused
+/// board reads it, for a host that reads its keys the same way (the keys
+/// sheet's own key).
+///
+/// A keymap spells `?` as Shift+/, the key that types it on a US layout;
+/// another layout types it elsewhere (Shift with `,` on AZERTY, with `ß` on
+/// German), so a typed `?` is asked as Shift+/ first, as the digit row's
+/// symbols are asked as digits (§5.1 rule 7). First, because the key that
+/// types it may be another board command's by its place: on Dvorak it is
+/// Shift with the key a keymap calls `[`. A key the app has bound stays the
+/// app's, as it is ahead of every board key.
+pub fn resolve(
+    policy: &(dyn Fn(&Key, key::Physical, Modifiers, bool) -> KeyRoute + Send + Sync),
+    key: &Key,
+    physical: key::Physical,
+    modifiers: Modifiers,
+    text: Option<&str>,
+    repeat: bool,
+) -> KeyRoute {
+    let shortcut = modifiers.control() || modifiers.alt() || modifiers.logo();
+    let asked = (text == Some("?") && !shortcut).then(|| {
+        policy(
+            &Key::Character("/".into()),
+            key::Physical::Code(key::Code::Slash),
+            Modifiers::SHIFT,
+            repeat,
+        )
+    });
+    match (asked, policy(key, physical, modifiers, repeat)) {
+        (Some(KeyRoute::Command(_)), KeyRoute::Host) => KeyRoute::Host,
+        (Some(bound @ KeyRoute::Command(_)), _) => bound,
+        (Some(asked), KeyRoute::Pass) => asked,
+        (_, route) => route,
     }
 }
 

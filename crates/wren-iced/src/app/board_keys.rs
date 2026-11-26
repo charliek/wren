@@ -688,16 +688,26 @@ fn split(heights: &[f32], count: usize) -> Vec<usize> {
 const SHEET_ROW: f32 = 23.0;
 const SHEET_HEADER: f32 = 31.0;
 
-/// Whether a press in the keys sheet's filter is the sheet's own key,
-/// read as a focused board reads it: it closes the sheet, whatever the
-/// layout types it with, and neither types nor edits in the filter. Text
-/// that only holds the key's character, `what?` pasted, filters.
+/// Whether a press while the keys sheet is open is the sheet's own key,
+/// read as a focused board reads it, the text it typed included
+/// ([`wren_canvas::resolve`]): it closes the sheet, whatever the layout
+/// types it with and wherever in the sheet the keyboard is, and neither
+/// types nor edits in the filter. Text that only holds the key's
+/// character, `what?` pasted, filters.
 pub(super) fn sheet_toggle(
     keymap: &Keymap,
-) -> impl Fn(&iced::keyboard::Key, iced::keyboard::key::Physical, iced::keyboard::Modifiers) -> bool + '_
-{
-    move |key, physical, modifiers| {
-        super::preferences::board_press(keymap, key, physical, modifiers, false)
+) -> impl Fn(
+    &iced::keyboard::Key,
+    iced::keyboard::key::Physical,
+    iced::keyboard::Modifiers,
+    Option<&str>,
+) -> bool
+       + '_ {
+    move |key, physical, modifiers, text| {
+        let policy = |key: &iced::keyboard::Key, physical, modifiers, repeat| {
+            super::preferences::board_press(keymap, key, physical, modifiers, repeat)
+        };
+        wren_canvas::resolve(&policy, key, physical, modifiers, text, false)
             == super::preferences::BoardRoute::Command(Command::Keys)
     }
 }
@@ -726,7 +736,7 @@ impl App {
             )
             .padding([3, 8])
             .style(move |_| chrome::surface(definition, colors.selected, 4.0, false)),
-            crate::field_keys::field_keys_owning(
+            crate::field_keys::field_keys(
                 text_input("Filter the board's keys…", &palette.query)
                     .id("palette-query")
                     .size(15)
@@ -734,8 +744,6 @@ impl App {
                     .on_input_maybe(self.loading.is_none().then_some(Message::PaletteQuery))
                     .style(move |_, status| chrome::input(definition, status, false)),
                 &self.preferences.field_keys,
-                sheet_toggle(&self.preferences.keymap),
-                || Message::PaletteClose,
             ),
             chrome::keycap("esc", definition),
         ]
@@ -865,21 +873,26 @@ impl App {
                 .style(move |_| chrome::scrim(definition)),
         )
         .on_press(Message::PaletteClose);
-        stack![
-            base,
-            opaque(scrim),
-            container(opaque(dialog))
-                .padding(iced::Padding {
-                    top,
-                    right: 16.0,
-                    bottom: 8.0,
-                    left: 16.0
-                })
-                .width(Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .height(Fill)
-        ]
-        .into()
+        // The sheet's own key is the sheet's, ahead of the filter and of
+        // whatever a click inside the sheet left the keyboard to.
+        crate::field_keys::key_owner(
+            stack![
+                base,
+                opaque(scrim),
+                container(opaque(dialog))
+                    .padding(iced::Padding {
+                        top,
+                        right: 16.0,
+                        bottom: 8.0,
+                        left: 16.0
+                    })
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .height(Fill)
+            ],
+            sheet_toggle(&self.preferences.keymap),
+            || Message::PaletteClose,
+        )
     }
 }
 
@@ -1371,9 +1384,17 @@ pub(super) mod tests {
                 _ => Modifiers::ALT,
             };
             let x = Physical::Code(Code::KeyX);
-            assert!(toggle(&Key::Character("x".into()), x, held), "{scheme:?}");
+            assert!(
+                toggle(&Key::Character("x".into()), x, held, None),
+                "{scheme:?}"
+            );
             if scheme == Scheme::new(Platform::Linux, LinuxModifier::Alt) {
-                assert!(!toggle(&Key::Character("x".into()), x, Modifiers::CTRL));
+                assert!(!toggle(
+                    &Key::Character("x".into()),
+                    x,
+                    Modifiers::CTRL,
+                    None
+                ));
             }
         }
     }
@@ -1446,17 +1467,25 @@ pub(super) mod tests {
             use iced::keyboard::{Key, Modifiers};
             let toggle = sheet_toggle(&app.preferences.keymap);
             let slash = Physical::Code(Code::Slash);
-            assert!(toggle(&Key::Character("?".into()), slash, Modifiers::SHIFT));
-            assert!(toggle(&Key::Character("/".into()), slash, Modifiers::SHIFT));
+            let shift = Modifiers::SHIFT;
+            assert!(toggle(&Key::Character("?".into()), slash, shift, Some("?")));
+            assert!(toggle(&Key::Character("/".into()), slash, shift, None));
             assert!(!toggle(
                 &Key::Character("/".into()),
                 slash,
-                Modifiers::empty()
+                Modifiers::empty(),
+                Some("/")
             ));
+            // A German layout types `?` with Shift and ß: the text says so,
+            // as it does to a focused board.
+            let minus = Physical::Code(Code::Minus);
+            assert!(toggle(&Key::Character("?".into()), minus, shift, Some("?")));
+            assert!(!toggle(&Key::Character("?".into()), minus, shift, None));
             assert!(!toggle(
                 &Key::Character("v".into()),
                 Physical::Code(Code::KeyV),
-                Modifiers::COMMAND
+                Modifiers::COMMAND,
+                None
             ));
         }
         // Closed, the board has the keyboard.
@@ -1571,7 +1600,7 @@ pub(super) mod tests {
         focus(&mut app);
         let _ = run(&mut app, Command::Keys);
         assert!(sheet_open(&app));
-        // The filter takes the key from the field and closes the sheet.
+        // The sheet takes the key from what is in it and closes.
         {
             use iced::keyboard::key::{Code, Named, Physical};
             use iced::keyboard::{Key, Modifiers};
@@ -1579,7 +1608,8 @@ pub(super) mod tests {
             assert!(toggle(
                 &Key::Named(Named::F1),
                 Physical::Code(Code::F1),
-                Modifiers::empty()
+                Modifiers::empty(),
+                None
             ));
         }
         let _ = app.update(Message::PaletteClose);

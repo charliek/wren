@@ -14,15 +14,18 @@
 //!   the focused input, so one press does one thing.
 //! - Before any other press the input hears the press's own modifiers: an
 //!   input mounted while a modifier was held never heard it go down.
+//! - AltGr's text ([`wren_editor::is_alt_graph`]), which can arrive as
+//!   Ctrl+Alt, comes before all of these: the input hears it with neither
+//!   Ctrl nor Alt held, so it types it and never takes it for a clipboard
+//!   chord.
 //!
-//! With the default Ctrl-mode keymap only that last holds, which changes
-//! nothing for an input that saw the modifiers change. On macOS the keys
-//! are not wrapped at all; [`field_keys_owning`] still gives a key to its
-//! owner there.
+//! With the default Ctrl-mode keymap only the last two hold, which change
+//! nothing for an input that saw the modifiers change and typed nothing
+//! with AltGr. On macOS the keys are not wrapped at all.
 //!
-//! [`field_keys_owning`] also takes the presses of one key from the
-//! field before anything else, for a field whose host closes on that key
-//! (the board's keys sheet on its own toggle).
+//! [`key_owner`] takes the presses of one key from everything under it,
+//! for a host that closes on that key (the board's keys sheet on its own
+//! toggle), focused or not.
 
 use std::sync::Arc;
 
@@ -156,7 +159,7 @@ impl FieldKeys {
     /// the rewritten keys: the press, and the modifiers the input must read
     /// for it.
     pub fn rewrite(&self, event: &Event) -> Option<(Modifiers, Event)> {
-        let table = self.0.as_deref()?;
+        let table = self.0.as_deref().filter(|_| !alt_graph(event))?;
         let Event::Keyboard(keyboard::Event::KeyPressed {
             physical_key,
             location,
@@ -193,9 +196,10 @@ impl FieldKeys {
     /// Whether `event` presses one of the input's own chords that the
     /// keymap gives elsewhere.
     pub fn takes(&self, event: &Event) -> bool {
-        self.0.as_deref().is_some_and(|table| {
-            Self::press(event).is_some_and(|(accel, _)| table.taken.contains(&accel))
-        })
+        !alt_graph(event)
+            && self.0.as_deref().is_some_and(|table| {
+                Self::press(event).is_some_and(|(accel, _)| table.taken.contains(&accel))
+            })
     }
 
     /// Hand `event` on through `update` as the text input knows it: a
@@ -210,6 +214,35 @@ impl FieldKeys {
             return update(event);
         }
         let modifiers = *modifiers;
+        if alt_graph(event) {
+            let Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                text,
+                repeat,
+                ..
+            }) = event
+            else {
+                return update(event);
+            };
+            let typing = modifiers - Modifiers::CTRL - Modifiers::ALT;
+            update(&Event::Keyboard(keyboard::Event::ModifiersChanged(typing)));
+            update(&Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: modified_key.clone(),
+                physical_key: *physical_key,
+                location: *location,
+                modifiers: typing,
+                text: text.clone(),
+                repeat: *repeat,
+            }));
+            update(&Event::Keyboard(keyboard::Event::ModifiersChanged(
+                modifiers,
+            )));
+            return;
+        }
         match self.rewrite(event) {
             Some((held, press)) => {
                 update(&Event::Keyboard(keyboard::Event::ModifiersChanged(held)));
@@ -251,13 +284,14 @@ where
     })
 }
 
-/// [`field_keys`], and the presses `owns` names taken from the focused
-/// field before anything else and published as `on_owned`, so the field
-/// never types or edits for them.
-pub fn field_keys_owning<'a, Message, Theme, Renderer>(
+/// `content`, with the presses `owns` names taken from everything in it
+/// before anything else: a first press is published as `on_owned`, and a
+/// held key's repeats do nothing, so nothing in it types or edits for
+/// them, focused or not. AltGr's text is never the owner's. The press
+/// carries its key, physical key, modifiers and the text it typed.
+pub fn key_owner<'a, Message, Theme, Renderer>(
     content: impl Into<Element<'a, Message, Theme, Renderer>>,
-    keys: &FieldKeys,
-    owns: impl Fn(&Key, keyboard::key::Physical, Modifiers) -> bool + 'a,
+    owns: impl Fn(&Key, keyboard::key::Physical, Modifiers, Option<&str>) -> bool + 'a,
     on_owned: impl Fn() -> Message + 'a,
 ) -> Element<'a, Message, Theme, Renderer>
 where
@@ -267,7 +301,7 @@ where
 {
     Element::new(KeyedField {
         content: content.into(),
-        keys: keys.clone(),
+        keys: FieldKeys::default(),
         owner: Some(Owner {
             owns: Box::new(owns),
             on_owned: Box::new(on_owned),
@@ -275,10 +309,25 @@ where
     })
 }
 
-/// Whether a press, by its key, physical key and modifiers, is the owner's.
-type Owns<'a> = Box<dyn Fn(&Key, keyboard::key::Physical, Modifiers) -> bool + 'a>;
+/// Whether a press, by its key, physical key, modifiers and text, is the
+/// owner's.
+type Owns<'a> = Box<dyn Fn(&Key, keyboard::key::Physical, Modifiers, Option<&str>) -> bool + 'a>;
 
-/// The key a field's host takes from it ([`field_keys_owning`]).
+/// Whether `event` presses AltGr, typing its text.
+fn alt_graph(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            text,
+            ..
+        }) if wren_editor::is_alt_graph(key, *physical_key, *modifiers, text.as_deref())
+    )
+}
+
+/// The key a host takes from what is under it ([`key_owner`]).
 struct Owner<'a, Message> {
     owns: Owns<'a>,
     on_owned: Box<dyn Fn() -> Message + 'a>,
@@ -377,23 +426,25 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        let altgr = alt_graph(event);
         if let (
             Some(owner),
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 physical_key,
                 modifiers,
+                text,
+                repeat,
                 ..
             }),
         ) = (&self.owner, event)
         {
-            if (owner.owns)(key, *physical_key, *modifiers) {
-                let message = (owner.on_owned)();
-                if self.focused(tree, layout, renderer) {
-                    shell.publish(message);
-                    shell.capture_event();
-                    return;
+            if !altgr && (owner.owns)(key, *physical_key, *modifiers, text.as_deref()) {
+                if !repeat {
+                    shell.publish((owner.on_owned)());
                 }
+                shell.capture_event();
+                return;
             }
         }
         // The input does nothing with it: the app runs the keymap's
@@ -848,19 +899,69 @@ pub(crate) mod tests {
             assert_eq!(run.kept.as_deref(), Some("abc"));
         }
 
-        /// A field owning `?`, as the keys sheet's filter owns its toggle,
-        /// and Ctrl+X, as it owns a toggle bound there.
-        fn owned(events: &[Event], clip: Option<&str>) -> (Vec<String>, Vec<bool>, Option<String>) {
+        /// AltGr typing `text` on the key `letter`, as Linux can report it:
+        /// Ctrl+Alt with the text.
+        fn alt_graph(letter: &str, text: &str) -> Event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(letter.into()),
+                modified_key: Key::Character(text.into()),
+                physical_key: Physical::Code(Code::KeyA),
+                location: Location::Standard,
+                modifiers: Modifiers::CTRL | Modifiers::ALT,
+                text: Some(text.into()),
+                repeat: false,
+            })
+        }
+
+        #[test]
+        fn alt_graph_text_types_in_a_field_and_is_never_a_clipboard_chord() {
+            let ctrl = Modifiers::CTRL;
+            // The default keymaps, one that gives Ctrl+Alt+E to Copy, and
+            // one that takes Ctrl+Alt+X from the field.
+            let mut edits = linux_edits(LinuxModifier::Alt);
+            edits.push((accel("ctrl+alt+e"), EditKey::Copy));
+            let alt = Scheme::new(Platform::Linux, LinuxModifier::Alt);
+            for keys in [
+                linux(LinuxModifier::Ctrl),
+                linux(LinuxModifier::Alt),
+                FieldKeys::new(alt, edits, [accel("ctrl+alt+x")]),
+            ] {
+                for (letter, typed) in [("x", "»"), ("e", "€"), ("c", "¢")] {
+                    let run = run(
+                        &keys,
+                        "abc",
+                        Some("sentinel"),
+                        &[chord("a", ctrl), alt_graph(letter, typed)],
+                        true,
+                        true,
+                    );
+                    assert_eq!(run.published, [typed], "{letter}");
+                    assert_eq!(run.kept.as_deref(), Some("sentinel"), "{letter}");
+                }
+            }
+        }
+
+        /// A field under a [`key_owner`] that owns `?` and Ctrl+X, as the
+        /// keys sheet owns its toggle wherever its keyboard is: the field
+        /// `focused` or not. Returns what was published, whether each press
+        /// was captured, and the clipboard.
+        fn owned(
+            events: &[Event],
+            clip: Option<&str>,
+            focused: bool,
+        ) -> (Vec<String>, Vec<bool>, Option<String>) {
             let mut value = String::from("abc");
             let keys = linux(LinuxModifier::Ctrl);
             let element = |value: &str| -> Element<'static, String, Theme, ()> {
-                crate::keys::alt_filter(field_keys_owning(
-                    text_input("", value)
-                        .id(ID)
-                        .width(200)
-                        .on_input(|text: String| text),
-                    &keys,
-                    |key: &Key, _, modifiers: Modifiers| match key.as_ref() {
+                crate::keys::alt_filter(key_owner(
+                    field_keys(
+                        text_input("", value)
+                            .id(ID)
+                            .width(200)
+                            .on_input(|text: String| text),
+                        &keys,
+                    ),
+                    |key: &Key, _, modifiers: Modifiers, _: Option<&str>| match key.as_ref() {
                         Key::Character("?") => modifiers == Modifiers::SHIFT,
                         Key::Character("x") => modifiers == Modifiers::CTRL,
                         _ => false,
@@ -876,12 +977,14 @@ pub(crate) mod tests {
                 &(),
                 &layout::Limits::new(Size::ZERO, Size::new(400.0, 100.0)),
             );
-            first.as_widget_mut().operate(
-                &mut tree,
-                Layout::new(&node),
-                &(),
-                &mut operation::focusable::focus(Id::new(ID)),
-            );
+            if focused {
+                first.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &(),
+                    &mut operation::focusable::focus(Id::new(ID)),
+                );
+            }
             let mut kept = Kept(clip.map(str::to_owned));
             let (mut published, mut captured) = (Vec::new(), Vec::new());
             for event in events {
@@ -908,33 +1011,57 @@ pub(crate) mod tests {
             (published, captured, kept.0)
         }
 
-        #[test]
-        fn an_owned_key_is_taken_from_the_field_and_its_text_is_not() {
-            let question = Event::Keyboard(keyboard::Event::KeyPressed {
+        fn question(repeat: bool) -> Event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character("?".into()),
                 modified_key: Key::Character("?".into()),
                 physical_key: Physical::Code(Code::Slash),
                 location: Location::Standard,
                 modifiers: Modifiers::SHIFT,
                 text: Some("?".into()),
-                repeat: false,
-            });
-            // A typed `?` is the owner's, and types nothing.
-            let (published, captured, _) = owned(&[question], None);
-            assert_eq!(
-                (published, captured),
-                (vec!["<owned>".to_owned()], vec![true])
-            );
+                repeat,
+            })
+        }
+
+        #[test]
+        fn an_owned_key_is_taken_from_everything_under_it_and_its_text_is_not() {
+            for focused in [true, false] {
+                // A typed `?` is the owner's, and types nothing, whether the
+                // field has the keyboard or a click inside took it.
+                let (published, captured, _) = owned(&[question(false)], None, focused);
+                assert_eq!(
+                    (published, captured),
+                    (vec!["<owned>".to_owned()], vec![true]),
+                    "{focused}"
+                );
+                // A held key's repeats are taken and do nothing.
+                let (published, captured, _) =
+                    owned(&[question(true), question(true)], None, focused);
+                assert!(published.is_empty(), "{published:?}");
+                assert_eq!(captured, [true, true]);
+            }
             // `what?` pasted filters.
-            let (published, _, _) = owned(&[end(), chord("v", Modifiers::CTRL)], Some("what?"));
+            let (published, _, _) =
+                owned(&[end(), chord("v", Modifiers::CTRL)], Some("what?"), true);
             assert_eq!(published, ["abcwhat?"]);
             // A shortcut the owner names is its too: no cut.
             let (published, captured, kept) = owned(
                 &[chord("a", Modifiers::CTRL), chord("x", Modifiers::CTRL)],
                 Some("sentinel"),
+                true,
             );
             assert_eq!(published, ["<owned>"]);
             assert_eq!((captured[1], kept.as_deref()), (true, Some("sentinel")));
+            // AltGr's text on an owned key is never the owner's.
+            let (published, _, kept) = owned(
+                &[chord("a", Modifiers::CTRL), alt_graph("x", "»")],
+                Some("sentinel"),
+                true,
+            );
+            assert_eq!(
+                (published, kept.as_deref()),
+                (vec!["»".to_owned()], Some("sentinel"))
+            );
         }
 
         #[test]

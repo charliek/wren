@@ -461,11 +461,22 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         return None;
     }
 
-    // AltGr's text types whatever the host binds the chord it arrives as.
-    let altgr = is_alt_graph(key, physical, m, key_press.text.as_deref());
+    // AltGr's text types whatever the host binds the chord it arrives as,
+    // and is never iced's: it would read Ctrl+Alt+X as Cut first.
+    if is_alt_graph(key, physical, m, key_press.text.as_deref()) {
+        let mut typed: Vec<Binding<Message>> = (key_press.text.as_deref())
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control())
+            .map(Binding::Insert)
+            .collect();
+        return Some(match typed.len() {
+            1 => typed.remove(0),
+            _ => Binding::Sequence(typed),
+        });
+    }
     match context
         .policy
-        .filter(|_| !altgr)
         .map_or(KeyRoute::Pass, |policy| policy(key, physical, m))
     {
         KeyRoute::Host => return None,

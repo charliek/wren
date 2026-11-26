@@ -659,3 +659,49 @@ def test_native_the_keys_sheet_s_filter_and_its_own_key(tmp_path, engine, mode) 
         wait_for(lambda: sheet() is None, description="Mod+X closes the sheet")
         assert call("clipboard.read") == "sentinel"
         assert call("session.get")["document"]["dirty"] is False
+
+
+@pytest.mark.native_x11
+@pytest.mark.parametrize("opener", ["dock", "palette"])
+def test_native_the_sheet_owns_its_key_after_a_click_inside_it(
+        tmp_path, engine, mode, opener) -> None:  # noqa: F811
+    """A click on the sheet's heading takes the keyboard from its filter;
+    the sheet's own key, `?` or a rebound F1, still closes it."""
+    from tools.wrentest.test_gestures import move
+
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    samples = copy_samples(tmp_path / "work")
+    with keys_app(f"sheet-click-{opener}", engine, mode,
+                  "boards = on\nkeybind = f1 = board.keys\n",
+                  workspace=samples, evaluation=False) as app:
+        call = app.client.call
+        sheet = lambda: board(app)["keys_sheet"]  # noqa: E731
+        focus = lambda: call("focus.get")  # noqa: E731
+        open_note(app, FLOW)
+        window = focus_native(app)
+        wait_for(lambda: focus()["named"] == ["note-editor"],
+                 description="the board has the keyboard")
+        for close in ("shift+slash", "F1"):
+            if opener == "dock":
+                call("board.dock", {"click": "board-dock-keys"})
+            else:
+                call("palette.open", {"mode": "commands"})
+                rows = call("palette.query", {"query": "keys"})["navigation"]["modal"]["results"]
+                index = next(at for at, row in enumerate(rows)
+                             if row["key"] == {"command": "board.keys"})
+                call("palette.activate", {"index": index})
+            wait_for(lambda: sheet() is not None, description=f"the {opener} opens the sheet")
+            wait_for(lambda: focus()["named"] == ["palette-query"],
+                     description="its filter has the keyboard")
+            field = focus()["bounds"]["palette-query"]
+            # The "Board keys" heading, left of the filter.
+            move(window, (int(field["x"] - 30), int(field["y"] + field["height"] / 2)))
+            xdo("click", "1")
+            wait_for(lambda: focus()["named"] == [], description="the click takes the keyboard")
+            assert sheet() is not None
+            native(window, close)
+            wait_for(lambda: sheet() is None, description=f"{close} closes the sheet")
+            assert call("session.get")["document"]["dirty"] is False
+            window = focus_native(app)
+            wait_for(lambda: focus()["named"] == ["note-editor"],
+                     description="the board has the keyboard again")

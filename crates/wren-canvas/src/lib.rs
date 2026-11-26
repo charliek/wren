@@ -71,7 +71,7 @@ mod paint;
 mod widget;
 
 pub use command::{Command, Grow, Tool, TEXT_SIZES};
-pub use keys::{KeyPolicy, KeyRoute};
+pub use keys::{resolve, KeyPolicy, KeyRoute};
 use label::Before;
 pub use label::{Label, LabelAction, Motion, Preedit};
 pub use machine::{Button, Input, Key, Machine, Mods, Scroll};
