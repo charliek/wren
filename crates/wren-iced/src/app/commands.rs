@@ -67,6 +67,12 @@ pub enum CommandId {
     Code,
     MoveLineUp,
     MoveLineDown,
+    EditUndo,
+    EditRedo,
+    EditCopy,
+    EditCut,
+    EditPaste,
+    EditSelectAll,
     ToggleMarkdownAssist,
     SwitchEngine,
     ToggleSpellCheck,
@@ -519,6 +525,22 @@ definitions![
         App
     ),
     (Quit, "app.quit", "Quit Wren", "App", App),
+    // The text editing keys, bindable so that they follow the command key
+    // (discovery/keybindings.md §2 item 5). Until the editor carries them
+    // out as intents, their key passes to the editor, which handles it as
+    // its own; they are not listed and do not run as commands.
+    (EditUndo, "edit.undo", "Undo text edit", "Hidden", Editor),
+    (EditRedo, "edit.redo", "Redo text edit", "Hidden", Editor),
+    (EditCopy, "edit.copy", "Copy text", "Hidden", Editor),
+    (EditCut, "edit.cut", "Cut text", "Hidden", Editor),
+    (EditPaste, "edit.paste", "Paste text", "Hidden", Editor),
+    (
+        EditSelectAll,
+        "edit.select_all",
+        "Select all text",
+        "Hidden",
+        Editor
+    ),
     (
         CommandPalette,
         "palette.commands",
@@ -942,6 +964,12 @@ impl CommandId {
             Self::TaskSetDue => Some(wren_editor::KeyRoute::Popover(self.payload())),
             // So does the task form's, on either engine.
             Self::TaskEdit => Some(wren_editor::KeyRoute::Popover(self.payload())),
+            Self::EditUndo
+            | Self::EditRedo
+            | Self::EditCopy
+            | Self::EditCut
+            | Self::EditPaste
+            | Self::EditSelectAll => Some(wren_editor::KeyRoute::Pass),
             _ if self.task_change().is_some() => {
                 Some(wren_editor::KeyRoute::Command(self.payload()))
             }
@@ -1029,6 +1057,20 @@ impl CommandId {
         self.task_change().is_some()
             || self.task_menu().is_some()
             || matches!(self, Self::TaskSetDue | Self::TaskEdit)
+    }
+
+    /// Whether the command is bindable on Linux only: the `edit.*` keys,
+    /// which on macOS belong to the editor and the Edit menu.
+    pub fn linux_only(self) -> bool {
+        matches!(
+            self,
+            Self::EditUndo
+                | Self::EditRedo
+                | Self::EditCopy
+                | Self::EditCut
+                | Self::EditPaste
+                | Self::EditSelectAll
+        )
     }
 
     /// The task menu a command opens at the caret's task.
@@ -1225,6 +1267,8 @@ impl App {
             }
             TaskSetDue => self.calendar_can_open(),
             TaskEdit => self.task_form_can_open(),
+            // Their keys are the editor's own; see their rows.
+            EditUndo | EditRedo | EditCopy | EditCut | EditPaste | EditSelectAll => false,
             SpellSuggest => {
                 self.surface() == Surface::Text
                     && self.editor.backend() == wren_editor::BackendKind::Owned
@@ -1548,6 +1592,9 @@ impl App {
             }
             TaskSetDue => self.run_set_due(),
             TaskEdit => self.run_task_form(),
+            EditUndo | EditRedo | EditCopy | EditCut | EditPaste | EditSelectAll => {
+                self.blocked("Press the key in the editor")
+            }
             ToggleTask | Bold | Italic | Code | MoveLineUp | MoveLineDown => {
                 // From the palette: act at the editor's cursor, as the
                 // shortcut does in the editor, then give it the keyboard.

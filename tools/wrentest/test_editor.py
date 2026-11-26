@@ -19,7 +19,7 @@ import pytest
 
 from tools.wrentest import png
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 ENGINES = ("classic", "advanced")
 
@@ -478,13 +478,14 @@ def test_native_text_size_shortcuts_resize_and_save(editor_app) -> None:
         call("editor.set", {"text": ""})
         window = focus_native(app)
         assert call("editor.get")["font_size"] == 14
-        # `alt+plus` is Shift+= to the X server; `alt+equal` is unshifted.
-        for key, size in (("alt+equal", 15), ("alt+plus", 16), ("alt+minus", 15)):
+        # `plus` is Shift+= to the X server; `equal` is unshifted.
+        for key, size in ((native_mod("equal"), 15), (native_mod("plus"), 16),
+                          (native_mod("minus"), 15)):
             xdo("key", "--window", window, "--clearmodifiers", key)
             wait_for(lambda size=size: call("editor.get")["font_size"] == size,
                      description=f"{key} → {size}")
         assert "editor-font-size = 15\n" in config.read_text()
-        xdo("key", "--window", window, "--clearmodifiers", "alt+0")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("0"))
         wait_for(lambda: call("editor.get")["font_size"] == 14, description="reset")
         assert "editor-font-size = 14\n" in config.read_text()
         # The shortcuts never type into the note.
@@ -637,7 +638,7 @@ def test_native_outline_shortcut_previews_restores_and_jumps(editor_app) -> None
             modal = call("navigation.get")["modal"]
             return modal is not None and modal["mode"] == "outline"
 
-        xdo("key", "--window", window, "--clearmodifiers", "alt+shift+o")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("shift+o"))
         wait_for(outline_open, description="native outline shortcut")
         xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", "part 6")
         wait_for(lambda: call("editor.get")["cursor"]["line"] == headings["Part 6"],
@@ -647,7 +648,7 @@ def test_native_outline_shortcut_previews_restores_and_jumps(editor_app) -> None
                  description="Escape restores the cursor")
         assert call("navigation.get")["modal"] is None
 
-        xdo("key", "--window", window, "--clearmodifiers", "alt+shift+o")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("shift+o"))
         wait_for(outline_open, description="native outline shortcut again")
         xdo("key", "--window", window, "--clearmodifiers", "Down")
         wait_for(lambda: call("editor.get")["cursor"]["line"] == headings["Details 1"],

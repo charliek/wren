@@ -8,7 +8,6 @@ real pointer with xdotool, at scale factor 1 (the X11 lanes' Xvfb).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -23,7 +22,7 @@ from tools.wrentest.test_board_view import wait_focus
 from tools.wrentest.test_editor import xdo
 from tools.wrentest.test_gestures import move, point_in
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, mod_label, wait_for
 
 START, PACK, SHIP, EDGE = "ahj860xh", "3qrg4kv1", "1wg3aw6z", "zpsr8rp7"
 
@@ -324,7 +323,7 @@ def test_the_footer_undoes_redoes_and_zooms(samples: Path) -> None:
             "board-footer-zoom", "board-footer-zoom-in"]
         assert [each["enabled"] for each in state["controls"]] == [False, False, True, True,
                                                                     True]
-        undo_key = "⌘Z" if sys.platform == "darwin" else "Ctrl+Z"
+        undo_key = f"{mod_label()}Z"
         assert footer_control(state, "board-footer-undo")["tip"] == f"Undo   {undo_key}"
         assert footer_control(state, "board-footer-zoom")["command"] == "board.zoom.fit"
         assert footer_control(state, "board-footer-zoom-in")["command"] == "font.increase"

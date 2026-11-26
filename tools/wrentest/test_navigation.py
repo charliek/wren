@@ -21,7 +21,7 @@ import pytest
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture
 from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
-from tools.wrentest.ui import WrenApp, spell_setting, wait_for
+from tools.wrentest.ui import WrenApp, mod_label, spell_setting, wait_for
 
 
 COMMANDS = {
@@ -423,8 +423,8 @@ def test_dated_creation_and_shortcut_metadata_handle_filename_collisions(vault: 
             assert shortcuts["note.new"] == "⌘N"
             assert shortcuts["note.new_dated"] == "⇧⌘N"
         else:
-            assert shortcuts["note.new"] == "Alt+N"
-            assert shortcuts["note.new_dated"] == "Alt+Shift+N"
+            assert shortcuts["note.new"] == f"{mod_label()}N"
+            assert shortcuts["note.new_dated"] == f"{mod_label()}Shift+N"
         nonempty = [value for value in shortcuts.values() if value]
         assert len(nonempty) == len(set(nonempty))
         activate(app, {"command": "note.new_dated"})

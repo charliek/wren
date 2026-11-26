@@ -243,7 +243,9 @@ def midpoint(points: list[list[float]]) -> tuple[float, float]:
 def key(app: WrenApp, name: str, *mods: str, repeat: bool = False,
         release: bool = False) -> dict:
     """A key pressed on the focused board (§6.2 ``board.key``): ``mod`` is
-    ⌘ on macOS and Ctrl elsewhere. ``release`` lets go of a held Space."""
+    the app's command key (⌘ on macOS; Ctrl or Alt on Linux, as
+    ``linux-modifier`` says) and ``opt`` the board's other one (⌥; Alt or
+    Ctrl). ``release`` lets go of a held Space."""
     return app.client.call("board.key", {"key": name, "mods": list(mods), "repeat": repeat,
                                          "release": release})
 
@@ -326,7 +328,11 @@ def drag(app: WrenApp, start: dict, by: tuple[float, float], *, button: str = "l
 # The keys of the acceptance script's notation (§5.20), and the modifiers.
 SCRIPT_KEYS = {"Tab": "tab", "Esc": "escape", "↵": "enter", "←": "left", "→": "right",
                "↑": "up", "↓": "down", "⌫": "backspace"}
-SCRIPT_MODS = {"⌘": "mod", "⇧": "shift", "⌥": "alt"}
+SCRIPT_MODS = {"⌘": "mod", "⇧": "shift", "⌥": "opt"}
+
+# An open label's own undo and paste keys: ⌘ on macOS and Ctrl on Linux in
+# either mode, as every text field's are (discovery/keybindings.md §4).
+LABEL_MOD = "logo" if os.uname().sysname == "Darwin" else "ctrl"
 NUMBERS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
            "nine": 9, "ten": 10}
 

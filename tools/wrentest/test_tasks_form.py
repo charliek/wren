@@ -27,7 +27,7 @@ from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import engine, focus_native, xdo  # noqa: F401  (fixture)
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.test_tasks_baseline import saved
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 TODAY = "2026-11-19"
 NOTE = "Tasks/Form/Form.md"
@@ -42,7 +42,6 @@ LINES = [
     "",
 ]
 ORIGINAL = "\n".join(LINES)
-MAC = os.uname().sysname == "Darwin"
 
 
 def width(text: str) -> int:
@@ -398,7 +397,7 @@ def test_with_tasks_off_there_is_no_form(tmp_path: Path, engine: str) -> None:  
         call = app.client.call
         caret_at(app, line_of("- [/] Draft"))
         assert call("command.run", {"id": "task.edit"})["disposition"] == "blocked"
-        mods = ["logo", "shift"] if MAC else ["ctrl", "shift"]
+        mods = ["mod", "shift"]
         call("editor.key", {"key": "enter", "mods": mods})
         with pytest.raises(RemoteError, match="Tasks are off"):
             call("tasks.form")
@@ -422,7 +421,7 @@ def test_native_ctrl_shift_enter_opens_it_and_the_keyboard_fills_it(
         def typed(text: str) -> None:
             xdo("type", "--window", window, "--clearmodifiers", "--delay", "15", text)
 
-        key("ctrl+shift+Return")
+        key(native_mod("shift+Return"))
         wait_for(lambda: form(app)["open"], description="Ctrl+Shift+Enter opens the form")
         wait_for(lambda: call("focus.get")["named"] == ["task-form-description"],
                  description="the description takes the keyboard")
@@ -465,7 +464,7 @@ def test_native_ctrl_shift_enter_opens_it_and_the_keyboard_fills_it(
         # Escape cancels and nothing reaches the note.
         caret = caret_at(app, line_of("- [ ] Owed"))
         call("editor.focus")
-        key("ctrl+shift+Return")
+        key(native_mod("shift+Return"))
         wait_for(lambda: call("focus.get")["named"] == ["task-form-description"],
                  description="the form opens again")
         typed(" now")
@@ -479,7 +478,7 @@ def test_native_ctrl_shift_enter_opens_it_and_the_keyboard_fills_it(
         # Typed straight after the key, in one go: whatever comes before the
         # form has the keyboard is dropped, never typed into the note.
         xdo("key", "--window", window, "--clearmodifiers", "--delay", "0",
-            "ctrl+shift+Return", "z", "z", "z")
+            native_mod("shift+Return"), "z", "z", "z")
         wait_for(lambda: form(app)["open"], description="the form opens")
         time.sleep(0.3)
         assert call("editor.get")["text"] == expected

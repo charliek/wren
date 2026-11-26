@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use iced::keyboard::key::Physical;
 use iced::theme::Mode as SystemMode;
 use iced::{Font, Task};
-use wren_core::keybind::{self, Accel, Keymap, Layer, Platform};
+use wren_core::keybind::{self, Accel, Keymap, Layer, Platform, Scheme};
 use wren_core::settings::{self, EditorEngine, Settings, ThemeChoice};
 use wren_core::theme::{self as definitions, Appearance, Theme};
 use wren_editor::{BackendKind, KeyPolicy, KeyRoute};
@@ -249,30 +249,37 @@ fn read(path: Option<&Path>) -> (Option<String>, Settings) {
     }
 }
 
-/// The keymap of `platform`'s defaults and the user's `keybinds`, before
+/// The keymap of `scheme`'s defaults and the user's `keybinds`, before
 /// the board bindings the app shadows are dropped. The task defaults join
 /// only while `tasks` is on.
 pub(super) fn build_keymap(
-    platform: Platform,
+    scheme: Scheme,
     keybinds: &[(String, String)],
     tasks: bool,
 ) -> (Keymap, Vec<String>) {
     let task_defaults = if tasks {
-        keybind::default_task_bindings(platform)
+        keybind::default_task_bindings(scheme)
     } else {
         Vec::new()
     };
     Keymap::build(
-        keybind::default_bindings(platform)
+        scheme,
+        keybind::default_bindings(scheme)
             .into_iter()
-            .chain(keybind::default_board_bindings(platform))
+            .chain(keybind::default_board_bindings(scheme))
             .chain(task_defaults),
         keybinds,
         // With tasks off a task command does not exist, so a `keybind`
-        // line naming one is an unknown action.
+        // line naming one is an unknown action. So is an `edit.*` action on
+        // macOS, where the editor and the Edit menu own those keys and a
+        // binding would only take a key from a shortcut.
         |action| {
+            let id = CommandId::parse(action);
             layer_of(action)
-                .filter(|_| tasks || !CommandId::parse(action).is_some_and(CommandId::tasks))
+                .filter(|_| tasks || !id.is_some_and(CommandId::tasks))
+                .filter(|_| {
+                    scheme.platform == Platform::Linux || !id.is_some_and(CommandId::linux_only)
+                })
         },
     )
 }
@@ -295,8 +302,8 @@ impl Preferences {
     }
 
     pub(super) fn rebuild_keymap(&mut self) {
-        let (mut keymap, mut warnings) =
-            build_keymap(Platform::current(), &self.settings.keybinds, self.tasks);
+        let scheme = Scheme::current(self.settings.linux_modifier);
+        let (mut keymap, mut warnings) = build_keymap(scheme, &self.settings.keybinds, self.tasks);
         // A board binding on a trigger the base layer gives an App command
         // could never run, since the app's shortcut wins, and neither could
         // one on Escape, which `board_policy` keeps for the ladder; drop
@@ -310,7 +317,8 @@ impl Preferences {
             .collect();
         for (trigger, action) in &self.settings.keybinds {
             let action = action.trim();
-            if let Some(accel) = keybind::parse_trigger(trigger)
+            if let Some(accel) = scheme
+                .parse(trigger)
                 .filter(|accel| shadowed.contains(accel))
                 .filter(|accel| keymap.board_action(accel) == Some(action))
             {
@@ -1104,6 +1112,15 @@ impl App {
     }
 }
 
+/// Every scheme the default keymap is generated for: macOS, and Linux in
+/// each `linux-modifier` mode.
+#[cfg(test)]
+pub(crate) const SCHEMES: [Scheme; 3] = [
+    Scheme::new(Platform::Mac, keybind::LinuxModifier::Ctrl),
+    Scheme::new(Platform::Linux, keybind::LinuxModifier::Ctrl),
+    Scheme::new(Platform::Linux, keybind::LinuxModifier::Alt),
+];
+
 /// Every bindable action name, for documentation and validation.
 #[cfg(test)]
 pub fn action_names() -> impl Iterator<Item = &'static str> {
@@ -1129,10 +1146,11 @@ mod tests {
 
     #[test]
     fn every_default_binding_names_a_real_command() {
-        for platform in [Platform::Mac, Platform::Linux] {
-            for (trigger, action) in keybind::default_bindings(platform)
+        for scheme in SCHEMES {
+            for (trigger, action) in keybind::default_bindings(scheme)
                 .into_iter()
-                .chain(keybind::default_board_bindings(platform))
+                .chain(keybind::default_board_bindings(scheme))
+                .chain(keybind::default_task_bindings(scheme))
             {
                 assert!(
                     action_names().any(|name| name == action),
@@ -1143,13 +1161,31 @@ mod tests {
     }
 
     #[test]
+    fn the_edit_actions_are_refused_on_macos_and_bound_on_linux() {
+        let user = [("mod+k".to_owned(), "edit.copy".to_owned())];
+        for scheme in SCHEMES {
+            let (keymap, warnings) = build_keymap(scheme, &user, false);
+            let k = scheme.parse("mod+k").unwrap();
+            if scheme.platform == Platform::Mac {
+                assert_eq!(warnings, ["keybind: unknown action \"edit.copy\""]);
+                // ⌘K keeps opening the palette.
+                assert_eq!(keymap.action(&k), Some("palette.commands"));
+                assert_eq!(keymap.accel("edit.copy"), None);
+            } else {
+                assert!(warnings.is_empty(), "{warnings:?}");
+                assert_eq!(keymap.action(&k), Some("edit.copy"), "{scheme:?}");
+            }
+        }
+    }
+
+    #[test]
     fn no_default_board_key_shadows_an_app_command() {
         // The base layer is read first, so a board default on a trigger the
         // base layer gives to an App command could never run; one it gives
         // to an Editor command is inert while a board has the keyboard.
-        for platform in [Platform::Mac, Platform::Linux] {
-            let (keymap, _) = Keymap::build(keybind::default_bindings(platform), &[], layer_of);
-            for (trigger, action) in keybind::default_board_bindings(platform) {
+        for scheme in SCHEMES {
+            let (keymap, _) = build_keymap(scheme, &[], true);
+            for (trigger, action) in keybind::default_board_bindings(scheme) {
                 assert!(
                     wren_canvas::Command::parse(action).is_some(),
                     "{trigger} → {action} is not a board command"
@@ -1172,30 +1208,29 @@ mod tests {
     }
 
     /// `p` is the app modifier and `m` the editing one, for the platform
-    /// the tests run on.
+    /// the tests run on in its default mode: both are Mod.
     fn modifiers() -> (&'static str, &'static str) {
-        match Platform::current() {
-            Platform::Mac => ("super", "super"),
-            Platform::Linux => ("alt", "ctrl"),
-        }
+        let primary = Scheme::default().modifier(keybind::Logical::Mod);
+        (primary, primary)
     }
 
     #[test]
     fn the_app_keymap_keeps_the_0_1_1_base_layer_and_every_board_default() {
-        for platform in [Platform::Mac, Platform::Linux] {
+        for scheme in SCHEMES {
             let (keymap, warnings) = Keymap::build(
-                keybind::default_bindings(platform)
+                scheme,
+                keybind::default_bindings(scheme)
                     .into_iter()
-                    .chain(keybind::default_board_bindings(platform)),
+                    .chain(keybind::default_board_bindings(scheme)),
                 &[],
                 layer_of,
             );
             assert!(warnings.is_empty());
-            let (base, _) = Keymap::build(keybind::default_bindings(platform), &[], |_| {
+            let (base, _) = Keymap::build(scheme, keybind::default_bindings(scheme), &[], |_| {
                 Some(Layer::Base)
             });
-            assert!(keymap.bindings().eq(base.bindings()), "{platform:?}");
-            let defaults = keybind::default_board_bindings(platform);
+            assert!(keymap.bindings().eq(base.bindings()), "{scheme:?}");
+            let defaults = keybind::default_board_bindings(scheme);
             assert!(keymap
                 .board_bindings()
                 .map(|(accel, action)| (accel.to_string(), action))
@@ -1208,7 +1243,7 @@ mod tests {
         assert!(preferences.settings.warnings.is_empty());
         assert_eq!(
             preferences.keymap.board_bindings().count(),
-            keybind::default_board_bindings(Platform::current()).len()
+            keybind::default_board_bindings(Scheme::default()).len()
         );
     }
 
@@ -1245,7 +1280,8 @@ mod tests {
         }
         if Platform::current() == Platform::Linux {
             assert_eq!(route("ctrl+f", false), BoardRoute::Host);
-            assert_eq!(route("ctrl+y", false), BoardRoute::Command(C::Redo));
+            // Ctrl+Y is Focus mode now that Ctrl is the command key.
+            assert_eq!(route("ctrl+y", false), BoardRoute::Host);
         }
         // Unbound keys are captured as text.
         assert_eq!(route("k", false), BoardRoute::Pass);
@@ -1281,7 +1317,7 @@ mod tests {
         let policy = board_policy(&Preferences::load(None).keymap);
         let app = match Platform::current() {
             Platform::Mac => Modifiers::LOGO,
-            Platform::Linux => Modifiers::ALT,
+            Platform::Linux => Modifiers::CTRL,
         };
         let character = |c: &str, code, modifiers| {
             policy(
@@ -1401,7 +1437,7 @@ mod tests {
         // The fallback keeps the modifiers: a user's chord on the digit.
         let chord = match Platform::current() {
             Platform::Mac => Modifiers::LOGO,
-            Platform::Linux => Modifiers::ALT,
+            Platform::Linux => Modifiers::CTRL,
         };
         assert_eq!(
             press("&", Code::Digit1, chord),
@@ -1485,7 +1521,7 @@ mod tests {
         assert_eq!(preferences.theme(SystemMode::Dark).0, definitions::DARK);
         let palette = keybind::parse_trigger(match Platform::current() {
             Platform::Mac => "super+shift+p",
-            Platform::Linux => "alt+shift+p",
+            Platform::Linux => "ctrl+shift+p",
         })
         .unwrap();
         assert_eq!(
@@ -1698,16 +1734,15 @@ mod tests {
         use wren_editor::Intent;
 
         let user = [("alt+t".to_string(), "markdown.italic".to_string())];
-        let (keymap, warnings) = Keymap::build(
-            keybind::default_bindings(Platform::current()),
-            &user,
-            layer_of,
-        );
+        let scheme = Scheme::default();
+        let (keymap, warnings) =
+            Keymap::build(scheme, keybind::default_bindings(scheme), &user, layer_of);
         assert!(warnings.is_empty());
         let policy = key_policy(&keymap, true, false);
+        // Both are Mod, which is Ctrl in Linux's default mode.
         let (editing, app) = match Platform::current() {
             Platform::Mac => (Modifiers::LOGO, Modifiers::LOGO),
-            Platform::Linux => (Modifiers::CTRL, Modifiers::ALT),
+            Platform::Linux => (Modifiers::CTRL, Modifiers::CTRL),
         };
         let letter = |letter: &str, code, modifiers| {
             policy(
@@ -1997,9 +2032,7 @@ mod tests {
         assert_eq!(app.last_processed.as_ref().unwrap().warning, None);
         // `=` and `+`, however the toolkit reports the shift, reach the command.
         for trigger in ["plus", "shift+plus", "equal", "shift+equal"] {
-            let accel =
-                keybind::parse_trigger(&format!("{}+{trigger}", Platform::current().primary()))
-                    .unwrap();
+            let accel = Scheme::default().parse(&format!("mod+{trigger}")).unwrap();
             assert_eq!(app.preferences.keymap.action(&accel), Some("font.increase"));
         }
     }

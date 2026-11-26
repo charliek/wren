@@ -873,16 +873,19 @@ pub(super) mod tests {
     use super::*;
     use crate::app::commands::Scope;
 
-    /// The default keymap on `platform`, with the user's `keybind` lines.
+    /// The default keymap on `platform`, in Linux's default Ctrl mode, with
+    /// the user's `keybind` lines.
     pub(in crate::app) fn keymap(platform: Platform, user: &[(&str, &str)]) -> Keymap {
         let user: Vec<(String, String)> = user
             .iter()
             .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
             .collect();
+        let scheme = keybind::Scheme::new(platform, keybind::LinuxModifier::default());
         let (keymap, warnings) = Keymap::build(
-            keybind::default_bindings(platform)
+            scheme,
+            keybind::default_bindings(scheme)
                 .into_iter()
-                .chain(keybind::default_board_bindings(platform)),
+                .chain(keybind::default_board_bindings(scheme)),
             &user,
             |action| {
                 CommandId::parse(action).map(|id| match id.scope() {
@@ -1242,10 +1245,7 @@ pub(super) mod tests {
             keys("Delete selection"),
             Some(vec!["⌫".into(), "Del".into()])
         );
-        assert_eq!(
-            keys("Redo"),
-            Some(vec!["Ctrl+Shift+Z".into(), "Ctrl+Y".into()])
-        );
+        assert_eq!(keys("Redo"), Some(vec!["Ctrl+Shift+Z".into()]));
         assert_eq!(
             keys("Connect in that direction"),
             Some(vec!["Ctrl+Arrow".into()])
@@ -1262,7 +1262,7 @@ pub(super) mod tests {
         assert_eq!(keys("Board keys"), Some(vec!["?".into()]));
         assert_eq!(
             keys("Zoom in, out, to 100 %"),
-            Some(vec!["Alt+=".into(), "Alt+-".into(), "Alt+0".into()])
+            Some(vec!["Ctrl+=".into(), "Ctrl+-".into(), "Ctrl+0".into()])
         );
         assert_eq!(keys("Move copies"), Some(vec!["Ctrl+drag".into()]));
         let jump: Vec<_> = sheet
@@ -1270,7 +1270,7 @@ pub(super) mod tests {
             .filter(|row| row.words == "Jump to node…")
             .map(|row| row.keys.clone())
             .collect();
-        assert_eq!(jump, [vec!["Alt+F".to_owned(), "Alt+Shift+O".to_owned()]]);
+        assert_eq!(jump, [vec!["Ctrl+F".to_owned(), "Ctrl+Shift+O".to_owned()]]);
         // No default key: the two unlettered tools, align, distribute and
         // the fills are left out until a key is bound.
         for words in [

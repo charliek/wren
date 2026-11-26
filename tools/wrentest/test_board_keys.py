@@ -3,8 +3,8 @@ Phase 2 item 7).
 
 `board.key` takes the path a real key takes: the board's key policy from
 the keymap, then the app's keyboard path for whatever the board leaves.
-These cases run on Linux, where Alt is the app's modifier and Ctrl the
-document's (`mod`).
+`mod` is the command key of the lane's `linux-modifier` (⌘ on macOS),
+which app and board commands share.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from tools.wrentest.boards import (
 from tools.wrentest.test_board_view import column, focused, wait_focus
 from tools.wrentest.ui import WrenApp
 
-# The app's modifier on Linux.
-APP = "alt"
+# The app's modifier: the harness's `mod`, the command key of the mode.
+APP = "mod"
 START, RECEIVE, PACK = "ahj860xh", "12axfsny", "3qrg4kv1"
 
 

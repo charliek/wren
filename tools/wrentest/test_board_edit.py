@@ -95,10 +95,10 @@ def test_a_move_is_one_line_and_its_inverse_or_undo_none(samples: Path) -> None:
         ready(app)
         original = flow.read_bytes()
         click(app, {"node": RECEIVE})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         flushed(app)
         assert line_diff(original, flow.read_bytes()) == ["- at = [0, 120]", "+ at = [20, 120]"]
-        key(app, "left", "alt")
+        key(app, "left", "opt")
         flushed(app)
         assert flow.read_bytes() == original
 
@@ -121,20 +121,20 @@ def test_a_pointer_passing_over_leaves_key_moves_one_undo_step(samples: Path) ->
         ready(app)
         original = flow.read_bytes()
         click(app, {"node": RECEIVE})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         pointer(app, "move", {"node": PACK})
         pointer(app, "move", {"canvas": [600, 300]})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         flushed(app)
         assert line_diff(original, flow.read_bytes()) == ["- at = [0, 120]", "+ at = [40, 120]"]
         state = key(app, "z", "mod")
         flushed(app)
         assert flow.read_bytes() == original and state["pristine"] and not state["can_undo"]
 
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         app.client.call("board.pointer", {"kind": "wheel", "at": {"node": PACK},
                                           "delta": {"y": -1}})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         key(app, "z", "mod")
         flushed(app)
         assert line_diff(original, flow.read_bytes()) == ["- at = [0, 120]", "+ at = [20, 120]"]
@@ -148,7 +148,7 @@ def test_a_hand_written_board_comes_back_byte_for_byte_after_undo(samples: Path)
     with board_app(samples, "board-edit-hand") as app:
         ready(app, HAND_WRITTEN)
         click(app, {"node": "first"})
-        key(app, "down", "alt")
+        key(app, "down", "opt")
         flushed(app)
         canonical = path.read_bytes()
         assert canonical != original and b"#" not in canonical
@@ -385,7 +385,7 @@ def test_a_change_on_disk_reloads_keeps_the_view_and_ends_what_was_in_flight(sam
         # Clean: the selection by id and the viewport are kept, and the
         # move made before is no longer undoable.
         click(app, {"node": RECEIVE})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         flushed(app)
         assert board(app)["can_undo"]
         viewport = board(app)["viewport"]
@@ -398,7 +398,7 @@ def test_a_change_on_disk_reloads_keeps_the_view_and_ends_what_was_in_flight(sam
 
         # Dirty: the draft goes to a conflict copy named for a board.
         app.client.call("test.timer.hold", {"held": True})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         assert dirty(app)
         mine = app.client.call("session.get")["document"]["text"]
         theirs = flow.read_text(encoding="utf-8").replace('"Extra"', '"Theirs"')
@@ -433,7 +433,7 @@ def test_each_gesture_is_one_step_and_as_many_undos_give_the_bytes_back(samples:
         ready(app)
         original = flow.read_bytes()
         gestures = [
-            lambda: (click(app, {"node": RECEIVE}), key(app, "right", "alt")),
+            lambda: (click(app, {"node": RECEIVE}), key(app, "right", "opt")),
             lambda: drag(app, {"node": PACK}, (60, 20)),
             lambda: (click(app, {"node": VALID}), key(app, "enter"), type_text(app, "Valid order?"),
                      key(app, "escape")),
@@ -662,7 +662,7 @@ def test_reloading_saved_bytes_and_a_no_op_writes_nothing(samples: Path) -> None
     with board_app(samples, "board-edit-reload") as app:
         ready(app)
         click(app, {"node": RECEIVE})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         flushed(app)
         saved = flow.read_text(encoding="utf-8")
         # The same board, reformatted by another program.
@@ -674,8 +674,8 @@ def test_reloading_saved_bytes_and_a_no_op_writes_nothing(samples: Path) -> None
         key(app, "up")
         key(app, "enter")
         key(app, "escape")
-        key(app, "right", "alt")
-        key(app, "left", "alt")
+        key(app, "right", "opt")
+        key(app, "left", "opt")
         time.sleep(1.0)
         flushed(app)
         assert stamp(flow) == before and not dirty(app)

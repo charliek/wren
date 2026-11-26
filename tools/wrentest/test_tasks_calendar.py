@@ -27,7 +27,7 @@ from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import engine, focus_native, xdo  # noqa: F401  (fixture)
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.test_tasks_baseline import saved
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 TODAY = "2026-11-19"
 NOTE = "Tasks/Calendar/Calendar.md"
@@ -41,7 +41,6 @@ LINES = [
     "Plain delta.",
 ]
 ORIGINAL = "\n".join(LINES)
-MAC = os.uname().sysname == "Darwin"
 
 
 def width(text: str) -> int:
@@ -295,7 +294,7 @@ def test_off_a_task_line_the_key_claims_nothing(tmp_path: Path, engine: str) -> 
         call = app.client.call
         plain = line_of("Plain delta.")
         caret_at(app, plain, 0)
-        call("editor.key", {"key": "d", "mods": ["logo"] if MAC else ["ctrl"]})
+        call("editor.key", {"key": "d", "mods": ["mod"]})
         assert calendar(app) == {"open": False}
         call("editor.key", {"key": "x"})
         expected = replaced(plain, "xPlain delta.")
@@ -312,7 +311,7 @@ def test_with_tasks_off_there_is_no_calendar(tmp_path: Path, engine: str) -> Non
             call("shortcut", {"id": "task.set_due"})
         assert call("command.run", {"id": "task.set_due"})["disposition"] == "blocked"
         # Ctrl+D (⌘D) is unbound, and does what it did before tasks.
-        call("editor.key", {"key": "d", "mods": ["logo"] if MAC else ["ctrl"]})
+        call("editor.key", {"key": "d", "mods": ["mod"]})
         assert call("editor.get")["text"] == ORIGINAL
         with pytest.raises(RemoteError, match="Tasks are off"):
             call("tasks.calendar_type", {"text": "fri"})
@@ -328,7 +327,7 @@ def test_native_ctrl_d_opens_it_and_typing_reaches_the_field(
         line = line_of("- [ ] Undated")
         cursor = caret_at(app, line)
         window = focus_native(app)
-        xdo("key", "--window", window, "--clearmodifiers", "ctrl+d")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("d"))
         if engine == "classic":
             time.sleep(0.5)
             assert calendar(app) == {"open": False}
@@ -353,7 +352,7 @@ def test_native_ctrl_d_opens_it_and_typing_reaches_the_field(
         saved(app, path, expected)
 
         # Escape closes it and nothing else.
-        xdo("key", "--window", window, "--clearmodifiers", "ctrl+d")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("d"))
         wait_for(lambda: call("focus.get")["named"] == ["calendar-field"],
                  description="the field takes the keyboard again")
         xdo("key", "--window", window, "--clearmodifiers", "Escape")
@@ -363,7 +362,7 @@ def test_native_ctrl_d_opens_it_and_typing_reaches_the_field(
         assert call("editor.get")["text"] == expected
 
         # The wheel over the card closes it too, writing nothing.
-        xdo("key", "--window", window, "--clearmodifiers", "ctrl+d")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("d"))
         wait_for(lambda: call("focus.get")["named"] == ["calendar-field"],
                  description="the field takes the keyboard again")
         card = calendar(app)["bounds"]
@@ -377,7 +376,7 @@ def test_native_ctrl_d_opens_it_and_typing_reaches_the_field(
         # Typed straight after Ctrl+D, in one go: whatever comes before the
         # field has the keyboard is dropped, never typed into the note.
         xdo("key", "--window", window, "--clearmodifiers", "--delay", "0",
-            "ctrl+d", "t", "o", "d", "a", "y")
+            native_mod("d"), "t", "o", "d", "a", "y")
         wait_for(lambda: calendar(app)["open"], description="Ctrl+D opens the calendar")
         time.sleep(0.3)
         assert call("editor.get")["text"] == expected

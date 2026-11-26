@@ -317,7 +317,7 @@ impl App {
             }
             "editor.key" => {
                 self.ensure_editor_ready()?;
-                let (key, modifiers) = key_press(params)?;
+                let (key, modifiers) = key_press(params, self.preferences.keymap.scheme())?;
                 let task = self.editor_key(key, modifiers);
                 request.respond(Ok(self.editor_snapshot()));
                 return Ok(task);
@@ -1039,11 +1039,29 @@ fn spell_event(params: &Value) -> Result<wren_editor::SpellEvent, String> {
     })
 }
 
+/// The modifier `token` stands for in `scheme`, for a request's `mod` and
+/// `opt`, so a case presses the command key of the mode the app runs in.
+pub(super) fn logical_modifier(
+    scheme: wren_core::keybind::Scheme,
+    token: wren_core::keybind::Logical,
+) -> iced::keyboard::Modifiers {
+    use iced::keyboard::Modifiers;
+    match scheme.modifier(token) {
+        "super" => Modifiers::LOGO,
+        "ctrl" => Modifiers::CTRL,
+        _ => Modifiers::ALT,
+    }
+}
+
 /// A key press for `editor.key`: a named key, or one character, and the
-/// modifiers held.
-fn key_press(params: &Value) -> Result<(iced::keyboard::Key, iced::keyboard::Modifiers), String> {
+/// modifiers held, where `mod` and `opt` are `scheme`'s.
+fn key_press(
+    params: &Value,
+    scheme: wren_core::keybind::Scheme,
+) -> Result<(iced::keyboard::Key, iced::keyboard::Modifiers), String> {
     use iced::keyboard::key::Named;
     use iced::keyboard::{Key, Modifiers};
+    use wren_core::keybind::Logical;
     let name = string(params, "key")?;
     let named = match name {
         "up" => Some(Named::ArrowUp),
@@ -1080,6 +1098,8 @@ fn key_press(params: &Value) -> Result<(iced::keyboard::Key, iced::keyboard::Mod
                 "ctrl" => Modifiers::CTRL,
                 "alt" => Modifiers::ALT,
                 "logo" => Modifiers::LOGO,
+                "mod" => logical_modifier(scheme, Logical::Mod),
+                "opt" => logical_modifier(scheme, Logical::Opt),
                 other => return Err(format!("unknown modifier {other:?}")),
             };
         }
@@ -1610,6 +1630,7 @@ fn updater_status() -> Value {
 mod tests {
     use super::*;
     use crate::cli::Options;
+    use wren_core::keybind::Scheme;
 
     #[test]
     fn documented_core_requests_use_ids_and_the_shared_operation_types() {
@@ -2143,7 +2164,7 @@ mod tests {
     }
 
     fn press(app: &mut App, key: &str) {
-        let (key, modifiers) = key_press(&json!({ "key": key })).unwrap();
+        let (key, modifiers) = key_press(&json!({ "key": key }), Scheme::default()).unwrap();
         let _ = app.editor_key(key, modifiers);
     }
 
@@ -2170,23 +2191,55 @@ mod tests {
             assert!(spell_event(&params).is_err(), "{params}");
         }
         assert_eq!(
-            key_press(&json!({"key":"down"})).unwrap(),
+            key_press(&json!({"key":"down"}), Scheme::default()).unwrap(),
             (Key::Named(Named::ArrowDown), Modifiers::empty())
         );
         assert_eq!(
-            key_press(&json!({"key":".","mods":["alt","shift"]})).unwrap(),
+            key_press(
+                &json!({"key":".","mods":["alt","shift"]}),
+                Scheme::default()
+            )
+            .unwrap(),
             (
                 Key::Character(".".into()),
                 Modifiers::ALT | Modifiers::SHIFT
             )
         );
+        // `mod` and `opt` are the scheme's: the command key and the other.
+        use wren_core::keybind::{LinuxModifier, Platform};
+        for (scheme, primary, secondary) in [
+            (
+                Scheme::new(Platform::Mac, LinuxModifier::Alt),
+                Modifiers::LOGO,
+                Modifiers::ALT,
+            ),
+            (
+                Scheme::new(Platform::Linux, LinuxModifier::Ctrl),
+                Modifiers::CTRL,
+                Modifiers::ALT,
+            ),
+            (
+                Scheme::new(Platform::Linux, LinuxModifier::Alt),
+                Modifiers::ALT,
+                Modifiers::CTRL,
+            ),
+        ] {
+            assert_eq!(
+                key_press(&json!({"key":"d","mods":["mod","shift"]}), scheme).unwrap(),
+                (Key::Character("d".into()), primary | Modifiers::SHIFT)
+            );
+            assert_eq!(
+                key_press(&json!({"key":"d","mods":["opt"]}), scheme).unwrap(),
+                (Key::Character("d".into()), secondary)
+            );
+        }
         for params in [
             json!({"key":"pageup"}),
             json!({"key":"ab"}),
             json!({"key":"a","mods":["hyper"]}),
             json!({"key":"a","mods":"alt"}),
         ] {
-            assert!(key_press(&params).is_err(), "{params}");
+            assert!(key_press(&params, Scheme::default()).is_err(), "{params}");
         }
     }
 
@@ -2391,7 +2444,8 @@ mod tests {
         app.editor
             .set_suggest_source(Some(std::sync::Arc::new(Offers)));
         let control_escape = |app: &mut App| {
-            let (key, modifiers) = key_press(&json!({"key":"escape","mods":["ctrl"]})).unwrap();
+            let (key, modifiers) =
+                key_press(&json!({"key":"escape","mods":["ctrl"]}), Scheme::default()).unwrap();
             let _ = app.editor_key(key, modifiers);
         };
         for open in [false, true] {

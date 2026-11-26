@@ -207,6 +207,7 @@ class _WrenAppTestBase(unittest.TestCase):
         os.environ.pop("WRENTEST_SPELL", None)
         os.environ.pop("WRENTEST_BOARDS", None)
         os.environ.pop("WRENTEST_TASKS", None)
+        os.environ.pop("WRENTEST_LINUX_MODIFIER", None)
 
     def tearDown(self) -> None:
         self._environment.stop()
@@ -436,27 +437,28 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                 self.assertEqual(app.settings_path.parent.stat().st_mode & 0o777, 0o700)
                 app.settings_path.write_text("editor-font-size = 18\n", encoding="utf-8")
                 app.restart(hard=True)
-        self.assertEqual(seen, ["editor-engine = advanced\nspell-check = off\n",
+        self.assertEqual(seen, ["editor-engine = advanced\nspell-check = off\n"
+                                "linux-modifier = alt\n",
                                 "editor-font-size = 18\n"])
 
-    def test_without_settings_the_config_file_holds_only_the_spell_setting(self) -> None:
+    def test_without_settings_the_config_file_holds_only_the_pinned_settings(self) -> None:
         factory = self._make_popen(_good_identify())
         with patch.object(subprocess, "Popen", side_effect=factory):
             with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
                 self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
-                                 "spell-check = off\n")
+                                 "spell-check = off\nlinux-modifier = alt\n")
                 self.assertFalse(app.words_path.exists())
 
     def test_the_lane_spell_setting_joins_the_settings_unless_they_name_it(self) -> None:
         factory = self._make_popen(_good_identify())
         cases = [
-            (None, None, "spell-check = off\n"),
-            ("on", None, "spell-check = on\n"),
-            ("off", "", "spell-check = off\n"),
-            ("on", "editor-engine = advanced", "editor-engine = advanced\nspell-check = on\n"),
-            ("on", "spell-check = off\n", "spell-check = off\n"),
-            ("off", "# note\n  spell-check=on\n", "# note\n  spell-check=on\n"),
-            ("on", "# spell-check is the lane's\n", "# spell-check is the lane's\nspell-check = on\n"),
+            (None, None, "spell-check = off\nlinux-modifier = alt\n"),
+            ("on", None, "spell-check = on\nlinux-modifier = alt\n"),
+            ("off", "", "spell-check = off\nlinux-modifier = alt\n"),
+            ("on", "editor-engine = advanced", "editor-engine = advanced\nspell-check = on\nlinux-modifier = alt\n"),
+            ("on", "spell-check = off\n", "spell-check = off\nlinux-modifier = alt\n"),
+            ("off", "# note\n  spell-check=on\n", "# note\n  spell-check=on\nlinux-modifier = alt\n"),
+            ("on", "# spell-check is the lane's\n", "# spell-check is the lane's\nspell-check = on\nlinux-modifier = alt\n"),
         ]
         for lane, settings, expected in cases:
             with self.subTest(lane=lane, settings=settings):
@@ -517,16 +519,16 @@ class TestWrenAppReadiness(_WrenAppTestBase):
     def test_wrentest_boards_writes_an_explicit_boards_line(self) -> None:
         factory = self._make_popen(_good_identify())
         cases = [
-            ("on", None, "spell-check = off\nboards = on\n"),
+            ("on", None, "spell-check = off\nboards = on\nlinux-modifier = alt\n"),
             ("off", "editor-engine = advanced\n",
-             "editor-engine = advanced\nspell-check = off\nboards = off\n"),
+             "editor-engine = advanced\nspell-check = off\nboards = off\nlinux-modifier = alt\n"),
             ("on", "editor-engine = advanced",
-             "editor-engine = advanced\nspell-check = off\nboards = on\n"),
+             "editor-engine = advanced\nspell-check = off\nboards = on\nlinux-modifier = alt\n"),
             # A case that sets it itself keeps its own.
-            ("on", "boards = off\n", "boards = off\nspell-check = off\n"),
-            ("off", "  boards=on\n", "  boards=on\nspell-check = off\n"),
+            ("on", "boards = off\n", "boards = off\nspell-check = off\nlinux-modifier = alt\n"),
+            ("off", "  boards=on\n", "  boards=on\nspell-check = off\nlinux-modifier = alt\n"),
             # Both lane lines, after the test's own text, spell check first.
-            ("off", "spell-check = on\n", "spell-check = on\nboards = off\n"),
+            ("off", "spell-check = on\n", "spell-check = on\nboards = off\nlinux-modifier = alt\n"),
         ]
         for value, settings, expected in cases:
             with self.subTest(value=value, settings=settings), \
@@ -551,11 +553,11 @@ class TestWrenAppReadiness(_WrenAppTestBase):
     def test_wrentest_tasks_writes_an_explicit_tasks_line(self) -> None:
         factory = self._make_popen(_good_identify())
         cases = [
-            ("on", None, "spell-check = off\ntasks = on\n"),
+            ("on", None, "spell-check = off\ntasks = on\nlinux-modifier = alt\n"),
             ("off", "editor-engine = advanced\n",
-             "editor-engine = advanced\nspell-check = off\ntasks = off\n"),
+             "editor-engine = advanced\nspell-check = off\ntasks = off\nlinux-modifier = alt\n"),
             # A task case that sets it itself keeps its own.
-            ("off", "tasks = on\n", "tasks = on\nspell-check = off\n"),
+            ("off", "tasks = on\n", "tasks = on\nspell-check = off\nlinux-modifier = alt\n"),
         ]
         for value, settings, expected in cases:
             with self.subTest(value=value, settings=settings), \
@@ -570,7 +572,8 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                 patch.object(subprocess, "Popen", side_effect=factory):
             with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
                 self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
-                                 "spell-check = off\nboards = off\ntasks = on\n")
+                                 "spell-check = off\nboards = off\ntasks = on\n"
+                                 "linux-modifier = alt\n")
 
     def test_wrentest_tasks_unset_or_empty_adds_nothing(self) -> None:
         for environment in ({}, {"WRENTEST_TASKS": ""}):
@@ -583,6 +586,48 @@ class TestWrenAppReadiness(_WrenAppTestBase):
         for value in ("yes", "ON", "1"):
             with self.subTest(value=value), patch.dict(os.environ, {"WRENTEST_TASKS": value}), \
                     self.assertRaisesRegex(ValueError, "WRENTEST_TASKS"):
+                WrenApp(settings=None)
+
+    def test_the_lane_pins_linux_modifier_alt_unless_the_settings_name_it(self) -> None:
+        factory = self._make_popen(_good_identify())
+        cases = [
+            # The suite's cases are written for Alt as the command key.
+            ({}, None, "spell-check = off\nlinux-modifier = alt\n"),
+            ({"WRENTEST_LINUX_MODIFIER": "ctrl"}, None,
+             "spell-check = off\nlinux-modifier = ctrl\n"),
+            # A case about the mode sets it itself and keeps its own.
+            ({}, "linux-modifier = ctrl\n", "linux-modifier = ctrl\nspell-check = off\n"),
+            ({"WRENTEST_LINUX_MODIFIER": "ctrl"}, "  linux-modifier=alt\n",
+             "  linux-modifier=alt\nspell-check = off\n"),
+            # Last, after every other lane line.
+            ({"WRENTEST_BOARDS": "on", "WRENTEST_TASKS": "off"}, "theme = nord\n",
+             "theme = nord\nspell-check = off\nboards = on\ntasks = off\nlinux-modifier = alt\n"),
+        ]
+        for environment, settings, expected in cases:
+            with self.subTest(environment=environment, settings=settings), \
+                    patch.dict(os.environ, environment), \
+                    patch.object(subprocess, "Popen", side_effect=factory):
+                with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                             settings=settings) as app:
+                    self.assertEqual(app.settings_path.read_text(encoding="utf-8"), expected)
+        # Without lane settings a fresh install's absent file stays absent.
+        with patch.object(subprocess, "Popen", side_effect=factory):
+            with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                         lane_settings=False) as app:
+                self.assertFalse(app.settings_path.exists())
+
+    def test_the_native_command_key_follows_the_lane(self) -> None:
+        self.assertEqual(ui.linux_modifier(), "alt")
+        self.assertEqual(ui.native_mod("d"), "alt+d")
+        with patch.dict(os.environ, {"WRENTEST_LINUX_MODIFIER": "ctrl"}):
+            self.assertEqual(ui.linux_modifier(), "ctrl")
+            self.assertEqual(ui.native_mod("Return"), "ctrl+Return")
+
+    def test_wrentest_linux_modifier_must_be_ctrl_or_alt(self) -> None:
+        for value in ("", "super", "ALT", "control"):
+            with self.subTest(value=value), \
+                    patch.dict(os.environ, {"WRENTEST_LINUX_MODIFIER": value}), \
+                    self.assertRaisesRegex(ValueError, "WRENTEST_LINUX_MODIFIER"):
                 WrenApp(settings=None)
 
     def test_today_reaches_every_launch_as_wren_test_today(self) -> None:

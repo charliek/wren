@@ -153,6 +153,50 @@ def _tasks_setting(settings: str | None) -> str | None:
     return settings if value is None else _with_setting(settings, "tasks", value)
 
 
+def linux_modifier() -> str:
+    """The lane's ``linux-modifier`` value: ``WRENTEST_LINUX_MODIFIER``,
+    ``alt`` when unset.
+
+    The build defaults to ``ctrl``. The suite pins ``alt``, the mode its cases
+    were written for, so a case that presses a command key means the same
+    thing whatever the build's default is.
+    """
+    value = os.environ.get("WRENTEST_LINUX_MODIFIER", "alt")
+    if value not in ("ctrl", "alt"):
+        raise ValueError(f"WRENTEST_LINUX_MODIFIER must be ctrl or alt, got {value!r}")
+    return value
+
+
+def native_mod(key: str) -> str:
+    """An xdotool chord of *key* on the lane's command key on Linux, for a
+    case that leaves its ``linux-modifier`` to the lane."""
+    return f"{linux_modifier()}+{key}"
+
+
+def native_opt(key: str) -> str:
+    """An xdotool chord of *key* on the board's other key on Linux: Alt
+    with Ctrl as the command key, Ctrl with Alt."""
+    return f"{'ctrl' if linux_modifier() == 'alt' else 'alt'}+{key}"
+
+
+def mod_label() -> str:
+    """How the app writes the lane's command key in a label: ``⌘`` on
+    macOS, ``Alt+`` or ``Ctrl+`` on Linux."""
+    if os.uname().sysname == "Darwin":
+        return "⌘"
+    return "Alt+" if linux_modifier() == "alt" else "Ctrl+"
+
+
+def _modifier_setting(settings: str | None) -> str:
+    """*settings* with the ``linux-modifier`` line the lane pins.
+
+    Like ``spell-check``, it is always written, and settings that already
+    name ``linux-modifier`` are left as they are: a case about the mode sets
+    it itself. macOS ignores the setting.
+    """
+    return _with_setting(settings, "linux-modifier", linux_modifier())
+
+
 def _with_setting(settings: str | None, key: str, value: str) -> str:
     """*settings* with ``key = value`` appended, unless a line names *key*."""
     if settings is not None and re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=", settings):
@@ -218,10 +262,12 @@ class WrenApp:
         launch, with ``spell-check = <WRENTEST_SPELL>`` appended unless it
         names ``spell-check`` itself; without it the file holds only that
         line. ``WRENTEST_BOARDS`` adds a ``boards`` line after it unless the
-        text has one, and ``WRENTEST_TASKS`` a ``tasks`` line after that.
+        text has one, ``WRENTEST_TASKS`` a ``tasks`` line after that, and
+        last comes ``linux-modifier = <WRENTEST_LINUX_MODIFIER>`` (``alt``
+        unless set), unless the text names ``linux-modifier`` itself.
         Restarts keep whatever the app has written there since.
     lane_settings:
-        Set to ``False`` to add neither lane line: ``config.conf`` is then
+        Set to ``False`` to add no lane line: ``config.conf`` is then
         the test's own text, and is not written at all without it, as a
         fresh install has none.
     words:
@@ -269,8 +315,9 @@ class WrenApp:
         self._workspace = workspace
         self._extra_args = extra_args
         self._evaluation = evaluation
-        self._settings = (_tasks_setting(_boards_setting(_spell_setting(settings)))
-                          if lane_settings else settings)
+        self._settings = (
+            _modifier_setting(_tasks_setting(_boards_setting(_spell_setting(settings))))
+            if lane_settings else settings)
         self._words = words
         self._today = today
 

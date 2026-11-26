@@ -221,10 +221,12 @@ mod tests {
             .iter()
             .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
             .collect();
+        let scheme = keybind::Scheme::new(platform, keybind::LinuxModifier::default());
         let (keymap, warnings) = Keymap::build(
-            keybind::default_bindings(platform)
+            scheme,
+            keybind::default_bindings(scheme)
                 .into_iter()
-                .chain(keybind::default_board_bindings(platform)),
+                .chain(keybind::default_board_bindings(scheme)),
             &user,
             |action| {
                 CommandId::parse(action).map(|id| match id.scope() {

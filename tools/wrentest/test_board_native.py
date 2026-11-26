@@ -20,7 +20,7 @@ from tools.wrentest.boards import (
 from tools.wrentest.test_board_view import column, moved, samples, wait_focus  # noqa: F401  (fixture)
 from tools.wrentest.test_editor import xdo
 from tools.wrentest.test_gestures import move, point_in
-from tools.wrentest.ui import wait_for
+from tools.wrentest.ui import native_mod, native_opt, wait_for
 
 # Past the wheel's 150 ms burst, so the next click starts its own.
 BURST = 0.3
@@ -367,8 +367,8 @@ def test_native_board_keys(samples) -> None:
         xdo("key", "Escape")
         settled(app, lambda state: state["tool"] == "select", "Escape put it away")
 
-        xdo("key", "alt+Right")
-        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Alt+Right moved it")
+        xdo("key", native_opt("Right"))
+        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Opt+Right moved it")
         xdo("key", "ctrl+z")
         settled(app, lambda state: at_of(app, RECEIVE) == [0, 120], "Ctrl+Z undid it")
 
@@ -377,12 +377,12 @@ def test_native_board_keys(samples) -> None:
         assert state["counts"] == {"nodes": 16, "edges": 18}, state
         xdo("key", "Escape")
         settled(app, lambda state: state["state"] == "idle", "Escape committed it")
-        # The slot right of Start is free, so Ctrl+Right makes a shape there.
+        # The slot right of Start is free, so Mod+Right makes a shape there.
         move(window, screen_of(bounds(app), START))
         xdo("click", "1")
         settled(app, lambda state: state["selection"] == [START], "Start selected")
-        xdo("key", "ctrl+Right")
-        state = settled(app, lambda state: state["state"] == "editing", "Ctrl+Right made a shape")
+        xdo("key", native_mod("Right"))
+        state = settled(app, lambda state: state["state"] == "editing", "Mod+Right made a shape")
         assert state["counts"] == {"nodes": 17, "edges": 19}, state
         made = state["selection"]
         xdo("key", "Escape")
@@ -409,7 +409,7 @@ def test_native_a_letter_in_the_palette_arms_nothing(samples) -> None:
         move(window, point_in(placed["root"]))
         xdo("click", "1")
         wait_focus(app, ["note-editor"])
-        xdo("key", "alt+shift+p")
+        xdo("key", native_mod("shift+p"))
         wait_focus(app, ["palette-query"])
         xdo("type", "--delay", "20", "rdo")
         wait_for(lambda: app.client.call("navigation.get")["modal"]["query"] == "rdo", timeout=3,
@@ -481,7 +481,7 @@ def test_native_keys_build_the_first_four_nodes_of_the_acceptance_script(samples
         typed("Receive order")
         xdo("key", "--delay", "0", "Escape", "d", "Tab")
         typed("Valid?")
-        xdo("key", "--delay", "0", "Escape", "ctrl+Right")
+        xdo("key", "--delay", "0", "Escape", native_mod("Right"))
         typed("Reject order")
         xdo("key", "Escape")
         state = settled(app, lambda state: state["state"] == "idle", "the last label committed")
@@ -515,6 +515,6 @@ def test_native_a_refused_paste_leaves_the_board_the_keyboard(samples) -> None:
         xdo("key", "ctrl+v")
         wait_for(lambda: app.client.call("session.get")["banner"], timeout=5, interval=0.025,
                  description="the refused paste's notice")
-        xdo("key", "alt+Right")
-        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Alt+Right moved it")
+        xdo("key", native_opt("Right"))
+        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Opt+Right moved it")
         wait_focus(app, ["note-editor"])

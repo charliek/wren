@@ -4,8 +4,8 @@ search hit on a board lands.
 
 Neither changes the board: the selection and the view are never written to
 the file, so every case also checks the bytes, the mtime and the draft.
-These cases run on Linux, where Alt is the app's modifier and Ctrl the
-document's (`mod`).
+`mod` is the command key of the lane's `linux-modifier` (⌘ on macOS),
+which app and board commands share.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def test_the_jump_palette_shows_each_node_and_closing_puts_the_board_back(sample
         assert state["revision"] == revision and state["pristine"]
 
         # Escape does the same, and the Outline key opens it too.
-        key(app, "o", "alt", "shift")
+        key(app, "o", "mod", "shift")
         assert modal(app)["mode"] == "board_nodes"
         app.client.call("palette.query", {"query": "ship"})
         assert board(app)["selection"] == [node_named(app, "Ship")]

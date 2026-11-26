@@ -22,7 +22,7 @@ from tools.wrentest.test_navigation import (
     vault, vault_factory,  # noqa: F401  (fixtures)
 )
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 native_workspace = native.native_workspace
 
@@ -340,8 +340,8 @@ def test_native_keys_walk_columns_and_editor_keeps_its_arrows(native_workspace) 
     assert navigation(app)["selected_note"] == origin and column(app) == "editor"
     assert "\n" in app.client.call("editor.get")["text"]
 
-    native.keys(window, "alt+shift+bracketleft")
-    wait_for(lambda: column(app) == "notes", description="Alt+Shift+[ moves to Notes")
+    native.keys(window, native_mod("shift+bracketleft"))
+    wait_for(lambda: column(app) == "notes", description="Mod+Shift+[ moves to Notes")
     wait_focus(app, [])
     native.keys(window, "Down")
     wait_for(lambda: navigation(app)["selected_note"] != origin,
@@ -351,13 +351,13 @@ def test_native_keys_walk_columns_and_editor_keeps_its_arrows(native_workspace) 
     wait_for(lambda: column(app) == "groups", description="native Left moves to Groups")
     native.keys(window, "Return")
     wait_for(lambda: column(app) == "notes", description="native Enter moves right")
-    native.keys(window, "alt+shift+bracketright")
-    wait_for(lambda: column(app) == "editor", description="Alt+Shift+] moves into the editor")
+    native.keys(window, native_mod("shift+bracketright"))
+    wait_for(lambda: column(app) == "editor", description="Mod+Shift+] moves into the editor")
     wait_focus(app, ["note-editor"])
     native.type_text(window, "typed after drill")
     wait_for(lambda: "typed after drill" in app.client.call("editor.get")["text"],
              description="typing reaches the editor after moving right")
-    native.keys(window, "alt+shift+bracketleft", "Escape")
+    native.keys(window, native_mod("shift+bracketleft"), "Escape")
     wait_for(lambda: column(app) == "editor", description="Escape returns to the editor")
     assert {path for path in native.files(root)} == set(original_files)
 
@@ -371,15 +371,15 @@ def test_native_double_click_moves_right_and_alt_r_renames(native_workspace) -> 
     wait_for(lambda: navigation(app)["selected_section"] == remote and column(app) == "groups",
              description="native double-click selects the section and moves right")
     assert navigation(app)["dialog"] is None
-    native.keys(window, "alt+r")
-    wait_for(lambda: navigation(app)["dialog"] is not None, description="Alt+R opens rename")
+    native.keys(window, native_mod("r"))
+    wait_for(lambda: navigation(app)["dialog"] is not None, description="Mod+R opens rename")
     assert navigation(app)["dialog"]["kind"].startswith("Rename")
 
 
 @pytest.mark.native_x11
 def test_native_breadcrumb_back_button_unfolds_one_column_at_a_time(native_workspace) -> None:
     app, root, window = native_workspace
-    native.keys(window, "alt+shift+bracketleft", "Escape")
+    native.keys(window, native_mod("shift+bracketleft"), "Escape")
     wait_for(lambda: (navigation(app)["column"], navigation(app)["fold"]) == ("editor", 2),
              description="Esc from Notes folds Sections and Groups")
     area = native.bounds(app)["root"]
@@ -463,12 +463,12 @@ def test_scoped_jump_picks_move_right_and_jump_again_widens(vault: Path) -> None
 def test_native_alt_p_and_alt_f_follow_the_active_column(native_workspace) -> None:
     app, root, window = native_workspace
     original_files = native.files(root)
-    native.keys(window, "alt+shift+bracketleft", "alt+shift+bracketleft", "alt+shift+bracketleft")
+    native.keys(window, native_mod("shift+bracketleft"), native_mod("shift+bracketleft"), native_mod("shift+bracketleft"))
     wait_for(lambda: column(app) == "sections", description="three column moves reach Sections")
-    native.keys(window, "alt+f")
+    native.keys(window, native_mod("f"))
     wait_focus(app, ["filter-sections"])
     native.type_text(window, "C Vis")
-    wait_for(lambda: navigation(app)["filters"]["sections"] == "C Vis", description="Alt+F filters Sections")
+    wait_for(lambda: navigation(app)["filters"]["sections"] == "C Vis", description="Mod+F filters Sections")
     native.keys(window, "Escape")
     wait_focus(app, [])
     assert column(app) == "sections", "Esc in a filter box keeps the column"
@@ -476,9 +476,9 @@ def test_native_alt_p_and_alt_f_follow_the_active_column(native_workspace) -> No
     remote = native.item(app, "sections", native.SECTIONS[2])["id"]
     wait_for(lambda: navigation(app)["selected_section"] == remote,
              description="Down selects the only visible row")
-    native.keys(window, "alt+p")
+    native.keys(window, native_mod("p"))
     wait_for(lambda: (navigation(app)["modal"] or {}).get("mode") == "jump_section",
-             description="Alt+P in Sections jumps among sections")
+             description="Mod+P in Sections jumps among sections")
     native.type_text(window, "A Visible")
     native.keys(window, "Return")
     wait_for(lambda: (column(app), navigation(app)["fold"]) == ("groups", 1),
@@ -491,26 +491,26 @@ def test_native_tab_walks_columns_and_alt_shift_y_collapses(native_workspace) ->
     app, root, window = native_workspace
     origin = native.item(app, "notes", native.ORIGIN)["id"]
     wait_focus(app, ["note-editor"])
-    native.keys(window, "alt+shift+bracketleft", "alt+shift+bracketleft", "alt+shift+bracketleft")
-    wait_for(lambda: column(app) == "sections", description="Alt+Shift+[ reaches Sections")
+    native.keys(window, native_mod("shift+bracketleft"), native_mod("shift+bracketleft"), native_mod("shift+bracketleft"))
+    wait_for(lambda: column(app) == "sections", description="Mod+Shift+[ reaches Sections")
     wait_focus(app, [])
     for expected in ("groups", "notes", "editor"):
         native.keys(window, "Tab")
         wait_for(lambda: column(app) == expected, description=f"native Tab moves to {expected}")
     wait_focus(app, ["note-editor"])
     assert navigation(app)["selected_note"] == origin
-    native.keys(window, "alt+shift+bracketleft")
+    native.keys(window, native_mod("shift+bracketleft"))
     wait_for(lambda: column(app) == "notes", description="back to Notes")
     native.keys(window, "shift+Tab")
     wait_for(lambda: column(app) == "groups", description="native Shift+Tab moves left")
 
     native.keys(window, "Escape")
     wait_for(lambda: column(app) == "editor", description="Escape returns to the editor")
-    native.keys(window, "alt+shift+bracketleft", "Escape")
-    native.keys(window, "alt+shift+y")
-    wait_for(lambda: navigation(app)["fold"] == 0, description="Alt+Shift+Y unfolds when collapsed")
-    native.keys(window, "alt+shift+y")
-    wait_for(lambda: navigation(app)["fold"] == 2, description="Alt+Shift+Y collapses")
+    native.keys(window, native_mod("shift+bracketleft"), "Escape")
+    native.keys(window, native_mod("shift+y"))
+    wait_for(lambda: navigation(app)["fold"] == 0, description="Mod+Shift+Y unfolds when collapsed")
+    native.keys(window, native_mod("shift+y"))
+    wait_for(lambda: navigation(app)["fold"] == 2, description="Mod+Shift+Y collapses")
     assert column(app) == "editor"
     wait_focus(app, ["note-editor"])
     native.type_text(window, "typed after collapse")

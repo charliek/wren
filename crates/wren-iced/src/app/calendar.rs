@@ -1724,17 +1724,18 @@ mod tests {
 
     #[test]
     fn the_board_layer_keeps_its_duplicate_key_with_tasks_on() {
+        use super::super::preferences::SCHEMES;
         use super::super::preferences::{board_route, build_keymap, BoardRoute};
-        use wren_core::keybind::{parse_trigger, Platform};
-        for (platform, trigger) in [(Platform::Mac, "super+d"), (Platform::Linux, "ctrl+d")] {
-            let (keymap, warnings) = build_keymap(platform, &[], true);
+        use wren_core::keybind::parse_trigger;
+        for (scheme, trigger) in SCHEMES.into_iter().zip(["super+d", "ctrl+d", "alt+d"]) {
+            let (keymap, warnings) = build_keymap(scheme, &[], true);
             assert!(warnings.is_empty(), "{warnings:?}");
             let accel = parse_trigger(trigger).unwrap();
             assert_eq!(keymap.action(&accel), Some("task.set_due"));
             assert_eq!(
                 board_route(&keymap, &accel, false),
                 BoardRoute::Command(wren_canvas::Command::Duplicate),
-                "{platform:?}"
+                "{scheme:?}"
             );
         }
     }

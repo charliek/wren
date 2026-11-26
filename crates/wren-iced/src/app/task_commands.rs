@@ -566,20 +566,17 @@ mod tests {
             assert_eq!(row.id.editor_route(), Some(route), "{}", row.key);
             assert!(row.id.task_change().is_some() != opens);
         }
-        for platform in [
-            wren_core::keybind::Platform::Mac,
-            wren_core::keybind::Platform::Linux,
-        ] {
-            let defaults = wren_core::keybind::default_bindings(platform)
+        for scheme in super::super::preferences::SCHEMES {
+            let defaults = wren_core::keybind::default_bindings(scheme)
                 .into_iter()
-                .chain(wren_core::keybind::default_task_bindings(platform));
+                .chain(wren_core::keybind::default_task_bindings(scheme));
             for (trigger, action) in defaults {
                 // ⌘D / Ctrl+D sets the due date (item 4.1) and ⇧⌘↵ /
                 // Ctrl+Shift+Enter opens the form (item 6.1; design §2 item
                 // 21).
                 assert!(
                     !action.starts_with("task.") || matches!(action, "task.set_due" | "task.edit"),
-                    "{platform:?}: {trigger} → {action} (Q13: palette only)"
+                    "{scheme:?}: {trigger} → {action} (Q13: palette only)"
                 );
             }
         }
@@ -613,7 +610,7 @@ mod tests {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
         let keybinds = vec![("alt+shift+c".to_owned(), "task.cycle_status".to_owned())];
         let (keymap, warnings) = super::super::preferences::build_keymap(
-            wren_core::keybind::Platform::current(),
+            wren_core::keybind::Scheme::default(),
             &keybinds,
             true,
         );
@@ -640,7 +637,7 @@ mod tests {
         );
 
         let (_, warnings) = super::super::preferences::build_keymap(
-            wren_core::keybind::Platform::current(),
+            wren_core::keybind::Scheme::default(),
             &keybinds,
             false,
         );

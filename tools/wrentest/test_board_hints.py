@@ -8,7 +8,6 @@ macOS's spelling of Mod as the platform has it.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -18,10 +17,10 @@ from tools.wrentest.boards import (
 )
 from tools.wrentest.test_board_view import wait_focus
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, mod_label, wait_for
 
 PACK = "3qrg4kv1"
-MOD = "⌘" if sys.platform == "darwin" else "Ctrl+"
+MOD = mod_label()
 
 
 @pytest.fixture

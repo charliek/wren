@@ -18,7 +18,7 @@ import pytest
 
 from tools.wrentest.test_editor import focus_native, xdo
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 
 SECTIONS = ("A Visible", "B Hidden", "C Visible", "D Hidden")
@@ -317,8 +317,8 @@ def test_native_command_palette_focus_typing_arrows_and_enter(native_workspace) 
     before = editor_identity(app)
     document = session(app)["document"]
     original_files = files(root)
-    keys(window, "alt+shift+p")
-    wait_for(lambda: navigation(app)["modal"] is not None, description="Alt+Shift+P opens commands")
+    keys(window, native_mod("shift+p"))
+    wait_for(lambda: navigation(app)["modal"] is not None, description="Mod+Shift+P opens commands")
     assert navigation(app)["modal"]["mode"] == "commands"
     type_text(window, "sort notes")
     wait_for(lambda: navigation(app)["modal"]["query"] == "sort notes", description="native command query focus")
@@ -349,8 +349,8 @@ def test_native_ctrl_p_jump_types_moves_and_opens_the_highlighted_note(native_wo
     before = editor_identity(app)
     first = item(app, "notes", PICKER_A)["id"]
     second = item(app, "notes", PICKER_B)["id"]
-    keys(window, "alt+p")
-    wait_for(lambda: navigation(app)["modal"] is not None, description="Alt+P opens Jump")
+    keys(window, native_mod("p"))
+    wait_for(lambda: navigation(app)["modal"] is not None, description="Mod+P opens Jump")
     assert navigation(app)["modal"]["mode"] == "jump"
     type_text(window, "Picker")
     wait_for(lambda: navigation(app)["modal"]["query"] == "Picker", description="native Jump query focus")
@@ -379,7 +379,7 @@ def test_native_escape_and_scrim_dismiss_palettes_without_typing_or_click_throug
     before_editor = editor_identity(app)
     before_session = session(app)
     original_files = files(root)
-    keys(window, "alt+shift+p")
+    keys(window, native_mod("shift+p"))
     wait_for(lambda: navigation(app)["modal"] is not None, description="commands overlay opens")
     type_text(window, "unmatched-gesture-query")
     wait_for(lambda: navigation(app)["modal"]["query"] == "unmatched-gesture-query",
@@ -390,7 +390,7 @@ def test_native_escape_and_scrim_dismiss_palettes_without_typing_or_click_throug
     wait_for(lambda: navigation(app)["modal"] is None, description="native Escape dismisses palette")
     assert editor_identity(app) == before_editor
     assert session(app)["document"] == before_session["document"]
-    keys(window, "alt+p")
+    keys(window, native_mod("p"))
     wait_for(lambda: navigation(app)["modal"] is not None, description="Jump overlay reopens")
     type_text(window, "Picker")
     wait_for(lambda: navigation(app)["modal"]["query"] == "Picker", description="Jump input consumes typing")
