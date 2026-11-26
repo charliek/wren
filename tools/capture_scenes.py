@@ -1197,10 +1197,18 @@ def board_style_bar_scenes(client, shot_here, open_board) -> None:
     key("0")
 
     # A narrow canvas folds the fills, the outline and the connector's
-    # controls into the last menu.
-    client.call("view.width", {"pane": "notes", "width": 480})
+    # controls into the last menu: 432 pixels, what a 1280-wide window
+    # leaves beside the sections and a 480-wide notes column. The notes
+    # column gives up what a narrower window lacks (macOS fits the window
+    # to a 1024x768 screen at 1024x640), or the canvas would be too narrow
+    # for even the folded bar, and none would show.
+    before = client.call("board.bounds")["root"]
+    window = client.call("navigation.get")["viewport"]["width"]
+    client.call("view.width", {"pane": "notes", "width": 480 - (1280 - window)})
     client.call("column.open", {"column": "sections"})
     client.call("editor.focus")
+    wait_for(lambda: client.call("board.bounds")["root"]["width"] == 432, timeout=5,
+             description="a canvas 432 wide")
     pick(pack, edge)
     laid_out(lambda state: state["folded"])
     shot_here("board-style-fold")
@@ -1209,6 +1217,11 @@ def board_style_bar_scenes(client, shot_here, open_board) -> None:
     shot_here("board-style-fold-menu")
     bar(click="board-style-more")
     client.call("command.run", {"id": "view.reset_widths"})
+    # The browser columns fold back as they were, or the scenes after these
+    # get the narrow canvas too.
+    client.call("command.run", {"id": "view.collapse_columns"})
+    wait_for(lambda: client.call("board.bounds")["root"] == before, timeout=5,
+             description="the canvas as it was")
     client.call("command.run", {"id": "board.select.none"})
 
 
