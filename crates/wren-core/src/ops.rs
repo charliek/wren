@@ -177,12 +177,29 @@ pub enum Event {
         before: String,
         after: String,
     },
+    /// [`Op::EditTaskLine`] found its task on line `line`, reading
+    /// `source`, and had nothing to change there. Nothing was written;
+    /// the note as read is what the indexes hold now.
+    TaskLineKept {
+        note: NoteId,
+        line: usize,
+        source: String,
+    },
     /// A task write found the note changed and wrote nothing. The note
     /// was read again, so the task index holds it as it is now: whatever
     /// lists its tasks should list them afresh.
     TaskWriteStale {
         note: NoteId,
     },
+}
+
+/// What a write to a note that is not open comes to, once planned on the
+/// note's text.
+enum Planned {
+    /// The text to write, and the event that says what was written.
+    Write(String, Event),
+    /// Nothing changes; what to say of it, if anything.
+    Kept(Option<Event>),
 }
 
 #[derive(Debug)]
@@ -653,6 +670,22 @@ impl Session {
     pub fn fail_next(&mut self, fault: Fault) {
         self.store.fail_next(fault);
     }
+    /// Whether the open document's file no longer holds the bytes the
+    /// document was read from or last saved as: another program has
+    /// written it, or taken it away, since, and the Session has not yet
+    /// reconciled the two. `false` with no document open. It reads the
+    /// file and changes nothing: what to do about a difference is the
+    /// document's own reconciliation (`Op::Reconcile`, or a Tick).
+    pub fn document_changed_on_disk(&self) -> Result<bool, String> {
+        let Some(document) = &self.document else {
+            return Ok(false);
+        };
+        match self.store.read(&document.entry.path) {
+            Ok(file) => Ok(file.bytes != document.baseline),
+            Err(error) if error.is_not_found() => Ok(true),
+            Err(error) => Err(error.to_string()),
+        }
+    }
     /// For tests, as [`Session::fail_next`] is: `writer` runs inside the
     /// next write to the workspace, after its comparison with the bytes
     /// expected and before its publication, as another program may.
@@ -914,28 +947,34 @@ impl Session {
                 change,
             } => self.write_closed(note, now, events, task_write::CHANGED, |source| {
                 let write = task_write::plan_line(source, line, &expect, &change)?;
-                Ok(write.changes().then(|| {
-                    let text = write.apply(source);
-                    let written = Event::TaskLineWritten {
+                if !write.changes() {
+                    return Ok(Planned::Kept(Some(Event::TaskLineKept {
                         note,
                         line: write.line,
-                        before: write.before,
-                        after: write.after,
-                    };
-                    (text, written)
-                }))
+                        source: write.before,
+                    })));
+                }
+                let text = write.apply(source);
+                let written = Event::TaskLineWritten {
+                    note,
+                    line: write.line,
+                    before: write.before,
+                    after: write.after,
+                };
+                Ok(Planned::Write(text, written))
             }),
             Op::EditTaskSwitch { note, change } => {
                 self.write_closed(note, now, events, task_write::SWITCH_CHANGED, |source| {
-                    Ok(task_write::plan_switch(source, &change)?.map(|write| {
-                        let text = write.apply(source);
-                        let written = Event::TaskSwitchWritten {
-                            note,
-                            before: write.before,
-                            after: write.after,
-                        };
-                        (text, written)
-                    }))
+                    let Some(write) = task_write::plan_switch(source, &change)? else {
+                        return Ok(Planned::Kept(None));
+                    };
+                    let text = write.apply(source);
+                    let written = Event::TaskSwitchWritten {
+                        note,
+                        before: write.before,
+                        after: write.after,
+                    };
+                    Ok(Planned::Write(text, written))
                 })
             }
             Op::Flush => {
@@ -1095,7 +1134,9 @@ impl Session {
 
     /// Rewrite the Markdown note `note`, which is not open, as `plan`
     /// makes of its text: the text to write and the event that says what
-    /// was written, or nothing when nothing changes.
+    /// was written, or, when nothing changes, what to say of that. Nothing
+    /// is written then, but the bytes read are the newest known of the
+    /// note, and both indexes and the model take them.
     ///
     /// The open document is settled first, so two writers never race: a
     /// flush that fails blocks the write and keeps the draft. The write
@@ -1112,7 +1153,7 @@ impl Session {
         now: Duration,
         events: &mut Vec<Event>,
         stale: &str,
-        plan: impl FnOnce(&str) -> Result<Option<(String, Event)>, Refused>,
+        plan: impl FnOnce(&str) -> Result<Planned, Refused>,
     ) -> Result<(), String> {
         if !self.options.tasks {
             return Err("Tasks are turned off; set `tasks = on` to change tasks".into());
@@ -1146,8 +1187,13 @@ impl Session {
         let source = std::str::from_utf8(&file.bytes)
             .map_err(|_| "The note is not valid UTF-8; it was left untouched")?;
         let (text, written) = match plan(source) {
-            Ok(Some(planned)) => planned,
-            Ok(None) => return Ok(()),
+            Ok(Planned::Write(text, written)) => (text, written),
+            Ok(Planned::Kept(kept)) => {
+                self.index.set_content(note, source, false);
+                self.record_file(note, &file);
+                events.extend(kept);
+                return Ok(());
+            }
             Err(Refused::Changed) => return Err(refresh(self)),
             Err(Refused::Invalid(why)) => return Err(why),
         };

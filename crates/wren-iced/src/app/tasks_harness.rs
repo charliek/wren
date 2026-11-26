@@ -36,7 +36,8 @@
 //! and the app's key handling reads. With tasks off both are refused.
 //!
 //! Writes from the view (item 9.1), each through the function the view's
-//! keys and menus call (`task_target.rs`), and refused with tasks off:
+//! keys and menus call (`task_target.rs`); with tasks off each answers
+//! `{"tasks": false}` and does nothing:
 //! `{"write": {"path", "line", "expect"?, "change"}}` changes the task on
 //! that line of the note (`expect` is the line a row holds, for a row out
 //! of date; without it, the task the index has there), where `change` is
@@ -48,8 +49,9 @@
 //! (`path`, `line`, `before`, `after`, `changed`, `open`, `warning`) or
 //! `switch` (the front matter `before` and `after`), `refused`
 //! (`message`, `refresh`) when nothing was written, `note` (what the task
-//! index holds of the note now: `hidden`, and each task's `line` and
-//! `source`), `can_undo`, and the action's `disposition` and `warning`.
+//! index holds now of the note the request was for, written or not:
+//! `hidden`, and each task's `line` and `source`), `can_undo`, and the
+//! action's `disposition` and `warning`.
 
 use std::sync::Arc;
 

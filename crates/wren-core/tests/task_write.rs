@@ -753,3 +753,149 @@ fn a_front_matter_change_races_another_writer_like_a_line_does() {
     assert_eq!(files(root.path()), FILES);
     assert_eq!(listed(&session, LIST_PATH).len(), 2);
 }
+
+fn kept(events: &[Event]) -> Option<(usize, &str)> {
+    events.iter().find_map(|event| match event {
+        Event::TaskLineKept { line, source, .. } => Some((*line, source.as_str())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_change_that_changes_nothing_says_where_the_task_is_and_refreshes_the_indexes() {
+    let root = fixture();
+    let mut session = session(root.path());
+    let list = note(&session, LIST_PATH);
+    // Another program moves the task down and adds one; the indexes
+    // still hold the note as it was.
+    let moved = LIST.replace(MAIL, &format!("new\n- [ ] theirs\n{MAIL}"));
+    write(root.path(), LIST_PATH, &moved);
+    let modified = fs::metadata(root.path().join(LIST_PATH))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(listed(&session, LIST_PATH)[0], format!("2 {MAIL}"));
+
+    let due = Change::SetDue(Date::new(2026, 12, 1));
+    let events = run(&mut session, edit_line(list, 2, MAIL, change(due)));
+    // Nothing is written, and the row is resolved to where the task is.
+    assert_eq!(kept(&events), Some((4, MAIL)));
+    assert!(written(&events).is_none() && !saved(&events, list));
+    assert_eq!(read(root.path(), LIST_PATH), moved);
+    let now = fs::metadata(root.path().join(LIST_PATH))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(now, modified);
+    // The bytes read reach both indexes and the model.
+    assert_eq!(
+        listed(&session, LIST_PATH),
+        [
+            "3 - [ ] theirs".to_owned(),
+            format!("4 {MAIL}"),
+            "5 - [ ] Book the room".to_owned()
+        ]
+    );
+    assert!(searched(&session, "theirs", LIST_PATH));
+    assert_eq!(session.model().note(list).unwrap().bytes, moved.len());
+
+    // The switch the same: a note hidden outside Wren, asked to hide.
+    let hidden = format!("---\ntasks: off\n---\n{moved}");
+    write(root.path(), LIST_PATH, &hidden);
+    let events = run(&mut session, switch(list, SwitchChange::Hide));
+    assert!(switched(&events).is_none() && !saved(&events, list));
+    assert_eq!(read(root.path(), LIST_PATH), hidden);
+    assert!(flags(&session, list).hidden);
+    assert!(listed(&session, LIST_PATH).is_empty());
+}
+
+#[test]
+fn a_line_written_whole_that_is_no_task_is_refused() {
+    let root = fixture();
+    let mut session = session(root.path());
+    let list = note(&session, LIST_PATH);
+    for text in ["plain text", "- no box", "```"] {
+        let error = fail(
+            &mut session,
+            edit_line(list, 2, MAIL, LineChange::Line(text.into())),
+        );
+        assert_ne!(error.message, CHANGED, "{text}");
+        assert!(written(&error.events).is_none() && !stale(&error.events, list));
+    }
+    assert_eq!(read(root.path(), LIST_PATH), LIST);
+    assert_eq!(listed(&session, LIST_PATH)[0], format!("2 {MAIL}"));
+}
+
+#[test]
+fn showing_never_makes_front_matter_of_the_notes_own_lines() {
+    let root = fixture();
+    let front = "---\ntasks: off\n---\n---\ntitle: keep\n---\nbody\n";
+    write(root.path(), LIST_PATH, front);
+    let mut session = session(root.path());
+    let list = note(&session, LIST_PATH);
+    let error = fail(&mut session, switch(list, SwitchChange::Show));
+    assert!(error.message.contains("front matter"), "{error}");
+    assert_ne!(error.message, SWITCH_CHANGED);
+    assert!(switched(&error.events).is_none() && !stale(&error.events, list));
+    assert_eq!(read(root.path(), LIST_PATH), front);
+    assert!(flags(&session, list).hidden);
+}
+
+#[test]
+fn front_matter_is_not_put_back_where_it_would_run_into_the_body() {
+    let root = fixture();
+    // The block is the whole note, with no ending after its closing line.
+    let front = "---\ntasks: off\n---";
+    write(root.path(), LIST_PATH, front);
+    let mut session = session(root.path());
+    let list = note(&session, LIST_PATH);
+    let events = run(&mut session, switch(list, SwitchChange::Show));
+    let (before, after) = switched(&events).unwrap();
+    assert_eq!((before, after), (front, ""));
+    assert_eq!(read(root.path(), LIST_PATH), "");
+    // Text written since would follow the closing line on its own line.
+    write(root.path(), LIST_PATH, "- [ ] body\n");
+    let undo = SwitchChange::Restore {
+        expect: String::new(),
+        replace: front.into(),
+    };
+    let error = fail(&mut session, switch(list, undo.clone()));
+    assert_eq!(error.message, SWITCH_CHANGED);
+    assert!(stale(&error.events, list));
+    assert_eq!(read(root.path(), LIST_PATH), "- [ ] body\n");
+    assert_eq!(listed(&session, LIST_PATH), ["0 - [ ] body"]);
+    // With the note empty again, it is put back as it was.
+    write(root.path(), LIST_PATH, "");
+    run(&mut session, switch(list, undo));
+    assert_eq!(read(root.path(), LIST_PATH), front);
+}
+
+#[test]
+fn the_open_documents_file_is_compared_with_what_the_document_was_read_from() {
+    let root = fixture();
+    let mut session = session(root.path());
+    assert_eq!(session.document_changed_on_disk(), Ok(false), "none open");
+    let open = note(&session, OPEN_PATH);
+    run(&mut session, Op::OpenNote { note: Some(open) });
+    assert_eq!(session.document_changed_on_disk(), Ok(false));
+    // A draft is no change on disk; a save moves the baseline with it.
+    let contents = format!("{OPEN}typed\n");
+    run(
+        &mut session,
+        Op::EditDraft {
+            note: open,
+            contents,
+        },
+    );
+    assert_eq!(session.document_changed_on_disk(), Ok(false));
+    run(&mut session, Op::Flush);
+    assert_eq!(session.document_changed_on_disk(), Ok(false));
+    // Another program writes it, or takes it away. Asking changes nothing.
+    write(root.path(), OPEN_PATH, "theirs\n");
+    assert_eq!(session.document_changed_on_disk(), Ok(true));
+    assert_eq!(session.document().unwrap().text, format!("{OPEN}typed\n"));
+    fs::remove_file(root.path().join(OPEN_PATH)).unwrap();
+    assert_eq!(session.document_changed_on_disk(), Ok(true));
+    write(root.path(), OPEN_PATH, format!("{OPEN}typed\n"));
+    assert_eq!(session.document_changed_on_disk(), Ok(false));
+}

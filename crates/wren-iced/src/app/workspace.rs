@@ -888,6 +888,10 @@ impl App {
                         after: after.clone(),
                     });
                 }
+                Event::TaskLineKept { line, source, .. } => self.task_write_seen(Seen::Kept {
+                    line: *line,
+                    source: source.clone(),
+                }),
                 Event::TaskWriteStale { .. } => self.task_write_seen(Seen::Stale),
                 _ => {}
             }

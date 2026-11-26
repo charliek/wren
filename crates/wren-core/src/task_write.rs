@@ -204,86 +204,140 @@ pub fn plan_line(
             }
         }
     };
-    Ok(LineWrite {
+    let write = LineWrite {
         line: at,
         before: before.to_owned(),
         after,
         range: document.line_range(at),
-    })
+    };
+    // A line written whole is still a task where it is: what undoes the
+    // write looks for it among the note's tasks.
+    if matches!(change, LineChange::Line(_))
+        && write.changes()
+        && tasks::task_lines(&write.apply(source))
+            .binary_search(&at)
+            .is_err()
+    {
+        return Err(Refused::Invalid("That line is no task".into()));
+    }
+    Ok(write)
+}
+
+/// The most single changes two texts may differ by to be compared part
+/// by part ([`changes`]).
+const MAX_CHANGES: usize = 256;
+
+/// The changes that turn `a` into `b`, in order and apart: each a range
+/// of `a` and the range of `b` that replaces it, with what the two have
+/// in common between them. It is a shortest such script (Myers' greedy
+/// search), which costs by how much the two differ and not by how long
+/// they are, so a long line with a box and a stamp changed keeps
+/// everything between them. Two that differ by more than
+/// [`MAX_CHANGES`] items are one change, between what they start and end
+/// with in common.
+fn changes<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Range<usize>, Range<usize>)> {
+    let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
+    let (a, b) = (&a[prefix..], &b[prefix..]);
+    let suffix = (a.iter().rev().zip(b.iter().rev()))
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (a, b) = (&a[..a.len() - suffix], &b[..b.len() - suffix]);
+    if a.is_empty() && b.is_empty() {
+        return Vec::new();
+    }
+    let found = shortest(a, b).unwrap_or_else(|| vec![(0..a.len(), 0..b.len())]);
+    (found.into_iter())
+        .map(|(old, new)| {
+            (
+                old.start + prefix..old.end + prefix,
+                new.start + prefix..new.end + prefix,
+            )
+        })
+        .collect()
+}
+
+/// [`changes`] of two sequences that differ at both ends, or `None` when
+/// they differ by more than [`MAX_CHANGES`] items.
+fn shortest<T: PartialEq>(a: &[T], b: &[T]) -> Option<Vec<(Range<usize>, Range<usize>)>> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let max = MAX_CHANGES.min(a.len() + b.len()) as isize;
+    // `reach[at(k)]` is how far along `a` the search has got on diagonal
+    // `k` (where `x - y == k`), and `rounds[d]` is `reach` before round `d`.
+    let at = |k: isize| (k + max + 1) as usize;
+    let down = |reach: &[isize], k: isize, d: isize| {
+        k == -d || (k != d && reach[at(k - 1)] < reach[at(k + 1)])
+    };
+    let mut reach = vec![0isize; (2 * max + 3) as usize];
+    let mut rounds: Vec<Vec<isize>> = Vec::new();
+    let mut found = None;
+    'search: for d in 0..=max {
+        rounds.push(reach.clone());
+        for k in (-d..=d).step_by(2) {
+            let mut x = if down(&reach, k, d) {
+                reach[at(k + 1)]
+            } else {
+                reach[at(k - 1)] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            reach[at(k)] = x;
+            if x >= n && y >= m {
+                found = Some(d);
+                break 'search;
+            }
+        }
+    }
+    // Walk back from the end: each round added one item of `b` (a step
+    // down) or took one of `a` away (a step right).
+    let (mut x, mut y) = (n, m);
+    let mut steps: Vec<(usize, usize, bool)> = Vec::new();
+    for d in (1..=found?).rev() {
+        let reach = &rounds[d as usize];
+        let k = x - y;
+        let added = down(reach, k, d);
+        let from = if added { k + 1 } else { k - 1 };
+        x = reach[at(from)];
+        y = x - from;
+        steps.push((x as usize, y as usize, added));
+    }
+    let mut found: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+    for (x, y, added) in steps.into_iter().rev() {
+        let (taken, given) = (usize::from(!added), usize::from(added));
+        match found.last_mut() {
+            Some((old, new)) if old.end == x && new.end == y => {
+                old.end += taken;
+                new.end += given;
+            }
+            _ => found.push((x..x + taken, y..y + given)),
+        }
+    }
+    Some(found)
 }
 
 /// The edits that turn the line `old` into `new`, in order and apart: the
-/// text between what the two have in common, character by character. Two
-/// long lines are compared only at their ends, as one edit.
+/// text between what the two have in common, character by character.
 fn hunks(old: &str, new: &str) -> Vec<(Range<usize>, String)> {
-    /// The most characters a line may have to be compared whole.
-    const WHOLE: usize = 512;
-    if old == new {
-        return Vec::new();
-    }
     let a: Vec<(usize, char)> = old.char_indices().collect();
     let b: Vec<(usize, char)> = new.char_indices().collect();
-    let prefix = (a.iter().zip(&b)).take_while(|(a, b)| a.1 == b.1).count();
-    let suffix = (a[prefix..].iter().rev().zip(b[prefix..].iter().rev()))
-        .take_while(|(a, b)| a.1 == b.1)
-        .count();
-    let (a, b) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
-    let byte = |chars: &[(usize, char)], at: usize, text: &str, rest: usize| {
-        chars.get(at).map_or(text.len() - rest, |(byte, _)| *byte)
+    let letters = |chars: &[(usize, char)]| -> Vec<char> { chars.iter().map(|c| c.1).collect() };
+    let byte = |chars: &[(usize, char)], text: &str, at: usize| {
+        chars.get(at).map_or(text.len(), |(byte, _)| *byte)
     };
-    let tail =
-        |text: &str| -> usize { (text.chars().rev().take(suffix)).map(char::len_utf8).sum() };
-    let (old_tail, new_tail) = (tail(old), tail(new));
-    let old_at = |at: usize| byte(a, at, old, old_tail);
-    let new_at = |at: usize| byte(b, at, new, new_tail);
-    if a.len() > WHOLE || b.len() > WHOLE {
-        return vec![(
-            old_at(0)..old_at(a.len()),
-            new[new_at(0)..new_at(b.len())].to_owned(),
-        )];
-    }
-    // The longest common subsequence of what is left, from the ends
-    // backwards: `common[i][j]` is that of `a[i..]` and `b[j..]`.
-    let width = b.len() + 1;
-    let mut common = vec![0u16; (a.len() + 1) * width];
-    for i in (0..a.len()).rev() {
-        for j in (0..b.len()).rev() {
-            common[i * width + j] = if a[i].1 == b[j].1 {
-                common[(i + 1) * width + j + 1] + 1
-            } else {
-                common[(i + 1) * width + j].max(common[i * width + j + 1])
-            };
-        }
-    }
-    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    let (mut from_old, mut from_new) = (0, 0);
-    let mut flush = |i: usize, j: usize, from_old: usize, from_new: usize| {
-        if i > from_old || j > from_new {
-            edits.push((
-                old_at(from_old)..old_at(i),
-                new[new_at(from_new)..new_at(j)].to_owned(),
-            ));
-        }
-    };
-    while i < a.len() && j < b.len() {
-        if a[i].1 == b[j].1 {
-            flush(i, j, from_old, from_new);
-            i += 1;
-            j += 1;
-            (from_old, from_new) = (i, j);
-        } else if common[(i + 1) * width + j] >= common[i * width + j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    flush(a.len(), b.len(), from_old, from_new);
-    edits
+    (changes(&letters(&a), &letters(&b)).into_iter())
+        .map(|(gone, come)| {
+            (
+                byte(&a, old, gone.start)..byte(&a, old, gone.end),
+                new[byte(&b, new, come.start)..byte(&b, new, come.end)].to_owned(),
+            )
+        })
+        .collect()
 }
 
 /// A note's task switch found and changed: its front matter before and
-/// after, and the one change to the text between them.
+/// after, and the changes to the text between them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SwitchWrite {
     /// The front matter as it reads, from its opening `---` to the end of
@@ -293,71 +347,73 @@ pub struct SwitchWrite {
     /// The front matter as the change leaves it; empty when the block is
     /// taken away.
     pub after: String,
-    /// The bytes of the text that change: whole lines.
-    pub range: Range<usize>,
-    /// What they become.
-    pub text: String,
+    /// The changes, in order and apart: each the bytes of the text that
+    /// go, whole lines, and what they become, with its line endings as
+    /// they are written.
+    pub edits: Vec<(Range<usize>, String)>,
 }
 
 impl SwitchWrite {
     /// `source`, the text this was planned on, with the change made.
     pub fn apply(&self, source: &str) -> String {
-        splice(source, &self.range, &self.text)
+        let mut text = source.to_owned();
+        for (range, with) in self.edits.iter().rev() {
+            text.replace_range(range.clone(), with);
+        }
+        text
     }
 
-    /// The change as an editor's replacement on `source`, the text this
-    /// was planned on. Its line breaks are `\n`: the editor gives each the
-    /// ending of the line it splits, which is the ending
-    /// [`SwitchWrite::apply`] writes too.
-    pub fn replace(&self, source: &str) -> Replace {
+    /// The change as an editor's replacements on `source`, the text this
+    /// was planned on, made together as one change. Each one's text is to
+    /// go in as it is, line endings and all: an editor that gave a line
+    /// break the ending of the line it splits would not put a CRLF block
+    /// back above an LF body as it was.
+    pub fn replaces(&self, source: &str) -> Vec<Replace> {
         let document = Document::new(source);
-        let lines: Vec<&str> = (wren_markdown::line_ranges(&self.text))
-            .map(|(range, _)| &self.text[range])
-            .collect();
-        Replace {
-            start: position(&document, self.range.start),
-            end: position(&document, self.range.end),
-            text: lines.join("\n"),
-        }
+        (self.edits.iter())
+            .map(|(range, text)| Replace {
+                start: position(&document, range.start),
+                end: position(&document, range.end),
+                text: text.clone(),
+            })
+            .collect()
     }
 
-    /// Where `pos` of `source` lands after [`replace`](Self::replace):
-    /// before the change, where it was; after it, on the same text, so a
+    /// Where `pos` of `source` lands after [`replaces`](Self::replaces):
+    /// before a change, where it was; after one, on the same text, so a
     /// caret where lines go in moves down with its own; inside lines that
-    /// are replaced, at the end of what replaces them.
+    /// are replaced, at the end of what replaces them. A position on a
+    /// line between two changes keeps its place on that line.
     pub fn moved(&self, source: &str, pos: Pos) -> Pos {
-        let replace = self.replace(source);
-        let (start, end) = (replace.start, replace.end);
-        let breaks = replace.text.matches('\n').count();
-        let tail = replace.text.rsplit('\n').next().map_or(0, str::len);
-        let landed = if breaks == 0 {
-            Pos::new(start.line, start.col + tail)
-        } else {
-            Pos::new(start.line + breaks, tail)
-        };
-        if pos >= end {
-            if pos.line == end.line {
-                Pos::new(landed.line, landed.col + pos.col - end.col)
+        let document = Document::new(source);
+        let line = pos.line.min(document.line_count() - 1);
+        let within = document.line_range(line);
+        let mut at = within.start + pos.col.min(within.len());
+        let mut shift = 0isize;
+        for (range, text) in &self.edits {
+            if at >= range.end {
+                shift += text.len() as isize - range.len() as isize;
             } else {
-                Pos::new(pos.line - end.line + landed.line, pos.col)
+                if at > range.start {
+                    at = range.start + text.len();
+                }
+                break;
             }
-        } else if pos <= start {
-            pos
-        } else {
-            landed
         }
+        let written = self.apply(source);
+        position(&Document::new(&written), at.saturating_add_signed(shift))
     }
 }
 
-/// The line and column of byte `at` of a document, which is the start of
-/// a line or the end of the text.
+/// The line and column of byte `at` of a document.
 fn position(document: &Document<'_>, at: usize) -> Pos {
     let count = document.line_count();
     let line = (0..count)
         .rev()
         .find(|line| document.line_range(*line).start <= at)
         .unwrap_or(0);
-    Pos::new(line, at - document.line_range(line).start)
+    let within = document.line_range(line);
+    Pos::new(line, at.min(within.end) - within.start)
 }
 
 /// The ending a line that goes in before line `line` takes: that line's
@@ -414,39 +470,64 @@ fn whole_line<'a>(document: &Document<'a>, line: usize) -> &'a str {
     }
 }
 
+/// The lines of `text`, each with its ending, as bytes of it.
+fn whole_lines(text: &str) -> Vec<Range<usize>> {
+    let document = Document::new(text);
+    (0..document.line_count())
+        .map(|line| {
+            let range = document.line_range(line);
+            range.start..range.end + document.ending(line).as_str().len()
+        })
+        .filter(|range| !range.is_empty())
+        .collect()
+}
+
 /// The change from the front matter at `place` of `source` to `after`,
-/// kept to the lines that differ.
+/// kept to the lines that differ: lines taken from two places are two
+/// changes, and what is between them is left alone.
 fn switch_write(source: &str, place: Range<usize>, after: String) -> SwitchWrite {
     let before = &source[place.clone()];
-    let lines = |text: &str| -> Vec<Range<usize>> {
-        let document = Document::new(text);
-        (0..document.line_count())
-            .map(|line| {
-                let range = document.line_range(line);
-                range.start..range.end + document.ending(line).as_str().len()
-            })
-            .filter(|range| !range.is_empty())
+    let (old, new) = (whole_lines(before), whole_lines(&after));
+    let texts = |text: &'_ str, lines: &[Range<usize>]| -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| text[line.clone()].to_owned())
             .collect()
     };
-    let (old, new) = (lines(before), lines(&after));
-    let same = |a: &Range<usize>, b: &Range<usize>| before[a.clone()] == after[b.clone()];
-    let prefix = (old.iter().zip(&new))
-        .take_while(|(a, b)| same(a, b))
-        .count();
-    let suffix = (old[prefix..].iter().rev().zip(new[prefix..].iter().rev()))
-        .take_while(|(a, b)| same(a, b))
-        .count();
     let start = |lines: &[Range<usize>], text: &str, at: usize| {
-        lines.get(at).map_or(text.len(), |range| range.start)
+        lines.get(at).map_or(text.len(), |line| line.start)
     };
-    let old_range = start(&old, before, prefix)..start(&old, before, old.len() - suffix);
-    let new_range = start(&new, &after, prefix)..start(&new, &after, new.len() - suffix);
+    let edits = (changes(&texts(before, &old), &texts(&after, &new)).into_iter())
+        .map(|(gone, come)| {
+            let gone = start(&old, before, gone.start)..start(&old, before, gone.end);
+            let come = start(&new, &after, come.start)..start(&new, &after, come.end);
+            (
+                place.start + gone.start..place.start + gone.end,
+                after[come].to_owned(),
+            )
+        })
+        .collect();
     SwitchWrite {
-        range: place.start + old_range.start..place.start + old_range.end,
-        text: after[new_range].to_owned(),
+        edits,
         before: before.to_owned(),
         after,
     }
+}
+
+/// Whether a line of front matter names a top-level key `tasks`, however
+/// it is written: bare, quoted, or with space before its colon.
+fn names_tasks(line: &str) -> bool {
+    let quoted = ['"', '\''].into_iter().find_map(|quote| {
+        line.strip_prefix(quote)?
+            .strip_prefix("tasks")?
+            .strip_prefix(quote)
+    });
+    let Some(rest) = quoted.or_else(|| line.strip_prefix("tasks")) else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([' ', '\t']);
+    rest.strip_prefix(':')
+        .is_some_and(|value| value.is_empty() || value.starts_with([' ', '\t']))
 }
 
 /// Plan the note's task switch set: `hidden` writes `tasks: off` into the
@@ -457,49 +538,56 @@ fn switch_write(source: &str, place: Range<usize>, after: String) -> SwitchWrite
 ///   line, at the top, after a byte order mark; a leading `---` that is a
 ///   thematic break (no front matter follows it) stays below the new
 ///   block. Front matter that is there gets the line before its closing
-///   line, or, when its last `tasks` key says on, has that line
-///   rewritten. Refused when that key holds anything else (a list of
-///   another tool's), which is not Wren's to rewrite. New lines end as
+///   line, or, when its `tasks` key says on, has that line rewritten.
+///   Refused when a `tasks` key is there that is no switch Wren reads (a
+///   list of another tool's, a quoted key): it is not Wren's to rewrite,
+///   and a second key beside it would be one too many. New lines end as
 ///   the line they go in before does.
 /// - **Showing.** Every `tasks` line that hides goes. A block left with
 ///   nothing but blank lines goes with it, whoever wrote it; one that
 ///   holds anything else stays. Refused when the note would still be
 ///   hidden, by Obsidian's `TP_ignore_this_file`, which is not Wren's to
-///   remove, and when what is left would no longer read as front matter.
+///   remove.
+///
+/// Either way the front matter must end where the change leaves it:
+/// refused when what is left would no longer read as front matter, and
+/// when taking the block away would make front matter of the lines under
+/// it, which are the note's text.
 pub fn set_hidden(source: &str, hidden: bool) -> Result<Option<SwitchWrite>, Refused> {
     if tasks::hides_tasks(source) == hidden {
         return Ok(None);
     }
     let document = Document::new(source);
     let (close, place) = front_matter(&document);
-    let mut left = close;
+    // The closing line once the change is made.
+    let left;
     let after = match (hidden, close) {
         (true, None) => {
             let ending = ending_at(&document, 0);
+            left = Some(2);
             format!("---{ending}{SWITCH_OFF}{ending}---{ending}")
         }
         (true, Some(close)) => {
-            let own =
-                (1..close)
-                    .rev()
-                    .find_map(|line| match tasks::key_value(document.line(line)) {
-                        Some(("tasks", value)) => Some((line, tasks::switch(value))),
-                        _ => None,
-                    });
-            let own = match own {
-                Some((line, Some(_))) => Some(line),
-                // A list, a number, some other tool's `tasks`: rewriting
-                // it would lose what it holds, and a second key below it
-                // would make the front matter one no YAML reader takes.
-                Some((_, None)) => {
+            let mut own = None;
+            for line in (1..close).filter(|line| names_tasks(document.line(*line))) {
+                let reads = match tasks::key_value(document.line(line)) {
+                    Some(("tasks", value)) => tasks::switch(value).is_some(),
+                    _ => false,
+                };
+                // A list, a number, a quoted key, some other tool's
+                // `tasks`: rewriting it would lose what it holds, and a
+                // second key below it would make the front matter one a
+                // YAML reader refuses.
+                if !reads {
                     return Err(Refused::Invalid(
                         "This note's front matter has a `tasks` key Wren does not read; \
                          add `tasks: off` in the note"
                             .into(),
-                    ))
+                    ));
                 }
-                None => None,
-            };
+                own = Some(line);
+            }
+            left = Some(if own.is_some() { close } else { close + 1 });
             let mut after = String::new();
             for line in 0..=close {
                 match own {
@@ -550,9 +638,16 @@ pub fn set_hidden(source: &str, hidden: bool) -> Result<Option<SwitchWrite>, Ref
                 .into()
         }));
     }
-    if !hidden && left.is_some() && block::front_matter_end(&Document::new(&written)) != left {
+    if block::front_matter_end(&Document::new(&written)) != left {
         return Err(Refused::Invalid(
-            "Without `tasks: off` the rest would not read as front matter; edit the note".into(),
+            if left.is_some() {
+                "With that change the note's front matter would not read as it does; \
+                 edit the note"
+            } else {
+                "Without its front matter the note's next lines would read as front matter; \
+                 edit the note"
+            }
+            .into(),
         ));
     }
     Ok(Some(write))
@@ -561,13 +656,22 @@ pub fn set_hidden(source: &str, hidden: bool) -> Result<Option<SwitchWrite>, Ref
 /// Plan the note's front matter put back: `replace` written where the
 /// front matter reads `expect` (each as [`SwitchWrite::before`] and
 /// [`SwitchWrite::after`] give them), which undoes the change that left
-/// it so. [`Refused::Changed`] once it reads otherwise.
+/// it so. [`Refused::Changed`] once it reads otherwise, and when the
+/// note's text has changed so that what is put back would not be its
+/// front matter: a block with no ending after its closing line, above
+/// text that would run on from it, or a block taken away from above
+/// lines that would then read as one.
 pub fn restore_switch(source: &str, expect: &str, replace: &str) -> Result<SwitchWrite, Refused> {
     let (_, place) = front_matter(&Document::new(source));
     if &source[place.clone()] != expect {
         return Err(Refused::Changed);
     }
-    Ok(switch_write(source, place, replace.to_owned()))
+    let write = switch_write(source, place, replace.to_owned());
+    let close = whole_lines(replace).len().checked_sub(1);
+    if block::front_matter_end(&Document::new(&write.apply(source))) != close {
+        return Err(Refused::Changed);
+    }
+    Ok(write)
 }
 
 /// Plan `change` to the task switch of `source`. `None` when it changes
@@ -712,14 +816,30 @@ mod tests {
     }
 
     #[test]
-    fn a_line_written_whole_is_one_line() {
+    fn a_line_written_whole_is_one_line_and_still_a_task() {
         let source = "- [ ] a\n";
-        for text in ["- [x] a\n", "- [x] a\r- [ ] b"] {
-            assert!(matches!(
-                plan_line(source, 0, "- [ ] a", &LineChange::Line(text.into())),
-                Err(Refused::Invalid(_))
-            ));
+        for text in [
+            "- [x] a\n",
+            "- [x] a\r- [ ] b",
+            // No task: what undoes the write could not find it again.
+            "plain text",
+            "- a",
+            "    - [ ] a",
+            "```",
+        ] {
+            assert!(
+                matches!(
+                    plan_line(source, 0, "- [ ] a", &LineChange::Line(text.into())),
+                    Err(Refused::Invalid(_))
+                ),
+                "{text:?}"
+            );
         }
+        // The line as it is is nothing to write, whatever it is.
+        let same = LineChange::Line("- [ ] a".into());
+        assert!(!plan_line(source, 0, "- [ ] a", &same).unwrap().changes());
+        let other = LineChange::Line("* [/] b @sam".into());
+        assert_eq!(written(source, 0, "- [ ] a", &other), "* [/] b @sam\n");
     }
 
     /// `old` with `edits` made, last first.
@@ -763,12 +883,74 @@ mod tests {
                 (19..19, " ✅ 2026-11-19".to_owned())
             ]
         );
-        // Long lines are compared at their ends only.
-        let long = "x".repeat(2_000);
-        let (old, new) = (format!("- [ ] {long} a"), format!("- [x] {long} b"));
+        // However long the line: the cost is in what differs.
+        let long = "word ".repeat(400);
+        let (old, new) = (format!("- [ ] {long}a"), format!("- [x] {long}b"));
         let edits = hunks(&old, &new);
-        assert_eq!(edits.len(), 1);
-        assert_eq!(patched(&old, &edits), new);
+        assert_eq!(
+            edits,
+            [
+                (3..4, "x".to_owned()),
+                (old.len() - 1..old.len(), "b".to_owned())
+            ]
+        );
+        // Two lines with next to nothing in common are one edit.
+        let (old, new) = ("ab".repeat(300), "cd".repeat(300));
+        let edits = hunks(&old, &new);
+        assert_eq!(edits, [(0..old.len(), new.clone())]);
+    }
+
+    #[test]
+    fn a_caret_in_a_long_description_keeps_its_place_when_the_change_is_undone() {
+        let words = "word ".repeat(120);
+        let done = format!("- [x] {words}✅ 2026-11-19");
+        let open = format!("- [ ] {words}");
+        let undo = LineChange::Line(open.trim_end().to_owned());
+        let plan = plan_line(&done, 0, &done, &undo).unwrap();
+        assert_eq!(plan.replaces().len(), 2, "the box, and the stamp");
+        for col in [6, 300, 600] {
+            assert_eq!(plan.moved(Pos::new(0, col)), Pos::new(0, col));
+        }
+        assert_eq!(plan.after, open.trim_end());
+    }
+
+    #[test]
+    fn changes_are_a_shortest_script_and_one_change_past_the_limit() {
+        let run = |a: &str, b: &str| {
+            let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+            changes(&a, &b)
+        };
+        assert_eq!(run("", ""), []);
+        assert_eq!(run("abc", "abc"), []);
+        assert_eq!(run("abc", ""), [(0..3, 0..0)]);
+        assert_eq!(run("", "abc"), [(0..0, 0..3)]);
+        assert_eq!(run("abcd", "aXcY"), [(1..2, 1..2), (3..4, 3..4)]);
+        assert_eq!(run("a-b-c", "abc"), [(1..2, 1..1), (3..4, 2..2)]);
+        assert_eq!(run("abc", "a-b-c"), [(1..1, 1..2), (2..2, 3..4)]);
+        // Each result rebuilds the second from the first.
+        let texts = [
+            "",
+            "a",
+            "abcabba",
+            "cbabac",
+            "xaxbxcx",
+            "the quick brown fox",
+        ];
+        for a in texts {
+            for b in texts {
+                let (old, new): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+                let mut built: Vec<char> = Vec::new();
+                let mut from = 0;
+                for (gone, come) in changes(&old, &new) {
+                    assert!(from <= gone.start, "{a:?} to {b:?}");
+                    built.extend(&old[from..gone.start]);
+                    built.extend(&new[come]);
+                    from = gone.end;
+                }
+                built.extend(&old[from..]);
+                assert_eq!(built, new, "{a:?} to {b:?}");
+            }
+        }
     }
 
     #[test]
@@ -854,7 +1036,7 @@ mod tests {
         let shown = "---\ntasks: on # for now\ntitle: A\n---\nbody\n";
         let (hidden, write) = switched(shown, true);
         assert_eq!(hidden, "---\ntasks: off\ntitle: A\n---\nbody\n");
-        assert_eq!(write.text, "tasks: off\n");
+        assert_eq!(write.edits, [(4..24, "tasks: off\n".to_owned())]);
         let back = restore_switch(&hidden, &write.after, &write.before).unwrap();
         assert_eq!(back.apply(&hidden), shown);
         // The last of several decides, so the last is the one rewritten.
@@ -957,16 +1139,19 @@ mod tests {
     }
 
     #[test]
-    fn a_switch_change_is_an_editors_replacement_of_whole_lines() {
+    fn a_switch_change_is_an_editors_replacements_of_whole_lines() {
         let source = "\u{feff}# A\r\nbody\r\n";
         let (_, write) = switched(source, true);
-        let replace = write.replace(source);
+        let [replace] = &write.replaces(source)[..] else {
+            panic!("one replacement");
+        };
         // After the mark, which is the first three bytes of line 0.
         assert_eq!(
             (replace.start, replace.end),
             (Pos::new(0, 3), Pos::new(0, 3))
         );
-        assert_eq!(replace.text, "---\ntasks: off\n---\n");
+        // With its line endings as they are written.
+        assert_eq!(replace.text, "---\r\ntasks: off\r\n---\r\n");
         // A caret where the block goes in moves down with its line, and
         // one before it (in the mark) stays.
         assert_eq!(write.moved(source, Pos::new(0, 3)), Pos::new(3, 0));
@@ -978,7 +1163,9 @@ mod tests {
         // the line goes to where it was.
         let source = "---\ntitle: A\ntasks: off\n---\nbody";
         let (_, write) = switched(source, false);
-        let replace = write.replace(source);
+        let [replace] = &write.replaces(source)[..] else {
+            panic!("one replacement");
+        };
         assert_eq!(
             (replace.start, replace.end),
             (Pos::new(2, 0), Pos::new(3, 0))
@@ -992,11 +1179,124 @@ mod tests {
         let source = "---\ntasks: off\n---";
         let (shown, write) = switched(source, false);
         assert_eq!(shown, "");
-        let replace = write.replace(source);
+        let [replace] = &write.replaces(source)[..] else {
+            panic!("one replacement");
+        };
         assert_eq!(
             (replace.start, replace.end),
             (Pos::new(0, 0), Pos::new(2, 3))
         );
         assert_eq!(write.moved(source, Pos::new(2, 3)), Pos::new(0, 0));
+    }
+
+    #[test]
+    fn lines_taken_from_two_places_are_two_replacements() {
+        let source = "---\ntasks: off\ntitle: keep\ntasks: off\n---\nbody\n";
+        let (shown, write) = switched(source, false);
+        assert_eq!(shown, "---\ntitle: keep\n---\nbody\n");
+        let replaces = write.replaces(source);
+        let places: Vec<(Pos, Pos)> = (replaces.iter())
+            .map(|replace| (replace.start, replace.end))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                (Pos::new(1, 0), Pos::new(2, 0)),
+                (Pos::new(3, 0), Pos::new(4, 0))
+            ]
+        );
+        // The line between them is not touched: a selection in it keeps
+        // both its ends.
+        assert_eq!(write.moved(source, Pos::new(2, 7)), Pos::new(1, 7));
+        assert_eq!(write.moved(source, Pos::new(2, 11)), Pos::new(1, 11));
+        assert_eq!(write.moved(source, Pos::new(5, 2)), Pos::new(3, 2));
+        // Undo puts both back, each where it was.
+        let back = restore_switch(&shown, &write.after, &write.before).unwrap();
+        assert_eq!(back.edits.len(), 2);
+        assert_eq!(back.apply(&shown), source);
+        assert_eq!(back.moved(&shown, Pos::new(1, 7)), Pos::new(2, 7));
+    }
+
+    #[test]
+    fn a_block_put_back_keeps_its_own_line_endings() {
+        // A CRLF block over an LF body.
+        let source = "---\r\ntasks: off\r\n---\r\nbody\n";
+        let (shown, write) = switched(source, false);
+        assert_eq!(shown, "body\n");
+        let back = restore_switch(&shown, &write.after, &write.before).unwrap();
+        assert_eq!(back.apply(&shown), source);
+        let [replace] = &back.replaces(&shown)[..] else {
+            panic!("one replacement");
+        };
+        assert_eq!(replace.text, "---\r\ntasks: off\r\n---\r\n");
+    }
+
+    #[test]
+    fn showing_is_refused_when_the_lines_under_the_block_would_become_front_matter() {
+        let source = "---\ntasks: off\n---\n---\ntitle: keep\n---\nbody\n";
+        let refused = set_hidden(source, false).unwrap_err();
+        assert!(
+            matches!(&refused, Refused::Invalid(why) if why.contains("next lines")),
+            "{refused:?}"
+        );
+        // A blank line between them keeps the second a rule and a heading.
+        let apart = "---\ntasks: off\n---\n\n---\ntitle: keep\n---\nbody\n";
+        assert_eq!(switched(apart, false).0, "\n---\ntitle: keep\n---\nbody\n");
+    }
+
+    #[test]
+    fn front_matter_is_put_back_only_where_it_would_read_as_front_matter() {
+        // The block was the whole note, with no ending after its closing
+        // line. Text written since would run on from that line.
+        let source = "---\ntasks: off\n---";
+        let (shown, write) = switched(source, false);
+        assert_eq!(shown, "");
+        let back = |text: &str| restore_switch(text, &write.after, &write.before);
+        assert_eq!(back("").unwrap().apply(""), source);
+        assert_eq!(back("body\n"), Err(Refused::Changed));
+        // Below a line break of its own the body is the body.
+        assert_eq!(
+            back("\nbody\n").unwrap().apply("\nbody\n"),
+            "---\ntasks: off\n---\nbody\n"
+        );
+
+        // A block taken away again from above lines that have since
+        // become what front matter looks like.
+        let (hidden, write) = switched("# A\n", true);
+        let edited = hidden.replace("# A\n", "---\ntitle: A\n---\n");
+        assert_eq!(
+            restore_switch(&edited, &write.after, &write.before),
+            Err(Refused::Changed)
+        );
+    }
+
+    #[test]
+    fn a_tasks_key_written_another_way_is_not_wrens_to_double() {
+        for other in [
+            "---\ntitle: A\n\"tasks\": [a, b]\n---\n",
+            "---\ntitle: A\n'tasks': on\n---\n",
+            "---\ntitle: A\ntasks : on\n---\n",
+            "---\ntitle: A\n\"tasks\":\n  - a\n---\n",
+            // Read, but with one that is not beside it.
+            "---\ntasks: on\n\"tasks\": 1\n---\n",
+        ] {
+            assert!(!tasks::hides_tasks(other), "{other:?}");
+            let refused = set_hidden(other, true).unwrap_err();
+            assert!(
+                matches!(&refused, Refused::Invalid(why) if why.contains("does not read")),
+                "{other:?}: {refused:?}"
+            );
+        }
+        // A key that only begins like it, or is nested, is another key.
+        for fine in [
+            "---\ntasks_done: 3\n---\n",
+            "---\nmeta:\n  tasks: [a]\n---\n",
+            "---\ntitle: \"tasks\": x\n---\n",
+        ] {
+            assert!(
+                switched(fine, true).0.contains("\ntasks: off\n---\n"),
+                "{fine:?}"
+            );
+        }
     }
 }

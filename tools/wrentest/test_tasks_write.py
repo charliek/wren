@@ -205,6 +205,14 @@ def test_a_row_out_of_date_and_an_undo_after_an_outside_edit_are_refused(
         # place, by the line the row holds.
         moved = FILES[OTHER].replace(LUNCH, f"new\nlines\n{LUNCH}")
         (tmp_path / "workspace" / OTHER).write_text(moved, encoding="utf-8")
+        # A change of nothing says where it is, and writes nothing.
+        modified = (tmp_path / "workspace" / OTHER).stat().st_mtime_ns
+        kept = write(app, OTHER, 2, {"due": None}, expect=LUNCH)
+        assert kept["write"] == {"path": OTHER, "line": 4, "before": LUNCH, "after": LUNCH,
+                                 "changed": False, "open": False, "warning": None}
+        assert kept["note"]["tasks"] == [{"line": 4, "source": LUNCH}]
+        assert (tmp_path / "workspace" / OTHER).stat().st_mtime_ns == modified
+        assert kept["can_undo"] is False
         answer = write(app, OTHER, 2, "toggle", expect=LUNCH)
         done = "- [x] Order lunch ✅ 2026-11-19"
         assert answer["write"]["line"] == 4 and answer["write"]["after"] == done
@@ -216,12 +224,44 @@ def test_a_row_out_of_date_and_an_undo_after_an_outside_edit_are_refused(
         (tmp_path / "workspace" / OTHER).write_text(theirs, encoding="utf-8")
         answer = undo(app)
         assert answer["refused"] == stale and answer["can_undo"] is False
+        # The refusal carries the note as the index has it now.
+        assert answer["note"] == {"path": OTHER, "hidden": False, "tasks": [
+            {"line": 4, "source": "- [x] Order lunches ✅ 2026-11-19"}]}
         assert on_disk(tmp_path, OTHER) == theirs
         assert files(tmp_path) == ["List.md", "Other.md"]
         fresh = write(app, OTHER, 4, {"due": None})
         assert fresh["refused"] is None
         assert fresh["note"]["tasks"] == [
             {"line": 4, "source": "- [x] Order lunches ✅ 2026-11-19"}]
+
+        # A line that would be no task is not written: its undo could
+        # never find it again.
+        answer = write(app, OTHER, 4, {"line": "plain text"})
+        assert answer["write"] is None and answer["refused"]["refresh"] is False
+        assert answer["can_undo"] is False
+        assert on_disk(tmp_path, OTHER) == theirs
+
+
+def test_an_undo_in_the_open_note_looks_at_its_file_first(tmp_path: Path) -> None:
+    with write_app(tmp_path, "open-undo") as app:
+        show(app)
+        write(app, LIST, 2, "toggle")
+        toggled = FILES[LIST].replace(MAIL, MAILED)
+        wait_for(lambda: on_disk(tmp_path, LIST) == toggled,
+                 description="autosave saves the change made from the view")
+        # Another program changes the task the undo is for. Whether or
+        # not the app has seen that yet, the undo is of a task that has
+        # changed: refused, with their text in the editor and on disk.
+        theirs = toggled.replace("Mail the deck", "Mail the decks")
+        (tmp_path / "workspace" / LIST).write_text(theirs, encoding="utf-8")
+        answer = undo(app)
+        assert answer["refused"] == {"message": CHANGED, "refresh": True}, answer
+        assert answer["can_undo"] is False
+        assert answer["note"]["tasks"][0]["source"] == MAILED.replace("deck", "decks")
+        assert app.client.call("editor.get")["text"] == theirs
+        assert session(app)["document"]["dirty"] is False
+        assert on_disk(tmp_path, LIST) == theirs
+        assert files(tmp_path) == ["List.md", "Other.md"]
 
 
 def test_a_draft_that_cannot_be_saved_blocks_the_write_to_another_note(
@@ -293,14 +333,17 @@ def test_hiding_a_notes_tasks_writes_its_front_matter_and_undo_takes_it_out(
 
 def test_with_tasks_off_no_write_is_reachable(tmp_path: Path) -> None:
     with write_app(tmp_path, "off", OFF) as app:
+        # Each answers as the plain request does, and does nothing.
         for request in ({"write": {"path": LIST, "line": 2, "change": "toggle"}},
                         {"write": {"path": OTHER, "line": 2, "change": "toggle",
                                    "expect": LUNCH}},
                         {"hide": {"path": OTHER, "hidden": True}},
-                        {"undo": True}):
-            with pytest.raises(RemoteError, match="Tasks are off"):
-                app.client.call("tasks.view", request)
-        assert app.client.call("tasks.view") == {"tasks": False}
+                        {"undo": True},
+                        {}):
+            assert app.client.call("tasks.view", request) == {"tasks": False}
+        # The view's own requests are still refused.
+        with pytest.raises(RemoteError, match="Tasks are off"):
+            app.client.call("tasks.view", {"open": {"scope": "group", "path": GROUP}})
         editor = app.client.call("editor.get")
         assert editor["text"] == FILES[LIST] and editor["can_undo"] is False
         for path, text in FILES.items():

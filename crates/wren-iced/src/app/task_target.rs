@@ -12,6 +12,9 @@
 //!   ([`App::text_changed`]), so `sync_editor` finds the texts equal and
 //!   the editor keeps its undo history. The caret and the selection stay
 //!   on the text they were on, and the view where it was scrolled to.
+//!   The note's file is looked at first: one another program has written
+//!   since the Session last read or saved it is taken into the editor
+//!   before the change is planned, or, over a draft, blocks the change.
 //! - **A note that is not open** is written by the Session
 //!   (`Op::EditTaskLine`, `Op::EditTaskSwitch`), which settles the open
 //!   document first and writes with a compare-and-swap.
@@ -32,8 +35,9 @@ use std::time::Instant;
 
 use iced::widget::text_editor::{Cursor, Position};
 use wren_core::fs_store::RelPath;
+use wren_core::kind::NoteKind;
 use wren_core::model::NoteId;
-use wren_core::ops::Op;
+use wren_core::ops::{Document, Op};
 use wren_core::task_write::{self, LineChange, Refused, SwitchChange};
 use wren_core::tasks::TaskRecord;
 use wren_markdown::task::{self, Change};
@@ -201,6 +205,11 @@ pub(super) enum Seen {
         before: String,
         after: String,
     },
+    /// The task was found, with nothing to change.
+    Kept {
+        line: usize,
+        source: String,
+    },
     Stale,
 }
 
@@ -364,6 +373,11 @@ impl App {
         let Some(entry) = session.model().note(note) else {
             return Err(Refusal::stale(stale));
         };
+        // Before either writer is chosen: a board that does not parse is
+        // shown as text in the editor, and is no note of tasks for that.
+        if entry.kind != NoteKind::Markdown {
+            return Err(Refusal::blocked("Only a Markdown note holds tasks"));
+        }
         let path = entry.path.clone();
         let open = session.document().map(|document| document.note) == Some(note);
         if open {
@@ -372,11 +386,50 @@ impl App {
             if self.editor_note != Some(note) {
                 return Err(Refusal::blocked("The editor does not hold the open note"));
             }
+            self.open_note_as_on_disk(note, stale)?;
         }
         // A done or cancelled stamp is today's, though the day changed
         // since the timer last looked.
         self.check_day();
         Ok((path, open))
+    }
+
+    /// Before the open note is changed through its editor: its file is
+    /// still what the Session read or last saved, or the two are brought
+    /// in step. Another program may have written the file since, with
+    /// the next reconciliation yet to come, and a change planned on the
+    /// editor's text would then pass for one made to the note as it is
+    /// (an undo would be reported done, of a task that has changed).
+    ///
+    /// With no draft, the editor takes the file's text here, and the
+    /// change is planned on that. With a draft, the two are in conflict,
+    /// which is the document's own reconciliation to settle: nothing is
+    /// written, and the draft is kept.
+    fn open_note_as_on_disk(&mut self, note: NoteId, stale: &str) -> Result<(), Refusal> {
+        let Some(session) = &self.session else {
+            return Ok(());
+        };
+        if !(session.document_changed_on_disk()).map_err(Refusal::blocked)? {
+            return Ok(());
+        }
+        if session.document().is_some_and(Document::dirty) {
+            return Err(Refusal::blocked(
+                "The open note changed outside Wren; nothing was written, and its draft is kept",
+            ));
+        }
+        let reconciled = self.process_core(Op::Reconcile);
+        if let Some(error) = closed_error(&reconciled) {
+            return Err(Refusal::blocked(error));
+        }
+        // Removed outside Wren, it is no longer the open note.
+        let open = (self.session.as_ref())
+            .and_then(|session| session.document())
+            .is_some_and(|document| document.note == note);
+        if open && self.editor_note == Some(note) {
+            Ok(())
+        } else {
+            Err(Refusal::stale(stale))
+        }
     }
 
     fn apply_row(&mut self, target: &RowTarget, change: &RowChange) -> TaskWrite<RowWrite> {
@@ -439,6 +492,14 @@ impl App {
                 after,
                 changed: true,
                 ..unchanged(gateway.processed.warning.clone())
+            }),
+            // Found, perhaps on another line than the row has, with
+            // nothing to change.
+            Some(Seen::Kept { line, source }) => Ok(RowWrite {
+                line,
+                before: source.clone(),
+                after: source,
+                ..unchanged(None)
             }),
             Some(Seen::Stale) => Err(Refusal::stale(task_write::CHANGED)),
             Some(Seen::Switch { .. }) | None => match closed_error(&gateway) {
@@ -540,7 +601,7 @@ impl App {
                 gateway.processed.warning.clone(),
             )),
             Some(Seen::Stale) => Err(Refusal::stale(task_write::SWITCH_CHANGED)),
-            Some(Seen::Line { .. }) | None => match closed_error(&gateway) {
+            Some(Seen::Line { .. } | Seen::Kept { .. }) | None => match closed_error(&gateway) {
                 Some(error) => Err(Refusal::blocked(error)),
                 None => Ok(write(None, None)),
             },
@@ -563,15 +624,21 @@ impl App {
         };
         let view = self.editor.viewport();
         let landing = mapped(view.cursor(), |at| plan.moved(&source, at));
-        let applied = self.editor.apply(&[plan.replace(&source).into()], landing);
+        // The lines go in with the endings the plan gives them, which are
+        // the ones the Session writes to a note that is not open: front
+        // matter put back is put back byte for byte. Lines taken from two
+        // places are two edits made together, one step to undo.
+        let replaces: Vec<wren_editor::Replace> = (plan.replaces(&source).into_iter())
+            .map(Into::into)
+            .collect();
+        let applied = self.editor.apply_exact(&replaces, landing);
         self.editor
             .restore_viewport(view.with_cursor(self.editor.cursor()));
         if !applied {
             return Err(Refusal::blocked("The editor could not make that change"));
         }
         self.text_changed(started);
-        // As the editor wrote it: a line break takes the ending of the
-        // line it splits.
+        // As the editor holds it, which is what an undo will find there.
         let after = task_write::front_matter_of(&self.editor.text()).to_owned();
         Ok(Some((plan.before, after)))
     }
@@ -753,22 +820,33 @@ mod harness {
             if write.is_none() && hide.is_none() && !undo {
                 return Ok(None);
             }
+            // Off, each answers as the plain request does, before
+            // anything of it is read.
             if !self.preferences.tasks {
-                return Err("Tasks are off".into());
+                request.respond(Ok(self.task_view_snapshot()));
+                return Ok(Some(iced::Task::none()));
             }
             let (mut row, mut switch) = (None, None);
+            // The note the request is for, written or not.
+            let attempted;
             let (result, gateway) = if let Some(write) = write {
                 let target = self.row_target(write)?;
                 let change = row_change(write.get("change").ok_or("change is missing")?)?;
+                attempted = Some(target.note);
                 let done = self.write_task_row(&target, &change);
                 (done.result.map(|write| row = Some(write)), done.gateway)
             } else if let Some(hide) = hide {
                 let note = self.note_at(string(hide, "path")?)?;
                 let hidden = (hide.get("hidden").and_then(Value::as_bool))
                     .ok_or("hidden must be a boolean")?;
+                attempted = Some(note);
                 let done = self.set_note_tasks_hidden(note, hidden);
                 (done.result.map(|write| switch = Some(write)), done.gateway)
             } else {
+                attempted = self.task_writes.undo.last().map(|inverse| match inverse {
+                    Inverse::Line { target, .. } => target.note,
+                    Inverse::Switch { note, .. } => *note,
+                });
                 let done = self.undo_task_write();
                 let result = done.result.map(|undone| match undone {
                     Undone::Line(write) => row = Some(write),
@@ -776,8 +854,13 @@ mod harness {
                 });
                 (result, done.gateway)
             };
-            let path = (row.as_ref().map(|write| &write.path))
-                .or(switch.as_ref().map(|write| &write.path));
+            // Where the note is now, if it still is: a refused write
+            // says what the index holds of it too, which is the refreshed
+            // list a stale row is told to take.
+            let path = (self.session.as_ref())
+                .zip(attempted)
+                .and_then(|(session, note)| session.model().note(note))
+                .map(|note| note.path.clone());
             let mut answer = self.task_view_snapshot();
             answer["write"] = row.as_ref().map_or(Value::Null, row_json);
             answer["switch"] = switch.as_ref().map_or(Value::Null, switch_json);
@@ -785,7 +868,7 @@ mod harness {
                 Ok(()) => Value::Null,
                 Err(refusal) => json!({"message": refusal.message, "refresh": refusal.refresh}),
             };
-            answer["note"] = path.map_or(Value::Null, |path| self.note_tasks_json(path));
+            answer["note"] = path.map_or(Value::Null, |path| self.note_tasks_json(&path));
             answer["can_undo"] = json!(self.can_undo_task_write());
             answer["disposition"] = json!(gateway.processed.disposition.key());
             answer["warning"] = json!(gateway.processed.warning);
@@ -857,12 +940,20 @@ mod tests {
 
     /// The fixture on each engine.
     fn engines() -> impl Iterator<Item = (tempfile::TempDir, App)> {
-        wren_editor::BackendKind::ALL.into_iter().map(|kind| {
+        engines_with(A, B)
+    }
+
+    /// The fixture with those notes on each engine.
+    fn engines_with<'a>(
+        a: &'a str,
+        b: &'a str,
+    ) -> impl Iterator<Item = (tempfile::TempDir, App)> + 'a {
+        wren_editor::BackendKind::ALL.into_iter().map(move |kind| {
             let engine = match kind {
                 wren_editor::BackendKind::Iced => "classic",
                 wren_editor::BackendKind::Owned => "advanced",
             };
-            let (directory, app) = fixture_with(&format!("editor-engine = {engine}\n{ON}"), A, B);
+            let (directory, app) = fixture_with(&format!("editor-engine = {engine}\n{ON}"), a, b);
             assert_eq!(app.editor.backend(), kind);
             (directory, app)
         })
@@ -1301,17 +1392,249 @@ mod tests {
         );
         assert!(!app.can_undo_task_write(), "the undo is forgotten");
 
-        // The open note, saved and then changed on disk, which the editor
-        // reloads.
+        // The open note, saved and then changed on disk, with no
+        // reconciliation yet: the editor still holds the line the undo
+        // expects. The undo looks at the file through the Session first,
+        // so the editor takes their text and the undo is of a task that
+        // has changed.
         toggle_row(&mut app, "A", 2).unwrap();
         assert!(app.process_core(Op::Flush).core_error.is_none());
-        let theirs = on_disk(&directory, "A").replace("Mail the deck", "Mail the decks");
+        let ours = app.editor.text();
+        let theirs = ours.replace("Mail the deck", "Mail the decks");
         std::fs::write(file(&directory, "A"), &theirs).unwrap();
-        assert!(app.process_core(Op::Reconcile).core_error.is_none());
-        assert_eq!(app.editor.text(), theirs);
+        assert_eq!(app.editor.text(), ours, "not reconciled yet");
         assert_eq!(undo(&mut app), Err(stale()));
         assert_eq!(app.editor.text(), theirs);
+        assert_eq!(draft(&app), theirs);
+        assert_eq!(on_disk(&directory, "A"), theirs);
         assert!(!dirty(&app) && !app.can_undo_task_write());
+        assert!(listed(&app, "A")[0].contains("decks"));
+        // A change for the note as it is now goes through.
+        assert!(toggle_row(&mut app, "A", 2).unwrap().changed);
+        assert!(undo(&mut app).is_ok());
+        assert_eq!(app.editor.text(), theirs);
+    }
+
+    #[test]
+    fn a_draft_in_conflict_with_the_file_is_kept_and_nothing_is_written_over_it() {
+        let (directory, mut app) = fixture();
+        show(&mut app);
+        // A change from the view, still a draft, and then another
+        // program's write to the same note.
+        toggle_row(&mut app, "A", 2).unwrap();
+        let ours = A.replace(MAIL, MAILED);
+        assert!(dirty(&app));
+        let theirs = A.replace("Book the room", "Book the hall");
+        std::fs::write(file(&directory, "A"), &theirs).unwrap();
+        // Neither an undo nor another change is made on top of it: that
+        // is for the document's own reconciliation to settle.
+        let refused = undo(&mut app).unwrap_err();
+        assert!(!refused.refresh, "{refused:?}");
+        assert!(refused.message.contains("outside Wren"), "{refused:?}");
+        let target = row(&app, "A", 3);
+        let refused = toggle(&mut app, &target).unwrap_err();
+        assert!(!refused.refresh, "{refused:?}");
+        let hide = app.set_note_tasks_hidden(note(&app, "A"), true);
+        assert!(!hide.result.unwrap_err().refresh);
+        assert_eq!(app.editor.text(), ours);
+        assert_eq!(draft(&app), ours, "the draft is kept");
+        assert!(dirty(&app));
+        assert_eq!(on_disk(&directory, "A"), theirs);
+        assert!(app.can_undo_task_write(), "kept to try again");
+        // Another note is still written, once the draft is settled, which
+        // here means its conflict copy.
+        assert_eq!(app.surface(), Surface::Tasks);
+    }
+
+    #[test]
+    fn a_board_shown_as_text_is_no_note_of_tasks() {
+        let (directory, mut app) = fixture();
+        let flow = (directory.path()).join("workspace/Work/Tasks/Flow.wren-board");
+        let broken = "- [ ] not a board\n";
+        std::fs::write(&flow, broken).unwrap();
+        assert!(app.process_core(Op::Reconcile).core_error.is_none());
+        open(&mut app, "Flow");
+        // It does not parse, so the editor shows its text.
+        assert_eq!(app.surface(), Surface::Raw);
+        assert_eq!(app.editor.text(), broken);
+        let board = note(&app, "Flow");
+        let hide = app.set_note_tasks_hidden(board, true);
+        let refused = hide.result.unwrap_err();
+        assert!(
+            !refused.refresh && refused.message.contains("Markdown"),
+            "{refused:?}"
+        );
+        let target = RowTarget {
+            note: board,
+            path: RelPath::new("Work/Tasks/Flow.wren-board").unwrap(),
+            line: 0,
+            expect: "- [ ] not a board".into(),
+        };
+        let refused = toggle(&mut app, &target).unwrap_err();
+        assert!(refused.message.contains("Markdown"), "{refused:?}");
+        assert_eq!(app.editor.text(), broken);
+        assert!(!app.editor.can_undo() && !dirty(&app));
+        assert!(!app.can_undo_task_write());
+        assert_eq!(std::fs::read_to_string(&flow).unwrap(), broken);
+    }
+
+    #[test]
+    fn showing_is_refused_when_it_would_make_front_matter_of_the_body() {
+        let stacked = "---\ntasks: off\n---\n---\ntitle: keep\n---\nbody\n";
+        let (directory, mut app) = fixture_with(ON, stacked, stacked);
+        for title in ["A", "B"] {
+            let shown = app.set_note_tasks_hidden(note(&app, title), false);
+            let refused = shown.result.unwrap_err();
+            assert!(
+                !refused.refresh && refused.message.contains("front matter"),
+                "{title}: {refused:?}"
+            );
+            assert!(hidden(&app, title), "{title}");
+        }
+        assert_eq!(app.editor.text(), stacked);
+        assert!(!app.editor.can_undo() && !dirty(&app));
+        assert_eq!(on_disk(&directory, "B"), stacked);
+        assert!(!app.can_undo_task_write());
+    }
+
+    #[test]
+    fn front_matter_put_back_in_the_open_note_keeps_its_line_endings() {
+        // A CRLF block over an LF body.
+        let mixed = "---\r\ntasks: off\r\n---\r\n- [ ] a\nbody\n";
+        for (directory, mut app) in engines_with(mixed, mixed) {
+            let kind = app.editor.backend();
+            let (a, b) = (note(&app, "A"), note(&app, "B"));
+            assert_eq!(app.editor.text(), mixed);
+            for id in [a, b] {
+                assert!(app.set_note_tasks_hidden(id, false).result.unwrap().changed);
+            }
+            assert_eq!(app.editor.text(), "- [ ] a\nbody\n", "{kind:?}");
+            assert_eq!(on_disk(&directory, "B"), "- [ ] a\nbody\n");
+            // Undone, each is as it was byte for byte, the open note
+            // through its editor.
+            assert!(matches!(undo(&mut app), Ok(Undone::Switch(write)) if !write.open));
+            assert_eq!(on_disk(&directory, "B"), mixed, "{kind:?}");
+            assert!(matches!(undo(&mut app), Ok(Undone::Switch(write)) if write.open));
+            assert_eq!(app.editor.text(), mixed, "{kind:?}");
+            assert_eq!(draft(&app), mixed, "{kind:?}");
+            // Each of the two changes is one step of the editor's history.
+            editor_undo(&mut app);
+            assert_eq!(app.editor.text(), "- [ ] a\nbody\n", "{kind:?}");
+            editor_undo(&mut app);
+            assert_eq!(app.editor.text(), mixed, "{kind:?}");
+            assert!(!app.editor.can_undo(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn front_matter_is_not_put_back_where_it_would_run_into_what_was_typed_since() {
+        // The block is the whole note, with no ending after it.
+        let only = "---\ntasks: off\n---";
+        let (_directory, mut app) = fixture_with(ON, only, B);
+        let a = note(&app, "A");
+        assert!(app.set_note_tasks_hidden(a, false).result.unwrap().changed);
+        assert_eq!(app.editor.text(), "");
+        let _ = app.update(paste("- [ ] typed\n"));
+        let refused = undo(&mut app).unwrap_err();
+        assert_eq!(refused, Refusal::stale(task_write::SWITCH_CHANGED));
+        assert_eq!(app.editor.text(), "- [ ] typed\n");
+        assert!(!hidden(&app, "A") && !app.can_undo_task_write());
+    }
+
+    #[test]
+    fn lines_taken_from_two_places_leave_a_selection_between_them_as_it_was() {
+        let front = "---\ntasks: off\ntitle: keep\ntasks: off\n---\n- [ ] a\n";
+        for (_directory, mut app) in engines_with(front, B) {
+            let kind = app.editor.backend();
+            // `keep` selected, in the key that stays.
+            app.editor.move_cursor(Cursor {
+                position: Position {
+                    line: 2,
+                    column: 11,
+                },
+                selection: Some(Position { line: 2, column: 7 }),
+            });
+            let a = note(&app, "A");
+            assert!(app.set_note_tasks_hidden(a, false).result.unwrap().changed);
+            assert_eq!(app.editor.text(), "---\ntitle: keep\n---\n- [ ] a\n");
+            let kept = Cursor {
+                position: Position {
+                    line: 1,
+                    column: 11,
+                },
+                selection: Some(Position { line: 1, column: 7 }),
+            };
+            assert_eq!(app.editor.cursor(), kept, "{kind:?}");
+            // Both lines went in one step, and come back in one.
+            editor_undo(&mut app);
+            assert_eq!(app.editor.text(), front, "{kind:?}");
+            assert!(!app.editor.can_undo(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_caret_in_a_long_description_stays_put_through_a_change_and_its_undo() {
+        let words = "word ".repeat(120);
+        let long = format!("# A\n\n- [ ] {words}📅 2026-12-01\n");
+        for (_directory, mut app) in engines_with(&long, B) {
+            let kind = app.editor.backend();
+            app.editor.move_cursor(at(2, 300));
+            show(&mut app);
+            assert!(toggle_row(&mut app, "A", 2).unwrap().changed);
+            assert_eq!(app.editor.cursor(), at(2, 300), "{kind:?}");
+            assert!(undo(&mut app).is_ok());
+            assert_eq!(app.editor.text(), long, "{kind:?}");
+            assert_eq!(app.editor.cursor(), at(2, 300), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_that_would_be_no_task_is_not_written() {
+        let (directory, mut app) = fixture();
+        show(&mut app);
+        for title in ["A", "B"] {
+            let target = row(&app, title, 2);
+            let plain = RowChange::Line("plain text".into());
+            let refused = app.write_task_row(&target, &plain).result.unwrap_err();
+            assert!(!refused.refresh, "{title}: {refused:?}");
+            assert_eq!(listed(&app, title)[0], format!("2 {}", target.expect));
+        }
+        assert_eq!(app.editor.text(), A);
+        assert_eq!(on_disk(&directory, "B"), B);
+        assert!(!app.editor.can_undo() && !app.can_undo_task_write());
+    }
+
+    #[test]
+    fn a_change_of_nothing_to_a_closed_note_says_where_the_task_is_now() {
+        let (directory, mut app) = fixture();
+        show(&mut app);
+        // The row as listed, before another program moves the task down.
+        let held = row(&app, "B", 2);
+        let moved = B.replace(LUNCH, &format!("new\nlines\n{LUNCH}"));
+        std::fs::write(file(&directory, "B"), &moved).unwrap();
+        let modified = std::fs::metadata(file(&directory, "B"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let kept = app.write_task_row(&held, &change(Change::SetDue(None)));
+        let kept = kept.result.unwrap();
+        assert_eq!(
+            (kept.line, &*kept.before, &*kept.after, kept.changed),
+            (4, LUNCH, LUNCH, false)
+        );
+        // Nothing was written, and the list has the note as it is.
+        assert_eq!(on_disk(&directory, "B"), moved);
+        assert_eq!(
+            std::fs::metadata(file(&directory, "B"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        assert_eq!(listed(&app, "B"), [format!("4 {LUNCH}")]);
+        assert!(!app.can_undo_task_write());
+        // The row it gives is the one the next change is for.
+        assert!(toggle(&mut app, &kept.target()).unwrap().changed);
     }
 
     #[test]
@@ -1517,7 +1840,7 @@ mod tests {
         };
         let refused = toggle(&mut app, &board).unwrap_err();
         assert!(
-            !refused.refresh && refused.message.contains("board"),
+            !refused.refresh && refused.message.contains("Markdown"),
             "{refused:?}"
         );
         let flow = (directory.path()).join("workspace/Work/Tasks/Flow.wren-board");
@@ -1682,17 +2005,39 @@ mod tests {
             assert!(ask(&mut app, bad.clone()).is_err(), "{bad}");
         }
 
-        // With tasks off each is refused, and the plain question still
-        // answers that they are off.
+        // A line that would be no task is not written, and leaves no
+        // undo of its own.
+        let depth = app.task_writes.undo.len();
+        let plain = json!({"write": {"path": b, "line": 2, "change": {"line": "plain text"}}});
+        let answer = ask(&mut app, plain).unwrap();
+        assert_eq!(answer["refused"]["refresh"], false);
+        assert_eq!(answer["write"], Value::Null);
+        assert_eq!(app.task_writes.undo.len(), depth);
+        assert_eq!(on_disk(&directory, "B"), B);
+        // A refused write says what the index holds of its note now.
+        let theirs = B.replace(LUNCH, "- [ ] Order dinner");
+        std::fs::write(file(&directory, "B"), &theirs).unwrap();
+        let held = json!({"path": b, "line": 2, "expect": LUNCH, "change": "toggle"});
+        let answer = ask(&mut app, json!({"write": held})).unwrap();
+        assert_eq!(answer["refused"]["refresh"], true);
+        assert_eq!(
+            answer["note"],
+            json!({"path": b, "hidden": false,
+                   "tasks": [{"line": 2, "source": "- [ ] Order dinner"}]})
+        );
+
+        // With tasks off each answers that they are off, as the plain
+        // question does, whatever it asks for, and does nothing.
         let (directory, mut app) = fixture_with("tasks = off\nboards = on\n", A, B);
         for request in [
             json!({"write": {"path": a, "line": 2, "change": "toggle"}}),
+            json!({"write": {"path": "no/such.md", "change": "frobnicate"}}),
             json!({"hide": {"path": b, "hidden": true}}),
             json!({"undo": true}),
+            json!({}),
         ] {
-            assert_eq!(ask(&mut app, request).unwrap_err(), "Tasks are off");
+            assert_eq!(ask(&mut app, request).unwrap(), json!({"tasks": false}));
         }
-        assert_eq!(ask(&mut app, json!({})).unwrap(), json!({"tasks": false}));
         assert_eq!(
             (on_disk(&directory, "A"), on_disk(&directory, "B")),
             (A.into(), B.into())

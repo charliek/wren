@@ -792,6 +792,20 @@ impl EditorView {
     /// Returns whether the text changed. A plan with an edit off the text,
     /// inside a character, backwards, or overlapping another changes nothing.
     pub fn apply(&mut self, edits: &[Replace], selection: Cursor) -> bool {
+        self.apply_edits(edits, selection, false)
+    }
+
+    /// [`apply`](Self::apply), with each edit's text put in as it is:
+    /// its line breaks keep the endings they are written with, instead
+    /// of taking the ending of the line they split. For a host that puts
+    /// back text it took out, endings and all (a CRLF block above an LF
+    /// body), and that has made sure the breaks do not run into the text
+    /// around them.
+    pub fn apply_exact(&mut self, edits: &[Replace], selection: Cursor) -> bool {
+        self.apply_edits(edits, selection, true)
+    }
+
+    fn apply_edits(&mut self, edits: &[Replace], selection: Cursor, exact: bool) -> bool {
         self.close_open();
         let Some(order) = self.content.with_lines(|lines| edit::ordered(edits, lines)) else {
             return false;
@@ -803,10 +817,14 @@ impl EditorView {
             .min()
             .unwrap_or(0);
         for replace in order.iter().rev() {
-            let ending = self.content.with_lines(|lines| {
-                edit::break_ending(lines, replace.start, replace.end, &replace.text)
-            });
-            let text = edit::with_breaks(&replace.text, ending);
+            let text = if exact {
+                std::borrow::Cow::Borrowed(replace.text.as_str())
+            } else {
+                let ending = self.content.with_lines(|lines| {
+                    edit::break_ending(lines, replace.start, replace.end, &replace.text)
+                });
+                edit::with_breaks(&replace.text, ending)
+            };
             self.content
                 .replace_range(replace.start, replace.end, &text);
             let last = replace.start.line + wren_markdown::line_ranges(&text).count();
@@ -5852,6 +5870,32 @@ mod tests {
                 assert_eq!(ev.first_visible_line(), top, "restoring {origin_cursor:?}");
                 assert_eq!(ev.cursor(), origin_cursor);
             }
+        }
+
+        #[test]
+        fn an_exact_edit_keeps_the_line_endings_it_is_written_with() {
+            let block = "---\r\ntasks: off\r\n---\r\n";
+            let mut ev = editor("body\nmore\n");
+            ev.move_cursor(super::at(1, 2));
+            let top = Position { line: 0, column: 0 };
+            // The same text through `apply` takes the body's endings.
+            assert!(ev.apply(&[Replace::insert(top, block)], super::at(4, 2)));
+            assert_eq!(ev.text(), "---\ntasks: off\n---\nbody\nmore\n");
+            assert!(ev.undo());
+            assert!(ev.apply_exact(&[Replace::insert(top, block)], super::at(4, 2)));
+            assert_eq!(ev.text(), format!("{block}body\nmore\n"));
+            assert_eq!(ev.cursor(), super::at(4, 2));
+            // One step, and two edits made together are one step too.
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "body\nmore\n");
+            assert!(!ev.can_undo());
+            let end = Position { line: 2, column: 0 };
+            let edits = [Replace::insert(top, "a\r\n"), Replace::insert(end, "z\r")];
+            assert!(ev.apply_exact(&edits, super::at(0, 0)));
+            assert_eq!(ev.text(), "a\r\nbody\nmore\nz\r");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "body\nmore\n");
+            assert!(!ev.can_undo());
         }
 
         #[test]
