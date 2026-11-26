@@ -506,14 +506,19 @@ impl App {
     /// `note.export_svg`, `note.export_png` and `note.export_drawio`: make
     /// the open board's document now, as it is drawn, and ask where to save
     /// it.
-    pub(super) fn export_board(&mut self, format: Format) -> Gateway {
-        // A board under a task view is not the one shown.
-        let Some(view) = self
-            .board
+    /// The board an export draws: the one in the pane. A board under a
+    /// task view is not shown, and is not exported.
+    fn exported_board(&self) -> Result<&BoardView, String> {
+        self.board
             .as_ref()
             .filter(|_| self.surface() == Surface::Board)
-        else {
-            return self.blocked("The open note is not shown as a board");
+            .ok_or_else(|| "The open note is not shown as a board".into())
+    }
+
+    pub(super) fn export_board(&mut self, format: Format) -> Gateway {
+        let view = match self.exported_board() {
+            Ok(view) => view,
+            Err(error) => return self.blocked(error),
         };
         if let Some(busy) = self.export_busy() {
             return self.blocked(busy);
@@ -706,10 +711,7 @@ impl App {
         format: Format,
         request: &std::sync::Arc<crate::test_ipc::Request>,
     ) -> Result<Task<Message>, String> {
-        let view = self
-            .board
-            .as_ref()
-            .ok_or("The open note is not shown as a board")?;
+        let view = self.exported_board()?;
         if let Some(busy) = self.export_busy() {
             return Err(busy);
         }

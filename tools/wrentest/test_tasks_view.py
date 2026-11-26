@@ -258,9 +258,11 @@ def test_back_and_forward_pass_through_the_view_by_command_and_by_key(tmp_path: 
             ("board.pointer", {"kind": "press", "at": {"x": 10, "y": 10}, "button": "left"}),
             ("board.key", {"key": "delete", "mods": []}),
             ("board.type", {"text": "typed"}),
+            ("board.export", {"format": "svg", "path": str(tmp_path / "covered.svg")}),
         ]:
             with pytest.raises(RemoteError, match="not shown as a board"):
                 app.client.call(request, params)
+        assert not (tmp_path / "covered.svg").exists()
         assert app.client.call("board.get")["surface"] == "board"
         wait_for(lambda: app.client.call("focus.get")["named"] == [],
                  description="no widget has the keyboard under the view")

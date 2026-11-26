@@ -167,6 +167,8 @@ pub(super) struct Mark {
     here: Option<u64>,
     /// The serial of the newest visit.
     newest: Option<u64>,
+    /// Whether a note was open.
+    open: bool,
     /// Each stop's tree item, for an op that moves paths.
     items: Option<Vec<Option<ItemRef>>>,
 }
@@ -182,6 +184,10 @@ pub(super) struct Mark {
 pub(super) struct Trail {
     stops: Vec<Stop>,
     shown: Option<usize>,
+    /// Whether the note under the view shown was closed while the view
+    /// showed (deleted, in Wren or outside it). A view opened over no note
+    /// lost none.
+    lost: bool,
     serial: u64,
 }
 
@@ -202,6 +208,9 @@ impl Trail {
     /// ahead are the Session's and stay. The view already shown is not
     /// opened twice.
     pub(super) fn open(&mut self, scope: Scope, visits: &[Visit], position: Option<usize>) {
+        if self.shown.is_none() {
+            self.lost = false;
+        }
         let (after, at) = match self.shown {
             Some(index) => {
                 if self.stops[index].scope == scope {
@@ -239,6 +248,9 @@ impl Trail {
     pub(super) fn show(&mut self, id: StopId) -> bool {
         let index = self.stops.iter().position(|stop| stop.id == id);
         if index.is_some() {
+            if self.shown.is_none() {
+                self.lost = false;
+            }
             self.shown = index;
         }
         index.is_some()
@@ -246,6 +258,12 @@ impl Trail {
 
     fn hide(&mut self) {
         self.shown = None;
+        self.lost = false;
+    }
+
+    /// Whether the note under the view shown was closed while it showed.
+    fn lost(&self) -> bool {
+        self.lost
     }
 
     /// What Back (`back`) or Forward does from here.
@@ -320,6 +338,7 @@ impl Trail {
         Some(Mark {
             here: serial_at(visits, session.visit_position()),
             newest: visits.last().map(|visit| visit.serial),
+            open: session.document().is_some(),
             items: moves.then(|| {
                 self.stops
                     .iter()
@@ -361,16 +380,25 @@ impl Trail {
         if mark.items.is_some() || tree_changed {
             self.follow_tree(mark.items.as_deref(), session.model());
         }
+        if self.shown.is_none() {
+            self.lost = false;
+        } else if was_shown && mark.open && session.document().is_none() {
+            self.lost = true;
+        }
         was_shown && self.shown.is_none()
     }
 
     /// Bring the trail in step with the Session's history after an op. A
-    /// new visit drops the stops ahead, as it drops the visits ahead, and
-    /// takes the view out of the pane; so does a note or a parent asked for
-    /// (`navigated`), whether or not it made a visit. A stop whose visit is
-    /// gone (its note deleted, or history too long) comes after the visit
-    /// before that one. `here` and `newest` are the serials of the visit
-    /// the Session was on and of its newest, before the op.
+    /// note or a parent asked for (`navigated`) takes the view out of the
+    /// pane, and the visit it makes drops the stops ahead, as it drops the
+    /// visits ahead. A visit no one asked for is the Session's recovery: a
+    /// draft kept in a conflict copy, which is then the open note, when a
+    /// flush met a change on disk. It cancels what was asked, so the view
+    /// shown stays, with the views of its gap, over the copy; the stops
+    /// past them go with the visits the recovery dropped. A stop whose
+    /// visit is gone (its note deleted, or history too long) comes after
+    /// the visit before that one. `here` and `newest` are the serials of
+    /// the visit the Session was on and of its newest, before the op.
     fn follow_visits(
         &mut self,
         here: Option<u64>,
@@ -379,7 +407,20 @@ impl Trail {
         navigated: bool,
     ) {
         let visited = visits.last().map(|visit| visit.serial) > newest;
-        if visited {
+        if let (true, false, Some(index)) = (visited, navigated, self.shown) {
+            let gap = self.stops[index].after;
+            let start = self.stops.partition_point(|stop| stop.after < gap);
+            let end = index
+                + self.stops[index..]
+                    .iter()
+                    .take_while(|stop| stop.after == gap)
+                    .count();
+            self.stops.truncate(end);
+            let recovered = visits.last().map(|visit| visit.serial);
+            for stop in &mut self.stops[start..] {
+                stop.after = recovered;
+            }
+        } else if visited {
             let ahead = match self.shown {
                 Some(index) => index + 1,
                 None => self.stops.partition_point(|stop| stop.after < here),
@@ -398,7 +439,7 @@ impl Trail {
                 }
             }
         }
-        if visited || navigated {
+        if navigated {
             self.shown = None;
         }
         for stop in &mut self.stops {
@@ -464,7 +505,15 @@ impl App {
     /// Back or Forward, the one way either runs (`run_command`).
     pub(super) fn history_step(&mut self, back: bool) -> Gateway {
         let op = if back { Op::Back } else { Op::Forward };
-        match self.history_next(back) {
+        let next = self.history_next(back);
+        // A step onto a view is refused under the calendar or the task
+        // form, as opening one is, before anything is flushed or moved.
+        if matches!(next, Step::Show(_) | Step::Session(Some(_))) {
+            if let Some(reason) = self.view_refused() {
+                return self.blocked(reason);
+            }
+        }
+        match next {
             // The Session says why there is nothing further.
             Step::End | Step::Session(None) => self.process_core(op),
             // The op puts the view in the pane itself, once the note under
@@ -485,12 +534,13 @@ impl App {
                 self.finish_action(Disposition::Completed, None, task)
             }
             Step::Reveal => {
-                // The note of the visit the view comes after is the stop
-                // before it. It is the open document, unless it was closed
-                // under the view (the document deleted outside Wren, with
-                // an earlier visit left): then that visit's note is opened
-                // again, which records no new visit and takes the pane.
-                if let Some(note) = self.closed_visit() {
+                // The note the view was shown over is the stop before it,
+                // or the pane with no note when it was opened over none.
+                // A note closed under the view while it showed (deleted,
+                // with an earlier visit left) is gone: the note of the
+                // visit the view now comes after is opened instead, which
+                // records no new visit and takes the pane.
+                if let Some(note) = self.closed_visit().filter(|_| self.task_views.lost()) {
                     return self.process_core(Op::OpenNote { note: Some(note) });
                 }
                 self.task_views.hide();
@@ -498,6 +548,13 @@ impl App {
                 self.finish_action(Disposition::Completed, None, task)
             }
         }
+    }
+
+    /// Why no view can take the pane now: the calendar and the task form
+    /// are over the note's text, and would be left over the view.
+    fn view_refused(&self) -> Option<&'static str> {
+        (self.calendar.is_some() || self.task_form.is_some())
+            .then_some("Close the task form or the calendar first")
     }
 
     /// The note of the visit the Session is on, when it is not the open
@@ -522,9 +579,8 @@ impl App {
         if !scope.exists(session.model()) {
             return self.blocked("The item no longer exists");
         }
-        // Each is over the note's text, and would be left over the view.
-        if self.calendar.is_some() || self.task_form.is_some() {
-            return self.blocked("Close the task form or the calendar first");
+        if let Some(reason) = self.view_refused() {
+            return self.blocked(reason);
         }
         // The view already shown is no transition. Any other is, from a
         // note or from another view.
@@ -1023,12 +1079,55 @@ mod tests {
         assert_eq!(stops(&trail), [(None, "A".to_owned())]);
     }
 
+    #[test]
+    fn a_visit_no_one_asked_for_keeps_the_view_shown_and_the_views_of_its_gap() {
+        // Three views after the note at 1, the second shown, and one after
+        // the note ahead.
+        let history = visits(&[0, 1, 2]);
+        let mut trail = Trail::default();
+        trail.open(group("W"), &history, Some(2));
+        trail.hide();
+        for name in ["A", "B", "C"] {
+            trail.open(group(name), &history, Some(1));
+        }
+        let [a, b, c] = ["A", "B", "C"].map(|name| id(&trail, &group(name)));
+        assert!(trail.show(b));
+
+        // A flush under the view kept the draft in a conflict copy: the
+        // Session dropped the visit ahead and is on the copy's. Nothing was
+        // asked for, so the view stays, with its gap, over the copy.
+        let recovered = visits(&[0, 1, 3]);
+        trail.follow_visits(Some(1), Some(2), &recovered, false);
+        assert_eq!(trail.shown(), Some(&group("B")));
+        assert_eq!(
+            stops(&trail),
+            [
+                (Some(3), "A".to_owned()),
+                (Some(3), "B".to_owned()),
+                (Some(3), "C".to_owned())
+            ]
+        );
+        assert_eq!(trail.step(false, &recovered, Some(2)), Step::Show(c));
+        assert_eq!(trail.step(true, &recovered, Some(2)), Step::Show(a));
+        assert!(trail.show(a));
+        assert_eq!(trail.step(true, &recovered, Some(2)), Step::Reveal);
+
+        // From a note the copy is the pane's, and the views ahead of the
+        // note go as for any visit.
+        let mut trail = Trail::default();
+        trail.open(group("A"), &history, Some(1));
+        trail.hide();
+        trail.follow_visits(Some(1), Some(2), &recovered, false);
+        assert_eq!(trail.shown(), None);
+        assert!(trail.stops.is_empty());
+    }
+
     const LIST: &str = "# List\n\n- [ ] Mail the deck\n";
     const NOTES: &str = "# Notes\n\nplain words\n";
 
     /// A workspace with two sections: `Work/Tasks` holds the notes `List`
-    /// and `Notes` and the board `Flow`, `Work/Other` the note `Third`, and
-    /// `Home/Chores` the note `Fourth`.
+    /// and `Notes` and the board `Flow`, `Work/Other` the note `Third`,
+    /// `Work/Empty` nothing, and `Home/Chores` the note `Fourth`.
     fn workspace(root: &Path) {
         for (path, text) in [
             ("Work/Tasks/List.md", LIST),
@@ -1041,6 +1140,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         }
+        std::fs::create_dir_all(root.join("Work/Empty")).unwrap();
     }
 
     /// An app whose `config.conf` holds `settings`, on the workspace at
@@ -2226,5 +2326,161 @@ mod tests {
         );
         assert!(ask(&mut app, "tasks.view", escape()).is_err());
         assert!(app.dialog.is_some());
+    }
+
+    #[test]
+    fn back_from_a_view_opened_over_no_note_is_the_empty_pane_and_writes_nothing() {
+        let (directory, mut app) = fixture();
+        let root = directory.path().join("workspace");
+        let empty = app
+            .model()
+            .unwrap()
+            .groups
+            .iter()
+            .find(|group| group.name == "Empty")
+            .unwrap()
+            .id;
+        // A group with no note is chosen: the note closes, and history is
+        // still on its visit.
+        assert!(app
+            .dispatch(Command::SelectParent(Parent::Group(empty)))
+            .processed
+            .disposition
+            .committed());
+        assert_eq!(document(&app), None);
+        assert_eq!(app.selected_group, Some(empty));
+        let visits = app.session.as_ref().unwrap().visits().to_vec();
+        assert_eq!(visits.len(), 1);
+        let saved = state_file(&root);
+        assert!(saved.contains("selection = \"Work/Empty\""), "{saved}");
+
+        // A view over the empty pane, and a second: Back from the first is
+        // the empty pane again, the group still chosen and nothing written.
+        assert_eq!(show(&mut app, Scope::Workspace), Disposition::Completed);
+        assert_eq!(show(&mut app, tasks_group()), Disposition::Completed);
+        assert_view(&app, &tasks_group(), None);
+        assert_eq!(state_file(&root), saved);
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_eq!(app.surface(), Surface::Text);
+        assert_eq!(app.task_view(), None);
+        assert_eq!(document(&app), None);
+        assert_eq!(app.selected_group, Some(empty));
+        assert_eq!(app.selected_note, None);
+        assert_eq!(app.session.as_ref().unwrap().visits(), visits);
+        assert_eq!(state_file(&root), saved);
+        // Forward shows the view again, over no note still.
+        assert_eq!(run(&mut app, CommandId::Forward), Disposition::Completed);
+        assert_view(&app, &Scope::Workspace, None);
+        assert_eq!(state_file(&root), saved);
+    }
+
+    #[test]
+    fn a_draft_kept_in_a_conflict_copy_under_a_view_cancels_the_step_and_keeps_the_views() {
+        let (directory, mut app) = fixture();
+        let list = note(&app, "List");
+        let path = directory.path().join("workspace/Work/Tasks/List.md");
+        // Two views after the note, the first shown.
+        assert_eq!(show(&mut app, Scope::Workspace), Disposition::Completed);
+        assert_eq!(show(&mut app, tasks_group()), Disposition::Completed);
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_view(&app, &Scope::Workspace, Some(list));
+
+        // The note is changed from the view and deleted outside Wren before
+        // the draft is saved. Asking for another scope flushes: the draft
+        // goes to a conflict copy, which is the open note now, and the
+        // step is cancelled.
+        let changed = "# List\n\n- [x] Mail the deck\n";
+        app.editor.replace_text(changed, true);
+        app.text_changed(Instant::now());
+        std::fs::remove_file(&path).unwrap();
+        let section = Scope::Section(RelPath::new("Work").unwrap());
+        assert_eq!(show(&mut app, section), Disposition::Blocked);
+        let copy = document(&app).expect("the copy is open");
+        assert_ne!(copy, list);
+        assert_eq!(draft(&app), changed);
+        assert!(app.banner.is_some());
+
+        // The view asked from is still the pane's, over the copy, and the
+        // view ahead of it is still ahead.
+        assert_view(&app, &Scope::Workspace, Some(copy));
+        let session = app.session.as_ref().unwrap();
+        let here = session.visits()[session.visit_position().unwrap()];
+        assert_eq!(here.note, copy);
+        assert_eq!(
+            stops(&app.task_views),
+            [
+                (Some(here.serial), String::new()),
+                (Some(here.serial), "Work/Tasks".to_owned())
+            ]
+        );
+        assert_eq!(run(&mut app, CommandId::Forward), Disposition::Completed);
+        assert_view(&app, &tasks_group(), Some(copy));
+        // Back from the first view is the copy.
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_eq!(app.surface(), Surface::Text);
+        assert_eq!(document(&app), Some(copy));
+        assert_eq!(app.editor.text(), changed);
+    }
+
+    #[test]
+    fn a_step_of_history_onto_a_view_is_refused_under_the_task_form() {
+        let (_directory, mut app) = fixture();
+        let list = note(&app, "List");
+        let form = |app: &mut App| {
+            app.editor.move_cursor(Cursor {
+                position: Position { line: 2, column: 6 },
+                selection: None,
+            });
+            let _ = app.update(Message::Tick);
+            assert!(run(app, CommandId::TaskEdit).committed());
+            assert!(app.task_form.is_some());
+        };
+        assert_eq!(show(&mut app, tasks_group()), Disposition::Completed);
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+
+        // Forward from the note into its view.
+        form(&mut app);
+        let _ = focuses(&app);
+        let _ = app.update(Message::Command(Command::Run(CommandId::Forward)));
+        assert_eq!(
+            app.last_processed.as_ref().unwrap().disposition,
+            Disposition::Blocked
+        );
+        assert_eq!(app.surface(), Surface::Text);
+        assert!(app.task_form.is_some(), "the form is kept");
+        assert_eq!(focuses(&app), []);
+        let _ = app.escape_task_form();
+        assert!(app.task_form.is_none());
+
+        // Back from the note after a view onto the view: the Session does
+        // not move either.
+        assert_eq!(run(&mut app, CommandId::Forward), Disposition::Completed);
+        assert_view(&app, &tasks_group(), Some(list));
+        assert_eq!(open(&mut app, "Notes"), Disposition::Completed);
+        let position = app.session.as_ref().unwrap().visit_position();
+        let _ = app.update(paste("- [ ] typed\n"));
+        app.editor.move_cursor(Cursor {
+            position: Position { line: 0, column: 6 },
+            selection: None,
+        });
+        let _ = app.update(Message::Tick);
+        assert!(run(&mut app, CommandId::TaskEdit).committed());
+        assert!(app.task_form.is_some());
+        let typed = draft(&app);
+        assert!(dirty(&app));
+        let _ = app.update(Message::Command(Command::Run(CommandId::Back)));
+        assert_eq!(
+            app.last_processed.as_ref().unwrap().disposition,
+            Disposition::Blocked
+        );
+        assert_eq!(app.surface(), Surface::Text);
+        assert_eq!(document(&app), Some(note(&app, "Notes")));
+        assert_eq!(app.session.as_ref().unwrap().visit_position(), position);
+        assert!(app.task_form.is_some(), "the form is kept");
+        // Nothing was flushed for a step that did not run.
+        assert_eq!(draft(&app), typed);
+        assert!(dirty(&app));
     }
 }

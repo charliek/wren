@@ -2460,7 +2460,7 @@ mod tests {
         use super::super::commands::Command;
         use super::super::tasks_view::Scope;
 
-        let (_directory, mut app) = boards::fixture();
+        let (directory, mut app) = boards::fixture();
         app.preferences.tasks = true;
         boards::open_board(&mut app, "Flow");
         lay_out(&mut app);
@@ -2524,6 +2524,22 @@ mod tests {
             .processed
             .disposition
             .committed());
+        // The export request writes no file either, in any format.
+        for format in ["svg", "png", "drawio"] {
+            let path = directory.path().join(format!("covered.{format}"));
+            let (request, mut reply) = Request::detached(
+                "board.export",
+                json!({"format": format, "path": path.to_string_lossy()}),
+            );
+            let _ = app.handle_test(request);
+            assert_eq!(
+                reply.try_recv().unwrap().unwrap_err(),
+                "The open note is not shown as a board",
+                "{format}"
+            );
+            assert!(app.board_export.is_none(), "{format}");
+            assert!(!path.exists(), "{format}");
+        }
     }
 
     #[test]
