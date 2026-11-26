@@ -6030,6 +6030,162 @@ mod tests {
         })
     }
 
+    /// A clipboard that keeps what is written to it.
+    #[derive(Default)]
+    struct Kept(Option<String>);
+
+    impl Clipboard for Kept {
+        fn read(&self, kind: clipboard::Kind) -> Option<String> {
+            self.0.clone().filter(|_| kind == clipboard::Kind::Standard)
+        }
+
+        fn write(&mut self, kind: clipboard::Kind, contents: String) {
+            if kind == clipboard::Kind::Standard {
+                self.0 = Some(contents);
+            }
+        }
+    }
+
+    #[test]
+    fn the_host_s_edit_keys_act_through_the_widget_on_both_engines() {
+        use crate::{EditKey, KeyRoute};
+        // A host whose keymap puts the editing keys on Alt, as Wren's
+        // Linux keymap does with `linux-modifier = alt`.
+        let policy: crate::KeyPolicy = Arc::new(|key: &keyboard::Key, _, modifiers| {
+            let alt = keyboard::Modifiers::ALT;
+            let edit = match (key.as_ref(), modifiers) {
+                (keyboard::Key::Character("z"), m) if m == alt => EditKey::Undo,
+                (keyboard::Key::Character("z"), m) if m == alt | keyboard::Modifiers::SHIFT => {
+                    EditKey::Redo
+                }
+                (keyboard::Key::Character("c"), m) if m == alt => EditKey::Copy,
+                (keyboard::Key::Character("x"), m) if m == alt => EditKey::Cut,
+                (keyboard::Key::Character("v"), m) if m == alt => EditKey::Paste,
+                (keyboard::Key::Character("a"), m) if m == alt => EditKey::SelectAll,
+                _ => return KeyRoute::Pass,
+            };
+            KeyRoute::Edit(edit)
+        });
+        for kind in BackendKind::ALL {
+            let mut ev = editing(kind, "cat teh", 0, 2);
+            ev.set_key_policy(Arc::clone(&policy));
+            let mut kept = Kept::default();
+            // Each press to a focused widget over the editor as it stands,
+            // what it published carried out as the host does.
+            let press = |ev: &mut crate::EditorView, kept: &mut Kept, letter: &str, modifiers| {
+                let mut editor = editor_with(&ev.content, true, Measure::default())
+                    .key_policy(ev.key_policy.as_ref());
+                let mut state = laid_out_state(&editor);
+                state.focus = Some(Focus::now());
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                editor.on_event(
+                    &mut state,
+                    &key(keyboard::Key::Character(letter.into()), modifiers, None),
+                    BOUNDS,
+                    mouse::Cursor::Unavailable,
+                    kept,
+                    &mut shell,
+                );
+                let captured = shell.event_status() == iced::event::Status::Captured;
+                for message in messages.clone() {
+                    host_applies(ev, message);
+                }
+                (messages, captured)
+            };
+            let alt = keyboard::Modifiers::ALT;
+            let (messages, captured) = press(&mut ev, &mut kept, "a", alt);
+            assert!(
+                matches!(messages.as_slice(), [Message::Action(Action::SelectAll)]),
+                "{kind:?}: {messages:?}"
+            );
+            assert!(captured, "{kind:?}");
+            assert_eq!(ev.selected_text().as_deref(), Some("cat teh"), "{kind:?}");
+            let (messages, _) = press(&mut ev, &mut kept, "c", alt);
+            assert!(
+                matches!(messages.as_slice(), [Message::Clip(crate::Clip::Selection)]),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(kept.0.as_deref(), Some("cat teh"), "{kind:?}");
+            assert_eq!(ev.text(), "cat teh", "{kind:?}");
+            press(&mut ev, &mut kept, "x", alt);
+            assert_eq!(
+                (ev.text().as_str(), kept.0.as_deref()),
+                ("", Some("cat teh"))
+            );
+            press(&mut ev, &mut kept, "v", alt);
+            press(&mut ev, &mut kept, "v", alt);
+            assert_eq!(ev.text(), "cat tehcat teh", "{kind:?}");
+            let (messages, _) = press(&mut ev, &mut kept, "z", alt);
+            assert!(
+                matches!(messages.as_slice(), [Message::Undo]),
+                "{kind:?}: {messages:?}"
+            );
+            assert_eq!(ev.text(), "cat teh", "{kind:?}");
+            press(&mut ev, &mut kept, "z", alt | keyboard::Modifiers::SHIFT);
+            assert_eq!(ev.text(), "cat tehcat teh", "{kind:?}");
+            // Off macOS, Ctrl+Y and Ctrl+Z are nothing of the editor's own.
+            if !cfg!(target_os = "macos") {
+                for letter in ["y", "z"] {
+                    let (messages, _) =
+                        press(&mut ev, &mut kept, letter, keyboard::Modifiers::CTRL);
+                    assert!(messages.is_empty(), "{kind:?} {letter}: {messages:?}");
+                }
+                assert_eq!(ev.text(), "cat tehcat teh", "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_clipboard_key_the_host_takes_does_nothing_in_the_text() {
+        use crate::KeyRoute;
+        // A host whose user unbound Cmd/Ctrl+V: the key is the host's, so
+        // iced's own Paste never runs for it.
+        let host: crate::KeyPolicy = Arc::new(|key: &keyboard::Key, _, modifiers| {
+            if modifiers == keyboard::Modifiers::COMMAND
+                && *key == keyboard::Key::Character("v".into())
+            {
+                KeyRoute::Host
+            } else {
+                KeyRoute::Pass
+            }
+        });
+        for kind in BackendKind::ALL {
+            for (policy, pastes) in [(Some(&host), false), (None, true)] {
+                let mut ev = editing(kind, "cat", 0, 3);
+                let mut editor =
+                    editor_with(&ev.content, true, Measure::default()).key_policy(policy);
+                let mut state = laid_out_state(&editor);
+                state.focus = Some(Focus::now());
+                let mut kept = Kept(Some("clip".into()));
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                editor.on_event(
+                    &mut state,
+                    &key(
+                        keyboard::Key::Character("v".into()),
+                        keyboard::Modifiers::COMMAND,
+                        None,
+                    ),
+                    BOUNDS,
+                    mouse::Cursor::Unavailable,
+                    &mut kept,
+                    &mut shell,
+                );
+                assert_eq!(
+                    matches!(messages.as_slice(), [Message::Clip(crate::Clip::Paste(_))]),
+                    pastes,
+                    "{kind:?}: {messages:?}"
+                );
+                for message in messages {
+                    host_applies(&mut ev, message);
+                }
+                let text = if pastes { "catclip" } else { "cat" };
+                assert_eq!(ev.text(), text, "{kind:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_menu_takes_up_down_enter_and_its_accelerators() {
         use keyboard::key::Named;
@@ -6398,7 +6554,6 @@ mod tests {
                     spell_events(&messages).is_empty(),
                     "{kind:?} {mode:?}: {messages:?}"
                 );
-                drop(editor);
                 let mut editor =
                     editor_with(&ev.content, true, Measure::default()).popover(ev.popover());
                 let (messages, _) = send(&mut editor, &mut state, typed("x"), None);
@@ -6409,7 +6564,6 @@ mod tests {
                     ),
                     "{kind:?} {mode:?}: {messages:?}"
                 );
-                drop(editor);
 
                 // A preedit that starts closes it.
                 hang(&mut ev, mode, 0, 2..5, plain_rows(&["a"]));

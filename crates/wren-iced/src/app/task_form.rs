@@ -1097,6 +1097,7 @@ impl App {
                 .width(Fill)
                 .style(move |_, status| chrome::input(definition, status, true))
         };
+        let keys = &self.preferences.field_keys;
         let header = row![
             text(open.title())
                 .size(15)
@@ -1110,10 +1111,11 @@ impl App {
         .clip(true);
         let description = row![
             label("Description", FIELD),
-            container(
+            container(crate::field_keys::field_keys(
                 input("What needs doing", form.description(), DESCRIPTION)
-                    .on_input(move |text| send(Event::Description(text)))
-            )
+                    .on_input(move |text| send(Event::Description(text))),
+                keys,
+            ))
             .height(FIELD)
         ]
         .spacing(LABEL_GAP)
@@ -1177,10 +1179,11 @@ impl App {
             label("Due", FIELD),
             column![
                 row![
-                    container(
+                    container(crate::field_keys::field_keys(
                         input("fri, +3d, 2026-12-01", form.due(), DUE)
-                            .on_input(move |text| send(Event::Due(text)))
-                    )
+                            .on_input(move |text| send(Event::Due(text))),
+                        keys,
+                    ))
                     .height(FIELD)
                     .width(Fill),
                     calendar_button
@@ -1350,6 +1353,7 @@ impl App {
                 Message::TaskForm(Event::Owner(text))
             })
             .style(move |_, status| chrome::input(definition, status, false));
+        let field = crate::field_keys::field_keys(field, &self.preferences.field_keys);
         let focused = open.focus == Slot::Owners && open.calendar.is_none();
         let boxed = container(chips.push(field))
             .padding([2, 5])

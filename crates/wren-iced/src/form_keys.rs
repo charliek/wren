@@ -1807,4 +1807,89 @@ mod tests {
         let messages = owners_batch_at(0, true, owners, None, &[named(Named::Enter)]);
         assert_eq!(messages, [key(FormKey::Accept), typed_text("owners", "")]);
     }
+
+    /// The form's text fields wrapped as the task form wraps them
+    /// ([`crate::field_keys`]): in Linux's Alt mode, Alt+A, Alt+C and
+    /// Alt+V select, copy and paste in the field with the keyboard, under
+    /// the form's keys, and in Ctrl mode Alt does none of it.
+    // Real iced input on Linux, where its clipboard keys are Ctrl's.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_form_s_fields_take_the_keymap_s_editing_keys() {
+        use crate::field_keys::tests::{chord, linux, Kept};
+        use crate::field_keys::{field_keys, FieldKeys};
+        use wren_core::keybind::LinuxModifier;
+
+        let run = |keys: &FieldKeys, events: &[Event]| {
+            let element = |value: &str| -> Element<'static, Out, Theme, ()> {
+                let content = column![
+                    field_keys(
+                        text_input("", value)
+                            .id(IDS[0])
+                            .width(200)
+                            .on_input(|text: String| Out::Typed(IDS[0], text)),
+                        keys,
+                    ),
+                    field_keys(text_input("", "").id(IDS[1]).width(200), keys),
+                    field_keys(text_input("", "").id(IDS[2]).width(200), keys),
+                    button("Save").on_press(Out::Pressed)
+                ];
+                form_keys(
+                    content,
+                    slots(),
+                    0,
+                    Rc::new(RefCell::new(String::new())),
+                    Out::Key,
+                )
+                .into()
+            };
+            let mut value = String::from("abc");
+            let mut first = element(&value);
+            let mut tree = Tree::new(&first);
+            let node = first.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+            );
+            first.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &(),
+                &mut operation::focusable::focus(Id::new(IDS[0])),
+            );
+            let mut kept = Kept::default();
+            let mut published = Vec::new();
+            for event in events {
+                let mut element = element(&value);
+                element.as_widget_mut().diff(&mut tree);
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &crate::keys::tests::without_alt_text(event),
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &(),
+                    &mut kept,
+                    &mut shell,
+                    &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+                );
+                for message in &messages {
+                    if let Out::Typed(_, text) = message {
+                        value.clone_from(text);
+                    }
+                }
+                published.extend(messages);
+            }
+            (published, kept.0)
+        };
+        let end = press(Key::Named(Named::End), Modifiers::empty(), None);
+        let alt = Modifiers::ALT;
+        let events = [chord("a", alt), chord("c", alt), end, chord("v", alt)];
+        let (published, kept) = run(&linux(LinuxModifier::Alt), &events);
+        assert_eq!(published, [Out::Typed(IDS[0], "abcabc".into())]);
+        assert_eq!(kept.as_deref(), Some("abc"));
+        let (published, kept) = run(&linux(LinuxModifier::Ctrl), &events);
+        assert_eq!((published, kept), (Vec::new(), None));
+    }
 }

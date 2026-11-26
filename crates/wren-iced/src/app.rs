@@ -615,7 +615,23 @@ impl App {
                     Some(wren_editor::KeyRoute::Command(payload)) => {
                         Some(wren_editor::Message::Command(payload))
                     }
-                    Some(wren_editor::KeyRoute::Host | wren_editor::KeyRoute::Pass) | None => None,
+                    Some(wren_editor::KeyRoute::Edit(wren_editor::EditKey::Undo)) => {
+                        Some(wren_editor::Message::Undo)
+                    }
+                    Some(wren_editor::KeyRoute::Edit(wren_editor::EditKey::Redo)) => {
+                        Some(wren_editor::Message::Redo)
+                    }
+                    Some(wren_editor::KeyRoute::Edit(wren_editor::EditKey::SelectAll)) => Some(
+                        wren_editor::Message::Action(iced::widget::text_editor::Action::SelectAll),
+                    ),
+                    // The clipboard keys need the widget's clipboard, which
+                    // the request refuses them for.
+                    Some(
+                        wren_editor::KeyRoute::Edit(_)
+                        | wren_editor::KeyRoute::Host
+                        | wren_editor::KeyRoute::Pass,
+                    )
+                    | None => None,
                 };
                 let task = message
                     .map_or_else(Task::none, |message| self.update(Message::Editor(message)));
@@ -1163,10 +1179,13 @@ impl App {
             body = body.push(
                 container(
                     row![
-                        text_input("Find literal text", &self.find_query)
-                            .id("find-query")
-                            .on_input(Message::FindChanged)
-                            .on_submit(Message::FindNext),
+                        crate::field_keys::field_keys(
+                            text_input("Find literal text", &self.find_query)
+                                .id("find-query")
+                                .on_input(Message::FindChanged)
+                                .on_submit(Message::FindNext),
+                            &self.preferences.field_keys,
+                        ),
                         text(format!(
                             "{} / {}",
                             self.editor.find_current().map_or(0, |n| n + 1),

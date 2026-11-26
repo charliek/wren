@@ -73,6 +73,7 @@ pub enum CommandId {
     EditCut,
     EditPaste,
     EditSelectAll,
+    ToggleLinuxModifier,
     ToggleMarkdownAssist,
     SwitchEngine,
     ToggleSpellCheck,
@@ -524,11 +525,21 @@ definitions![
         "App",
         App
     ),
+    // Linux's command key (discovery/keybindings.md §2 item 2): listed on
+    // Linux only, titled for the key it moves to (`App::command_title`).
+    (
+        ToggleLinuxModifier,
+        "keys.toggle_linux_modifier",
+        "Use Alt for commands",
+        "App",
+        App
+    ),
     (Quit, "app.quit", "Quit Wren", "App", App),
     // The text editing keys, bindable so that they follow the command key
-    // (discovery/keybindings.md §2 item 5). Until the editor carries them
-    // out as intents, their key passes to the editor, which handles it as
-    // its own; they are not listed and do not run as commands.
+    // (discovery/keybindings.md §2 item 5). The editor carries them out
+    // from its key policy, as its own keys; they are not listed and do not
+    // run as commands, since the palette and the menus have the keyboard
+    // when they run one.
     (EditUndo, "edit.undo", "Undo text edit", "Hidden", Editor),
     (EditRedo, "edit.redo", "Redo text edit", "Hidden", Editor),
     (EditCopy, "edit.copy", "Copy text", "Hidden", Editor),
@@ -964,16 +975,13 @@ impl CommandId {
             Self::TaskSetDue => Some(wren_editor::KeyRoute::Popover(self.payload())),
             // So does the task form's, on either engine.
             Self::TaskEdit => Some(wren_editor::KeyRoute::Popover(self.payload())),
-            Self::EditUndo
-            | Self::EditRedo
-            | Self::EditCopy
-            | Self::EditCut
-            | Self::EditPaste
-            | Self::EditSelectAll => Some(wren_editor::KeyRoute::Pass),
             _ if self.task_change().is_some() => {
                 Some(wren_editor::KeyRoute::Command(self.payload()))
             }
-            _ => self.intent().map(wren_editor::KeyRoute::Intent),
+            _ => self
+                .edit_key()
+                .map(wren_editor::KeyRoute::Edit)
+                .or_else(|| self.intent().map(wren_editor::KeyRoute::Intent)),
         }
     }
 
@@ -1011,6 +1019,21 @@ impl CommandId {
             Self::TaskRaisePriority => Change::RaisePriority,
             Self::TaskLowerPriority => Change::LowerPriority,
             Self::TaskClearDue => Change::SetDue(None),
+            _ => return None,
+        })
+    }
+
+    /// The text editing key of an `edit.*` command, which the editor and
+    /// the text fields carry out as their own.
+    pub fn edit_key(self) -> Option<wren_editor::EditKey> {
+        use wren_editor::EditKey;
+        Some(match self {
+            Self::EditUndo => EditKey::Undo,
+            Self::EditRedo => EditKey::Redo,
+            Self::EditCopy => EditKey::Copy,
+            Self::EditCut => EditKey::Cut,
+            Self::EditPaste => EditKey::Paste,
+            Self::EditSelectAll => EditKey::SelectAll,
             _ => return None,
         })
     }
@@ -1059,18 +1082,11 @@ impl CommandId {
             || matches!(self, Self::TaskSetDue | Self::TaskEdit)
     }
 
-    /// Whether the command is bindable on Linux only: the `edit.*` keys,
-    /// which on macOS belong to the editor and the Edit menu.
+    /// Whether the command exists on Linux only: the `edit.*` keys, which
+    /// on macOS belong to the editor and the Edit menu, and the switch of
+    /// Linux's command key. On macOS it is neither bindable nor listed.
     pub fn linux_only(self) -> bool {
-        matches!(
-            self,
-            Self::EditUndo
-                | Self::EditRedo
-                | Self::EditCopy
-                | Self::EditCut
-                | Self::EditPaste
-                | Self::EditSelectAll
-        )
+        self.edit_key().is_some() || self == Self::ToggleLinuxModifier
     }
 
     /// The task menu a command opens at the caret's task.
@@ -1215,6 +1231,20 @@ impl App {
         }
     }
 
+    /// A command's title in the palette: its label, but for the switch of
+    /// Linux's command key, which names the key it switches to.
+    pub(super) fn command_title(&self, definition: &Definition) -> &'static str {
+        use wren_core::keybind::LinuxModifier;
+        match definition.id {
+            CommandId::ToggleLinuxModifier
+                if self.preferences.keymap.scheme().linux == LinuxModifier::Alt =>
+            {
+                "Use Ctrl for commands"
+            }
+            _ => definition.label,
+        }
+    }
+
     pub(super) fn command_enabled(&self, id: CommandId) -> bool {
         use CommandId::*;
         if self.loading.is_some() || (id.tasks() && !self.preferences.tasks) {
@@ -1225,6 +1255,9 @@ impl App {
             SwitchWorkspace | ChooseTheme | ChooseFont | TextBigger | TextSmaller | TextReset
             | OpenSettings | ReloadSettings | CommandPalette | Quit | ToggleMarkdownAssist
             | SwitchEngine | ToggleSpellCheck | OpenWords => true,
+            ToggleLinuxModifier => {
+                wren_core::keybind::Platform::current() == wren_core::keybind::Platform::Linux
+            }
             RemoveWorkspace => self
                 .config
                 .as_ref()
@@ -1552,6 +1585,7 @@ impl App {
             TextReset => self.step_text_size(None),
             ToggleMarkdownAssist => self.toggle_markdown_assist(),
             SwitchEngine => self.toggle_editor_engine(),
+            ToggleLinuxModifier => self.toggle_linux_modifier(),
             ToggleSpellCheck => self.toggle_spell_check(),
             OpenWords => self.open_words(),
             SpellSuggest => {

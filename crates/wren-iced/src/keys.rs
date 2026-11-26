@@ -382,8 +382,14 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// `event` as the root's filter hands it to the widgets.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn without_alt_text(event: &Event) -> Event {
+        strip_alt_text(event).unwrap_or_else(|| event.clone())
+    }
     use iced::keyboard::key::{Code, Physical};
     use iced::keyboard::Location;
     use wren_core::keybind::parse_trigger;

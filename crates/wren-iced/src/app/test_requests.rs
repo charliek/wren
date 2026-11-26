@@ -98,6 +98,11 @@ impl App {
                             | wren_editor::KeyRoute::Suggest
                             | wren_editor::KeyRoute::Popover(_)
                             | wren_editor::KeyRoute::Command(_)
+                            | wren_editor::KeyRoute::Edit(
+                                wren_editor::EditKey::Undo
+                                    | wren_editor::EditKey::Redo
+                                    | wren_editor::EditKey::SelectAll
+                            )
                     ) {
                         return Err("The editor does not route this command's key".into());
                     }

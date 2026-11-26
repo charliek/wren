@@ -758,7 +758,8 @@ impl App {
                     .style(move |_, status| chrome::input(definition, status, true))
             },
             move |event| send(Event::Field(event)),
-        );
+        )
+        .field_keys(&self.preferences.field_keys);
         let caption = model.caption();
         let caption = container(chrome::label(
             caption.to_string(),
