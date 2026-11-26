@@ -461,8 +461,11 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         return None;
     }
 
+    // AltGr's text types whatever the host binds the chord it arrives as.
+    let altgr = is_alt_graph(key, physical, m, key_press.text.as_deref());
     match context
         .policy
+        .filter(|_| !altgr)
         .map_or(KeyRoute::Pass, |policy| policy(key, physical, m))
     {
         KeyRoute::Host => return None,
@@ -512,6 +515,30 @@ pub(crate) fn key_binding(key_press: KeyPress, context: Context) -> Option<Bindi
         .or_else(|| Binding::from_key_press(key_press))
         .filter(|binding| types_with(binding, m, macos))
         .map(|binding| editing(binding, m, context.markdown_assist))
+}
+
+/// Whether a press is AltGr typing `text`. Off macOS AltGr can arrive as
+/// Ctrl+Alt with the text it types; a real Ctrl+Alt chord types nothing,
+/// a control character or its own letter. Such a press is text, never a
+/// shortcut: the host's keys and the editor's both leave it alone.
+pub fn is_alt_graph(
+    key: &Key,
+    physical: key::Physical,
+    modifiers: Modifiers,
+    text: Option<&str>,
+) -> bool {
+    if cfg!(target_os = "macos") || !(modifiers.control() && modifiers.alt()) || modifiers.logo() {
+        return false;
+    }
+    let Some(text) = text else {
+        return false;
+    };
+    let mut typed = text.chars().filter(|c| !c.is_control());
+    match (typed.next(), typed.next(), key.to_latin(physical)) {
+        (None, _, _) => false,
+        (Some(one), None, Some(own)) => !one.to_lowercase().eq(own.to_lowercase()),
+        _ => true,
+    }
 }
 
 /// On macOS (`macos`), ⌘Z, ⌘⇧Z and ⌘F, which the editor keeps there because
@@ -640,6 +667,40 @@ mod tests {
             Binding::Custom(Message::Intent(intent)) => Some(intent),
             _ => None,
         }
+    }
+
+    /// AltGr's text arrives as Ctrl+Alt off macOS: it types even where the
+    /// host binds the chord, and a real Ctrl+Alt chord stays the host's.
+    #[test]
+    fn altgr_text_types_whatever_the_host_binds_its_chord_to() {
+        let host: KeyPolicy = Arc::new(|_, _, _| KeyRoute::Host);
+        let context = Context {
+            policy: Some(&host),
+            ..ASSIST
+        };
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        let e = |text| press(Key::Character("e".into()), ctrl_alt, text, context);
+        let unidentified = key::Physical::Unidentified(key::NativeCode::Unidentified);
+        let character = Key::Character("e".into());
+        if cfg!(target_os = "macos") {
+            assert!(e(Some("€")).is_none());
+            assert!(!is_alt_graph(&character, unidentified, ctrl_alt, Some("€")));
+        } else {
+            assert!(matches!(e(Some("€")), Some(Binding::Insert('€'))));
+            assert!(is_alt_graph(&character, unidentified, ctrl_alt, Some("€")));
+        }
+        for text in [None, Some("\u{5}"), Some("E")] {
+            assert!(e(text).is_none(), "{text:?}");
+            assert!(!is_alt_graph(&character, unidentified, ctrl_alt, text));
+        }
+        let logo = ctrl_alt | Modifiers::LOGO;
+        assert!(!is_alt_graph(&character, unidentified, logo, Some("€")));
+        assert!(!is_alt_graph(
+            &character,
+            unidentified,
+            Modifiers::ALT,
+            Some("€")
+        ));
     }
 
     #[test]

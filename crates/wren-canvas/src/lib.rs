@@ -1253,10 +1253,10 @@ impl BoardView {
 
     /// The host's say over each key the focused board is given (§5.1);
     /// without one, a key with Ctrl, Alt or the logo key is the host's and
-    /// every other key the board's. In an open label, the chords it gives
-    /// [`Command::SelectAll`], the clipboard's commands, [`Command::Undo`]
-    /// and [`Command::Redo`] act on the text; without one, ⌘ or Ctrl with
-    /// A, C, X, V, Z and Shift+Z do.
+    /// every other key the board's. In an open label off macOS, the chords
+    /// it gives [`Command::SelectAll`], the clipboard's commands,
+    /// [`Command::Undo`] and [`Command::Redo`] act on the text; on macOS,
+    /// and without a policy, ⌘ or Ctrl with A, C, X, V, Z and Shift+Z do.
     pub fn set_key_policy(&mut self, policy: KeyPolicy) {
         self.key_policy = Some(policy);
     }
@@ -1313,6 +1313,7 @@ impl BoardView {
             escapes: self.machine.escapes(),
             held_from_before,
             policy: self.key_policy.as_ref(),
+            fixed_chords: keys::FIXED_CHORDS,
         };
         let keys::Keyed::Take(outs) = keys::route(key, physical, modifiers, text, repeat, context)
         else {

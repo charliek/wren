@@ -575,7 +575,8 @@ fn reselect(app: &mut App) {
 /// app in each scheme: on a board Mod+arrow connects and the other key
 /// with an arrow moves, Mod+D duplicates, Mod+A selects all, Mod+C, X and
 /// V are the clipboard's, and Mod+Z and Mod+Shift+Z undo and redo, on the
-/// board and in an open label. In Alt mode the Ctrl versions of the
+/// board and in an open label (on macOS, only the Mac scheme's label
+/// keys, which are its fixed chords). In Alt mode the Ctrl versions of the
 /// clipboard, select all and undo keys work too. Ctrl+Y redoes nothing.
 #[test]
 fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
@@ -677,7 +678,11 @@ fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
             assert_eq!(nodes(&app), 2, "{scheme:?}");
         }
 
-        // In a label.
+        // In a label. On macOS a label keeps its fixed ⌘ chords, so a
+        // Linux scheme's keys are not its own there.
+        if cfg!(target_os = "macos") && scheme.platform == Platform::Linux {
+            continue;
+        }
         for &each in board_keys {
             click_at(&mut app, EMPTY);
             relabel(&mut app, "pack", "Ship");
@@ -744,6 +749,107 @@ fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
             );
             chord(&mut app, "z", modifier);
         }
+    }
+}
+
+/// A keymap of `scheme`'s defaults with the user's `keybind` lines, given
+/// to the app and its open board.
+fn bind(app: &mut App, scheme: wren_core::keybind::Scheme, user: &[(&str, &str)]) {
+    let user: Vec<(String, String)> = user
+        .iter()
+        .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
+        .collect();
+    let (keymap, warnings) = super::preferences::build_keymap(scheme, &user, false);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.preferences.keymap = keymap;
+    app.apply_preferences();
+}
+
+/// Branch review, severity 3: with `ctrl+alt+e = view.focus`, AltGr+E,
+/// which arrives as Ctrl+Alt+E typing `€` on some Linux layouts, types in
+/// an open label in either mode, and the app's copy of the press does
+/// not toggle Focus mode; a real Ctrl+Alt+E still does.
+#[test]
+fn altgr_text_types_in_a_label_whatever_app_command_its_chord_is() {
+    use iced::keyboard::key::{Code, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    use wren_core::keybind::{LinuxModifier, Platform, Scheme};
+    let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+    let event = |text: Option<&str>| iced::keyboard::Event::KeyPressed {
+        key: Key::Character("e".into()),
+        modified_key: Key::Character(text.unwrap_or("e").into()),
+        physical_key: Physical::Code(Code::KeyE),
+        location: iced::keyboard::Location::Standard,
+        modifiers: ctrl_alt,
+        text: text.map(Into::into),
+        repeat: false,
+    };
+    for linux in [LinuxModifier::Ctrl, LinuxModifier::Alt] {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        bind(
+            &mut app,
+            Scheme::new(Platform::Linux, linux),
+            &[("ctrl+alt+e", "view.focus")],
+        );
+        lay_out(&mut app);
+        relabel(&mut app, "pack", "Ship");
+        let epoch = view(&app).epoch();
+        let press = wren_canvas::KeyPress {
+            key: Key::Character("e".into()),
+            physical: Physical::Code(Code::KeyE),
+            modifiers: ctrl_alt,
+            text: Some("€".into()),
+            repeat: false,
+            held: true,
+        };
+        let _ = app.update(Message::Board(Sent::Key(epoch, press)));
+        // What the app's keyboard subscription makes of the same press.
+        if let Some(input) = crate::keys::input(&event(Some("€"))) {
+            let _ = app.update(Message::Key(input));
+        }
+        let text = view(&app).label().map(|label| label.text().to_owned());
+        if cfg!(target_os = "macos") {
+            continue;
+        }
+        assert_eq!(text.as_deref(), Some("Ship€"), "{linux:?}");
+        assert!(!app.focus, "{linux:?}");
+        // A Ctrl+Alt+E that types nothing is the app's chord.
+        let input = crate::keys::input(&event(None)).expect("the chord");
+        let _ = app.update(Message::Key(input));
+        assert!(app.focus, "{linux:?}");
+    }
+}
+
+/// Branch review, severity 4: on macOS a label keeps its fixed ⌘ chords
+/// whatever the board layer binds, as before the command-key work: with
+/// `super+z = board.unbind`, or ⌘Z rebound to another board command, ⌘Z
+/// still undoes the label's typing.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_macos_a_label_keeps_command_z_whatever_the_board_layer_binds() {
+    use iced::keyboard::Modifiers;
+    use wren_core::keybind::{LinuxModifier, Platform, Scheme};
+    let mac = Scheme::new(Platform::Mac, LinuxModifier::default());
+    for user in [
+        &[("super+z", "board.unbind")][..],
+        &[("super+z", "board.copy")][..],
+        &[("super+z", "board.unbind"), ("super+u", "board.undo")][..],
+    ] {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        bind(&mut app, mac, user);
+        lay_out(&mut app);
+        click_at(&mut app, EMPTY);
+        relabel(&mut app, "pack", "Ship");
+        let text = |app: &App| view(app).label().map(|label| label.text().to_owned());
+        chord(&mut app, "z", Modifiers::LOGO);
+        assert_eq!(text(&app).as_deref(), Some("Pack"), "{user:?}: ⌘Z");
+        chord(&mut app, "z", Modifiers::LOGO | Modifiers::SHIFT);
+        assert_eq!(text(&app).as_deref(), Some("Ship"), "{user:?}: ⇧⌘Z");
+        chord(&mut app, "a", Modifiers::LOGO);
+        label(&mut app, LabelAction::Insert("Go".into()));
+        assert_eq!(text(&app).as_deref(), Some("Go"), "{user:?}: ⌘A");
     }
 }
 

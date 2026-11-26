@@ -45,7 +45,7 @@ pub use highlighter::HighlightedLine;
 #[cfg(feature = "test-support")]
 pub use highlighter::{highlight_lines, Highlight, Highlights, LineDecor, Scale};
 pub use hit::Hit;
-pub use keys::{EditKey, KeyPolicy, KeyRoute};
+pub use keys::{is_alt_graph, EditKey, KeyPolicy, KeyRoute};
 pub use popover::{
     is_plain_escape, Accelerator, Anchor, Choice, Clicked, MenuProvider, MenuSource, Mode, Popover,
     PopoverEvent, Provider, Requested, Row, RowKind, Seen, Stroke, SuggestSource, Suggestion,
