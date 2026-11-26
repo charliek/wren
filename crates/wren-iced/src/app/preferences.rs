@@ -662,7 +662,7 @@ impl App {
     /// Whether the editor's Markdown keys act: as the setting says, and
     /// never in a board's raw text, which is not Markdown.
     fn markdown_assist(&self) -> bool {
-        self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
+        self.preferences.settings.markdown_assist && self.document_surface() != Surface::Raw
     }
 
     /// Bring the editor's Markdown keys, its task menus and its
@@ -692,7 +692,7 @@ impl App {
         if kind == self.editor.backend() {
             return;
         }
-        let text = if self.surface() == Surface::Board {
+        let text = if self.document_surface() == Surface::Board {
             String::new()
         } else {
             self.session
@@ -1171,7 +1171,15 @@ impl App {
                         _ => Task::none(),
                     };
                 }
-                if self.dialog.is_some() || !self.column.is_browser() {
+                if self.dialog.is_some() {
+                    return Task::none();
+                }
+                // The task view in the pane has the keyboard: the key is
+                // its own, never the note's under it.
+                if self.task_view_has_keys() {
+                    return self.task_view_key(nav);
+                }
+                if !self.column.is_browser() {
                     return Task::none();
                 }
                 return match nav {

@@ -120,7 +120,22 @@ impl App {
     /// when it is the active column, so arrows reach the browser otherwise.
     pub(super) fn column_focus(&self) -> Task<Message> {
         if self.column.is_browser() {
+            #[cfg(test)]
+            self.focus_given.borrow_mut().push(None);
             iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
+        } else {
+            self.pane_focus()
+        }
+    }
+
+    /// Give the keyboard to what the editor pane shows: the editor or the
+    /// board, or the task view in their place, never the note hidden
+    /// under one.
+    pub(super) fn pane_focus(&self) -> Task<Message> {
+        #[cfg(test)]
+        self.focus_given.borrow_mut().push(Some(self.surface()));
+        if self.surface() == super::board::Surface::Tasks {
+            self.task_view_focus()
         } else {
             iced::widget::operation::focus("note-editor")
         }

@@ -273,6 +273,16 @@ enum Navigation {
     History(usize),
 }
 
+/// One stop in Back and Forward history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Visit {
+    /// Names the stop for as long as the Session lives: a later stop has a
+    /// larger one and none is used twice, so a frontend can hang stops of
+    /// its own (views that are not notes) off a note's. Never stored.
+    pub serial: u64,
+    pub note: NoteId,
+}
+
 pub struct Session {
     store: FsStore,
     model: Workspace,
@@ -289,8 +299,10 @@ pub struct Session {
     started: Instant,
     last_poll: Duration,
     last_durability_retry: Duration,
-    history: Vec<NoteId>,
+    history: Vec<Visit>,
     history_index: Option<usize>,
+    /// The serial the next [`Visit`] takes.
+    history_serial: u64,
     recent: Vec<NoteId>,
     last_save_micros: u128,
     options: SessionOptions,
@@ -405,7 +417,10 @@ impl Session {
         let mut through_position = 0usize;
         for (position, path) in state.history().iter().enumerate() {
             if let Some(note) = notes_by_path.get(path) {
-                history.push(*note);
+                history.push(Visit {
+                    serial: history.len() as u64,
+                    note: *note,
+                });
                 if saved_position.is_some_and(|saved| position <= saved) {
                     through_position += 1;
                 }
@@ -419,7 +434,7 @@ impl Session {
         let recent_paths = state.recent();
         let restoring_recent = !recent_paths.is_empty();
         let recent: Vec<_> = if !restoring_recent {
-            history.clone()
+            history.iter().map(|visit| visit.note).collect()
         } else {
             recent_paths
                 .iter()
@@ -440,6 +455,7 @@ impl Session {
             started: Instant::now(),
             last_poll: Duration::ZERO,
             last_durability_retry: Duration::ZERO,
+            history_serial: history.len() as u64,
             history,
             history_index,
             recent: Vec::new(),
@@ -519,12 +535,13 @@ impl Session {
             if session
                 .history_index
                 .and_then(|position| session.history.get(position))
-                != Some(&note)
+                .map(|visit| visit.note)
+                != Some(note)
             {
                 session.history_index = session
                     .history
                     .iter()
-                    .rposition(|candidate| *candidate == note);
+                    .rposition(|candidate| candidate.note == note);
                 if session.history_index.is_none() {
                     session.record_history(note);
                 }
@@ -591,6 +608,14 @@ impl Session {
     pub fn limit_search_content(&mut self, bytes: usize) {
         let open = self.document.as_ref().map(|document| document.note);
         self.index.shrink_budget(bytes, open);
+    }
+    /// Back and Forward history, oldest first.
+    pub fn visits(&self) -> &[Visit] {
+        &self.history
+    }
+    /// Where in [`Self::visits`] the open note is.
+    pub fn visit_position(&self) -> Option<usize> {
+        self.history_index
     }
     pub fn can_back(&self) -> bool {
         self.history_index.is_some_and(|index| index > 0)
@@ -973,7 +998,7 @@ impl Session {
                     (current + 1 < self.history.len()).then_some(current + 1)
                 }
                 .ok_or("No further navigation history")?;
-                let note = self.history[index];
+                let note = self.history[index].note;
                 self.select(Some(note), now, Navigation::History(index), events)
             }
         }
@@ -1935,7 +1960,7 @@ impl Session {
         let history = self
             .history
             .iter()
-            .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
+            .filter_map(|visit| paths.get(&visit.note).map(|path| (*path).clone()))
             .collect::<Vec<_>>();
         let recent = self
             .recent
@@ -1993,7 +2018,7 @@ impl Session {
         if self
             .history_index
             .and_then(|index| self.history.get(index))
-            .copied()
+            .map(|visit| visit.note)
             == Some(note)
         {
             return;
@@ -2001,7 +2026,11 @@ impl Session {
         if let Some(index) = self.history_index {
             self.history.truncate(index + 1);
         }
-        self.history.push(note);
+        self.history.push(Visit {
+            serial: self.history_serial,
+            note,
+        });
+        self.history_serial += 1;
         if self.history.len() > MAX_NAVIGATION_ENTRIES {
             self.history.remove(0);
         }
@@ -2022,8 +2051,8 @@ impl Session {
         let ids: HashSet<_> = self.model.notes.iter().map(|note| note.id).collect();
         let mut through_position = 0usize;
         let mut position = 0usize;
-        self.history.retain(|id| {
-            let keep = ids.contains(id);
+        self.history.retain(|visit| {
+            let keep = ids.contains(&visit.note);
             if keep
                 && self
                     .history_index

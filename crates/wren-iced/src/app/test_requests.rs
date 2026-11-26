@@ -81,6 +81,16 @@ impl App {
                 if id.tasks() && !self.preferences.tasks {
                     return Err("The command is unavailable".into());
                 }
+                // Under a task view no widget is mounted under the editor's
+                // focus id, so nothing would answer whether it is focused:
+                // neither the editor nor a board has the keyboard, and
+                // neither's key runs.
+                if matches!(id.scope(), Scope::Editor | Scope::Board)
+                    && self.surface() == super::board::Surface::Tasks
+                {
+                    request.respond(Ok(self.navigation_snapshot()));
+                    return Ok(Task::none());
+                }
                 if id.scope() == Scope::Editor {
                     // The editor's key policy routes the bound key, and only
                     // a focused editor sees it.
@@ -414,7 +424,7 @@ impl App {
             }
             "tasks.get" | "tasks.set_today" | "tasks.calendar" | "tasks.calendar_type"
             | "tasks.calendar_click" | "tasks.owners" | "tasks.form" | "tasks.form_type"
-            | "tasks.form_click" => return self.tasks_request(request),
+            | "tasks.form_click" | "tasks.view" => return self.tasks_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.
@@ -438,6 +448,10 @@ impl App {
                 }));
             }
             "editor.focus" => {
+                // Under a task view no widget is under the editor's id.
+                if self.surface() == super::board::Surface::Tasks {
+                    return Err("The task view is showing; the text editor is not".into());
+                }
                 request.respond(Ok(Value::Null));
                 return Ok(focus_editor());
             }
@@ -689,6 +703,13 @@ impl App {
         })
     }
 
+    /// Whether the editor is what the pane draws: under a board or a task
+    /// view its last frame is an earlier note's.
+    fn editor_drawn(&self) -> bool {
+        use super::board::Surface;
+        matches!(self.surface(), Surface::Text | Surface::Raw)
+    }
+
     pub(super) fn navigation_snapshot(&self) -> Value {
         let visible_sections = self
             .model()
@@ -754,7 +775,7 @@ impl App {
             "filters":{"sections":self.filters.sections,"groups":self.filters.groups,"notes":self.filters.notes},
             "preferred_widths":preferred,"effective_widths":effective,"viewport":{"width":self.viewport.width,"height":self.viewport.height},
             "visible":{"sections":visible_sections,"groups":visible_groups,"parents":visible_parents,"notes":self.note_hits().iter().map(|hit| hit.note.0).collect::<Vec<_>>()},
-            "history":self.session.as_ref().map(|session| session.state().history().iter().map(|path| path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"history_position":self.session.as_ref().and_then(|session|session.state().history_position()),"mru":self.session.as_ref().map(|session| session.state().recent().iter().map(|path|path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"can_back":self.session.as_ref().is_some_and(Session::can_back),"can_forward":self.session.as_ref().is_some_and(Session::can_forward),
+            "history":self.session.as_ref().map(|session| session.state().history().iter().map(|path| path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"history_position":self.session.as_ref().and_then(|session|session.state().history_position()),"mru":self.session.as_ref().map(|session| session.state().recent().iter().map(|path|path.as_path().to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default(),"can_back":self.can_step(true),"can_forward":self.can_step(false),"surface":self.surface().key(),
             "index_revision":self.session.as_ref().map(|session| session.index().revision()),"index_count":self.session.as_ref().map_or(0,|session| session.index().len()),"index_unextracted":self.session.as_ref().map_or(0,|session| session.index().unextracted()),"sort":self.note_sort(),
             "registrations":self.config.as_ref().map(|config| config.workspaces().iter().map(|entry| json!({"name":entry.name,"path":entry.path})).collect::<Vec<_>>()).unwrap_or_default(),"active_registration":self.config.as_ref().and_then(|config| config.active()),"registry_warning":self.registry_warning,"metadata_warning":self.metadata_warning,"config_writable":self.config.as_ref().is_some_and(|config| config.writable()),"config_directory":self.config.as_ref().and_then(|config|config.directory()),"folder_request":self.folder_request,
             "generation":self.workspace_generation(),"gesture_generation":self.gesture_generation,"spring_section":self.spring_section.map(|section|section.0),"gesture_preview":gesture,
@@ -865,7 +886,8 @@ impl App {
             .collect::<Vec<_>>();
         let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
         // Where the last frame drew it, once it has been drawn.
-        let bounds = (self.surface() != super::board::Surface::Board)
+        let bounds = self
+            .editor_drawn()
             .then(|| self.editor.spell_frame().menu)
             .flatten();
         json!({
@@ -935,10 +957,10 @@ impl App {
     /// editor draws nothing while a board is shown, so its last frame is
     /// then an earlier note's and is not reported.
     fn spell_snapshot(&self) -> Value {
-        let frame = if self.surface() == super::board::Surface::Board {
-            wren_editor::SpellFrame::default()
-        } else {
+        let frame = if self.editor_drawn() {
             self.editor.spell_frame()
+        } else {
+            wren_editor::SpellFrame::default()
         };
         let rectangle = |bounds: iced::Rectangle| json!({"x":bounds.x,"y":bounds.y,"width":bounds.width,"height":bounds.height});
         let marks = frame
@@ -1065,7 +1087,7 @@ pub(super) fn logical_modifier(
 
 /// A key press for `editor.key`: a named key, or one character, and the
 /// modifiers held, where `mod` and `opt` are `scheme`'s.
-fn key_press(
+pub(super) fn key_press(
     params: &Value,
     scheme: wren_core::keybind::Scheme,
 ) -> Result<(iced::keyboard::Key, iced::keyboard::Modifiers), String> {

@@ -2134,6 +2134,67 @@ fn deleting_the_selected_history_entry_prunes_visits_and_mru_without_losing_forw
     assert_eq!(reopened.document().unwrap().path(), &rel("A/L/Loose.md"));
 }
 
+/// A frontend hangs its own stops (views that are not notes) off these.
+#[test]
+fn every_visit_keeps_one_serial_that_grows_along_history_and_is_never_reused() {
+    let root = fixture();
+    let mut session = session(root.path());
+    let a = note(&session, "A/G/Note 2.md");
+    let b = note(&session, "A/G/Note 10.md");
+    let c = note(&session, "A/L/Loose.md");
+    let stops = |session: &Session| {
+        session
+            .visits()
+            .iter()
+            .map(|visit| (visit.serial, visit.note))
+            .collect::<Vec<_>>()
+    };
+    for id in [a, b, c] {
+        open(&mut session, id);
+    }
+    let first = stops(&session);
+    assert_eq!(
+        first.iter().map(|stop| stop.1).collect::<Vec<_>>(),
+        [a, b, c]
+    );
+    assert!(first.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(session.visit_position(), Some(2));
+
+    // Back and Forward move the position only.
+    run(&mut session, Op::Back);
+    run(&mut session, Op::Back);
+    assert_eq!(stops(&session), first);
+    assert_eq!(session.visit_position(), Some(0));
+
+    // A visit from the middle drops what was ahead and takes a new serial,
+    // larger than any given before.
+    open(&mut session, c);
+    let branched = stops(&session);
+    assert_eq!(branched[0], first[0]);
+    assert_eq!(branched.len(), 2);
+    assert_eq!(branched[1].1, c);
+    assert!(branched[1].0 > first[2].0);
+
+    // A deleted note's stops go; the others keep theirs.
+    fs::remove_file(root.path().join("A/G/Note 2.md")).unwrap();
+    run(&mut session, Op::Reconcile);
+    assert_eq!(stops(&session), [branched[1]]);
+
+    // The serials are the running Session's alone: the file holds paths.
+    let saved = fs::read_to_string(root.path().join(".wren/workspace.toml")).unwrap();
+    assert!(!saved.contains("serial"), "{saved}");
+    drop(session);
+    let reopened = self::session(root.path());
+    assert_eq!(
+        reopened
+            .visits()
+            .iter()
+            .map(|visit| visit.note)
+            .collect::<Vec<_>>(),
+        [note(&reopened, "A/L/Loose.md")]
+    );
+}
+
 #[test]
 fn mru_and_the_current_duplicate_occurrence_follow_note_group_and_section_moves() {
     let root = fixture();

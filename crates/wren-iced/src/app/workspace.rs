@@ -11,7 +11,7 @@ use wren_core::reconcile::ReconcileResult;
 
 use super::board::{self, Surface};
 use super::commands::{Disposition, Gateway};
-use super::{focus_editor, App, Message};
+use super::{App, Message};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WarningKind {
@@ -318,7 +318,20 @@ impl App {
     // All adapters use this processed gateway. The legacy Result adapter below
     // remains for existing callers, but never decides whether a picker dismisses.
     pub(super) fn process_core(&mut self, op: Op) -> Gateway {
+        self.process_core_showing(op, None)
+    }
+
+    /// [`Self::process_core`], putting the task view `then` in the pane once
+    /// the op has committed: a step of history onto the note a view comes
+    /// after (`App::history_step`). The view is there before the keyboard
+    /// is given, so it is given once, to what the pane ends up showing.
+    pub(super) fn process_core_showing(
+        &mut self,
+        op: Op,
+        then: Option<super::tasks_view::StopId>,
+    ) -> Gateway {
         let passive = matches!(op, Op::Tick | Op::EditDraft { .. } | Op::FinishReconcile(_));
+        let view_had_keys = self.task_view_has_keys();
         let previous_processed = self.last_processed.clone();
         if self.loading.is_some() {
             return self.blocked("A workspace is already loading; wait for it to finish");
@@ -350,6 +363,7 @@ impl App {
             return self.blocked("No workspace is open");
         };
         let before = EffectBefore::capture(session, &op);
+        let views = self.task_views.mark(session, &op);
         // A board this op opens is timed from here.
         #[cfg(feature = "smoke-test")]
         {
@@ -363,6 +377,14 @@ impl App {
         let mut core_error = error.clone();
         let effect_committed = before.committed(session, &op, &events);
         let committed = error.is_none() || effect_committed;
+        // The task views follow what the op did to history and the tree,
+        // and a note asked for takes the pane from one.
+        let view_left = self
+            .task_views
+            .follow(views.as_ref(), session, &op, &events, committed);
+        if let Some(stop) = then.filter(|_| committed) {
+            self.task_views.show(stop);
+        }
         // CreateNote persists selection only in its follow-up OpenNote operation.
         let read_only_metadata = error.is_none()
             && effect_committed
@@ -504,7 +526,13 @@ impl App {
                         | Op::SelectSection { .. }
                         | Op::Back
                         | Op::Forward
-                )) {
+                ))
+            // A view that went in the background (its item deleted) leaves
+            // the pane to the note, which takes the keyboard the view had.
+            // Under a palette or a dialog, or with a browser column active,
+            // the view had none, and the keyboard stays where it is.
+            || (view_left && view_had_keys)
+        {
             self.column_focus()
         } else {
             Task::none()
@@ -797,7 +825,7 @@ impl App {
             return result.unwrap_or_else(|_| Task::none());
         }
         if accepted {
-            focus_editor()
+            self.pane_focus()
         } else if self.palette.is_some() {
             iced::widget::operation::focus("palette-query")
         } else {
@@ -861,7 +889,9 @@ impl App {
                 .is_some_and(|entry| entry.kind == NoteKind::Board)
         });
         let identity_changed = workspace_changed || self.editor_note != note;
-        let kind_changed = board_note.is_some() != (self.surface() != Surface::Text);
+        // The document's own surface: a task view over it changes nothing
+        // of what the editor or the board viewer holds.
+        let kind_changed = board_note.is_some() != (self.document_surface() != Surface::Text);
         let taken = match &self.board {
             Some(view) => view.synced() == text,
             None => self.editor.text() == text,
@@ -997,7 +1027,21 @@ impl App {
         outcome.processed.warning.map_or(Ok(()), Err)
     }
 
+    /// Whether the editor may take input: it is what the pane shows, and
+    /// it holds the open note. Every message of the editor's and every
+    /// harness `editor.*` write asks this first.
     pub(super) fn ensure_editor_ready(&self) -> Result<(), String> {
+        // Under a task view the editor is not mounted. What still reaches
+        // it was typed at the note as it showed, and is dropped.
+        if self.surface() == Surface::Tasks {
+            return Err("The task view is showing; the text editor is not".into());
+        }
+        self.editor_holds_note()
+    }
+
+    /// Whether the editor holds the open note's text, shown or under a
+    /// task view: what its own state (its proofreader) follows.
+    pub(super) fn editor_holds_note(&self) -> Result<(), String> {
         if self.loading.is_some() {
             return Err("The editor is disabled while a workspace is loading".into());
         }
@@ -1006,7 +1050,7 @@ impl App {
         }
         // Only the visible surface may write: the editor behind a board is
         // empty, and its text must never become the board's draft.
-        if self.surface() == Surface::Board {
+        if self.document_surface() == Surface::Board {
             return Err("The open note is a board; the text editor is not showing it".into());
         }
         Ok(())

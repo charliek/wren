@@ -99,7 +99,9 @@ when one lands, move what users need into `docs/` and trim the note.
     room), `app/task_suggest.rs` (suggestions and the owner cache),
     `app/calendar.rs` with `date_field.rs` (the calendar overlay and its
     text field), `app/task_form.rs` with `form_keys.rs` (the task form and
-    its key wrapper), `app/tasks_harness.rs` (the `tasks.*` test requests)
+    its key wrapper), `app/tasks_view.rs` (the task view's surface in the
+    editor pane, its scope, and its stops in Back and Forward history),
+    `app/tasks_harness.rs` (the `tasks.*` test requests)
     and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
     `ellipsis.rs`, `keys.rs`, `field_keys.rs` (the text fields' editing
@@ -189,6 +191,16 @@ when one lands, move what users need into `docs/` and trim the note.
 - Settle before any non-passive op: `App::settle_board()` commits an open
   label, cancels a gesture and drops a preview before a note switch, a
   palette or dialog, a blur, or quit, so a flush never writes half a drag.
+- A task view is not a document. While `Surface::Tasks` shows, the note
+  under it stays `Session.document`, and neither the editor nor the board
+  viewer is mounted: `App::edit` and `App::board_edit` drop what is
+  addressed to them, and the keyboard goes to the view
+  (`App::pane_focus`), never to `note-editor`. A view's stops in Back and
+  Forward history live in the app (`tasks_view::Trail`), hung after the
+  Session's visits by their serials; the Session's history holds notes
+  only, so nothing of a view is written to `.wren/workspace.toml`. Back
+  and Forward run through `App::history_step`, and a view opens through
+  `Command::ShowTasks`.
 - With `tasks = off` (restart-only) the shared classifier
   accepts only the boxes it always did, the toggle writes no stamp, and no
   task command, key or file exists (the harness's `tasks.get` alone still

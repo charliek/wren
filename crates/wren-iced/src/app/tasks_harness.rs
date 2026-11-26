@@ -23,6 +23,17 @@
 //! the calendar button, Save, Cancel or outside, or on the calendar over
 //! the form. While it is open `editor.key` presses a key in it
 //! ([`App::form_key`]).
+//!
+//! The task view (item 10.1): `tasks.view`. With no parameters it says what
+//! the pane shows: `{"tasks": true, "open", "scope", "path", "label",
+//! "keys"}`, the scope's kind and path `null` with no view open and `keys`
+//! whether the view has the keyboard; with tasks off, `{"tasks": false}`.
+//! With `{"open": {"scope": "workspace" | "section" | "group" | "note",
+//! "path": …}}` it opens the view of that scope, as any entry point does
+//! (through `dispatch`), and answers that with the action's `disposition`
+//! and `warning` beside it. With `{"key": {"key": …, "mods": […]}}` it
+//! presses a key while the view has the keyboard, which no widget takes
+//! and the app's key handling reads. With tasks off both are refused.
 
 use std::sync::Arc;
 
@@ -54,6 +65,37 @@ impl App {
                     .ok_or_else(|| format!("date must be YYYY-MM-DD, not {text:?}"))?;
                 self.pin_today(date);
                 request.respond(Ok(self.tasks_snapshot()));
+            }
+            "tasks.view" => {
+                let press = request.params.get("key");
+                let open = request.params.get("open");
+                if (press.is_some() || open.is_some()) && !self.preferences.tasks {
+                    return Err("Tasks are off".into());
+                }
+                if let Some(press) = press {
+                    if !self.task_view_has_keys() {
+                        return Err("The task view does not have the keyboard".into());
+                    }
+                    let scheme = self.preferences.keymap.scheme();
+                    let (key, modifiers) = super::test_requests::key_press(press, scheme)?;
+                    let task = self.task_view_press(key, modifiers);
+                    request.respond(Ok(self.task_view_snapshot()));
+                    return Ok(task);
+                }
+                let Some(open) = open else {
+                    request.respond(Ok(self.task_view_snapshot()));
+                    return Ok(Task::none());
+                };
+                let scope = super::tasks_view::Scope::parse(
+                    string(open, "scope")?,
+                    open.get("path").and_then(Value::as_str),
+                )?;
+                let outcome = self.dispatch(super::commands::Command::ShowTasks(scope));
+                let mut answer = self.task_view_snapshot();
+                answer["disposition"] = json!(outcome.processed.disposition.key());
+                answer["warning"] = json!(outcome.processed.warning);
+                request.respond(Ok(answer));
+                return Ok(outcome.task);
             }
             "tasks.calendar"
             | "tasks.calendar_type"
@@ -499,6 +541,49 @@ impl App {
             "bounds": card.map(|card| json!({
                 "x": card.x, "y": card.y, "width": card.width, "height": card.height,
             })),
+        })
+    }
+
+    /// A key pressed while the task view has the keyboard: no widget takes
+    /// it, so the app's key handling reads it as it reads any press that
+    /// reaches it.
+    fn task_view_press(
+        &mut self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Message> {
+        let event = iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        let status = iced::event::Status::Ignored;
+        match crate::keys::input(&event).filter(|input| crate::keys::reaches_app(input, status)) {
+            Some(input) => self.update(Message::Key(crate::keys::with_status(input, status))),
+            None => Task::none(),
+        }
+    }
+
+    fn task_view_snapshot(&self) -> Value {
+        if !self.preferences.tasks {
+            return json!({"tasks": false});
+        }
+        let scope = self.task_view();
+        json!({
+            "tasks": true,
+            "open": scope.is_some(),
+            "scope": scope.map(super::tasks_view::Scope::kind),
+            "path": scope
+                .and_then(super::tasks_view::Scope::prefix)
+                .map(|path| path.as_path().to_string_lossy().into_owned()),
+            "label": scope.map(|scope| self.task_view_label(scope)),
+            "keys": self.task_view_has_keys(),
         })
     }
 

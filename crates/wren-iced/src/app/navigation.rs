@@ -31,6 +31,7 @@ impl App {
             return;
         };
         self.widths = Widths::from_state(session.state());
+        self.clear_task_views();
         self.focus = false;
         self.column = super::columns::Column::Editor;
         self.fold = 0;

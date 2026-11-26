@@ -18,7 +18,6 @@ use wren_board::{
 use wren_canvas::machine::{self, State};
 use wren_canvas::{handles, hit, BoardView, Button, Input, Mods, Scroll, Tool};
 
-use super::board::Surface;
 use super::test_requests::Focused;
 use super::{board_dock, board_footer, board_style_bar};
 use super::{focus_editor, App, Message};
@@ -98,17 +97,25 @@ impl App {
         &mut self,
         request: &Arc<Request>,
     ) -> Result<Task<Message>, String> {
-        if request.op != "board.get" {
-            self.board
-                .as_ref()
-                .ok_or("The open note is not shown as a board")?;
-        }
+        self.board_asked(&request.op)?;
         let request = Arc::clone(request);
         Ok(
             iced::advanced::widget::operate(Focused::default()).map(move |focused| {
                 Message::BoardProbed(Arc::clone(&request), Box::new(Placement::of(&focused)))
             }),
         )
+    }
+
+    /// Whether the request `op` can be answered: every one but `board.get`,
+    /// which only looks, is input for the board in the pane or an edit of
+    /// it, and is refused when the pane shows no board; a board under a
+    /// task view is not shown, and takes nothing.
+    fn board_asked(&self, op: &str) -> Result<(), String> {
+        if op == "board.get" || self.surface() == super::board::Surface::Board {
+            Ok(())
+        } else {
+            Err("The open note is not shown as a board".into())
+        }
     }
 
     /// Answer a `board.*` request once the widget tree has said where the
@@ -119,6 +126,12 @@ impl App {
         placement: Placement,
     ) -> Task<Message> {
         let params = &request.params;
+        // The pane may show something else by the time the widget tree has
+        // answered.
+        if let Err(error) = self.board_asked(&request.op) {
+            request.respond(Err(error));
+            return Task::none();
+        }
         let (task, result) = match request.op.as_str() {
             "board.get" => {
                 let elements = params
@@ -220,11 +233,8 @@ impl App {
     /// it shows and how it is looked at. `focused` is whether the widget
     /// has the keyboard.
     pub(super) fn board_snapshot(&self, elements: bool, focused: bool) -> Value {
-        let surface = self.editor_note.map(|_| match self.surface() {
-            Surface::Board => "board",
-            Surface::Raw => "raw",
-            Surface::Text => "text",
-        });
+        // The note's own surface, whatever is over it.
+        let surface = self.editor_note.map(|_| self.document_surface().key());
         let mut snapshot = json!({
             "enabled": self.preferences.boards,
             "surface": surface,
@@ -2440,6 +2450,80 @@ mod tests {
         let (_directory, mut app) = boards::fixture();
         boards::open_board(&mut app, "Flow");
         assert!(ask(&mut app, "board.seed", json!({"seed": -1}), PLACED).is_err());
+    }
+
+    /// A board under a task view is in `App::board` still, and is not the
+    /// pane's: it takes no input and no edit, by the request or by the
+    /// reply the widget tree sends after it.
+    #[test]
+    fn a_board_under_a_task_view_takes_no_request_but_board_get() {
+        use super::super::commands::Command;
+        use super::super::tasks_view::Scope;
+
+        let (_directory, mut app) = boards::fixture();
+        app.preferences.tasks = true;
+        boards::open_board(&mut app, "Flow");
+        lay_out(&mut app);
+        let before = ask(&mut app, "board.get", json!({"elements": true}), PLACED).unwrap();
+        let outcome = app.dispatch(Command::ShowTasks(Scope::Workspace));
+        assert!(outcome.processed.disposition.committed());
+        assert_eq!(app.surface(), super::super::board::Surface::Tasks);
+        let revision = app.board_revision;
+
+        let edit = json!({"edits": [
+            {"op": "set", "id": "pack", "field": "text", "value": "Packed"},
+        ]});
+        let center = json!({"x": 400.0, "y": 300.0});
+        let requests = [
+            ("board.apply", edit),
+            (
+                "board.pointer",
+                json!({"kind": "press", "at": center, "button": "left"}),
+            ),
+            (
+                "board.pointer",
+                json!({"kind": "click", "at": center, "button": "left"}),
+            ),
+            ("board.key", json!({"key": "delete", "mods": []})),
+            ("board.type", json!({"text": "typed"})),
+            ("board.seed", json!({"seed": 7})),
+            ("board.pinch", json!({"delta": 0.25})),
+            ("board.bounds", json!({})),
+            ("board.dock", json!({})),
+            ("board.style_bar", json!({})),
+            ("board.footer", json!({})),
+        ];
+        for focused in [true, false] {
+            let placement = Placement { focused, ..PLACED };
+            for (op, params) in &requests {
+                // As the request arrives, where it is refused before the
+                // widget tree is asked, and as the tree's answer to one
+                // sent before the view opened.
+                let (request, _reply) = Request::detached(op, params.clone());
+                assert!(app.board_request(&request).is_err(), "{op}");
+                let answer = ask(&mut app, op, params.clone(), placement);
+                assert_eq!(
+                    answer.unwrap_err(),
+                    "The open note is not shown as a board",
+                    "{op}"
+                );
+            }
+        }
+        assert_eq!(app.board_revision, revision);
+        assert_eq!(boards::session_text(&app), boards::FLOW);
+        assert!(!app.session.as_ref().unwrap().document().unwrap().dirty());
+        // The board is still there to look at, as it was.
+        let mut after = ask(&mut app, "board.get", json!({"elements": true}), PLACED).unwrap();
+        let mut before = before;
+        for snapshot in [&mut before, &mut after] {
+            snapshot.as_object_mut().unwrap().remove("state");
+        }
+        assert_eq!(after, before);
+        assert!(!app
+            .export_board(crate::board_export::Format::Svg)
+            .processed
+            .disposition
+            .committed());
     }
 
     #[test]

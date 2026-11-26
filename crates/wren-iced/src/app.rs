@@ -37,6 +37,7 @@ mod task_form;
 mod task_menus;
 mod task_suggest;
 mod tasks;
+mod tasks_view;
 mod workspaces;
 
 use crate::panes::Widths;
@@ -87,6 +88,13 @@ pub struct App {
     owners: wren_core::owners::Owners,
     /// The footers' measured label widths; see `task_footer::Widths`.
     label_widths: task_footer::Widths,
+    /// The task views in Back and Forward history, and the one in the
+    /// pane; see `tasks_view::Trail`. Empty with tasks off.
+    task_views: tasks_view::Trail,
+    /// Each time the keyboard was given to a column: the surface the pane
+    /// showed when it was the pane's, `None` for a browser column.
+    #[cfg(test)]
+    focus_given: std::cell::RefCell<Vec<Option<board::Surface>>>,
     editor: EditorView,
     /// The open note as a board, when it is one and its text parses; see
     /// `board::Surface`. The editor is empty meanwhile.
@@ -226,6 +234,8 @@ pub enum Message {
     Calendar(calendar::Event),
     /// Input from the task form.
     TaskForm(task_form::Event),
+    /// Input from the task view in the pane.
+    TaskView(tasks_view::Event),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
     /// The board's style bar opens one of its menus, or closes it.
@@ -427,6 +437,9 @@ impl App {
             suggest_installed: false,
             owners: wren_core::owners::Owners::default(),
             label_widths: task_footer::Widths::default(),
+            task_views: tasks_view::Trail::default(),
+            #[cfg(test)]
+            focus_given: Default::default(),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
             board_error: None,
@@ -666,6 +679,7 @@ impl App {
             Message::Command(command) => return self.dispatch(command).task,
             Message::Calendar(event) => return self.calendar_event(event),
             Message::TaskForm(event) => return self.task_form_event(event),
+            Message::TaskView(event) => return self.task_view_event(event),
             // Opening a menu of a bar finishes an open label first, as a
             // click on one of its controls does: the keys typed next are
             // not the label's, and a style menu's rows preview on the
@@ -766,7 +780,7 @@ impl App {
             Message::ConfirmTrash => return self.submit_dialog(true),
             Message::CancelDialog => {
                 self.dialog = None;
-                return focus_editor();
+                return self.pane_focus();
             }
             Message::DismissBanner => {
                 self.conflict_copy = None;
@@ -793,7 +807,7 @@ impl App {
             }
             Message::FindClose => {
                 self.find_open = false;
-                return focus_editor();
+                return self.pane_focus();
             }
             Message::Escape => {
                 // The calendar and the task form are above everything else
@@ -816,7 +830,9 @@ impl App {
                 }
                 self.cancel_gestures();
                 // Esc closes the topmost overlay and keeps the active column;
-                // with none open, it returns the keyboard to the editor.
+                // with none open, it returns the keyboard to the editor, or
+                // to the task view in its place, where it does nothing more
+                // (discovery/tasks-build.md §10, the Escape rule).
                 if self.palette.take().is_some() || self.dialog.take().is_some() {
                     return self.column_focus();
                 }
@@ -1079,9 +1095,14 @@ impl App {
     /// What follows every change to the editor's text: the session draft,
     /// which autosave saves, the edit revision, and a word recount on a
     /// later tick.
+    ///
+    /// Under a task view the editor still holds the open note's text, and
+    /// takes no input: [`App::edit`] refuses every message of its own. An
+    /// edit the app itself applies to it there (a task changed from the
+    /// view) is the note's draft like any other, and calls this.
     fn text_changed(&mut self, started: Instant) {
         // The editor behind a board is not its writer, whatever changed it.
-        if self.surface() == board::Surface::Board {
+        if self.document_surface() == board::Surface::Board {
             return;
         }
         if let Some(note) = self.selected_note {

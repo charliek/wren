@@ -11,7 +11,7 @@ use wren_core::ops::Op;
 use super::board::Surface;
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
-use super::{focus_editor, App, Message};
+use super::{App, Message};
 use crate::board_export::Format;
 use crate::panes::Pane;
 
@@ -1152,6 +1152,10 @@ pub enum Command {
         name: Option<String>,
     },
     RemoveWorkspace(PathBuf),
+    /// Open the task view of a scope in the editor pane. Until the entry
+    /// points (item 10.2) only the harness sends it.
+    #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
+    ShowTasks(super::tasks_view::Scope),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1277,10 +1281,14 @@ impl App {
             // The find bar searches the editor's text and the outline reads
             // its Markdown headings; on a board both open the jump palette
             // (§5.18 rule 3), and a board's raw text has no headings.
-            Find => self.selected_note.is_some() || !self.workspace_mode,
+            // Under a task view the note is not shown, and has neither.
+            Find => {
+                (self.selected_note.is_some() || !self.workspace_mode)
+                    && self.surface() != Surface::Tasks
+            }
             Outline => {
                 (self.selected_note.is_some() || !self.workspace_mode)
-                    && self.surface() != Surface::Raw
+                    && !matches!(self.surface(), Surface::Raw | Surface::Tasks)
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
             ExportSvg | ExportPng | ExportDrawio => {
@@ -1308,19 +1316,17 @@ impl App {
                     && self.spelling.ready()
                     && self.ensure_editor_ready().is_ok()
             }
-            Back => self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.can_back()),
-            Forward => self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.can_forward()),
-            // Only on a board, which exists only on the Board surface.
-            Board(command) => self
-                .board
-                .as_ref()
-                .is_some_and(|view| board_enabled(view, command)),
+            Back => self.can_step(true),
+            Forward => self.can_step(false),
+            // Only on a board, which exists only on the Board surface; one
+            // under a task view is not shown.
+            Board(command) => {
+                self.surface() == Surface::Board
+                    && self
+                        .board
+                        .as_ref()
+                        .is_some_and(|view| board_enabled(view, command))
+            }
         }
     }
 
@@ -1387,7 +1393,8 @@ impl App {
                 self.cancel_gestures();
                 self.focus = enabled.unwrap_or(!self.focus);
                 self.column = super::columns::Column::Editor;
-                self.finish_action(Disposition::Completed, None, focus_editor())
+                let task = self.pane_focus();
+                self.finish_action(Disposition::Completed, None, task)
             }
             Command::Width { pane, width } => {
                 if self.session.is_none() {
@@ -1432,6 +1439,7 @@ impl App {
                 outcome
             }
             Command::RemoveWorkspace(path) => self.remove_registration(&path),
+            Command::ShowTasks(scope) => self.show_tasks(scope),
         }
     }
 
@@ -1545,7 +1553,8 @@ impl App {
             }
             Back | Forward => {
                 self.column = super::columns::Column::Editor;
-                let outcome = self.process_core(if id == Back { Op::Back } else { Op::Forward });
+                // Through notes and task views alike.
+                let outcome = self.history_step(id == Back);
                 if outcome.processed.disposition.committed() {
                     self.palette = None;
                     self.reveal_selection();
@@ -1605,6 +1614,7 @@ impl App {
             ReloadSettings => {
                 self.palette = None;
                 let warning = self.reload_settings(true);
+                let task = self.pane_focus();
                 self.finish_action(
                     if warning.is_some() {
                         Disposition::CommittedWarning
@@ -1612,7 +1622,7 @@ impl App {
                         Disposition::Completed
                     },
                     warning,
-                    focus_editor(),
+                    task,
                 )
             }
             ToggleTask if self.preferences.tasks => self.run_task_command(id),

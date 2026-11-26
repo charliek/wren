@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use iced::Task;
 
 use super::commands::{Disposition, Gateway};
-use super::{focus_editor, App, Message};
+use super::{App, Message};
 
 impl App {
     pub(super) fn pick_workspace(&mut self) -> Gateway {
@@ -110,6 +110,7 @@ impl App {
         if warning.is_none() || committed {
             self.palette = None;
         }
+        let task = self.pane_focus();
         self.finish_action(
             if warning.is_some() {
                 if committed {
@@ -121,7 +122,7 @@ impl App {
                 Disposition::Completed
             },
             warning,
-            focus_editor(),
+            task,
         )
     }
 }

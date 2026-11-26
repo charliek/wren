@@ -387,6 +387,28 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
         menu_scenes(client, shot_here, resize)
         calendar_scenes(client, shot_here, resize)
         suggestion_scenes(client, shot_here)
+    view_scenes(client, shot_here)
+
+
+def view_scenes(client, shot_here) -> None:
+    """The task view's surface (discovery/tasks-build.md item 10.1): the
+    view of a group in the editor pane, over the note it was opened from,
+    with Back lit in its header; then the view of the whole workspace,
+    opened from the first. Back twice returns to the note."""
+    open_note(client, "Task lines.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Task lines"),
+             timeout=10, description="the task lines note opens")
+    state = client.call("tasks.view", {"open": {"scope": "group", "path": "Tasks/Baseline"}})
+    assert state["open"] and (state["scope"], state["label"]) == ("group", "Baseline"), state
+    assert state["keys"] and client.call("navigation.get")["can_back"], state
+    shot_here("task-view")
+    state = client.call("tasks.view", {"open": {"scope": "workspace"}})
+    assert state["open"] and state["scope"] == "workspace", state
+    shot_here("task-view-workspace")
+    for _ in range(2):
+        client.call("command.run", {"id": "navigation.back"})
+    assert not client.call("tasks.view")["open"]
+    assert client.call("navigation.get")["surface"] == "text"
 
 
 def suggestion_scenes(client, shot_here) -> None:

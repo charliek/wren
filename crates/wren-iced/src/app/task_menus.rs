@@ -357,7 +357,7 @@ impl App {
     /// before tasks.
     pub(super) fn sync_task_menus(&mut self) {
         // A board's raw text is no note's, and has no task menus.
-        if self.preferences.tasks && self.surface() == super::board::Surface::Text {
+        if self.preferences.tasks && self.document_surface() == super::board::Surface::Text {
             let menus = Arc::clone(&*TASK_MENUS);
             self.editor.set_menu_providers(vec![
                 Provider::Spelling,

@@ -25,6 +25,8 @@ pub enum Icon {
     Text,
     /// The board's connector tool: a line ending in an arrow.
     Connector,
+    /// Tasks: a ticked box.
+    Tasks,
 }
 
 pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Message> {
@@ -43,6 +45,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, tint: Rgb) -> Element<'a, Me
         Icon::Hand => "<path d='M8 12.5V6a1.5 1.5 0 0 1 3 0v5.5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v6M17 12V8.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1.6a5 5 0 0 1-3.9-1.9l-3.8-4.8a1.5 1.5 0 0 1 2.2-2L8 14.5'/>",
         Icon::Text => "<path d='M5.5 7V5h13v2M12 5v14M9.5 19h5'/>",
         Icon::Connector => "<path d='M5 19 18 6M11 6h7v7'/>",
+        Icon::Tasks => "<rect x='3.5' y='3.5' width='17' height='17' rx='3.5'/><path d='m7.5 12.4 3.2 3.2 5.8-6.3'/>",
     };
     paths_icon(paths, size, tint)
 }

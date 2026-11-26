@@ -330,7 +330,7 @@ impl App {
     /// tasks on. (The task index gives back its own copy of the open
     /// note's draft when the Session leaves the note.)
     pub(super) fn release_task_caches(&mut self) {
-        let shown = (self.selected_note, self.surface() == Surface::Text);
+        let shown = (self.selected_note, self.document_surface() == Surface::Text);
         if self.task_memo.shown.get() == Some(shown) {
             return;
         }
