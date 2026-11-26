@@ -26,12 +26,15 @@ header does the same.
 
 | Action | macOS | Linux |
 |---|---|---|
-| New note | ⌘N | Alt+N |
-| New dated note (today's date, no prompt) | ⇧⌘N | Alt+Shift+N |
-| Command palette | ⇧⌘P or ⌘K | Alt+Shift+P or Alt+K |
+| New note | ⌘N | Mod+N |
+| New dated note (today's date, no prompt) | ⇧⌘N | Mod+Shift+N |
+| Command palette | ⇧⌘P or ⌘K | Mod+Shift+P or Mod+K |
+
+On Linux, Mod is Ctrl; [Keybindings](keybindings.md) shows how to use Alt
+instead.
 
 New section, New group, Rename, Delete, Move, and Reveal are in the command
-palette. Rename note is also ⌘R (Alt+R on Linux), and moves also work by drag
+palette. Rename note is also ⌘R (Mod+R on Linux), and moves also work by drag
 and drop: a note onto a group, a group onto a section, and sections or
 groups reordered within their column. Delete moves items to the OS trash and
 asks first when a section or group still holds notes.
@@ -54,13 +57,13 @@ palette writes it out. Boards are on by default; `boards = off` in
 | Tool | Scope |
 |---|---|
 | Column filter boxes | Section names, group names in the selected section, or note titles and text in the selected group. |
-| **Jump to note** (⌘P / Alt+P) | Fuzzy titles across the workspace, most recently opened first. |
-| **Search workspace** (⇧⌘F / Alt+Shift+F) | Titles and text across the workspace, board labels included, with snippets. A hit on a board opens it with the matching element selected and centred. |
-| **Find in note** (⌘F / Alt+F) | The open note. On a board, the board's labels. |
-| **Jump to heading** (⇧⌘O / Alt+Shift+O) | The open note's outline. On a board, its labelled shapes and connectors. |
-| **Back / Forward** (⌘[ / ⌘], Alt on Linux) | Notes you visited. |
+| **Jump to note** (⌘P / Mod+P) | Fuzzy titles across the workspace, most recently opened first. |
+| **Search workspace** (⇧⌘F / Mod+Shift+F) | Titles and text across the workspace, board labels included, with snippets. A hit on a board opens it with the matching element selected and centred. |
+| **Find in note** (⌘F / Mod+F) | The open note. On a board, the board's labels. |
+| **Jump to heading** (⇧⌘O / Mod+Shift+O) | The open note's outline. On a board, its labelled shapes and connectors. |
+| **Back / Forward** (⌘[ / ⌘], Mod+[ / Mod+] on Linux) | Notes you visited. |
 
-**Focus mode** (⌘Y / Alt+Y) hides the browser columns and centres the
+**Focus mode** (⌘Y / Mod+Y) hides the browser columns and centres the
 text in the window; press it again to bring them back. Outside focus mode
 the text starts at the left of the editor pane. Either way long lines wrap
 at 100 characters, or at the pane's edge when it is narrower;

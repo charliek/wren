@@ -1,28 +1,66 @@
 # Keybindings
 
-Wren uses each platform's app modifier: **Command** on macOS and **Alt** on
-Linux. Ctrl stays with text editing on Linux, so Ctrl+Z, Ctrl+C, Ctrl+V,
-and Ctrl+A keep working in the editor and in every text field.
+Wren has one command key, **Mod**. Mod is **⌘** on macOS and **Ctrl** on
+Linux. The tables below write every Linux shortcut with Mod, so Mod+N is ⌘N
+on macOS and Ctrl+N on Linux. Where a shortcut does not use Mod, the table
+names its keys.
+
+## The command key on Linux
+
+Linux has two command keys to choose from. The default is Ctrl, as in most
+Linux apps. If you prefer Alt, the way ⌘ works on a Mac, switch to it:
+
+- run **Use Alt for commands** from the command palette, or
+- set `linux-modifier = alt` in
+  [`config.conf`](../reference/configuration.md#settings).
+
+The switch applies at once, with no restart, and the palette saves it to
+`config.conf`. With no `config.conf` yet, it applies for this session only.
+The palette command reads **Use Ctrl for commands** while Alt is in use, and
+switches back. It is listed on Linux only, and macOS ignores the setting.
+
+With `linux-modifier = alt`, Mod is Alt, so every Mod shortcut moves to Alt:
+the app's commands, Markdown formatting, tasks, the board, undo and redo, and
+copy, cut, paste, and select all. Alt+C, Alt+X, Alt+V, and Alt+A work in the
+editor, on a board, and in the text fields: the palette, dialogs, the find
+bars, the column filters, the calendar, the task form, and the board keys
+sheet's filter. A text field has no undo, in either mode, so Alt+Z and Ctrl+Z
+do nothing there. The Ctrl versions keep working too: Ctrl+Z, Ctrl+Shift+Z,
+Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A, Ctrl+F (find), and Ctrl+Q (quit). In Ctrl
+mode, those are the only versions. AltGr is not Alt: it types its characters
+as usual.
+
+A few keys do not follow Mod, on macOS and in both Linux modes:
+
+| Key | Linux | Why |
+|---|---|---|
+| Move line up / down | Alt+↑ / Alt+↓ | As in code editors; nothing else uses them. |
+| Suggest spelling | Mod+. in Alt mode, Alt+. in Ctrl mode | Ctrl+. is the emoji key of IBus on GNOME, so the app never sees it. |
+| Move by word, delete a word, start or end of the note | Ctrl+←/→, Ctrl+Backspace/Delete, Ctrl+Home/End (Alt+Backspace/Delete also delete a word in the editor) | Text editing keys that every desktop text field shares. |
+| Board pointer modifiers: drag to copy, scroll to zoom | Ctrl | Window managers take Alt+drag. These are mouse gestures, not keybindings. |
+
+Ctrl+Y no longer redoes. Redo is Mod+Shift+Z everywhere, and Mod+Y toggles
+focus mode.
 
 | Action | macOS | Linux | Action name |
 |---|---|---|---|
-| Command palette | ⇧⌘P or ⌘K | Alt+Shift+P or Alt+K | `palette.commands` |
-| Jump to note | ⌘P | Alt+P | `navigation.jump` |
-| Search workspace | ⇧⌘F | Alt+Shift+F | `navigation.search` |
-| Find in note | ⌘F | Alt+F or Ctrl+F | `navigation.find` |
-| Jump to heading | ⇧⌘O | Alt+Shift+O | `navigation.outline` |
-| New note | ⌘N | Alt+N | `note.new` |
-| New dated note | ⇧⌘N | Alt+Shift+N | `note.new_dated` |
-| Back / Forward | ⌘[ / ⌘] | Alt+[ / Alt+] | `navigation.back` / `navigation.forward` |
-| Column left / right | ⇧⌘[ / ⇧⌘] | Alt+Shift+[ / Alt+Shift+] | `navigation.column_left` / `navigation.column_right` |
-| Rename note | ⌘R | Alt+R | `note.rename` |
-| Toggle focus mode | ⌘Y | Alt+Y | `view.focus` |
-| Toggle collapsed columns | ⇧⌘Y | Alt+Shift+Y | `view.collapse_columns` |
-| Increase text size | ⌘+ or ⌘= | Alt++ or Alt+= | `font.increase` |
-| Decrease text size | ⌘- | Alt+- | `font.decrease` |
-| Reset text size | ⌘0 | Alt+0 | `font.reset` |
-| Open settings file | ⌘, | — | `settings.open` |
-| Quit (saves first) | ⌘Q | Ctrl+Q | `app.quit` |
+| Command palette | ⇧⌘P or ⌘K | Mod+Shift+P or Mod+K | `palette.commands` |
+| Jump to note | ⌘P | Mod+P | `navigation.jump` |
+| Search workspace | ⇧⌘F | Mod+Shift+F | `navigation.search` |
+| Find in note | ⌘F | Mod+F | `navigation.find` |
+| Jump to heading | ⇧⌘O | Mod+Shift+O | `navigation.outline` |
+| New note | ⌘N | Mod+N | `note.new` |
+| New dated note | ⇧⌘N | Mod+Shift+N | `note.new_dated` |
+| Back / Forward | ⌘[ / ⌘] | Mod+[ / Mod+] | `navigation.back` / `navigation.forward` |
+| Column left / right | ⇧⌘[ / ⇧⌘] | Mod+Shift+[ / Mod+Shift+] | `navigation.column_left` / `navigation.column_right` |
+| Rename note | ⌘R | Mod+R | `note.rename` |
+| Toggle focus mode | ⌘Y | Mod+Y | `view.focus` |
+| Toggle collapsed columns | ⇧⌘Y | Mod+Shift+Y | `view.collapse_columns` |
+| Increase text size | ⌘+ or ⌘= | Mod++ or Mod+= | `font.increase` |
+| Decrease text size | ⌘- | Mod+- | `font.decrease` |
+| Reset text size | ⌘0 | Mod+0 | `font.reset` |
+| Open settings file | ⌘, | Mod+, | `settings.open` |
+| Quit (saves first) | ⌘Q | Mod+Q | `app.quit` |
 
 In the palette, use ↑ and ↓ to move, ↵ to run the highlighted row, and Esc
 to close. While the palette or a dialog is open, other shortcuts are
@@ -33,14 +71,22 @@ Quit.
 
 | Action | macOS | Linux |
 |---|---|---|
-| Undo | ⌘Z | Ctrl+Z |
-| Redo | ⇧⌘Z | Ctrl+Shift+Z or Ctrl+Y |
+| Undo | ⌘Z | Mod+Z |
+| Redo | ⇧⌘Z | Mod+Shift+Z |
+| Move by word | ⌥← / ⌥→ | Ctrl+← / Ctrl+→ |
 | Delete the previous word | ⌥⌫ | Ctrl+Backspace or Alt+Backspace |
 | Delete the next word | ⌥⌦ | Ctrl+Delete or Alt+Delete |
 | Delete to the start of the line | ⌘⌫ | — |
 | Start or end of the note | ⌘↑ / ⌘↓ | Ctrl+Home / Ctrl+End |
 | Start of the line (smart, below) | Home, ⌘←, or ⌃A | Home |
-| Cut, copy, paste | ⌘X, ⌘C, ⌘V | Ctrl+X, Ctrl+C, Ctrl+V |
+| Cut, copy, paste | ⌘X, ⌘C, ⌘V | Mod+X, Mod+C, Mod+V |
+| Select all | ⌘A | Mod+A |
+
+Undo, redo, cut, copy, paste, and select all are the `edit.undo`,
+`edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, and `edit.select_all`
+actions, so a `keybind` line can move them (see
+[Custom keybindings](#custom-keybindings)). On macOS the editor keeps ⌘Z,
+⌘C and the rest.
 
 Add Shift to Home and the motions to select as you go. Word deletes take
 the spaces next to the cursor, then one word or one run of punctuation:
@@ -100,11 +146,11 @@ beside the text you are writing.
 
 | Action | macOS | Linux | Action name |
 |---|---|---|---|
-| Toggle a task | ⌘↵ | Ctrl+Enter | `markdown.toggle_task` |
-| Bold | ⌘B | Ctrl+B | `markdown.bold` |
-| Italic | ⌘I | Ctrl+I | `markdown.italic` |
-| Inline code | ⌘E | Ctrl+E | `markdown.code` |
-| Move line up / down | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | `edit.move_line_up` / `edit.move_line_down` |
+| Toggle a task | ⌘↵ | Mod+Enter | `markdown.toggle_task` |
+| Bold | ⌘B | Mod+B | `markdown.bold` |
+| Italic | ⌘I | Mod+I | `markdown.italic` |
+| Inline code | ⌘E | Mod+E | `markdown.code` |
+| Move line up / down | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓, in both modes | `edit.move_line_up` / `edit.move_line_down` |
 
 - **Toggle a task** checks `- [ ] a` as `- [x] a` and back. A list item
   or a plain line becomes an open task (`- a` and `a` both become
@@ -129,7 +175,7 @@ so in the find bar, a filter box, or a browser column they do nothing. The
 palette lists them under **Markdown**; run from there, they act at the
 editor's cursor and give it the keyboard. They are unavailable while
 `markdown-assist = off`, and their keys then do what they do in any text:
-⌘↵ (Ctrl+Enter) starts a new line, and ⌥↑ / ⌥↓ (Alt+↑ / Alt+↓) move the
+⌘↵ (Mod+Enter) starts a new line, and ⌥↑ / ⌥↓ (Alt+↑ / Alt+↓) move the
 cursor. On macOS, ⌘ with a letter never types the letter, even when
 nothing is bound to it.
 
@@ -137,7 +183,7 @@ nothing is bound to it.
 
 | Action | macOS | Linux | Action name |
 |---|---|---|---|
-| Suggest spelling | ⌘. | Alt+. | `editor.spell_suggest` |
+| Suggest spelling | ⌘. | Alt+. (Mod+. in Alt mode) | `editor.spell_suggest` |
 
 On the `advanced` engine, with the caret in or touching an underlined
 word, **Suggest spelling** opens the corrections menu under it; a
@@ -184,7 +230,7 @@ window losing focus cancels it too. A click with a modifier held, a drag
 that starts on the box, and a press let go off the box select text or place
 the caret as they would anywhere else.
 
-**Set task due date** (⌘D / Ctrl+D) opens the calendar at the caret's
+**Set task due date** (⌘D / Mod+D) opens the calendar at the caret's
 task, on the `advanced` engine: on the task's due date, or today, hung
 under the date or the caret. Its field has the keyboard:
 
@@ -205,12 +251,12 @@ written as `📅 2026-12-01`, before any done or cancelled date and the
 stands, keeping a `🗓`, a `📆` or a `[due:: …]` as written. Each is one undo
 step. A click outside the
 calendar, a scroll, or a change to the note closes it and writes nothing.
-Keys typed in the same instant as ⌘D / Ctrl+D, before the calendar shows,
+Keys typed in the same instant as ⌘D / Mod+D, before the calendar shows,
 are dropped rather than typed into the note.
 
 ### The task form
 
-**Create or edit task** (⇧⌘↵ / Ctrl+Shift+Enter, `task.edit`, or **Edit
+**Create or edit task** (⇧⌘↵ / Mod+Shift+Enter, `task.edit`, or **Edit
 task…** in the task menu) opens a form for the line at the caret, on either
 engine: the description, the status, the due date, the priority and the
 owners, with a **Writes** line that shows the Markdown saving will write as
@@ -235,7 +281,7 @@ matter has no form.
 | Tab | in the owners field with a name typed, adds the owner chosen with ↑ ↓, or else the first offered, then moves on |
 | ⌫ | in an empty owners field, removes the last owner |
 | Esc | in the owners field with a name typed, empties it; otherwise closes the form and writes nothing |
-| ⇧⌘↵ / Ctrl+Shift+Enter, ⌘↵ / Ctrl+Enter | save, from any field |
+| ⇧⌘↵ / Mod+Shift+Enter, ⌘↵ / Mod+Enter | save, from any field |
 
 A click outside the form closes it and writes nothing. The due field takes
 the same [date words](../reference/tasks.md#date-words) as the calendar; the
@@ -286,7 +332,7 @@ list (only **Due date…** still opens the calendar).
 
 ## Jumping to a heading
 
-**Jump to heading** (⇧⌘O / Alt+Shift+O) opens the open note's outline: its
+**Jump to heading** (⇧⌘O / Mod+Shift+O) opens the open note's outline: its
 headings in order, indented by level, each with the headings it sits under.
 Headings inside code blocks and front matter are left out. Type to filter
 the list, as in the other palettes. It opens on the section the cursor is
@@ -323,7 +369,7 @@ one column right.
 Moving right (↵, →, Tab, ⇧⌘], or a double-click) folds the columns to the
 left of the active one, so the editor gets their width. Groups folds
 Sections; Notes and the editor fold Sections and Groups. Notes never folds;
-focus mode (⌘Y) hides it. ⇧⌘Y (Alt+Shift+Y) folds Sections and Groups and
+focus mode (⌘Y / Mod+Y) hides it. ⇧⌘Y (Mod+Shift+Y) folds Sections and Groups and
 leaves focus mode; press it again to unfold them. From the editor or Notes
 the keyboard stays where it is, and the editor keeps its cursor; from
 Sections or Groups, Notes takes the keyboard. Folded columns show as a path at the top of the
@@ -335,14 +381,14 @@ A few shortcuts act on the active column:
 
 | Shortcut | Sections | Groups | Notes | Editor |
 |---|---|---|---|---|
-| ⌘P / Alt+P | Jump to section | Jump to group, this section's first | Jump to note | Jump to note |
-| ⌘N / Alt+N | New section | New group | New note | New note |
-| ⌘R / Alt+R | Rename section | Rename group | Rename note | Rename note |
-| ⌘F / Alt+F | Filter sections | Filter groups | Search titles and text | Find in note |
+| ⌘P / Mod+P | Jump to section | Jump to group, this section's first | Jump to note | Jump to note |
+| ⌘N / Mod+N | New section | New group | New note | New note |
+| ⌘R / Mod+R | Rename section | Rename group | Rename note | Rename note |
+| ⌘F / Mod+F | Filter sections | Filter groups | Search titles and text | Find in note |
 
 A new section or group is selected, and its column opens and takes the
 keyboard; a new note opens in the editor. Picking a section or group from
-its jump list selects it and moves one column right, like ↵. Pressing ⌘P again in that list widens it to every
+its jump list selects it and moves one column right, like ↵. Pressing ⌘P (Mod+P) again in that list widens it to every
 note. Esc in a filter box leaves the filter and keeps the column. Commands
 chosen from the palette always do what their label says, whichever column
 is active.
@@ -350,9 +396,14 @@ is active.
 ## On a board
 
 These keys work while a [board](../reference/boards.md) has the keyboard.
-Their modifier is **Mod**: ⌘ on macOS and **Ctrl** on Linux, as in text
-editing, so Linux board shortcuts take Ctrl where the app's take Alt. The
-app's shortcuts in the first table above keep working on a board.
+Their modifier is **Mod**, the same command key as everywhere else: ⌘ on
+macOS, Ctrl on Linux, or Alt with `linux-modifier = alt`. The app's shortcuts
+in the first table above keep working on a board.
+
+A board also binds the arrow keys with a second key, **Opt**, to move and
+resize. It is ⌥ on macOS, and on Linux whichever of Ctrl and Alt Mod is not:
+Alt in Ctrl mode, Ctrl in Alt mode. So Mod+arrow and Opt+arrow never share a
+key.
 
 | Action | macOS | Linux | Action name |
 |---|---|---|---|
@@ -361,26 +412,26 @@ app's shortcuts in the first table above keep working on a board.
 | Rounded rectangle, document tool | — | — | `board.tool.rounded`, `board.tool.document` |
 | Text tool / Connector tool | T / C or A | the same | `board.tool.text` / `board.tool.connector` |
 | Change shape | ⇧ + the tool letter | Shift + the tool letter | `board.shape.rectangle`, … (`rounded` and `document` have no key) |
-| Edit label / Finish label | ↵ or F2 / ⌘↵ | Enter or F2 / Ctrl+Enter | `board.label.edit` / `board.label.commit` |
+| Edit label / Finish label | ↵ or F2 / ⌘↵ | Enter or F2 / Mod+Enter | `board.label.edit` / `board.label.commit` |
 | Add next shape | Tab | Tab | `board.connect.next` |
-| Connect left, right, up, down | ⌘ + arrow | Ctrl + arrow | `board.connect.left`, … |
+| Connect left, right, up, down | ⌘ + arrow | Mod + arrow | `board.connect.left`, … |
 | Select left, right, up, down | arrow | arrow | `board.select.left`, … |
 | Extend selection | ⇧ + arrow | Shift + arrow | `board.select.extend_left`, … |
-| Select the connector on that side | ⇧⌘ + arrow | Ctrl+Shift + arrow | `board.select.connector_left`, … |
-| Select all / Select connected | ⌘A / ⇧⌘A | Ctrl+A / Ctrl+Shift+A | `board.select.all` / `board.select.connected` |
+| Select the connector on that side | ⇧⌘ + arrow | Mod+Shift + arrow | `board.select.connector_left`, … |
+| Select all / Select connected | ⌘A / ⇧⌘A | Mod+A / Mod+Shift+A | `board.select.all` / `board.select.connected` |
 | Clear selection | — (Esc clears it too) | — (Esc clears it too) | `board.select.none` |
-| Move one cell | ⌥ + arrow | Alt + arrow | `board.move.left`, … |
-| Wider, narrower, taller, shorter | ⌥⇧ + → ← ↓ ↑ | Alt+Shift + → ← ↓ ↑ | `board.resize.wider`, `.narrower`, `.taller`, `.shorter` |
-| Delete / Duplicate | ⌫ or ⌦ / ⌘D | Backspace or Delete / Ctrl+D | `board.delete` / `board.duplicate` |
-| Copy / Cut / Paste | ⌘C / ⌘X / ⌘V | Ctrl+C / Ctrl+X / Ctrl+V | `board.copy` / `board.cut` / `board.paste` |
-| Undo / Redo | ⌘Z / ⇧⌘Z | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y | `board.undo` / `board.redo` |
+| Move one cell | ⌥ + arrow | Opt + arrow | `board.move.left`, … |
+| Wider, narrower, taller, shorter | ⌥⇧ + → ← ↓ ↑ | Opt+Shift + → ← ↓ ↑ | `board.resize.wider`, `.narrower`, `.taller`, `.shorter` |
+| Delete / Duplicate | ⌫ or ⌦ / ⌘D | Backspace or Delete / Mod+D | `board.delete` / `board.duplicate` |
+| Copy / Cut / Paste | ⌘C / ⌘X / ⌘V | Mod+C / Mod+X / Mod+V | `board.copy` / `board.cut` / `board.paste` |
+| Undo / Redo | ⌘Z / ⇧⌘Z | Mod+Z / Mod+Shift+Z | `board.undo` / `board.redo` |
 | Zoom to fit / Zoom to selection | ⇧1 / ⇧2 | Shift+1 / Shift+2 | `board.zoom.fit` / `board.zoom.selection` |
-| Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Alt+= / Alt+- / Alt+0 | `font.increase` / `font.decrease` / `font.reset` |
+| Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Mod+= / Mod+- / Mod+0 | `font.increase` / `font.decrease` / `font.reset` |
 | Bring to front / Send to back | ] / [ | the same | `board.arrange.front` / `board.arrange.back` |
 | Bring forward / Send backward | ⇧] / ⇧[ | Shift+] / Shift+[ | `board.arrange.forward` / `board.arrange.backward` |
 | Colour: neutral, red, orange, yellow, green, cyan, purple, blue | 0 to 7 | 0 to 7 | `board.color.neutral`, `.red`, `.orange`, `.yellow`, `.green`, `.cyan`, `.purple`, `.blue` |
 | Board actions | / or ⇧F10 | / or Shift+F10 | `board.actions` |
-| Jump to node | ⇧⌘O or ⌘F | Alt+Shift+O, Alt+F, or Ctrl+F | `board.jump` (reached through `navigation.outline` and `navigation.find`) |
+| Jump to node | ⇧⌘O or ⌘F | Mod+Shift+O or Mod+F | `board.jump` (reached through `navigation.outline` and `navigation.find`) |
 | Board keys (the keys sheet) | ? | ? | `board.keys` (bound as `shift+/`; a `?` typed with another key, as on AZERTY, works too) |
 
 These have no default key; run them from the command palette or the
@@ -406,9 +457,11 @@ Esc steps back one thing at a time: it finishes an open label, ends a
 connect, puts away an armed tool, then clears the selection. It never
 leaves the board.
 
-While a label is open, only Finish label (⌘↵ / Ctrl+Enter) and Add next
+While a label is open, only Finish label (⌘↵ / Mod+Enter) and Add next
 shape (Tab) act as board keys, and every other key edits the label's text,
-so ⌘C, ⌘Z, arrows, and Backspace are the label's. While you connect from
+so ⌘C / Mod+C, ⌘Z / Mod+Z, ⌘A / Mod+A, arrows, and Backspace are the
+label's: the board's select all, copy, cut, paste, undo and redo keys act on
+the label's text, and typed text always wins over a binding. While you connect from
 the keyboard (C with one shape selected), letters type into the search for
 a target. The app's own shortcuts, such as the command palette, work in
 both.
@@ -424,9 +477,14 @@ a digit-row key whose character nothing is bound to acts as its digit, so
 colour new shapes take and change nothing on the board.
 
 **Alt+Shift on Linux.** Some Linux desktops use Alt+Shift to switch
-keyboard layout, which can take the resize keys (Alt+Shift + arrow) and the
-app's Alt+Shift shortcuts before Wren sees them. Change the desktop's
-layout switch, or bind the commands to other keys.
+keyboard layout, which can take the resize keys (Alt+Shift + arrow in Ctrl
+mode) and, in Alt mode, every Mod+Shift shortcut before Wren sees them.
+Change the desktop's layout switch, or bind the commands to other keys.
+
+**Pointer modifiers.** Dragging with ⌥ (macOS) or Ctrl (Linux) held copies
+instead of moves, and ⌘+scroll (macOS) or Ctrl+scroll (Linux) zooms. These
+are mouse gestures, not keybindings, so they stay on Ctrl on Linux in both
+modes; window managers often take Alt+drag.
 
 **Board keybindings.** Board actions bind with the same `keybind` lines
 (see below), and a bare key such as `x` is allowed for them:
@@ -454,17 +512,26 @@ trigger replaces the earlier one, and the action `unbind` removes a
 binding. A user binding also becomes the shortcut shown in the palette and
 title bar for that action. A key bound to any command other than the
 Markdown commands and Suggest spelling above is the app's even inside the
-editor, so binding
-`ctrl+z` to something else takes it from Undo.
+editor, so binding `mod+z` to something else takes it from Undo.
 
 ```conf
-keybind = ctrl+shift+p = palette.commands   # add a second palette shortcut
-keybind = alt+k = unbind                    # free Alt+K
-keybind = alt+t = theme.choose              # bind a palette-only command
+keybind = mod+shift+p = palette.commands    # add a second palette shortcut
+keybind = mod+k = unbind                    # free Mod+K
+keybind = mod+t = theme.choose              # bind a palette-only command
+keybind = mod+shift+c = edit.copy           # a second Copy key
 ```
 
-**Modifiers:** `shift`, `ctrl` (`control`), `alt` (`opt`, `option`), and
-`super` (`cmd`, `command`). **Keys:** letters, digits, punctuation such as
+**Modifiers:** `shift`, `ctrl` (`control`), `alt` (`option`), `super`
+(`cmd`, `command`), and the two that follow the platform:
+
+- `mod` is the command key: ⌘ on macOS, Ctrl on Linux, or Alt with
+  `linux-modifier = alt`.
+- `opt` is the board's second key: ⌥ on macOS, and on Linux whichever of Ctrl
+  and Alt `mod` is not.
+
+A line written with `mod` or `opt` moves when you switch modes; a line
+written with `ctrl` or `alt` stays where you put it. The default shortcuts
+are written the same way. **Keys:** letters, digits, punctuation such as
 `[`, `]`, `\`, `,`, written either literally or by name (`bracketleft`,
 `backslash`, `comma`, `plus`), plus `enter`, `escape`, `space`, `tab`,
 `backspace`, `delete`, arrows (`left`, `right`, `up`, `down`), `home`,
@@ -486,14 +553,15 @@ font.choose  font.increase  font.decrease  font.reset  workspace.switch
 workspace.add  workspace.remove  settings.open  settings.reload  app.quit
 palette.commands  markdown.toggle_task  markdown.bold  markdown.italic
 markdown.code  edit.move_line_up  edit.move_line_down
+edit.undo  edit.redo  edit.copy  edit.cut  edit.paste  edit.select_all
 editor.toggle_markdown_assist  editor.toggle_engine
 editor.toggle_spell_check  editor.spell_suggest  settings.open_words
 note.new_board  note.export_svg  note.export_png  note.export_drawio
 ```
 
 With `tasks = on`, the task line commands can be bound too; they act on
-the task at the caret, and only `task.set_due` (⌘D / Ctrl+D) and
-`task.edit` (⇧⌘↵ / Ctrl+Shift+Enter) have default keys:
+the task at the caret, and only `task.set_due` (⌘D / Mod+D) and
+`task.edit` (⇧⌘↵ / Mod+Shift+Enter) have default keys:
 
 ```
 task.set_status  task.cycle_status  task.set_priority  task.priority.high
@@ -508,6 +576,17 @@ menus, and `task.set_due` the calendar, described under
 task form, on either engine.
 
 The board actions are listed under [On a board](#on-a-board).
+
+`edit.undo`, `edit.redo`, `edit.copy`, `edit.cut`, `edit.paste`, and
+`edit.select_all` are the editor's own keys as actions. Their Linux
+defaults are Mod+Z, Mod+Shift+Z, Mod+C, Mod+X, Mod+V, and Mod+A (plus the
+Ctrl versions in Alt mode). They are Linux only: on macOS they have no
+default key, a `keybind` line for one is refused, and the editor keeps ⌘Z, ⌘C
+and the rest. They are not in the command palette, so they only run from
+their keys. `keybind = ctrl+v = unbind` makes Ctrl+V do nothing, and binding
+a key such as Ctrl+V to another command makes it do only that command. Keys
+that belong to a single widget cannot be rebound: ↵, Esc, Tab, and the
+arrows in menus, the calendar, and the form.
 
 `editor.toggle_markdown_assist`, `editor.toggle_engine`, and
 `editor.toggle_spell_check` have no default key. They flip

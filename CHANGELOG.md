@@ -13,7 +13,37 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Changed
+
+- **On Linux the command key is now Ctrl, like other apps.** Wren's commands
+  used Alt there; the app's shortcuts, Markdown formatting, tasks and the
+  board now take Ctrl (Ctrl+N, Ctrl+Shift+P, Ctrl+B, Ctrl+D, Ctrl+Z, and so
+  on). To keep Alt, run **Use Alt for commands** from the command palette, or
+  set `linux-modifier = alt` in `config.conf`; it applies at once. macOS is
+  unchanged, and Move line (Alt+Up and Alt+Down) stays on Alt.
+- **Ctrl+Y no longer redoes.** Redo is Ctrl+Shift+Z (Mod+Shift+Z in either
+  mode), in the editor and on a board. Ctrl+Y now toggles focus mode.
+- Suggest spelling stays on Alt+. in Ctrl mode, because IBus takes Ctrl+. on
+  GNOME.
+- The spelling menu is now one of several menus built on a shared anchored
+  popover. Its keys and look are the same.
+
 ### Added
+
+- **A switch for Linux's command key.** Run **Use Alt for commands** (or
+  **Use Ctrl for commands**) from the palette, or set `linux-modifier` in
+  `config.conf`. In Alt mode the app's commands, Markdown formatting, tasks,
+  the board, undo and redo, and copy, cut, paste and select all (Alt+C, Alt+X,
+  Alt+V, Alt+A) all move to Alt, in the editor, on a board and in the text
+  fields (the palette, dialogs, find bars, filters, calendar and task form);
+  the Ctrl versions keep working. See
+  [Keybindings](https://charliek.github.io/wren/getting-started/keybindings/).
+- **`mod+` and `opt+` in `keybind` lines.** `mod` is the command key and
+  `opt` the board's second key, so an override follows the switch. Undo, redo,
+  copy, cut, paste and select all are now the actions `edit.undo`,
+  `edit.redo`, `edit.copy`, `edit.cut`, `edit.paste` and `edit.select_all`.
+  Settings opens with Ctrl+, on Linux.
+
 
 - **Tasks** (`tasks = on` in `config.conf`, off by default; restart Wren to
   apply). A task line's box takes a status: `[ ]` open, `[/]` doing,
@@ -53,11 +83,6 @@ version's section as its notes, and publishes to the apt repo. See
   step, and makes a task of a blank line, an empty list item, a list item
   or a line of text. It refuses to save a due field that is not a date.
 - **`tasks-suggest`** turns the suggestions off.
-
-### Changed
-
-- The spelling menu is now one of several menus built on a shared anchored
-  popover. Its keys and look are the same.
 
 ### Fixed
 

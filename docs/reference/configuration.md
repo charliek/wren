@@ -9,7 +9,7 @@ Linux:
 | Override | set `WREN_CONFIG=/absolute/path/to/config.conf` |
 
 A missing file means every setting uses its default. The palette command
-**Open settings file** (⌘, on macOS) creates the file from a commented
+**Open settings file** (⌘, on macOS, Mod+, on Linux) creates the file from a commented
 template and opens it in your text editor. Wren re-reads the file when its
 window regains focus, or immediately with **Reload settings**. Problems
 such as an unknown key or an invalid value show in the warning banner and
@@ -33,7 +33,7 @@ only that one line.
 | Key | Values | Default | Effect |
 |---|---|---|---|
 | `theme` | `system`, a theme id, or `light:<id>,dark:<id>` | `system` | The color theme. `system` uses Wren Dark or Wren Light to match the OS appearance. |
-| `editor-font-size` | number from 9 to 32 | `14` | Editor text size in points. ⌘+ / ⌘- / ⌘0 (Alt on Linux) change it one point at a time, or reset it, and save the result here. |
+| `editor-font-size` | number from 9 to 32 | `14` | Editor text size in points. ⌘+ / ⌘- / ⌘0 (Mod on Linux) change it one point at a time, or reset it, and save the result here. |
 | `editor-font-family` | an installed font family, quoted | `"JetBrains Mono"` (bundled) | The editor font. **Change editor font…** lists the monospace ones; any installed family works here. An unknown family warns and uses JetBrains Mono. |
 | `editor-line-height` | number from 1.2 to 2.2 | `1.7` | The height of an editor row as a multiple of the text size: `1.7` gives 24 px rows at 14 pt. Rows round to whole pixels, and the ratio holds when the text size changes. The gutter numbers, caret, current-line band, and selection follow it on both engines. |
 | `editor-wrap-column` | characters from 20 to 400, or `none` | `100` | Where long lines wrap, counted in the width of the editor font's `0`, so the same number of characters fits at any text size. The text starts at the left of the editor pane, after the line numbers, and wraps at this column or 24 px short of the pane's right edge, whichever comes first; the current-line and code bands span the pane. `none` wraps at the pane's edge. [Focus mode](../getting-started/first-run.md) centres the text at this column (100 when this is `none`), with the line numbers in its left margin; the margins stay at least the gutter's width, 48 px, and 6% of the window wide. Lines only soft-wrap: the file keeps its own line breaks. On the advanced engine the larger H1–H3 headings wrap sooner, since the column counts body-size characters. |
@@ -47,6 +47,7 @@ only that one line.
 | `board-key-badges` | `hold` / `on` / `off` | `hold` | When the dock's buttons and the style bar's swatches show their keys: while Space is held on the board (`hold`), always (`on`), or never (`off`). A button's tooltip names its key whatever this says. See [Boards](boards.md#the-tool-dock). Applies on reload. |
 | `tasks` | `on` / `off` | `off` | [Tasks](tasks.md): statuses, due dates, priorities and owners on task lines, with their colours, status-bar line, menus, calendar, suggestions, form, commands and keys. Off, task lines edit, highlight, spell check and search exactly as before, and no task command, key or file exists. Applies when Wren restarts; until then the banner says "Restart Wren to apply `tasks`." |
 | `tasks-suggest` | `on` / `off` | `on` | With `tasks = on` on the `advanced` engine, typing on a task line offers a due date, a priority or an owner. See [Suggestions](tasks.md#suggestions). Off, nothing is offered and Tab and Enter act as in any list. Applies on reload. |
+| `linux-modifier` | `ctrl` / `alt` | `ctrl` | The command key, **Mod**, on Linux: Ctrl, as in most Linux apps, or Alt, the way ⌘ works on macOS. With `alt`, every Mod shortcut moves to Alt, copy, cut, paste, select all, undo and redo included, and the Ctrl versions keep working too. Applies at once. The palette command **Use Alt for commands** (**Use Ctrl for commands** while Alt is in use) flips it and saves it here. macOS ignores it. See [The command key on Linux](../getting-started/keybindings.md#the-command-key-on-linux). |
 | `keybind` | `<trigger> = <action>` | see [Keybindings](../getting-started/keybindings.md) | Add, replace, or remove a shortcut. Repeatable; later lines win. Board shortcuts are listed under [On a board](../getting-started/keybindings.md#on-a-board). |
 
 ## Themes

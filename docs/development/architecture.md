@@ -41,9 +41,14 @@ A command has a `CommandId`, a stable key (`note.new`, `navigation.jump`), a
 palette label, a group, and a scope. To add one, add a `CommandId`, a
 `definitions!` row in `app/commands.rs`, and a case in `run_command`. Default
 shortcuts live in `wren_core::keybind::default_bindings`; users override them
-with `keybind` lines. macOS uses Command as the app modifier and Linux uses
-Alt, leaving Ctrl to text editing. `keys::alt_filter` drops the text of Alt
-presses on Linux so shortcuts never type their letter.
+with `keybind` lines. The command key is one
+logical **Mod**: Command on macOS, Ctrl on Linux by default, and Alt on Linux
+with `linux-modifier = alt`. A default table is written with `mod` (and the
+board's second key, `opt`), and `wren_core::keybind::Scheme`, a `Platform`
+plus a `LinuxModifier`, resolves them; `keybind` lines may use `mod` and `opt`
+too, so an override follows the switch. A palette command changes the mode
+live and saves it to `config.conf`. `keys::alt_filter` still drops the text of
+Alt presses on Linux so shortcuts never type their letter.
 
 The scope says who runs a command from its key. An **App** command runs
 wherever the keyboard is. An **Editor** command (`markdown.*`, `edit.*`,
@@ -70,8 +75,8 @@ and a user's `keybind` lines for board actions, removed with
 `board_policy` builds. A key the base layer gives an App command stays the
 app's on a board, and no board default shares a trigger with one, so
 `App::key_input` never needs to know a board is focused. Board keys may be
-bare (`r`, `]`, `1`), and on a board the document modifier is ⌘ on macOS
-and Ctrl on Linux, as in text editing. Every board command is one
+bare (`r`, `]`, `1`), and on a board the document modifier is Mod (⌘ on
+macOS, Ctrl or Alt on Linux) and the second key, Opt, the other one. Every board command is one
 `CommandId::Board(wren_canvas::Command)` row; `command_enabled` and
 `run_command` route it to the board.
 

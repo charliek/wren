@@ -82,7 +82,7 @@ Open it on a marked word in either of two ways:
 - Right-click the word. The editor takes the keyboard, as a left click
   would.
 - With the caret in or touching the word, press **Suggest spelling**:
-  Alt+. on Linux, ⌘. on macOS. From the command palette, the same command
+  Alt+. on Linux (Mod+. with `linux-modifier = alt`), ⌘. on macOS. From the command palette, the same command
   returns the keyboard to the editor and opens the menu at its caret.
 
 Anywhere else, neither opens anything. The menu lists up to five
@@ -148,7 +148,7 @@ always come from the dictionary.
 | Command | Action name | Default key | Available |
 |---|---|---|---|
 | Toggle spell check | `editor.toggle_spell_check` | none | Always. Its palette row shows `on` or `off`. |
-| Suggest spelling | `editor.spell_suggest` | Alt+. (Linux), ⌘. (macOS) | On the advanced engine with spell check on, once the dictionary has loaded and a Markdown note is open (not a board, nor a board shown as text). |
+| Suggest spelling | `editor.spell_suggest` | Alt+. (Linux; Mod+. in Alt mode), ⌘. (macOS) | On the advanced engine with spell check on, once the dictionary has loaded and a Markdown note is open (not a board, nor a board shown as text). |
 | Open spelling word list | `settings.open_words` | none | Always. Like **Open settings file**, it stops with a message when there is no settings location (neither `HOME` nor `WREN_CONFIG` is set). |
 
 All three can be bound with `keybind` lines (see

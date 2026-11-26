@@ -164,9 +164,16 @@ when one lands, move what users need into `docs/` and trim the note.
   command. A board command is a `wren_canvas::Command` variant with its
   `key()`, a `BOARD_DEFINITIONS` row in `app/commands.rs` and, if it has a
   key, a `keybind::default_board_bindings` entry.
-- macOS uses Command as the app modifier; Linux uses Alt, leaving Ctrl to
-  text editing. `keys::alt_filter` drops the text of Alt presses on Linux
-  so shortcuts never type their letter.
+- One command key, **Mod**: ⌘ on macOS, Ctrl on Linux by default, and Alt on
+  Linux with `linux-modifier = alt` (a palette command switches it live). A
+  default table is written once with the logical `mod` and `opt` tokens (`opt`
+  is the board's second key: ⌥ on macOS, the other of Ctrl and Alt on Linux),
+  and `wren_core::keybind::Scheme` (a `Platform` plus a `LinuxModifier`)
+  resolves them; `keybind` lines may use them too, so an override follows the
+  switch. The few keys that do not follow Mod (move line Alt+↑/↓, spell
+  suggest, word motion, board pointer modifiers) are exceptions, each with a
+  comment and a test. `keys::alt_filter` still drops the text of Alt presses
+  on Linux so shortcuts never type their letter.
 - Autosave is a primary reliability requirement. Every note or workspace
   transition, and quit, flushes first, and a failed flush blocks the
   transition and keeps the draft.
