@@ -9,6 +9,7 @@
 //! `palette.commands`, …); this module does not know the command table, so
 //! callers validate action names.
 
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -613,6 +614,10 @@ impl Keymap {
             ..Self::default()
         };
         let mut warnings = Vec::new();
+        // Each recorded unbind with the line that made it, so a later base
+        // binding clears one in constant time and the order stays the lines'.
+        let mut unbound: HashMap<Accel, usize> = HashMap::new();
+        let mut order = 0;
         for (trigger, action) in defaults {
             if let (Some(accel), Some(layer)) = (scheme.parse(&trigger), layer_of(action)) {
                 let table = keymap.layer_mut(layer);
@@ -653,9 +658,10 @@ impl Keymap {
                 continue;
             }
             if layer == Layer::Base {
-                keymap.unbound.retain(|bound| *bound != accel);
+                unbound.remove(&accel);
                 if unbind {
-                    keymap.unbound.push(accel.clone());
+                    unbound.insert(accel.clone(), order);
+                    order += 1;
                 }
             }
             let table = keymap.layer_mut(layer);
@@ -665,6 +671,9 @@ impl Keymap {
                 table.insert(0, (accel, action.into()));
             }
         }
+        let mut unbound: Vec<_> = unbound.into_iter().collect();
+        unbound.sort_by_key(|(_, order)| *order);
+        keymap.unbound = unbound.into_iter().map(|(accel, _)| accel).collect();
         (keymap, warnings)
     }
 

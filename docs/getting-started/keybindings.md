@@ -28,8 +28,9 @@ editor, on a board, and in the text fields: the palette, dialogs, the find
 bars, the column filters, the calendar, the task form, and the board keys
 sheet's filter. A text field has no undo, in either mode, so Alt+Z and Ctrl+Z
 do nothing there. The Ctrl versions keep working too: Ctrl+Z, Ctrl+Shift+Z,
-Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A, Ctrl+F (find), and Ctrl+Q (quit). In Ctrl
-mode, those are the only versions. AltGr is not Alt: it types its characters
+Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A, Ctrl+F (find), and Ctrl+Q (quit). Those
+are the only Ctrl keys that do: other Ctrl shortcuts, such as Ctrl+N, do
+nothing in Alt mode. In Ctrl mode, those are the only versions. AltGr is not Alt: it types its characters
 as usual.
 
 Alt mode is not the layout Wren had before this switch, where only the app's

@@ -941,9 +941,9 @@ pub(crate) mod tests {
             }
         }
 
-        /// A field under a [`key_owner`] that owns `?` and Ctrl+X, as the
-        /// keys sheet owns its toggle wherever its keyboard is: the field
-        /// `focused` or not. Returns what was published, whether each press
+        /// A field under a [`key_owner`] that owns `?`, Ctrl+X and Ctrl+Alt+X,
+        /// as the keys sheet owns its toggle wherever its keyboard is: the
+        /// field `focused` or not. Returns what was published, whether each press
         /// was captured, and the clipboard.
         fn owned(
             events: &[Event],
@@ -963,7 +963,10 @@ pub(crate) mod tests {
                     ),
                     |key: &Key, _, modifiers: Modifiers, _: Option<&str>| match key.as_ref() {
                         Key::Character("?") => modifiers == Modifiers::SHIFT,
-                        Key::Character("x") => modifiers == Modifiers::CTRL,
+                        Key::Character("x") => {
+                            modifiers == Modifiers::CTRL
+                                || modifiers == Modifiers::CTRL | Modifiers::ALT
+                        }
                         _ => false,
                     },
                     || "<owned>".to_owned(),
@@ -1052,6 +1055,10 @@ pub(crate) mod tests {
             );
             assert_eq!(published, ["<owned>"]);
             assert_eq!((captured[1], kept.as_deref()), (true, Some("sentinel")));
+            // A textless Ctrl+Alt+X is the owner's.
+            let (published, _, _) =
+                owned(&[chord("x", Modifiers::CTRL | Modifiers::ALT)], None, true);
+            assert_eq!(published, ["<owned>"]);
             // AltGr's text on an owned key is never the owner's.
             let (published, _, kept) = owned(
                 &[chord("a", Modifiers::CTRL), alt_graph("x", "»")],

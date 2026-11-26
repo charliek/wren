@@ -658,6 +658,7 @@ where
                         modified_key,
                         physical_key,
                         modifiers,
+                        text,
                         ..
                     }) => {
                         // A character is offered to a row of choices as typed,
@@ -673,10 +674,15 @@ where
                             .map_or(SlotKind::Button, |slot| slot.kind);
                         let typed = !self.typed.borrow().trim().is_empty()
                             || (kind == SlotKind::Owners && self.chosen.get());
-                        let save = self
-                            .save
-                            .as_ref()
-                            .is_some_and(|save| save(key, *physical_key, *modifiers));
+                        let save = self.save.as_ref().is_some_and(|save| {
+                            // AltGr's text is no save key.
+                            !wren_editor::is_alt_graph(
+                                key,
+                                *physical_key,
+                                *modifiers,
+                                text.as_deref(),
+                            ) && save(key, *physical_key, *modifiers)
+                        });
                         match route(kind, routed_key, *modifiers, state.composing, typed, save) {
                             Routed::Pass => {
                                 // The text input reads the modifiers it last
@@ -1210,6 +1216,59 @@ mod tests {
             );
         }
         assert_eq!(claims.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// With `ctrl+alt+e` a save key, AltGr's `€` types into the field and
+    /// does not save, while a textless Ctrl+Alt+E still does.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn alt_graph_text_is_no_save_key() {
+        let save: SaveKeys = Rc::new(|key: &Key, _, modifiers: Modifiers| {
+            *key == Key::Character("e".into()) && modifiers == Modifiers::CTRL | Modifiers::ALT
+        });
+        let chord = |text: Option<&str>| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character("e".into()),
+                modified_key: Key::Character(text.unwrap_or("e").into()),
+                physical_key: Physical::Code(Code::KeyE),
+                location: Location::Standard,
+                modifiers: Modifiers::CTRL | Modifiers::ALT,
+                text: text.map(Into::into),
+                repeat: false,
+            })
+        };
+        let saves = |event: Event| {
+            let mut element: Element<'static, Out, Theme, ()> = form_keys(
+                column![text_input("", "").id(IDS[0])],
+                slots(),
+                0,
+                Rc::new(RefCell::new(String::new())),
+                Out::Key,
+            )
+            .save_keys(Rc::clone(&save))
+            .into();
+            let mut tree = Tree::new(&element);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+            );
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+            );
+            messages.contains(&key(FormKey::Save))
+        };
+        assert!(!saves(chord(Some("€"))), "AltGr types");
+        assert!(saves(chord(None)), "a textless Ctrl+Alt+E saves");
     }
 
     #[test]
