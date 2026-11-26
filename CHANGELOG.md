@@ -15,6 +15,7 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Changed
 
+- The task form and the priority menu list priorities from highest to lowest.
 - **On Linux the command key is now Ctrl, like other apps.** Wren's commands
   used Alt there; the app's shortcuts, Markdown formatting, tasks and the
   board now take Ctrl (Ctrl+N, Ctrl+Shift+P, Ctrl+B, Ctrl+D, Ctrl+Z, and so

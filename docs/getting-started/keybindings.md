@@ -228,7 +228,7 @@ chooses a row directly:
 | Menu | Keys |
 |---|---|
 | Status | Space Open, `/` Doing, `x` Done, `-` Cancelled: the characters that go in the box |
-| Priority | `h` High, `m` Medium, `l` Low, ⇧H Highest, ⇧L Lowest, `n` None |
+| Priority | ⇧H Highest, `h` High, `m` Medium, `l` Low, ⇧L Lowest, `n` None |
 | Task | the status keys, then `d` Set or Change due date…, `p` Priority…, `e` Edit task… |
 
 A choice rewrites the task's line as one undo step, with the done or
@@ -286,7 +286,7 @@ matter has no form.
 | Tab, ⇧Tab | the next or the previous field, round the ends: description, status, due, priority, owners, Save, Cancel |
 | ← → | on the status or the priority, the previous or the next choice |
 | Space `/` `x` `-` | on the status, Open, Doing, Done or Cancelled |
-| `h` `m` `l` ⇧H ⇧L `n` | on the priority, High, Medium, Low, Highest, Lowest or None |
+| ⇧H `h` `m` `l` ⇧L `n` | on the priority, Highest, High, Medium, Low, Lowest or None |
 | ↓ | in the due field, opens the calendar under it; whatever closes it gives the due field the keyboard back |
 | ↵ | saves, from any field but these: in the owners field with a name typed it adds that name as typed, or the owner chosen with ↑ ↓; on Save or Cancel it presses the button |
 | Space | on Save or Cancel, presses the button |

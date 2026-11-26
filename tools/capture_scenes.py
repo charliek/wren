@@ -612,7 +612,7 @@ def menu_scenes(client, shot_here, resize) -> None:
     menu_at("[", status, "Doing")
     shot_here("task-menu-status")
     client.call("editor.key", {"key": "escape"})
-    menu_at("⏫", ["High", "Medium", "Low", "Highest", "Lowest", "None"], "High")
+    menu_at("⏫", ["Highest", "High", "Medium", "Low", "Lowest", "None"], "High")
     shot_here("task-menu-priority")
     client.call("editor.key", {"key": "escape"})
 

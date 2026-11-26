@@ -13,8 +13,8 @@
 //!
 //! - status: Open (Space), Doing (`/`), Done (`x`), Cancelled (`-`), the
 //!   characters that go in the box;
-//! - priority: High (H), Medium (M), Low (L), Highest (⇧H), Lowest (⇧L),
-//!   None (N), the common three first (Q7);
+//! - priority: Highest (⇧H), High (H), Medium (M), Low (L), Lowest (⇧L),
+//!   None (N), from highest to lowest;
 //! - task: the status rows, then Set due date… (D), which opens the
 //!   calendar, Priority… (P), which opens the priority menu, and Edit task…
 //!   (E), which opens the task form (item 6.1, `task_form.rs`).
@@ -132,12 +132,12 @@ fn level_number(level: Priority) -> u32 {
     u32::try_from(place.expect("every level is listed") + 1).expect("five levels")
 }
 
-/// The priority menu's rows, in Q7's order: a level and its key.
+/// The priority menu's rows, from highest to lowest: a level and its key.
 const PRIORITY_ROWS: [(Option<Priority>, Accelerator); 6] = [
+    (Some(Priority::Highest), Accelerator::shifted('h')),
     (Some(Priority::High), Accelerator::plain('h')),
     (Some(Priority::Medium), Accelerator::plain('m')),
     (Some(Priority::Low), Accelerator::plain('l')),
-    (Some(Priority::Highest), Accelerator::shifted('h')),
     (Some(Priority::Lowest), Accelerator::shifted('l')),
     (None, Accelerator::plain('n')),
 ];
@@ -727,7 +727,7 @@ mod tests {
             };
             let first = rows.first().map(|row| row.label.as_str());
             let expected = match kind {
-                MenuKind::Priority => (6, Some("High")),
+                MenuKind::Priority => (6, Some("Highest")),
                 MenuKind::Status => (4, Some("Open")),
                 MenuKind::Task => (7, Some("Open")),
             };
@@ -809,18 +809,18 @@ mod tests {
                 .iter()
                 .map(|row| row.label.as_str())
                 .collect::<Vec<_>>(),
-            ["High", "Medium", "Low", "Highest", "Lowest", "None"]
+            ["Highest", "High", "Medium", "Low", "Lowest", "None"]
         );
         assert_eq!(
             keys(&priority),
-            ["H", "M", "L", "\u{21e7}H", "\u{21e7}L", "N"]
+            ["\u{21e7}H", "H", "M", "L", "\u{21e7}L", "N"]
         );
         assert_eq!(
             priority
                 .iter()
                 .map(|row| row.glyph.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            ["⏫", "🔼", "🔽", "🔺", "⏬", "·"]
+            ["🔺", "⏫", "🔼", "🔽", "⏬", "·"]
         );
         for (text, mark) in [
             ("- [ ] a", "None"),
@@ -1154,7 +1154,7 @@ mod tests {
         press(&mut app, character("p"), Modifiers::empty());
         assert_eq!(
             labels(&app),
-            ["High", "Medium", "Low", "Highest", "Lowest", "None"]
+            ["Highest", "High", "Medium", "Low", "Lowest", "None"]
         );
         let popover = app.editor.popover().unwrap();
         assert_eq!(popover.line(), at);
@@ -1186,7 +1186,11 @@ mod tests {
             "Priority…"
         );
         press(&mut app, Key::Named(Named::Enter), Modifiers::empty());
-        assert_eq!(labels(&app)[0], "High", "Enter on Priority… opens its menu");
+        assert_eq!(
+            labels(&app)[0],
+            "Highest",
+            "Enter on Priority… opens its menu"
+        );
     }
 
     /// A row acts on the task its menu was opened for by the right-click,
@@ -1279,7 +1283,7 @@ mod tests {
         assert_eq!(app.editor.popover().unwrap().range(), glyph..glyph + 3);
         assert_eq!(
             app.editor.popover().unwrap().selected(),
-            Some(0),
+            Some(1),
             "High, checked"
         );
         press(&mut app, character("l"), Modifiers::SHIFT);
