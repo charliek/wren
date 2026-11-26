@@ -1864,7 +1864,7 @@ mod tests {
     }
 
     /// Another note in the editor gives back the lines kept of the one
-    /// before, and the owners' copy of it.
+    /// before, and the task index's copy of its draft.
     #[test]
     fn another_note_gives_back_what_was_kept() {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
@@ -1877,16 +1877,18 @@ mod tests {
                 Edit::Insert(c),
             ))));
         }
+        let holds_draft =
+            |app: &App| (app.session.as_ref().unwrap().tasks().unwrap()).holds_draft();
         assert!(app.task_lines_kept());
-        assert!(app.owners.holds_typing());
+        assert!(holds_draft(&app));
         let other = first_note(&app, "B Other");
         let _ = app.process_core(Op::OpenNote { note: Some(other) });
         app.release_task_caches();
         assert!(!app.task_lines_kept());
-        assert!(!app.owners.holds_typing());
+        assert!(!holds_draft(&app));
         // A message reads only the note shown now.
         let _ = app.update(Message::Tick);
-        assert!(!app.owners.holds_typing());
+        assert!(!holds_draft(&app));
     }
 
     /// Typing at the end of a 20,000-line note reads a bounded number of

@@ -13,6 +13,7 @@ use wren_markdown::block::{self, Boxes, Kind, LineInfo, Scanner};
 use crate::fs_store::{DiskFile, FsStore, RelPath};
 use crate::kind::NoteKind;
 use crate::model::{GroupId, Note, NoteId, SectionId, Workspace};
+use crate::tasks::{self, TaskIndex};
 
 pub const MAX_CONTENT_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_QUERY_BYTES: usize = 4096;
@@ -121,6 +122,16 @@ struct Entry {
     limitation: Option<String>,
 }
 
+/// What [`Index::read_note`] found on disk.
+pub(crate) enum Reread {
+    /// The file as read, text or not.
+    Read(DiskFile),
+    /// No file.
+    Missing,
+    /// A file that could not be read, or a note the index does not hold.
+    Failed,
+}
+
 #[derive(Debug)]
 pub struct Index {
     entries: HashMap<NoteId, Entry>,
@@ -141,6 +152,13 @@ pub struct Index {
     /// The task boxes previews and snippets read, as the editor of the same
     /// run reads them: fixed by the Session's `tasks` option.
     boxes: Boxes,
+    /// The task index, with tasks on. It lives here because it is fed
+    /// here: every Markdown source the search index takes or loses passes
+    /// [`Index::put`] or [`Index::unavailable`], and every change of the
+    /// notes [`Index::sync_metadata`], so the two cannot fall out of step.
+    /// It reads a source as it arrives and keeps none, so content dropped
+    /// for the budget costs it nothing.
+    tasks: Option<TaskIndex>,
     /// Board sources handed to extraction, so tests can prove that unchanged
     /// boards are never extracted again.
     #[cfg(test)]
@@ -163,6 +181,16 @@ impl Index {
         }
     }
 
+    /// An empty index for a Session whose tasks are on or off: on, it
+    /// reads a task box of any status and keeps the task index; off, it
+    /// is [`Index::default`].
+    pub(crate) fn with_tasks(on: bool) -> Self {
+        Self {
+            tasks: on.then(TaskIndex::default),
+            ..Self::with_boxes(Boxes::with_tasks(on))
+        }
+    }
+
     fn with_budget(budget: usize) -> Self {
         Self {
             entries: HashMap::new(),
@@ -175,6 +203,7 @@ impl Index {
             warnings: Vec::new(),
             pending: None,
             boxes: Boxes::Plain,
+            tasks: None,
             #[cfg(test)]
             extractions: 0,
         }
@@ -200,19 +229,31 @@ impl Index {
         self.identity
     }
 
-    /// Each Markdown note's source as the index holds it, with the time the
-    /// note was last changed on disk: what the owners of tasks are read
-    /// from (`crate::owners`). Boards, and notes whose content the index
-    /// dropped, are left out. The sources are shared, not copied.
-    pub fn markdown_sources(&self) -> Vec<(NoteId, SystemTime, Arc<str>)> {
-        self.entries
-            .iter()
-            .filter(|(_, entry)| entry.kind == NoteKind::Markdown)
-            .filter_map(|(note, entry)| {
-                let content = entry.content.as_ref()?;
-                Some((*note, entry.modified, Arc::clone(&content.source)))
-            })
-            .collect()
+    /// The task index; `None` with tasks off, when none is built.
+    pub fn tasks(&self) -> Option<&TaskIndex> {
+        self.tasks.as_ref()
+    }
+
+    /// Take the folders `.wren/tasks.toml` leaves out of every rollup.
+    pub(crate) fn exclude_tasks(&mut self, folders: &[RelPath]) {
+        if let Some(tasks) = &mut self.tasks {
+            tasks.set_excluded(folders);
+        }
+    }
+
+    /// Lower the content budget to `budget` bytes and drop content, the
+    /// last notes' first and never `keep`'s, until what is retained fits.
+    pub(crate) fn shrink_budget(&mut self, budget: usize, keep: Option<NoteId>) {
+        self.budget = budget;
+        for candidate in self.order.clone().into_iter().rev() {
+            if self.retained_bytes <= self.budget {
+                break;
+            }
+            if Some(candidate) != keep && self.entries[&candidate].content.is_some() {
+                self.drop_content(candidate);
+                self.set_limitation(candidate, Some(self.budget_message()));
+            }
+        }
     }
 
     /// Retained source, extracted and lowercase content bytes, excluding title
@@ -427,6 +468,13 @@ impl Index {
             self.order = workspace.notes.iter().map(|note| note.id).collect();
             self.changed();
         }
+        if self
+            .tasks
+            .as_mut()
+            .is_some_and(|tasks| tasks.sync(workspace))
+        {
+            self.changed();
+        }
         added
     }
 
@@ -447,6 +495,9 @@ impl Index {
                 limitation: None,
             });
             self.changed();
+        }
+        if let Some(tasks) = &mut self.tasks {
+            tasks.admit(note);
         }
         match contents {
             Ok(file) => match std::str::from_utf8(&file.bytes) {
@@ -483,9 +534,12 @@ impl Index {
         }
     }
 
-    pub(crate) fn scan_failed(&mut self, active: Option<NoteId>) {
+    /// A scan of the workspace failed: nothing it would have read is
+    /// known any more, but the notes `keep` names, whose text the owner
+    /// holds or has read since the scan began.
+    pub(crate) fn scan_failed(&mut self, keep: impl Fn(NoteId) -> bool) {
         for note in self.order.clone() {
-            if Some(note) != active {
+            if !keep(note) {
                 self.unavailable(
                     note,
                     "scan failed; content search unavailable until reconciliation succeeds",
@@ -494,16 +548,28 @@ impl Index {
         }
     }
 
-    pub(crate) fn read_note(&mut self, store: &FsStore, note: NoteId) {
+    /// Reads `note` from disk as a closed note's text, and says what was
+    /// found there, so the caller can keep the model's metadata in step.
+    pub(crate) fn read_note(&mut self, store: &FsStore, note: NoteId) -> Reread {
         let Some(entry) = self.entries.get(&note) else {
-            return;
+            return Reread::Failed;
         };
         match store.read(&entry.path) {
-            Ok(file) => match std::str::from_utf8(&file.bytes) {
-                Ok(text) => self.set_content(note, text, false),
-                Err(_) => self.unavailable(note, NOT_UTF8),
-            },
-            Err(error) => self.unavailable(note, &format!("content search unavailable: {error}")),
+            Ok(file) => {
+                match std::str::from_utf8(&file.bytes) {
+                    Ok(text) => self.set_content(note, text, false),
+                    Err(_) => self.unavailable(note, NOT_UTF8),
+                }
+                Reread::Read(file)
+            }
+            Err(error) => {
+                self.unavailable(note, &format!("content search unavailable: {error}"));
+                if error.is_not_found() {
+                    Reread::Missing
+                } else {
+                    Reread::Failed
+                }
+            }
         }
     }
 
@@ -515,6 +581,11 @@ impl Index {
         let Some(entry) = self.entries.get(&note) else {
             return;
         };
+        // Only a board's labels are worth the wait. With tasks on, a
+        // Markdown source never waits: its tasks are read as it arrives.
+        if self.tasks.is_some() && entry.kind == NoteKind::Markdown {
+            return self.set_content(note, source, true);
+        }
         let kept = entry
             .content
             .as_ref()
@@ -623,11 +694,36 @@ impl Index {
             .as_ref()
             .is_some_and(|content| &*content.source == source)
         {
+            // The source the tasks were read from. A note read as a
+            // closed one is no longer the open note, whose draft is kept.
+            if !priority {
+                if let Some(tasks) = &mut self.tasks {
+                    tasks.closed(note, source);
+                }
+            }
             return;
         }
         let kind = entry.kind;
+        // How far the open note's text agrees with the one held until
+        // now: the task index keeps no text to find that out by.
+        let before = match &entry.content {
+            Some(content) if priority && self.tasks.is_some() => Some(tasks::Before {
+                len: content.source.len(),
+                same: tasks::common_prefix(content.source.as_bytes(), source.as_bytes()),
+            }),
+            _ => None,
+        };
         self.drop_content(note);
         let source: Arc<str> = source.into();
+        // Before the budget decides whether search keeps the source: the
+        // tasks are read from it either way.
+        if self
+            .tasks
+            .as_mut()
+            .is_some_and(|tasks| tasks.take(note, &source, priority, before))
+        {
+            self.changed();
+        }
         let searched = if hold && kind == NoteKind::Board {
             None
         } else {
@@ -761,8 +857,20 @@ impl Index {
     }
 
     fn unavailable(&mut self, note: NoteId, reason: &str) {
+        // A source of the note that waited to be extracted is no longer
+        // its text either: settling it would bring the note back.
+        if self.pending.as_ref().is_some_and(|(of, _)| *of == note) {
+            self.pending = None;
+        }
         self.drop_content(note);
         self.set_limitation(note, Some(reason.into()));
+        if self
+            .tasks
+            .as_mut()
+            .is_some_and(|tasks| tasks.unreadable(note))
+        {
+            self.changed();
+        }
     }
 
     fn budget_message(&self) -> String {
@@ -1928,6 +2036,22 @@ mod tests {
             bytes: 0,
         });
         workspace
+    }
+
+    /// A board that can no longer be read gives up the source that waited
+    /// with its content: settling afterwards does not bring it back.
+    #[test]
+    fn a_note_that_cannot_be_read_gives_up_its_waiting_source() {
+        let mut index = board_index();
+        index.set_content(BOARD, LABELLED_BOARD, true);
+        index.defer_content(BOARD, &LABELLED_BOARD.replace("Pack the parcel", "Wrap it"));
+        assert!(index.has_pending());
+        index.ingest_scanned(BOARD, Err("the board is gone"));
+        assert!(!index.has_pending());
+        index.settle();
+        assert_eq!(index.content(BOARD), None);
+        assert!(search(&index, "Wrap it").is_empty());
+        assert!(index.limitation(BOARD).unwrap().contains("gone"));
     }
 
     #[test]

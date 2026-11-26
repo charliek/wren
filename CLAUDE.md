@@ -45,8 +45,12 @@ when one lands, move what users need into `docs/` and trim the note.
   `keybind.rs` (triggers, platform default bindings, and the board
   layer), `kind.rs` (`NoteKind`, the kind a file name gives), and
   `theme.rs` (built-in palettes, with each theme's board hues and its task
-  date and owner colours), and `owners.rs` (the `@owner`s that suggestions
-  offer, read from the search index's notes).
+  date and owner colours), `tasks.rs` (the task index: a record for each
+  task line, fed by `index.rs` wherever it takes a note's text, queried by
+  path, and built only with tasks on), `tasks_file.rs` (the app-managed
+  `.wren/tasks.toml`: folder exclusions and each view's filters), and
+  `owners.rs` (the `@owner`s that suggestions offer, read from the task
+  index's records).
 - `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
   types so it can be extracted later. It must not depend on `wren-core` or
   `wren-spell`, or know app messages; the host passes in a `Style`, a
@@ -189,7 +193,9 @@ when one lands, move what users need into `docs/` and trim the note.
   accepts only the boxes it always did, the toggle writes no stamp, and no
   task command, key or file exists (the harness's `tasks.get` alone still
   answers, `{"tasks": false}`): `tasks_baseline.rs` and
-  `test_tasks_baseline.py` pin it. Task dates come from `App::today()`,
+  `test_tasks_baseline.py` pin it. No task index is built, and
+  `.wren/tasks.toml` is neither read nor written; with tasks on it is
+  created only once something is set. Task dates come from `App::today()`,
   which `WREN_TEST_TODAY` pins under `smoke-test`. A structured change to an
   existing task (menus, commands, suggestions, the form's edits) goes
   through `wren_markdown::task::edit`, as one `EditPlan` that carries the
@@ -221,6 +227,7 @@ ICED_BACKEND=tiny-skia make smoke-x11   # real-window functional suite under Xvf
 make smoke-wayland               # same suite on headless Weston, minus X11-native cases
 uv run --locked --group docs zensical build --strict  # docs site; run for changes under docs/
 make fuzz-board && make perf-board   # after changing wren-board; perf-board needs a quiet machine
+make perf-tasks                  # after changing the task index (wren-core `tasks.rs`); a quiet machine
 ```
 
 - Task changes: `make smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on

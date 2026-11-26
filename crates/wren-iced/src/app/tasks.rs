@@ -325,9 +325,10 @@ impl App {
         })
     }
 
-    /// Give back what is kept of a note's lines, here and in the owners'
-    /// copy of the note typed in, once the editor shows another note, or a
-    /// board, or no note. After every message, with tasks on.
+    /// Give back what is kept of a note's lines, once the editor shows
+    /// another note, or a board, or no note. After every message, with
+    /// tasks on. (The task index gives back its own copy of the open
+    /// note's draft when the Session leaves the note.)
     pub(super) fn release_task_caches(&mut self) {
         let shown = (self.selected_note, self.surface() == Surface::Text);
         if self.task_memo.shown.get() == Some(shown) {
@@ -335,7 +336,6 @@ impl App {
         }
         self.task_memo.shown.set(Some(shown));
         *self.task_memo.lines.borrow_mut() = None;
-        self.owners.release_typing();
     }
 
     /// Whether lines of the editor's text are kept.

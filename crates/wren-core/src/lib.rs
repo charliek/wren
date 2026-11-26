@@ -10,6 +10,8 @@ pub mod owners;
 pub mod reconcile;
 pub mod scan;
 pub mod settings;
+pub mod tasks;
+pub mod tasks_file;
 pub mod theme;
 pub mod watch;
 pub mod workspace_state;

@@ -255,11 +255,8 @@ lacks. Two rules open the list:
 | `@`, `@sa` | Owners already on task lines in the workspace |
 
 Suggestions use these words only: `+3d` and ISO dates are typed in the
-calendar or the form. Owners come from the task lines of the notes whose
-text the search index holds. In a workspace past the index's memory limit
-(128 MiB, counting each note's text and its lowercase copy), a note whose
-content search is unavailable is left out, so a name written only there is
-not offered. Owners are compared without regard to case (Unicode case
+calendar or the form. Owners come from the task lines of every Markdown
+note in the workspace. Owners are compared without regard to case (Unicode case
 folding, so `@µ` and `@μ` are one owner) and offered in their most common
 spelling. They are ranked by the notes they appear in, each note counting
 less the longer ago it changed (half as much after 30 days), so this week's

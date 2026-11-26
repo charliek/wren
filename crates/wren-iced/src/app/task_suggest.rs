@@ -19,10 +19,10 @@
 //! calendar under the word, which takes the word out with the date it
 //! writes, and leaves it where it is when cancelled.
 //!
-//! **Owners** come from the Markdown notes the search index holds
+//! **Owners** come from the task index's records of the workspace's notes
 //! (`wren_core::owners::Owners`), brought up to the index after every
 //! message while the caret is on a task line, on the UI thread within a
-//! measured budget: a note is read again only when its source changed, so
+//! measured budget: a note is read again only when its records changed, so
 //! typing reads the one note typed in, leaving out the line typed on. The
 //! owners offered are always those of the index as it is now, of this
 //! workspace: another index starts afresh, and with none they are dropped.
@@ -347,10 +347,13 @@ impl App {
         if self.owners.is_current(identity, index.revision(), skip) {
             return;
         }
-        let changed = self.owners.update(
+        let sources = (index.tasks())
+            .map(|tasks| tasks.owner_sources())
+            .unwrap_or_default();
+        let changed = (self.owners).update(
             identity,
             index.revision(),
-            index.markdown_sources(),
+            &sources,
             skip,
             SystemTime::now(),
         );
@@ -977,15 +980,23 @@ mod tests {
             .session
             .as_ref()
             .unwrap()
-            .index()
-            .markdown_sources()
+            .tasks()
+            .unwrap()
+            .owner_sources()
             .into_iter()
-            .map(|(note, modified, text)| {
-                (
-                    note,
-                    modified,
-                    std::sync::Arc::from(text.replace("@Priya.K", "@Priyanka")),
-                )
+            .map(|source| wren_core::owners::Source {
+                note: source.note,
+                modified: source.modified,
+                stamp: source.stamp + 1,
+                names: (source.names.iter().cloned())
+                    .map(|mut owner| {
+                        if owner.name == "Priya.K" {
+                            owner.name = "Priyanka".into();
+                            owner.key = wren_markdown::task::fold_name("Priyanka");
+                        }
+                        owner
+                    })
+                    .collect(),
             })
             .collect();
         let skip = app
@@ -994,7 +1005,8 @@ mod tests {
             .unwrap()
             .document()
             .map(|document| (document.note, 2));
-        assert!(app.owners.update(99, 0, sources, skip, SystemTime::now()));
+        let sources = wren_core::owners::lend(&sources);
+        assert!((app.owners).update(99, 0, &sources, skip, SystemTime::now()));
         app.offer_owners();
         assert_eq!(labels(&app), ["@Priyanka"]);
     }

@@ -4,13 +4,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::autosave::Autosave;
 use crate::fs_store::{DiskFile, Expected, Fault, FsStore, Leaf, RelPath, WriteReceipt};
-use crate::index::Index;
+use crate::index::{Index, Reread};
 use crate::kind::NoteKind;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
 use crate::reconcile::{self, ReconcileJob, ReconcileResult, Scanned, Tags};
 use crate::scan;
+use crate::tasks::TaskIndex;
+use crate::tasks_file::{TaskFilters, TasksFile};
 use crate::watch::Watch;
 use crate::workspace_state::WorkspaceState;
 
@@ -85,6 +87,20 @@ pub enum Op {
     /// Merges a background scan from [`Session::take_reconcile_job`]. Results
     /// from another Session, an older job, or a since-changed tree are dropped.
     FinishReconcile(ReconcileResult),
+    /// Leave a section's or a group's tasks out of every rollup, or bring
+    /// them back: "Hide tasks from this group". Kept in `.wren/tasks.toml`;
+    /// refused while tasks are off.
+    SetTasksExcluded {
+        target: ItemRef,
+        excluded: bool,
+    },
+    /// Remember a task view's filters for its scope: the workspace
+    /// (`None`), a section, a group or a note. Kept in `.wren/tasks.toml`;
+    /// refused while tasks are off.
+    SetTaskFilters {
+        scope: Option<ItemRef>,
+        filters: TaskFilters,
+    },
     Back,
     Forward,
 }
@@ -236,7 +252,8 @@ pub struct SessionOptions {
     /// Whether board notes are scanned, listed, indexed and opened.
     pub boards: bool,
     /// Whether the app's tasks are on: previews and search snippets then
-    /// read a task box of any status, as the editor does.
+    /// read a task box of any status, as the editor does, the task index
+    /// is built, and `.wren/tasks.toml` is read and may be written.
     pub tasks: bool,
 }
 
@@ -247,10 +264,6 @@ impl SessionOptions {
         } else {
             scan::Kinds::MARKDOWN
         }
-    }
-
-    fn boxes(self) -> wren_markdown::block::Boxes {
-        wren_markdown::block::Boxes::with_tasks(self.tasks)
     }
 }
 
@@ -264,6 +277,9 @@ pub struct Session {
     store: FsStore,
     model: Workspace,
     state: WorkspaceState,
+    /// `.wren/tasks.toml`; `None` with tasks off, when it is neither read
+    /// nor written.
+    tasks_file: Option<TasksFile>,
     index: Index,
     selected_parent: Option<Parent>,
     watcher: Option<Watch>,
@@ -288,6 +304,9 @@ pub struct Session {
     // Notes whose model metadata or index text the owner refreshed while a job
     // was in flight. Their newer owner state wins over the job's snapshot read.
     touched: HashSet<NoteId>,
+    // Those of them the owner last found with no file. A job that did not
+    // find such a note agrees with the owner: its result is not older.
+    missing: HashSet<NoteId>,
     /// When the open board last sent a draft whose labels the index has
     /// not extracted yet.
     index_drafted: Option<Duration>,
@@ -341,7 +360,13 @@ impl Session {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
-        let mut index = Index::with_boxes(options.boxes());
+        let mut index = Index::with_tasks(options.tasks);
+        // Before the scan, so each note is found under its folder's
+        // exclusion or not.
+        let tasks_file = options.tasks.then(|| TasksFile::load(&store));
+        if let Some(file) = &tasks_file {
+            index.exclude_tasks(&file.excluded());
+        }
         let mut model =
             scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
                 index.ingest(note, contents);
@@ -361,6 +386,12 @@ impl Session {
         if let Some(warning) = state.warning() {
             model.warnings.push(model::ScanWarning {
                 path: store.root().join(".wren/workspace.toml"),
+                message: warning.into(),
+            });
+        }
+        if let Some(warning) = tasks_file.as_ref().and_then(TasksFile::warning) {
+            model.warnings.push(model::ScanWarning {
+                path: store.root().join(".wren/tasks.toml"),
                 message: warning.into(),
             });
         }
@@ -399,6 +430,7 @@ impl Session {
             store,
             model,
             state,
+            tasks_file,
             index,
             selected_parent: None,
             watcher,
@@ -419,6 +451,7 @@ impl Session {
             reconcile_job: None,
             tree_revision: 0,
             touched: HashSet::new(),
+            missing: HashSet::new(),
             index_drafted: None,
         };
         session.sort_model();
@@ -438,6 +471,7 @@ impl Session {
                 .flatten()
                 .find_map(|path| session.resolve_selection(&path))
             });
+        let mut unopened = None;
         if let Some((parent, note)) = selected {
             session.selected_parent = Some(parent);
             if let Some(note) = note {
@@ -450,14 +484,22 @@ impl Session {
                     .and_then(|file| Document::new(entry, file))
                 {
                     Ok(document) => session.document = Some(document),
-                    Err(message) => session.model.warnings.push(model::ScanWarning {
-                        path: session.store.root().join(path.as_path()),
-                        message,
-                    }),
+                    Err(message) => {
+                        unopened = Some(note);
+                        session.model.warnings.push(model::ScanWarning {
+                            path: session.store.root().join(path.as_path()),
+                            message,
+                        });
+                    }
                 }
             }
         }
         session.index.sync_metadata(&session.model);
+        if let Some(note) = unopened {
+            // What the scan read of it a moment ago can no longer be read
+            // so: the indexes and the model take what is there now.
+            let _ = session.reread(note);
+        }
         if let Some(document) = &session.document {
             session
                 .index
@@ -507,6 +549,24 @@ impl Session {
     pub fn index(&self) -> &Index {
         &self.index
     }
+    /// The task index; `None` with tasks off, when none is built.
+    pub fn tasks(&self) -> Option<&TaskIndex> {
+        self.index.tasks()
+    }
+    /// `.wren/tasks.toml` as read; `None` with tasks off.
+    pub fn tasks_file(&self) -> Option<&TasksFile> {
+        self.tasks_file.as_ref()
+    }
+    /// The filters remembered for the task view of `scope` (the workspace
+    /// for `None`); the defaults for a scope with none, and with tasks off.
+    pub fn task_filters(&self, scope: Option<ItemRef>) -> TaskFilters {
+        let path = scope.map(|scope| self.model.path(scope));
+        match (&self.tasks_file, path) {
+            (Some(file), None) => file.filters(None),
+            (Some(file), Some(Some(path))) => file.filters(Some(path)),
+            _ => TaskFilters::default(),
+        }
+    }
     pub fn selected_parent(&self) -> Option<Parent> {
         self.selected_parent
     }
@@ -524,6 +584,13 @@ impl Session {
     }
     pub fn fail_next(&mut self, fault: Fault) {
         self.store.fail_next(fault);
+    }
+    /// For tests, as [`Session::fail_next`] is: lower the search index's
+    /// content budget to `bytes`, dropping content that no longer fits.
+    #[doc(hidden)]
+    pub fn limit_search_content(&mut self, bytes: usize) {
+        let open = self.document.as_ref().map(|document| document.note);
+        self.index.shrink_budget(bytes, open);
     }
     pub fn can_back(&self) -> bool {
         self.history_index.is_some_and(|index| index > 0)
@@ -742,6 +809,21 @@ impl Session {
                 events.push(Event::TreeChanged);
                 self.persist_metadata(events)
             }
+            Op::SetTasksExcluded { target, excluded } => {
+                if matches!(target, ItemRef::Note(_)) {
+                    return Err("Only a section or a group can be left out of task views".into());
+                }
+                let path = self.item_path(target)?;
+                self.tasks_file_mut()?.set_excluded(&path, excluded)?;
+                self.sync_task_exclusions();
+                self.persist_tasks_file(events)
+            }
+            Op::SetTaskFilters { scope, filters } => {
+                let path = scope.map(|scope| self.item_path(scope)).transpose()?;
+                self.tasks_file_mut()?
+                    .set_filters(path.as_ref(), &filters)?;
+                self.persist_tasks_file(events)
+            }
             Op::Flush => {
                 self.flush_active(now, true, events)?;
                 self.store
@@ -805,13 +887,18 @@ impl Session {
                     .notes
                     .retain(|item| !item.path.as_path().starts_with(path.as_path()));
                 self.state.remove_paths(&path);
+                if let Some(file) = &mut self.tasks_file {
+                    file.remove_paths(&path);
+                }
+                self.sync_task_exclusions();
                 if active_removed {
                     self.document = None;
                     events.push(Event::Selected(None));
                 }
                 self.prune_history();
                 events.push(Event::TreeChanged);
-                self.finish_structure(events)
+                let finished = self.finish_structure(events);
+                finished.and(self.persist_tasks_file(events))
             }
             Op::Reorder { target, before } => {
                 if !self.state.writable() {
@@ -973,11 +1060,17 @@ impl Session {
                         .note(note)
                         .cloned()
                         .ok_or("The note no longer exists")?;
-                    let file = self
-                        .store
-                        .read(&entry.path)
-                        .map_err(|error| error.to_string())?;
-                    Document::new(entry, file)
+                    let read = (self.store.read(&entry.path))
+                        .map_err(|error| error.to_string())
+                        .and_then(|file| Document::new(entry, file));
+                    if read.is_err() {
+                        // The note cannot be opened as the indexes hold it:
+                        // they and the model take what is there now, or
+                        // nothing, and a scan begun before this cannot put
+                        // it back. The open document stays as it is.
+                        let _ = self.reread(note);
+                    }
+                    read
                 })
                 .transpose()?;
             if let Some(document) = &document {
@@ -1347,6 +1440,7 @@ impl Session {
         };
         let ticket = reconcile::next_ticket();
         self.touched.clear();
+        self.missing.clear();
         self.reconcile_in_flight = Some(ticket);
         self.reconcile_job = Some(ReconcileJob::new(
             Tags {
@@ -1385,11 +1479,41 @@ impl Session {
         // One fresh read keeps conflict protection for the active note exactly
         // as in synchronous reconciliation, independent of the snapshot. It runs
         // while still in flight so a reload marks the note as touched.
+        let open = self.document.as_ref().map(|document| document.note);
         let document_result = self.reconcile_document(now, events);
+        // The open note found deleted just now is the newest there is to
+        // know of it. The indexes give up its text at once; should a file
+        // be back there already, they take that, and the note stays.
+        let gone = open
+            .filter(|_| self.document.is_none())
+            .filter(|gone| self.reread(*gone));
         self.reconcile_in_flight = None;
-        if self.tree_revision != tags.tree_revision {
+        let mut outcome = outcome;
+        if let (Some(gone), Ok(scanned)) = (gone, &mut outcome) {
+            // A job that read the note before it was deleted still lists it,
+            // with the text it read: neither is true any more. Without the
+            // note, its result is as good as one that never found it, and
+            // the rest of what it read is merged now.
+            scanned.model.notes.retain(|note| note.id != gone);
+            scanned.contents.retain(|(note, ..)| *note != gone);
+            scanned.extracted.retain(|(note, ..)| *note != gone);
+            scanned.changed |= self.model.note(gone).is_some();
+        }
+        // A result that did not find a note the owner has read or written
+        // since must not take that note, and what is known of it, away:
+        // unless the owner's own last look found no file either.
+        let omits_touched = outcome.as_ref().is_ok_and(|scanned| {
+            scanned.changed
+                && (self.touched.iter()).any(|note| {
+                    !self.missing.contains(note)
+                        && self.model.note(*note).is_some()
+                        && scanned.model.note(*note).is_none()
+                })
+        });
+        if self.tree_revision != tags.tree_revision || omits_touched {
             // Own structural changes (or a conflict-copy rescan) happened after
-            // the snapshot; its IDs and paths cannot be merged safely. Labels
+            // the snapshot, or the result is older than what the owner knows
+            // of a note; its IDs and paths cannot be merged safely. Labels
             // name the source they came from, so they still apply.
             if let Ok(scanned) = outcome {
                 for (note, source, text) in scanned.extracted {
@@ -1405,8 +1529,12 @@ impl Session {
                 Ok(())
             }
             Err(error) => {
+                // The failure is of the disk as the job found it. What the
+                // owner has read or written since is newer than that.
+                let active = self.document.as_ref().map(|document| document.note);
+                let touched = &self.touched;
                 self.index
-                    .scan_failed(self.document.as_ref().map(|document| document.note));
+                    .scan_failed(|note| Some(note) == active || touched.contains(&note));
                 Err(error)
             }
         };
@@ -1593,6 +1721,13 @@ impl Session {
             }
         }
         self.state.remap_paths(from, &receipt.path);
+        if let Some(file) = &mut self.tasks_file {
+            file.remap_paths(from, &receipt.path);
+        }
+        self.sync_task_exclusions();
+        // The move is published: the settings that name it are saved now,
+        // whatever fails below.
+        let tasks_saved = self.persist_tasks_file(events);
         let ordering = moved_group_section.map_or(Ok(()), |section| {
             let siblings: Vec<_> = self
                 .model
@@ -1639,7 +1774,8 @@ impl Session {
             ));
         }
         ordering?;
-        self.persist_metadata(events)
+        let persisted = self.persist_metadata(events);
+        persisted.and(tasks_saved)
     }
 
     fn finish_structure(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
@@ -1671,7 +1807,8 @@ impl Session {
         let scanned = match scanned {
             Ok(scanned) => scanned,
             Err(error) => {
-                self.index.scan_failed(active.map(|(id, _)| id));
+                let active = active.map(|(id, _)| id);
+                self.index.scan_failed(|note| Some(note) == active);
                 return Err(error.to_string());
             }
         };
@@ -1822,6 +1959,36 @@ impl Session {
         })
     }
 
+    fn tasks_file_mut(&mut self) -> Result<&mut TasksFile, String> {
+        self.tasks_file
+            .as_mut()
+            .ok_or_else(|| "Tasks are turned off; set `tasks = on` to use task views".into())
+    }
+
+    /// Hand the task index the folders `.wren/tasks.toml` excludes now.
+    fn sync_task_exclusions(&mut self) {
+        if let Some(file) = &self.tasks_file {
+            self.index.exclude_tasks(&file.excluded());
+        }
+    }
+
+    /// Save `.wren/tasks.toml` if an op changed it. It is created only
+    /// once it has something to hold.
+    fn persist_tasks_file(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
+        let Some(file) = &mut self.tasks_file else {
+            return Ok(());
+        };
+        if !file.dirty() {
+            return Ok(());
+        }
+        file.save(&mut self.store).map_err(|error| {
+            events.push(Event::Warning(format!(
+                "The change remains applied; task settings were not saved: {error}"
+            )));
+            error
+        })
+    }
+
     fn record_history(&mut self, note: NoteId) {
         if self
             .history_index
@@ -1904,6 +2071,31 @@ impl Session {
     fn touch(&mut self, note: NoteId) {
         if self.reconcile_in_flight.is_some() {
             self.touched.insert(note);
+            self.missing.remove(&note);
+        }
+    }
+
+    /// Read `note` afresh as a closed note: the indexes take its text, or
+    /// give it up, and the model the file's time and size, so a job in
+    /// flight, whose read of it is older, changes none of them. Returns
+    /// whether there was no file.
+    fn reread(&mut self, note: NoteId) -> bool {
+        match self.index.read_note(&self.store, note) {
+            Reread::Read(file) => {
+                self.record_file(note, &file);
+                false
+            }
+            Reread::Missing => {
+                self.touch(note);
+                if self.reconcile_in_flight.is_some() {
+                    self.missing.insert(note);
+                }
+                true
+            }
+            Reread::Failed => {
+                self.touch(note);
+                false
+            }
         }
     }
 

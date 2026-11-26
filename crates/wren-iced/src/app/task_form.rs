@@ -2443,19 +2443,19 @@ mod tests {
             notes: 1,
             score: 0.5,
         });
-        let sources = vec![(
+        let sources = vec![wren_core::owners::source(
             NoteId(1_000_000),
             std::time::SystemTime::now(),
-            std::sync::Arc::<str>::from(
-                many.iter()
-                    .map(|owner| format!("- [ ] @{}\n", owner.name))
-                    .collect::<String>(),
-            ),
+            &many
+                .iter()
+                .map(|owner| format!("- [ ] @{}\n", owner.name))
+                .collect::<String>(),
         )];
         // Read straight into the owners, with no message after it, which
         // would bring them back to the index.
+        let sources = wren_core::owners::lend(&sources);
         app.owners
-            .update(1, 1, sources, None, std::time::SystemTime::now());
+            .update(1, 1, &sources, None, std::time::SystemTime::now());
         let typed = |app: &mut App, text: &str| {
             app.task_form.as_mut().unwrap().form.set_pending_owner(text);
         };
@@ -2603,16 +2603,16 @@ mod tests {
     /// nothing and keeps the name typed.
     #[test]
     fn the_owner_chosen_is_held_by_name_across_a_refresh() {
-        let owners = |names: &[&str]| -> Vec<(NoteId, std::time::SystemTime, std::sync::Arc<str>)> {
+        let owners = |names: &[&str]| -> Vec<wren_core::owners::Source> {
             names
                 .iter()
                 .enumerate()
                 .map(|(n, name)| {
-                    (
+                    wren_core::owners::source(
                         NoteId(1_000 + n as u64),
                         std::time::SystemTime::now()
                             - std::time::Duration::from_secs(86_400 * n as u64),
-                        std::sync::Arc::<str>::from(format!("- [ ] @{name}\n")),
+                        &format!("- [ ] @{name}\n"),
                     )
                 })
                 .collect()
@@ -2628,7 +2628,8 @@ mod tests {
         };
         let refresh = |app: &mut App, names: &[&str], revision: u64| {
             let now = std::time::SystemTime::now();
-            app.owners.update(1, revision, owners(names), None, now);
+            let sources = owners(names);
+            (app.owners).update(1, revision, &wren_core::owners::lend(&sources), None, now);
         };
         refresh(&mut app, &["alice", "bob"], 1);
         app.task_form.as_mut().unwrap().form.set_pending_owner("");
@@ -2676,12 +2677,12 @@ mod tests {
         // `@albert` comes first before the queued Tab is handled. Read
         // straight into the owners, with no message after it.
         let now = std::time::SystemTime::now();
-        let sources = vec![(
+        let sources = vec![wren_core::owners::source(
             NoteId(1_000),
             now,
-            std::sync::Arc::<str>::from("- [ ] @albert\n- [ ] @albert again\n"),
+            "- [ ] @albert\n- [ ] @albert again\n",
         )];
-        app.owners.update(1, 1, sources, None, now);
+        (app.owners).update(1, 1, &wren_core::owners::lend(&sources), None, now);
         assert_ne!(app.owners.generation(), drawn);
         assert_eq!(app.owner_suggestions()[0], "albert");
         let _ = app.task_form_event(Event::OwnerKey(FormKey::Complete, drawn));
