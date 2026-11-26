@@ -268,7 +268,10 @@ def unwritable(directory: Path):
 
 
 def test_full_command_catalog_and_context_availability(vault: Path) -> None:
-    with WrenApp(workspace=vault, artifacts_dir=artifact_directory("navigation-catalog")) as app:
+    # Pinned to the classic engine, whatever the lane's engine, because the
+    # states and the disabled spell suggestion below are the classic's.
+    with WrenApp(workspace=vault, settings="editor-engine = classic\n",
+                 artifacts_dir=artifact_directory("navigation-catalog")) as app:
         jump(app, FIRST)
         # The setting as the app read it, so the expectation follows the app
         # and a run that asked for one value cannot pass with the other.
