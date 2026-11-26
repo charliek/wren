@@ -326,12 +326,23 @@ impl StoreReader {
 pub struct FsStore {
     reader: StoreReader,
     // This descriptor, and the persistent name, must survive for the entire lock.
-    _lock: File,
+    lock: File,
     fault: Option<Fault>,
     pending_directories: Vec<PendingDirectory>,
     // Losing an unsynced descriptor means later retries cannot prove durability.
     durability_tracking_error: Option<String>,
     warnings: Vec<String>,
+}
+
+impl Drop for FsStore {
+    fn drop(&mut self) {
+        // flock belongs to the open file description, and a process spawned
+        // on another thread shares it until its exec closes the copy, so
+        // closing this descriptor alone can leave the workspace locked a
+        // moment longer. An unlock releases it for every copy at once. A
+        // failed unlock leaves the close to release it, as before.
+        let _ = fs::flock(&self.lock, FlockOperation::Unlock);
+    }
 }
 
 impl FsStore {
@@ -370,7 +381,7 @@ impl FsStore {
         };
         let store = Self {
             reader,
-            _lock: lock,
+            lock,
             fault: None,
             pending_directories: Vec::new(),
             durability_tracking_error: None,
@@ -2235,6 +2246,23 @@ mod tests {
             fs::metadata(reopened.root().join(LOCK_NAME)).unwrap().ino(),
             inode
         );
+    }
+
+    #[test]
+    fn a_dropped_store_unlocks_while_a_child_still_holds_its_descriptor() {
+        let temp = TempDir::new().unwrap();
+        let store = FsStore::open(temp.path()).unwrap();
+        // A process spawned on another thread holds a copy of every
+        // descriptor, this one included, until its exec closes them.
+        let inherited = store.lock.try_clone().unwrap();
+        drop(store);
+        let reopened = FsStore::open(temp.path()).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            FsStore::open(temp.path()),
+            Err(StoreError::Locked)
+        ));
+        drop(reopened);
     }
 
     #[test]
