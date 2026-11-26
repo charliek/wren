@@ -13,6 +13,8 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+## v0.2.2 — 2026-11-26
+
 ### Changed
 
 - **Tasks are on by default.** Task lines get their statuses, dates,
@@ -71,8 +73,6 @@ version's section as its notes, and publishes to the apt repo. See
   board.undo` makes ⌘U undo on a board and in its labels. With no such line
   nothing changes. A line on a key of the macOS menu (⌘H, ⌥⌘H, ⌘M, ⌃⌘F) is
   refused with a warning, since the menu takes the key first.
-
-
 - **Tasks**, on by default (`tasks = off` in `config.conf` turns them off;
   restart Wren to apply). A task line's box takes a status: `[ ]` open, `[/]` doing,
   `[x]` or `[X]` done, `[-]` cancelled, and any other character reads as
@@ -114,6 +114,9 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Fixed
 
+- Reopening a workspace right after closing it could fail with "workspace
+  is already locked by another writer" when Wren had just started another
+  program (a link opening in the browser); the lock is now released at once.
 - In a spelling menu, ↵ and a click on a row that arrive together now act
   in that order, and keys typed while an input method is composing are no
   longer taken by an open menu.
