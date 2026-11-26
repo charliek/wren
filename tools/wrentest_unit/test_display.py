@@ -197,9 +197,11 @@ class CompositorTests(unittest.TestCase):
             server.bind(str(self.socket))
             # Bound but not listening, as a restarting Weston's socket can be.
             timer = threading.Timer(0.3, server.listen)
+            # Timed from before the timer starts, so a pause in this thread
+            # cannot shorten the measured wait below the timer's delay.
+            started = time.monotonic()
             timer.start()
             self.addCleanup(timer.cancel)
-            started = time.monotonic()
             ui._wait_for_compositor(env, timeout=10)
             self.assertGreaterEqual(time.monotonic() - started, 0.25)
 
