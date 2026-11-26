@@ -62,6 +62,9 @@ pub struct TaskRecord {
     /// The due date; [`Parsed::Invalid`] for one in a date's shape that is
     /// no real day, which is kept and shown as a problem.
     pub due: Option<Parsed>,
+    /// Where the due date's ten bytes are in [`TaskRecord::source`]: what
+    /// a date that is no real day is shown as.
+    pub due_at: Option<std::ops::Range<usize>>,
     pub priority: Option<Priority>,
     /// The owners' names as written, without the `@`, in line order.
     pub owners: Vec<String>,
@@ -372,6 +375,7 @@ fn read_lines<L: Lines + ?Sized>(
                     symbol: found.symbol,
                     status: found.status,
                     due: parsed.due().map(|token| token.value),
+                    due_at: parsed.due().map(|token| token.date.clone()),
                     priority: parsed.priority().map(|token| token.level),
                     owners: parsed.owner_names().map(str::to_owned).collect(),
                     done: parsed.date(DateField::Done).map(|token| token.value),
@@ -1323,6 +1327,15 @@ mod tests {
         assert_eq!(tasks[5].due_date(), None);
         assert!(!tasks[5].is_overdue(today()));
         assert_eq!(tasks[5].source, "- [ ] No such day 📅 2026-02-30");
+        let at = tasks[5].due_at.clone().unwrap();
+        assert_eq!(&tasks[5].source[at], "2026-02-30");
+        assert_eq!(tasks[4].due_at, None);
+        // The due date the line's tokens read, not a glyph further on.
+        let kept = read("- [ ] Repair 📅 2026-02-30 [meta:: 📅 2026-04-31]");
+        assert_eq!(
+            &kept[0].source[kept[0].due_at.clone().unwrap()],
+            "2026-02-30"
+        );
         assert_eq!((tasks[7].line, tasks[7].description.as_str()), (7, ""));
         // Late is unfinished and due before today; due today is not late.
         let late = read("- [ ] a 📅 2026-11-18\n- [/] b 📅 2026-11-19\n- [x] c 📅 2026-11-01");

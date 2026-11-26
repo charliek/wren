@@ -18,9 +18,17 @@
 //! - **Escape** closes the menu over the view, else gives a control's
 //!   keyboard back to the list, else does nothing: it neither clears the
 //!   filters (they are remembered) nor leaves the view (Back does).
-//! - **A key that opens something** (a menu, or the note) stops its batch:
-//!   the keys after it in the batch are dropped, their Escape and shortcut
-//!   copies too. So are keys after a press in their batch.
+//! - **Input in order, batch by batch.** Every key report and click
+//!   carries the serial of the view it came from, which is its batch of
+//!   events ([`crate::list_keys`]), and the list reads them in input order.
+//!   A key that opens something (a menu, the note), Escape that closes a
+//!   menu, and any press stop the rest of their batch, which was typed
+//!   before the user could see what changed: it is dropped (drop, don't
+//!   forward). Escape is read at its place in the batch; the app's own
+//!   copies of Escape and of the shortcuts, which come after the batch, are
+//!   matched one by one to the reports they copy, and each is dropped or
+//!   let through as its report was. A click on a row names the listing it
+//!   was drawn from, and does nothing once that listing is gone.
 //! - **The selection** survives a refresh by note, line and source line
 //!   ([`task_list::Listing::find`]), else stays at its place in the list.
 
@@ -128,6 +136,31 @@ impl MenuFor {
     }
 }
 
+/// A click in the view or in its menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Click {
+    /// A row, by the listing it was drawn from and its entry there.
+    Select {
+        generation: u64,
+        entry: usize,
+    },
+    /// A row's source: open the note at its line.
+    Open {
+        generation: u64,
+        entry: usize,
+    },
+    Control(Control),
+    Menu(host_menu::Event),
+}
+
+/// The app's own copy of a key the view reported, which its key handling
+/// hears after the batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AppCopy {
+    Escape,
+    Shortcut(wren_core::keybind::Accel),
+}
+
 const GROUPINGS: [(GroupBy, &str, char); 4] = [
     (GroupBy::Note, "Note", 'n'),
     (GroupBy::Due, "Due date", 'd'),
@@ -140,6 +173,9 @@ const BUCKET_KEYS: [char; 7] = ['o', 'e', 't', 'w', 'x', 'l', 'n'];
 /// What the listing was built from.
 #[derive(Debug, Clone, PartialEq)]
 struct Built {
+    /// The workspace's root and generation: another workspace's index
+    /// counts its revisions afresh.
+    workspace: (std::path::PathBuf, u64),
     scope: Scope,
     revision: u64,
     filters: TaskFilters,
@@ -169,18 +205,46 @@ pub(super) struct ListState {
     pub focus: Option<Control>,
     pub menu: Option<HostMenu<MenuFor>>,
     menus: u64,
-    /// A key of this batch opened something: the rest of it is dropped.
+    /// The serial of the view last built: the batch its input comes in.
+    serials: std::cell::Cell<u64>,
+    /// The batch whose input was read last.
+    batch: u64,
+    /// Something in that batch opened, closed or was pressed: the rest of
+    /// it is dropped.
     stopped: bool,
-    /// Plain Escapes dropped from a stopped batch, whose app copies are
-    /// still to come.
-    escapes: u32,
-    /// Shortcuts dropped likewise.
-    shortcuts: u32,
+    /// The app's copies still to come of the batch's Escapes and
+    /// shortcuts, in order, each with whether it is dropped.
+    copies: std::collections::VecDeque<(AppCopy, bool)>,
+    /// Moves each time the listing is built: what a row click names.
+    pub generation: u64,
+    /// The titles of the workspace's notes, read when the listing is built.
+    titles: std::collections::HashMap<wren_core::model::NoteId, String>,
+    /// The footer's counts and what it says is left out, for the listing.
+    footer: (wren_core::tasks::Counts, Option<String>),
     /// Where the view's controls were last drawn.
     pub drawn: Drawn<Control>,
 }
 
 impl ListState {
+    /// Forget the list: another workspace is open. The serials and the
+    /// menus' numbers go on, so nothing of the old list's is taken for
+    /// the new one's.
+    pub(super) fn reset(&mut self) {
+        *self = Self {
+            serials: std::cell::Cell::new(self.serials.get()),
+            menus: self.menus,
+            generation: self.generation + 1,
+            ..Self::default()
+        };
+    }
+
+    /// A new serial, for the view being built or for the harness's input.
+    pub(super) fn next_serial(&self) -> u64 {
+        let serial = self.serials.get() + 1;
+        self.serials.set(serial);
+        serial
+    }
+
     /// The control at `control`'s place, as last drawn.
     pub(super) fn drawn(&self, control: Control) -> Option<Rectangle> {
         (self.drawn.borrow().iter())
@@ -255,7 +319,7 @@ pub(super) fn due_cell(record: &TaskRecord, today: Date) -> Option<DueCell> {
         Parsed::Invalid => Some(DueCell {
             text: format!(
                 "{} \u{26a0}",
-                task_list::invalid_due(&record.source).unwrap_or("invalid date")
+                task_list::invalid_due(record).unwrap_or("invalid date")
             ),
             look: "invalid",
         }),
@@ -309,12 +373,9 @@ impl App {
         }
     }
 
-    /// A note's title, as the model has it.
-    fn note_title(&self, note: wren_core::model::NoteId) -> String {
-        self.model()
-            .and_then(|model| model.note(note))
-            .map(|note| note.title.clone())
-            .unwrap_or_default()
+    /// A note's title, as the model had it when the listing was built.
+    fn note_title(&self, note: wren_core::model::NoteId) -> &str {
+        self.task_list.titles.get(&note).map_or("", String::as_str)
     }
 
     /// Build the list again when what it shows changed; keep the menu only
@@ -336,6 +397,7 @@ impl App {
             .tasks()
             .map_or(0, wren_core::tasks::TaskIndex::revision);
         let built = Built {
+            workspace: (session.model().root.clone(), self.workspace_generation()),
             filters: self.task_filters(&scope),
             scope,
             revision,
@@ -349,17 +411,25 @@ impl App {
             .task_list
             .built
             .as_ref()
-            .is_none_or(|old| old.scope != built.scope);
+            .is_none_or(|old| old.scope != built.scope || old.workspace != built.workspace);
         let records: Vec<TaskRecord> = session
             .tasks()
             .map(|tasks| tasks.tasks_under(built.scope.prefix()).cloned().collect())
             .unwrap_or_default();
+        let titles: std::collections::HashMap<_, _> = (session.model().notes.iter())
+            .map(|note| (note.id, note.title.clone()))
+            .collect();
         let place = |record: &TaskRecord| {
-            task_list::note_place(&record.path, &self.note_title(record.note))
+            let title = titles.get(&record.note).map_or("", String::as_str);
+            task_list::note_place(&record.path, title)
         };
         let listing = Listing::build(records, &built.filters, &built.me, built.today, &place);
+        let footer = self.task_list_counts(&built.scope);
         let list = &mut self.task_list;
         list.listing = listing;
+        list.titles = titles;
+        list.footer = footer;
+        list.generation += 1;
         list.built = Some(built);
         if new_scope {
             list.selected = None;
@@ -505,45 +575,76 @@ impl App {
         self.task_list.focus = slots[(at + step).rem_euclid(count) as usize];
     }
 
-    /// A key reported by the view's key wrapper. See the module's
-    /// description.
-    pub(super) fn task_list_key(&mut self, key: ListKey) -> Task<Message> {
-        if key.first {
-            self.task_list.stopped = false;
+    /// Read input of the batch `serial`: a new batch starts afresh.
+    fn enter_batch(&mut self, serial: u64) {
+        let list = &mut self.task_list;
+        if serial != list.batch {
+            list.batch = serial;
+            list.stopped = false;
+            list.copies.clear();
         }
+    }
+
+    /// A key reported by the view's key wrapper, at its place in its batch.
+    /// See the module's description.
+    pub(super) fn task_list_key(&mut self, key: ListKey) -> Task<Message> {
+        self.enter_batch(key.serial);
         let press = key.press;
+        let copy = if press.is_plain_escape() {
+            Some(AppCopy::Escape)
+        } else {
+            crate::keys::shortcut(&press.key, press.physical, press.modifiers)
+                .map(AppCopy::Shortcut)
+        };
+        // Typed after something opened or was pressed in its batch, or
+        // after the view lost the keyboard (the note it opened has it):
+        // dropped, and so is the app's copy.
         if self.task_list.stopped || key.after_press || !self.task_view_has_keys() {
-            if press.is_plain_escape() {
-                self.task_list.escapes += 1;
-            } else if press.is_shortcut() {
-                self.task_list.shortcuts += 1;
+            if let Some(copy) = copy {
+                self.task_list.copies.push_back((copy, true));
             }
             return Task::none();
         }
-        // The app's own key handling reads these.
-        if press.is_shortcut() || press.is_plain_escape() {
-            return Task::none();
+        match copy {
+            // Escape is read here, in its place: it closes the menu, which
+            // stops the batch, or gives a control's keyboard back to the
+            // list. The app's copy has nothing left to do.
+            Some(AppCopy::Escape) => {
+                self.task_list.copies.push_back((AppCopy::Escape, true));
+                if self.close_task_menu() {
+                    self.task_list.stopped = true;
+                } else {
+                    self.unfocus_task_control();
+                }
+                Task::none()
+            }
+            // A shortcut is the app's, through its copy.
+            Some(copy) => {
+                self.task_list.copies.push_back((copy, false));
+                Task::none()
+            }
+            None => {
+                let (task, stops) = self.task_list_press(&press);
+                if stops {
+                    self.task_list.stopped = true;
+                }
+                task
+            }
         }
-        let (task, stops) = self.task_list_press(&press);
-        if stops {
-            self.task_list.stopped = true;
-        }
-        task
     }
 
-    /// Whether the app's copy of a plain Escape or a shortcut was dropped
-    /// with a stopped batch of the view's: it is taken here, once.
-    pub(super) fn take_task_list_claim(&mut self, escape: bool) -> bool {
-        let ledger = if escape {
-            &mut self.task_list.escapes
-        } else {
-            &mut self.task_list.shortcuts
-        };
-        if *ledger > 0 {
-            *ledger -= 1;
-            return true;
+    /// Whether the app's copy `copy` of a key the view reported is dropped.
+    /// Each copy is matched to the report it copies, in order; a copy of
+    /// a key the view never reported is the app's.
+    pub(super) fn take_task_list_copy(&mut self, copy: &AppCopy) -> bool {
+        match self.task_list.copies.front() {
+            Some((front, drop)) if front == copy => {
+                let drop = *drop;
+                self.task_list.copies.pop_front();
+                drop
+            }
+            _ => false,
         }
-        false
     }
 
     /// A key for the view: the menu's while one is open, else the focused
@@ -558,7 +659,8 @@ impl App {
                 press.text.as_deref(),
             ) {
                 MenuKey::Choose(row) => (self.choose_task_menu(row), true),
-                MenuKey::Moved | MenuKey::Held => (Task::none(), false),
+                MenuKey::Moved => (self.reveal_task_menu(), false),
+                MenuKey::Held => (Task::none(), false),
             };
         }
         if press.key == Key::Named(Named::Tab) {
@@ -646,10 +748,7 @@ impl App {
             | Control::Owner
             | Control::GroupBy
             | Control::Due
-            | Control::Priority => {
-                self.open_list_menu(control);
-                Task::none()
-            }
+            | Control::Priority => self.open_list_menu(control),
             Control::List | Control::Source(_) => Task::none(),
         }
     }
@@ -710,9 +809,9 @@ impl App {
     }
 
     /// Open the menu of `control`, under it.
-    fn open_list_menu(&mut self, control: Control) {
+    fn open_list_menu(&mut self, control: Control) -> Task<Message> {
         let Some(scope) = self.task_view().cloned() else {
-            return;
+            return Task::none();
         };
         let filters = self.task_filters(&scope);
         let (purpose, title, rows) = match control {
@@ -736,10 +835,11 @@ impl App {
                             ),
                             None => kind.to_owned(),
                         };
+                        let current = choice.as_ref() == Some(&scope);
                         Row::new(id as u32, label)
                             .accelerator(Accelerator::plain(key))
-                            .glyph("\u{2713}")
-                            .checked(choice.as_ref() == Some(&scope))
+                            .glyph(if current { "\u{2713}" } else { "" })
+                            .checked(current)
                             .enabled(choice.is_some())
                     })
                     .collect();
@@ -806,7 +906,7 @@ impl App {
                 ));
                 (MenuFor::Priority, Some("Priority"), rows)
             }
-            _ => return,
+            _ => return Task::none(),
         };
         let anchor = self.task_list.drawn(control).unwrap_or(Rectangle::new(
             iced::Point::new(self.viewport.width / 2.0 - 100.0, 96.0),
@@ -820,6 +920,25 @@ impl App {
             rows,
             anchor,
         ));
+        self.reveal_task_menu()
+    }
+
+    /// Scroll the open menu's rows, when they scroll, to show its selected
+    /// row.
+    fn reveal_task_menu(&mut self) -> Task<Message> {
+        let window = self.viewport;
+        match self
+            .task_list
+            .menu
+            .as_mut()
+            .and_then(|menu| menu.reveal(window))
+        {
+            Some(y) => iced::widget::operation::scroll_to(
+                host_menu::ROWS,
+                iced::widget::operation::AbsoluteOffset { x: 0.0, y },
+            ),
+            None => Task::none(),
+        }
     }
 
     /// Act on the row `row` of the open menu, and close it.
@@ -941,6 +1060,26 @@ impl App {
 
     /// Input from the list.
     pub(super) fn task_list_event(&mut self, event: Event) -> Task<Message> {
+        // A key from the view goes through its batch's gate before anything
+        // asks what the pane now shows.
+        if let Event::Key(key) = event {
+            return self.task_list_key(key);
+        }
+        if let Event::Click {
+            click: Click::Menu(host_menu::Event::Scrolled { instance, y }),
+            ..
+        } = event
+        {
+            if let Some(menu) =
+                (self.task_list.menu.as_mut()).filter(|menu| menu.instance() == instance)
+            {
+                menu.scrolled(y);
+            }
+            return Task::none();
+        }
+        if let Event::Click { serial, .. } = event {
+            self.enter_batch(serial);
+        }
         if self.task_view().is_none() || self.dialog.is_some() || self.palette.is_some() {
             return Task::none();
         }
@@ -949,25 +1088,48 @@ impl App {
                 self.column = Column::Editor;
                 self.column_focus()
             }
-            Event::Key(key) => self.task_list_key(key),
             Event::Scrolled { y, height } => {
                 self.task_list.scroll = y;
                 self.task_list.height = Some(height);
                 Task::none()
             }
-            Event::Select(entry) => {
+            Event::Click { click, .. } => {
+                // A press ends what its batch may still do; one after
+                // something opened in the batch is dropped.
+                if std::mem::replace(&mut self.task_list.stopped, true) {
+                    return Task::none();
+                }
+                self.task_list_click(click)
+            }
+            Event::Key(_) => Task::none(),
+        }
+    }
+
+    /// A click, read in its batch.
+    fn task_list_click(&mut self, click: Click) -> Task<Message> {
+        let current = |app: &Self, generation: u64, entry: usize| {
+            generation == app.task_list.generation && app.task_list.listing.record(entry).is_some()
+        };
+        match click {
+            Click::Select { generation, entry } => {
+                if !current(self, generation, entry) {
+                    return Task::none();
+                }
                 self.column = Column::Editor;
                 self.task_list.focus = None;
                 let task = self.select_entry(entry);
                 Task::batch([task, self.column_focus()])
             }
-            Event::Open(entry) => {
+            Click::Open { generation, entry } => {
+                if !current(self, generation, entry) {
+                    return Task::none();
+                }
                 self.column = Column::Editor;
                 self.task_list.focus = None;
                 let _ = self.select_entry(entry);
                 self.open_task_at(entry)
             }
-            Event::Control(control) => {
+            Click::Control(control) => {
                 // A click leaves the keyboard with the list: only keys
                 // walk the controls.
                 self.column = Column::Editor;
@@ -975,7 +1137,7 @@ impl App {
                 self.task_list.focus = None;
                 Task::batch([task, self.column_focus()])
             }
-            Event::Menu(event) => match event {
+            Click::Menu(event) => match event {
                 host_menu::Event::Choose { instance, row } => {
                     let chosen =
                         (self.task_list.menu.as_ref()).and_then(|menu| menu.choose(instance, row));
@@ -992,6 +1154,7 @@ impl App {
                     }
                     Task::none()
                 }
+                host_menu::Event::Scrolled { .. } => Task::none(),
             },
         }
     }
@@ -1003,8 +1166,13 @@ impl App {
             .menu
             .as_ref()
             .filter(|_| self.task_view().is_some())?;
-        Some(menu.layers(self.definition, self.viewport, |event| {
-            Message::TaskView(Event::Menu(event))
+        // The view's serial: the menu's input is read in the view's batch.
+        let serial = self.task_list.serials.get();
+        Some(menu.layers(self.definition, self.viewport, move |event| {
+            Message::TaskView(Event::Click {
+                serial,
+                click: Click::Menu(event),
+            })
         }))
     }
 
@@ -1026,7 +1194,10 @@ impl App {
         let definition = self.definition;
         let chip = button(content)
             .padding([3, 8])
-            .on_press(Message::TaskView(Event::Control(Control::Scope)))
+            .on_press(Message::TaskView(Event::Click {
+                serial: self.task_list.serials.get(),
+                click: Click::Control(Control::Scope),
+            }))
             .style(move |_, status| control_style(definition, status, false, focused));
         container(probe(chip, &self.task_list.drawn, Control::Scope))
             .id("task-view-scope")
@@ -1038,6 +1209,8 @@ impl App {
     pub(super) fn task_list_body(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
         let list = &self.task_list;
+        // Each view built is one batch of input.
+        let serial = list.next_serial();
         let filters = list
             .built
             .as_ref()
@@ -1046,7 +1219,12 @@ impl App {
         let has_keys = self.task_view_has_keys();
         let definition = self.definition;
         let focused = |control: Control| has_keys && list.focus == Some(control);
-        let send = |control: Control| Message::TaskView(Event::Control(control));
+        let send = move |control: Control| {
+            Message::TaskView(Event::Click {
+                serial,
+                click: Click::Control(control),
+            })
+        };
         let mut tools = row![chrome::label("Status", 12, colors.muted)]
             .spacing(6)
             .align_y(iced::Center);
@@ -1180,7 +1358,10 @@ impl App {
                 .style(move |_| chrome::surface(definition, colors.editor, 0.0, false)),
         )
         .on_press(Message::TaskView(Event::Press));
-        list_keys(content, has_keys, |key| Message::TaskView(Event::Key(key))).into()
+        list_keys(content, has_keys, serial, |key| {
+            Message::TaskView(Event::Key(key))
+        })
+        .into()
     }
 
     /// The rows in view, between spaces for those out of it.
@@ -1284,9 +1465,14 @@ impl App {
             .size(13.5)
             .font(fonts::UI)
             .wrapping(iced::widget::text::Wrapping::None);
-        let source = source_text(record, &self.note_title(record.note), by_note);
+        let source = source_text(record, self.note_title(record.note), by_note);
+        let serial = self.task_list.serials.get();
+        let generation = self.task_list.generation;
         let source = mouse_area(ellipsis(source, 11.5, theme::color(colors.faint)).width(Shrink))
-            .on_press(Message::TaskView(Event::Open(entry)))
+            .on_press(Message::TaskView(Event::Click {
+                serial,
+                click: Click::Open { generation, entry },
+            }))
             .interaction(iced::mouse::Interaction::Pointer);
         let source = probe(source, &self.task_list.drawn, Control::Source(entry));
         let priority = record
@@ -1343,7 +1529,10 @@ impl App {
                 }
             });
         mouse_area(container(card).padding([2, 8]).height(ROW_HEIGHT))
-            .on_press(Message::TaskView(Event::Select(entry)))
+            .on_press(Message::TaskView(Event::Click {
+                serial,
+                click: Click::Select { generation, entry },
+            }))
             .into()
     }
 
@@ -1351,7 +1540,8 @@ impl App {
     /// and its keys.
     pub(super) fn task_list_footer(&self, scope: &Scope) -> Element<'_, Message> {
         let colors = self.definition.colors;
-        let (counts, left) = self.task_list_counts(scope);
+        let _ = scope;
+        let (counts, left) = self.task_list.footer.clone();
         let mut pieces = row![
             chrome::label(
                 format!("{} open \u{b7} ", counts.open_and_doing),
@@ -1655,21 +1845,72 @@ mod tests {
         press(Key::Character(c.into()), Some(c))
     }
 
-    /// One batch of presses, as the view's key wrapper reports them, then
-    /// the app's copies of those it lets through (Escape here).
+    /// One batch of presses, as iced hands it over: the view's key
+    /// wrapper reports each, then the app hears its own copies of those
+    /// the wrapper lets through, Escape and the shortcuts, in order.
     fn batch(app: &mut App, presses: &[Press]) {
-        for (index, press) in presses.iter().enumerate() {
+        let serial = app.task_list.next_serial();
+        in_batch(app, serial, presses);
+    }
+
+    /// [`batch`] in the batch `serial`, which may have had other input.
+    fn in_batch(app: &mut App, serial: u64, presses: &[Press]) {
+        for press in presses {
             let _ = app.update(Message::TaskView(Event::Key(ListKey {
                 press: press.clone(),
-                first: index == 0,
+                serial,
                 after_press: false,
             })));
         }
+        copies(app, presses);
+    }
+
+    /// The app's copies of `presses`.
+    fn copies(app: &mut App, presses: &[Press]) {
         for press in presses {
             if press.is_plain_escape() {
                 let _ = app.update(Message::Key(Input::Nav(Nav::Escape)));
+            } else if let Some(accel) =
+                crate::keys::shortcut(&press.key, press.physical, press.modifiers)
+            {
+                let _ = app.update(Message::Key(Input::Accel(accel)));
             }
         }
+    }
+
+    /// A click in a batch of its own.
+    fn click(app: &mut App, click: Click) {
+        let serial = app.task_list.next_serial();
+        let _ = app.update(Message::TaskView(Event::Click { serial, click }));
+    }
+
+    fn control(app: &mut App, control: Control) {
+        click(app, Click::Control(control));
+    }
+
+    fn menu_event(app: &mut App, event: host_menu::Event) {
+        click(app, Click::Menu(event));
+    }
+
+    /// The chord of `action`, as the keymap binds it, with Ctrl or Alt.
+    fn chord(app: &App, action: &str, key: &str) -> Press {
+        [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO]
+            .into_iter()
+            .map(|modifiers| Press {
+                modifiers,
+                text: None,
+                ..letter(key)
+            })
+            .find(|press| {
+                crate::keys::shortcut(&press.key, press.physical, press.modifiers)
+                    .is_some_and(|accel| app.preferences.keymap.action(&accel) == Some(action))
+            })
+            .unwrap_or_else(|| panic!("{action} is bound to no chord of {key}"))
+    }
+
+    fn document(app: &App) -> Option<String> {
+        let document = app.session.as_ref()?.document()?;
+        Some(document.path().as_path().to_string_lossy().into_owned())
     }
 
     fn descriptions(app: &App) -> Vec<String> {
@@ -1761,7 +2002,7 @@ mod tests {
     #[test]
     fn a_chip_narrows_the_list_and_is_remembered_after_a_restart() {
         let (directory, mut app) = fixture();
-        let _ = app.update(Message::TaskView(Event::Control(Control::Chip(1))));
+        control(&mut app, Control::Chip(1));
         assert_eq!(descriptions(&app), ["Review the budget @sam"]);
         assert_eq!(
             app.task_list.focus, None,
@@ -1771,7 +2012,7 @@ mod tests {
             tasks_toml(&directory).unwrap(),
             "schema_version = 1\n\n[views.\".\"]\nstatuses = [\"doing\"]\n"
         );
-        let _ = app.update(Message::TaskView(Event::Control(Control::Chip(3))));
+        control(&mut app, Control::Chip(3));
         assert_eq!(app.task_list.listing.shown, 2);
         // Escape neither clears the filters nor leaves the view.
         batch(&mut app, &[named(Named::Escape)]);
@@ -1792,7 +2033,7 @@ mod tests {
 
         // Show all clears the chips.
         let _ = app.dispatch(Command::ShowTasks(Scope::Workspace));
-        let _ = app.update(Message::TaskView(Event::Control(Control::ShowAll)));
+        control(&mut app, Control::ShowAll);
         assert_eq!(app.task_list.listing.shown, 12);
         assert_eq!(tasks_toml(&directory).unwrap(), "schema_version = 1\n");
     }
@@ -1873,7 +2114,7 @@ mod tests {
         assert!(matches!(menu.purpose, MenuFor::Scope(_)));
         let checked: Vec<bool> = menu.rows().iter().map(|row| row.checked).collect();
         assert_eq!(checked, [true, false, false, false]);
-        assert_eq!(app.task_list.escapes, 0, "the copy took its credit");
+        assert!(app.task_list.copies.is_empty(), "the copy found its report");
         assert!(matches!(app.task_view(), Some(Scope::Workspace)));
         // In a batch of its own, Escape closes it without a choice.
         batch(&mut app, &[named(Named::Escape)]);
@@ -1915,30 +2156,32 @@ mod tests {
     #[test]
     fn a_stale_menu_choice_and_a_press_outside_do_nothing() {
         let (directory, mut app) = fixture();
-        let _ = app.update(Message::TaskView(Event::Control(Control::GroupBy)));
+        control(&mut app, Control::GroupBy);
         let first = app.task_list.menu.as_ref().unwrap().instance();
-        let _ = app.update(Message::TaskView(Event::Menu(host_menu::Event::Outside {
-            instance: first,
-        })));
+        menu_event(&mut app, host_menu::Event::Outside { instance: first });
         assert!(app.task_list.menu.is_none());
-        let _ = app.update(Message::TaskView(Event::Control(Control::GroupBy)));
+        control(&mut app, Control::GroupBy);
         let second = app.task_list.menu.as_ref().unwrap().instance();
         assert_ne!(first, second);
         // A click on a row of the first menu chooses nothing, and a press
         // outside the first closes nothing.
-        let _ = app.update(Message::TaskView(Event::Menu(host_menu::Event::Choose {
-            instance: first,
-            row: 1,
-        })));
-        let _ = app.update(Message::TaskView(Event::Menu(host_menu::Event::Outside {
-            instance: first,
-        })));
+        menu_event(
+            &mut app,
+            host_menu::Event::Choose {
+                instance: first,
+                row: 1,
+            },
+        );
+        menu_event(&mut app, host_menu::Event::Outside { instance: first });
         assert!(app.task_list.menu.is_some());
         assert_eq!(tasks_toml(&directory), None);
-        let _ = app.update(Message::TaskView(Event::Menu(host_menu::Event::Choose {
-            instance: second,
-            row: 1,
-        })));
+        menu_event(
+            &mut app,
+            host_menu::Event::Choose {
+                instance: second,
+                row: 1,
+            },
+        );
         assert!(app.task_list.menu.is_none());
         let labels: Vec<&str> = (app.task_list.listing.groups.iter())
             .map(|group| group.label.as_str())
@@ -1946,7 +2189,7 @@ mod tests {
         assert_eq!(labels[0], "Overdue");
         assert!(tasks_toml(&directory).unwrap().contains("group = \"due\""));
         // The palette takes the keyboard, and the menu goes.
-        let _ = app.update(Message::TaskView(Event::Control(Control::Owner)));
+        control(&mut app, Control::Owner);
         assert!(app.task_list.menu.is_some());
         let _ = app.open_palette(super::super::palette::Mode::Commands);
         let _ = app.update(Message::Tick);
@@ -1956,7 +2199,7 @@ mod tests {
     #[test]
     fn owner_me_reads_tasks_me_and_a_person_narrows() {
         let (_directory, mut app) = fixture();
-        let _ = app.update(Message::TaskView(Event::Control(Control::Owner)));
+        control(&mut app, Control::Owner);
         let menu = app.task_list.menu.as_ref().unwrap();
         let labels: Vec<&str> = menu.rows().iter().map(|row| row.label.as_str()).collect();
         // Each person once, as first written in the tree's order.
@@ -1964,7 +2207,7 @@ mod tests {
         batch(&mut app, &[letter("m")]);
         assert_eq!(app.task_list.listing.shown, 11);
         assert!(!descriptions(&app).contains(&"Follow up with legal @priya".to_owned()));
-        let _ = app.update(Message::TaskView(Event::Control(Control::Owner)));
+        control(&mut app, Control::Owner);
         batch(&mut app, &[named(Named::ArrowDown), named(Named::Enter)]);
         assert_eq!(
             descriptions(&app),
@@ -1981,10 +2224,10 @@ mod tests {
         batch(&mut app, &[named(Named::End)]);
         batch(&mut app, &[letter("k"), letter("k")]);
         assert_eq!(selected(&app), "Write the retro");
-        let _ = app.update(Message::TaskView(Event::Control(Control::GroupBy)));
+        control(&mut app, Control::GroupBy);
         batch(&mut app, &[letter("p")]);
         assert_eq!(selected(&app), "Write the retro", "now under Low");
-        let _ = app.update(Message::TaskView(Event::Control(Control::Due)));
+        control(&mut app, Control::Due);
         batch(&mut app, &[letter("o")]);
         // Gone from the list: the row at its place, else the last.
         assert_eq!(descriptions(&app), ["Draft the Q1 plan"]);
@@ -1992,28 +2235,166 @@ mod tests {
     }
 
     #[test]
-    fn a_shortcut_and_an_escape_after_a_stopping_key_are_dropped() {
+    fn enter_then_back_in_one_batch_opens_the_note_and_back_does_not_run() {
         let (_directory, mut app) = fixture();
-        let mut back = letter("[");
-        back.modifiers = Modifiers::ALT;
-        back.text = None;
+        let back = chord(&app, "navigation.back", "[");
+        batch(&mut app, &[named(Named::Home)]);
+        assert_eq!(selected(&app), "Order badges");
+        // Enter opens the note; Back and Escape after it in the batch were
+        // pressed at the view, and are dropped, their app copies too.
+        batch(
+            &mut app,
+            &[named(Named::Enter), back.clone(), named(Named::Escape)],
+        );
+        assert!(app.task_view().is_none());
+        assert_eq!(document(&app).as_deref(), Some("Work/Meetings/Standup.md"));
+        assert!(
+            app.task_list.copies.is_empty(),
+            "each copy found its report"
+        );
+        // In a batch of its own, Back runs: to the view.
         let accel = crate::keys::shortcut(&back.key, back.physical, back.modifiers).unwrap();
-        // Tab to the chip, Enter opens its menu, then Back's chord in the
-        // same batch: its copy is dropped, and the view stays.
-        batch(&mut app, &[named(Named::Tab)]);
-        batch(&mut app, &[named(Named::Enter), back.clone()]);
-        assert_eq!(app.task_list.shortcuts, 1);
-        let _ = app.update(Message::Key(Input::Accel(accel.clone())));
-        assert_eq!(app.task_list.shortcuts, 0);
-        assert!(app.task_list.menu.is_some());
+        let _ = app.update(Message::Key(Input::Accel(accel)));
         assert!(app.task_view().is_some());
+    }
+
+    #[test]
+    fn escape_then_a_key_on_an_open_menu_closes_it_and_drops_the_key() {
+        let (_directory, mut app) = fixture();
+        batch(&mut app, &[named(Named::Tab)]);
+        batch(&mut app, &[named(Named::Enter)]);
+        assert!(app.task_list.menu.is_some());
+        // Escape, read in its place, closes the menu; `s` after it is
+        // dropped, never chosen from the menu that was open.
+        batch(&mut app, &[named(Named::Escape), letter("s")]);
+        assert!(app.task_list.menu.is_none());
+        assert_eq!(app.task_view(), Some(&Scope::Workspace));
+        assert_eq!(app.task_list.focus, Some(Control::Scope));
+        assert!(app.task_list.copies.is_empty());
+    }
+
+    #[test]
+    fn each_dropped_copy_is_matched_to_its_own_key() {
+        let (_directory, mut app) = fixture();
+        let back = chord(&app, "navigation.back", "[");
+        let f5 = press(Key::Named(Named::F5), None);
+        batch(&mut app, &[named(Named::Tab)]);
+        // An unbound function key, Enter on the chip, then Back: the
+        // function key's copy is the app's (and does nothing), Back's is
+        // dropped with the batch Enter stopped.
+        batch(&mut app, &[f5, named(Named::Enter), back]);
+        assert!(app.task_list.menu.is_some());
+        assert_eq!(app.task_view(), Some(&Scope::Workspace));
+        assert!(app.task_list.copies.is_empty());
         // A key after a press in its batch is dropped too.
+        let serial = app.task_list.next_serial();
         let _ = app.update(Message::TaskView(Event::Key(ListKey {
             press: letter("w"),
-            first: true,
+            serial,
             after_press: true,
         })));
         assert!(app.task_list.menu.is_some());
+    }
+
+    #[test]
+    fn a_press_outside_the_menu_then_enter_in_one_batch_drops_enter() {
+        let (_directory, mut app) = fixture();
+        control(&mut app, Control::GroupBy);
+        let instance = app.task_list.menu.as_ref().unwrap().instance();
+        // The press is taken by the layer under the menu, so the view's
+        // keys never see it; it carries the view's serial, and stops the
+        // batch, so Enter does not open the selected note.
+        let serial = app.task_list.next_serial();
+        let _ = app.update(Message::TaskView(Event::Click {
+            serial,
+            click: Click::Menu(host_menu::Event::Outside { instance }),
+        }));
+        in_batch(&mut app, serial, &[named(Named::Enter)]);
+        assert!(app.task_list.menu.is_none());
+        assert_eq!(app.task_view(), Some(&Scope::Workspace));
+        // Enter in the next batch opens it.
+        batch(&mut app, &[named(Named::Enter)]);
+        assert!(app.task_view().is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_row_of_a_listing_since_rebuilt_does_nothing() {
+        let (_directory, mut app) = fixture();
+        let generation = app.task_list.generation;
+        let order_badges = app.task_list.listing.rows().next().unwrap();
+        // Doing's chip has the keys: Enter narrows the list to Review the
+        // budget, which now stands where Order badges was drawn.
+        batch(
+            &mut app,
+            &[named(Named::Tab), named(Named::Tab), named(Named::Tab)],
+        );
+        assert_eq!(app.task_list.focus, Some(Control::Chip(1)));
+        let serial = app.task_list.next_serial();
+        in_batch(&mut app, serial, &[named(Named::Enter)]);
+        assert_eq!(descriptions(&app), ["Review the budget @sam"]);
+        assert_ne!(app.task_list.generation, generation);
+        // The press on Order badges' source, queued in the same batch.
+        let _ = app.update(Message::TaskView(Event::Click {
+            serial,
+            click: Click::Open {
+                generation,
+                entry: order_badges,
+            },
+        }));
+        assert_eq!(app.task_view(), Some(&Scope::Workspace));
+        // In a batch of its own it still names the old listing.
+        click(
+            &mut app,
+            Click::Open {
+                generation,
+                entry: order_badges,
+            },
+        );
+        assert_eq!(app.task_view(), Some(&Scope::Workspace));
+        assert_eq!(document(&app), None);
+        // The row as drawn now opens.
+        let entry = app.task_list.listing.rows().next().unwrap();
+        let generation = app.task_list.generation;
+        click(&mut app, Click::Open { generation, entry });
+        assert_eq!(document(&app).as_deref(), Some("Work/Planning/Roadmap.md"));
+    }
+
+    #[test]
+    fn another_workspace_never_shows_the_last_ones_list() {
+        let (directory, mut app) = fixture();
+        assert!(descriptions(&app).contains(&"Draft the Q1 plan".to_owned()));
+        // The same notes, one task renamed: its index counts the same
+        // revisions as the first's.
+        let other = directory.path().join("other");
+        copy(Path::new(FIXTURE), &other);
+        let roadmap = other.join("Work/Planning/Roadmap.md");
+        let text = std::fs::read_to_string(&roadmap).unwrap();
+        std::fs::write(&roadmap, text.replace("Q1 plan", "Q2 plan")).unwrap();
+        app.session = Some(Session::open_with(&other, app.session_options()).unwrap());
+        app.sync_editor(true);
+        app.hydrate_navigation();
+        assert!(app.task_list.selected.is_none(), "the old list is gone");
+        let _ = app.dispatch(Command::ShowTasks(Scope::Workspace));
+        let _ = app.update(Message::Tick);
+        let shown = descriptions(&app);
+        assert!(shown.contains(&"Draft the Q2 plan".to_owned()), "{shown:?}");
+        assert!(!shown.contains(&"Draft the Q1 plan".to_owned()));
+        // Even with the list kept, the key tells the workspaces apart.
+        let session = Session::open_with(&root(&directory), app.session_options()).unwrap();
+        app.session = Some(session);
+        let _ = app.update(Message::Tick);
+        assert!(descriptions(&app).contains(&"Draft the Q1 plan".to_owned()));
+    }
+
+    #[test]
+    fn the_scope_menu_marks_only_the_current_scope() {
+        let (_directory, mut app) = fixture();
+        control(&mut app, Control::Scope);
+        let menu = app.task_list.menu.as_ref().unwrap();
+        let glyphs: Vec<&str> = (menu.rows().iter())
+            .map(|row| row.glyph.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(glyphs, ["\u{2713}", "", "", ""]);
     }
 
     #[test]
@@ -2070,36 +2451,52 @@ mod tests {
         assert_eq!(look("Order badges"), None);
     }
 
-    /// The list's view builds only the rows in view: with 5,000 tasks,
-    /// a frame's build stays well under a frame.
-    #[test]
-    #[ignore = "a timing; run with --ignored on a quiet machine"]
-    fn perf_task_list_view() {
+    /// Builds the list and its view for 5,000 tasks in `notes` notes of
+    /// one group, and returns how long the list took to build once, and
+    /// the view a frame.
+    fn time_list(notes: usize) -> (std::time::Duration, std::time::Duration) {
         let directory = crate::test_support::tempdir();
         let root = directory.path().join("workspace");
-        let mut text = String::new();
-        for line in 0..5000 {
-            text.push_str(&format!(
-                "- [ ] Task {line} @sam 📅 2026-11-{:02}\n",
-                1 + line % 28
-            ));
-        }
         std::fs::create_dir_all(root.join("Work/Big")).unwrap();
-        std::fs::write(root.join("Work/Big/Many.md"), text).unwrap();
+        let per_note = 5000 / notes;
+        for note in 0..notes {
+            let mut text = String::new();
+            for line in 0..per_note {
+                let day = 1 + (note + line) % 28;
+                text.push_str(&format!(
+                    "- [ ] Task {note}.{line} @sam 📅 2026-11-{day:02}\n"
+                ));
+            }
+            std::fs::write(root.join(format!("Work/Big/Note {note}.md")), text).unwrap();
+        }
         let mut app = launch(directory.path(), &root);
         let start = std::time::Instant::now();
         let _ = app.dispatch(Command::ShowTasks(Scope::Workspace));
         let _ = app.update(Message::Tick);
         let built = start.elapsed();
         assert_eq!(app.task_list.listing.shown, 5000);
+        assert_eq!(app.task_list.listing.groups.len(), notes);
         let start = std::time::Instant::now();
         let frames = 50;
         for _ in 0..frames {
             let view = app.view();
             std::hint::black_box(&view);
         }
-        let frame = start.elapsed() / frames;
-        eprintln!("5,000 tasks: list built in {built:?}, view built in {frame:?} a frame");
-        assert!(frame < std::time::Duration::from_millis(16), "{frame:?}");
+        (built, start.elapsed() / frames)
+    }
+
+    /// The list's view builds only the rows in view: with 5,000 tasks in
+    /// one note or in 5,000, a frame's build stays well under a frame.
+    #[test]
+    #[ignore = "a timing; run with --ignored on a quiet machine"]
+    fn perf_task_list_view() {
+        for notes in [1, 5000] {
+            let (built, frame) = time_list(notes);
+            eprintln!(
+                "5,000 tasks in {notes} notes: list built in {built:?}, view built in \
+                 {frame:?} a frame"
+            );
+            assert!(frame < std::time::Duration::from_millis(16), "{frame:?}");
+        }
     }
 }

@@ -42,13 +42,19 @@ const GLYPH_WIDTH: f32 = 26.0;
 const TEXT_SIZE: f32 = 13.0;
 
 /// Input from a host menu's card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
     /// The row `row` was clicked in the menu `instance`.
     Choose { instance: u64, row: u32 },
     /// A press, or a scroll, outside the card.
     Outside { instance: u64 },
+    /// The rows of the menu `instance`, taller than the window, scrolled to
+    /// `y`.
+    Scrolled { instance: u64, y: f32 },
 }
+
+/// The scrollable of a menu's rows, when they are taller than the window.
+pub const ROWS: &str = "host-menu-rows";
 
 /// What a key does to an open menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +77,8 @@ pub struct HostMenu<T> {
     rows: Vec<Row>,
     selected: Option<usize>,
     anchor: Rectangle,
+    /// How far the rows are scrolled, when they scroll.
+    scroll: f32,
 }
 
 impl<T> HostMenu<T> {
@@ -92,7 +100,33 @@ impl<T> HostMenu<T> {
             rows,
             selected,
             anchor,
+            scroll: 0.0,
         }
+    }
+
+    /// The rows scrolled to `y`, as the scrollable reports.
+    pub fn scrolled(&mut self, y: f32) {
+        self.scroll = y;
+    }
+
+    /// Where the rows must scroll to show the selected row, in a window of
+    /// `window`'s size: `None` when they all show, else the offset, moved
+    /// as little as it can be. Asked when the menu opens, since a scrollable
+    /// of an earlier menu may keep its offset, and after every key.
+    pub fn reveal(&mut self, window: Size) -> Option<f32> {
+        let shown = self.bounds(window).height;
+        let natural = self.size().height;
+        if shown >= natural {
+            return None;
+        }
+        let room = (shown - (natural - self.rows.len() as f32 * ROW_HEIGHT)).max(ROW_HEIGHT);
+        let top = self.selected.unwrap_or(0) as f32 * ROW_HEIGHT;
+        if top < self.scroll {
+            self.scroll = top;
+        } else if top + ROW_HEIGHT > self.scroll + room {
+            self.scroll = top + ROW_HEIGHT - room;
+        }
+        Some(self.scroll)
     }
 
     pub fn instance(&self) -> u64 {
@@ -244,7 +278,7 @@ impl<T> HostMenu<T> {
         &'a self,
         definition: Theme,
         window: Size,
-        send: fn(Event) -> M,
+        send: impl Fn(Event) -> M + Copy + 'a,
     ) -> (Element<'a, M>, Element<'a, M>) {
         let instance = self.instance;
         let outside = send(Event::Outside { instance });
@@ -327,7 +361,14 @@ impl<T> HostMenu<T> {
         let card = if bounds.height < self.size().height {
             card.push(
                 scrollable(lines)
+                    .id(ROWS)
                     .height(Fill)
+                    .on_scroll(move |viewport| {
+                        send(Event::Scrolled {
+                            instance,
+                            y: viewport.absolute_offset().y,
+                        })
+                    })
                     .style(move |_, status| chrome::scrollbar(definition, status)),
             )
         } else {
@@ -397,6 +438,15 @@ mod tests {
             Some("Show tasks in".into()),
             rows(),
             Rectangle::new(Point::new(100.0, 40.0), Size::new(120.0, 24.0)),
+        )
+    }
+
+    fn named_any<T>(menu: &mut HostMenu<T>, named: Named) -> MenuKey {
+        menu.key(
+            &Key::Named(named),
+            Physical::Unidentified(NativeCode::Unidentified),
+            Modifiers::empty(),
+            None,
         )
     }
 
@@ -524,10 +574,26 @@ mod tests {
         assert_eq!(low.y + low.height, 780.0 - GAP);
         // Taller than the window, it fits in it, and scrolls.
         let many: Vec<Row> = (0..60).map(|id| Row::new(id, "@someone")).collect();
-        let tall = HostMenu::new(1, (), None, many, Rectangle::default()).bounds(window);
+        let mut tall = HostMenu::new(1, (), None, many, Rectangle::default());
+        let card = tall.bounds(window);
         assert_eq!(
-            (tall.y, tall.height),
+            (card.y, card.height),
             (MARGIN, window.height - 2.0 * MARGIN)
         );
+        assert!(
+            menu.clone().reveal(window).is_none(),
+            "a short menu does not scroll"
+        );
+        // It opens at its top, End brings the last row into view, Home the
+        // first, and a row already shown moves nothing.
+        assert_eq!(tall.reveal(window), Some(0.0));
+        let room = card.height - 2.0 * PADDING - 2.0;
+        assert_eq!(named_any(&mut tall, Named::End), MenuKey::Moved);
+        let end = tall.reveal(window).unwrap();
+        assert_eq!(end, 60.0 * ROW_HEIGHT - room);
+        assert_eq!(named_any(&mut tall, Named::ArrowUp), MenuKey::Moved);
+        assert_eq!(tall.reveal(window), Some(end));
+        assert_eq!(named_any(&mut tall, Named::Home), MenuKey::Moved);
+        assert_eq!(tall.reveal(window), Some(0.0));
     }
 }

@@ -10,13 +10,15 @@
 //! reports those only so the host can drop its copy of one that comes
 //! after its batch was stopped.
 //!
-//! **A batch boundary.** Each report says whether it is the first the
-//! wrapper made in its batch of events, and whether a mouse press came
-//! before it in the batch. A key the host reads as opening something (a
-//! menu, the note) stops the rest of its batch, which was typed before the
-//! user could see what opened, so the host drops it (drop, don't forward);
-//! and a key after a press in its batch is dropped too, since the press
-//! may have opened something the key could not see.
+//! **A batch boundary.** Each report carries the host's serial for the
+//! view it was built in, which is one batch of events: iced builds the view
+//! again after any batch that publishes anything. Every other input of the
+//! view (its clicks, its menu's) carries the same serial, so the host sees
+//! a batch's input in order and knows where it ends. A key the host reads
+//! as opening something (a menu, the note) stops the rest of its batch,
+//! which was typed before the user could see what opened, so the host
+//! drops it (drop, don't forward). A report also says whether a mouse
+//! press inside the wrapper came before it in the batch.
 
 use std::cell::{Cell, RefCell};
 
@@ -52,8 +54,8 @@ impl Press {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListKey {
     pub press: Press,
-    /// The first report of the wrapper's batch of events.
-    pub first: bool,
+    /// The host's serial of the view the wrapper was built in: its batch.
+    pub serial: u64,
     /// A mouse press came before it in its batch.
     pub after_press: bool,
 }
@@ -63,12 +65,13 @@ pub struct ListKey {
 pub fn list_keys<'a, Message, Theme, Renderer>(
     content: impl Into<Element<'a, Message, Theme, Renderer>>,
     active: bool,
+    serial: u64,
     on_key: impl Fn(ListKey) -> Message + 'a,
 ) -> ListKeys<'a, Message, Theme, Renderer> {
     ListKeys {
         content: content.into(),
         active,
-        reported: Cell::new(false),
+        serial,
         pressed: Cell::new(false),
         on_key: Box::new(on_key),
     }
@@ -77,8 +80,7 @@ pub fn list_keys<'a, Message, Theme, Renderer>(
 pub struct ListKeys<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     active: bool,
-    /// A key was reported in this batch.
-    reported: Cell<bool>,
+    serial: u64,
     /// A mouse press came in this batch.
     pressed: Cell<bool>,
     on_key: Box<dyn Fn(ListKey) -> Message + 'a>,
@@ -165,10 +167,9 @@ where
                     text: text.as_ref().map(ToString::to_string),
                 };
                 let passes = press.is_shortcut() || press.is_plain_escape();
-                let first = !self.reported.replace(true);
                 shell.publish((self.on_key)(ListKey {
                     press,
-                    first,
+                    serial: self.serial,
                     after_press: self.pressed.get(),
                 }));
                 if !passes {
@@ -428,6 +429,7 @@ mod tests {
         let mut element: Element<'static, Out, Theme, ()> = list_keys(
             column![button("press").on_press(Out::Clicked).width(100).height(20)],
             active,
+            7,
             Out::Key,
         )
         .into();
@@ -462,9 +464,9 @@ mod tests {
             .filter_map(|message| match message {
                 Out::Key(ListKey {
                     press,
-                    first,
+                    serial,
                     after_press,
-                }) => Some((format!("{:?}", press.key), *first, *after_press)),
+                }) => Some((format!("{:?}", press.key), *serial == 7, *after_press)),
                 Out::Clicked => None,
             })
             .collect()
@@ -497,12 +499,9 @@ mod tests {
         );
         let reported = reported(&messages);
         assert_eq!(reported.len(), 4);
-        assert_eq!(
-            reported
-                .iter()
-                .map(|(_, first, _)| *first)
-                .collect::<Vec<_>>(),
-            [true, false, false, false]
+        assert!(
+            reported.iter().all(|(_, serial, _)| *serial),
+            "the view's serial"
         );
         assert_eq!(captured, [true, true, false, false]);
     }
@@ -534,8 +533,8 @@ mod tests {
             "the button inside hears the press"
         );
         let keys = reported(&messages);
-        assert!(keys[0].1);
-        assert_eq!((keys[1].1, keys[1].2), (false, true));
+        assert!(!keys[0].2);
+        assert!(keys[1].2);
         // A press anywhere counts: it may have opened something.
         let (messages, _) = batch(
             true,

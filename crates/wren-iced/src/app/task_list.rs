@@ -17,6 +17,7 @@
 //!   then due date (none last), then the tree's order.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use wren_core::fs_store::RelPath;
 use wren_core::model::NoteId;
@@ -156,7 +157,7 @@ fn order(records: &[TaskRecord], today: Date, a: usize, b: usize) -> Ordering {
 }
 
 /// What a group gathers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum GroupKey {
     Note(NoteId),
     Due(DueBucket),
@@ -259,14 +260,15 @@ impl Listing {
         }
         owners.sort();
         let mut groups: Vec<Group> = Vec::new();
+        let mut found: HashMap<GroupKey, usize> = HashMap::new();
         let mut add =
-            |key: GroupKey, record: usize, label: &dyn Fn() -> (String, String)| match groups
-                .iter_mut()
-                .find(|group| group.key == key)
+            |key: GroupKey, record: usize, label: &dyn Fn() -> (String, String)| match found
+                .get(&key)
             {
-                Some(group) => group.rows.push(record),
+                Some(&group) => groups[group].rows.push(record),
                 None => {
                     let (label, detail) = label();
+                    found.insert(key.clone(), groups.len());
                     groups.push(Group {
                         key,
                         label,
@@ -435,16 +437,13 @@ impl Listing {
 }
 
 /// A due date as written, when it is in a date's shape but no real day:
-/// what a row shows, marked, in place of a date.
-pub(super) fn invalid_due(source: &str) -> Option<&str> {
-    const GLYPHS: [&str; 4] = ["📅", "📆", "🗓", "[due::"];
-    let start = GLYPHS
-        .iter()
-        .filter_map(|glyph| source.rfind(glyph).map(|at| at + glyph.len()))
-        .max()?;
-    let rest = source[start..].trim_start_matches(['\u{fe0f}', ' ', '\t']);
-    let date = rest.get(..10)?;
-    matches!(Parsed::from_iso(date), Some(Parsed::Invalid)).then_some(date)
+/// what a row shows, marked, in place of a date. The date the line's
+/// tokens read as its due date, whatever else the line holds.
+pub(super) fn invalid_due(record: &TaskRecord) -> Option<&str> {
+    match record.due {
+        Some(Parsed::Invalid) => record.source.get(record.due_at.clone()?),
+        _ => None,
+    }
 }
 
 /// A piece of a row's description.
@@ -888,20 +887,31 @@ mod tests {
 
     #[test]
     fn an_invalid_date_is_kept_as_written() {
+        let read = |line: &str| {
+            let (records, _) =
+                wren_core::tasks::read_note(NoteId(9), &RelPath::new("a.md").unwrap(), line);
+            records.into_iter().next().unwrap()
+        };
+        let due = |line: &str| invalid_due(&read(line)).map(str::to_owned);
         assert_eq!(
-            invalid_due("- [ ] Fix the date 📅 2026-02-30"),
-            Some("2026-02-30")
+            due("- [ ] Fix the date 📅 2026-02-30"),
+            Some("2026-02-30".into())
         );
         assert_eq!(
-            invalid_due("- [ ] Fix 📅\u{fe0f} 2026-13-01 ⏫"),
-            Some("2026-13-01")
+            due("- [ ] Fix 📅\u{fe0f} 2026-13-01 ⏫"),
+            Some("2026-13-01".into())
         );
         assert_eq!(
-            invalid_due("- [ ] Fix [due:: 2026-02-31]"),
-            Some("2026-02-31")
+            due("- [ ] Fix [due:: 2026-02-31]"),
+            Some("2026-02-31".into())
         );
-        assert_eq!(invalid_due("- [ ] Fine 📅 2026-02-28"), None);
-        assert_eq!(invalid_due("- [ ] None"), None);
+        assert_eq!(due("- [ ] Fine 📅 2026-02-28"), None);
+        assert_eq!(due("- [ ] None"), None);
+        // The due date the tokens read, not a glyph in a field after it.
+        assert_eq!(
+            due("- [ ] Repair 📅 2026-02-30 [meta:: 📅 2026-04-31]"),
+            Some("2026-02-30".into())
+        );
         let records = records();
         let record = records
             .iter()

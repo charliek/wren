@@ -475,15 +475,12 @@ pub enum Event {
     Key(crate::list_keys::ListKey),
     /// The list scrolled to `y`, and is `height` tall.
     Scrolled { y: f32, height: f32 },
-    /// A click on the list's row at this entry.
-    Select(usize),
-    /// A click on the source of the list's row at this entry: open the
-    /// note at its line.
-    Open(usize),
-    /// A click on a control of the view.
-    Control(super::task_list_view::Control),
-    /// Input from the menu over the view.
-    Menu(super::host_menu::Event),
+    /// A click in the view or its menu, in the batch of the view whose
+    /// serial it carries (`task_list_view::ListState`).
+    Click {
+        serial: u64,
+        click: super::task_list_view::Click,
+    },
 }
 
 impl App {
@@ -496,6 +493,8 @@ impl App {
     /// Forget every view: another workspace is open.
     pub(super) fn clear_task_views(&mut self) {
         self.task_views = Trail::default();
+        // Another workspace's list is no list of this one's.
+        self.task_list.reset();
     }
 
     /// What Back or Forward does next, through notes and views alike.

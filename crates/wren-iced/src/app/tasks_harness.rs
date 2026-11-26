@@ -620,7 +620,7 @@ impl App {
         let listed = self.update(Message::TaskView(super::tasks_view::Event::Key(
             crate::list_keys::ListKey {
                 press,
-                first: true,
+                serial: self.task_list.next_serial(),
                 after_press: false,
             },
         )));
@@ -651,7 +651,7 @@ impl App {
     /// (`{"source": n}`), on a row of the menu over the view
     /// (`{"menu": label}`), or outside that menu (`{"outside": true}`).
     fn task_view_click(&mut self, click: &Value) -> Result<Task<Message>, String> {
-        use super::task_list_view::Control;
+        use super::task_list_view::{Click, Control};
         use super::tasks_view::Event;
         if self.task_view().is_none() {
             return Err("No task view is open".into());
@@ -689,11 +689,17 @@ impl App {
                 .into_iter()
                 .find(|control| control.name() == name)
                 .ok_or_else(|| format!("no control {name:?}"))?;
-            Event::Control(control)
+            Click::Control(control)
         } else if let Some(entry) = row("row")? {
-            Event::Select(entry)
+            Click::Select {
+                generation: self.task_list.generation,
+                entry,
+            }
         } else if let Some(entry) = row("source")? {
-            Event::Open(entry)
+            Click::Open {
+                generation: self.task_list.generation,
+                entry,
+            }
         } else if let Some(label) = click.get("menu").and_then(Value::as_str) {
             let menu = self.task_list.menu.as_ref().ok_or("No menu is open")?;
             let found = menu
@@ -701,7 +707,7 @@ impl App {
                 .iter()
                 .find(|row| row.label == label || row.label.starts_with(&format!("{label} (")))
                 .ok_or_else(|| format!("the menu has no row {label:?}"))?;
-            Event::Menu(super::host_menu::Event::Choose {
+            Click::Menu(super::host_menu::Event::Choose {
                 instance: click
                     .get("instance")
                     .and_then(Value::as_u64)
@@ -710,13 +716,17 @@ impl App {
             })
         } else if click.get("outside").and_then(Value::as_bool) == Some(true) {
             let menu = self.task_list.menu.as_ref().ok_or("No menu is open")?;
-            Event::Menu(super::host_menu::Event::Outside {
+            Click::Menu(super::host_menu::Event::Outside {
                 instance: menu.instance(),
             })
         } else {
             return Err("click needs control, row, source, menu or outside".into());
         };
-        Ok(self.update(Message::TaskView(event)))
+        let serial = self.task_list.next_serial();
+        Ok(self.update(Message::TaskView(Event::Click {
+            serial,
+            click: event,
+        })))
     }
 
     /// The task view's list, its filters, its menu and where its controls

@@ -968,9 +968,9 @@ impl App {
                 return true;
             }
         }
-        // An Escape the task view dropped with the rest of a batch a key
-        // of its stopped.
-        if self.take_task_list_claim(true) {
+        // An Escape the task view read in its place, or dropped with the
+        // rest of a batch.
+        if self.take_task_list_copy(&task_list_view::AppCopy::Escape) {
             return true;
         }
         self.editor.take_claimed_escape()

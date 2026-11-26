@@ -1191,8 +1191,14 @@ impl App {
                 };
             }
             // A shortcut the task view dropped with the rest of a batch a
-            // key of its stopped.
-            Input::Accel(_) if self.take_task_list_claim(false) => return Task::none(),
+            // key of its stopped: each copy is matched to its own report.
+            Input::Accel(accel)
+                if self.take_task_list_copy(&super::task_list_view::AppCopy::Shortcut(
+                    accel.clone(),
+                )) =>
+            {
+                return Task::none()
+            }
             Input::Accel(accel) => accel,
         };
         // The sheet's own key is its filter's to close it with
