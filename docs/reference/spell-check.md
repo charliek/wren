@@ -1,6 +1,6 @@
 # Spell check
 
-On the `advanced` [editor engine](configuration.md), Wren underlines
+On the `advanced` [editor engine](configuration.md), the default, Wren underlines
 misspelled words with a red zigzag and offers corrections in a small menu
 under the word. Checking is offline and works the same on macOS and Linux:
 a bundled US English dictionary (SCOWL `en_US`, read by `spellbook`) plus a

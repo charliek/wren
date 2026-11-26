@@ -862,8 +862,9 @@ mod tests {
         for (engine, settings) in [
             ("advanced", "tasks = on\ntasks-suggest = off\n"),
             ("advanced", "tasks = off\n"),
-            ("advanced", ""),
+            ("advanced", "tasks-suggest = off\n"),
             ("classic", "tasks = on\n"),
+            ("classic", ""),
         ] {
             let (_directory, mut app) = app_with(engine, settings);
             type_text(&mut app, " to");

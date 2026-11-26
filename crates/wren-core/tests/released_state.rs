@@ -70,19 +70,18 @@ impl Workspace {
     }
 
     fn open(&self, boards: bool) -> Session {
+        self.open_with(SessionOptions {
+            boards,
+            tasks: false,
+        })
+    }
+
+    fn open_with(&self, options: SessionOptions) -> Session {
         let bin = Bin {
             directory: TempDir::new().unwrap(),
             count: 0,
         };
-        Session::with_options(
-            self.path(),
-            Box::new(bin),
-            SessionOptions {
-                boards,
-                tasks: false,
-            },
-        )
-        .unwrap()
+        Session::with_options(self.path(), Box::new(bin), options).unwrap()
     }
 
     fn state_bytes(&self) -> Option<Vec<u8>> {
@@ -570,6 +569,25 @@ fn with_boards_on_and_none_on_disk_the_state_file_is_the_one_main_writes() {
         String::from_utf8(workspace.state_bytes().unwrap()).unwrap(),
         String::from_utf8(MAIN_STATE.to_vec()).unwrap()
     );
+}
+
+/// Tasks, on by default, change nothing in the state file, with boards off
+/// or on.
+#[test]
+fn with_tasks_on_the_state_file_is_the_one_main_writes() {
+    for (boards, board_on_disk) in [(false, true), (true, false)] {
+        let workspace = script_workspace(board_on_disk);
+        let mut session = workspace.open_with(SessionOptions {
+            boards,
+            tasks: true,
+        });
+        scripted_ops(&mut session);
+        assert_eq!(
+            String::from_utf8(workspace.state_bytes().unwrap()).unwrap(),
+            String::from_utf8(MAIN_STATE.to_vec()).unwrap(),
+            "boards {boards}"
+        );
+    }
 }
 
 /// A xorshift generator, so a failing walk replays from its seed.

@@ -1838,7 +1838,16 @@ mod tests {
         let (app, _) = App::with_config(options(), None, Some(path.clone()));
         assert_eq!(app.editor.backend(), BackendKind::Owned);
 
-        std::fs::write(&path, "editor-font-size = 18\nline-numbers = off\n").unwrap();
+        // Without the line, the default engine is the advanced one.
+        std::fs::write(&path, "editor-font-size = 18\n").unwrap();
+        let (app, _) = App::with_config(options(), None, Some(path.clone()));
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
+
+        std::fs::write(
+            &path,
+            "editor-font-size = 18\nline-numbers = off\neditor-engine = classic\n",
+        )
+        .unwrap();
         let (mut app, _) = App::with_config(options(), None, Some(path.clone()));
         assert_eq!(app.editor.backend(), BackendKind::Iced);
         let _ = app.edit(wren_editor::Message::Action(Action::Move(
@@ -2655,7 +2664,7 @@ mod tests {
     fn the_engine_command_switches_live_and_saves_keeping_text_and_cursor() {
         use iced::widget::text_editor::{Action, Edit, Motion};
 
-        let (mut app, path, _directory) = app_with_settings("");
+        let (mut app, path, _directory) = app_with_settings("editor-engine = classic\n");
         assert_eq!(app.editor.backend(), BackendKind::Iced);
         let _ = app.edit(wren_editor::Message::Action(Action::Move(
             Motion::DocumentEnd,
@@ -2707,11 +2716,12 @@ mod tests {
             ..Default::default()
         };
         let (mut app, _) = App::with_config(options, None, None);
+        assert_eq!(app.editor.backend(), BackendKind::Owned);
         let _ = app.update(Message::Command(Command::Run(CommandId::SwitchEngine)));
         let _ = app.update(Message::Command(Command::Run(
             CommandId::ToggleMarkdownAssist,
         )));
-        assert_eq!(app.editor.backend(), BackendKind::Owned);
+        assert_eq!(app.editor.backend(), BackendKind::Iced);
         assert!(!app.editor.markdown_assist());
         assert!(app.last_processed.as_ref().unwrap().disposition.committed());
     }
@@ -2725,7 +2735,7 @@ mod tests {
         std::fs::write(workspace.path().join("Alpha/Inbox/First.md"), "first body").unwrap();
         let directory = crate::test_support::tempdir();
         let path = directory.path().join("config.conf");
-        std::fs::write(&path, "").unwrap();
+        std::fs::write(&path, "editor-engine = classic\n").unwrap();
         let options = super::super::Options {
             editor: true,
             ..Default::default()

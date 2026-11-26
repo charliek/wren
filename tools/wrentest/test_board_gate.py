@@ -90,6 +90,9 @@ def test_with_no_settings_file_boards_are_on(small: Path, monkeypatch: pytest.Mo
     with WrenApp(workspace=small, artifacts_dir=artifact_directory("board-gate-default"),
                  lane_settings=False) as app:
         assert not app.settings_path.exists()
+        # The other defaults a fresh install has: tasks on, the advanced engine.
+        assert app.client.call("tasks.get")["tasks"] is True
+        assert app.client.call("editor.get")["engine"] == "advanced"
         notes = {row["path"] for row in app.client.call("session.get")["notes"]}
         assert notes == {"Plans/Q1/Flow.wren-board", "Plans/Q1/Note.md"}
         assert board(app)["enabled"] is True

@@ -200,13 +200,14 @@ class _WrenAppTestBase(unittest.TestCase):
             ui, "_find_binary", return_value=Path("/bin/true"),
         )
         self._binary_patch.start()
-        # The lane's spell and board settings are part of every config.conf
-        # written; the settings cases assume neither is set from outside.
+        # The lane's settings are part of every config.conf written; the
+        # settings cases assume none is set from outside.
         self._environment = patch.dict(os.environ)
         self._environment.start()
         os.environ.pop("WRENTEST_SPELL", None)
         os.environ.pop("WRENTEST_BOARDS", None)
         os.environ.pop("WRENTEST_TASKS", None)
+        os.environ.pop("WRENTEST_ENGINE", None)
         os.environ.pop("WRENTEST_LINUX_MODIFIER", None)
 
     def tearDown(self) -> None:
@@ -438,7 +439,7 @@ class TestWrenAppReadiness(_WrenAppTestBase):
                 app.settings_path.write_text("editor-font-size = 18\n", encoding="utf-8")
                 app.restart(hard=True)
         self.assertEqual(seen, ["editor-engine = advanced\nspell-check = off\n"
-                                "linux-modifier = alt\n",
+                                "tasks = off\nlinux-modifier = alt\n",
                                 "editor-font-size = 18\n"])
 
     def test_without_settings_the_config_file_holds_only_the_pinned_settings(self) -> None:
@@ -446,19 +447,25 @@ class TestWrenAppReadiness(_WrenAppTestBase):
         with patch.object(subprocess, "Popen", side_effect=factory):
             with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
                 self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
-                                 "spell-check = off\nlinux-modifier = alt\n")
+                                 "spell-check = off\ntasks = off\neditor-engine = classic\n"
+                                 "linux-modifier = alt\n")
                 self.assertFalse(app.words_path.exists())
 
     def test_the_lane_spell_setting_joins_the_settings_unless_they_name_it(self) -> None:
         factory = self._make_popen(_good_identify())
         cases = [
-            (None, None, "spell-check = off\nlinux-modifier = alt\n"),
-            ("on", None, "spell-check = on\nlinux-modifier = alt\n"),
-            ("off", "", "spell-check = off\nlinux-modifier = alt\n"),
-            ("on", "editor-engine = advanced", "editor-engine = advanced\nspell-check = on\nlinux-modifier = alt\n"),
-            ("on", "spell-check = off\n", "spell-check = off\nlinux-modifier = alt\n"),
-            ("off", "# note\n  spell-check=on\n", "# note\n  spell-check=on\nlinux-modifier = alt\n"),
-            ("on", "# spell-check is the lane's\n", "# spell-check is the lane's\nspell-check = on\nlinux-modifier = alt\n"),
+            (None, None, "spell-check = off\ntasks = off\neditor-engine = classic\nlinux-modifier = alt\n"),
+            ("on", None, "spell-check = on\ntasks = off\neditor-engine = classic\nlinux-modifier = alt\n"),
+            ("off", "", "spell-check = off\ntasks = off\neditor-engine = classic\nlinux-modifier = alt\n"),
+            ("on", "editor-engine = advanced",
+             "editor-engine = advanced\nspell-check = on\ntasks = off\nlinux-modifier = alt\n"),
+            ("on", "spell-check = off\n",
+             "spell-check = off\ntasks = off\neditor-engine = classic\nlinux-modifier = alt\n"),
+            ("off", "# note\n  spell-check=on\n",
+             "# note\n  spell-check=on\ntasks = off\neditor-engine = classic\nlinux-modifier = alt\n"),
+            ("on", "# spell-check is the lane's\n",
+             "# spell-check is the lane's\nspell-check = on\ntasks = off\neditor-engine = classic\n"
+             "linux-modifier = alt\n"),
         ]
         for lane, settings, expected in cases:
             with self.subTest(lane=lane, settings=settings):
@@ -519,16 +526,22 @@ class TestWrenAppReadiness(_WrenAppTestBase):
     def test_wrentest_boards_writes_an_explicit_boards_line(self) -> None:
         factory = self._make_popen(_good_identify())
         cases = [
-            ("on", None, "spell-check = off\nboards = on\nlinux-modifier = alt\n"),
+            ("on", None, "spell-check = off\nboards = on\ntasks = off\neditor-engine = classic\n"
+             "linux-modifier = alt\n"),
             ("off", "editor-engine = advanced\n",
-             "editor-engine = advanced\nspell-check = off\nboards = off\nlinux-modifier = alt\n"),
+             "editor-engine = advanced\nspell-check = off\nboards = off\ntasks = off\n"
+             "linux-modifier = alt\n"),
             ("on", "editor-engine = advanced",
-             "editor-engine = advanced\nspell-check = off\nboards = on\nlinux-modifier = alt\n"),
+             "editor-engine = advanced\nspell-check = off\nboards = on\ntasks = off\n"
+             "linux-modifier = alt\n"),
             # A case that sets it itself keeps its own.
-            ("on", "boards = off\n", "boards = off\nspell-check = off\nlinux-modifier = alt\n"),
-            ("off", "  boards=on\n", "  boards=on\nspell-check = off\nlinux-modifier = alt\n"),
+            ("on", "boards = off\n", "boards = off\nspell-check = off\ntasks = off\n"
+             "editor-engine = classic\nlinux-modifier = alt\n"),
+            ("off", "  boards=on\n", "  boards=on\nspell-check = off\ntasks = off\n"
+             "editor-engine = classic\nlinux-modifier = alt\n"),
             # Both lane lines, after the test's own text, spell check first.
-            ("off", "spell-check = on\n", "spell-check = on\nboards = off\nlinux-modifier = alt\n"),
+            ("off", "spell-check = on\n", "spell-check = on\nboards = off\ntasks = off\n"
+             "editor-engine = classic\nlinux-modifier = alt\n"),
         ]
         for value, settings, expected in cases:
             with self.subTest(value=value, settings=settings), \
@@ -553,11 +566,13 @@ class TestWrenAppReadiness(_WrenAppTestBase):
     def test_wrentest_tasks_writes_an_explicit_tasks_line(self) -> None:
         factory = self._make_popen(_good_identify())
         cases = [
-            ("on", None, "spell-check = off\ntasks = on\nlinux-modifier = alt\n"),
+            ("on", None, "spell-check = off\ntasks = on\neditor-engine = classic\n"
+             "linux-modifier = alt\n"),
             ("off", "editor-engine = advanced\n",
              "editor-engine = advanced\nspell-check = off\ntasks = off\nlinux-modifier = alt\n"),
             # A task case that sets it itself keeps its own.
-            ("off", "tasks = on\n", "tasks = on\nspell-check = off\nlinux-modifier = alt\n"),
+            ("off", "tasks = on\n", "tasks = on\nspell-check = off\neditor-engine = classic\n"
+             "linux-modifier = alt\n"),
         ]
         for value, settings, expected in cases:
             with self.subTest(value=value, settings=settings), \
@@ -573,14 +588,46 @@ class TestWrenAppReadiness(_WrenAppTestBase):
             with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5) as app:
                 self.assertEqual(app.settings_path.read_text(encoding="utf-8"),
                                  "spell-check = off\nboards = off\ntasks = on\n"
-                                 "linux-modifier = alt\n")
+                                 "editor-engine = classic\nlinux-modifier = alt\n")
 
-    def test_wrentest_tasks_unset_or_empty_adds_nothing(self) -> None:
+    def test_wrentest_tasks_unset_or_empty_pins_tasks_off(self) -> None:
+        # The build defaults to on; a lane that does not ask runs with them off.
         for environment in ({}, {"WRENTEST_TASKS": ""}):
             with self.subTest(environment=environment), patch.dict(os.environ, environment):
-                self.assertIsNone(ui._tasks_setting(None))
-                self.assertEqual(ui._tasks_setting("x = 1\n"), "x = 1\n")
-                self.assertIsNone(ui.tasks_setting())
+                self.assertEqual(ui._tasks_setting(None), "tasks = off\n")
+                self.assertEqual(ui._tasks_setting("x = 1\n"), "x = 1\ntasks = off\n")
+                self.assertEqual(ui.tasks_setting(), "off")
+
+    def test_the_lane_engine_is_the_first_wrentest_engine_names(self) -> None:
+        # The build defaults to advanced; a case that names no engine runs on
+        # the lane's, classic unless WRENTEST_ENGINE puts advanced first.
+        factory = self._make_popen(_good_identify())
+        cases = [
+            ({}, None, "classic"),
+            ({"WRENTEST_ENGINE": ""}, None, "classic"),
+            ({"WRENTEST_ENGINE": "classic,advanced"}, None, "classic"),
+            ({"WRENTEST_ENGINE": " advanced , classic"}, None, "advanced"),
+            ({"WRENTEST_ENGINE": "advanced"}, None, "advanced"),
+            # A case that names its engine keeps its own.
+            ({"WRENTEST_ENGINE": "advanced"}, "editor-engine = classic\n", None),
+        ]
+        for environment, settings, engine in cases:
+            with self.subTest(environment=environment, settings=settings), \
+                    patch.dict(os.environ, environment), \
+                    patch.object(subprocess, "Popen", side_effect=factory):
+                with WrenApp(artifacts_dir=self._artifacts, readiness_timeout=5,
+                             settings=settings) as app:
+                    text = app.settings_path.read_text(encoding="utf-8")
+                    if engine is None:
+                        self.assertEqual(text.count("editor-engine"), 1)
+                        self.assertTrue(text.startswith(settings))
+                    else:
+                        self.assertIn(f"\neditor-engine = {engine}\n", text)
+                        self.assertEqual(ui.engine_setting(), engine)
+        for value in ("gpui", "Classic", ",advanced"):
+            with self.subTest(value=value), patch.dict(os.environ, {"WRENTEST_ENGINE": value}), \
+                    self.assertRaisesRegex(ValueError, "WRENTEST_ENGINE"):
+                WrenApp(settings=None)
 
     def test_wrentest_tasks_must_be_off_or_on(self) -> None:
         for value in ("yes", "ON", "1"):
@@ -592,16 +639,19 @@ class TestWrenAppReadiness(_WrenAppTestBase):
         factory = self._make_popen(_good_identify())
         cases = [
             # The suite's cases are written for Alt as the command key.
-            ({}, None, "spell-check = off\nlinux-modifier = alt\n"),
+            ({}, None, "spell-check = off\ntasks = off\neditor-engine = classic\n"
+             "linux-modifier = alt\n"),
             ({"WRENTEST_LINUX_MODIFIER": "ctrl"}, None,
-             "spell-check = off\nlinux-modifier = ctrl\n"),
+             "spell-check = off\ntasks = off\neditor-engine = classic\nlinux-modifier = ctrl\n"),
             # A case about the mode sets it itself and keeps its own.
-            ({}, "linux-modifier = ctrl\n", "linux-modifier = ctrl\nspell-check = off\n"),
+            ({}, "linux-modifier = ctrl\n",
+             "linux-modifier = ctrl\nspell-check = off\ntasks = off\neditor-engine = classic\n"),
             ({"WRENTEST_LINUX_MODIFIER": "ctrl"}, "  linux-modifier=alt\n",
-             "  linux-modifier=alt\nspell-check = off\n"),
+             "  linux-modifier=alt\nspell-check = off\ntasks = off\neditor-engine = classic\n"),
             # Last, after every other lane line.
             ({"WRENTEST_BOARDS": "on", "WRENTEST_TASKS": "off"}, "theme = nord\n",
-             "theme = nord\nspell-check = off\nboards = on\ntasks = off\nlinux-modifier = alt\n"),
+             "theme = nord\nspell-check = off\nboards = on\ntasks = off\n"
+             "editor-engine = classic\nlinux-modifier = alt\n"),
         ]
         for environment, settings, expected in cases:
             with self.subTest(environment=environment, settings=settings), \

@@ -17,18 +17,18 @@ they differ.
 - [-] Old idea ❌ 2026-11-18
 ```
 
-## Turning tasks on
+## Turning tasks off
 
-Tasks are off by default. Set `tasks = on` in [`config.conf`](configuration.md)
-and restart Wren. Until then the banner says "Restart Wren to apply
-`tasks`."
+Tasks are on by default. To turn them off, set `tasks = off` in
+[`config.conf`](configuration.md) and restart Wren. Until then the banner
+says "Restart Wren to apply `tasks`."
 
-With `tasks = off`, nothing changes:
+With `tasks = off`, task lines are plain Markdown checkboxes again:
 
 - A box holds a space, `x` or `X`. `[/]` and `[-]` are text.
 - The Markdown toggle writes no done date.
 - Highlighting, [spell check](spell-check.md) and search read a task line
-  as they always did.
+  as plain Markdown.
 - No task command is listed, its keys do nothing, and a `keybind` line
   that names one is skipped with a warning.
 

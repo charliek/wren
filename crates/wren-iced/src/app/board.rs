@@ -1672,22 +1672,21 @@ z = "c"
 
         // An engine change in the file reaches the hidden editor empty.
         let engine = app.editor.backend();
-        std::fs::write(
-            &settings,
-            "boards = on\neditor-engine = advanced\neditor-font-size = 17\n",
-        )
-        .unwrap();
-        let _ = app.reload_settings(false);
+        assert_eq!(engine, wren_editor::BackendKind::Owned);
         std::fs::write(
             &settings,
             "boards = on\neditor-engine = classic\neditor-font-size = 17\n",
         )
         .unwrap();
         let _ = app.reload_settings(false);
-        assert_eq!(
-            engine == wren_editor::BackendKind::Iced,
-            app.editor.backend() == wren_editor::BackendKind::Iced
-        );
+        assert_eq!(app.editor.backend(), wren_editor::BackendKind::Iced);
+        std::fs::write(
+            &settings,
+            "boards = on\neditor-engine = advanced\neditor-font-size = 17\n",
+        )
+        .unwrap();
+        let _ = app.reload_settings(false);
+        assert_eq!(app.editor.backend(), engine);
         assert_in_step(&app, Surface::Board);
         assert_eq!(session_text(&app), FLOW);
     }

@@ -185,7 +185,7 @@ when one lands, move what users need into `docs/` and trim the note.
 - Settle before any non-passive op: `App::settle_board()` commits an open
   label, cancels a gesture and drops a preview before a note switch, a
   palette or dialog, a blur, or quit, so a flush never writes half a drag.
-- With `tasks = off` (the default; restart-only) the shared classifier
+- With `tasks = off` (restart-only) the shared classifier
   accepts only the boxes it always did, the toggle writes no stamp, and no
   task command, key or file exists (the harness's `tasks.get` alone still
   answers, `{"tasks": false}`): `tasks_baseline.rs` and

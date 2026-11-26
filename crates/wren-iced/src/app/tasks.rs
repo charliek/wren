@@ -757,19 +757,20 @@ mod tests {
 
     #[test]
     fn the_day_timer_runs_only_with_tasks_on() {
-        let (_directory, app) = app("tasks = on\n");
-        assert!(app.preferences.tasks);
-        assert!(app.day_subscription().is_some());
-        for settings in ["", "tasks = off\n"] {
+        // On is the default.
+        for settings in ["tasks = on\n", ""] {
             let (_directory, app) = self::app(settings);
-            assert!(!app.preferences.tasks, "{settings:?}");
-            assert!(app.day_subscription().is_none(), "{settings:?}");
+            assert!(app.preferences.tasks, "{settings:?}");
+            assert!(app.day_subscription().is_some(), "{settings:?}");
         }
+        let (_directory, app) = app("tasks = off\n");
+        assert!(!app.preferences.tasks);
+        assert!(app.day_subscription().is_none());
     }
 
     #[test]
     fn a_changed_tasks_setting_waits_for_a_restart_and_says_so() {
-        let (directory, mut app) = app("");
+        let (directory, mut app) = app("tasks = off\n");
         let path = directory.path().join("config.conf");
         std::fs::write(&path, "tasks = on\n").unwrap();
         assert_eq!(app.reload_settings(false), None);
@@ -794,7 +795,7 @@ mod tests {
     /// names must keep: with the setting off it is neither listed nor run.
     #[test]
     fn with_tasks_off_no_task_command_is_listed_or_runs() {
-        let (_directory, mut app) = app("");
+        let (_directory, mut app) = app("tasks = off\n");
         assert!(!app.preferences.tasks);
         let _ = app.open_palette(Mode::Commands);
         let listed: Vec<CommandId> = app
@@ -865,8 +866,9 @@ mod tests {
                 );
             }
         }
+        // With no settings file tasks are on, the default.
         let preferences = Preferences::load(None);
-        assert!(!preferences.tasks && preferences.settings.warnings.is_empty());
+        assert!(preferences.tasks && preferences.settings.warnings.is_empty());
     }
 
     /// A note of task lines, read by the status bar's task line.

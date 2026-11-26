@@ -101,10 +101,15 @@ after smart keys, and each smart key's handler under 400 ms, both generous
 ceilings for a debug build on CI. Work done on every frame, such as
 re-reading every note's preview, shows up there first.
 
-The `make smoke-*` targets pass the variable through, so
-`WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite with the editor
-cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on
-all four Linux smoke lanes.
+Every other case runs on one engine, the first that `WRENTEST_ENGINE`
+names (`classic` when unset): the harness writes that `editor-engine` line
+into the `config.conf` of every `WrenApp` whose settings do not name
+`editor-engine`, as it does for `spell-check`, since the build defaults to
+`advanced`. The `make smoke-*` targets pass the variable through, so
+`WRENTEST_ENGINE=advanced make smoke-x11` runs the whole suite on the
+advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on all four
+Linux smoke lanes, which runs the editor cases on both engines and the rest
+on `classic`.
 
 ### Command key
 
@@ -140,8 +145,10 @@ For native X11 keys and for labels, `tools/wrentest/ui.py` has three helpers:
 every case that does not name it: `off` (the default when unset, so sample
 notes full of names keep their look) or `on`. Any other value fails the
 case. A case that needs no settings file at all, as a fresh install has
-none, passes `WrenApp(lane_settings=False)`, which adds neither this line
-nor the `WRENTEST_BOARDS` one. Spell check runs only on the advanced engine,
+none, passes `WrenApp(lane_settings=False)`, which adds none of the lane's
+lines (this one, `boards`, `tasks`, `editor-engine` or `linux-modifier`);
+it then has the build's defaults, tasks on and the advanced engine among
+them. Spell check runs only on the advanced engine,
 so `on` matters only to the cases `WRENTEST_ENGINE` runs there:
 
 ```bash
@@ -324,9 +331,12 @@ date is written by a change of status to Cancelled (`task.set_status`, the
 status menu, the form). The `native_x11` cases use real clicks
 and chords.
 
-`WRENTEST_TASKS=off` or `on` does the same for the `tasks` line. CI runs
-one lane (X11, tiny-skia) with it `on`; the others pass it empty, which adds no line, so the
-build's default (`off`) holds. `make
+`WRENTEST_TASKS=off` or `on` writes that `tasks` line into every
+`config.conf` whose settings do not name `tasks`. Unset or empty means
+`off`, as `WRENTEST_SPELL` does, because the build defaults to on: a lane
+that does not ask for tasks runs with them off. CI runs one lane (X11,
+tiny-skia) with it `on`; the others pass it empty, so they run with tasks
+off. `make
 smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on both engines, once with
 tasks `off` and once `on`, for `DISPLAY_BACKEND` (default `x11`) and the
 current `ICED_BACKEND`, and fails if either run ran no task test (none collected, or all skipped).

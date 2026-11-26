@@ -29,7 +29,7 @@ from typing import Any
 
 from tools.wrentest.client import Client, ProtocolError, RemoteError, TransportError
 
-__all__ = ["WrenApp", "spell_setting", "tasks_setting", "wait_for"]
+__all__ = ["WrenApp", "engine_setting", "spell_setting", "tasks_setting", "wait_for"]
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -136,24 +136,50 @@ def _boards_setting(settings: str | None) -> str | None:
     return _with_setting(settings, "boards", value)
 
 
-def tasks_setting() -> str | None:
-    """The lane's ``tasks`` value: ``WRENTEST_TASKS``, or ``None`` unset."""
-    value = os.environ.get("WRENTEST_TASKS", "")
-    if value and value not in ("off", "on"):
+def tasks_setting() -> str:
+    """The lane's ``tasks`` value: ``WRENTEST_TASKS``, ``off`` when unset or
+    empty.
+
+    The build defaults to on. Like ``spell-check``, the lane pins a value,
+    so a lane that does not ask for tasks runs with them off, as it did
+    before the default changed.
+    """
+    value = os.environ.get("WRENTEST_TASKS", "") or "off"
+    if value not in ("off", "on"):
         raise ValueError(f"WRENTEST_TASKS must be off or on, got {value!r}")
-    return value or None
+    return value
 
 
-def _tasks_setting(settings: str | None) -> str | None:
+def _tasks_setting(settings: str | None) -> str:
     """*settings* with the ``tasks`` line ``WRENTEST_TASKS`` asks for.
 
-    Like ``WRENTEST_BOARDS``: ``off`` or ``on`` writes that setting into
-    every launch's ``config.conf``, unset adds nothing, and settings that
-    already name ``tasks`` are left as they are, since a task case sets it
-    itself.
+    It is always written, and settings that already name ``tasks`` are left
+    as they are, since a task case sets it itself.
     """
-    value = tasks_setting()
-    return settings if value is None else _with_setting(settings, "tasks", value)
+    return _with_setting(settings, "tasks", tasks_setting())
+
+
+def engine_setting() -> str:
+    """The ``editor-engine`` for a case that does not choose one: the first
+    engine ``WRENTEST_ENGINE`` names, ``classic`` when unset.
+
+    The build defaults to ``advanced``. The editor cases run on each engine
+    ``WRENTEST_ENGINE`` names and write their own line; every other case
+    runs on this one, so ``WRENTEST_ENGINE=classic,advanced`` keeps them on
+    ``classic``, as before the default changed, and
+    ``WRENTEST_ENGINE=advanced`` moves the whole suite to ``advanced``.
+    """
+    value = os.environ.get("WRENTEST_ENGINE", "").strip()
+    first = value.split(",")[0].strip() if value else "classic"
+    if first not in ("classic", "advanced"):
+        raise ValueError(f"WRENTEST_ENGINE must name classic or advanced, got {first!r}")
+    return first
+
+
+def _engine_setting(settings: str | None) -> str:
+    """*settings* with the ``editor-engine`` line the lane pins, unless they
+    name ``editor-engine`` themselves."""
+    return _with_setting(settings, "editor-engine", engine_setting())
 
 
 def linux_modifier() -> str:
@@ -287,11 +313,13 @@ class WrenApp:
     settings:
         Text for the sandbox's ``config.conf``, written before the first
         launch, with ``spell-check = <WRENTEST_SPELL>`` appended unless it
-        names ``spell-check`` itself; without it the file holds only that
-        line. ``WRENTEST_BOARDS`` adds a ``boards`` line after it unless the
-        text has one, ``WRENTEST_TASKS`` a ``tasks`` line after that, and
-        last comes ``linux-modifier = <WRENTEST_LINUX_MODIFIER>`` (``alt``
-        unless set), unless the text names ``linux-modifier`` itself.
+        names ``spell-check`` itself; without it the file holds only the
+        lane's lines. ``WRENTEST_BOARDS`` adds a ``boards`` line after it
+        unless the text has one, then come ``tasks = <WRENTEST_TASKS>``
+        (``off`` unless set), ``editor-engine = <engine_setting()>``
+        (``classic`` unless ``WRENTEST_ENGINE`` names ``advanced`` first),
+        and last ``linux-modifier = <WRENTEST_LINUX_MODIFIER>`` (``alt``
+        unless set), each unless the text names its key itself.
         Restarts keep whatever the app has written there since.
     lane_settings:
         Set to ``False`` to add no lane line: ``config.conf`` is then
@@ -343,7 +371,8 @@ class WrenApp:
         self._extra_args = extra_args
         self._evaluation = evaluation
         self._settings = (
-            _modifier_setting(_tasks_setting(_boards_setting(_spell_setting(settings))))
+            _modifier_setting(_engine_setting(_tasks_setting(
+                _boards_setting(_spell_setting(settings)))))
             if lane_settings else settings)
         self._words = words
         self._today = today

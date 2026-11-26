@@ -95,10 +95,10 @@ impl ThemeChoice {
 /// The editor's text engine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EditorEngine {
-    /// iced's own text editor.
-    #[default]
+    /// iced's own text editor, the fallback.
     Classic,
     /// Wren's own cosmic-text editor.
+    #[default]
     Advanced,
 }
 
@@ -207,7 +207,7 @@ impl Default for Settings {
             board_hints: true,
             board_toolbar: true,
             board_key_badges: KeyBadges::Hold,
-            tasks: false,
+            tasks: true,
             tasks_suggest: true,
             linux_modifier: LinuxModifier::default(),
             keybinds: Vec::new(),
@@ -565,9 +565,10 @@ pub const TEMPLATE: &str = "\
 # Show the line-number gutter.
 # line-numbers = true
 
-# Editor engine: classic (the current editor) or advanced (Wren's new
-# editor engine, under evaluation).
-# editor-engine = classic
+# Editor engine: advanced (Wren's own editor) or classic (the earlier
+# editor, kept as a fallback; it has no spell check, task menus or task
+# suggestions).
+# editor-engine = advanced
 
 # Markdown assist: Enter continues lists and quotes, Tab nests list items,
 # Backspace removes markup, and Home stops at the text after the markup.
@@ -596,9 +597,9 @@ pub const TEMPLATE: &str = "\
 # board-key-badges = hold
 
 # Tasks: statuses, due dates, priorities and owners on task lines, with
-# their commands. Still being built; off, task lines are edited as before.
+# their commands. Off, task lines are plain Markdown checkboxes again.
 # Applies when Wren restarts.
-# tasks = off
+# tasks = on
 
 # Task suggestions: on a task line, typing `du`, `to`, `fri`, `hi` or `@`
 # offers a due date, a priority or an owner. Tab picks one. It needs
@@ -674,7 +675,21 @@ mod tests {
 
     #[test]
     fn editor_engine_parses_either_engine_and_warns_on_others() {
-        assert_eq!(Settings::default().editor_engine, EditorEngine::Classic);
+        assert_eq!(Settings::default().editor_engine, EditorEngine::Advanced);
+        assert_eq!(Settings::parse("").editor_engine, EditorEngine::Advanced);
+        assert_eq!(
+            Settings::parse(TEMPLATE).editor_engine,
+            EditorEngine::Advanced
+        );
+        assert!(TEMPLATE.contains("\n# editor-engine = advanced\n"));
+        let settings = Settings::parse("editor-engine = classic\n");
+        assert_eq!(settings.editor_engine, EditorEngine::Classic);
+        assert!(settings.warnings.is_empty());
+        let classic = with_value(TEMPLATE, "editor-engine", "classic");
+        assert_eq!(
+            Settings::parse(&classic).editor_engine,
+            EditorEngine::Classic
+        );
         let settings = Settings::parse("editor-engine = advanced\n");
         assert_eq!(settings.editor_engine, EditorEngine::Advanced);
         assert!(settings.warnings.is_empty());
@@ -832,9 +847,9 @@ mod tests {
     }
 
     #[test]
-    fn tasks_default_off_and_parse_booleans() {
-        assert!(!Settings::default().tasks);
-        assert!(!Settings::parse("").tasks);
+    fn tasks_default_on_and_parse_booleans() {
+        assert!(Settings::default().tasks);
+        assert!(Settings::parse("").tasks);
         for (value, enabled) in [
             ("on", true),
             ("yes", true),
@@ -850,16 +865,16 @@ mod tests {
             assert!(settings.warnings.is_empty(), "{value}");
         }
         for bad in ["sometimes", "1", ""] {
-            let settings = Settings::parse(&format!("tasks = on\ntasks = {bad}\n"));
-            assert!(settings.tasks, "{bad:?} keeps the earlier value");
+            let settings = Settings::parse(&format!("tasks = off\ntasks = {bad}\n"));
+            assert!(!settings.tasks, "{bad:?} keeps the earlier value");
             assert_eq!(settings.warnings.len(), 1, "{bad:?}");
             assert!(settings.warnings[0].contains("line 2: invalid tasks value"));
         }
-        assert!(TEMPLATE.contains("\n# tasks = off\n"));
-        assert!(!Settings::parse(TEMPLATE).tasks);
-        let on = with_value(TEMPLATE, "tasks", "on");
-        assert!(Settings::parse(&on).tasks);
-        assert!(on.contains("\n# tasks = off\n") && on.ends_with("tasks = on\n"));
+        assert!(TEMPLATE.contains("\n# tasks = on\n"));
+        assert!(Settings::parse(TEMPLATE).tasks);
+        let off = with_value(TEMPLATE, "tasks", "off");
+        assert!(!Settings::parse(&off).tasks);
+        assert!(off.contains("\n# tasks = on\n") && off.ends_with("tasks = off\n"));
     }
 
     #[test]
@@ -876,8 +891,8 @@ mod tests {
             let settings = Settings::parse(&format!("tasks-suggest = {value}\n"));
             assert_eq!(settings.tasks_suggest, enabled, "{value}");
             assert!(settings.warnings.is_empty(), "{value}");
-            // It is its own setting: `tasks` stays as it was.
-            assert!(!settings.tasks, "{value}");
+            // It is its own setting: `tasks` keeps its default.
+            assert!(settings.tasks, "{value}");
         }
         let settings = Settings::parse("tasks-suggest = off\ntasks-suggest = maybe\n");
         assert!(!settings.tasks_suggest, "a bad value keeps the earlier one");

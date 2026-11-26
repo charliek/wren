@@ -2102,10 +2102,11 @@ mod tests {
             .committed());
         assert_eq!(app.editor.text(), "- [ ] first **body**");
         assert_eq!(app.edit_revision, revision + 2);
+        // With tasks on, the default, the toggle stamps the done date.
         let _ = app.dispatch(Command::Run(CommandId::ToggleTask));
         assert_eq!(
             app.session.as_ref().unwrap().document().unwrap().text,
-            "- [x] first **body**"
+            format!("- [x] first **body** ✅ {}", app.today())
         );
     }
 
