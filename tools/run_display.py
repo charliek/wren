@@ -236,7 +236,9 @@ class Compositor:
                 self.discard()
                 self.report(f"Weston exited with {describe_exit(info)}; log: {log}")
                 if not self.restart():
-                    if self.stopping:
+                    # A stop that cut the restarts short is no loss; one that
+                    # came after every attempt failed still fails the run.
+                    if self.stopping and self.attempts < self.ATTEMPTS:
                         return
                     self.lost = True
                     self.report(f"Weston is down after {self.attempts} restart attempts; "
