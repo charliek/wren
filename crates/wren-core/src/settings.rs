@@ -611,10 +611,12 @@ pub const TEMPLATE: &str = "\
 # linux-modifier = ctrl
 
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
-# to remove a default. Modifiers: ctrl, alt, shift, super (cmd), and mod, the
-# command key (Cmd on macOS, linux-modifier on Linux), so a line follows it.
+# to remove a default. Modifiers: ctrl, alt, shift, super (cmd), and two that
+# follow the platform, so a line moves with them: mod, the command key (Cmd
+# on macOS, linux-modifier on Linux), and opt, the board's second key
+# (Option on macOS; on Linux whichever of Ctrl and Alt mod is not).
 # keybind = ctrl+shift+p = palette.commands
-# keybind = alt+k = unbind
+# keybind = mod+k = unbind
 ";
 
 #[cfg(test)]

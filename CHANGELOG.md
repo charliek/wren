@@ -18,11 +18,16 @@ version's section as its notes, and publishes to the apt repo. See
 - **On Linux the command key is now Ctrl, like other apps.** Wren's commands
   used Alt there; the app's shortcuts, Markdown formatting, tasks and the
   board now take Ctrl (Ctrl+N, Ctrl+Shift+P, Ctrl+B, Ctrl+D, Ctrl+Z, and so
-  on). To keep Alt, run **Use Alt for commands** from the command palette, or
-  set `linux-modifier = alt` in `config.conf`; it applies at once. macOS is
+  on). To use Alt instead, run **Use Alt for commands** from the command
+  palette, or set `linux-modifier = alt` in `config.conf`; it applies at
+  once. Alt mode is not the old layout: there Markdown formatting, the task
+  keys and the board move to Alt too (Ctrl+B, Ctrl+I, Ctrl+E, Ctrl+Enter and
+  Ctrl+D become Alt+B, Alt+I, Alt+E, Alt+Enter and Alt+D), and on a board
+  Alt+arrow connects and Ctrl+arrow moves, swapped from before. A line such
+  as `keybind = ctrl+b = markdown.bold` keeps an old Ctrl key. macOS is
   unchanged, and Move line (Alt+Up and Alt+Down) stays on Alt.
-- **Ctrl+Y no longer redoes.** Redo is Ctrl+Shift+Z (Mod+Shift+Z in either
-  mode), in the editor and on a board. Ctrl+Y now toggles focus mode.
+- **Ctrl+Y no longer redoes.** Redo is Mod+Shift+Z (Ctrl+Shift+Z by default),
+  in the editor, on a board and in a board label. Mod+Y toggles focus mode.
 - Suggest spelling stays on Alt+. in Ctrl mode, because IBus takes Ctrl+. on
   GNOME.
 - The spelling menu is now one of several menus built on a shared anchored
@@ -32,11 +37,12 @@ version's section as its notes, and publishes to the apt repo. See
 
 - **A switch for Linux's command key.** Run **Use Alt for commands** (or
   **Use Ctrl for commands**) from the palette, or set `linux-modifier` in
-  `config.conf`. In Alt mode the app's commands, Markdown formatting, tasks,
-  the board, undo and redo, and copy, cut, paste and select all (Alt+C, Alt+X,
-  Alt+V, Alt+A) all move to Alt, in the editor, on a board and in the text
-  fields (the palette, dialogs, find bars, filters, calendar and task form);
-  the Ctrl versions keep working. See
+  `config.conf`. In Alt mode the app's commands, Markdown formatting, tasks
+  and the board move to Alt, and so do undo and redo (in the editor, on a
+  board and in a board label) and copy, cut, paste and select all (Alt+C,
+  Alt+X, Alt+V, Alt+A: there and in the text fields, the palette, dialogs,
+  find bars, filters, calendar, task form and keys sheet); the Ctrl versions
+  keep working. See
   [Keybindings](https://charliek.github.io/wren/getting-started/keybindings/).
 - **`mod+` and `opt+` in `keybind` lines.** `mod` is the command key and
   `opt` the board's second key, so an override follows the switch. Undo, redo,

@@ -449,11 +449,6 @@ impl App {
             palette.error = Some(error.into());
             return self.blocked(error);
         }
-        // `?` opens the keys sheet and closes it, whatever the layout
-        // types it with; it filters nothing there.
-        if palette.mode == Mode::BoardKeys && query.contains('?') {
-            return self.close_palette();
-        }
         palette.query = query;
         palette.error = None;
         self.refresh_palette(true);

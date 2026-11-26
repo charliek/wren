@@ -110,7 +110,8 @@ WRENTEST_LINUX_MODIFIER=ctrl ICED_BACKEND=tiny-skia make smoke-x11
 ```
 
 It takes `ctrl` or `alt` (`alt` when unset), and anything else fails the
-run. macOS ignores the setting.
+run. macOS ignores the setting. CI runs one lane (X11, wgpu) with it `ctrl`,
+the shipped default, and the others with `alt`.
 
 Cases name keys with the logical modifiers instead of ⌘, Ctrl or Alt.
 `editor.key` and `board.key` take `mod` (the command key: ⌘ on macOS, Ctrl or

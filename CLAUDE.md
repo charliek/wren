@@ -98,8 +98,9 @@ when one lands, move what users need into `docs/` and trim the note.
     its key wrapper), `app/tasks_harness.rs` (the `tasks.*` test requests)
     and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
-    `ellipsis.rs`, `keys.rs`, and `layers.rs` (a stack whose layers all
-    hear a press something before them took).
+    `ellipsis.rs`, `keys.rs`, `field_keys.rs` (the text fields' editing
+    keys on Linux, from the keymap), and `layers.rs` (a stack whose layers
+    all hear a press something before them took).
   - `macos_menu.rs` is the native menu bar, built from the table in
     `menu.rs`, which is compiled on macOS, in tests and with `smoke-test`
     so its rules are checked on Linux.

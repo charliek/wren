@@ -66,7 +66,9 @@ Default tables are written with two logical modifiers:
 
 ## 4. Text fields in Alt mode
 
-The palette input, dialogs, the find bar, the calendar field and the task form's fields are iced `text_input`s, which take Ctrl for clipboard, select all and undo. In Alt mode, a small wrapper turns Alt+C/X/V/A/Z (and Shift+Z) into what the input expects before passing the event on. `form_keys.rs` and `date_field.rs` already wrap their inputs; extend them, and add one shared wrapper for the rest. The board's label editor (`wren-canvas`) reads its clipboard and select-all keys from the host's key policy instead of hard-coded Ctrl/⌘. In Ctrl mode no wrapper changes anything.
+The palette input, dialogs, the find bar, the calendar field and the task form's fields are iced `text_input`s, which take Ctrl for clipboard, select all and undo. In Alt mode, a small wrapper turns Alt+C/X/V/A/Z (and Shift+Z) into what the input expects before passing the event on. `form_keys.rs` and `date_field.rs` already wrap their inputs; extend them, and add one shared wrapper for the rest. The board's label editor (`wren-canvas`) reads its clipboard and select-all keys from the host's key policy instead of hard-coded Ctrl/⌘. With the default Ctrl-mode keymap no wrapper changes anything.
+
+As built (`field_keys.rs`), on Linux only: any `edit.*` binding that is not the input's own Ctrl press is rewritten to it, in either mode, so a Ctrl-mode user's `alt+c = edit.copy` copies in a field too; a native chord the keymap gives another command or unbinds is taken from the focused field, unless it is another edit, which wins; every press first tells the input its real modifiers, so a field mounted with Ctrl held still pastes. The keys sheet's filter gives its own toggle to the sheet at routing time, so `what?` pasted filters and `mod+x = board.keys` closes the sheet without cutting.
 
 ## 5. The build
 
@@ -107,7 +109,15 @@ What differs from §3 and §4:
 - **Word motion.** On Linux it is Ctrl+←/→ only; Alt+←/→ was never bound. Alt+Backspace and Alt+Delete still delete a word.
 - **`edit.*` is Linux only.** On macOS the editor keeps its own ⌘Z, ⌘⇧Z and ⌘F, and a `keybind` line naming an `edit.*` action is refused. The palette rows are hidden.
 - **Unbound and reassigned clipboard chords.** An explicitly unbound Ctrl+C/X/V/A does nothing, in the editor and in a focused field. One given to another command does only that command.
-- **Text fields have no undo.** iced's text input has none, so Alt+Z and Ctrl+Z do nothing there. The wrapper rewrites keys only in Alt mode.
+- **Text fields have no undo.** iced's text input has none, so Alt+Z and Ctrl+Z do nothing there.
+- **Branch review fixes** (2026-11-25):
+  1. a native chord bound to a Markdown command stays that command's with Markdown assist off, so iced neither cuts nor copies for it;
+  2. a native chord given another edit (Alt mode, `ctrl+v = edit.copy`) does that edit in a field, not nothing;
+  3. an open palette is redrawn after a keymap change read from the file, keeping its query and row;
+  4. the keys sheet's own key, bound to a clipboard chord, closes the sheet and edits nothing in its filter: the focused filter is its one owner, and the app no longer closes the sheet from its own copy of the press (which closed it again on the press that opened it);
+  5. the sheet closes on its key pressed, not on a `?` in the filter's text;
+  6. field rewrites apply in both Linux modes (the default Ctrl keymap has none), and the keymap records the triggers a line unbinds (`Keymap::unbound`).
+- **CI** runs one Linux smoke lane (X11, wgpu) in Ctrl mode, the shipped default.
 - **Ctrl+Y in Ctrl mode is Focus mode,** on a board too, where an open label stays open.
 - **Board labels.** The board's select all, copy, cut, paste, undo and redo keys act on an open label's text. Typed text, AltGr text and the label's caret and erase keys win over any binding. A held paste repeats in a label.
 - **Harness.** `WRENTEST_LINUX_MODIFIER` picks a lane's mode (default `alt`). `mod` and `opt` work in `editor.key` and `board.key`, and `native_mod`, `native_opt` and `mod_label` cover native chords.

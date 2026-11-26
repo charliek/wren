@@ -3,20 +3,26 @@
 //! cut, paste and select all, and the keymap may put those keys elsewhere.
 //! [`field_keys`] wraps a text input:
 //!
-//! - In Alt mode, a press the keymap gives an `edit.*` action reaches the
-//!   input as the Ctrl press it knows for that action, with the modifiers
-//!   it reads (the ones it last heard change) set for that press alone. The
-//!   input has no history, so undo and redo reach it as Ctrl+Z and
-//!   Ctrl+Shift+Z, which it ignores: they never type their letter.
-//! - In either mode, one of the input's own clipboard chords that the
-//!   keymap gives another command, or that a `keybind` line unbinds, is
-//!   taken from the focused input, so one press does one thing.
+//! - A press the keymap gives an `edit.*` action, other than the input's
+//!   own press for it, reaches the input as that Ctrl press, with the
+//!   modifiers it reads (the ones it last heard change) set for that press
+//!   alone: Alt mode's Alt keys, or a user's own. The input has no history,
+//!   so undo and redo reach it as Ctrl+Z and Ctrl+Shift+Z, which it
+//!   ignores: they never type their letter.
+//! - Otherwise, one of the input's own clipboard chords that the keymap
+//!   gives another command, or that a `keybind` line unbinds, is taken from
+//!   the focused input, so one press does one thing.
 //! - Before any other press the input hears the press's own modifiers: an
 //!   input mounted while a modifier was held never heard it go down.
 //!
-//! In Ctrl mode with the default keymap only that last holds, which
-//! changes nothing for an input that saw the modifiers change. On macOS
-//! the wrapper is not there at all.
+//! With the default Ctrl-mode keymap only that last holds, which changes
+//! nothing for an input that saw the modifiers change. On macOS the keys
+//! are not wrapped at all; [`field_keys_owning`] still gives a key to its
+//! owner there.
+//!
+//! [`field_keys_owning`] also takes the presses of one key from the
+//! field before anything else, for a field whose host closes on that key
+//! (the board's keys sheet on its own toggle).
 
 use std::sync::Arc;
 
@@ -25,7 +31,7 @@ use iced::advanced::widget::{tree, Id, Operation, Tree};
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell, Widget};
 use iced::keyboard::{self, Key, Modifiers};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
-use wren_core::keybind::{Accel, LinuxModifier, Mods, Platform, Scheme};
+use wren_core::keybind::{Accel, Mods, Platform, Scheme};
 use wren_editor::EditKey;
 
 /// What the wrapper does with a Linux keymap's keys; with none (macOS),
@@ -96,8 +102,8 @@ pub fn native_chords() -> impl Iterator<Item = Accel> {
 impl FieldKeys {
     /// The wrapper for a keymap of `scheme`: its `edits` (each trigger the
     /// keymap gives an `edit.*` action, and that action's key), rewritten
-    /// in Alt mode but for those on the input's own press, and `taken`, the
-    /// input's own chords the keymap gives elsewhere.
+    /// but for those on the input's own press, and `taken`, the input's own
+    /// chords the keymap gives elsewhere, but for those it rewrites.
     pub fn new(
         scheme: Scheme,
         edits: impl IntoIterator<Item = (Accel, EditKey)>,
@@ -118,18 +124,16 @@ impl FieldKeys {
                     key: letter.to_owned(),
                 }
         };
-        let rewrites = if scheme.linux == LinuxModifier::Alt {
-            edits
-                .into_iter()
-                .filter(|(accel, edit)| !own(accel, *edit))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        Self(Some(Arc::new(Table {
-            rewrites,
-            taken: taken.into_iter().collect(),
-        })))
+        let rewrites: Vec<(Accel, EditKey)> = edits
+            .into_iter()
+            .filter(|(accel, edit)| !own(accel, *edit))
+            .collect();
+        // A chord the keymap gives another edit is that edit, not nothing.
+        let taken = taken
+            .into_iter()
+            .filter(|accel| rewrites.iter().all(|(bound, _)| bound != accel))
+            .collect();
+        Self(Some(Arc::new(Table { rewrites, taken })))
     }
 
     fn press(event: &Event) -> Option<(Accel, Modifiers)> {
@@ -149,7 +153,7 @@ impl FieldKeys {
     }
 
     /// `event` as the text input knows it, when it is a press of one of
-    /// Alt mode's keys: the press, and the modifiers the input must read
+    /// the rewritten keys: the press, and the modifiers the input must read
     /// for it.
     pub fn rewrite(&self, event: &Event) -> Option<(Modifiers, Event)> {
         let table = self.0.as_deref()?;
@@ -195,12 +199,16 @@ impl FieldKeys {
     }
 
     /// Hand `event` on through `update` as the text input knows it: a
-    /// press with its own modifiers set first, and one of Alt mode's keys
-    /// as its Ctrl press, the modifiers put back after it.
+    /// press with its own modifiers set first, and a rewritten key as its
+    /// Ctrl press, the modifiers put back after it. Unwrapped keys (macOS)
+    /// hand it on as it is.
     fn deliver(&self, event: &Event, mut update: impl FnMut(&Event)) {
         let Event::Keyboard(keyboard::Event::KeyPressed { modifiers, .. }) = event else {
             return update(event);
         };
+        if self.0.is_none() {
+            return update(event);
+        }
         let modifiers = *modifiers;
         match self.rewrite(event) {
             Some((held, press)) => {
@@ -239,7 +247,41 @@ where
     Element::new(KeyedField {
         content,
         keys: keys.clone(),
+        owner: None,
     })
+}
+
+/// [`field_keys`], and the presses `owns` names taken from the focused
+/// field before anything else and published as `on_owned`, so the field
+/// never types or edits for them.
+pub fn field_keys_owning<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+    keys: &FieldKeys,
+    owns: impl Fn(&Key, keyboard::key::Physical, Modifiers) -> bool + 'a,
+    on_owned: impl Fn() -> Message + 'a,
+) -> Element<'a, Message, Theme, Renderer>
+where
+    Message: 'a,
+    Theme: 'a,
+    Renderer: renderer::Renderer + 'a,
+{
+    Element::new(KeyedField {
+        content: content.into(),
+        keys: keys.clone(),
+        owner: Some(Owner {
+            owns: Box::new(owns),
+            on_owned: Box::new(on_owned),
+        }),
+    })
+}
+
+/// Whether a press, by its key, physical key and modifiers, is the owner's.
+type Owns<'a> = Box<dyn Fn(&Key, keyboard::key::Physical, Modifiers) -> bool + 'a>;
+
+/// The key a field's host takes from it ([`field_keys_owning`]).
+struct Owner<'a, Message> {
+    owns: Owns<'a>,
+    on_owned: Box<dyn Fn() -> Message + 'a>,
 }
 
 /// Whether a focusable widget in a tree has the keyboard.
@@ -258,6 +300,20 @@ impl Operation for HasFocus {
 struct KeyedField<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     keys: FieldKeys,
+    owner: Option<Owner<'a, Message>>,
+}
+
+impl<Message, Theme, Renderer> KeyedField<'_, Message, Theme, Renderer>
+where
+    Renderer: renderer::Renderer,
+{
+    fn focused(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer) -> bool {
+        let mut focus = HasFocus(false);
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, &mut focus);
+        focus.0
+    }
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -321,17 +377,30 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if self.keys.takes(event) {
-            let mut focus = HasFocus(false);
-            self.content
-                .as_widget_mut()
-                .operate(tree, layout, renderer, &mut focus);
-            // The input does nothing with it: the app runs the keymap's
-            // command for it, if it has one.
-            if focus.0 {
-                shell.capture_event();
-                return;
+        if let (
+            Some(owner),
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }),
+        ) = (&self.owner, event)
+        {
+            if (owner.owns)(key, *physical_key, *modifiers) {
+                let message = (owner.on_owned)();
+                if self.focused(tree, layout, renderer) {
+                    shell.publish(message);
+                    shell.capture_event();
+                    return;
+                }
             }
+        }
+        // The input does nothing with it: the app runs the keymap's
+        // command for it, if it has one.
+        if self.keys.takes(event) && self.focused(tree, layout, renderer) {
+            shell.capture_event();
+            return;
         }
         let content = self.content.as_widget_mut();
         self.keys.deliver(event, |event| {
@@ -389,6 +458,7 @@ pub(crate) mod tests {
     use iced::advanced::clipboard;
     use iced::keyboard::key::{Code, Physical};
     use iced::keyboard::Location;
+    use wren_core::keybind::LinuxModifier;
 
     use super::*;
 
@@ -490,20 +560,44 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ctrl_mode_rewrites_nothing_even_for_a_user_s_edit_key() {
+    fn ctrl_mode_s_defaults_rewrite_nothing_and_a_user_s_edit_key_rewrites() {
         let scheme = Scheme::new(Platform::Linux, LinuxModifier::Ctrl);
-        let mut edits = linux_edits(LinuxModifier::Ctrl);
-        edits.push((accel("alt+b"), EditKey::Cut));
-        let keys = FieldKeys::new(scheme, edits, []);
+        let defaults = linux(LinuxModifier::Ctrl);
         for letter in ["b", "z", "c", "x", "v", "a"] {
             for modifiers in [Modifiers::ALT, Modifiers::CTRL] {
-                assert!(
-                    keys.rewrite(&chord(letter, modifiers)).is_none(),
-                    "{letter}"
-                );
-                assert!(!keys.takes(&chord(letter, modifiers)), "{letter}");
+                let press = chord(letter, modifiers);
+                assert!(defaults.rewrite(&press).is_none(), "{letter}");
+                assert!(!defaults.takes(&press), "{letter}");
             }
         }
+        // `keybind = alt+c = edit.copy` copies in a text field too.
+        let mut edits = linux_edits(LinuxModifier::Ctrl);
+        edits.push((accel("alt+c"), EditKey::Copy));
+        let keys = FieldKeys::new(scheme, edits, []);
+        let Some((held, _)) = keys.rewrite(&chord("c", Modifiers::ALT)) else {
+            panic!("a user's Alt+C is a rewrite");
+        };
+        assert_eq!(held, Modifiers::CTRL);
+        assert!(keys.rewrite(&chord("c", Modifiers::CTRL)).is_none());
+    }
+
+    #[test]
+    fn a_chord_given_another_edit_is_that_edit_not_taken() {
+        // Alt mode with `keybind = ctrl+v = edit.copy`: Ctrl+V is iced's
+        // paste given elsewhere, and copies.
+        let scheme = Scheme::new(Platform::Linux, LinuxModifier::Alt);
+        let mut edits = linux_edits(LinuxModifier::Alt);
+        edits.retain(|(bound, _)| *bound != accel("ctrl+v"));
+        edits.push((accel("ctrl+v"), EditKey::Copy));
+        let keys = FieldKeys::new(scheme, edits, [accel("ctrl+v")]);
+        let ctrl_v = chord("v", Modifiers::CTRL);
+        assert!(!keys.takes(&ctrl_v));
+        let Some((_, Event::Keyboard(keyboard::Event::KeyPressed { key, .. }))) =
+            keys.rewrite(&ctrl_v)
+        else {
+            panic!("Ctrl+V is Copy's");
+        };
+        assert_eq!(key, Key::Character("c".into()));
     }
 
     #[test]
@@ -697,19 +791,15 @@ pub(crate) mod tests {
         }
 
         #[test]
-        fn in_ctrl_mode_the_field_does_what_it_does_without_the_wrapper() {
-            let mut edits = linux_edits(LinuxModifier::Ctrl);
-            edits.push((accel("alt+b"), EditKey::Cut));
-            let scheme = Scheme::new(Platform::Linux, LinuxModifier::Ctrl);
-            let keys = FieldKeys::new(scheme, edits, []);
+        fn in_ctrl_mode_the_default_field_does_what_it_does_without_the_wrapper() {
+            let keys = linux(LinuxModifier::Ctrl);
             let ctrl = Modifiers::CTRL;
             let alt = Modifiers::ALT;
             let cases: [&[Event]; 4] = [
                 &[chord("a", ctrl), chord("c", ctrl), end(), chord("v", ctrl)],
                 &[chord("a", alt), chord("c", alt)],
                 &[chord("v", alt)],
-                // A user's Alt+B cut is the editor's, not the field's.
-                &[chord("a", ctrl), chord("b", alt)],
+                &[chord("a", ctrl), chord("x", ctrl)],
             ];
             for events in cases {
                 let wrapped = run(&keys, "abc", Some("clip"), events, true, true);
@@ -725,17 +815,126 @@ pub(crate) mod tests {
                 assert_eq!(wrapped.captured, bare.captured, "{events:?}");
                 assert_eq!(wrapped.kept, bare.kept, "{events:?}");
             }
-            let (published, kept) = field(
-                &keys,
-                "abc",
-                &[chord("a", ctrl), chord("c", ctrl), end(), chord("v", ctrl)],
-            );
+            let (published, kept) = field(&keys, "abc", &[chord("a", alt), chord("c", alt)]);
+            assert_eq!((published, kept), (Vec::<String>::new(), None));
+            // A user's `alt+x = edit.cut` cuts in the field.
+            let mut edits = linux_edits(LinuxModifier::Ctrl);
+            edits.push((accel("alt+x"), EditKey::Cut));
+            let scheme = Scheme::new(Platform::Linux, LinuxModifier::Ctrl);
+            let keys = FieldKeys::new(scheme, edits, []);
+            let (published, kept) = field(&keys, "abc", &[chord("a", ctrl), chord("x", alt)]);
             assert_eq!(
                 (published, kept.as_deref()),
-                (vec!["abcabc".into()], Some("abc"))
+                (vec![String::new()], Some("abc"))
             );
-            let (published, kept) = field(&keys, "abc", &[chord("a", alt), chord("b", alt)]);
-            assert_eq!((published, kept), (Vec::<String>::new(), None));
+        }
+
+        #[test]
+        fn a_chord_given_another_edit_does_that_edit_in_the_field() {
+            let scheme = Scheme::new(Platform::Linux, LinuxModifier::Alt);
+            let mut edits = linux_edits(LinuxModifier::Alt);
+            edits.retain(|(bound, _)| *bound != accel("ctrl+v"));
+            edits.push((accel("ctrl+v"), EditKey::Copy));
+            let keys = FieldKeys::new(scheme, edits, [accel("ctrl+v")]);
+            let run = run(
+                &keys,
+                "abc",
+                Some("clip"),
+                &[chord("a", Modifiers::CTRL), chord("v", Modifiers::CTRL)],
+                true,
+                true,
+            );
+            assert!(run.published.is_empty(), "{:?}", run.published);
+            assert_eq!(run.kept.as_deref(), Some("abc"));
+        }
+
+        /// A field owning `?`, as the keys sheet's filter owns its toggle,
+        /// and Ctrl+X, as it owns a toggle bound there.
+        fn owned(events: &[Event], clip: Option<&str>) -> (Vec<String>, Vec<bool>, Option<String>) {
+            let mut value = String::from("abc");
+            let keys = linux(LinuxModifier::Ctrl);
+            let element = |value: &str| -> Element<'static, String, Theme, ()> {
+                crate::keys::alt_filter(field_keys_owning(
+                    text_input("", value)
+                        .id(ID)
+                        .width(200)
+                        .on_input(|text: String| text),
+                    &keys,
+                    |key: &Key, _, modifiers: Modifiers| match key.as_ref() {
+                        Key::Character("?") => modifiers == Modifiers::SHIFT,
+                        Key::Character("x") => modifiers == Modifiers::CTRL,
+                        _ => false,
+                    },
+                    || "<owned>".to_owned(),
+                ))
+                .into()
+            };
+            let mut first = element(&value);
+            let mut tree = Tree::new(&first);
+            let node = first.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 100.0)),
+            );
+            first.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &(),
+                &mut operation::focusable::focus(Id::new(ID)),
+            );
+            let mut kept = Kept(clip.map(str::to_owned));
+            let (mut published, mut captured) = (Vec::new(), Vec::new());
+            for event in events {
+                let mut element = element(&value);
+                element.as_widget_mut().diff(&mut tree);
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    event,
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &(),
+                    &mut kept,
+                    &mut shell,
+                    &Rectangle::new(Point::ORIGIN, Size::new(400.0, 100.0)),
+                );
+                captured.push(shell.event_status() == iced::event::Status::Captured);
+                if let Some(last) = messages.last().filter(|last| *last != "<owned>") {
+                    value.clone_from(last);
+                }
+                published.extend(messages);
+            }
+            (published, captured, kept.0)
+        }
+
+        #[test]
+        fn an_owned_key_is_taken_from_the_field_and_its_text_is_not() {
+            let question = Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character("?".into()),
+                modified_key: Key::Character("?".into()),
+                physical_key: Physical::Code(Code::Slash),
+                location: Location::Standard,
+                modifiers: Modifiers::SHIFT,
+                text: Some("?".into()),
+                repeat: false,
+            });
+            // A typed `?` is the owner's, and types nothing.
+            let (published, captured, _) = owned(&[question], None);
+            assert_eq!(
+                (published, captured),
+                (vec!["<owned>".to_owned()], vec![true])
+            );
+            // `what?` pasted filters.
+            let (published, _, _) = owned(&[end(), chord("v", Modifiers::CTRL)], Some("what?"));
+            assert_eq!(published, ["abcwhat?"]);
+            // A shortcut the owner names is its too: no cut.
+            let (published, captured, kept) = owned(
+                &[chord("a", Modifiers::CTRL), chord("x", Modifiers::CTRL)],
+                Some("sentinel"),
+            );
+            assert_eq!(published, ["<owned>"]);
+            assert_eq!((captured[1], kept.as_deref()), (true, Some("sentinel")));
         }
 
         #[test]

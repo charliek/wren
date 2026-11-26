@@ -113,8 +113,12 @@ def test_the_keys_sheet_opens_with_question_mark_dims_and_closes(samples: Path) 
             groups = list(dict.fromkeys(row["group"] for row in sheet(app)["rows"]))
             assert groups == ["Tools", "Build", "Select", "Edit", "Colour", "Arrange", "View",
                               "Menus"]
-            # `?` in the filter closes it; the board has the keyboard again.
-            app.client.call("palette.query", {"query": "?"})
+            # A `?` in the filter's text filters (only the key pressed
+            # closes it: `test_board_native.py`); closed, the board has the
+            # keyboard again.
+            app.client.call("palette.query", {"query": "what?"})
+            assert sheet(app)["query"] == "what?"
+            app.client.call("palette.close")
             assert sheet(app) is None
             wait_focus(app, ["note-editor"])
 

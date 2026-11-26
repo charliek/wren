@@ -15,7 +15,9 @@ Linux apps. If you prefer Alt, the way ⌘ works on a Mac, switch to it:
   [`config.conf`](../reference/configuration.md#settings).
 
 The switch applies at once, with no restart, and the palette saves it to
-`config.conf`. With no `config.conf` yet, it applies for this session only.
+`config.conf`, creating the file if there is none yet. Only with no settings
+location at all (no `HOME` or `WREN_CONFIG`) does it apply for this session
+alone.
 The palette command reads **Use Ctrl for commands** while Alt is in use, and
 switches back. It is listed on Linux only, and macOS ignores the setting.
 
@@ -30,12 +32,23 @@ Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A, Ctrl+F (find), and Ctrl+Q (quit). In Ctrl
 mode, those are the only versions. AltGr is not Alt: it types its characters
 as usual.
 
-A few keys do not follow Mod, on macOS and in both Linux modes:
+Alt mode is not the layout Wren had before this switch, where only the app's
+commands were on Alt. In Alt mode the editor's and the board's commands move
+to Alt too: Ctrl+B, Ctrl+I, Ctrl+E, Ctrl+Enter and Ctrl+D become Alt+B,
+Alt+I, Alt+E, Alt+Enter and Alt+D. On a board, Alt+arrow now connects and
+Ctrl+arrow moves, swapped from before. To keep one of the old Ctrl keys, bind
+it with `ctrl`, which stays where you put it:
+
+```conf
+keybind = ctrl+b = markdown.bold
+```
+
+A few keys do not follow Mod. On Linux they are the same in both modes:
 
 | Key | Linux | Why |
 |---|---|---|
 | Move line up / down | Alt+↑ / Alt+↓ | As in code editors; nothing else uses them. |
-| Suggest spelling | Mod+. in Alt mode, Alt+. in Ctrl mode | Ctrl+. is the emoji key of IBus on GNOME, so the app never sees it. |
+| Suggest spelling | Alt+. | Ctrl+. is the emoji key of IBus on GNOME, so the app never sees it. |
 | Move by word, delete a word, start or end of the note | Ctrl+←/→, Ctrl+Backspace/Delete, Ctrl+Home/End (Alt+Backspace/Delete also delete a word in the editor) | Text editing keys that every desktop text field shares. |
 | Board pointer modifiers: drag to copy, scroll to zoom | Ctrl | Window managers take Alt+drag. These are mouse gestures, not keybindings. |
 
@@ -183,7 +196,7 @@ nothing is bound to it.
 
 | Action | macOS | Linux | Action name |
 |---|---|---|---|
-| Suggest spelling | ⌘. | Alt+. (Mod+. in Alt mode) | `editor.spell_suggest` |
+| Suggest spelling | ⌘. | Alt+. | `editor.spell_suggest` |
 
 On the `advanced` engine, with the caret in or touching an underlined
 word, **Suggest spelling** opens the corrections menu under it; a
@@ -480,6 +493,8 @@ colour new shapes take and change nothing on the board.
 keyboard layout, which can take the resize keys (Alt+Shift + arrow in Ctrl
 mode) and, in Alt mode, every Mod+Shift shortcut before Wren sees them.
 Change the desktop's layout switch, or bind the commands to other keys.
+Alt mode suits a desktop that leaves Alt+letter to the app; if Alt is your
+window manager's key, as it often is in i3 and sway, stay on Ctrl.
 
 **Pointer modifiers.** Dragging with ⌥ (macOS) or Ctrl (Linux) held copies
 instead of moves, and ⌘+scroll (macOS) or Ctrl+scroll (Linux) zooms. These
@@ -490,9 +505,14 @@ modes; window managers often take Alt+drag.
 (see below), and a bare key such as `x` is allowed for them:
 
 ```conf
-keybind = x = board.delete          # X deletes on a board
-keybind = tab = board.unbind        # Tab no longer adds the next shape
+# X deletes on a board
+keybind = x = board.delete
+# Tab no longer adds the next shape
+keybind = tab = board.unbind
 ```
+
+A `#` starts a comment only at the start of a line; after a binding it
+would be read as part of the action.
 
 `board.unbind` removes a board binding, and `unbind` removes only an app
 binding. A board binding on a key the app already uses for one of its own
@@ -515,10 +535,14 @@ Markdown commands and Suggest spelling above is the app's even inside the
 editor, so binding `mod+z` to something else takes it from Undo.
 
 ```conf
-keybind = mod+shift+p = palette.commands    # add a second palette shortcut
-keybind = mod+k = unbind                    # free Mod+K
-keybind = mod+t = theme.choose              # bind a palette-only command
-keybind = mod+shift+c = edit.copy           # a second Copy key
+# F1 opens the command palette too
+keybind = f1 = palette.commands
+# Free Mod+K
+keybind = mod+k = unbind
+# Bind a palette-only command
+keybind = mod+t = theme.choose
+# A second Copy key
+keybind = mod+shift+c = edit.copy
 ```
 
 **Modifiers:** `shift`, `ctrl` (`control`), `alt` (`option`), `super`

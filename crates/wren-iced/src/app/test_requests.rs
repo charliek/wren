@@ -200,6 +200,11 @@ impl App {
                 self.session.as_mut().ok_or("No workspace is open, or it is still loading")?.fail_next(fault);
                 request.respond(Ok(Value::Null));
             }
+            "window.focus" => {
+                // As the window's Focused event: `config.conf` is read again.
+                let _ = self.reload_settings(false);
+                request.respond(Ok(self.session_snapshot()));
+            }
             "window.blur" => {
                 let calendar = self.close_calendar_for_window();
                 self.window_unfocused()?;

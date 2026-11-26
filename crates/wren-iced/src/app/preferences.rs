@@ -17,7 +17,6 @@ use super::{workspace, App, Message};
 use crate::field_keys::FieldKeys;
 use crate::fonts;
 use crate::keys::{Input, Nav};
-use wren_canvas::Command as BoardCommand;
 
 /// The theme or editor font picker row being previewed. `theme` is
 /// `Some(None)` while previewing "System".
@@ -124,6 +123,11 @@ pub(super) fn key_route(
         None => KeyRoute::Pass,
         Some(id) => match id.editor_route() {
             None => KeyRoute::Host,
+            // A clipboard chord of iced's own stays its command's, so
+            // that iced does not act on it either.
+            Some(KeyRoute::Intent(_)) if !markdown_assist && native_chord(keymap, trigger) => {
+                KeyRoute::Host
+            }
             Some(KeyRoute::Intent(_)) if !markdown_assist => KeyRoute::Pass,
             Some(KeyRoute::Intent(wren_editor::Intent::ToggleTask)) if tasks => {
                 KeyRoute::Command(id.payload())
@@ -131,6 +135,13 @@ pub(super) fn key_route(
             Some(route) => route,
         },
     }
+}
+
+/// Whether `trigger` is one of iced's own clipboard chords on Linux, which
+/// its text widgets act on with no binding.
+fn native_chord(keymap: &Keymap, trigger: &Accel) -> bool {
+    keymap.scheme().platform == Platform::Linux
+        && crate::field_keys::native_edit(Platform::Linux, trigger).is_some()
 }
 
 /// The text fields' editing keys: the keymap's `edit.*` bindings, and the
@@ -148,21 +159,15 @@ fn field_keys(keymap: &Keymap, unbound: &[Accel]) -> FieldKeys {
     FieldKeys::new(keymap.scheme(), edits, taken)
 }
 
-/// The clipboard chords of iced's own that `keybinds` unbind on Linux and
-/// that nothing binds again: with no binding they would still act.
-fn unbound_chords(keymap: &Keymap, keybinds: &[(String, String)]) -> Vec<Accel> {
-    let scheme = keymap.scheme();
-    if scheme.platform != Platform::Linux {
-        return Vec::new();
-    }
-    keybinds
+/// The clipboard chords of iced's own that `keybind` lines unbind on
+/// Linux and that nothing binds again: with no binding they would still
+/// act.
+fn unbound_chords(keymap: &Keymap) -> Vec<Accel> {
+    keymap
+        .unbound()
         .iter()
-        .filter(|(_, action)| action.trim() == keybind::UNBIND)
-        .filter_map(|(trigger, _)| scheme.parse(trigger))
-        .filter(|accel| {
-            keymap.action(accel).is_none()
-                && crate::field_keys::native_edit(Platform::Linux, accel).is_some()
-        })
+        .filter(|accel| native_chord(keymap, accel))
+        .cloned()
         .collect()
 }
 
@@ -185,27 +190,38 @@ pub(super) use wren_canvas::KeyRoute as BoardRoute;
 /// the app's shortcuts. Escape always runs the board's ladder; an input
 /// method's preedit and a held Space are the widget's to see first.
 pub(super) fn board_policy(keymap: &Keymap) -> wren_canvas::KeyPolicy {
-    use iced::keyboard::{key::Named, Key};
     let keymap = keymap.clone();
     std::sync::Arc::new(move |key, physical, modifiers, repeat| {
-        if matches!(key, Key::Named(Named::Escape)) {
-            return BoardRoute::Pass;
-        }
-        // Bare keys are board triggers, so read the press as `accel` does,
-        // not as `shortcut`, which drops them.
-        let Some(trigger) = crate::keys::accel(key, physical, modifiers) else {
-            return BoardRoute::Pass;
-        };
-        let route = board_route(&keymap, &trigger, repeat);
-        match digit_row(&keymap, &trigger, physical) {
-            Some(fallback) => match board_route(&keymap, &fallback, repeat) {
-                // The app reads the typed character, not this fallback.
-                BoardRoute::Host => route,
-                found => found,
-            },
-            None => route,
-        }
+        board_press(&keymap, key, physical, modifiers, repeat)
     })
+}
+
+/// Where a focused board sends a press, as [`board_policy`] reads it.
+pub(super) fn board_press(
+    keymap: &Keymap,
+    key: &iced::keyboard::Key,
+    physical: Physical,
+    modifiers: iced::keyboard::Modifiers,
+    repeat: bool,
+) -> BoardRoute {
+    use iced::keyboard::{key::Named, Key};
+    if matches!(key, Key::Named(Named::Escape)) {
+        return BoardRoute::Pass;
+    }
+    // Bare keys are board triggers, so read the press as `accel` does,
+    // not as `shortcut`, which drops them.
+    let Some(trigger) = crate::keys::accel(key, physical, modifiers) else {
+        return BoardRoute::Pass;
+    };
+    let route = board_route(keymap, &trigger, repeat);
+    match digit_row(keymap, &trigger, physical) {
+        Some(fallback) => match board_route(keymap, &fallback, repeat) {
+            // The app reads the typed character, not this fallback.
+            BoardRoute::Host => route,
+            found => found,
+        },
+        None => route,
+    }
 }
 
 /// The press of a digit-row key read as its digit, when the character it
@@ -385,7 +401,7 @@ impl Preferences {
             }
         }
         keymap.retain_board(|accel, _| !shadowed.contains(accel));
-        self.unbound = unbound_chords(&keymap, &self.settings.keybinds);
+        self.unbound = unbound_chords(&keymap);
         self.field_keys = field_keys(&keymap, &self.unbound);
         self.keymap = keymap;
         let parsed = self.settings.warnings.len() - self.keymap_warnings;
@@ -521,7 +537,6 @@ impl App {
     /// An engine switch keeps the editor widget's tree state, and with it
     /// keyboard focus, so nothing is refocused here.
     pub(super) fn reload_settings(&mut self, force: bool) -> Option<String> {
-        #[cfg(target_os = "macos")]
         let keymap = self.preferences.keymap.clone();
         let words = self.spelling.reload_words();
         if self.preferences.reload(force) {
@@ -531,9 +546,14 @@ impl App {
         } else {
             return None;
         }
-        #[cfg(target_os = "macos")]
-        if self.window.is_some() && self.preferences.keymap != keymap {
-            self.install_menu();
+        if self.preferences.keymap != keymap {
+            // An open palette shows the keys, and the switch's title, of
+            // the keymap it was drawn with; its query and row stay.
+            self.refresh_palette(false);
+            #[cfg(target_os = "macos")]
+            if self.window.is_some() {
+                self.install_menu();
+            }
         }
         self.show_settings_warning()
     }
@@ -1135,15 +1155,9 @@ impl App {
             }
             Input::Accel(accel) => accel,
         };
-        // The sheet's own key closes it, as `?` typed in its filter does.
-        if self
-            .palette
-            .as_ref()
-            .is_some_and(|palette| palette.mode == Mode::BoardKeys)
-            && self.preferences.keymap.board_action(&accel) == Some(BoardCommand::Keys.key())
-        {
-            return self.close_palette().task;
-        }
+        // The sheet's own key is its filter's to close it with
+        // (`board_keys::sheet_toggle`): here the press that opened it
+        // would close it again.
         let Some(id) = self
             .preferences
             .keymap
@@ -2010,13 +2024,13 @@ mod tests {
         assert!(field_keys(&keymap, &[])
             .rewrite(&chord("c", shifted))
             .is_some());
-        // In Ctrl mode the fields are left alone, and the editor has it.
+        // So it does in Ctrl mode, for the editor and the fields alike.
         let ctrl = Scheme::new(Platform::Linux, keybind::LinuxModifier::Ctrl);
         let user = [("alt+b".to_owned(), "edit.cut".to_owned())];
         let (keymap, _) = build_keymap(ctrl, &user, false);
         assert!(field_keys(&keymap, &[])
             .rewrite(&chord("b", Modifiers::ALT))
-            .is_none());
+            .is_some());
         let policy = key_policy(&keymap, &[], true, false);
         assert_eq!(
             policy(
@@ -2037,7 +2051,7 @@ mod tests {
         // The defaults take none of the text fields' own chords.
         for scheme in SCHEMES {
             let (keymap, _) = build_keymap(scheme, &[], false);
-            let keys = field_keys(&keymap, &unbound_chords(&keymap, &[]));
+            let keys = field_keys(&keymap, &unbound_chords(&keymap));
             for accel in crate::field_keys::native_chords() {
                 let press = chord(&accel.key, {
                     let mut held = Modifiers::CTRL;
@@ -2054,7 +2068,7 @@ mod tests {
             // Unbound: neither the editor nor a field pastes.
             let user = [("ctrl+v".to_owned(), "unbind".to_owned())];
             let (keymap, _) = build_keymap(scheme, &user, false);
-            let unbound = unbound_chords(&keymap, &user);
+            let unbound = unbound_chords(&keymap);
             assert_eq!(unbound, [scheme.parse("ctrl+v").unwrap()], "{mode:?}");
             assert!(field_keys(&keymap, &unbound).takes(&ctrl_v()), "{mode:?}");
             let policy = key_policy(&keymap, &unbound, true, false);
@@ -2078,7 +2092,7 @@ mod tests {
                 ("ctrl+v".to_owned(), "edit.paste".to_owned()),
             ];
             let (keymap, _) = build_keymap(scheme, &user, false);
-            assert!(unbound_chords(&keymap, &user).is_empty(), "{mode:?}");
+            assert!(unbound_chords(&keymap).is_empty(), "{mode:?}");
             // Given to a command: a field takes it from its paste, and the
             // app runs the command.
             let user = [("ctrl+v".to_owned(), "navigation.find".to_owned())];
@@ -2099,7 +2113,7 @@ mod tests {
         let mac = SCHEMES[0];
         let user = [("super+v".to_owned(), "unbind".to_owned())];
         let (keymap, _) = build_keymap(mac, &user, false);
-        assert!(unbound_chords(&keymap, &user).is_empty());
+        assert!(unbound_chords(&keymap).is_empty());
     }
 
     /// The Mac's own keymap gives the text fields no wrapper.
@@ -2115,6 +2129,92 @@ mod tests {
                 assert!(!keys.takes(&chord(letter, modifiers)));
             }
         }
+    }
+
+    #[test]
+    fn a_clipboard_chord_given_to_a_markdown_command_stays_it_without_assist() {
+        use iced::keyboard::{Key, Modifiers};
+        use iced::widget::text_editor::Action;
+        if Platform::current() != Platform::Linux {
+            return;
+        }
+        let (mut app, _path, _directory) =
+            app_with_settings("markdown-assist = off\nkeybind = ctrl+x = markdown.bold\n");
+        assert!(!app.editor.markdown_assist());
+        app.editor.replace_text("cat teh", true);
+        let _ = app.edit(wren_editor::Message::Action(Action::SelectAll));
+        assert_eq!(app.editor.selected_text().as_deref(), Some("cat teh"));
+        // Neither bold, which is off, nor iced's Cut.
+        let messages = app
+            .editor
+            .key_message(Key::Character("x".into()), Modifiers::CTRL);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert_eq!(app.editor.text(), "cat teh");
+        assert_eq!(app.editor.selected_text().as_deref(), Some("cat teh"));
+        // Another Markdown key without assist is the editor's own again.
+        let keymap = &app.preferences.keymap;
+        let route = |trigger: &str| {
+            key_route(
+                keymap,
+                &keymap.scheme().parse(trigger).unwrap(),
+                false,
+                false,
+            )
+        };
+        assert_eq!(route("ctrl+x"), KeyRoute::Host);
+        assert_eq!(route("ctrl+b"), KeyRoute::Pass);
+    }
+
+    #[test]
+    fn an_open_palette_follows_a_switch_read_from_the_file() {
+        use keybind::LinuxModifier;
+        if Platform::current() != Platform::Linux {
+            return;
+        }
+        let (mut app, path, _directory) = app_with_settings("linux-modifier = ctrl\n");
+        let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
+        let _ = app.palette_query("for commands".into());
+        let rows = |app: &App| {
+            let palette = app.palette.as_ref().unwrap();
+            let active = palette
+                .active
+                .map(|index| palette.results[index].key.clone());
+            let titles: Vec<(Key, String, String)> = palette
+                .results
+                .iter()
+                .map(|row| (row.key.clone(), row.title.clone(), row.shortcut.clone()))
+                .collect();
+            (palette.query.clone(), active, titles)
+        };
+        let switch = Key::Command(CommandId::ToggleLinuxModifier);
+        let (query, active, before) = rows(&app);
+        assert_eq!(query, "for commands");
+        assert_eq!(active.as_ref(), Some(&switch));
+        let title = |titles: &[(Key, String, String)]| {
+            titles
+                .iter()
+                .find(|(key, _, _)| *key == switch)
+                .map(|(_, title, _)| title.clone())
+        };
+        assert_eq!(title(&before).as_deref(), Some("Use Alt for commands"));
+
+        std::fs::write(&path, "linux-modifier = alt\n").unwrap();
+        assert_eq!(app.reload_settings(false), None);
+        assert_eq!(app.preferences.keymap.scheme().linux, LinuxModifier::Alt);
+        let (query, active, after) = rows(&app);
+        assert_eq!(
+            (query.as_str(), active.as_ref()),
+            ("for commands", Some(&switch))
+        );
+        assert_eq!(title(&after).as_deref(), Some("Use Ctrl for commands"));
+        // Its keys too.
+        let _ = app.palette_query("Jump".into());
+        let (_, _, rows) = rows(&app);
+        let jump = rows
+            .iter()
+            .find(|(key, _, _)| *key == Key::Command(CommandId::Jump))
+            .unwrap();
+        assert_eq!(jump.2, "Alt+P");
     }
 
     #[test]

@@ -137,7 +137,8 @@ impl Scheme {
 
     /// Whether `accel` holds the command key, with or without Shift, and
     /// nothing else.
-    pub fn is_mod(self, accel: &Accel) -> bool {
+    #[cfg(test)]
+    fn is_mod(self, accel: &Accel) -> bool {
         let mut mods = Mods {
             shift: accel.mods.shift,
             ..Mods::default()
@@ -586,6 +587,8 @@ pub struct Keymap {
     scheme: Scheme,
     base: Vec<(Accel, String)>,
     board: Vec<(Accel, String)>,
+    /// Base-layer triggers a user line unbinds and no later line binds.
+    unbound: Vec<Accel>,
 }
 
 impl Keymap {
@@ -649,6 +652,12 @@ impl Keymap {
                 warnings.push(needs_modifier());
                 continue;
             }
+            if layer == Layer::Base {
+                keymap.unbound.retain(|bound| *bound != accel);
+                if unbind {
+                    keymap.unbound.push(accel.clone());
+                }
+            }
             let table = keymap.layer_mut(layer);
             table.retain(|(bound, _)| *bound != accel);
             if !unbind {
@@ -674,6 +683,12 @@ impl Keymap {
     /// The base layer's action for `accel`.
     pub fn action(&self, accel: &Accel) -> Option<&str> {
         find_action(&self.base, accel)
+    }
+
+    /// The base-layer triggers a `keybind` line unbinds, which no later
+    /// line binds again.
+    pub fn unbound(&self) -> &[Accel] {
+        &self.unbound
     }
 
     /// The board layer's action for `accel`.
@@ -1719,6 +1734,29 @@ mod tests {
         // `unbind` on a bare key names the base layer, where it cannot bind.
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("\"tab\""), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_keymap_records_the_base_triggers_a_line_unbinds() {
+        let user = user(&[
+            ("mod+v", "unbind"),
+            ("mod+c", "unbind"),
+            ("mod+c", "edit.copy"),
+            ("mod+x", "board.unbind"),
+            ("tab", "unbind"),
+        ]);
+        for scheme in SCHEMES {
+            let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &user, by_name);
+            // A later line binds Mod+C again; `board.unbind` and a line
+            // that warns record nothing.
+            assert_eq!(
+                keymap.unbound(),
+                [scheme.parse("mod+v").unwrap()],
+                "{scheme:?}"
+            );
+        }
+        let (keymap, _) = Keymap::build(CTRL, both_defaults(CTRL), &[], by_name);
+        assert!(keymap.unbound().is_empty());
     }
 
     #[test]

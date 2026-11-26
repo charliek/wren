@@ -28,6 +28,8 @@ import time
 
 import pytest
 
+from tools.wrentest.boards import FLOW, NOTES, board, click, copy_samples, open_note
+from tools.wrentest.boards import key as board_key
 from tools.wrentest.test_editor import engine, focus_native, xdo  # noqa: F401  (fixture)
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.ui import WrenApp, wait_for
@@ -56,9 +58,10 @@ def label(mode: str) -> str:
 
 @contextmanager
 def keys_app(name: str, engine: str, mode: str,  # noqa: F811
-             settings: str = "") -> Iterator[WrenApp]:
+             settings: str = "", **kwargs) -> Iterator[WrenApp]:
     with WrenApp(settings=f"editor-engine = {engine}\nlinux-modifier = {mode}\n{settings}",
-                 artifacts_dir=artifact_directory(f"keys-modifier-{name}-{mode}-{engine}")) as app:
+                 artifacts_dir=artifact_directory(f"keys-modifier-{name}-{mode}-{engine}"),
+                 **kwargs) as app:
         assert app.client.call("editor.get")["engine"] == engine
         yield app
 
@@ -323,30 +326,52 @@ def test_native_alt_mode_edits_every_text_field_with_alt(engine, mode) -> None: 
         wait_for(lambda: modal(app) is None, description="Escape closes the palette")
 
         # The calendar's field, at a task's box, on the advanced engine.
-        if engine != "advanced":
-            return
         call("editor.set", {"text": "- [ ] task"})
         call("editor.cursor", {"line": 0, "column": 10, "selection": None})
         window = focus_native(app)
-        native(window, f"{mode}+d")
-        wait_for(lambda: call("focus.get")["named"] == ["calendar-field"],
-                 description="the calendar's field has the keyboard")
-        typed(window, "fri")
-        wait_for(lambda: call("tasks.calendar")["typed"] == "fri",
-                 description="typing in the field")
+        if engine == "advanced":
+            native(window, f"{mode}+d")
+            wait_for(lambda: call("focus.get")["named"] == ["calendar-field"],
+                     description="the calendar's field has the keyboard")
+            typed(window, "fri")
+            wait_for(lambda: call("tasks.calendar")["typed"] == "fri",
+                     description="typing in the field")
+            call("clipboard.write", {"text": "clip"})
+            native(window, "alt+a", "alt+c", "End", "alt+v")
+            if alt:
+                wait_for(lambda: call("tasks.calendar")["typed"] == "frifri",
+                         description="Alt+A, Alt+C, Alt+V in the field")
+                assert call("clipboard.read") == "fri"
+            else:
+                settle()
+                assert call("tasks.calendar")["typed"] == "fri"
+                assert call("clipboard.read") == "clip"
+            native(window, "Escape")
+            wait_for(lambda: call("tasks.calendar") == {"open": False},
+                     description="Escape closes the calendar")
+            assert text(app) == "- [ ] task"
+            window = focus_native(app)
+
+        # The task form's description, on either engine, with tasks on.
+        if not call("tasks.get")["tasks"]:
+            return
+        native(window, f"{mode}+shift+Return")
+        wait_for(lambda: call("focus.get")["named"] == ["task-form-description"],
+                 description="the form's description has the keyboard")
+        assert call("tasks.form")["description"] == "task"
         call("clipboard.write", {"text": "clip"})
         native(window, "alt+a", "alt+c", "End", "alt+v")
         if alt:
-            wait_for(lambda: call("tasks.calendar")["typed"] == "frifri",
-                     description="Alt+A, Alt+C, Alt+V in the field")
-            assert call("clipboard.read") == "fri"
+            wait_for(lambda: call("tasks.form")["description"] == "tasktask",
+                     description="Alt+A, Alt+C, Alt+V in the form")
+            assert call("clipboard.read") == "task"
         else:
             settle()
-            assert call("tasks.calendar")["typed"] == "fri"
+            assert call("tasks.form")["description"] == "task"
             assert call("clipboard.read") == "clip"
         native(window, "Escape")
-        wait_for(lambda: call("tasks.calendar") == {"open": False},
-                 description="Escape closes the calendar")
+        wait_for(lambda: call("tasks.form") == {"open": False},
+                 description="Escape cancels the form")
         assert text(app) == "- [ ] task"
 
 
@@ -414,10 +439,10 @@ def test_native_an_unbound_clipboard_chord_does_nothing(engine, mode) -> None:  
 
 @pytest.mark.native_x11
 def test_native_a_clipboard_chord_given_to_a_command_does_only_it(engine, mode) -> None:  # noqa: F811
-    """``keybind = ctrl+v = navigation.find``: in the editor and in the find
-    bar's field Ctrl+V opens Find and pastes nothing."""
+    """``keybind = ctrl+v = palette.commands``: in the editor and in the
+    find bar's field Ctrl+V opens the palette and pastes nothing."""
     assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
-    with keys_app("rebound", engine, mode, "keybind = ctrl+v = navigation.find\n") as app:
+    with keys_app("rebound", engine, mode, "keybind = ctrl+v = palette.commands\n") as app:
         call = app.client.call
         assert call("session.get")["banner"] is None
         call("editor.set", {"text": "note"})
@@ -425,16 +450,47 @@ def test_native_a_clipboard_chord_given_to_a_command_does_only_it(engine, mode) 
         window = focus_native(app)
         call("clipboard.write", {"text": "clip"})
         native(window, "ctrl+v")
+        wait_for(lambda: (modal(app) or {}).get("mode") == "commands",
+                 description="Ctrl+V opens the palette from the editor")
+        assert (text(app), modal(app)["query"]) == ("note", "")
+        native(window, "Escape")
+        wait_for(lambda: modal(app) is None, description="Escape closes it")
+        call("editor.focus")
+        native(window, f"{mode}+f")
         wait_for(lambda: call("focus.get")["named"] == ["find-query"],
-                 description="Ctrl+V opens Find")
-        assert text(app) == "note"
+                 description="Mod+F opens Find")
         typed(window, "no")
         wait_for(lambda: call("editor.get")["find_query"] == "no", description="typing in Find")
         native(window, "ctrl+v")
+        wait_for(lambda: (modal(app) or {}).get("mode") == "commands",
+                 description="Ctrl+V opens the palette from the find bar")
+        state = call("editor.get")
+        assert (state["find_query"], state["text"], modal(app)["query"]) == ("no", "note", "")
+        native(window, "Escape")
+        wait_for(lambda: modal(app) is None, description="Escape closes it")
+
+
+@pytest.mark.native_x11
+def test_native_a_clipboard_chord_given_to_a_markdown_command_without_assist(
+        engine, mode) -> None:  # noqa: F811
+    """``keybind = ctrl+x = markdown.bold`` with Markdown assist off: Ctrl+X
+    neither bolds nor cuts; the selection and the clipboard stay."""
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    settings = "markdown-assist = off\nkeybind = ctrl+x = markdown.bold\n"
+    with keys_app("bold-cut", engine, mode, settings) as app:
+        call = app.client.call
+        two = "first line\nsecond line"
+        call("editor.set", {"text": two})
+        window = focus_native(app)
+        native(window, "ctrl+a")
+        wait_for(lambda: call("editor.get")["selected_text"] == two,
+                 description="Ctrl+A selects the note")
+        call("clipboard.write", {"text": "sentinel"})
+        native(window, "ctrl+x")
         settle()
         state = call("editor.get")
-        assert (state["find_open"], state["find_query"], state["text"]) == (True, "no", "note")
-        assert call("focus.get")["named"] == ["find-query"]
+        assert (state["text"], state["selected_text"]) == (two, two)
+        assert call("clipboard.read") == "sentinel"
 
 
 @pytest.mark.native_x11
@@ -458,3 +514,148 @@ def test_native_a_field_opened_with_mod_held_pastes(engine, mode) -> None:  # no
         finally:
             xdo("keyup", "--window", window, mode)
         assert text(app) == "note"
+
+
+def reloaded(app: WrenApp, mode: str) -> str:
+    """Switch the command key from *mode* by editing ``config.conf``, which
+    the window reads again when it gets the keyboard back; returns the new
+    mode."""
+    target = other(mode)
+    path = app.settings_path
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace(f"linux-modifier = {mode}", f"linux-modifier = {target}"),
+                    encoding="utf-8")
+    app.client.call("window.focus")
+    return target
+
+
+def switched(app: WrenApp, mode: str) -> str:
+    """Switch the command key from *mode* while something holds the
+    keyboard, as a reload of ``config.conf`` would; returns the new mode."""
+    target = other(mode)
+    assert app.client.call("command.run", {"id": SWITCH})["disposition"] == "completed"
+    assert f"linux-modifier = {target}" in app.settings_path.read_text(encoding="utf-8")
+    return target
+
+
+@pytest.mark.native_x11
+def test_native_the_switch_keeps_an_open_label_dialog_and_calendar(
+        tmp_path, engine, mode) -> None:  # noqa: F811
+    """A switch while a board label, a rename dialog or the calendar has the
+    keyboard keeps its draft and its focus, and the next chord there is the
+    new mode's. The label and the calendar switch by the command, the dialog
+    by ``config.conf`` read again on focus."""
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    samples = copy_samples(tmp_path / "work")
+    with keys_app("switch-open", engine, mode, "boards = on\ntasks = on\n",
+                  workspace=samples, evaluation=False) as app:
+        call = app.client.call
+        focus = lambda: call("focus.get")["named"]  # noqa: E731
+        # A board label.
+        open_note(app, FLOW)
+        window = focus_native(app)
+        wait_for(lambda: focus() == ["note-editor"], description="the board has the keyboard")
+        click(app, {"node": "3qrg4kv1"})
+        assert board_key(app, "enter")["state"] == "editing"
+        native(window, "ctrl+a" if mode == "ctrl" else "alt+a")
+        typed(window, "draft")
+        wait_for(lambda: (board(app).get("editing") or {}).get("text") == "draft",
+                 description="typing in the label")
+        mode = switched(app, mode)
+        state = board(app)
+        assert (state["state"], state["editing"]["text"]) == ("editing", "draft")
+        assert focus() == ["note-editor"]
+        native(window, f"{mode}+a")
+        typed(window, "x")
+        wait_for(lambda: (board(app).get("editing") or {}).get("text") == "x",
+                 description="the new Mod+A selects the label")
+        native(window, "Escape")
+        wait_for(lambda: board(app)["state"] == "idle", description="Escape ends the label")
+
+        # A rename dialog.
+        open_note(app, NOTES)
+        window = focus_native(app)
+        assert call("command.run", {"id": "note.rename"})["disposition"] == "completed"
+        wait_for(lambda: focus() == ["item-name"], description="the dialog has the keyboard")
+        native(window, "ctrl+a")
+        typed(window, "draft")
+        wait_for(lambda: call("navigation.get")["dialog"]["name"] == "draft",
+                 description="typing in the dialog")
+        # The palette is shut while a dialog is open: the file switches.
+        mode = reloaded(app, mode)
+        assert call("navigation.get")["dialog"]["name"] == "draft"
+        assert focus() == ["item-name"]
+        native(window, f"{mode}+a")
+        typed(window, "z")
+        wait_for(lambda: call("navigation.get")["dialog"]["name"] == "z",
+                 description="the new Mod+A selects the name")
+        native(window, "Escape")
+        wait_for(lambda: call("navigation.get")["dialog"] is None,
+                 description="Escape closes the dialog")
+
+        # The calendar, on the advanced engine.
+        if engine != "advanced":
+            return
+        lines = text(app).split("\n")
+        end = {"line": len(lines) - 1, "column": len(lines[-1].encode()), "selection": None}
+        call("editor.cursor", end)
+        call("editor.insert", {"text": "\n- [ ] task"})
+        task = text(app)
+        call("editor.cursor", {"line": len(lines), "column": 10, "selection": None})
+        window = focus_native(app)
+        native(window, f"{mode}+d")
+        wait_for(lambda: focus() == ["calendar-field"], description="the calendar opens")
+        typed(window, "fri")
+        wait_for(lambda: call("tasks.calendar")["typed"] == "fri", description="typing in it")
+        mode = switched(app, mode)
+        assert call("tasks.calendar")["typed"] == "fri"
+        assert focus() == ["calendar-field"]
+        native(window, f"{mode}+a")
+        typed(window, "mon")
+        wait_for(lambda: call("tasks.calendar")["typed"] == "mon",
+                 description="the new Mod+A selects the field")
+        native(window, "Escape")
+        wait_for(lambda: call("tasks.calendar") == {"open": False},
+                 description="Escape closes the calendar")
+        assert text(app) == task
+
+
+@pytest.mark.native_x11
+def test_native_the_keys_sheet_s_filter_and_its_own_key(tmp_path, engine, mode) -> None:  # noqa: F811
+    """In the keys sheet's filter `what?` pasted filters, `?` pressed closes
+    the sheet, and with ``keybind = mod+x = board.keys`` Mod+X closes it and
+    cuts nothing."""
+    assert not os.environ.get("WAYLAND_DISPLAY"), "Run native_x11 only in the X11 lane"
+    samples = copy_samples(tmp_path / "work")
+    with keys_app("sheet", engine, mode, "boards = on\nkeybind = mod+x = board.keys\n",
+                  workspace=samples, evaluation=False) as app:
+        call = app.client.call
+        sheet = lambda: board(app)["keys_sheet"]  # noqa: E731
+        open_note(app, FLOW)
+        window = focus_native(app)
+        wait_for(lambda: call("focus.get")["named"] == ["note-editor"],
+                 description="the board has the keyboard")
+        native(window, "shift+slash")
+        wait_for(lambda: sheet() is not None, description="? opens the sheet")
+        wait_for(lambda: call("focus.get")["named"] == ["palette-query"],
+                 description="its filter has the keyboard")
+        call("clipboard.write", {"text": "what?"})
+        native(window, "ctrl+v")
+        wait_for(lambda: (sheet() or {}).get("query") == "what?",
+                 description="what? pasted filters")
+        native(window, "shift+slash")
+        wait_for(lambda: sheet() is None, description="? pressed closes the sheet")
+        wait_for(lambda: call("focus.get")["named"] == ["note-editor"],
+                 description="the board has the keyboard again")
+        native(window, f"{mode}+x")
+        wait_for(lambda: sheet() is not None, description="Mod+X opens the sheet")
+        wait_for(lambda: call("focus.get")["named"] == ["palette-query"],
+                 description="its filter has the keyboard")
+        typed(window, "abc")
+        wait_for(lambda: sheet()["query"] == "abc", description="typing in the filter")
+        native(window, "ctrl+a")
+        call("clipboard.write", {"text": "sentinel"})
+        native(window, f"{mode}+x")
+        wait_for(lambda: sheet() is None, description="Mod+X closes the sheet")
+        assert call("clipboard.read") == "sentinel"
+        assert call("session.get")["document"]["dirty"] is False
